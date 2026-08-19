@@ -322,10 +322,14 @@ impl TextContext {
     ///   no break opportunity (one long unspaced word) that parley lets
     ///   overflow rather than force-break.
     ///
-    /// Neither condition holds → the text already fits; both overflow modes
-    /// return the full layout unchanged (this is also why an exact-fit line,
-    /// width `== max_width`, never gets truncated: the comparison is a
-    /// strict `>`).
+    /// Neither condition holds → the text already fits (this is also why an
+    /// exact-fit line, width `== max_width`, never gets truncated: the
+    /// comparison is a strict `>`); both overflow modes then return the full
+    /// layout as-is, *unless* `full` itself still carries the raw phantom
+    /// line parley opens after a terminal `'\n'` — in which case it's
+    /// reshaped with the trailing newline(s) stripped first, so a fitting
+    /// layout's reported line count and height always match what paints
+    /// (see [`visible_line_count`]).
     ///
     /// On overflow, [`TextOverflow::Clip`] only ever drops whole trailing
     /// lines — the source text is cut at the end of line `max_lines - 1`'s
@@ -356,7 +360,8 @@ impl TextContext {
 
         let full = self.layout(text, style, max_width);
         let last_visible = max_lines - 1;
-        let has_extra_lines = visible_line_count(&full, text.len()) > max_lines;
+        let visible_lines = visible_line_count(&full, text.len());
+        let has_extra_lines = visible_lines > max_lines;
         let Some(last_line) = full.line_info(last_visible) else {
             // Fewer than `max_lines` lines exist at all: nothing overflowed.
             return full;
@@ -364,7 +369,24 @@ impl TextContext {
         let width_overflows = matches!(max_width, Some(w) if last_line.width > w);
 
         if !has_extra_lines && !width_overflows {
-            return full;
+            if full.line_count() == visible_lines {
+                // No phantom trailing line to discount — `full`'s raw line
+                // count already matches what's painted.
+                return full;
+            }
+            // The text fits, but `full` is parley's raw, undiscounted
+            // layout: it still counts the phantom line opened after a
+            // terminal `'\n'` in both its line count and its height (the
+            // sum of every raw line's height, `visible_line_count`'s docs)
+            // — so returning it unchanged reports a taller block than what
+            // actually paints. Reshape with the trailing newline(s)
+            // stripped — the same trim-then-reshape the `Clip` arm below
+            // performs — so the returned layout's line count and height
+            // match the visible content exactly.
+            let Some(cut) = text.get(..last_line.range.end) else {
+                return full;
+            };
+            return self.layout(cut.trim_end(), style, max_width);
         }
 
         match overflow {
@@ -1422,11 +1444,8 @@ mod tests {
         let s = style(16.0);
         for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
             let mut cx = TextContext::new();
-            let fitting = cx
-                .layout("Hello", &s, Some(400.0))
-                .line_info(0)
-                .expect("one line")
-                .width;
+            let plain = cx.layout("Hello", &s, Some(400.0));
+            let fitting = plain.line_info(0).expect("one line").width;
             let with_ellipsis = cx
                 .layout(&format!("Hello{ELLIPSIS}"), &s, Some(400.0))
                 .line_info(0)
@@ -1446,6 +1465,19 @@ mod tests {
                 "{overflow:?}: no ellipsis may be appended to text that fits"
             );
             assert_eq!(
+                bounded.line_count(),
+                plain.line_count(),
+                "{overflow:?}: parley's phantom trailing line must not survive \
+                 into the reported line count"
+            );
+            assert_eq!(
+                bounded.size().height,
+                plain.size().height,
+                "{overflow:?}: parley's phantom trailing line must not inflate \
+                 the reported height — a text ending in one newline, capped to \
+                 one line, must paint and measure exactly one line tall"
+            );
+            assert_eq!(
                 cx.measurement_count(),
                 0,
                 "{overflow:?}: a fitting line must not enter the truncation walk"
@@ -1458,17 +1490,27 @@ mod tests {
         let s = style(16.0);
         for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
             let mut cx = TextContext::new();
-            let plain = cx
-                .layout("A\nBB", &s, Some(400.0))
-                .line_info(1)
-                .expect("two lines")
-                .width;
+            let plain = cx.layout("A\nBB", &s, Some(400.0));
+            let plain_last_width = plain.line_info(1).expect("two lines").width;
             let bounded = cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(2), overflow);
             assert_eq!(
                 bounded.line_info(1).expect("two content lines").width,
-                plain,
+                plain_last_width,
                 "{overflow:?}: two content lines plus a terminal newline fit \
                  max_lines(2)"
+            );
+            assert_eq!(
+                bounded.line_count(),
+                plain.line_count(),
+                "{overflow:?}: the phantom trailing line must not survive into \
+                 the reported line count"
+            );
+            assert_eq!(
+                bounded.size().height,
+                plain.size().height,
+                "{overflow:?}: the phantom trailing line must not inflate the \
+                 reported height — two content lines plus a terminal newline, \
+                 capped to two lines, must measure exactly two lines tall"
             );
         }
     }

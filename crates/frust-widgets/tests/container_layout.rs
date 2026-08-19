@@ -228,13 +228,13 @@ fn childless_expand_fills_a_tight_constraint_too() {
 }
 
 // ---------------------------------------------------------------------------
-// Infinite-max fill axes (cfx2, Arc C fix round 1): `BoxConstraints::constrain`'s
-// clamp is a no-op when `max == f64::INFINITY`, so `.expand()` must collapse to
-// `bc.min()` on an unbounded axis rather than reporting the old 1e7
-// `EXPAND_INTRINSIC` sentinel — the real shape `Flex`'s inflexible-child
-// intrinsic-probe pass (`flex.rs:341`), `ScrollView`'s content layout
-// (`scroll.rs:621`), and `ListView`'s row layout (`list_view.rs:1720`) all hand a
-// childless expanding box.
+// Infinite-max fill axes: `BoxConstraints::constrain`'s clamp is a no-op when
+// `max == f64::INFINITY`, so `.expand()` must collapse to `bc.min()` on an
+// unbounded axis rather than reporting the old 1e7 `EXPAND_INTRINSIC`
+// sentinel — the real shape `Flex`'s inflexible-child intrinsic-probe pass
+// (`flex.rs:341`), `ScrollView`'s content layout (`scroll.rs:621`), and
+// `ListView`'s row layout (`list_view.rs:1720`) all hand a childless
+// expanding box.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -453,7 +453,7 @@ fn border_strokes_fully_inside_the_container_bounds_inset_by_half_width() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-corner radius, dashed border, glow — the Arc C wave 2 container extras.
+// Per-corner radius, dashed border, glow — container decoration extras.
 // ---------------------------------------------------------------------------
 
 #[test]
