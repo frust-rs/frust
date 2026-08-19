@@ -56,6 +56,7 @@
 pub mod appbar;
 pub mod button_group;
 pub mod card;
+pub mod checkbox;
 pub mod chips;
 pub mod dialog;
 pub mod fab;
@@ -82,6 +83,7 @@ pub use button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_g
 pub use card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
 };
+pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox, tristate_checkbox};
 pub use chips::{
     AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
     assist_chip, filter_chip,
