@@ -87,7 +87,7 @@ pub use chips::{
     assist_chip, filter_chip,
 };
 pub use dialog::{DialogView, DialogWidget, dialog, show_dialog};
-pub use fab::{FabSize, FabView, FabWidget, extended_fab, fab};
+pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
 pub use interaction::{HapticSignal, InteractionState, MaterialHaptics};
 pub use list_item::{
