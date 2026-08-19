@@ -14,9 +14,18 @@ Reserved Font Name" clause), so the unmodified face ships under its original
 name with the full OFL-1.1 license text vendored (`roboto-flex/OFL.txt`), as the
 license's license-inclusion term requires.
 
-Roboto Mono is licensed under Apache 2.0 per Google Fonts distribution (see
-`roboto-mono/APACHE2.txt`). The variable font format carries no additional
-licensing terms beyond the copyright and license text herein.
+Roboto Mono is licensed under the SIL Open Font License, Version 1.1
+(OFL-1.1), the same license as Roboto Flex — verified directly from the
+shipped font's own `name` table (nameID 13/14: "This Font Software is
+licensed under the SIL Open Font License, Version 1.1",
+https://openfontlicense.org; nameID 0 copyright: "Copyright 2015 The Roboto
+Mono Project Authors (https://github.com/googlefonts/robotomono)"), and
+corroborated by its Google Fonts source path living under `ofl/`
+(`google/fonts/tree/main/ofl/robotomono` — Google Fonts partitions its repo
+by license, and `ofl/` is the OFL-1.1 tree, not `apache/`). The full OFL-1.1
+license text is vendored at `roboto-mono/OFL.txt`. The variable font format
+carries no additional licensing terms beyond the copyright and license text
+herein.
 
 Both font bytes are pure data: they are only ever returned by
 `frust_material::font_data()`. Registering them into a live `TextContext` is a
@@ -32,18 +41,22 @@ shell's job — `frust_material::install()` pushes them through the facade's
 - **License**: SIL Open Font License 1.1 (OFL-1.1), no Reserved Font Name
 - **Vendored as**: `roboto-flex/RobotoFlex.ttf`
 - **Size**: 1,684,624 B (~1.61 MiB)
+- **SHA-256**: `2bd17942bba38048b2f86e00cdd6fb2242035c0b2c843d5979bb24f13d5512ef`
 - **Family name** (`name` ID 1): `Roboto Flex`
 - **Usage**: Headlines, display text, and default body text in Material 3 type scale
 
 ## Roboto Mono
 
-- **Upstream**: `github.com/google/fonts/tree/main/ofl/robotomono`
+- **Upstream**: `github.com/googlefonts/robotomono`
 - **Release**: Variable font from Google Fonts
 - **Retrieved**: 2026-08-19
 - **Source**: https://github.com/google/fonts/tree/main/ofl/robotomono
-- **License**: Apache License 2.0 (Apache-2.0)
+- **License**: SIL Open Font License 1.1 (OFL-1.1), no Reserved Font Name —
+  verified from the shipped font's own `name` table (nameID 13/14) and
+  corroborated by the `ofl/` source path above
 - **Vendored as**: `roboto-mono/RobotoMono.ttf`
 - **Size**: 181,388 B (~177 KiB)
+- **SHA-256**: `ffe6db2a820fad13df78365b4d471a5adb5d7530f409d462aa105a109586eb94`
 - **Family name** (`name` ID 1): `Roboto Mono`
 - **Usage**: Monospace text, code, and tabular figures in Material 3 catalog
 

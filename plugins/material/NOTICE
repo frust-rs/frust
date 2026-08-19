@@ -118,17 +118,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Applies to:
-- Shape token implementation (src/tokens/shapes/): ported from
-  androidx.graphics.shapes and the material_new_shapes package, which carry
-  Apache-2.0 lineage from androidx.
+- Shape token implementation (src/shapes/: rounded_polygon.rs, morph.rs,
+  catalog.rs): ported from androidx.graphics.shapes and the
+  material_new_shapes package, which carry Apache-2.0 lineage from androidx.
 - Loading indicator (when implemented): ported from
   androidx.compose.material3 LoadingIndicator.kt via material_3_expressive.
-- Future Material Icons path data (src/icons.rs, when implemented): Apache-2.0,
-  generated from Google's Material Design icons.
+- Material Icons path data (src/icons.rs): Apache-2.0, vendored verbatim from
+  Google's `material-design-icons` (`google/material-design-icons`), path
+  data as SVG `d` attributes in a 24x24 design box.
 
-Per Apache License, Section 4(d), any Derivative Works distributed must
-include a readable copy of the attribution notices contained within this
-NOTICE file, excluding notices that do not pertain to the Derivative Work.
+The complete Apache License, Version 2.0 text is vendored at
+`plugins/material/licenses/Apache-2.0.txt`. Per Apache License, Section
+4(d), any Derivative Works distributed must include a readable copy of the
+attribution notices contained within this NOTICE file, excluding notices
+that do not pertain to the Derivative Work.
 
 ================================================================================
 Apache License, Version 2.0 — Google LLC (material-color-utilities)
@@ -142,7 +145,8 @@ Copyright (c) 2021 Google LLC
                       forward transform, the HCT solver, tonal and core
                       palettes, and the Material 3 tone-role table
   License: Apache License, Version 2.0 — same terms as the section above, whose
-           license text and Section 4(d) attribution requirement apply here too
+           license text (`plugins/material/licenses/Apache-2.0.txt`) and
+           Section 4(d) attribution requirement apply here too
 
 ================================================================================
 OFL 1.1 License — Roboto Flex Font
@@ -154,19 +158,26 @@ Copyright (c) 2023 The Roboto Flex Project Authors
   License: SIL Open Font License 1.1 (no Reserved Font Name)
 
 The Roboto Flex font family is licensed under the SIL Open Font License, Version 1.1.
-See FONTS-LICENSE for the complete OFL 1.1 text.
+See `plugins/material/fonts/roboto-flex/OFL.txt` for the complete OFL 1.1 text
+(also FONTS-LICENSE for provenance details).
 
 ================================================================================
-Apache License, Version 2.0 — Roboto Mono Font
+SIL Open Font License, Version 1.1 — Roboto Mono Font
 ================================================================================
 
-Copyright (c) 2015 The Roboto Mono Project Authors
-  Upstream: https://github.com/google/fonts/tree/main/ofl/robotomono
+Copyright 2015 The Roboto Mono Project Authors
+  Upstream: https://github.com/googlefonts/robotomono
+  Source: https://github.com/google/fonts/tree/main/ofl/robotomono
   Bundled as: plugins/material/fonts/roboto-mono/RobotoMono.ttf
-  License: Apache License, Version 2.0
+  License: SIL Open Font License, Version 1.1 (verified from the shipped
+           font's own `name` table, nameID 13/14: "This Font Software is
+           licensed under the SIL Open Font License, Version 1.1" /
+           https://openfontlicense.org; the upstream Google Fonts repo path
+           above is itself under `ofl/`, Google Fonts' own OFL-licensed tree)
 
-The Roboto Mono font family is licensed under the Apache License, Version 2.0.
-See FONTS-LICENSE for the complete Apache 2.0 text.
+The Roboto Mono font family is licensed under the SIL Open Font License,
+Version 1.1. See `plugins/material/fonts/roboto-mono/OFL.txt` for the
+complete OFL 1.1 text (also FONTS-LICENSE for provenance details).
 
 ================================================================================
 Module Attribution Header Convention

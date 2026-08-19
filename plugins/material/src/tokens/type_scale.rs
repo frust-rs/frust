@@ -139,13 +139,9 @@
 //! own font-registration wiring is this crate's `baseline()` concern, not
 //! this module's.
 
+use super::ROBOTO_FLEX_FAMILY;
 use frust::TypeScale;
 use frust::authoring::text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
-
-/// The family name Roboto Flex's own `name` table reports (`name` ID 1) —
-/// what a font stack must name for the bundled face to resolve. See this
-/// module's "Family: Roboto Flex" doc section for the verification evidence.
-pub const ROBOTO_FLEX_FAMILY: &str = "Roboto Flex";
 
 /// The Material 3 Expressive type family: the bundled Roboto Flex face, then
 /// the platform's generic sans — so text still renders (in the system sans)

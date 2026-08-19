@@ -4,21 +4,21 @@
 //!
 //! - **Roboto Flex Variable** (upright) — Google Fonts, OFL-1.1. The sans face
 //!   the whole catalog's display/heading/body text resolves to
-//!   ([`type_scale`](super::theme::type_scale)).
-//! - **Roboto Mono Variable** (upright) — Google Fonts, Apache-2.0. The
-//!   monospace face for `kbd`, code, and tabular figures (currently unused by
-//!   the catalog; available for components that need mono text).
+//!   ([`type_scale`](super::type_scale)).
+//! - **Roboto Mono Variable** (upright) — Google Fonts, OFL-1.1 (verified from
+//!   the shipped font's own `name` table, nameID 13/14). The monospace face
+//!   for `kbd`, code, and tabular figures (currently unused by the catalog;
+//!   available for components that need mono text).
 //!
 //! Both are *variable* fonts, so one file per family covers the whole weight
 //! range the catalog names instead of one file per weight.
 //!
-//! Provenance (exact upstream releases/URLs, retrieval date, per-face sizes) is
-//! recorded in `plugins/material/FONTS-LICENSE`, alongside the full license
-//! text for each family (`fonts/roboto-flex/OFL.txt`,
-//! `fonts/roboto-mono/APACHE2.txt`) — required by the licenses' inclusion terms.
-//! Roboto Flex declares no Reserved Font Name, and Roboto Mono ships under
-//! Apache 2.0; this module ships the upstream bytes unmodified under the
-//! upstream names.
+//! Provenance (exact upstream releases/URLs, retrieval date, per-face sizes,
+//! SHA-256) is recorded in `plugins/material/FONTS-LICENSE`, alongside the
+//! full license text for each family (`fonts/roboto-flex/OFL.txt`,
+//! `fonts/roboto-mono/OFL.txt`) — required by the OFL-1.1 license-inclusion
+//! term. Neither font declares a Reserved Font Name; this module ships the
+//! upstream bytes unmodified under the upstream names.
 //!
 //! The bytes are compiled in **unconditionally**: depending on this plugin at
 //! all is the Material opt-in, so there is no second feature to switch the faces
@@ -33,12 +33,12 @@
 /// Roboto Flex Variable, upright (Google Fonts `v1.2.0`, OFL-1.1). See
 /// `fonts/roboto-flex/OFL.txt`.
 const ROBOTO_FLEX_VARIABLE: &[u8] = include_bytes!("../../fonts/roboto-flex/RobotoFlex.ttf");
-/// Roboto Mono Variable, upright (Google Fonts, Apache-2.0). See
-/// `fonts/roboto-mono/APACHE2.txt`.
+/// Roboto Mono Variable, upright (Google Fonts, OFL-1.1). See
+/// `fonts/roboto-mono/OFL.txt`.
 const ROBOTO_MONO_VARIABLE: &[u8] = include_bytes!("../../fonts/roboto-mono/RobotoMono.ttf");
 
 /// Index of the Roboto Flex face in [`font_data`]'s array — the face
-/// [`native_typefaces`](super::theme::native_typefaces) binds into both native
+/// [`native_typefaces`](super::native_typefaces) binds into both native
 /// slots. Named rather than spelled `0` inline because a native host's publish
 /// guard de-duplicates by byte *identity*: the face this index selects and the
 /// one `font_data()` hands a shell must be the same `&'static [u8]`.
