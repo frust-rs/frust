@@ -7,8 +7,10 @@
 //! sourced.
 //!
 //! **`info`/`success`/`warning` also name fields on `frust::StatusPalette`**
-//! (the framework-wide status trio baseline `frust-widgets` components
-//! resolve) — at deliberately different values. The two are different
+//! (the framework-wide status trio resolved by sibling design-system
+//! catalogs — Glyph's badge/alert/toast family, Cupertino — and app code;
+//! baseline `frust-widgets` itself has no `StatusPalette` consumer) — at
+//! deliberately different values. The two are different
 //! vocabularies that share role names by coincidence, not one role table
 //! with two readers: `MaterialTokens` is the M3E reference's own semantic
 //! set (this crate's catalog code resolves only this one), `StatusPalette`

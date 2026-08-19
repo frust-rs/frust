@@ -6,8 +6,14 @@ vendored or ported from other projects. Vendored code is marked in module header
 (e.g., "Ported from", "Vendored from") with upstream attribution, version, and
 license. The notices below preserve the original copyrights and license terms.
 
-The package itself is licensed under the MIT License; see the LICENSE field in
-Cargo.toml or the workspace root's LICENSE file.
+The package's declared license is `Apache-2.0 AND OFL-1.1` (see Cargo.toml):
+the crate bundles Apache-2.0-only ported code (material-color-utilities,
+androidx.graphics.shapes lineage, Material Icons path data) and OFL-1.1 font
+data alongside its own workspace-licensed sources, so no MIT-only arm can be
+offered for the combined artifact. There is no workspace-root LICENSE file;
+the license texts live at `plugins/material/licenses/Apache-2.0.txt`,
+`plugins/material/fonts/roboto-flex/OFL.txt`, and
+`plugins/material/fonts/roboto-mono/OFL.txt`.
 
 Unless a different license is stated in a subsection below, vendored MIT
 components use the same MIT License terms as the workspace.
@@ -154,8 +160,9 @@ Copyright (c) 2021 Google LLC
 OFL 1.1 License — Roboto Flex Font
 ================================================================================
 
-Copyright (c) 2023 The Roboto Flex Project Authors
-  Upstream: https://github.com/googlefonts/roboto-flex
+Copyright 2017 The Roboto Flex Project Authors
+  Upstream: https://github.com/TypeNetwork/Roboto-Flex (per the shipped
+  font's own name table, ID 0; font version 3.200;gftools[0.9.32])
   Bundled as: plugins/material/fonts/roboto-flex/RobotoFlex.ttf
   License: SIL Open Font License 1.1 (no Reserved Font Name)
 

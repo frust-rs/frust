@@ -34,8 +34,10 @@ shell's job — `frust_material::install()` pushes them through the facade's
 
 ## Roboto Flex
 
-- **Upstream**: `github.com/googlefonts/roboto-flex`
-- **Release tag**: v1.2.0 (variable upright release from Google Fonts)
+- **Upstream**: `github.com/TypeNetwork/Roboto-Flex` (per the shipped font's
+  name table, ID 0: "Copyright 2017 The Roboto Flex Project Authors")
+- **Font version**: 3.200;gftools[0.9.32] (name ID 5 of the shipped bytes;
+  distributed via Google Fonts)
 - **Retrieved**: 2026-08-19
 - **Source**: https://github.com/google/fonts/tree/main/ofl/robotoflex
 - **License**: SIL Open Font License 1.1 (OFL-1.1), no Reserved Font Name

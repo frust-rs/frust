@@ -77,9 +77,9 @@
 //! | `surfaceTint` | `ColorScheme::surface_tint` |
 //! | `emphasis` | `MaterialTokens.{light,dark}.emphasis` |
 //! | `onEmphasis` | `MaterialTokens.{light,dark}.on_emphasis` |
-//! | `info` | `MaterialTokens.{light,dark}.info` (M3E-parity value); also `StatusPalette.{light,dark}.info` (framework status trio — different vocabulary, different value, see below) |
-//! | `success` | `MaterialTokens.{light,dark}.success` (M3E-parity value); also `StatusPalette.{light,dark}.success` (framework status trio, see below) |
-//! | `warning` | `MaterialTokens.{light,dark}.warning` (M3E-parity value); also `StatusPalette.{light,dark}.warning` (framework status trio, see below) |
+//! | `info` | `MaterialTokens.{light,dark}.info` (see *Two semantic vocabularies*) |
+//! | `success` | `MaterialTokens.{light,dark}.success` (see *Two semantic vocabularies*) |
+//! | `warning` | `MaterialTokens.{light,dark}.warning` (see *Two semantic vocabularies*) |
 //! | `danger` | `MaterialTokens.{light,dark}.danger` |
 //! | `surfaceStrong` | `MaterialTokens.{light,dark}.surface_strong` |
 //! | `onSurfaceStrong` | `MaterialTokens.{light,dark}.on_surface_strong` |
@@ -92,22 +92,25 @@
 //!
 //! [`baseline`] attaches *both* [`MaterialTokens`] and a [`StatusPalette`]
 //! (via [`status_palette`]), and both carry `info`/`success`/`warning`
-//! fields — but they are two **different vocabularies that happen to share
-//! role names**, not one role table with two readers:
+//! fields — two **different vocabularies that happen to share role names**,
+//! not one role table with two readers:
 //!
 //! - **[`MaterialTokens`]** carries the M3E reference's own semantic roles,
 //!   `info`/`success`/`warning` included — `info` is the reference's
 //!   `scheme.tertiary` alias exactly as `m3e_color_scheme.dart` defines it
 //!   (see [`color`]'s module docs), and `success`/`warning` are its two
-//!   independent constants, transcribed verbatim. **frust-material catalog
-//!   code (every widget in this crate) resolves `MaterialTokens`, never
+//!   independent constants, transcribed verbatim. **Binding rule for this
+//!   crate (prescriptive — no widget consumes either extension yet):
+//!   frust-material catalog code MUST resolve `MaterialTokens`, never
 //!   `StatusPalette`** — it is the crate's one source of truth for M3E
 //!   parity.
 //! - **[`StatusPalette`]** (`frust::StatusPalette`, defined in
-//!   `frust-theme`) carries the framework-wide, community-approximate
-//!   status trio every baseline `frust-widgets` component (e.g. badge's
-//!   `Info` variant) resolves — a pre-existing contract this crate's
-//!   `status_palette()` supplies values for, unrelated to the M3E port.
+//!   `frust-theme`) is the framework-wide, community-approximate status
+//!   trio. Its readers are NOT in baseline `frust-widgets` (which has no
+//!   `StatusPalette` consumer) — they are sibling design-system catalogs
+//!   (`frust-glyph`'s badge/alert/toast/stat-card family,
+//!   `frust-cupertino`'s tokens) and app code, all of which resolve
+//!   `theme.extension::<StatusPalette>()` from whatever `Theme` is active.
 //!
 //! Their same-named fields hold **deliberately different values** (e.g.
 //! light `warning`: `MaterialTokens` `#EF6C00` vs. `StatusPalette`
@@ -116,10 +119,16 @@
 //! [`two_semantic_vocabularies_diverge_by_design`](tests::two_semantic_vocabularies_diverge_by_design)
 //! below, which pins both tables so a future reconciliation is a deliberate,
 //! test-editing act rather than an accidental drift. **Neither table takes
-//! precedence over the other**: there is no ladder to resolve because their
-//! consumers are disjoint — a frust-material component never reads
-//! `StatusPalette`, and a baseline `frust-widgets` component never reads
-//! `MaterialTokens`.
+//! precedence over the other** — there is no resolution ladder between
+//! them; each reader class names its extension explicitly. The mixed case
+//! is real and defined: a Glyph/Cupertino status widget rendered under a
+//! Material theme reads this crate's `status_palette()` values (`#0061A4`
+//! info etc.), NOT the M3E `MaterialTokens` values — two same-named roles
+//! can therefore legitimately paint differently on one screen when catalogs
+//! are mixed. Note also that [`theme_from_seed`] regenerates
+//! `MaterialTokens` from the seed but leaves `status_palette()`'s baked
+//! values untouched — the two vocabularies diverge further under seeding,
+//! by the same rule.
 
 mod color;
 mod extension;

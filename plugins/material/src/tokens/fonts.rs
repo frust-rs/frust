@@ -30,7 +30,8 @@
 //! [`install`](crate::install) hands them to `frust::register_app_fonts`, and
 //! each shell drains that queue into its own `TextContext`.
 
-/// Roboto Flex Variable, upright (Google Fonts `v1.2.0`, OFL-1.1). See
+/// Roboto Flex Variable, upright (font version `3.200;gftools[0.9.32]`,
+/// OFL-1.1, © 2017 The Roboto Flex Project Authors). See
 /// `fonts/roboto-flex/OFL.txt`.
 const ROBOTO_FLEX_VARIABLE: &[u8] = include_bytes!("../../fonts/roboto-flex/RobotoFlex.ttf");
 /// Roboto Mono Variable, upright (Google Fonts, OFL-1.1). See
