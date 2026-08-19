@@ -34,6 +34,16 @@
 //! `PatternSwitcher`). Direction is forward (new slides in from the right) by
 //! default; [`AppBarView::title_direction`] flips it to back-nav.
 //!
+//! # Title position
+//!
+//! The compact title (+subtitle) anchors leading-aligned by default —
+//! [`AppBarView::title_position`]`(`[`TitlePosition::Center`]`)` optically
+//! centers it over the bar's full width instead, clamped to the free span
+//! between the leading/trailing slots on collision (see
+//! [`AppBarWidget::resolve_title_x`] for the exact rule). The crossfade above
+//! keeps working under either position — its shift is relative to wherever
+//! the run currently sits, not to a fixed leading edge.
+//!
 //! # Selection mode
 //!
 //! [`AppBarView::selection`]`(Some(`[`SelectionBar`]`))` morphs the bar into a
@@ -361,6 +371,29 @@ pub enum TitleDirection {
     Back,
 }
 
+/// Horizontal anchor for the compact bar's title (+ subtitle, which always
+/// shares the title's anchor — they move together) within the bar's
+/// leading/title/trailing three-zone anatomy (see the [module docs](self)).
+/// Set via [`AppBarView::title_position`]. Applies to the **compact title
+/// face only** — selection mode's `"N selected"` count always anchors
+/// leading-aligned regardless of this setting (its own face, not covered by
+/// this knob), and the large scroll-collapse variant's big title has no
+/// anchor knob of its own either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TitlePosition {
+    /// Flush against the leading zone (the pre-existing, only-ever behavior
+    /// — the default, so every existing consumer's layout is byte-identical).
+    #[default]
+    Leading,
+    /// Optically centered over the bar's full width (leading edge to
+    /// trailing edge — the standard mobile convention), **clamped to never
+    /// overlap the leading or trailing slot's own box**: if centering over
+    /// the full width would collide with either slot, the title instead
+    /// centers within the free span between them. See
+    /// [`AppBarWidget::resolve_title_x`] for the exact rule.
+    Center,
+}
+
 /// A minimal retained shaped text run — see [`super::navbar`]'s `GlyphLabel`.
 struct ShapedRun {
     content: String,
@@ -511,6 +544,7 @@ pub struct AppBarView<State: 'static> {
     actions: Vec<AnyView<State>>,
     elevated: bool,
     title_direction: TitleDirection,
+    title_position: TitlePosition,
     selection: Option<SelectionBar<State>>,
     large: Option<LargeConfig<State>>,
     collapse_progress: f64,
@@ -527,6 +561,7 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         actions: Vec::new(),
         elevated: false,
         title_direction: TitleDirection::Forward,
+        title_position: TitlePosition::Leading,
         selection: None,
         large: None,
         collapse_progress: 0.0,
@@ -572,6 +607,15 @@ impl<State: 'static> AppBarView<State> {
     /// Set the title-crossfade direction for the next title change.
     pub fn title_direction(mut self, direction: TitleDirection) -> Self {
         self.title_direction = direction;
+        self
+    }
+
+    /// Set the compact title's horizontal anchor — leading-aligned (the
+    /// default) or optically centered over the bar's full width. See
+    /// [`TitlePosition`] for the collision-clamp rule and its
+    /// selection-mode/large-variant carve-outs.
+    pub fn title_position(mut self, position: TitlePosition) -> Self {
+        self.title_position = position;
         self
     }
 
@@ -644,6 +688,11 @@ pub struct AppBarWidget {
     selection_present: bool,
     on_close: Option<frust::authoring::ErasedCallback>,
     title_direction: TitleDirection,
+    /// Compact-face title/subtitle horizontal anchor — see
+    /// [`AppBarWidget::resolve_title_x`]. Ignored by the selection face
+    /// (`count_pos` always anchors leading) and the large variant (no
+    /// compact title zone).
+    title_position: TitlePosition,
     elevated_target: bool,
     // --- large variant ---
     /// Whether the current view carries a [`LargeConfig`] (its layout is only
@@ -726,6 +775,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
                 .as_ref()
                 .map(|s| frust::authoring::erase_callback(&s.on_close)),
             title_direction: self.title_direction,
+            title_position: self.title_position,
             elevated_target: self.elevated,
             large_present,
             big_title: ShapedRun::new(
@@ -782,6 +832,10 @@ impl<State: 'static> View<State> for AppBarView<State> {
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
         element.title_direction = self.title_direction;
+        if prev.title_position != self.title_position {
+            element.title_position = self.title_position;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
 
         // Title change → stage a directional crossfade.
         if prev.title != self.title {
@@ -1118,8 +1172,13 @@ impl AppBarWidget {
             right -= SLOT_GAP;
         }
 
-        // Title zone fills the middle; its runs are left-aligned and ellipsized
-        // to the available width.
+        // Title zone fills the middle; its runs are ellipsized to the
+        // available width (`zone_w`) regardless of `title_position` — only
+        // the horizontal anchor within the bar changes. `zone_x` (always
+        // leading-aligned) anchors the selection face's count run; the
+        // title/subtitle anchor is resolved separately below, since
+        // selection mode ignores `title_position` (its own face — see
+        // `Self::resolve_title_x`).
         let zone_x = left;
         let zone_w = (right - left).max(0.0);
         let title_size =
@@ -1140,15 +1199,51 @@ impl AppBarWidget {
         self.count
             .layout(ctx, &count_style(colors.accent), Some(zone_w as f32));
 
-        // Vertically center the title (+subtitle) stack inside the content band.
+        // Vertically center the title (+subtitle) stack inside the content
+        // band; horizontally, resolve the shared title/subtitle anchor per
+        // `title_position` — both share `title_x` (they move together).
+        let run_width = title_size.width.max(subtitle_size.map_or(0.0, |s| s.width));
+        let title_x = self.resolve_title_x(width, left, right, run_width);
         let stack_h = title_size.height + subtitle_size.map_or(0.0, |s| SUBTITLE_GAP + s.height);
         let title_y = content_top + (BAR_HEIGHT - stack_h) / 2.0;
-        self.title_pos = Point::new(zone_x, title_y);
-        self.subtitle_pos = Point::new(zone_x, title_y + title_size.height + SUBTITLE_GAP);
+        self.title_pos = Point::new(title_x, title_y);
+        self.subtitle_pos = Point::new(title_x, title_y + title_size.height + SUBTITLE_GAP);
         let count_h = self.count.size().height;
         self.count_pos = Point::new(zone_x, content_top + (BAR_HEIGHT - count_h) / 2.0);
 
         top_inset + BAR_HEIGHT
+    }
+
+    /// Resolve the compact title (+subtitle) run's horizontal anchor per
+    /// [`TitlePosition`], given the bar's own `width`, the free title zone's
+    /// `left`/`right` edges (the leading/trailing slot boxes end/start
+    /// there, including their gap), and `run_width` (the wider of the title
+    /// and subtitle runs, already ellipsis-constrained to the free span).
+    ///
+    /// [`TitlePosition::Leading`] always returns `left` — byte-identical to
+    /// the bar's original, only-ever layout.
+    ///
+    /// [`TitlePosition::Center`] optically centers the run over the bar's
+    /// **full** width (`0..width`, the standard mobile convention — not just
+    /// the free span between the slots). **Collision clamp:** if that
+    /// full-width-centered box (`[x, x + run_width]`) would overlap either
+    /// slot's own box (i.e. `x < left` or `x + run_width > right`), the run
+    /// instead centers within the free span `[left, right]` alone, so it
+    /// never overlaps a leading/trailing slot regardless of how much either
+    /// occupies.
+    fn resolve_title_x(&self, width: f64, left: f64, right: f64, run_width: f64) -> f64 {
+        match self.title_position {
+            TitlePosition::Leading => left,
+            TitlePosition::Center => {
+                let full_width_centered = (width - run_width) / 2.0;
+                if full_width_centered >= left && full_width_centered + run_width <= right {
+                    full_width_centered
+                } else {
+                    let free_span = (right - left).max(0.0);
+                    left + ((free_span - run_width) / 2.0).max(0.0)
+                }
+            }
+        }
     }
 
     /// Lay out the large scroll-collapse variant, returning its total
@@ -1787,6 +1882,109 @@ mod tests {
         back.title_direction = TitleDirection::Back;
         let (back_new, _) = back.title_shift(0.0);
         assert!(back_new < 0.0, "back-nav enters from the left");
+    }
+
+    // -- Title position (leading default / center + collision clamp) --------
+
+    #[test]
+    fn title_position_defaults_to_leading_and_is_byte_identical_to_todays_layout() {
+        let view: AppBarView<()> = app_bar("Sessions");
+        assert_eq!(view.title_position, TitlePosition::Leading);
+        let mut w = build(&view);
+        layout(&mut w, Size::new(360.0, 100.0), None);
+        // No leading child: the pre-`title_position` bar always put the
+        // title flush against the leading edge (`left == PAD_X`) — pinned
+        // here unchanged.
+        assert_eq!(w.title_pos.x, PAD_X);
+    }
+
+    #[test]
+    fn title_position_center_optically_centers_over_the_full_bar_width_when_it_fits() {
+        // A leading child narrow enough that a full-width-centered title
+        // still clears both slot boxes — Center should center over the
+        // bar's full width, not just the free span between the slots (which
+        // would land at a different x here, since the leading slot isn't
+        // symmetric with the trailing edge).
+        let view: AppBarView<()> = app_bar("Hi")
+            .title_position(TitlePosition::Center)
+            .leading(leaf_any(40.0, 40.0));
+        let mut w = build(&view);
+        layout(&mut w, Size::new(400.0, 100.0), None);
+
+        let left = PAD_X + 40.0 + SLOT_GAP;
+        let right = 400.0 - PAD_X;
+        let run_width = w.title.size().width;
+        let full_width_centered = (400.0 - run_width) / 2.0;
+        assert!(
+            full_width_centered >= left && full_width_centered + run_width <= right,
+            "test setup: the centered title must not collide with either slot"
+        );
+        assert!(
+            (w.title_pos.x - full_width_centered).abs() < 0.5,
+            "expected {full_width_centered}, got {}",
+            w.title_pos.x
+        );
+    }
+
+    #[test]
+    fn title_position_center_clamps_to_the_free_span_on_collision() {
+        // A wide leading child pushes the free span far enough right that
+        // centering over the bar's full width would land inside the
+        // leading slot's own box — the clamp falls back to centering within
+        // the free span between the slots instead.
+        let view: AppBarView<()> = app_bar("Hi")
+            .title_position(TitlePosition::Center)
+            .leading(leaf_any(320.0, 40.0));
+        let mut w = build(&view);
+        layout(&mut w, Size::new(400.0, 100.0), None);
+
+        let left = PAD_X + 320.0 + SLOT_GAP;
+        let right = 400.0 - PAD_X;
+        let run_width = w.title.size().width;
+        let full_width_centered = (400.0 - run_width) / 2.0;
+        assert!(
+            full_width_centered < left,
+            "test setup: an uncollided center would defeat the clamp assertion"
+        );
+        let expected = left + ((right - left - run_width).max(0.0)) / 2.0;
+        assert!(
+            (w.title_pos.x - expected).abs() < 0.5,
+            "expected {expected}, got {}",
+            w.title_pos.x
+        );
+        assert!(
+            w.title_pos.x >= left,
+            "the clamped title never overlaps the leading slot"
+        );
+    }
+
+    #[test]
+    fn title_position_center_crossfade_still_stages_both_runs() {
+        let prev = app_bar("Sessions").title_position(TitlePosition::Center);
+        let mut w = build(&prev);
+        layout(&mut w, Size::new(360.0, 100.0), None);
+
+        let next = app_bar("Settings").title_position(TitlePosition::Center);
+        let flags = rebuild(&prev, &next, &mut w);
+        assert!(flags.needs_layout());
+        assert!(
+            w.title_stage.is_some(),
+            "a title change still stages a crossfade under Center"
+        );
+        layout(&mut w, Size::new(360.0, 100.0), None);
+
+        // Seed the driver clock: still staging, another frame requested.
+        let (_, animating0) = paint(&mut w, ft_ms(0.0), None);
+        assert!(animating0);
+        assert!(w.title_stage.is_some());
+
+        // Past the 220ms crossfade: staging clears, same as under Leading.
+        let (_, animating1) = paint(&mut w, ft_ms(400.0), None);
+        assert!(!animating1);
+        assert!(
+            w.title_stage.is_none(),
+            "the crossfade settled under Center too"
+        );
     }
 
     // -- Selection mode morph + close ----------------------------------------
