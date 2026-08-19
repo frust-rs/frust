@@ -56,6 +56,7 @@ pub mod chips;
 pub mod dialog;
 pub mod fab;
 pub mod fab_menu;
+pub mod interaction;
 pub mod list_item;
 pub mod list_view;
 pub mod loading_indicator;
@@ -83,6 +84,7 @@ pub use chips::{
 pub use dialog::{DialogView, DialogWidget, dialog, show_dialog};
 pub use fab::{FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
+pub use interaction::{HapticSignal, InteractionState, MaterialHaptics};
 pub use list_item::{
     ListItem, ListItemLines, ListItemWidget, ONE_LINE_HEIGHT, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
     list_item,

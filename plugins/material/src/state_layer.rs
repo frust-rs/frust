@@ -21,6 +21,23 @@
 //! opacities — M3 does not stack multiple overlays additively, it shows the
 //! strongest one.
 //!
+//! # Relationship to `crate::interaction`
+//!
+//! This type now wraps [`crate::interaction::InteractionState`] and its
+//! `opacity()` method below delegates to
+//! [`InteractionState::max_active_opacity`]
+//! — the exact max-of-active behavior this module has always documented,
+//! preserved unchanged for this module's existing consumers
+//! (`list_item`/`card`/`chips`/`fab`/`switch`). `crate::interaction` also
+//! hosts a **precedence**-based resolver
+//! (`dragged > pressed > focused > hovered`, porting the reference's
+//! `M3EInteractionState.opacity` exactly) as its new documented default for
+//! any future consumer — see that module's doc for why the two resolvers
+//! agree numerically on this crate's own token table today, and why they
+//! are still kept as two distinct functions rather than one. This module's
+//! own public constants and `StateLayer` API are unchanged by that
+//! addition; every existing call site here keeps its current behavior.
+//!
 //! # Live vs. aspirational states
 //!
 //! Of the four interaction states this helper models, **`pressed` and `hovered`
@@ -72,27 +89,25 @@ use frust::authoring::{PaintCtx, PaintScene};
 use kurbo::Rect;
 use peniko::Color;
 
-pub use frust::authoring::PRESSED_OPACITY;
+use crate::interaction::InteractionState;
 
-/// Hover-state overlay opacity (source: androidx Compose Material3
+/// Dragged-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17).
-pub const HOVER_OPACITY: f32 = 0.08;
+pub use crate::interaction::DRAGGED_OPACITY;
 /// Focus-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17 — supersedes material-web
 /// v0.192's 12%, see R18).
-pub const FOCUS_OPACITY: f32 = 0.10;
-/// Dragged-state overlay opacity (source: androidx Compose Material3
+pub use crate::interaction::FOCUS_OPACITY;
+/// Hover-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17).
-pub const DRAGGED_OPACITY: f32 = 0.16;
+pub use crate::interaction::HOVER_OPACITY;
+pub use crate::interaction::PRESSED_OPACITY;
 
 /// Tracks a widget's hover/focus/pressed/dragged interaction state and paints
 /// the M3 state-layer overlay for it. See the [module docs](self).
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct StateLayer {
-    hovered: bool,
-    focused: bool,
-    pressed: bool,
-    dragged: bool,
+    state: InteractionState,
 }
 
 impl StateLayer {
@@ -103,56 +118,35 @@ impl StateLayer {
 
     /// Record the widget's hover state. Returns whether the flag changed.
     pub fn set_hovered(&mut self, hovered: bool) -> bool {
-        let changed = self.hovered != hovered;
-        self.hovered = hovered;
-        changed
+        self.state.set_hovered(hovered)
     }
 
     /// Record the widget's focus state. Returns whether the flag changed.
     pub fn set_focused(&mut self, focused: bool) -> bool {
-        let changed = self.focused != focused;
-        self.focused = focused;
-        changed
+        self.state.set_focused(focused)
     }
 
     /// Record the widget's pressed state. Returns whether the flag changed.
     pub fn set_pressed(&mut self, pressed: bool) -> bool {
-        let changed = self.pressed != pressed;
-        self.pressed = pressed;
-        changed
+        self.state.set_pressed(pressed)
     }
 
     /// Record the widget's dragged state. Returns whether the flag changed.
     pub fn set_dragged(&mut self, dragged: bool) -> bool {
-        let changed = self.dragged != dragged;
-        self.dragged = dragged;
-        changed
+        self.state.set_dragged(dragged)
     }
 
     /// Whether any interaction state is currently active (i.e. whether
     /// [`StateLayer::paint`] will paint anything).
     pub fn is_active(&self) -> bool {
-        self.hovered || self.focused || self.pressed || self.dragged
+        self.state.is_active()
     }
 
     /// The overlay opacity for the current state: the maximum of every active
     /// state's opacity (see the [module docs](self)), or `0.0` if none are
     /// active.
     pub fn opacity(&self) -> f32 {
-        let mut opacity: f32 = 0.0;
-        if self.hovered {
-            opacity = opacity.max(HOVER_OPACITY);
-        }
-        if self.focused {
-            opacity = opacity.max(FOCUS_OPACITY);
-        }
-        if self.pressed {
-            opacity = opacity.max(PRESSED_OPACITY);
-        }
-        if self.dragged {
-            opacity = opacity.max(DRAGGED_OPACITY);
-        }
-        opacity
+        self.state.max_active_opacity()
     }
 
     /// Paint the overlay: a filled rounded rect covering `shape_rect` with
