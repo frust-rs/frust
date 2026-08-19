@@ -44,20 +44,28 @@
 //! - **A queued-but-undrained op is not in it.** The op queue is *intent*
 //!   (`RouteNavigator::location`, the router's own request queue); this
 //!   observable is *fact*. Both stay — the split is deliberate.
-//! - **One bounded staleness window: an in-flight interactive edge swipe.**
-//!   From the steal (`begin_interactive_pop`) to the settle-frame publish
-//!   (the explicit `publish_state` call after `finalize_transition` in
-//!   `NavigatorView::rebuild`) the observable still reports the *pre-swipe*
-//!   stack, including its depth — up to the whole drag, unbounded in wall
-//!   time because a finger can hold. That is the committed truth, and a
-//!   cancelled swipe makes it retroactively correct rather than something to
-//!   retract. Frame-accurate drag chrome already has
+//! - **One bounded staleness window: an in-flight interactive edge swipe —
+//!   and the two halves diverge, not agree.** `begin_interactive_pop` pops
+//!   the page out of `self.pages` immediately, at steal, before the drag
+//!   paints a single frame. `NavigatorView::rebuild`'s trailing
+//!   `publish_state()` call is UNCONDITIONAL, so every drag frame
+//!   republishes `depth()`/`can_pop()`/`back_interest()` against that
+//!   already-popped count — EAGER, ahead of the commit. This observable's
+//!   own publish (`publish_route_stack`, called from inside `publish_state`)
+//!   is gated on `self.transition` being `Some` and `interactive` and
+//!   returns early while that holds, so it keeps reporting the *pre-swipe*
+//!   stack — CONSERVATIVE, behind the commit — until the settle-frame
+//!   publish (after `finalize_transition` clears the flag). Depth leads, the
+//!   stack lags, for the whole drag — unbounded in wall time because a
+//!   finger can hold. A cancelled swipe makes the lagging observable read
+//!   retroactively correct rather than something to retract.
+//!   **Consequence**: at depth 2, a held swipe already publishes
+//!   `compute_back_interest(1, Pop) == false` — a back press read mid-drag
+//!   claims no interest and escapes to the platform (activity finish on
+//!   Android), even though releasing below the commit point restores the
+//!   page. Frame-accurate drag chrome already has
 //!   `NavigatorController::transition()` (`is_pop`/`progress`/`interactive`)
 //!   for exactly this window — this observable is not it.
-//!   `depth()`/`can_pop()` are stale in the same window for the same
-//!   pre-existing reason (tracked separately: back arbitration re-reads
-//!   `back_interest` live at press time, so a stale depth never actually
-//!   mis-pops).
 
 use super::path::Location;
 

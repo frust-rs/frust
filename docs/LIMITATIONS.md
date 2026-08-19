@@ -2665,23 +2665,33 @@ write/read offset surface).
 
 ---
 
-### `nav-swipe-depth-staleness` — `depth()`/`can_pop()` are stale for the duration of an in-flight interactive swipe
+### `nav-swipe-depth-staleness` — `depth()`/`can_pop()`/`back_interest()` run eager, the route-state observable runs conservative, for the same in-flight interactive swipe
 
-**Observed**: from the left-edge steal (`begin_interactive_pop`) to the settle-frame publish, both
-`NavigatorController::depth()`/`can_pop()` and the route-state observable
-(`route_stack()`/`RouteObserver`) still report the pre-swipe stack — up to the whole drag,
-unbounded in wall time because a finger can hold. A cancelled swipe makes that pre-swipe read
+**Observed**: from the left-edge steal (`begin_interactive_pop`) to the settle-frame publish,
+`NavigatorController::depth()`/`can_pop()`/`back_interest()` and the route-state observable
+(`route_stack()`/`RouteObserver`) diverge in opposite directions rather than both lagging alike.
+`begin_interactive_pop` pops the page out of the retained stack immediately, at steal, before the
+drag paints a frame; `NavigatorView::rebuild`'s trailing `publish_state()` call is unconditional,
+so every drag frame republishes `depth`/`can_pop`/`back_interest` against that already-popped
+count — EAGER, ahead of the commit. The route-state observable's own publish is gated on the
+transition's `interactive` flag and returns early while the drag holds, so it keeps reporting the
+pre-swipe stack — CONSERVATIVE, behind the commit — until the settle-frame publish. Unbounded in
+wall time because a finger can hold; a cancelled swipe makes the lagging observable's read
 retroactively correct rather than something to retract.
 
-**Applies to**: any consumer reading `depth`/`can_pop`/the route-state observable while an edge-swipe
-pop is in flight, in any app using the baseline `Navigator`/`Router`.
+**Applies to**: any consumer reading `depth`/`can_pop`/`back_interest`/the route-state observable
+while an edge-swipe pop is in flight, in any app using the baseline `Navigator`/`Router`.
 
-**Why accepted, not fixed**: back arbitration itself is unaffected — `back_interest` is re-read live
-at press time, so a stale `depth` never actually mis-pops. The route-state observable was
-deliberately designed to publish only on settle (a committed-mutation contract, not a live drag
-readout); frame-accurate drag chrome already has `NavigatorController::transition()`
-(`is_pop`/`progress`/`interactive`) for that window. This is a pre-existing `depth`/`can_pop` gap
-the new observable inherits and documents rather than fixes.
+**Why accepted, not fixed**: the eager side has a real, non-cosmetic cost — at depth 2, a held
+swipe already publishes `compute_back_interest(1, Pop) == false`, so a back press read mid-drag
+claims no interest and escapes to the platform (activity finish on Android) even though releasing
+below the commit point restores the page. A fix needs `depth`/`can_pop`/`back_interest` to also
+gate on the transition's `interactive` flag the way the route-state observable's publish already
+does — real follow-up work, not something dismissed as harmless. The route-state observable
+itself was deliberately designed to publish only on settle (a committed-mutation contract, not a
+live drag readout); frame-accurate drag chrome already has `NavigatorController::transition()`
+(`is_pop`/`progress`/`interactive`) for that window. This is a pre-existing `depth`/`can_pop`/
+`back_interest` gap the new observable documents rather than fixes.
 
 **Evidence**: `crates/frust-widgets/src/nav/route_state.rs` module docs' Staleness contract;
 `crates/frust-widgets/src/nav/navigator.rs`'s `depth`/`can_pop`/`back_interest` doc comments.

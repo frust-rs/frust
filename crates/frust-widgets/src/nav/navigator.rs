@@ -6778,8 +6778,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Gesture policy (Arc B, B3): BackPolicy arm gate, per-route/platform
-    // pop_swipe resolution, and R-B3-inner (innermost-first swipe claiming).
+    // Gesture policy: BackPolicy arm gate, per-route/platform pop_swipe
+    // resolution, and R-B3-inner (innermost-first swipe claiming).
     // ---------------------------------------------------------------------
 
     /// Downcast a page's own `ChildPod` widget to `&NavigatorWidget<S>` — the
