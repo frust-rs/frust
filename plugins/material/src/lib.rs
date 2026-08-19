@@ -16,6 +16,12 @@
 //! the in-tree catalog it was extracted from is consumed through the `frust`
 //! facade (`frust::AppBar`, `frust::card`, ...).
 //!
+//! The one name carrying two implementations is `RoundedPolygon`: the flat
+//! re-export is [`shapes::RoundedPolygon`], the feature-point geometry engine
+//! ported from `material_new_shapes`. [`mod@shape_morph`]'s older radial-model
+//! polygon keeps its own module path until its two consumers
+//! ([`mod@loading_indicator`], [`mod@button_group`]) move across.
+//!
 //! # `install()`: this design system's one-line installer
 //!
 //! [`install`] seeds [`frust::set_default_theme`] with this crate's
@@ -57,6 +63,7 @@ pub mod navbar;
 mod press;
 pub mod progress;
 pub mod shape_morph;
+pub mod shapes;
 pub mod sheet;
 pub mod split_button;
 pub mod state_layer;
@@ -90,7 +97,8 @@ pub use progress::{
     CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
     LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
 };
-pub use shape_morph::{RoundedPolygon, morph_path};
+pub use shape_morph::morph_path;
+pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
