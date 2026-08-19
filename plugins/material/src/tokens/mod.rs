@@ -11,16 +11,23 @@
 //! catalog moved out of tree; nothing in the framework constructs them any
 //! more, so this crate owns them outright.
 //!
-//! Split across three files:
+//! Module layout:
 //!
-//! - This module — `baseline()`, the module's public re-export surface, and
-//!   (for now) the type scale/shape scale/elevation table/motion
-//!   scheme/`StatusPalette` bodies. A later task moves each of those into
-//!   its own file; this one only splits out color.
+//! - This module — `baseline()`, the public re-export surface, the bundled
+//!   font family constants + `NativeTypefaces` attach, and (still here) the
+//!   shape scale and `StatusPalette` bodies.
 //! - [`color`] — [`color_scheme_light`]/[`color_scheme_dark`] plus the M3E
 //!   semantic-role expansion ([`MaterialSemanticColors`]).
 //! - [`extension`] — [`MaterialTokens`], the `ThemeExtensions` payload
 //!   wrapping [`color::MaterialSemanticColors`] for both brightnesses.
+//! - [`hct`] — the material-color-utilities port behind [`from_seed`]/
+//!   [`theme_from_seed`].
+//! - [`motion`] — the 16-duration/7-easing/11-spring M3E motion tables
+//!   ([`MaterialMotion`]/[`MaterialSpring`]) `motion_scheme()` is built from.
+//! - [`type_scale`] — the 30-role M3 type scale, resolved to Roboto Flex.
+//! - [`metrics`] — the elevation table plus the [`MaterialSpacing`]/
+//!   [`MaterialDimensions`] const catalogs.
+//! - [`fonts`] — the bundled Roboto Flex/Mono font bytes ([`font_data`]).
 //!
 //! # M3E role partition
 //!
