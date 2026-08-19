@@ -79,6 +79,20 @@ A device gate for `frust-i18n` (`plugins/i18n`), against an app depending on the
 
 Keep this checklist in sync with `plugins/i18n/README.md` §9.
 
+## Material asset regeneration
+
+`frust-material`'s generated/bundled assets are checked in, not built by `build.rs`; regenerate by
+hand when the source list changes:
+
+- **Icons:** `python3 plugins/material/scripts/gen_icons.py` regenerates
+  `plugins/material/src/icons.rs` from Google's `material-design-icons` SVGs (network fetch,
+  cached under the gitignored `target/material-icons-cache/`); deterministic given the script's
+  fixed icon list — a re-run with no source changes reproduces byte-identical output.
+- **Fonts + NOTICE:** bundled Roboto Flex/Mono bytes live under `plugins/material/fonts/`;
+  `plugins/material/NOTICE` and `FONTS-LICENSE` are hand-maintained, not generated — update both
+  alongside any font or vendored-module change (see
+  [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)'s attribution-header convention).
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are

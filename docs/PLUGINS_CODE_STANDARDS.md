@@ -79,6 +79,12 @@ is additional or different for a plugin.
   (`CameraError::UiThread`) on the platform's UI thread instead of parking there. A call
   that answers without waiting (e.g. an already-decided permission status) is exempt and
   stays callable from anywhere.
+- **`frust-material`'s ported/vendored modules carry a 2–4 line attribution header**: upstream
+  file or package, version/revision, license, and any porting decisions, e.g.
+  `// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)`. Binding for every
+  module under `plugins/material/src/` ported from Dart/upstream source (tokens, shapes, icons); a
+  from-scratch module carries none. `plugins/material/NOTICE`'s own convention section and
+  attribution entries are the canonical reference.
 
 ## See Also
 

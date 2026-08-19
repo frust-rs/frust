@@ -50,7 +50,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
 | `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog — including its own switch-class control (`toggle`), since baseline `frust-widgets` deliberately ships no `Switch` — plus its bundled OFL monospace fonts |
-| `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
+| `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`): a 43-role token system (34 baseline `ColorScheme` roles + a 9-role `MaterialTokens` extension) with runtime HCT seed-color generation (`from_seed`), a feature-point `RoundedPolygon`/`Morph` shape engine backing a 35-shape catalog, a unified interaction core with a pluggable haptics hook, 88 generated Material Icons vector constants, and bundled Roboto Flex/Mono fonts |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 | `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
 
@@ -154,18 +154,19 @@ toolkit they all build against). Their shared charter:
 - **`install()` is the one-line entry point, called from `app!`'s `setup = { .. }` block —
   before shell construction, the one point a shell reads the default-theme slot.** Each `install()`
   calls `frust::set_default_theme(baseline())` (`frust_shadcn::install()` names its seed `theme()`
-  instead, but the shape is the same); `frust_glyph::install()` and `frust_shadcn::install()`
-  additionally call `frust::register_app_fonts` for their bundled fonts — Glyph's OFL monospace
-  faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), shadcn's bundled Inter Variable and
-  JetBrains Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/shadcn/fonts/`) — each
-  registered unconditionally, not behind a feature, since neither crate has a feature to gate them
-  with. A call after shell construction takes effect only on a later theme reseed, which may never
-  happen.
-- **`frust_glyph::baseline()` and `frust_shadcn::theme()` both attach the `NativeTypefaces` theme
-  extension** — the bundled faces reach `frust-native-widgets`' native controls through this
-  attach, not through any
+  instead, but the shape is the same); `frust_glyph::install()`, `frust_material::install()`, and
+  `frust_shadcn::install()` additionally call `frust::register_app_fonts` for their bundled fonts —
+  Glyph's OFL monospace faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's
+  bundled Roboto Flex (OFL-1.1) and Roboto Mono (Apache-2.0, `plugins/material/fonts/`), shadcn's
+  bundled Inter Variable and JetBrains Mono Variable (OFL-1.1, no Reserved Font Name,
+  `plugins/shadcn/fonts/`) — each registered unconditionally, not behind a feature, since none of
+  the three crates has a feature to gate them with. A call after shell construction takes effect
+  only on a later theme reseed, which may never happen.
+- **`frust_glyph::baseline()`, `frust_material::baseline()`, and `frust_shadcn::theme()` all attach
+  the `NativeTypefaces` theme extension** — the bundled faces reach `frust-native-widgets`' native
+  controls through this attach, not through any
   `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
-  theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
+  theme ladder). Cupertino's `baseline()` attaches no font extension.
 - **`frust-shadcn`'s one cross-component seam is its `overlay` module** — a full-area top-layer
   widget pattern standing in for the DOM portal shadcn/ui itself relies on: an `anchored` host
   (trigger-relative placement in window space, light-dismiss, no scrim — popover, tooltip,

@@ -174,7 +174,7 @@ build from.
 |------|---------|
 | `Theme` / `DesignLanguage` / `ThemeBuilder` | `frust-theme`'s aggregate design-token bundle, tagged by baseline (Material3/Cupertino/Glyph), plus a fluent editor |
 | `ColorScheme`, `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme`, `GlassScale`, `StatusPalette` | Individual token-group types composed into `Theme`; `frust-theme` ships only each one's `neutral()` floor — a design system assembles its own values via `ThemeBuilder`'s per-group editors |
-| `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()` is the one built-in that does — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
+| `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()` and `frust-material::baseline()` both do (as does `frust-shadcn::theme()`) — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
@@ -198,9 +198,10 @@ crate root (`frust_glyph::app_bar`, `frust_material::AppBar`, `frust_cupertino::
 its token constructors are free functions (`baseline()`, `color_scheme_light()`/`_dark()`,
 `type_scale()`, `shape_scale()`, `elevation()`, `motion_scheme()`) rather than an in-crate module
 `frust-theme` used to ship, and `install()` seeds the theme with `frust::set_default_theme(baseline())`
-from an `app!` `setup` block. `frust-glyph::baseline()` additionally attaches the
-`NativeTypefaces` theme extension (its bundled monospace faces) — the one built-in that does, see
-Key Types and NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder.
+from an `app!` `setup` block. `frust-glyph::baseline()` and `frust-material::baseline()` additionally
+attach the `NativeTypefaces` theme extension (their bundled monospace and Roboto faces,
+respectively) — Cupertino's does not — see Key Types and NATIVE_WIDGETS_ARCHITECTURE.md's theme
+ladder.
 
 `DesignLanguage` is `#[non_exhaustive]` with a `Custom(&'static str)` variant (compared by string
 content, not interning identity) so a third-party design system can tag its identity without a
