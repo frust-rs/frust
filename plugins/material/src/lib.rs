@@ -87,7 +87,8 @@ pub use card::{
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox, tristate_checkbox};
 pub use chips::{
     AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
-    assist_chip, filter_chip,
+    InputChip, InputChipView, InputChipWidget, SuggestionChip, SuggestionChipView,
+    SuggestionChipWidget, assist_chip, filter_chip, input_chip, suggestion_chip,
 };
 pub use dialog::{DialogView, DialogWidget, dialog, show_dialog};
 pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
