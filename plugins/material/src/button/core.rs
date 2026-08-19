@@ -53,8 +53,10 @@ const FOCUS_RING_GAP: f64 = 2.0;
 const FOCUS_RING_WIDTH: f64 = 2.0;
 
 /// Flattening tolerance for the `kurbo` rounded-rect paths this module strokes
-/// (matches [`mod@crate::card`]'s `STROKE_TOLERANCE`).
-const PATH_TOLERANCE: f64 = 0.1;
+/// (matches [`mod@crate::card`]'s `STROKE_TOLERANCE`). `pub(super)`: also the
+/// tolerance [`super::gradient`]'s outline layer flattens its stroke path at,
+/// so a solid and a gradient hairline agree pixel-for-pixel.
+pub(super) const PATH_TOLERANCE: f64 = 0.1;
 
 /// The ink every label run is *shaped* with; never painted — the run is
 /// re-brushed with its resolved per-variant/per-state color at paint time, and
@@ -401,7 +403,8 @@ pub(super) fn resolve_shadow(theme: Option<&Theme>, dp: f64) -> Option<(f64, f64
     }
 }
 
-// ---- Seams (filled in by the follow-up gradient/overflow tasks) ------------
+// ---- Seams (ButtonDecoration's gradient layers now live in `super::gradient`;
+// ---- OverflowObserver awaits a follow-up overflow-strategy task) -----------
 
 /// The morphing surface a [`ButtonDecoration`] paints against: window-space
 /// geometry, the live corner radius, and the inks + interaction state the core
@@ -439,15 +442,19 @@ pub enum DecorationOutcome {
 }
 
 /// The paint-time decoration seam — where the reference's
-/// `m3eGradientSurfaceBuilder` fill/overlay/outline layers attach.
+/// `m3eGradientSurfaceBuilder` fill/overlay/outline layers (plus
+/// `m3eGradientForegroundBuilder`'s separate content layer) attach. See
+/// [`super::gradient`] for the built-in [`ButtonDecoration`] implementation
+/// that fills every hook with gradient paint.
 ///
-/// Every method defaults to [`DecorationOutcome::Skipped`], so an
+/// The first three methods default to [`DecorationOutcome::Skipped`], so an
 /// implementation overrides only the layers it draws and a button with no
-/// decoration behaves exactly as if this trait did not exist. The hooks fire
-/// in paint order — fill, overlay, outline — each with the same
+/// decoration behaves exactly as if this trait did not exist. They fire in
+/// paint order — fill, overlay, outline — each with the same
 /// [`ButtonSurface`], whose `radius` is the morph's live value rather than a
 /// resting token (the reference threads `animatedRadius` into its own builders
 /// for the same reason: a gradient must clip to the shape actually painted).
+/// [`Self::foreground_brush`] is shaped differently — see its own doc.
 pub trait ButtonDecoration {
     /// Paint the container fill. [`DecorationOutcome::Painted`] suppresses the
     /// core's own solid fill.
@@ -479,6 +486,39 @@ pub trait ButtonDecoration {
         _scene: &mut dyn PaintScene,
     ) -> DecorationOutcome {
         DecorationOutcome::Skipped
+    }
+
+    /// Resolve a [`Brush`] (solid or gradient) to paint the label's ink with,
+    /// replacing the core's own per-variant/per-state solid `content` color —
+    /// where the reference's `foregroundGradient` attaches
+    /// (`m3eGradientForegroundBuilder`, `m3e_button_content.dart:157`).
+    ///
+    /// Upstream applies this through `ShaderMask` + `BlendMode.srcIn` over
+    /// the *whole* assembled content (icon and label together): the shader
+    /// only shows through pixels the content already painted opaque, which
+    /// is why upstream's `_resolveForegroundColor` first forces the
+    /// underlying paint to opaque white when a foreground gradient is set
+    /// (`m3e_button_style.dart:58`) — `srcIn` discards that color anyway and
+    /// keeps only its alpha. This port has no `srcIn`-style masking primitive
+    /// in [`PaintScene`], but the label's own glyph runs already carry a
+    /// [`Brush`] (never just a solid color) and paint only their covered
+    /// glyph pixels either way — brushing a run with a gradient directly is
+    /// pixel-equivalent to `srcIn`-masking a solid-ink run with the same
+    /// gradient, no synthetic white layer needed. The leading/trailing icon
+    /// is a nested [`frust::authoring::ChildPod`] this seam has no
+    /// color-override reach into, so v1 narrows the foreground gradient to
+    /// the label only — a documented gap (see [`super::gradient`]'s module
+    /// doc), not a silent drop.
+    ///
+    /// Shaped as a *resolver* rather than a paint callback (unlike the three
+    /// hooks above): the label's shaped glyph geometry is core-private —
+    /// cached lazily against the exact style it was last shaped in — so only
+    /// the core can safely re-emit it. This hook supplies the brush; the core
+    /// does the drawing, right where it would otherwise paint the label in
+    /// its own resolved solid ink. `None` (the default) leaves that solid ink
+    /// untouched.
+    fn foreground_brush(&self, _surface: &ButtonSurface) -> Option<Brush> {
+        None
     }
 }
 
@@ -633,6 +673,21 @@ impl LabelRun {
             scene.draw_glyph_run(run);
         }
     }
+
+    /// Paint the run at `origin` with an arbitrary `brush` (solid or
+    /// gradient), overriding the [`SHAPING_INK`] it was shaped with — the
+    /// paint side of [`ButtonDecoration::foreground_brush`]. A run that has
+    /// never been shaped paints nothing. Mirrors [`Self::paint`], which stays
+    /// the plain-color path a button with no foreground decoration takes.
+    pub(super) fn paint_brush(&self, origin: Point, brush: &Brush, scene: &mut dyn PaintScene) {
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        for mut run in layout.to_scene_runs(origin) {
+            run.brush = brush.clone();
+            scene.draw_glyph_run(run);
+        }
+    }
 }
 
 // ---- Geometry helpers ------------------------------------------------------
@@ -645,8 +700,10 @@ fn inside(pos: Point, size: Size) -> bool {
 /// The rounded rect to *stroke* for a `width`-wide hairline lying fully inside
 /// a container of `size` with corner `radius` — a stroke is centered on its
 /// path, so both the rect and the radius pull in by half the width (the inset
-/// [`mod@crate::card`]'s outlined variant applies too).
-fn inset_stroke_rect(size: Size, radius: f64, width: f64) -> RoundedRect {
+/// [`mod@crate::card`]'s outlined variant applies too). `pub(super)`: shared
+/// with [`super::gradient`]'s outline layer, which strokes the identical
+/// geometry with a gradient brush instead of a solid one.
+pub(super) fn inset_stroke_rect(size: Size, radius: f64, width: f64) -> RoundedRect {
     let half = width / 2.0;
     RoundedRect::new(
         half,
@@ -911,14 +968,18 @@ impl Widget for ButtonWidget {
         if let Some(pod) = self.icon.as_mut() {
             pod.paint_child(ctx, scene);
         }
-        self.label.paint(
-            Point::new(
-                origin.x + self.label_origin.x,
-                origin.y + self.label_origin.y,
-            ),
-            colors.content,
-            scene,
+        let label_origin = Point::new(
+            origin.x + self.label_origin.x,
+            origin.y + self.label_origin.y,
         );
+        match self
+            .decoration
+            .as_ref()
+            .and_then(|d| d.foreground_brush(&surface))
+        {
+            Some(brush) => self.label.paint_brush(label_origin, &brush, scene),
+            None => self.label.paint(label_origin, colors.content, scene),
+        }
 
         // Outside the container, and only while focused — see the parent
         // module's Focus ring section, including why nothing reaches it yet.

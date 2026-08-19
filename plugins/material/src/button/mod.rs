@@ -103,10 +103,15 @@
 //!
 //! Two hook points exist here as documented, no-op-by-default interfaces:
 //!
-//! - [`ButtonDecoration`] — a paint-time fill/overlay/outline triple, called
-//!   with the morphing [`ButtonSurface`], where the reference's
-//!   `m3eGradientSurfaceBuilder` layers live. Returning
-//!   [`DecorationOutcome::Painted`] suppresses the core's own solid layer.
+//! - [`ButtonDecoration`] — a paint-time fill/overlay/outline triple plus a
+//!   [`foreground_brush`](ButtonDecoration::foreground_brush) resolver,
+//!   called with the morphing [`ButtonSurface`], where the reference's
+//!   `m3eGradientSurfaceBuilder`/`m3eGradientForegroundBuilder` layers live.
+//!   Returning [`DecorationOutcome::Painted`] suppresses the core's own solid
+//!   layer. [`gradient::GradientButtonDecoration`] is the built-in
+//!   implementation that fills every hook with ported gradient paint — see
+//!   that module's docs for the full gradient-class inventory and the
+//!   `PaintScene` gradient-support finding.
 //! - [`OverflowObserver`] — handed the [`ContentMetrics`] every layout
 //!   resolves, including whether the label's natural width exceeded the width
 //!   actually available to it. The reference's `M3EOverflowStrategy` family
@@ -141,6 +146,7 @@
 //! Attribution Header Convention.
 
 mod core;
+pub mod gradient;
 mod motion;
 
 use std::rc::Rc;
@@ -153,6 +159,10 @@ use crate::interaction::{HapticSignal, InteractionState};
 use self::core::LabelRun;
 pub use self::core::{
     ButtonDecoration, ButtonSurface, ContentMetrics, DecorationOutcome, OverflowObserver,
+};
+pub use self::gradient::{
+    GradientAlignment, GradientButtonDecoration, GradientProperty, GradientSpec, GradientStates,
+    LinearGradientSpec, RadialGradientSpec, SweepGradientSpec, constant_gradient, implied_stops,
 };
 use self::motion::RadiusPaddingMotion;
 
