@@ -40,7 +40,8 @@ Copyright (c) 2025 Emily Moonstone
 
 Copyright (c) 2026 Mudit Purohit
   Upstream: https://github.com/Mudit200408/m3e_buttons
-  Ported to Rust for: buttons, split buttons, toggle button groups
+  Ported to Rust for: buttons, split buttons, toggle buttons, toggle button
+                      groups
   Reference: The original Dart components in material_3_expressive
 
 Copyright (c) 2024 Mudit Purohit

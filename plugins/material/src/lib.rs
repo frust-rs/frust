@@ -80,6 +80,7 @@ pub mod split_button;
 pub mod state_layer;
 pub mod switch;
 pub mod text_field;
+pub mod toggle_button;
 mod tokens;
 pub mod toolbar;
 
@@ -136,6 +137,11 @@ pub use slider::{
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
+pub use toggle_button::{
+    ToggleButton, ToggleButtonSize, ToggleButtonView, ToggleButtonWidget, elevated_toggle_button,
+    filled_toggle_button, outlined_toggle_button, text_toggle_button, toggle_button,
+    tonal_toggle_button,
+};
 pub use toolbar::{
     DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
     floating_toolbar,
