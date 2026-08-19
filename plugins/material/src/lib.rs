@@ -76,6 +76,7 @@ pub mod sheet;
 pub mod split_button;
 pub mod state_layer;
 pub mod switch;
+pub mod text_field;
 mod tokens;
 pub mod toolbar;
 
@@ -114,6 +115,7 @@ pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
+pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
 pub use toolbar::{
     DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
     floating_toolbar,
