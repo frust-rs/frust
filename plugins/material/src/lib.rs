@@ -22,6 +22,11 @@
 //! polygon keeps its own module path until its two consumers
 //! ([`mod@loading_indicator`], [`mod@button_group`]) move across.
 //!
+//! [`icons`] is the one deliberate exception: its 88 generated
+//! [`frust::IconSource`] constants stay namespaced (`frust_material::icons::CHECK`),
+//! not flat re-exported at the crate root — see that module's own doc for
+//! provenance and the regen command.
+//!
 //! # `install()`: this design system's one-line installer
 //!
 //! [`install`] seeds [`frust::set_default_theme`] with this crate's
@@ -56,6 +61,7 @@ pub mod chips;
 pub mod dialog;
 pub mod fab;
 pub mod fab_menu;
+pub mod icons;
 pub mod interaction;
 pub mod list_item;
 pub mod list_view;
@@ -131,4 +137,65 @@ pub use tokens::{
 /// construction).
 pub fn install() {
     frust::set_default_theme(baseline());
+}
+
+/// Coverage for the generated [`icons`] module — deliberately hand-written
+/// (not part of `scripts/gen_icons.py`'s output) since a generated file's
+/// content is machine-owned end to end.
+#[cfg(test)]
+mod icons_tests {
+    use frust::IconData;
+
+    use crate::icons;
+
+    /// The exact count `plugins/material/scripts/gen_icons.py`'s `ICON_SET`
+    /// enumerates — the 88 distinct `M3EIcons.*` names `material_3_expressive`'s
+    /// components and example app reference. A change here should come from
+    /// a regen (a new/removed `ICON_SET` entry), never a hand-edit.
+    const EXPECTED_ICON_COUNT: usize = 88;
+
+    #[test]
+    fn all_has_the_expected_count() {
+        assert_eq!(icons::ALL.len(), EXPECTED_ICON_COUNT);
+    }
+
+    #[test]
+    fn every_generated_icon_source_resolves_to_a_non_empty_path() {
+        for source in icons::ALL {
+            let data: IconData = (*source).into();
+            let (path, design) = data.resolve();
+            assert_eq!(design, 24.0);
+            assert!(
+                !path.elements().is_empty(),
+                "generated icon `{}` resolved to an empty path",
+                source.d
+            );
+        }
+    }
+
+    #[test]
+    fn spot_check_check_search_arrow_back() {
+        for source in [icons::CHECK, icons::SEARCH, icons::ARROW_BACK] {
+            let data: IconData = source.into();
+            let (path, design) = data.resolve();
+            assert_eq!(design, 24.0);
+            assert!(
+                !path.elements().is_empty(),
+                "spot-checked icon `{}` resolved to an empty path",
+                source.d
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_entries_share_identical_path_data() {
+        let mut seen = std::collections::HashSet::new();
+        for source in icons::ALL {
+            assert!(
+                seen.insert(source.d),
+                "two icons::ALL entries share identical path data: {}",
+                source.d
+            );
+        }
+    }
 }
