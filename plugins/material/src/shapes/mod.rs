@@ -72,9 +72,11 @@
 //!
 //! Full attribution ships in the crate's `NOTICE`.
 
+mod catalog;
 mod morph;
 mod rounded_polygon;
 
+pub use catalog::ShapeKind;
 pub use morph::Morph;
 pub use rounded_polygon::{
     CornerRounding, Cubic, DISTANCE_EPSILON, Feature, FeatureKind, PillStarParams, RoundedPolygon,
