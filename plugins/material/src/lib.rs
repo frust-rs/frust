@@ -54,12 +54,14 @@
 //! `frust::glyph_theme::install` and `frust_shadcn::install` document).
 
 pub mod appbar;
+pub mod badge;
 pub mod button;
 pub mod button_group;
 pub mod card;
 pub mod checkbox;
 pub mod chips;
 pub mod dialog;
+pub mod divider;
 pub mod fab;
 pub mod fab_menu;
 pub mod icon_button;
@@ -87,6 +89,7 @@ mod tokens;
 pub mod toolbar;
 
 pub use appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
+pub use badge::{BadgeAlignment, BadgeView, BadgeWidget, badge};
 pub use button::{
     Button, ButtonDecoration, ButtonShape, ButtonSize, ButtonSurface, ButtonVariant, ButtonView,
     ButtonWidget, ContentMetrics, DecorationOutcome, GradientAlignment, GradientButtonDecoration,
@@ -110,6 +113,7 @@ pub use chips::{
     SuggestionChipWidget, assist_chip, filter_chip, input_chip, suggestion_chip,
 };
 pub use dialog::{DialogView, DialogWidget, dialog, show_dialog};
+pub use divider::{DividerView, DividerWidget, divider};
 pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
 pub use icon_button::{
