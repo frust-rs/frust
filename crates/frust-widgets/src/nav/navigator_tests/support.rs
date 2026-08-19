@@ -43,6 +43,9 @@ pub(super) fn cancel_ev(x: f64, y: f64) -> InputEvent {
     })
 }
 
+// --- A leaf with retained internal state (a counter) that reports its value
+//     during paint, so a test can prove the page's widget state survives a
+//     push→pop round-trip (pod retention, not a rebuild-from-scratch). ---
 struct CounterView {
     observed: Rc<Cell<u32>>,
 }
@@ -94,6 +97,8 @@ pub(super) fn counter_page(observed: &Rc<Cell<u32>>) -> AnyView<()> {
     })
 }
 
+/// A leaf that fills a rect of a fixed size — RecordingScene captures its
+/// (origin, size) so a paint-culling test can tell pages apart by size.
 pub(super) struct SizedLeaf {
     pub(super) size: Size,
 }
