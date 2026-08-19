@@ -20,13 +20,22 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
-| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions |
+| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
 The three built-in catalogs (`frust-material::*`, `frust-cupertino::*`, `frust-glyph::*` — PLUGINS
 unit) live outside this crate's module tree entirely now; see *External Design-System Contract*
 below and [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for their module structure.
+
+`nav/` internal layout (all files private, re-exported through `navigator.rs` so the crate's public
+path is unchanged): `navigator.rs` (2,044 lines — `PageEntry`/`ActiveTransition`/`NavigatorWidget`
+core, plus the module's public re-export block), `ambient.rs` (the `PAGE_REACH`/`SWIPE_CLAIM`
+ambient-context idioms), `options.rs` (`PageVisibility`/`PopResult`/`BackPolicy`/`PushOptions`/
+`ReplaceOptions`/`NavOp`/`NavigatorId` and callback type aliases), `controller.rs`
+(`NavigatorController`), `view.rs` (`NavigatorView`/`navigator()`/`overlay_host()`), and
+`edge_swipe.rs` (`EdgeSwipe` and its gesture driver). Tests live alongside in `navigator_tests/`,
+themed one file per concern (stack/back/transition/edge-swipe/visibility/route-state/semantics).
 
 ## Layer Dependencies
 
