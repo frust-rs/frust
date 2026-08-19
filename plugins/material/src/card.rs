@@ -1,3 +1,14 @@
+// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)
+// Upstream: https://github.com/paadevelopments/material_3_expressive
+//   lib/components/cards/ (`m3e_cards.dart`, `enums/m3e_card_variant.dart`,
+//   `styles/m3e_card_theme.dart`)
+// This rework adds the reference's hover/press interaction treatment
+// (`M3ETappable`, ported once and shared crate-wide as `crate::interaction`)
+// on top of the v1 static-elevation port; `onLongPress` and the
+// customization escape hatches (`border`/`color`/`elevation`/`width`/
+// `mouseCursor`/`semanticLabel`/`onStateChanged` overrides) stay unported —
+// see the module docs' Not ported section.
+
 //! The M3 `Card` container: elevated / filled / outlined variants, wrapping a
 //! single [`frust::authoring::AnyView`] child (the same single-child `ChildPod`
 //! wrapper shape as [`frust::Padding`]).
@@ -9,13 +20,14 @@
 //! (m3.material.io/components/cards/specs):
 //!
 //! * **Elevated**: container `surfaceContainerLow`, M3 elevation level 1
-//!   (1dp), painted via [`frust::authoring::PaintScene::draw_shadow`].
+//!   (1dp) at rest, level 2 (3dp) while hovered — see Hover elevation lift
+//!   below — painted via [`frust::authoring::PaintScene::draw_shadow`].
 //! * **Filled**: container `surfaceContainerHighest`, elevation 0 (no
-//!   shadow).
+//!   shadow, at rest or hovered).
 //! * **Outlined**: container `surface`, a 1dp stroke in `outlineVariant`
 //!   (the enabled-state stroke color — `outline` is reserved for a disabled
-//!   card, out of v1 scope since no card here models a disabled state), no
-//!   shadow.
+//!   card, applied only while an interactive card is disabled, see Disabled
+//!   state below), no shadow.
 //!
 //! # Outlined stroke primitive choice
 //!
@@ -32,23 +44,121 @@
 //!
 //! [`CardView::on_press`] makes the whole card surface one interactive
 //! target — mirroring [`frust::Button`] (fire-on-up-inside; the card itself
-//! owns capture and paints the shared [`super::state_layer`] overlay, tinted
-//! `on_surface`), rather than forwarding events into the child. Without
-//! `on_press` the card is a transparent, non-interactive
-//! wrapper that routes pointer events straight to its child (mirroring
-//! [`frust::Padding`]).
+//! owns capture and paints the shared M3E state-layer overlay via
+//! [`crate::interaction::InteractionState`], the crate's unified
+//! hover/focus/pressed/dragged substrate, tinted `on_surface`), rather than
+//! forwarding events into the child. Without `on_press` the card is a
+//! transparent, non-interactive wrapper that routes pointer events straight
+//! to its child (mirroring [`frust::Padding`]) — [`CardView::enabled`] and
+//! [`CardView::haptic`] are then no-ops, since there is no interactive
+//! surface for either to act on (mirroring the reference's own
+//! `M3ETappable`-only scope for both).
+//!
+//! # Hover elevation lift
+//!
+//! An interactive elevated card raises from M3 elevation level 1 (1dp) to
+//! level 2 (3dp) while hovered (`M3ECardTheme.elevation(variant, {hovered})`)
+//! — a *non-interactive* elevated card (no [`CardView::on_press`]) never
+//! hovers at all and stays pinned at level 1, matching the reference's own
+//! `_buildCard`, which never wraps a non-interactive card in `M3ETappable`
+//! (so its `M3EInteractionState` — and therefore `hovered` — is permanently
+//! the default `const M3EInteractionState()`, i.e. every flag `false`).
+//!
+//! Unlike this crate's [`super::fab`] and [`super::button`], whose own
+//! hover-elevation steps are instant, per-frame binary switches (a
+//! documented simplification of the reference's `AnimatedContainer`-driven
+//! shadow tween, verified against both modules' own doc comments), this
+//! module plays the reference's tween for real: [`CardWidget::elevation_anim`]
+//! springs the *shadow geometry* (blur/y-offset — see
+//! [`resolve_elevation_endpoints`]) between the level-1 and level-2 endpoints
+//! whenever the live hover read flips, mirroring `switch`'s `anim_target`
+//! idiom (a fresh [`frust::AnimationController::fling`] starts lazily in
+//! `paint` whenever the live value disagrees with the target the last fling
+//! aimed at). The driving spring is
+//! [`crate::interaction::PressSpringId::DefaultEffects`] — this module's
+//! first real (non-test) consumer of that seam, per its own doc: "this task
+//! ships the shared state and resolved-values plumbing ... not a runtime."
+//! A shadow-geometry change is a magnitude/effects transition, not a
+//! spatial one (`crate::tokens::motion_scheme()`'s own spatial-vs-effects
+//! split), and `DefaultEffects` is critically damped (`damping_ratio: 1.0`),
+//! so the lift never overshoots into an unnaturally large or negative
+//! shadow. [`ELEVATION_RETARGET_VELOCITY`] mirrors `switch::RELEASE_VELOCITY`
+//! exactly: a near-zero signed nudge that only picks the fling's direction
+//! (`fling` targets `1.0` for a non-negative velocity, `0.0` otherwise) and
+//! leaves the spring's own stiffness/damping to shape the whole motion — a
+//! hover flip is a discrete state change, not a directional user gesture
+//! like [`super::fab`]'s press/release kick.
+//!
+//! Shadow *color* never changes between the two endpoints (both M3 elevation
+//! levels share the same `0.3` `color_alpha`, per
+//! `crate::tokens::metrics::elevation_level`) — only the geometry is
+//! interpolated; see [`resolve_shadow_color`].
+//!
+//! # Disabled state
+//!
+//! [`CardView::enabled`] (default `true`) is this crate's own extension —
+//! the reference `M3ECard` widget itself carries no `enabled` field (only
+//! the `M3ETappable` primitive it wraps does, gating `_isInteractive`
+//! alongside `onPressed`/`onLongPress`). Rather than literally mirroring
+//! that formula (which would make a disabled interactive card
+//! indistinguishable from a plain non-interactive one — no dimmed styling,
+//! no accesskit disabled flag), this module follows this crate's own
+//! established `enabled` convention instead (`button`/`radio`/`switch`/
+//! `icon_button`/`toggle_button`/`text_field`): an interactive card that is
+//! disabled **keeps** its `Role::Button` semantics (reporting
+//! `Node::set_disabled()` instead of `Action::Click` — see
+//! [`CardWidget::semantics`]) and its container/outline visually dim to
+//! `on_surface` at [`crate::interaction::DISABLED_CONTAINER_OPACITY`] (12%,
+//! mirroring `button::core::resolve_colors`'s identical disabled treatment)
+//! — but it claims no hover, springs no elevation lift, paints no state
+//! layer, and fires no press/haptic. **Hover is enabled-gated** in both the
+//! event pass and paint's self-correction (`self.interactive &&
+//! self.enabled && ...`) — the radio-hover-regression fix (never react to
+//! hover while disabled) applied here from the start rather than
+//! retrofitted. A disabled interactive card's own
+//! `Widget::event` early-returns `Ignored` for every pointer phase (mirrors
+//! `button::core::ButtonWidget::event`'s identical disabled early-return) —
+//! it does **not** forward to its child; a disabled card block is fully
+//! inert, not a pass-through.
+//!
+//! Elevation itself carries no disabled branch (`M3ECardTheme.elevation`
+//! takes no `enabled` parameter) — a disabled elevated card still rests at
+//! level 1, simply never lifting to level 2 since it can never hover.
+//!
+//! # Haptics
+//!
+//! [`CardView::haptic`] ports `M3ECard.haptic` (default
+//! [`crate::interaction::HapticSignal::None`], passed straight through to
+//! `M3ETappable`): fired via [`crate::interaction::MaterialHaptics::fire`]
+//! immediately before `on_press`, mirroring `button::core`'s identical
+//! ordering. `None` is a documented no-op, elided rather than routed through
+//! the process-global hook.
+//!
+//! # Not ported
+//!
+//! `onLongPress` — no gesture primitive for it exists anywhere in this
+//! crate yet (`button`'s own module docs record the same v1 scope line: "not
+//! ported in v1: no tooltip host in the catalog, and neither long-press nor
+//! a hover callback has a reference-visual attached to it"). The reference's
+//! customization escape hatches (`clipBehavior`, a `borderRadius`/`color`/
+//! `elevation`/`border`/`width` override, `surfaceKey`, `mouseCursor`,
+//! `semanticLabel`, `animationDuration`/`animationCurve` overrides,
+//! `onStateChanged`) are all out of this task's scope (hover-lift/press/
+//! disabled treatment) and stay unported.
 //!
 //! # Semantics
 //!
 //! An interactive card contributes a [`Role::Button`] container node (its
 //! child's own semantics become the button's accesskit children — a card has
 //! no single-line text label of its own to flatten into the node, unlike
-//! `Button`). A non-interactive card contributes a [`Role::GenericContainer`]
-//! ("group") node instead of transparently forwarding like `Padding` — a
-//! deliberate choice to keep a card's content grouped as one semantic unit
-//! even when it isn't clickable.
+//! `Button`), reporting `Node::set_disabled()` while disabled instead of
+//! `Action::Click` (see Disabled state above). A non-interactive card
+//! contributes a [`Role::GenericContainer`] ("group") node instead of
+//! transparently forwarding like `Padding` — a deliberate choice to keep a
+//! card's content grouped as one semantic unit even when it isn't clickable.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use frust::Theme;
 use frust::authoring::{Action, Role};
@@ -56,11 +166,15 @@ use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
-use kurbo::{Point, Rect, RoundedRect, Shape, Size};
+use frust::{AnimationController, Tween};
+use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::interaction::{
+    DISABLED_CONTAINER_OPACITY, HapticSignal, InteractionState, MaterialHaptics, PressSpringId,
+};
+
 use super::press::presses;
-use super::state_layer::StateLayer;
 
 /// Content padding on all four edges, in logical px (M3 card spec).
 const CARD_PADDING: f64 = 16.0;
@@ -90,16 +204,31 @@ const OUTLINE_VARIANT: Color = Color::from_rgb8(0xCA, 0xC4, 0xD0);
 /// theme resolves this from `colors.on_surface`).
 const ON_SURFACE: Color = Color::from_rgb8(0x1D, 0x1B, 0x20);
 
-/// Unthemed-fallback shadow y-offset, matching
-/// `crate::tokens::elevation().level1`'s `y_offset` exactly (`dp / 2.0 + 1.0`
-/// at `dp = 1.0`).
+/// Unthemed-fallback shadow y-offset at rest (M3 elevation level 1),
+/// matching `crate::tokens::elevation().level1`'s `y_offset` exactly
+/// (`dp / 2.0 + 1.0` at `dp = 1.0`).
 const FALLBACK_SHADOW_Y_OFFSET: f64 = 1.5;
-/// Unthemed-fallback shadow blur std-dev, matching
-/// `crate::tokens::elevation().level1`.
+/// Unthemed-fallback shadow blur std-dev at rest (M3 elevation level 1),
+/// matching `crate::tokens::elevation().level1`.
 const FALLBACK_SHADOW_BLUR: f64 = 1.0;
+/// Unthemed-fallback shadow y-offset while hovered (M3 elevation level 2),
+/// matching `crate::tokens::elevation().level2`'s `y_offset` exactly
+/// (`dp / 2.0 + 1.0` at `dp = 3.0`).
+const FALLBACK_HOVER_SHADOW_Y_OFFSET: f64 = 2.5;
+/// Unthemed-fallback shadow blur std-dev while hovered (M3 elevation level
+/// 2), matching `crate::tokens::elevation().level2`.
+const FALLBACK_HOVER_SHADOW_BLUR: f64 = 3.0;
 /// Unthemed-fallback shadow color (opaque black at
-/// `crate::tokens::elevation().level1`'s `0.3` alpha).
+/// `crate::tokens::elevation()`'s `0.3` alpha — identical at every level, so
+/// this one constant covers both the rest and hovered endpoints).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
+
+/// A near-zero signed velocity that only picks
+/// [`frust::AnimationController::fling`]'s direction, leaving the spring
+/// itself to shape the motion — mirrors `switch::RELEASE_VELOCITY` exactly.
+/// See the [module docs](self)' Hover elevation lift section for why a
+/// hover flip uses this rather than [`super::fab`]'s directional kick.
+const ELEVATION_RETARGET_VELOCITY: f64 = 1e-3;
 
 /// The M3 card container variant. See the [module docs](self).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,11 +245,17 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::new([c[0], c[1], c[2], alpha])
 }
 
-/// The resolved container fill for `variant`. Themed: `surface_container_low`
-/// (elevated) / `surface_container_highest` (filled) / `surface` (outlined).
-/// Unthemed: [`ELEVATED_CONTAINER`]/[`FILLED_CONTAINER`]/[`OUTLINED_CONTAINER`]
-/// exactly.
-fn resolve_container(theme: Option<&Theme>, variant: CardVariant) -> Color {
+/// The resolved container fill for `variant`. `disabled` (an interactive
+/// card with [`CardView::enabled`]`(false)`) overrides every variant to a
+/// dimmed `on_surface` wash — see the [module docs](self)' Disabled state
+/// section. Themed (enabled): `surface_container_low` (elevated) /
+/// `surface_container_highest` (filled) / `surface` (outlined). Unthemed
+/// (enabled): [`ELEVATED_CONTAINER`]/[`FILLED_CONTAINER`]/
+/// [`OUTLINED_CONTAINER`] exactly.
+fn resolve_container(theme: Option<&Theme>, variant: CardVariant, disabled: bool) -> Color {
+    if disabled {
+        return with_alpha(resolve_content_color(theme), DISABLED_CONTAINER_OPACITY);
+    }
     match theme {
         Some(theme) => {
             let scheme = theme.scheme();
@@ -147,10 +282,15 @@ fn resolve_radius(theme: Option<&Theme>) -> f64 {
     }
 }
 
-/// The resolved outline stroke color (outlined variant only, enabled state —
-/// see the module docs). Themed: `colors.outline_variant`. Unthemed:
-/// [`OUTLINE_VARIANT`] exactly.
-fn resolve_outline(theme: Option<&Theme>) -> Color {
+/// The resolved outline stroke color (outlined variant only). `disabled`
+/// dims to the same `on_surface` wash [`resolve_container`] uses — see the
+/// [module docs](self)' Disabled state section. Themed (enabled):
+/// `colors.outline_variant`. Unthemed (enabled): [`OUTLINE_VARIANT`]
+/// exactly.
+fn resolve_outline(theme: Option<&Theme>, disabled: bool) -> Color {
+    if disabled {
+        return with_alpha(resolve_content_color(theme), DISABLED_CONTAINER_OPACITY);
+    }
     match theme {
         Some(theme) => theme.scheme().outline_variant,
         None => OUTLINE_VARIANT,
@@ -166,24 +306,41 @@ fn resolve_content_color(theme: Option<&Theme>) -> Color {
     }
 }
 
-/// The resolved `(blur_std_dev, y_offset, color)` shadow parameters at M3
-/// elevation level 1 (the elevated variant's resting elevation).
-/// Themed: `theme.elevation.level1`'s `ShadowSpec`, colored by `colors.shadow`
-/// at the spec's `color_alpha`. Unthemed: the [`FALLBACK_SHADOW_BLUR`]/
-/// [`FALLBACK_SHADOW_Y_OFFSET`]/[`FALLBACK_SHADOW_COLOR`] constants exactly.
-fn resolve_shadow(theme: Option<&Theme>) -> (f64, f64, Color) {
+/// The `(blur_std_dev, y_offset)` shadow-geometry endpoints the elevated
+/// variant's hover-lift spring lerps between: resting (M3 elevation level 1)
+/// and fully hovered (level 2). See the [module docs](self)' Hover elevation
+/// lift section for why only geometry (not color) is interpolated. Themed:
+/// `theme.elevation.{level1,level2}`'s own `ShadowSpec`. Unthemed: the
+/// `FALLBACK_*`/`FALLBACK_HOVER_*` constants exactly (dp 1.0/3.0, matching
+/// `crate::tokens::elevation()`'s table).
+fn resolve_elevation_endpoints(theme: Option<&Theme>) -> ((f64, f64), (f64, f64)) {
     match theme {
         Some(theme) => {
-            let level = theme.elevation.level1;
-            let shadow = level.shadow(theme.brightness);
-            let color = with_alpha(theme.scheme().shadow, shadow.color_alpha);
-            (shadow.blur_std_dev, shadow.y_offset, color)
+            let rest = theme.elevation.level1.shadow(theme.brightness);
+            let hover = theme.elevation.level2.shadow(theme.brightness);
+            (
+                (rest.blur_std_dev, rest.y_offset),
+                (hover.blur_std_dev, hover.y_offset),
+            )
         }
         None => (
-            FALLBACK_SHADOW_BLUR,
-            FALLBACK_SHADOW_Y_OFFSET,
-            FALLBACK_SHADOW_COLOR,
+            (FALLBACK_SHADOW_BLUR, FALLBACK_SHADOW_Y_OFFSET),
+            (FALLBACK_HOVER_SHADOW_BLUR, FALLBACK_HOVER_SHADOW_Y_OFFSET),
         ),
+    }
+}
+
+/// The elevated variant's shadow color — identical at rest and hovered (see
+/// [`resolve_elevation_endpoints`]'s doc). Themed: `colors.shadow` at
+/// `theme.elevation.level1`'s `color_alpha`. Unthemed: [`FALLBACK_SHADOW_COLOR`]
+/// exactly.
+fn resolve_shadow_color(theme: Option<&Theme>) -> Color {
+    match theme {
+        Some(theme) => {
+            let alpha = theme.elevation.level1.shadow(theme.brightness).color_alpha;
+            with_alpha(theme.scheme().shadow, alpha)
+        }
+        None => FALLBACK_SHADOW_COLOR,
     }
 }
 
@@ -199,6 +356,8 @@ pub struct CardView<State: 'static> {
     variant: CardVariant,
     child: AnyView<State>,
     on_press: Option<OnPress<State>>,
+    enabled: bool,
+    haptic: HapticSignal,
 }
 
 /// Wrap `child` in a card of the given `variant`. Chain [`CardView::on_press`]
@@ -208,11 +367,13 @@ pub fn card<State: 'static, V: View<State>>(variant: CardVariant, child: V) -> C
         variant,
         child: any(child),
         on_press: None,
+        enabled: true,
+        haptic: HapticSignal::None,
     }
 }
 
 /// Wrap `child` in an elevated card (`surfaceContainerLow`, M3 elevation
-/// level 1).
+/// level 1 at rest / level 2 hovered).
 pub fn elevated_card<State: 'static, V: View<State>>(child: V) -> CardView<State> {
     card(CardVariant::Elevated, child)
 }
@@ -234,6 +395,27 @@ impl<State: 'static> CardView<State> {
         self.on_press = Some(Rc::new(on_press));
         self
     }
+
+    /// Gate the interactive treatment (hover elevation lift, state-layer
+    /// hover/press tint, and firing [`CardView::on_press`]/
+    /// [`CardView::haptic`] at all) without dropping back to a
+    /// non-interactive, transparently-forwarding card. Defaults to `true`.
+    /// Only meaningful once [`CardView::on_press`] is chained — a no-op on a
+    /// plain wrapper card. See the [module docs](self)' Disabled state
+    /// section for the full behavior and how it differs from the reference.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set the haptic fired immediately before [`CardView::on_press`] on a
+    /// successful release (`M3ECard.haptic`). Defaults to
+    /// [`HapticSignal::None`] (no feedback). A no-op on a non-interactive or
+    /// disabled card.
+    pub fn haptic(mut self, haptic: HapticSignal) -> Self {
+        self.haptic = haptic;
+        self
+    }
 }
 
 /// The retained widget for a [`CardView`].
@@ -241,9 +423,23 @@ pub struct CardWidget {
     variant: CardVariant,
     child: ChildPod,
     interactive: bool,
-    pressed: bool,
+    enabled: bool,
+    haptic: HapticSignal,
+    /// Armed by a `Down` (alongside `capture_pointer`), cleared on
+    /// `Up`/`Cancel`/loss of interactivity or enablement.
     captured: bool,
-    state_layer: StateLayer,
+    state: InteractionState,
+    /// Drives the elevated variant's hover-lift shadow-geometry lerp —
+    /// `0.0` at rest (M3 elevation level 1) .. `1.0` fully hovered (level
+    /// 2). See the [module docs](self)' Hover elevation lift section.
+    /// Unused (stays at its build-time rest value) for the filled/outlined
+    /// variants, which never elevate.
+    elevation_anim: AnimationController,
+    /// The `hovered` value [`CardWidget::elevation_anim`]'s current fling is
+    /// driving toward — compared against the live hover read each paint to
+    /// decide whether a fresh fling needs to start (mirrors `switch`'s
+    /// `anim_target` idiom).
+    elevation_target: bool,
     on_press: Option<frust::authoring::ErasedCallback>,
 }
 
@@ -255,9 +451,12 @@ impl<State: 'static> View<State> for CardView<State> {
             variant: self.variant,
             child: frust::authoring::build_child(&self.child, ctx),
             interactive: self.on_press.is_some(),
-            pressed: false,
+            enabled: self.enabled,
+            haptic: self.haptic,
             captured: false,
-            state_layer: StateLayer::new(),
+            state: InteractionState::new(),
+            elevation_anim: AnimationController::new(Duration::ZERO),
+            elevation_target: false,
             on_press: self.on_press.as_ref().map(frust::authoring::erase_callback),
         }
     }
@@ -277,14 +476,29 @@ impl<State: 'static> View<State> for CardView<State> {
         if element.interactive != now_interactive {
             element.interactive = now_interactive;
             // Losing the interactive surface mid-gesture must not leave a
-            // dangling capture behind.
-            if !now_interactive && element.captured {
-                element.pressed = false;
+            // dangling capture, press, or hover behind.
+            if !now_interactive {
                 element.captured = false;
-                element.state_layer.set_pressed(false);
+                element.state.set_pressed(false);
+                element.state.set_hovered(false);
             }
             flags |= ChangeFlags::PAINT;
         }
+        if prev.enabled != self.enabled {
+            element.enabled = self.enabled;
+            if !self.enabled && element.interactive {
+                // A card disabled mid-gesture keeps neither the press nor
+                // the hover it was holding — mirrors `switch`/`radio`'s
+                // identical disabled-mid-interaction clear.
+                element.captured = false;
+                element.state.set_pressed(false);
+                element.state.set_hovered(false);
+            }
+            if element.interactive {
+                flags |= ChangeFlags::PAINT;
+            }
+        }
+        element.haptic = self.haptic;
         element.on_press = self.on_press.as_ref().map(frust::authoring::erase_callback);
         flags |= frust::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
@@ -318,14 +532,49 @@ impl Widget for CardWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Every theme read happens here, before `ctx` is taken mutably below
+        // (`request_frame`) — mirrors `button::ButtonWidget::paint`'s own
+        // documented ordering.
         let theme = Theme::from_paint_ctx(ctx);
-        let container = resolve_container(theme, self.variant);
+        let disabled = self.interactive && !self.enabled;
+        let container = resolve_container(theme, self.variant, disabled);
         let radius = resolve_radius(theme);
+        // Authoritative hover read, self-correcting the latched flag —
+        // inert while non-interactive or disabled (`docs/CODE_STANDARDS.md`'s
+        // Interaction Semantics; the radio-hover-regression fix: never react
+        // to hover while disabled).
+        let hovered = self.interactive && self.enabled && ctx.is_hovered();
+        let (elevation_rest, elevation_hover) = resolve_elevation_endpoints(theme);
+        let shadow_color = resolve_shadow_color(theme);
+        let outline =
+            (self.variant == CardVariant::Outlined).then(|| resolve_outline(theme, disabled));
+        // `theme`'s last use: resolved here, before `ctx` is taken mutably
+        // below (`request_frame`) — mirrors `button::ButtonWidget::paint`'s
+        // own documented ordering.
+        let content_color = resolve_content_color(theme);
+
+        self.state.set_hovered(hovered);
+
         let o = ctx.origin();
         let size = ctx.size();
 
         if self.variant == CardVariant::Elevated {
-            let (blur, y_offset, shadow_color) = resolve_shadow(theme);
+            if hovered != self.elevation_target {
+                let velocity = if hovered {
+                    ELEVATION_RETARGET_VELOCITY
+                } else {
+                    -ELEVATION_RETARGET_VELOCITY
+                };
+                self.elevation_anim
+                    .fling(velocity, PressSpringId::DefaultEffects.resolve());
+                self.elevation_target = hovered;
+            }
+            if self.elevation_anim.advance(ctx.frame_time()) {
+                ctx.request_frame();
+            }
+            let t = self.elevation_anim.value_clamped();
+            let blur = Tween::new(elevation_rest.0, elevation_hover.0).lerp(t);
+            let y_offset = Tween::new(elevation_rest.1, elevation_hover.1).lerp(t);
             scene.draw_shadow(
                 Point::new(o.x, o.y + y_offset),
                 size,
@@ -337,8 +586,7 @@ impl Widget for CardWidget {
 
         scene.fill_rounded_rect(o, size, radius, container);
 
-        if self.variant == CardVariant::Outlined {
-            let outline = resolve_outline(theme);
+        if let Some(outline) = outline {
             // Inset by half the stroke width so the 1dp line paints fully
             // inside the card's own bounds (a stroke is centered on its path).
             let half = STROKE_WIDTH / 2.0;
@@ -354,14 +602,10 @@ impl Widget for CardWidget {
         }
 
         if self.interactive {
-            let content_color = resolve_content_color(theme);
-            self.state_layer.paint(
-                ctx,
-                scene,
-                Rect::from_origin_size(o, size),
-                radius,
-                content_color,
-            );
+            let opacity = self.state.resolve_opacity();
+            if opacity > 0.0 {
+                scene.fill_rounded_rect(o, size, radius, with_alpha(content_color, opacity));
+            }
         }
 
         self.child.paint_child(ctx, scene);
@@ -373,10 +617,19 @@ impl Widget for CardWidget {
         }
         // Non-pointer events (Key, Ime, focus-routed) must be forwarded to
         // the child, even when interactive. Only pointer events drive the
-        // interactive card's own capture/press behavior.
+        // interactive card's own capture/press/hover behavior.
         let InputEvent::Pointer(p) = event else {
             return frust::authoring::route_event_single(&mut self.child, ctx, event);
         };
+        if !self.enabled {
+            // A disabled interactive card arms nothing and claims no hover —
+            // mirrors `button::core::ButtonWidget::event`'s disabled
+            // early-return, and the radio-hover-regression fix (never react
+            // to hover while disabled). It does not forward to its child
+            // either: a disabled card block is fully inert, not a
+            // pass-through (see the module docs' Disabled state section).
+            return EventResult::Ignored;
+        }
         let on_press = self
             .on_press
             .as_mut()
@@ -386,21 +639,31 @@ impl Widget for CardWidget {
                 if !presses(p) {
                     return EventResult::Ignored;
                 }
-                self.pressed = true;
+                self.state.set_pressed(true);
                 self.captured = true;
-                self.state_layer.set_pressed(true);
                 ctx.capture_pointer();
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Move => {
                 if !self.captured {
+                    // No capture: this is the hover pass — claim, latch, and
+                    // let paint self-correct (`docs/CODE_STANDARDS.md`'s
+                    // three-part hover contract; see the [module docs](self)'
+                    // Hover elevation lift section).
+                    let over = inside(p.position, ctx.size());
+                    if over {
+                        ctx.claim_hover();
+                    }
+                    if self.state.set_hovered(over) {
+                        ctx.request_redraw();
+                    }
                     return EventResult::Ignored;
                 }
                 let inside_now = inside(p.position, ctx.size());
-                self.pressed = inside_now;
-                self.state_layer.set_pressed(inside_now);
-                ctx.request_redraw();
+                if self.state.set_pressed(inside_now) {
+                    ctx.request_redraw();
+                }
                 EventResult::Handled
             }
             PointerPhase::Up => {
@@ -408,11 +671,13 @@ impl Widget for CardWidget {
                     return EventResult::Ignored;
                 }
                 if inside(p.position, ctx.size()) {
+                    if self.haptic != HapticSignal::None {
+                        MaterialHaptics::fire(self.haptic);
+                    }
                     (on_press)(ctx);
                 }
-                self.pressed = false;
+                self.state.set_pressed(false);
                 self.captured = false;
-                self.state_layer.set_pressed(false);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -420,9 +685,8 @@ impl Widget for CardWidget {
                 if !self.captured {
                     return EventResult::Ignored;
                 }
-                self.pressed = false;
+                self.state.set_pressed(false);
                 self.captured = false;
-                self.state_layer.set_pressed(false);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -434,7 +698,11 @@ impl Widget for CardWidget {
             ctx.push_container(
                 Role::Button,
                 |node| {
-                    node.add_action(Action::Click);
+                    if self.enabled {
+                        node.add_action(Action::Click);
+                    } else {
+                        node.set_disabled();
+                    }
                 },
                 |ctx| {
                     self.child.semantics_child(ctx);
@@ -457,6 +725,7 @@ impl Widget for CardWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::FrameTime;
     use frust_widgets::test_support::leaf_any;
     use std::any::Any;
 
@@ -466,6 +735,10 @@ mod tests {
             position: Point::new(x, y),
             button: frust::authoring::PointerButton::Primary,
         })
+    }
+
+    fn ft_secs(s: f64) -> FrameTime {
+        FrameTime::from_nanos((s * 1_000_000_000.0) as u64)
     }
 
     /// Records each rounded rect's `(origin, size, radius, color)`, each
@@ -564,9 +837,9 @@ mod tests {
         // `ElevationLevel::shadow` carries a per-brightness split
         // (`shadow_light`/`shadow_dark`), and the M3 v1 mapping duplicates
         // the same value into both slots. This pins the elevated card's
-        // rendered shadow on `Brightness::Light` to `theme.elevation.level1`'s
-        // shadow spec, byte-identical to the pre-migration single-field
-        // output.
+        // rendered (resting, unhovered) shadow on `Brightness::Light` to
+        // `theme.elevation.level1`'s shadow spec, byte-identical to the
+        // pre-migration single-field output.
         let theme = crate::baseline();
         assert_eq!(theme.brightness, frust::Brightness::Light);
         let level1 = theme.elevation.level1;
@@ -610,6 +883,59 @@ mod tests {
         let rec = paint(&mut w, Size::new(100.0, 60.0), Some(&theme));
         assert_eq!(rec.rrects[0].3, scheme.surface);
         assert_eq!(rec.strokes[0].2, scheme.outline_variant);
+    }
+
+    // --- Disabled interactive card: dimmed styling, no shadow lift ---
+
+    #[test]
+    fn disabled_interactive_card_dims_container_uniformly_across_variants() {
+        let theme = crate::baseline();
+        let expected = with_alpha(theme.scheme().on_surface, DISABLED_CONTAINER_OPACITY);
+        for variant in [
+            CardVariant::Elevated,
+            CardVariant::Filled,
+            CardVariant::Outlined,
+        ] {
+            let view: CardView<()> = card(variant, leaf_any(40.0, 20.0))
+                .on_press(|_: &mut ()| {})
+                .enabled(false);
+            let mut w = build(&view);
+            let rec = paint(&mut w, Size::new(100.0, 60.0), Some(&theme));
+            assert_eq!(
+                rec.rrects[0].3, expected,
+                "{variant:?} container dims while disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_interactive_outlined_card_dims_its_outline_too() {
+        let theme = crate::baseline();
+        let expected = with_alpha(theme.scheme().on_surface, DISABLED_CONTAINER_OPACITY);
+        let view: CardView<()> = outlined_card(leaf_any(40.0, 20.0))
+            .on_press(|_: &mut ()| {})
+            .enabled(false);
+        let mut w = build(&view);
+        let rec = paint(&mut w, Size::new(100.0, 60.0), Some(&theme));
+        assert_eq!(rec.strokes[0].2, expected);
+    }
+
+    #[test]
+    fn disabled_interactive_elevated_card_still_rests_at_level1_unlifted() {
+        let view: CardView<()> = elevated_card(leaf_any(40.0, 20.0))
+            .on_press(|_: &mut ()| {})
+            .enabled(false);
+        let mut w = build(&view);
+        let rec = paint(&mut w, Size::new(100.0, 60.0), None);
+        assert_eq!(rec.shadows.len(), 1);
+        assert_eq!(
+            rec.shadows[0].3, FALLBACK_SHADOW_BLUR,
+            "never lifts: a disabled card never hovers"
+        );
+        assert!(
+            rec.rrects.get(1).is_none(),
+            "no state-layer overlay while disabled"
+        );
     }
 
     // --- Non-interactive: transparent event routing to the child ---
@@ -697,6 +1023,22 @@ mod tests {
         assert!(!w.captured);
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
         assert_eq!(state.presses, 0);
+    }
+
+    #[test]
+    fn disabled_interactive_card_ignores_every_pointer_phase() {
+        let view: CardView<Counter> = filled_card(content_stub::<Counter>())
+            .on_press(|s: &mut Counter| s.presses += 1)
+            .enabled(false);
+        let mut w = build(&view);
+        let mut state = Counter::default();
+        assert_eq!(
+            dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0)),
+            EventResult::Ignored
+        );
+        assert!(!w.captured, "a disabled card never captures");
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.presses, 0, "and never fires");
     }
 
     // --- Interactive with focus-routed child events ---
@@ -799,6 +1141,28 @@ mod tests {
             !node.children().is_empty(),
             "the child is a semantics child"
         );
+        assert!(!node.is_disabled());
+    }
+
+    #[test]
+    fn semantics_disabled_interactive_card_reports_disabled_and_no_click_action() {
+        fn logic(_s: &mut ()) -> CardView<()> {
+            filled_card(frust::text("body"))
+                .on_press(|_s: &mut ()| {})
+                .enabled(false)
+        }
+        let mut root: frust_core::RenderRoot<(), CardView<()>> = frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = frust::authoring::text::TextContext::new();
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("a disabled interactive card still contributes a Role::Button node");
+        assert!(node.is_disabled());
     }
 
     #[test]
@@ -821,5 +1185,157 @@ mod tests {
             !node.children().is_empty(),
             "the child is a semantics child"
         );
+    }
+
+    // --- Hover elevation lift + press state layer (through a real RenderRoot) ---
+    //
+    // Hover and focus are *authoritative reads* off `PaintCtx`, seeded by the
+    // pod chain, so a bare `PaintCtx` can never fake them — only a real tree
+    // can (the pattern `list_item.rs`'s own hover harness uses, and
+    // `button::core`'s own `Harness` mirrors). These tests dispatch through a
+    // real `frust_core::RenderRoot`.
+
+    const HARNESS_WINDOW: Size = Size::new(300.0, 200.0);
+
+    struct Harness {
+        root: frust_core::RenderRoot<u32, CardView<u32>>,
+        state: u32,
+        tcx: frust::authoring::text::TextContext,
+        variant: CardVariant,
+        enabled: bool,
+    }
+
+    impl Harness {
+        fn new(variant: CardVariant, enabled: bool) -> Self {
+            let mut h = Self {
+                root: frust_core::RenderRoot::new(),
+                state: 0,
+                tcx: frust::authoring::text::TextContext::new(),
+                variant,
+                enabled,
+            };
+            h.sync();
+            h
+        }
+
+        fn sync(&mut self) {
+            let (variant, enabled) = (self.variant, self.enabled);
+            let mut app = move |_: &mut u32| {
+                card::<u32, _>(variant, content_stub::<u32>())
+                    .on_press(|s: &mut u32| *s += 1)
+                    .enabled(enabled)
+            };
+            self.root.rebuild(&mut app, &mut self.state);
+            self.root
+                .layout_with_text(HARNESS_WINDOW, &mut self.tcx as &mut dyn Any);
+        }
+
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) {
+            self.root.event(
+                &mut self.state,
+                &InputEvent::Pointer(frust::authoring::PointerEvent {
+                    phase,
+                    position: Point::new(x, y),
+                    button: frust::authoring::PointerButton::Primary,
+                }),
+            );
+        }
+
+        fn paint_at(&mut self, ft: FrameTime) -> Recorder {
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft);
+            rec
+        }
+
+        /// The alpha of the state-layer overlay painted this frame, if any
+        /// (the container fill is always the first rect).
+        fn overlay_alpha(&mut self, ft: FrameTime) -> Option<f32> {
+            let rec = self.paint_at(ft);
+            rec.rrects
+                .get(1)
+                .map(|(_, _, _, color)| color.components[3])
+        }
+    }
+
+    #[test]
+    fn hover_lifts_the_elevated_card_shadow_from_level1_to_level2_and_back() {
+        let mut h = Harness::new(CardVariant::Elevated, true);
+        let rest = h.paint_at(FrameTime::ZERO);
+        assert_eq!(rest.shadows[0].3, FALLBACK_SHADOW_BLUR, "rests at level1");
+        assert_eq!(rest.shadows[0].0, Point::new(0.0, FALLBACK_SHADOW_Y_OFFSET));
+
+        h.dispatch(PointerPhase::Move, 10.0, 10.0);
+        // First paint after the fling starts only seeds the spring's clock
+        // (`AnimationController::advance`'s own documented first-call
+        // contract).
+        h.paint_at(ft_secs(0.0));
+        let settled = h.paint_at(ft_secs(1.0));
+        assert_eq!(
+            settled.shadows[0].3, FALLBACK_HOVER_SHADOW_BLUR,
+            "settles at level2's blur once the hover-lift spring settles"
+        );
+        assert_eq!(
+            settled.shadows[0].0,
+            Point::new(0.0, FALLBACK_HOVER_SHADOW_Y_OFFSET)
+        );
+
+        h.dispatch(PointerPhase::Move, 290.0, 190.0);
+        h.paint_at(ft_secs(1.0));
+        let dropped = h.paint_at(ft_secs(2.0));
+        assert_eq!(
+            dropped.shadows[0].3, FALLBACK_SHADOW_BLUR,
+            "drops back to level1 once unhovered"
+        );
+    }
+
+    #[test]
+    fn hover_never_lifts_a_disabled_interactive_card() {
+        let mut h = Harness::new(CardVariant::Elevated, false);
+        h.dispatch(PointerPhase::Move, 10.0, 10.0);
+        let rec = h.paint_at(ft_secs(1.0));
+        assert_eq!(
+            rec.shadows[0].3, FALLBACK_SHADOW_BLUR,
+            "a disabled card never reacts to hover (the radio-hover-regression fix)"
+        );
+        h.dispatch(PointerPhase::Down, 10.0, 10.0);
+        h.dispatch(PointerPhase::Up, 10.0, 10.0);
+        assert_eq!(h.state, 0, "and never fires either");
+    }
+
+    #[test]
+    fn hovering_paints_the_hover_state_layer_and_pressing_outranks_it() {
+        let mut h = Harness::new(CardVariant::Filled, true);
+        assert_eq!(h.overlay_alpha(FrameTime::ZERO), None, "no overlay at rest");
+
+        h.dispatch(PointerPhase::Move, 10.0, 10.0);
+        assert_eq!(
+            h.overlay_alpha(ft_secs(0.0)),
+            Some(crate::interaction::HOVER_OPACITY),
+            "the hovered card tints at the M3E hover opacity"
+        );
+
+        h.dispatch(PointerPhase::Down, 10.0, 10.0);
+        assert_eq!(
+            h.overlay_alpha(ft_secs(0.0)),
+            Some(frust::authoring::PRESSED_OPACITY),
+            "pressed outranks hover in the precedence order"
+        );
+
+        h.dispatch(PointerPhase::Up, 10.0, 10.0);
+        assert_eq!(h.state, 1, "and the release fired the callback");
+    }
+
+    #[test]
+    fn disabled_card_never_tints_and_never_fires() {
+        let mut h = Harness::new(CardVariant::Filled, false);
+        h.dispatch(PointerPhase::Move, 10.0, 10.0);
+        assert_eq!(
+            h.overlay_alpha(ft_secs(0.0)),
+            None,
+            "a disabled card claims no hover"
+        );
+        h.dispatch(PointerPhase::Down, 10.0, 10.0);
+        h.dispatch(PointerPhase::Up, 10.0, 10.0);
+        assert_eq!(h.state, 0);
     }
 }
