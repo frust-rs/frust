@@ -69,6 +69,7 @@ pub mod loading_indicator;
 pub mod navbar;
 mod press;
 pub mod progress;
+pub mod radio;
 pub mod shape_morph;
 pub mod shapes;
 pub mod sheet;
@@ -106,6 +107,7 @@ pub use progress::{
     CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
     LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
 };
+pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use shape_morph::morph_path;
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
