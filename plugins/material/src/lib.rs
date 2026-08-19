@@ -54,6 +54,7 @@
 //! `frust::glyph_theme::install` and `frust_shadcn::install` document).
 
 pub mod appbar;
+pub mod button;
 pub mod button_group;
 pub mod card;
 pub mod checkbox;
@@ -81,6 +82,11 @@ mod tokens;
 pub mod toolbar;
 
 pub use appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
+pub use button::{
+    Button, ButtonDecoration, ButtonShape, ButtonSize, ButtonSurface, ButtonVariant, ButtonView,
+    ButtonWidget, ContentMetrics, DecorationOutcome, IconAlignment, OverflowObserver, button,
+    button_with_icon, elevated_button, filled_button, outlined_button, text_button, tonal_button,
+};
 pub use button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
 pub use card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
