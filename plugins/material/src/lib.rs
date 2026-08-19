@@ -19,8 +19,8 @@
 //! The one name carrying two implementations is `RoundedPolygon`: the flat
 //! re-export is [`shapes::RoundedPolygon`], the feature-point geometry engine
 //! ported from `material_new_shapes`. [`mod@shape_morph`]'s older radial-model
-//! polygon keeps its own module path until its two consumers
-//! ([`mod@loading_indicator`], [`mod@button_group`]) move across.
+//! polygon keeps its own module path until its last remaining consumer
+//! ([`mod@loading_indicator`]) moves across.
 //!
 //! [`icons`] is the one deliberate exception: its 88 generated
 //! [`frust::IconSource`] constants stay namespaced (`frust_material::icons::CHECK`),
@@ -93,7 +93,11 @@ pub use button::{
     button_with_icon, constant_gradient, elevated_button, filled_button, implied_stops,
     outlined_button, text_button, tonal_button,
 };
-pub use button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
+pub use button_group::{
+    ButtonGroup, ButtonGroupAction, ButtonGroupDensity, ButtonGroupDirection, ButtonGroupOverflow,
+    ButtonGroupType, ButtonGroupView, ButtonGroupWidget, button_group, button_group_action,
+    button_group_actions, button_group_icon_action,
+};
 pub use card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
 };
