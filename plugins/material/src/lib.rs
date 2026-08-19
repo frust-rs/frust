@@ -16,11 +16,12 @@
 //! the in-tree catalog it was extracted from is consumed through the `frust`
 //! facade (`frust::AppBar`, `frust::card`, ...).
 //!
-//! The one name carrying two implementations is `RoundedPolygon`: the flat
-//! re-export is [`shapes::RoundedPolygon`], the feature-point geometry engine
-//! ported from `material_new_shapes`. [`mod@shape_morph`]'s older radial-model
-//! polygon keeps its own module path until its last remaining consumer
-//! ([`mod@loading_indicator`]) moves across.
+//! `RoundedPolygon` is the flat re-export of [`shapes::RoundedPolygon`], the
+//! feature-point geometry engine ported from `material_new_shapes` — every
+//! shape-morphing consumer in this crate, including
+//! [`mod@loading_indicator`]'s shape sequence, builds on this one engine;
+//! the older, since-removed radial-model polygon module has no remaining
+//! callers.
 //!
 //! [`icons`] is the one deliberate exception: its 88 generated
 //! [`frust::IconSource`] constants stay namespaced (`frust_material::icons::CHECK`),
@@ -77,7 +78,6 @@ mod press;
 pub mod progress;
 pub mod radio;
 pub mod segmented_button;
-pub mod shape_morph;
 pub mod shapes;
 pub mod sheet;
 pub mod slider;
@@ -133,7 +133,8 @@ pub use list_item::{
     list_item,
 };
 pub use loading_indicator::{
-    LoadingIndicator, LoadingIndicatorView, LoadingIndicatorWidget, loading_indicator,
+    LoadingIndicator, LoadingIndicatorVariant, LoadingIndicatorView, LoadingIndicatorWidget,
+    loading_indicator,
 };
 pub use navbar::{
     NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
@@ -160,7 +161,6 @@ pub use segmented_button::{
     MAX_SEGMENTS, MIN_SEGMENTS, Segment, SegmentedButton, SegmentedButtonView,
     SegmentedButtonWidget, segment, segmented_button,
 };
-pub use shape_morph::morph_path;
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use slider::{
