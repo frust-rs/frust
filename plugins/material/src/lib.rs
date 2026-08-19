@@ -150,8 +150,10 @@ pub use overlay::{
     place_anchored, show_overlay_modal,
 };
 pub use progress::{
-    CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
-    LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
+    AmplitudeCurve, CircularProgress, CircularProgressView, CircularProgressWidget,
+    CircularWavyProgress, LinearProgress, LinearProgressView, LinearProgressWidget,
+    LinearWavyProgress, ProgressSize, ProgressValue, circular_progress, circular_wavy_progress,
+    linear_progress, linear_wavy_progress,
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use segmented_button::{
