@@ -810,12 +810,27 @@ impl Widget for ButtonWidget {
                 self.target_radius(theme, metrics.height),
             )
         };
+        // The padding target is a pure function of `self.size` — unlike the
+        // radius channel, which also depends on interaction state only
+        // `paint` tracks — so `layout` resolves it directly rather than
+        // reading it back off the morph. Reading `self.motion.padding()`
+        // here would lag a runtime `size` change by a whole pass: `layout`
+        // always runs before `paint` in a frame, and `paint` below is the
+        // only place that ever calls `retarget` with the new size's
+        // padding — its bare `request_frame` (never `request_layout`)
+        // leaves the stale width standing until an unrelated layout dirty
+        // happens along (`button_group.rs`'s layout-affecting-animation
+        // convention names this exact hazard). A plain button's padding
+        // target never depends on press/hover state either (the parent
+        // module's Shape and the press morph section), so it is never
+        // itself mid-flight — the width computed here is always
+        // immediately correct, with no in-flight frame that would need its
+        // own `request_layout`.
+        let padding = ContentPadding::symmetric(metrics.h_padding);
         if !self.motion.is_seeded() {
             // The mount frame snaps; only a later target change springs.
-            self.motion
-                .snap_to(resting_radius, ContentPadding::symmetric(metrics.h_padding));
+            self.motion.snap_to(resting_radius, padding);
         }
-        let padding = self.motion.padding();
 
         let icon_size = self.icon.as_mut().map(|pod| {
             pod.layout_child(
@@ -916,6 +931,12 @@ impl Widget for ButtonWidget {
             )
         };
 
+        // Retargeted every paint so a press/hover change is caught
+        // continuously and the morph's own continuity bookkeeping stays
+        // live; `layout` above resolves its own copy of this same
+        // size-derived padding directly rather than reading it back through
+        // `self.motion.padding()` (see that comment) — this call drives the
+        // radius channel, not this widget's layout.
         let padding = ContentPadding::symmetric(self.size.metrics().h_padding);
         if self.motion.retarget(radius_target, padding) {
             ctx.request_frame();
@@ -2303,6 +2324,64 @@ mod tests {
         widget.state.set_pressed(true);
         widget.state.set_hovered(true);
         assert_eq!(widget.target_radius(None, laid.height), laid.height / 2.0);
+    }
+
+    #[test]
+    fn a_runtime_size_change_relayouts_at_the_new_sizes_padding_immediately() {
+        // `ButtonView::rebuild` already raises `ChangeFlags::LAYOUT` on a
+        // `size` change (`rebuild_moves_props_and_flags_what_changed`), so
+        // the very next `layout` pass must already reflect the NEW size's
+        // padding table — it must not wait for an intervening `paint` to
+        // retarget the morph first, since the crate's per-frame order
+        // always runs `layout` before `paint`. Mutating `size` directly
+        // (the same field write `rebuild` performs) with no `paint` call in
+        // between reproduces exactly that ordering.
+        let mut widget = build(&button::<u32, _>("Save", |_| {}).size(ButtonSize::Sm));
+        layout_with(&mut widget, 1000.0, None);
+        assert_eq!(
+            widget.content_metrics().available_label_width,
+            1000.0 - ButtonSize::Sm.metrics().h_padding * 2.0
+        );
+
+        widget.size = ButtonSize::Xl;
+        layout_with(&mut widget, 1000.0, None);
+        assert_eq!(
+            widget.content_metrics().available_label_width,
+            1000.0 - ButtonSize::Xl.metrics().h_padding * 2.0,
+            "layout must resolve the NEW size's padding on its very next pass, \
+             not the stale one only a later paint would have retargeted"
+        );
+    }
+
+    #[test]
+    fn a_plain_buttons_padding_never_moves_during_a_press_morph() {
+        // Pins the module docs' claim (`super`'s Shape and the press morph
+        // section): a plain button only ever retargets the radius channel,
+        // so an in-flight press morph has nothing for `layout` to chase —
+        // confirming `layout`'s direct-resolve fix above needs no
+        // `request_layout` companion for this widget's own press morph.
+        let mut state = 0u32;
+        let mut widget = build(&button::<u32, _>("Save", |_| {}));
+        let laid = layout_with(&mut widget, 500.0, None);
+        let resting_available = widget.content_metrics().available_label_width;
+
+        dispatch(
+            &mut widget,
+            &mut state,
+            laid,
+            &ev(PointerPhase::Down, 10.0, 10.0),
+        );
+        // Installs the press's radius-only retarget leg.
+        paint_at(&mut widget, laid, None);
+        // Mid-flight, deliberately not settled.
+        widget.motion.advance(ft_secs(0.05));
+        layout_with(&mut widget, 500.0, None);
+        assert_eq!(
+            widget.content_metrics().available_label_width,
+            resting_available,
+            "a plain button's padding target never depends on press state, \
+             mid-flight or otherwise"
+        );
     }
 
     // ---- events -----------------------------------------------------------

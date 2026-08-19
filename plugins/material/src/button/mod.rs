@@ -83,7 +83,11 @@
 //! table value and does not move on press (the reference passes a constant
 //! `baseInternalPadding`, `m3e_button_content.dart:7`). The padding channel is
 //! nonetheless real and layout-affecting, because the same primitive is what
-//! the connected/toggle families morph their padding with.
+//! the connected/toggle families morph their padding with — for a plain
+//! button, though, `layout` resolves that per-size padding value directly
+//! rather than reading it back off the morph, since the morph's own copy can
+//! lag a runtime size change by a whole pass (`core::ButtonWidget::layout`'s
+//! own comment has the full hazard).
 //!
 //! # Focus ring
 //!
@@ -526,10 +530,37 @@ impl<State: 'static> View<State> for ButtonView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.on_press = frust::authoring::erase_callback(&self.on_press);
-        element.decoration = self.decoration.clone();
-        element.overflow = self.overflow.clone();
-        element.haptic = self.haptic;
         let mut flags = ChangeFlags::NONE;
+
+        // `ButtonDecoration`/`OverflowObserver` are trait objects with
+        // nothing to compare by value (the same shape `CardView::rebuild`'s
+        // `on_press` adoption hits), so a same-presence swap — one
+        // decoration for another, both sides `Some` — can't be told apart
+        // from a no-op reinstall by identity alone. Flag `PAINT` whenever a
+        // decoration/observer is installed on *either* side of the rebuild,
+        // not only on an `Option` presence flip: `CardView`'s narrower
+        // presence-only gate is safe there because losing/gaining
+        // `on_press` is the only thing that changes what it paints, but a
+        // decoration or overflow-observer swap changes *what* paints even
+        // while `Some` stays `Some` on both sides — the exact "a decoration
+        // swap can go unpainted" hazard this closes.
+        if self.decoration.is_some() || prev.decoration.is_some() {
+            flags |= ChangeFlags::PAINT;
+        }
+        element.decoration = self.decoration.clone();
+        if self.overflow.is_some() || prev.overflow.is_some() {
+            flags |= ChangeFlags::PAINT;
+        }
+        element.overflow = self.overflow.clone();
+        // `haptic` doesn't itself change anything painted, but flagging it
+        // alongside the two seams above keeps every field this rebuild
+        // silently mutates in the "adopts a new value ⇒ flags something"
+        // shape, rather than a bare exception sitting beside two guarded
+        // ones.
+        if prev.haptic != self.haptic {
+            flags |= ChangeFlags::PAINT;
+        }
+        element.haptic = self.haptic;
 
         if prev.overflow_strategy != self.overflow_strategy {
             element.overflow_strategy = self.overflow_strategy;
@@ -747,5 +778,83 @@ mod tests {
         View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
         assert!(!widget.state.pressed);
         assert!(!widget.captured);
+    }
+
+    // ---- the decoration/overflow-observer/haptic rebuild rider ------------
+
+    struct NoopDecoration;
+    impl ButtonDecoration for NoopDecoration {}
+
+    struct NoopObserver;
+    impl OverflowObserver for NoopObserver {
+        fn measured(&self, _metrics: ContentMetrics) {}
+    }
+
+    #[test]
+    fn rebuild_flags_paint_on_a_decoration_swap_even_though_both_sides_are_some() {
+        let deco_a: Rc<dyn ButtonDecoration> = Rc::new(NoopDecoration);
+        let deco_b: Rc<dyn ButtonDecoration> = Rc::new(NoopDecoration);
+        let prev = button::<u32, _>("Save", |_| {}).decoration(deco_a);
+        let next = button::<u32, _>("Save", |_| {}).decoration(deco_b);
+        let mut widget = build(&prev);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "a decoration swap must repaint even though the Option stays Some on both sides"
+        );
+    }
+
+    #[test]
+    fn rebuild_flags_paint_when_a_decoration_is_installed_or_removed() {
+        let deco: Rc<dyn ButtonDecoration> = Rc::new(NoopDecoration);
+        let none = button::<u32, _>("Save", |_| {});
+        let some = button::<u32, _>("Save", |_| {}).decoration(deco);
+
+        let mut widget = build(&none);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&some, &none, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "installing a decoration must repaint"
+        );
+
+        let mut widget = build(&some);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&none, &some, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "removing a decoration must repaint"
+        );
+    }
+
+    #[test]
+    fn rebuild_flags_paint_on_an_overflow_observer_swap() {
+        let obs_a: Rc<dyn OverflowObserver> = Rc::new(NoopObserver);
+        let obs_b: Rc<dyn OverflowObserver> = Rc::new(NoopObserver);
+        let prev = button::<u32, _>("Save", |_| {}).overflow_observer(obs_a);
+        let next = button::<u32, _>("Save", |_| {}).overflow_observer(obs_b);
+        let mut widget = build(&prev);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "an overflow-observer swap must repaint even though the Option stays Some"
+        );
+    }
+
+    #[test]
+    fn rebuild_flags_paint_on_a_haptic_change() {
+        let prev = button::<u32, _>("Save", |_| {});
+        let next = button::<u32, _>("Save", |_| {}).haptic(HapticSignal::Light);
+        let mut widget = build(&prev);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(flags.contains(ChangeFlags::PAINT));
     }
 }
