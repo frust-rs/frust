@@ -2862,3 +2862,41 @@ material-specific.
 **Evidence**: `plugins/material/src/text_field.rs` module doc's "Container
 fill: a documented fidelity gap" section; Material 3 Expressive Phase 2 wave 1
 ledger (`workflow/plans/features/material-3-expressive/phase-2/TASKS.md`).
+
+---
+
+### `material-textfield-slot-blur-on-interactive-children` — an interactive leading/trailing slot child blurs the field before its own tap registers
+
+**Observed**: `frust_material::text_field`'s leading/trailing icon slots are
+routed through the shared container contract
+(`frust::authoring::route_event`), not a text-field-specific one. That
+contract's blur-on-outside-tap rule fires on `Down`: "a `Down` that does not
+re-establish focus on the child it hits clears every focused sibling." A slot
+child that is itself interactive (a password-visibility toggle, a clear
+button) has not yet claimed focus at the moment its own `Down` arrives, so
+that `Down` reads as an outside tap and blurs the field first — before the
+slot child's own tap handler ever sees the event. The module doc states this
+plainly: "**A `Down` on an interactive slot blurs the field** ... not
+something this widget adds or can suppress — another reason the slots are
+meant for plain icons."
+
+**Applies to**: any app placing an interactive view (not a static icon) in
+`TextFieldView::leading`/`trailing`. Two mainstream M3 patterns are not
+properly buildable in v1: a password-visibility toggle and a trailing clear
+button both need their own tap to land without first blurring the field they
+sit on.
+
+**Why accepted**: the blur-on-outside-tap rule is the shared container
+contract every multi-child `frust-widgets` container routes through
+(`authoring::route_event`), not something `text_field.rs` opted into or can
+override locally. A fix needs a slot-level opt-out — a way for a same-widget
+slot child to be exempted from blur-on-outside-tap when it is itself the
+`Down` target — which is a `frust-widgets`/`frust::authoring` seam change,
+not a catalog-level fix. Deliberately left as a v1 scope line (icon slots are
+"the intended content") rather than attempted inside Phase 2's core-controls
+port.
+
+**Evidence**: `plugins/material/src/text_field.rs` module doc's "Known
+limitations" section (the "A `Down` on an interactive slot blurs the field"
+bullet); Material 3 Expressive Phase 2 review round 0, confirmed Major 5
+(`workflow/reviews/features/material-3-expressive-phase-2/REVIEW.md`).
