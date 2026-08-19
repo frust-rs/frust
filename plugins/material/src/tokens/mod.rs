@@ -85,6 +85,7 @@ mod color;
 mod extension;
 mod fonts;
 mod hct;
+mod metrics;
 mod motion;
 mod type_scale;
 
@@ -92,14 +93,15 @@ pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
 pub use extension::MaterialTokens;
 pub use fonts::font_data;
 pub use hct::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
+pub use metrics::{MaterialDimensions, MaterialSpacing, elevation};
 pub use motion::{MaterialMotion, MaterialSpring};
 pub use type_scale::type_scale;
 
 use frust::authoring::text::TextStyle;
 use frust::{
-    Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
-    GlassScale, MotionDurations, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions,
+    Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, FontFace, GlassScale, MotionDurations,
+    MotionScheme, MotionSpring, NativeTypefaces, ShapeScale, StatusColors, StatusPalette, Theme,
+    ThemeExtensions,
 };
 use peniko::Color;
 
@@ -214,53 +216,6 @@ pub const fn shape_scale() -> ShapeScale {
         extra_large_increased: 32.0,
         extra_extra_large: 48.0,
         full: f64::INFINITY,
-    }
-}
-
-// ---- Elevation ----------------------------------------------------------
-
-/// dp source: <https://m3.material.io/styles/elevation> (verified
-/// 2026-07-17): L0 0dp, L1 1dp, L2 3dp, L3 6dp, L4 8dp, L5 12dp. Component
-/// mapping per the same source: L1 = elevated cards/bottom sheets, L2 = nav
-/// bar/menus, L3 = FAB/dialogs.
-///
-/// **Shadow math is TUNABLE, not an M3-published spec.** Material 3's 2023
-/// direction replaced tonal-overlay tinting with *static surface-container
-/// roles* for most elevated surfaces — the opposite of "primarily tonal
-/// overlay post-2023" — but shadows still exist alongside; M3 does not
-/// publish exact shadow blur/offset math, so this module defines a
-/// documented v1 mapping: `y_offset = dp / 2.0 + 1.0`, `blur_std_dev = dp`,
-/// shadow color = `ColorScheme::shadow` at `color_alpha` ~0.3. Treat it as
-/// adjustable, not load-bearing, Frust-specific policy.
-///
-/// [`ElevationLevel`] carries **separate** light/dark shadow specs; this
-/// mapping doesn't branch by brightness, so both slots hold the same value —
-/// behavior-preserving, byte-identical rendered output on either brightness.
-const fn elevation_level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
-    let shadow = ShadowSpec {
-        y_offset: dp / 2.0 + 1.0,
-        blur_std_dev: dp,
-        color_alpha: 0.3,
-    };
-    ElevationLevel {
-        dp,
-        shadow_light: shadow,
-        shadow_dark: shadow,
-        surface_role,
-    }
-}
-
-/// The Material 3 baseline elevation table (dp values verified; shadow math
-/// and surface-role assignment are this crate's documented v1 mapping — see
-/// [`elevation_level`]'s doc comment).
-pub const fn elevation() -> Elevation {
-    Elevation {
-        level0: elevation_level(0.0, SurfaceRole::Surface),
-        level1: elevation_level(1.0, SurfaceRole::SurfaceContainerLow),
-        level2: elevation_level(3.0, SurfaceRole::SurfaceContainer),
-        level3: elevation_level(6.0, SurfaceRole::SurfaceContainerHigh),
-        level4: elevation_level(8.0, SurfaceRole::SurfaceContainerHigh),
-        level5: elevation_level(12.0, SurfaceRole::SurfaceContainerHighest),
     }
 }
 
