@@ -131,8 +131,10 @@ pub use shape_morph::morph_path;
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use slider::{
-    Slider, SliderIconPosition, SliderTrackIcons, SliderTrackKind, SliderView, SliderWidget,
-    centered_slider, slider,
+    RangeSliderView, RangeSliderWidget, Slider, SliderIconPosition, SliderRange, SliderTrackIcons,
+    SliderTrackKind, SliderView, SliderWidget, centered_slider, range_slider, slider,
+    vertical_centered_slider, vertical_slider, wavy_centered_slider, wavy_range_slider,
+    wavy_slider,
 };
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};

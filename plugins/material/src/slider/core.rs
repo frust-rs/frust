@@ -23,11 +23,11 @@
 //! variant needs: it swaps that one mapping (and feeds a reversed fraction),
 //! with no change to any formula below.
 //!
-//! # Extension points for the wavy/vertical/range variants
+//! # Extension points the wavy/vertical/range variants hook into
 //!
-//! The next task adds wave-phase painting, vertical orientation, and a second
-//! thumb. Each has a named seam here so none of them needs to reopen the state
-//! machine:
+//! Wave-phase painting, vertical orientation, and the second thumb each hang
+//! off a named seam here, so none of them reopens the state machine
+//! ([`super::variants`] and [`super::range`] are the consumers):
 //!
 //! 1. **Wavy active segment** — [`TrackMetrics::segments`] emits the active
 //!    span as a [`TrackSegment`] with [`SegmentRole::Active`]; a wavy variant
@@ -39,15 +39,18 @@
 //! 2. **Vertical orientation** — the primary/cross split above, plus
 //!    [`SliderGeometry::reverse`]: the reference's `reverse` flag
 //!    (`m3e_slider_build.dart:82`) is `!topToBottom` on a vertical slider and
-//!    RTL on a horizontal one. It is carried (and honoured) here already, so a
-//!    vertical variant only supplies `reverse` and a transposed paint mapping.
+//!    RTL on a horizontal one. Every formula here stays value-oriented and the
+//!    variant's axis map applies the one flip at paint, mirroring the
+//!    reference's `Transform.flip` around its track layer;
+//!    [`SliderGeometry::reverse`] is what the *widget*-space consumers
+//!    ([`icon_dock`], [`ValueSpec::value_from_offset`]) take.
 //! 3. **Second thumb (range)** — [`SliderGeometry::active_start_fraction`] is
 //!    a real input to every formula (the reference's `activeStartFraction`),
-//!    fixed at `0.0` for the single-thumb slider. A range variant feeds the
-//!    low thumb's fraction there and adds a `Range` arm beside
-//!    [`SliderTrackKind::Centered`] in the three `centered`-branching spots
-//!    ([`TrackMetrics::resolve`], [`TrackMetrics::segments`], [`dots`]) —
-//!    the same three the reference's `_range` getter branches in.
+//!    fixed at `0.0` for the single-thumb slider. The range variant feeds the
+//!    low thumb's fraction there and selects [`SliderTrackKind::Range`], the
+//!    third arm of the same three `centered`-branching spots
+//!    ([`TrackMetrics::resolve`], [`TrackMetrics::segments`], [`dots`]) — the
+//!    same three the reference's `_range` getter branches in.
 //!
 //! The drag machine ([`Drag`]) and the haptic scheduler ([`HapticScheduler`])
 //! are thumb-agnostic: a range slider holds one [`Drag`] per thumb and one
@@ -182,7 +185,15 @@ pub(crate) const VALUE_INDICATOR_PAD_Y: f64 = 4.0;
 /// fallback so an unconstrained slider still measures something paintable.
 pub(crate) const DEFAULT_EXTENT: f64 = 200.0;
 
-/// Which track geometry a slider paints (`M3ESliderTrackKind`).
+/// Which track geometry a slider paints (`M3ESliderTrackKind`, with
+/// `M3ESliderPaintMode.range` folded in as its third arm).
+///
+/// Upstream splits this across two enums — a `trackKind` (standard/centered)
+/// and a paint `mode` (single/range) — but only three of the four combinations
+/// exist: a range track is always the standard kind
+/// (`m3e_range_slider_track.dart:100-101` hard-codes it, and Compose has no
+/// centered range slider). One enum keeps the impossible fourth
+/// unrepresentable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SliderTrackKind {
     /// Active track runs from the start edge to the thumb.
@@ -190,6 +201,9 @@ pub enum SliderTrackKind {
     Standard,
     /// Active track grows from the track's midpoint toward the thumb.
     Centered,
+    /// Active track spans between two thumbs
+    /// ([`super::range`]'s `M3ERangeSlider`).
+    Range,
 }
 
 /// Axis-relative resting edge for the relocating end icon
@@ -324,6 +338,7 @@ pub(crate) struct TrackMetrics {
     pub(crate) slider_start: f64,
     pub(crate) slider_end: f64,
     pub(crate) centered: bool,
+    pub(crate) range: bool,
     pub(crate) corner: f64,
     pub(crate) inside_corner: f64,
     pub(crate) start_gap: f64,
@@ -373,8 +388,9 @@ impl TrackMetrics {
             return None;
         }
         let centered = geometry.kind == SliderTrackKind::Centered;
+        let range = geometry.kind == SliderTrackKind::Range;
         let corner = geometry.corner_radius.min(geometry.track_thickness / 2.0);
-        let start_gap = if centered {
+        let start_gap = if centered || range {
             geometry.handle_thickness / 2.0 + geometry.handle_gap
         } else {
             0.0
@@ -402,6 +418,10 @@ impl TrackMetrics {
                 } else {
                     0.0
                 }
+        } else if range {
+            // The low thumb carves its own gap out of the active span, the
+            // mirror of what the high thumb already does at `active_end`.
+            value_start + start_gap
         } else {
             slider_start
         };
@@ -420,6 +440,7 @@ impl TrackMetrics {
             slider_start,
             slider_end,
             centered,
+            range,
             corner,
             inside_corner: TRACK_INSIDE_CORNER,
             start_gap,
@@ -445,10 +466,12 @@ impl TrackMetrics {
         let mut out = Vec::with_capacity(3);
         let (outer, inner) = (self.corner, self.inside_corner);
 
-        // Inactive leading (`_paintInactiveLeading`): centered tracks only —
-        // a standard track's active span starts at the very edge, so there is
-        // nothing leading it.
-        if self.centered && self.adjusted_value_end > self.slider_start + self.start_gap + outer {
+        // Inactive leading (`_paintInactiveLeading`): centered and range
+        // tracks only — a standard track's active span starts at the very
+        // edge, so there is nothing leading it.
+        if (self.centered || self.range)
+            && self.adjusted_value_end > self.slider_start + self.start_gap + outer
+        {
             let start = self.slider_start;
             let end = self.adjusted_value_end - self.start_gap;
             if end > start {
@@ -478,8 +501,16 @@ impl TrackMetrics {
         }
 
         // Active (`_paintActive`).
-        let start_corner = if rtl || self.centered { inner } else { outer };
-        let end_corner = if rtl && !self.centered { outer } else { inner };
+        let start_corner = if rtl || self.centered || self.range {
+            inner
+        } else {
+            outer
+        };
+        let end_corner = if rtl && !self.centered && !self.range {
+            outer
+        } else {
+            inner
+        };
         if self.active_end - self.active_start > start_corner {
             out.push(TrackSegment {
                 start: self.active_start,
@@ -542,6 +573,8 @@ pub(crate) fn dots(metrics: &TrackMetrics, ticks: &[f64], spec: &DotSpec) -> Vec
     let (tick_start, tick_end) = (stop_start, stop_end);
     let center_gap_lo = metrics.center_axis - metrics.end_gap;
     let center_gap_hi = metrics.center_axis + metrics.end_gap;
+    let start_gap_lo = metrics.value_start - metrics.start_gap;
+    let start_gap_hi = metrics.value_start + metrics.start_gap;
     let end_gap_lo = metrics.value_end - metrics.end_gap;
     let end_gap_hi = metrics.value_end + metrics.end_gap;
     for (i, fraction) in ticks.iter().enumerate() {
@@ -551,6 +584,10 @@ pub(crate) fn dots(metrics: &TrackMetrics, ticks: &[f64], spec: &DotSpec) -> Vec
         }
         let center = tick_start + (tick_end - tick_start) * fraction;
         if metrics.centered && center >= center_gap_lo && center <= center_gap_hi {
+            continue;
+        }
+        // A range track's low thumb owns a gap of its own.
+        if metrics.range && center >= start_gap_lo && center <= start_gap_hi {
             continue;
         }
         if center >= end_gap_lo && center <= end_gap_hi {
@@ -566,9 +603,15 @@ pub(crate) fn dots(metrics: &TrackMetrics, ticks: &[f64], spec: &DotSpec) -> Vec
 }
 
 /// Whether `primary` falls on the active span or inside a handle gap —
-/// `M3ESliderDotLayout._onActiveOrGap`, minus its range-only arm.
+/// `M3ESliderDotLayout._onActiveOrGap`.
 fn on_active_or_gap(primary: f64, metrics: &TrackMetrics) -> bool {
     if primary >= metrics.active_start && primary <= metrics.active_end {
+        return true;
+    }
+    if metrics.range
+        && primary >= metrics.value_start - metrics.start_gap
+        && primary <= metrics.value_start + metrics.start_gap
+    {
         return true;
     }
     if primary >= metrics.value_end - metrics.end_gap
@@ -743,6 +786,10 @@ pub(crate) fn track_icon_placements(
     let active_len = fraction * extent;
     let inactive_len = (1.0 - fraction) * extent;
     let candidates: Vec<(TrackIconSlot, f64, bool)> = match kind {
+        // Upstream reserves `M3ERangeSlider.trackIcons` "for parity" and never
+        // renders it (`m3e_range_slider_build.dart:149-211` wraps no
+        // `_TrackIconsOverlay`), so a range track hosts none either.
+        SliderTrackKind::Range => Vec::new(),
         SliderTrackKind::Centered => vec![
             (
                 TrackIconSlot::ActiveStart,
@@ -1196,6 +1243,67 @@ mod tests {
             .expect("an active span left of centre");
         assert_eq!(active.start, 58.0, "thumb at 50 plus the gap");
         assert_eq!(active.end, 100.0, "the midpoint itself");
+    }
+
+    /// A range track over the same 200px extent, thumbs at `low`/`high`.
+    fn range_geometry(low: f64, high: f64) -> SliderGeometry {
+        SliderGeometry {
+            active_start_fraction: low,
+            active_end_fraction: high,
+            ..geometry(high, SliderTrackKind::Range)
+        }
+    }
+
+    #[test]
+    fn a_range_track_spans_between_two_thumbs_and_keeps_both_inactive_ends() {
+        let m = TrackMetrics::resolve(&range_geometry(0.25, 0.75)).expect("metrics");
+        let segments = m.segments(false);
+        assert_eq!(
+            segments.len(),
+            3,
+            "inactive leading, inactive trailing, active"
+        );
+        // Both thumbs carve the same 8dp gap out of the active span.
+        let active = segments[2];
+        assert_eq!(active.role, SegmentRole::Active);
+        assert_eq!(active.start, 58.0, "low thumb at 50 plus its gap");
+        assert_eq!(active.end, 142.0, "high thumb at 150 less its gap");
+        assert_eq!(
+            active.start_corner, TRACK_INSIDE_CORNER,
+            "both ends face a gap"
+        );
+        assert_eq!(active.end_corner, TRACK_INSIDE_CORNER);
+        assert_eq!((segments[0].start, segments[0].end), (0.0, 42.0));
+        assert_eq!((segments[1].start, segments[1].end), (158.0, 200.0));
+    }
+
+    #[test]
+    fn a_range_tracks_dots_clear_both_thumb_gaps() {
+        let ticks = spec(0.0, 1.0, Some(4)).tick_fractions();
+        let m = TrackMetrics::resolve(&range_geometry(0.25, 0.75)).expect("metrics");
+        let placed = dots(&m, &ticks, &dot_spec());
+        // Both end stops survive (the active span is in the middle); the ticks
+        // at 0.25 and 0.75 sit inside the two thumb gaps, leaving 0.5.
+        let primaries: Vec<f64> = placed.iter().map(|d| d.primary).collect();
+        assert_eq!(primaries, vec![8.0, 192.0, 100.0], "{placed:?}");
+        assert!(
+            placed[2].active,
+            "the surviving tick lies on the active span"
+        );
+    }
+
+    #[test]
+    fn a_range_track_hosts_no_inset_icons() {
+        assert!(
+            track_icon_placements(
+                200.0,
+                0.5,
+                SliderTrackKind::Range,
+                TRACK_ICON_SIZE,
+                [true; 4]
+            )
+            .is_empty()
+        );
     }
 
     #[test]

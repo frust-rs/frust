@@ -1,33 +1,47 @@
-//! The Material 3 Expressive `Slider`: a controlled, horizontal value picker
-//! painted as a segmented track with a bar handle, a floating value indicator,
-//! and (optionally) discrete stops or a relocating end icon.
+//! The Material 3 Expressive `Slider`: a controlled value picker painted as a
+//! segmented track with a bar handle, a floating value indicator, and
+//! (optionally) discrete stops or a relocating end icon — horizontal or
+//! vertical, flat or wavy.
 //!
 //! Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments),
 //! `lib/components/sliders/` (retrieved 2026-08-19).
 //! Upstream: <https://github.com/paadevelopments/material_3_expressive>
 //!
 //! This module owns the `View`/`Widget` wiring, colour resolution, and every
-//! paint call; `core` owns the tokens, the geometry, the drag state machine,
-//! and the haptic scheduler — including the extension points the wavy/vertical/
-//! range variants hook into.
+//! paint call; [`core`](mod@self::core) owns the tokens, the geometry, the drag
+//! state machine, and the haptic scheduler, and [`variants`](mod@self::variants)
+//! owns the axis map and the wave recipe the two variant families add.
+//! [`range`](mod@self::range) is a widget of its own — two thumbs need their own
+//! state — built on the same three.
 //!
 //! # Constructors: the reference's named-constructor split, kept
 //!
 //! `M3ESlider` ships six Dart named constructors over one widget class
-//! (`m3e_sliders.dart:58-306`). This task ports the two horizontal
-//! non-wavy ones, as sibling functions rather than builder flags, so the
-//! mapping stays one-to-one:
+//! (`m3e_sliders.dart:58-306`). All six are sibling functions here rather than
+//! builder flags, so the mapping stays one-to-one:
 //!
 //! | Reference | Here |
 //! |---|---|
 //! | `M3ESlider(...)` | [`slider`] (alias [`Slider`]) |
 //! | `M3ESlider.centered(...)` | [`centered_slider`] |
-//! | `M3ESlider.wavy` / `.wavyCentered` / `.vertical` / `.verticalCentered` | *next task* |
-//! | `M3ERangeSlider` | *next task* |
+//! | `M3ESlider.wavy(...)` | [`wavy_slider`] |
+//! | `M3ESlider.wavyCentered(...)` | [`wavy_centered_slider`] |
+//! | `M3ESlider.vertical(...)` | [`vertical_slider`] |
+//! | `M3ESlider.verticalCentered(...)` | [`vertical_centered_slider`] |
+//! | `M3ERangeSlider(...)` | [`range_slider`] |
+//! | `M3ERangeSlider.wavy(...)` | [`wavy_range_slider`] |
 //!
-//! Both build the same [`SliderView`], differing only in its
-//! [`SliderTrackKind`] — so a variant that wants the third kind adds an enum
-//! arm and a constructor, not a second widget.
+//! Every knob those constructors *only* accept when it is meaningful —
+//! `amplitude`/`amplitudeForProgress`/`wavelength`/`waveSpeed` on the two wavy
+//! ones, `topToBottom` on the two vertical ones — is a builder method here
+//! instead ([`SliderView::wavelength`], [`SliderView::top_to_bottom`], …),
+//! documented as inert on a constructor that has no use for it. A builder
+//! cannot be constructor-gated in Rust without splitting the view type per
+//! variant, which would multiply eight near-identical types (and their
+//! `Widget`s) to enforce what a doc line already says.
+//!
+//! All six build the same [`SliderView`], differing only in its
+//! [`SliderTrackKind`], its axis, and its wavy flag.
 //!
 //! # Controlled, like every other value-reporting widget here
 //!
@@ -76,25 +90,27 @@
 //! today with none of the machinery. The ring's geometry is pinned by
 //! `core`'s own tests, so it is correct the day focus can reach here.
 //!
-//! # Not ported in this core
+//! # Not ported
 //!
 //! `thumbBuilder`/`trackBuilder`/`dotBuilder` (per-instance paint overrides),
-//! `semanticFormatterCallback`, `focusNode`/`autofocus`, keyboard stepping,
+//! `semanticFormatterCallback`, `focusNode`/`autofocus`, keyboard stepping, and
 //! the desktop hover cursor (`MouseRegion`'s `SystemMouseCursors.click`,
 //! `m3e_slider_build.dart:318-322` — the baseline `frust::Slider` asks for no
-//! cursor either), and the wavy/vertical/range variants. The `label`,
-//! `trackIcons`, `icon`, and every theme-override knob (`trackThickness`,
+//! cursor either). The `label`, `trackIcons`, `icon`, the wave knobs,
+//! `topToBottom`, and every theme-override knob (`trackThickness`,
 //! `cornerRadius`, `thumbLength`, `dotSize`, `dotSpacing`, `iconSize`,
 //! `iconEdgeInset`) are.
 
 mod core;
+mod range;
+mod variants;
 
 use std::rc::Rc;
 
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
-    BoxConstraints, BuildCtx, ChangeFlags, CornerRadii, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, SemanticsCtx, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
+    PaintScene, PointerPhase, Role, SemanticsCtx, View, Widget,
 };
 use frust::{AnimationController, Curve, IconData, IconSource, Theme};
 use kurbo::{Affine, Point, RoundedRect, Shape, Size, Vec2};
@@ -111,8 +127,12 @@ use self::core::{
     TRACK_CORNER_RADIUS, TRACK_HEIGHT, TRACK_ICON_SIZE, TrackMetrics, VALUE_INDICATOR_PAD_X,
     VALUE_INDICATOR_PAD_Y, VALUE_INDICATOR_RADIUS, ValueSpec,
 };
+use self::variants::{AxisMap, SliderAxis, WAVE_AMPLITUDE, WaveClock, WaveOverrides};
 
 pub use self::core::{SliderIconPosition, SliderTrackKind};
+pub use self::range::{
+    RangeSliderView, RangeSliderWidget, SliderRange, range_slider, wavy_range_slider,
+};
 
 /// Tessellation tolerance for the stroked focus ring (the same value
 /// [`mod@crate::switch`]/[`crate::card`] use for their own stroked paths).
@@ -429,11 +449,24 @@ fn same_icon_source(a: Option<IconSource>, b: Option<IconSource>) -> bool {
 /// A view-held, typed value callback (erased on build).
 type OnValue<State> = Rc<dyn Fn(&mut State, f64)>;
 
+/// An app-supplied amplitude-vs-progress curve for a wavy track
+/// (`M3ESlider.amplitudeForProgress`). Shared rather than boxed so `rebuild`
+/// can adopt the new view's copy for the cost of a refcount bump, the same way
+/// the value callbacks do.
+pub(crate) type AmplitudeCurve = Rc<dyn Fn(f64) -> f64>;
+
 /// A declarative M3E slider. See the [module docs](self).
 pub struct SliderView<State: 'static> {
     value: f64,
     spec: ValueSpec,
     kind: SliderTrackKind,
+    axis: SliderAxis,
+    /// `M3ESlider.topToBottom` — vertical only; the horizontal constructors
+    /// hold it at its `true` (leading-edge-is-minimum) default.
+    top_to_bottom: bool,
+    wavy: bool,
+    wave: WaveOverrides,
+    amplitude_for_progress: Option<AmplitudeCurve>,
     enabled: bool,
     label: Option<String>,
     haptic: HapticSignal,
@@ -465,6 +498,11 @@ pub fn slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
         value,
         spec: ValueSpec::default(),
         kind: SliderTrackKind::Standard,
+        axis: SliderAxis::Horizontal,
+        top_to_bottom: true,
+        wavy: false,
+        wave: WaveOverrides::default(),
+        amplitude_for_progress: None,
         enabled: true,
         label: None,
         haptic: HapticSignal::None,
@@ -496,6 +534,65 @@ pub fn centered_slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
     SliderView {
         kind: SliderTrackKind::Centered,
         ..slider(value, on_changed)
+    }
+}
+
+/// Create a horizontal slider whose active track is a traveling sine wave
+/// (`M3ESlider.wavy`). Everything else — inactive track, thumb, gaps, ticks,
+/// interaction — matches [`slider`].
+///
+/// The wave's shape and travel are tunable through [`SliderView::wavelength`],
+/// [`SliderView::wave_speed`], [`SliderView::amplitude`], and
+/// [`SliderView::amplitude_for_progress`].
+pub fn wavy_slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
+    value: f64,
+    on_changed: F,
+) -> SliderView<State> {
+    SliderView {
+        wavy: true,
+        ..slider(value, on_changed)
+    }
+}
+
+/// Create a horizontal centered slider with a wavy active segment
+/// (`M3ESlider.wavyCentered`).
+pub fn wavy_centered_slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
+    value: f64,
+    on_changed: F,
+) -> SliderView<State> {
+    SliderView {
+        kind: SliderTrackKind::Centered,
+        wavy: true,
+        ..slider(value, on_changed)
+    }
+}
+
+/// Create a vertical slider (`M3ESlider.vertical`, Compose's
+/// `VerticalSlider`).
+///
+/// As upstream, `topToBottom` defaults to `false`: the minimum sits at the
+/// bottom and dragging up increases the value. [`SliderView::top_to_bottom`]
+/// flips it.
+pub fn vertical_slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
+    value: f64,
+    on_changed: F,
+) -> SliderView<State> {
+    SliderView {
+        axis: SliderAxis::Vertical,
+        top_to_bottom: false,
+        ..slider(value, on_changed)
+    }
+}
+
+/// Create a vertical slider whose active track grows from the track's midpoint
+/// toward the thumb (`M3ESlider.verticalCentered`), minimum at the bottom.
+pub fn vertical_centered_slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
+    value: f64,
+    on_changed: F,
+) -> SliderView<State> {
+    SliderView {
+        kind: SliderTrackKind::Centered,
+        ..vertical_slider(value, on_changed)
     }
 }
 
@@ -549,6 +646,47 @@ impl<State: 'static> SliderView<State> {
     /// defaulting to none). See the [module docs](self)' Haptics section.
     pub fn haptic(mut self, haptic: HapticSignal) -> Self {
         self.haptic = haptic;
+        self
+    }
+
+    /// Map the vertical track's *top* edge to the minimum
+    /// (`M3ESlider.topToBottom`), instead of the default bottom-up
+    /// orientation. Inert on a horizontal slider, which has no such choice
+    /// here (RTL is not wired — see the [module docs](self)).
+    pub fn top_to_bottom(mut self, top_to_bottom: bool) -> Self {
+        self.top_to_bottom = top_to_bottom;
+        self
+    }
+
+    /// Length of one full wave cycle, in logical px (`M3ESlider.wavelength`,
+    /// defaulting to 40). Inert unless the slider is wavy.
+    pub fn wavelength(mut self, wavelength: f64) -> Self {
+        self.wave.wavelength = Some(wavelength);
+        self
+    }
+
+    /// How fast the wave travels, in logical px per second
+    /// (`M3ESlider.waveSpeed`, defaulting to the wavelength — one cycle per
+    /// second). Inert unless the slider is wavy.
+    pub fn wave_speed(mut self, wave_speed: f64) -> Self {
+        self.wave.wave_speed = Some(wave_speed);
+        self
+    }
+
+    /// Fix the wave's amplitude factor (`0..=1`, `M3ESlider.amplitude`),
+    /// replacing the default end-of-track ramp. Inert unless the slider is
+    /// wavy; outranked by [`Self::amplitude_for_progress`].
+    pub fn amplitude(mut self, amplitude: f64) -> Self {
+        self.wave.amplitude = Some(amplitude);
+        self
+    }
+
+    /// Drive the wave's amplitude factor from the current progress
+    /// (`M3ESlider.amplitudeForProgress`), the highest-precedence of the three
+    /// amplitude sources. The return is clamped to `0..=1`. Inert unless the
+    /// slider is wavy.
+    pub fn amplitude_for_progress<F: Fn(f64) -> f64 + 'static>(mut self, curve: F) -> Self {
+        self.amplitude_for_progress = Some(Rc::new(curve));
         self
     }
 
@@ -635,6 +773,13 @@ impl<State: 'static> SliderView<State> {
         self
     }
 
+    /// Whether the primary axis runs backwards in widget space
+    /// (`m3e_slider_build.dart:82`). Vertical only in this port: the
+    /// horizontal arm of upstream's expression is RTL, which is not wired.
+    fn reverse(&self) -> bool {
+        self.axis == SliderAxis::Vertical && !self.top_to_bottom
+    }
+
     /// The value indicator's text for the current value
     /// (`m3e_slider_build.dart:88-92`).
     fn indicator_text(&self) -> String {
@@ -653,6 +798,15 @@ pub struct SliderWidget {
     spec: ValueSpec,
     ticks: Vec<f64>,
     kind: SliderTrackKind,
+    axis: SliderAxis,
+    /// Whether the primary axis runs backwards in widget space — a bottom-up
+    /// vertical slider (`m3e_slider_build.dart:82`'s `reverse`).
+    reverse: bool,
+    wavy: bool,
+    wave: WaveOverrides,
+    amplitude_for_progress: Option<AmplitudeCurve>,
+    /// The wave's repeating phase clock; idle (never stepped) unless wavy.
+    wave_clock: WaveClock,
     enabled: bool,
     overrides: Overrides,
     haptic: HapticSignal,
@@ -700,6 +854,12 @@ impl<State: 'static> View<State> for SliderView<State> {
             spec: self.spec,
             ticks: self.spec.tick_fractions(),
             kind: self.kind,
+            axis: self.axis,
+            reverse: self.reverse(),
+            wavy: self.wavy,
+            wave: self.wave,
+            amplitude_for_progress: self.amplitude_for_progress.clone(),
+            wave_clock: WaveClock::new(),
             enabled: self.enabled,
             overrides: self.overrides,
             haptic: self.haptic,
@@ -738,6 +898,10 @@ impl<State: 'static> View<State> for SliderView<State> {
             .as_ref()
             .map(frust::authoring::erase_callback_arg);
         element.haptic_sink = self.haptic_sink;
+        // Two closures a diff cannot compare: adopted every pass like the
+        // value callbacks above. A wavy slider repaints every frame anyway, so
+        // an adopted curve is on screen by the next one.
+        element.amplitude_for_progress = self.amplitude_for_progress.clone();
         let mut flags = ChangeFlags::NONE;
 
         // The value indicator's label is shaped at layout time, so anything
@@ -762,6 +926,18 @@ impl<State: 'static> View<State> for SliderView<State> {
         }
         if prev.kind != self.kind {
             element.kind = self.kind;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.axis != self.axis || prev.top_to_bottom != self.top_to_bottom {
+            element.axis = self.axis;
+            element.reverse = self.reverse();
+            // The axis decides which constraint the control measures against,
+            // so a swapped axis is a relayout, not a repaint.
+            flags |= ChangeFlags::LAYOUT;
+        }
+        if prev.wavy != self.wavy || prev.wave != self.wave {
+            element.wavy = self.wavy;
+            element.wave = self.wave;
             flags |= ChangeFlags::PAINT;
         }
         if prev.enabled != self.enabled {
@@ -824,10 +1000,13 @@ impl SliderWidget {
             spec: self.spec,
             current: self.last_reported.unwrap_or(self.value),
             extent,
-            // Horizontal LTR in this core; the vertical/RTL variants flip it
-            // (see `core`'s extension points).
-            reverse: false,
+            reverse: self.reverse,
         }
+    }
+
+    /// The axis map for a paint or event pass over `size`.
+    fn axis_map(&self, size: Size) -> AxisMap {
+        AxisMap::new(self.axis, size, self.reverse)
     }
 
     /// Apply one drag outcome: queue the haptic, report the value, settle.
@@ -869,34 +1048,51 @@ impl SliderWidget {
 
 impl Widget for SliderWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let width = if bc.max().width.is_finite() {
-            bc.max().width
-        } else {
-            DEFAULT_EXTENT
-        };
         // The value indicator's label is shaped every pass, whether or not it
         // is currently shown: a press must not have to wait for a relayout to
         // put text on screen.
         let style = label_large(Theme::from_layout_ctx(ctx));
         self.indicator.layout(ctx, &style);
-        let height = HANDLE_HEIGHT.max(self.overrides.thumb_length());
-        bc.constrain(Size::new(width, height))
+
+        // The track fills the primary axis and takes its natural thickness
+        // across it. A vertical slider transposes exactly that rule; upstream
+        // instead lets a vertical slider's *cross* axis fill the incoming
+        // width too (`m3e_slider_build.dart:122-126`), which is a
+        // `LayoutBuilder`/`Stack` artifact — it would make an unconstrained
+        // vertical slider as wide as its parent.
+        let cross = HANDLE_HEIGHT.max(self.overrides.thumb_length());
+        let available = match self.axis {
+            SliderAxis::Horizontal => bc.max().width,
+            SliderAxis::Vertical => bc.max().height,
+        };
+        let extent = if available.is_finite() {
+            available
+        } else {
+            DEFAULT_EXTENT
+        };
+        let size = match self.axis {
+            SliderAxis::Horizontal => Size::new(extent, cross),
+            SliderAxis::Vertical => Size::new(cross, extent),
+        };
+        bc.constrain(size)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.is_some_and(|t| t.motion.reduce_motion);
         let colors = resolve_colors(theme, self.enabled);
         let focused = ctx.has_focus();
         let o = ctx.origin();
-        let size = ctx.size();
-        let extent = size.width;
-        let cross_center = size.height / 2.0;
+        let map = self.axis_map(ctx.size());
+        let extent = map.extent();
 
         let fraction = self.spec.fraction(self.value);
         let thumb_primary = fraction * extent;
         // The gap is measured from the *instant* handle thickness even while
         // the handle's own width is still gliding — the reference's own split
-        // (see `TrackMetrics::resolve`).
+        // (see `TrackMetrics::resolve`). A vertical slider's own token
+        // (`verticalHandleHeight`) resolves to the same 4/2 pair, so the axis
+        // makes no difference here.
         let handle_thickness = if self.drag.pressed {
             PRESSED_HANDLE_WIDTH
         } else {
@@ -907,7 +1103,7 @@ impl Widget for SliderWidget {
             extent,
             active_start_fraction: 0.0,
             active_end_fraction: fraction,
-            reverse: false,
+            reverse: self.reverse,
             kind: self.kind,
             handle_thickness,
             handle_gap: HANDLE_GAP
@@ -923,7 +1119,7 @@ impl Widget for SliderWidget {
         // The relocating icon's dock target is geometry-derived, so it is
         // resolved before the animation channels advance (the crate's
         // lazily-started fling idiom — see `crate::switch`).
-        let dock = self.icon_dock(&geometry, thumb_primary);
+        let dock = self.icon_dock(&geometry, map.flip(thumb_primary));
         if let Some(dock) = &dock
             && dock.docked != self.dock_target
         {
@@ -942,35 +1138,18 @@ impl Widget for SliderWidget {
         if press_animating || dock_animating {
             ctx.request_frame();
         }
+        let wave = self.wavy.then(|| {
+            let factor = self.amplitude_factor(fraction);
+            wave_paint(&mut self.wave_clock, self.wave, factor, ctx, reduce_motion)
+        });
         // The haptic queued by the last event pass resolves against this
         // frame's clock (see `core::HapticScheduler`).
         if let Some(signal) = self.haptics.take(ctx.frame_time()) {
             (self.haptic_sink)(signal);
         }
 
-        let track_top = cross_center - track_thickness / 2.0;
         if let Some(metrics) = TrackMetrics::resolve(&geometry) {
-            for segment in metrics.segments(false) {
-                let color = match segment.role {
-                    SegmentRole::Active => colors.active_track,
-                    SegmentRole::Inactive => colors.inactive_track,
-                };
-                // Clockwise from the top-left: the span's leading corners take
-                // `start_corner`, its trailing ones `end_corner`.
-                let radii = CornerRadii::new(
-                    segment.start_corner,
-                    segment.end_corner,
-                    segment.end_corner,
-                    segment.start_corner,
-                );
-                scene.fill_rounded_rect_radii(
-                    Point::new(o.x + segment.start, o.y + track_top),
-                    Size::new(segment.end - segment.start, track_thickness),
-                    radii,
-                    color,
-                );
-            }
-
+            paint_track(scene, o, &map, &metrics, track_thickness, wave, &colors);
             // A relocating icon takes the stop indicators' place
             // (`m3e_slider_build.dart:227`'s `drawDots`).
             if self.icon.is_none() {
@@ -979,72 +1158,34 @@ impl Widget for SliderWidget {
                     tick_size: self.overrides.tick_size(),
                     edge_inset: self.overrides.dot_spacing(),
                 };
-                for dot in core::dots(&metrics, &self.ticks, &spec) {
-                    let color = if dot.active {
-                        colors.active_tick
-                    } else {
-                        colors.inactive_tick
-                    };
-                    scene.fill_rounded_rect(
-                        Point::new(
-                            o.x + dot.primary - dot.size / 2.0,
-                            o.y + cross_center - dot.size / 2.0,
-                        ),
-                        Size::new(dot.size, dot.size),
-                        dot.size / 2.0,
-                        color,
-                    );
-                }
+                paint_dots(scene, o, &map, &metrics, &self.ticks, &spec, &colors);
             }
         }
 
-        self.paint_track_icons(scene, o, extent, cross_center, fraction, &colors);
+        self.paint_track_icons(scene, o, &map, fraction, &colors);
 
-        // Handle halo: the interaction model's precedence opacity behind the
-        // thumb. The reference paints no halo at all (Compose dropped the
-        // slider's state layer); this crate keeps every interactive component
-        // on one interaction substrate, so a dragged/pressed handle carries
-        // the same overlay every other control does, at the focus ring's own
-        // footprint rather than a second invented size.
         let thumb_thickness =
             HANDLE_WIDTH + (PRESSED_HANDLE_WIDTH - HANDLE_WIDTH) * self.press_anim.value_clamped();
-        let thumb = core::thumb_rect(
+        let thumb = map.place_thumb(
             thumb_primary,
-            cross_center,
             thumb_thickness,
             self.overrides.thumb_length(),
         );
-        let overlay = self.interaction.resolve_opacity();
-        if overlay > 0.0 {
-            let halo = core::focus_ring_rect(thumb);
-            scene.fill_rounded_rect(
-                Point::new(o.x + halo.x0, o.y + halo.y0),
-                halo.size(),
-                core::thumb_radius(halo),
-                colors.thumb.multiply_alpha(overlay),
-            );
-        }
-        scene.fill_rounded_rect(
-            Point::new(o.x + thumb.x0, o.y + thumb.y0),
-            thumb.size(),
-            core::thumb_radius(thumb),
-            colors.thumb,
+        paint_thumb(
+            scene,
+            o,
+            thumb,
+            focused,
+            self.interaction.resolve_opacity(),
+            &colors,
         );
-        if focused {
-            let ring = core::focus_ring_rect(thumb);
-            let inset = FOCUS_STROKE / 2.0;
-            let path = RoundedRect::from_rect(
-                ring.inset(-inset),
-                (core::thumb_radius(ring) - inset).max(0.0),
-            )
-            .to_path(PATH_TOLERANCE);
-            scene.stroke_path(o, &path, FOCUS_STROKE, &Brush::Solid(colors.thumb));
-        }
 
         if let (Some(dock), Some((path, design))) = (dock, &self.icon_geom) {
+            // Widget space, like the reference's own icon layer — see
+            // `variants`' module docs.
             let center = dock.center_at(self.dock_anim.value_clamped());
             let icon_size = self.overrides.icon_size();
-            let color = if dock.over_active(center, thumb_primary, false) {
+            let color = if dock.over_active(center, map.flip(thumb_primary), self.reverse) {
                 colors.on_active
             } else {
                 colors.on_inactive
@@ -1054,36 +1195,16 @@ impl Widget for SliderWidget {
                 o,
                 path,
                 *design,
-                Point::new(center - icon_size / 2.0, cross_center - icon_size / 2.0),
+                map.widget_square(center, icon_size),
                 icon_size,
                 color,
             );
         }
 
-        // The value indicator floats above the control while it is pressed
+        // The value indicator floats outside the control while it is pressed
         // (`m3e_slider_build.dart:439-449`).
         if self.drag.pressed {
-            let label = self.indicator.size();
-            let origin = core::value_indicator_origin(thumb_primary);
-            let box_size = Size::new(
-                label.width + 2.0 * VALUE_INDICATOR_PAD_X,
-                label.height + 2.0 * VALUE_INDICATOR_PAD_Y,
-            );
-            let box_origin = Point::new(o.x + origin.x, o.y + origin.y);
-            scene.fill_rounded_rect(
-                box_origin,
-                box_size,
-                VALUE_INDICATOR_RADIUS,
-                colors.value_indicator,
-            );
-            self.indicator.paint(
-                Point::new(
-                    box_origin.x + VALUE_INDICATOR_PAD_X,
-                    box_origin.y + VALUE_INDICATOR_PAD_Y,
-                ),
-                colors.value_indicator_label,
-                scene,
-            );
+            paint_value_indicator(scene, o, &map, &self.indicator, thumb_primary, &colors);
         }
     }
 
@@ -1091,17 +1212,19 @@ impl Widget for SliderWidget {
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
-        let extent = ctx.size().width;
+        let map = self.axis_map(ctx.size());
+        let extent = map.extent();
+        let primary = map.event_primary(p.position);
         match p.phase {
             PointerPhase::Down => {
                 if !self.enabled || !presses(p) {
                     return EventResult::Ignored;
                 }
-                let out = self.drag.down(p.position.x, &self.drag_ctx(extent));
+                let out = self.drag.down(primary, &self.drag_ctx(extent));
                 self.apply(out, ctx)
             }
             PointerPhase::Move => {
-                let out = self.drag.moved(p.position.x, &self.drag_ctx(extent));
+                let out = self.drag.moved(primary, &self.drag_ctx(extent));
                 self.apply(out, ctx)
             }
             PointerPhase::Up => {
@@ -1159,8 +1282,7 @@ impl SliderWidget {
         &self,
         scene: &mut dyn PaintScene,
         origin: Point,
-        extent: f64,
-        cross_center: f64,
+        map: &AxisMap,
         fraction: f64,
         colors: &SliderColors,
     ) {
@@ -1169,7 +1291,7 @@ impl SliderWidget {
         };
         let size = icons.size();
         for placement in
-            core::track_icon_placements(extent, fraction, self.kind, size, icons.present())
+            core::track_icon_placements(map.extent(), fraction, self.kind, size, icons.present())
         {
             let Some((path, design)) = &self.track_icon_geom[placement.slot.index()] else {
                 continue;
@@ -1184,12 +1306,211 @@ impl SliderWidget {
                 origin,
                 path,
                 *design,
-                Point::new(placement.primary, cross_center - size / 2.0),
+                map.place_leading_square(placement.primary, size),
                 size,
                 color,
             );
         }
     }
+
+    /// This frame's amplitude factor, in the reference's precedence order.
+    fn amplitude_factor(&self, progress: f64) -> f64 {
+        variants::amplitude_factor(
+            progress,
+            self.wave.amplitude,
+            self.amplitude_for_progress.as_deref(),
+        )
+    }
+}
+
+/// The resolved wave inputs for one paint pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WavePaint {
+    /// Peak cross-axis offset, in logical px (the token amplitude already
+    /// scaled by this frame's amplitude factor).
+    amplitude: f64,
+    wavelength: f64,
+    /// Travel phase, in radians.
+    phase: f64,
+}
+
+/// Advance a wavy track's phase clock for this frame and resolve its paint
+/// inputs.
+///
+/// The wave is a perpetual decorative loop: it asks for a *paced* frame, and
+/// under `reduce_motion` it freezes wherever its phase sits and asks for
+/// nothing at all (`docs/WIDGETS_CODE_STANDARDS.md`, the same shape
+/// [`crate::progress`]/[`crate::loading_indicator`] take). It is still drawn
+/// while frozen — only its travel stops.
+fn wave_paint(
+    clock: &mut WaveClock,
+    wave: WaveOverrides,
+    amplitude_factor: f64,
+    ctx: &mut PaintCtx,
+    reduce_motion: bool,
+) -> WavePaint {
+    if !reduce_motion {
+        clock.step(ctx.frame_time());
+        ctx.request_frame_paced();
+    }
+    WavePaint {
+        amplitude: WAVE_AMPLITUDE * amplitude_factor,
+        wavelength: wave.wavelength(),
+        phase: clock.radians(&wave),
+    }
+}
+
+/// Paint a resolved track: every segment in the reference's own order, with
+/// the active one stroked as a traveling wave when `wave` is set.
+fn paint_track(
+    scene: &mut dyn PaintScene,
+    origin: Point,
+    map: &AxisMap,
+    metrics: &TrackMetrics,
+    track_thickness: f64,
+    wave: Option<WavePaint>,
+    colors: &SliderColors,
+) {
+    // `segments`' flag is RTL, which stays false in this port; a vertical
+    // slider's mirroring is the axis map's job instead (see `variants`).
+    for segment in metrics.segments(false) {
+        let color = match segment.role {
+            SegmentRole::Active => colors.active_track,
+            SegmentRole::Inactive => colors.inactive_track,
+        };
+        // The reference's own split: only the active segment waves, every
+        // other one stays flat (`m3e_slider_track_painter.dart:226-235`).
+        if let Some(wave) = wave.filter(|_| segment.role == SegmentRole::Active)
+            && let Some(path) = variants::wave_path(
+                map,
+                segment.start,
+                segment.end,
+                track_thickness,
+                wave.amplitude,
+                wave.wavelength,
+                wave.phase,
+            )
+        {
+            // Stroked at the track's own thickness with round caps, so the
+            // wave's tips land exactly where the flat segment's ends would.
+            scene.stroke_path(origin, &path, track_thickness, &Brush::Solid(color));
+            continue;
+        }
+        let placed = map.place_span(
+            segment.start,
+            segment.end,
+            track_thickness,
+            segment.start_corner,
+            segment.end_corner,
+        );
+        scene.fill_rounded_rect_radii(
+            Point::new(origin.x + placed.origin.x, origin.y + placed.origin.y),
+            placed.size,
+            placed.radii,
+            color,
+        );
+    }
+}
+
+/// Paint a track's stop indicators and discrete ticks.
+fn paint_dots(
+    scene: &mut dyn PaintScene,
+    origin: Point,
+    map: &AxisMap,
+    metrics: &TrackMetrics,
+    ticks: &[f64],
+    spec: &core::DotSpec,
+    colors: &SliderColors,
+) {
+    for dot in core::dots(metrics, ticks, spec) {
+        let color = if dot.active {
+            colors.active_tick
+        } else {
+            colors.inactive_tick
+        };
+        let at = map.place_square(dot.primary, dot.size);
+        scene.fill_rounded_rect(
+            Point::new(origin.x + at.x, origin.y + at.y),
+            Size::new(dot.size, dot.size),
+            dot.size / 2.0,
+            color,
+        );
+    }
+}
+
+/// Paint one thumb: its interaction halo, the handle itself, and the focus
+/// outline when the control holds focus.
+///
+/// The reference paints no halo at all (Compose dropped the slider's state
+/// layer); this crate keeps every interactive component on one interaction
+/// substrate, so a dragged/pressed handle carries the same overlay every other
+/// control does, at the focus ring's own footprint rather than a second
+/// invented size.
+fn paint_thumb(
+    scene: &mut dyn PaintScene,
+    origin: Point,
+    thumb: kurbo::Rect,
+    focused: bool,
+    overlay: f32,
+    colors: &SliderColors,
+) {
+    if overlay > 0.0 {
+        let halo = core::focus_ring_rect(thumb);
+        scene.fill_rounded_rect(
+            Point::new(origin.x + halo.x0, origin.y + halo.y0),
+            halo.size(),
+            core::thumb_radius(halo),
+            colors.thumb.multiply_alpha(overlay),
+        );
+    }
+    scene.fill_rounded_rect(
+        Point::new(origin.x + thumb.x0, origin.y + thumb.y0),
+        thumb.size(),
+        core::thumb_radius(thumb),
+        colors.thumb,
+    );
+    if focused {
+        let ring = core::focus_ring_rect(thumb);
+        let inset = FOCUS_STROKE / 2.0;
+        let path = RoundedRect::from_rect(
+            ring.inset(-inset),
+            (core::thumb_radius(ring) - inset).max(0.0),
+        )
+        .to_path(PATH_TOLERANCE);
+        scene.stroke_path(origin, &path, FOCUS_STROKE, &Brush::Solid(colors.thumb));
+    }
+}
+
+/// Paint the floating value indicator for a thumb at `thumb_primary`.
+fn paint_value_indicator(
+    scene: &mut dyn PaintScene,
+    origin: Point,
+    map: &AxisMap,
+    indicator: &Run,
+    thumb_primary: f64,
+    colors: &SliderColors,
+) {
+    let label = indicator.size();
+    let at = map.value_indicator_origin(thumb_primary);
+    let box_size = Size::new(
+        label.width + 2.0 * VALUE_INDICATOR_PAD_X,
+        label.height + 2.0 * VALUE_INDICATOR_PAD_Y,
+    );
+    let box_origin = Point::new(origin.x + at.x, origin.y + at.y);
+    scene.fill_rounded_rect(
+        box_origin,
+        box_size,
+        VALUE_INDICATOR_RADIUS,
+        colors.value_indicator,
+    );
+    indicator.paint(
+        Point::new(
+            box_origin.x + VALUE_INDICATOR_PAD_X,
+            box_origin.y + VALUE_INDICATOR_PAD_Y,
+        ),
+        colors.value_indicator_label,
+        scene,
+    );
 }
 
 /// Paint one resolved icon path scaled into a `size`-square box at `local`
@@ -1213,7 +1534,7 @@ mod tests {
     use super::*;
     use frust::FrameTime;
     use frust::authoring::scene::GlyphRun;
-    use frust::authoring::{PointerButton, PointerEvent};
+    use frust::authoring::{CornerRadii, PointerButton, PointerEvent};
     use kurbo::BezPath;
     use std::any::Any;
     use std::sync::Mutex;
@@ -1274,6 +1595,8 @@ mod tests {
         rrects: Vec<(Point, Size, f64, Color)>,
         radii: Vec<(Point, Size, CornerRadii, Color)>,
         strokes: Vec<(f64, Color)>,
+        /// Every stroked path, in call order — the wave assertions read it.
+        stroke_paths: Vec<BezPath>,
         paths: Vec<Color>,
         runs: Vec<(Point, Color)>,
     }
@@ -1287,12 +1610,13 @@ mod tests {
         fn fill_rounded_rect_radii(&mut self, o: Point, s: Size, radii: CornerRadii, color: Color) {
             self.radii.push((o, s, radii, color));
         }
-        fn stroke_path(&mut self, _o: Point, _p: &BezPath, width: f64, brush: &Brush) {
+        fn stroke_path(&mut self, _o: Point, p: &BezPath, width: f64, brush: &Brush) {
             let color = match brush {
                 Brush::Solid(c) => *c,
                 _ => Color::TRANSPARENT,
             };
             self.strokes.push((width, color));
+            self.stroke_paths.push(p.clone());
         }
         fn fill_path(&mut self, _o: Point, _p: &BezPath, brush: &Brush) {
             if let Brush::Solid(color) = brush {
@@ -1328,13 +1652,29 @@ mod tests {
     }
 
     fn paint(w: &mut SliderWidget, theme: Option<&Theme>) -> Recorder {
+        paint_frame(w, theme, SIZE).rec
+    }
+
+    /// One paint pass plus the frame requests it made — what the wave's
+    /// pacing and reduce-motion assertions read.
+    struct Frame {
+        rec: Recorder,
+        needs_frame: bool,
+        paced_only: bool,
+    }
+
+    fn paint_frame(w: &mut SliderWidget, theme: Option<&Theme>, size: Size) -> Frame {
         let mut rec = Recorder::default();
         let mut ctx = match theme {
-            Some(t) => PaintCtx::new(Point::ZERO, SIZE).with_theme(t),
-            None => PaintCtx::new(Point::ZERO, SIZE),
+            Some(t) => PaintCtx::new(Point::ZERO, size).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, size),
         };
         w.paint(&mut ctx, &mut rec);
-        rec
+        Frame {
+            needs_frame: ctx.needs_frame(),
+            paced_only: ctx.needs_frame_paced_only(),
+            rec,
+        }
     }
 
     // -- value reporting ----------------------------------------------------
@@ -1684,6 +2024,270 @@ mod tests {
         assert_eq!(rec.paths.len(), 2, "one per filled slot");
         assert_eq!(rec.paths[0], ON_PRIMARY, "over the active track");
         assert_eq!(rec.paths[1], ON_SURFACE_VARIANT, "over the inactive track");
+    }
+
+    // -- vertical -----------------------------------------------------------
+    //
+    // The vertical harness transposes the horizontal one: the same 200px
+    // track, now 200 tall and `HANDLE_HEIGHT` wide.
+
+    const V_SIZE: Size = Size::new(HANDLE_HEIGHT, WIDTH);
+
+    fn v_view(value: f64) -> SliderView<Val> {
+        vertical_slider::<Val, _>(value, |s: &mut Val, v: f64| {
+            s.value = v;
+            s.changes.push(v);
+        })
+    }
+
+    fn v_layout(w: &mut SliderWidget) -> Size {
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut ctx, &BoxConstraints::loose(V_SIZE))
+    }
+
+    fn v_ev(phase: PointerPhase, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(HANDLE_HEIGHT / 2.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn v_dispatch(w: &mut SliderWidget, state: &mut Val, event: &InputEvent) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, V_SIZE);
+        w.event(&mut ctx, event)
+    }
+
+    #[test]
+    fn a_vertical_slider_fills_the_height_and_takes_the_handle_width_across_it() {
+        let mut w = build(&v_view(0.5));
+        assert_eq!(v_layout(&mut w), V_SIZE);
+
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let unbounded = w.layout(
+            &mut ctx,
+            &BoxConstraints::new(Size::ZERO, Size::new(f64::INFINITY, f64::INFINITY)),
+        );
+        assert_eq!(
+            unbounded.height, DEFAULT_EXTENT,
+            "the primary axis is y now"
+        );
+        assert_eq!(unbounded.width, HANDLE_HEIGHT);
+    }
+
+    #[test]
+    fn a_vertical_slider_maps_value_to_y_bottom_up() {
+        let mut w = build(&v_view(0.25));
+        v_layout(&mut w);
+        let rec = paint_frame(&mut w, None, V_SIZE).rec;
+
+        // Painter space is value-oriented, so the active span still runs
+        // `0..thumb`; the axis map mirrors it onto the *bottom* of the box.
+        assert_eq!(rec.radii.len(), 2);
+        let (inactive_origin, inactive_size, inactive_radii, _) = rec.radii[0];
+        let (active_origin, active_size, active_radii, active_color) = rec.radii[1];
+        assert_eq!(active_color, PRIMARY);
+        assert_eq!(
+            active_origin,
+            Point::new(14.0, 158.0),
+            "42 tall, at the foot"
+        );
+        assert_eq!(active_size, Size::new(TRACK_HEIGHT, 42.0));
+        assert_eq!(inactive_origin, Point::new(14.0, 0.0));
+        assert_eq!(inactive_size, Size::new(TRACK_HEIGHT, 142.0));
+        // The track's outer (bottom) end keeps the full radius, the
+        // gap-facing one the small radius — mirrored with the span.
+        assert_eq!(active_radii.bottom_left, TRACK_CORNER_RADIUS);
+        assert_eq!(active_radii.top_left, core::TRACK_INSIDE_CORNER);
+        assert_eq!(inactive_radii.top_left, TRACK_CORNER_RADIUS);
+        assert_eq!(inactive_radii.bottom_left, core::TRACK_INSIDE_CORNER);
+
+        // The thumb is transposed too: handle *width* along y.
+        let thumb = rec
+            .rrects
+            .iter()
+            .find(|(_, s, _, _)| s.width == HANDLE_HEIGHT)
+            .expect("a vertical thumb spans the cross axis");
+        assert_eq!(thumb.0, Point::new(0.0, 148.0), "centred on y = 150");
+        assert_eq!(thumb.1, Size::new(HANDLE_HEIGHT, HANDLE_WIDTH));
+
+        // And a press reads y, inverted: the top of the track is the maximum.
+        let mut state = Val::default();
+        v_dispatch(&mut w, &mut state, &v_ev(PointerPhase::Down, 50.0));
+        assert_eq!(state.changes, vec![0.75]);
+        v_dispatch(&mut w, &mut state, &v_ev(PointerPhase::Move, 0.0));
+        assert_eq!(state.changes.last(), Some(&1.0), "the top edge is the max");
+    }
+
+    #[test]
+    fn top_to_bottom_puts_the_minimum_at_the_top_instead() {
+        let mut w = build(&v_view(0.25).top_to_bottom(true));
+        v_layout(&mut w);
+        let rec = paint_frame(&mut w, None, V_SIZE).rec;
+        let (active_origin, active_size, _, _) = rec.radii[1];
+        assert_eq!(active_origin, Point::new(14.0, 0.0), "grown from the top");
+        assert_eq!(active_size.height, 42.0);
+
+        let mut state = Val::default();
+        v_dispatch(&mut w, &mut state, &v_ev(PointerPhase::Down, 100.0));
+        assert_eq!(state.changes, vec![0.5], "y now runs with the value");
+        v_dispatch(&mut w, &mut state, &v_ev(PointerPhase::Move, 0.0));
+        assert_eq!(state.changes.last(), Some(&0.0), "the top edge is the min");
+    }
+
+    #[test]
+    fn a_vertical_centered_slider_grows_from_the_midpoint() {
+        let mut w = build(&vertical_centered_slider::<Val, _>(0.75, |_s, _v| {}));
+        v_layout(&mut w);
+        let rec = paint_frame(&mut w, None, V_SIZE).rec;
+        assert_eq!(
+            rec.radii.len(),
+            3,
+            "both inactive ends plus the active span"
+        );
+        let (active_origin, active_size, _, _) = rec.radii[2];
+        // Painter space [100, 142] mirrors onto [58, 100] — the midpoint is
+        // its own mirror, so the span still touches the centre.
+        assert_eq!(active_origin, Point::new(14.0, 58.0));
+        assert_eq!(active_size.height, 42.0);
+        assert_eq!(active_origin.y + active_size.height, 100.0, "the midpoint");
+    }
+
+    // -- wavy ---------------------------------------------------------------
+
+    /// The points of a sampled wave path, which is moves and lines only.
+    fn path_points(path: &BezPath) -> Vec<Point> {
+        path.elements()
+            .iter()
+            .map(|el| match el {
+                kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => *p,
+                other => panic!("a sampled wave is moves and lines only: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wavy_slider_strokes_its_active_span_instead_of_filling_it() {
+        let mut w = build(&wavy_slider::<Val, _>(0.5, |_s, _v| {}));
+        layout(&mut w);
+        let frame = paint_frame(&mut w, None, SIZE);
+
+        assert_eq!(
+            frame.rec.radii.len(),
+            1,
+            "only the inactive remainder fills"
+        );
+        assert_eq!(frame.rec.strokes.len(), 1, "the active span is a wave");
+        assert_eq!(
+            frame.rec.strokes[0],
+            (TRACK_HEIGHT, PRIMARY),
+            "stroked at the track's own thickness, in the active ink"
+        );
+        // The wave spans the flat segment's own ends, inset half a stroke so
+        // its round caps land exactly where the rect's edges would.
+        let points = path_points(&frame.rec.stroke_paths[0]);
+        assert_eq!(points[0].x, TRACK_HEIGHT / 2.0);
+        assert_eq!(points.last().unwrap().x, 92.0 - TRACK_HEIGHT / 2.0);
+        assert!(
+            points
+                .iter()
+                .any(|p| (p.y - HANDLE_HEIGHT / 2.0).abs() > 1.0),
+            "and it actually leaves the centreline: {points:?}"
+        );
+        assert!(frame.paced_only, "a traveling wave is a cosmetic loop");
+    }
+
+    #[test]
+    fn the_wave_moves_as_its_phase_advances_and_freezes_under_reduce_motion() {
+        let mut w = build(&wavy_slider::<Val, _>(0.5, |_s, _v| {}));
+        layout(&mut w);
+        let first = path_points(&paint(&mut w, None).stroke_paths[0]);
+
+        // Advancing the phase clock moves the whole wave (the widget's own
+        // clock is stepped directly here: a test `PaintCtx` carries no shell
+        // frame time — the same reason the haptic tests drive the scheduler).
+        w.wave_clock.step(secs(0.05));
+        let second = path_points(&paint(&mut w, None).stroke_paths[0]);
+        assert_eq!(first.len(), second.len(), "the same span, re-sampled");
+        assert!(
+            first.iter().zip(second.iter()).all(|(a, b)| a.x == b.x),
+            "the span itself does not move, only the wave on it"
+        );
+        // Two sine curves a phase apart still cross, so a *sample* may match;
+        // the curve as a whole must have moved.
+        let travel = first
+            .iter()
+            .zip(second.iter())
+            .map(|(a, b)| (a.y - b.y).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            travel > 0.1,
+            "the wave must travel: {:?} vs {:?}",
+            &first[..3],
+            &second[..3]
+        );
+
+        // Reduce-motion still draws the wave, but neither advances it nor
+        // asks for another frame.
+        let mut theme = crate::baseline();
+        theme.motion.reduce_motion = true;
+        let before = w.wave_clock.seconds();
+        let frame = paint_frame(&mut w, Some(&theme), SIZE);
+        assert_eq!(frame.rec.strokes.len(), 1, "the frozen wave is still drawn");
+        assert_eq!(w.wave_clock.seconds(), before, "and its phase stands still");
+        assert!(!frame.needs_frame, "a frozen loop requests no frames");
+    }
+
+    #[test]
+    fn the_amplitude_ramp_flattens_a_nearly_full_track_unless_overridden() {
+        // 0.98 is past the ramp's upper boundary, so the wave collapses onto
+        // the centreline rather than fighting the thumb gap.
+        let mut w = build(&wavy_slider::<Val, _>(0.98, |_s, _v| {}));
+        layout(&mut w);
+        let flat = path_points(&paint(&mut w, None).stroke_paths[0]);
+        assert!(flat.iter().all(|p| p.y == HANDLE_HEIGHT / 2.0), "{flat:?}");
+
+        // An explicit amplitude outranks the ramp...
+        let mut w = build(&wavy_slider::<Val, _>(0.98, |_s, _v| {}).amplitude(1.0));
+        layout(&mut w);
+        let waved = path_points(&paint(&mut w, None).stroke_paths[0]);
+        assert!(waved.iter().any(|p| p.y != HANDLE_HEIGHT / 2.0));
+
+        // ...and a curve outranks both, including down to nothing.
+        let mut w = build(
+            &wavy_slider::<Val, _>(0.5, |_s, _v| {})
+                .amplitude(1.0)
+                .amplitude_for_progress(|_| 0.0),
+        );
+        layout(&mut w);
+        let curved = path_points(&paint(&mut w, None).stroke_paths[0]);
+        assert!(
+            curved.iter().all(|p| p.y == HANDLE_HEIGHT / 2.0),
+            "{curved:?}"
+        );
+    }
+
+    #[test]
+    fn a_wavy_centered_slider_waves_only_its_active_span() {
+        let mut w = build(&wavy_centered_slider::<Val, _>(0.75, |_s, _v| {}));
+        layout(&mut w);
+        let rec = paint(&mut w, None);
+        assert_eq!(rec.radii.len(), 2, "both inactive spans stay flat rects");
+        assert_eq!(rec.strokes.len(), 1, "the centred active span waves");
+        let points = path_points(&rec.stroke_paths[0]);
+        assert_eq!(points[0].x, 100.0 + TRACK_HEIGHT / 2.0, "from the midpoint");
+    }
+
+    #[test]
+    fn a_flat_slider_never_asks_for_a_frame_it_does_not_need() {
+        let mut w = widget(0.5);
+        layout(&mut w);
+        let frame = paint_frame(&mut w, None, SIZE);
+        assert!(frame.rec.strokes.is_empty());
+        assert!(!frame.needs_frame, "a resting flat slider is static");
     }
 
     #[test]
