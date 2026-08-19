@@ -1,6 +1,7 @@
 //! The Material 3 baseline design tokens this crate installs: a [`Theme`]
-//! aggregate plus its constituent light/dark [`ColorScheme`]s, the M3 type
-//! scale/shape scale/elevation table/Expressive motion scheme, and the
+//! aggregate plus its constituent light/dark [`ColorScheme`](frust::ColorScheme)s
+//! and [`MaterialTokens`] semantic extension, the M3 type scale/shape
+//! scale/elevation table/Expressive motion scheme, and the
 //! success/warning/info [`StatusPalette`] extension.
 //!
 //! Values sourced from Google's Material 3 design-system tokens v0.192
@@ -9,24 +10,102 @@
 //! color `#6750A4`. These tables lived in `frust-theme` until the Material
 //! catalog moved out of tree; nothing in the framework constructs them any
 //! more, so this crate owns them outright.
+//!
+//! Split across three files:
+//!
+//! - This module — `baseline()`, the module's public re-export surface, and
+//!   (for now) the type scale/shape scale/elevation table/motion
+//!   scheme/`StatusPalette` bodies. A later task moves each of those into
+//!   its own file; this one only splits out color.
+//! - [`color`] — [`color_scheme_light`]/[`color_scheme_dark`] plus the M3E
+//!   semantic-role expansion ([`MaterialSemanticColors`]).
+//! - [`extension`] — [`MaterialTokens`], the `ThemeExtensions` payload
+//!   wrapping [`color::MaterialSemanticColors`] for both brightnesses.
+//!
+//! # M3E role partition
+//!
+//! The Material 3 Expressive reference (`paadevelopments/material_3_expressive`
+//! v1.0.8, `lib/foundations/m3e_color_scheme.dart`, retrieved 2026-08-19)'s
+//! `M3EColorScheme` carries 43 `Color` roles. 34 have a direct analogue in
+//! frust-theme's baseline `ColorScheme` and flow through
+//! [`color_scheme_light`]/[`color_scheme_dark`]; the remaining 9 — the
+//! semantic set this `ColorScheme` has no fixed slot for — are
+//! [`MaterialTokens`] fields instead:
+//!
+//! | M3E role (`m3e_color_scheme.dart`) | Carried by |
+//! |---|---|
+//! | `primary` | `ColorScheme::primary` |
+//! | `onPrimary` | `ColorScheme::on_primary` |
+//! | `primaryContainer` | `ColorScheme::primary_container` |
+//! | `onPrimaryContainer` | `ColorScheme::on_primary_container` |
+//! | `secondary` | `ColorScheme::secondary` |
+//! | `onSecondary` | `ColorScheme::on_secondary` |
+//! | `secondaryContainer` | `ColorScheme::secondary_container` |
+//! | `onSecondaryContainer` | `ColorScheme::on_secondary_container` |
+//! | `tertiary` | `ColorScheme::tertiary` |
+//! | `onTertiary` | `ColorScheme::on_tertiary` |
+//! | `tertiaryContainer` | `ColorScheme::tertiary_container` |
+//! | `onTertiaryContainer` | `ColorScheme::on_tertiary_container` |
+//! | `error` | `ColorScheme::error` |
+//! | `onError` | `ColorScheme::on_error` |
+//! | `errorContainer` | `ColorScheme::error_container` |
+//! | `onErrorContainer` | `ColorScheme::on_error_container` |
+//! | `surface` | `ColorScheme::surface` |
+//! | `onSurface` | `ColorScheme::on_surface` |
+//! | `onSurfaceVariant` | `ColorScheme::on_surface_variant` |
+//! | `surfaceContainerLowest` | `ColorScheme::surface_container_lowest` |
+//! | `surfaceContainerLow` | `ColorScheme::surface_container_low` |
+//! | `surfaceContainer` | `ColorScheme::surface_container` |
+//! | `surfaceContainerHigh` | `ColorScheme::surface_container_high` |
+//! | `surfaceContainerHighest` | `ColorScheme::surface_container_highest` |
+//! | `surfaceDim` | `ColorScheme::surface_dim` |
+//! | `surfaceBright` | `ColorScheme::surface_bright` |
+//! | `inverseSurface` | `ColorScheme::inverse_surface` |
+//! | `onInverseSurface` | `ColorScheme::inverse_on_surface` |
+//! | `inversePrimary` | `ColorScheme::inverse_primary` |
+//! | `outline` | `ColorScheme::outline` |
+//! | `outlineVariant` | `ColorScheme::outline_variant` |
+//! | `shadow` | `ColorScheme::shadow` |
+//! | `scrim` | `ColorScheme::scrim` |
+//! | `surfaceTint` | `ColorScheme::surface_tint` |
+//! | `emphasis` | `MaterialTokens.{light,dark}.emphasis` |
+//! | `onEmphasis` | `MaterialTokens.{light,dark}.on_emphasis` |
+//! | `info` | `MaterialTokens.{light,dark}.info` |
+//! | `success` | `MaterialTokens.{light,dark}.success` |
+//! | `warning` | `MaterialTokens.{light,dark}.warning` |
+//! | `danger` | `MaterialTokens.{light,dark}.danger` |
+//! | `surfaceStrong` | `MaterialTokens.{light,dark}.surface_strong` |
+//! | `onSurfaceStrong` | `MaterialTokens.{light,dark}.on_surface_strong` |
+//! | `outlineStrong` | `MaterialTokens.{light,dark}.outline_strong` |
+//!
+//! (`brightness` is the reference's 44th constructor parameter, but it's a
+//! `Brightness` enum, not a `Color` — not part of the 43-role count.)
+
+mod color;
+mod extension;
+
+pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
+pub use extension::MaterialTokens;
 
 use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, ColorScheme, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation,
-    ElevationLevel, GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
+    Brightness, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation, ElevationLevel,
+    GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
+    StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
 
 /// The Material 3 baseline theme: baseline light/dark color schemes, the M3
 /// type scale (built from `TextStyle::default()`), the M3 shape scale, the M3
 /// elevation table, and the M3 Expressive motion scheme. Starts in
-/// [`Brightness::Light`]. Attaches [`status_palette`] as a pre-populated
-/// extension (see `Theme::extension`) so `extension::<StatusPalette>()` is
-/// always `Some` on this baseline.
+/// [`Brightness::Light`]. Attaches [`status_palette`] and
+/// [`MaterialTokens::material`] as pre-populated extensions (see
+/// `Theme::extension`), so `extension::<StatusPalette>()` and
+/// `extension::<MaterialTokens>()` are always `Some` on this baseline.
 pub fn baseline() -> Theme {
     let mut extensions = ThemeExtensions::new();
     extensions.insert(status_palette());
+    extensions.insert(MaterialTokens::material());
     Theme {
         light: color_scheme_light(),
         dark: color_scheme_dark(),
@@ -38,126 +117,6 @@ pub fn baseline() -> Theme {
         brightness: Brightness::Light,
         design_language: DesignLanguage::Material3,
         extensions,
-    }
-}
-
-/// The Material 3 baseline light [`ColorScheme`] (seed `#6750A4`).
-///
-/// Source: material-components/material-web tokens v0.192
-/// `_md-sys-color.scss` (light), resolved 2026-07-17.
-pub fn color_scheme_light() -> ColorScheme {
-    ColorScheme {
-        primary: Color::from_rgb8(0x67, 0x50, 0xA4),
-        on_primary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
-        primary_container: Color::from_rgb8(0xEA, 0xDD, 0xFF),
-        on_primary_container: Color::from_rgb8(0x21, 0x00, 0x5D),
-        primary_fixed: Color::from_rgb8(0xEA, 0xDD, 0xFF),
-        primary_fixed_dim: Color::from_rgb8(0xD0, 0xBC, 0xFF),
-        on_primary_fixed: Color::from_rgb8(0x21, 0x00, 0x5D),
-        on_primary_fixed_variant: Color::from_rgb8(0x4F, 0x37, 0x8B),
-
-        secondary: Color::from_rgb8(0x62, 0x5B, 0x71),
-        on_secondary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
-        secondary_container: Color::from_rgb8(0xE8, 0xDE, 0xF8),
-        on_secondary_container: Color::from_rgb8(0x1D, 0x19, 0x2B),
-        secondary_fixed: Color::from_rgb8(0xE8, 0xDE, 0xF8),
-        secondary_fixed_dim: Color::from_rgb8(0xCC, 0xC2, 0xDC),
-        on_secondary_fixed: Color::from_rgb8(0x1D, 0x19, 0x2B),
-        on_secondary_fixed_variant: Color::from_rgb8(0x4A, 0x44, 0x58),
-
-        tertiary: Color::from_rgb8(0x7D, 0x52, 0x60),
-        on_tertiary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
-        tertiary_container: Color::from_rgb8(0xFF, 0xD8, 0xE4),
-        on_tertiary_container: Color::from_rgb8(0x31, 0x11, 0x1D),
-        tertiary_fixed: Color::from_rgb8(0xFF, 0xD8, 0xE4),
-        tertiary_fixed_dim: Color::from_rgb8(0xEF, 0xB8, 0xC8),
-        on_tertiary_fixed: Color::from_rgb8(0x31, 0x11, 0x1D),
-        on_tertiary_fixed_variant: Color::from_rgb8(0x63, 0x3B, 0x48),
-
-        error: Color::from_rgb8(0xB3, 0x26, 0x1E),
-        on_error: Color::from_rgb8(0xFF, 0xFF, 0xFF),
-        error_container: Color::from_rgb8(0xF9, 0xDE, 0xDC),
-        on_error_container: Color::from_rgb8(0x41, 0x0E, 0x0B),
-
-        surface: Color::from_rgb8(0xFE, 0xF7, 0xFF),
-        on_surface: Color::from_rgb8(0x1D, 0x1B, 0x20),
-        on_surface_variant: Color::from_rgb8(0x49, 0x45, 0x4F),
-        surface_dim: Color::from_rgb8(0xDE, 0xD8, 0xE1),
-        surface_bright: Color::from_rgb8(0xFE, 0xF7, 0xFF),
-        surface_container_lowest: Color::from_rgb8(0xFF, 0xFF, 0xFF),
-        surface_container_low: Color::from_rgb8(0xF7, 0xF2, 0xFA),
-        surface_container: Color::from_rgb8(0xF3, 0xED, 0xF7),
-        surface_container_high: Color::from_rgb8(0xEC, 0xE6, 0xF0),
-        surface_container_highest: Color::from_rgb8(0xE6, 0xE0, 0xE9),
-
-        outline: Color::from_rgb8(0x79, 0x74, 0x7E),
-        outline_variant: Color::from_rgb8(0xCA, 0xC4, 0xD0),
-        shadow: Color::from_rgb8(0x00, 0x00, 0x00),
-        scrim: Color::from_rgb8(0x00, 0x00, 0x00),
-        inverse_surface: Color::from_rgb8(0x32, 0x2F, 0x35),
-        inverse_on_surface: Color::from_rgb8(0xF5, 0xEF, 0xF7),
-        inverse_primary: Color::from_rgb8(0xD0, 0xBC, 0xFF),
-        surface_tint: Color::from_rgb8(0x67, 0x50, 0xA4),
-    }
-}
-
-/// The Material 3 baseline dark [`ColorScheme`] (seed `#6750A4`).
-///
-/// Source: material-components/material-web tokens v0.192
-/// `_md-sys-color.scss` (dark), resolved 2026-07-17.
-pub fn color_scheme_dark() -> ColorScheme {
-    ColorScheme {
-        primary: Color::from_rgb8(0xD0, 0xBC, 0xFF),
-        on_primary: Color::from_rgb8(0x38, 0x1E, 0x72),
-        primary_container: Color::from_rgb8(0x4F, 0x37, 0x8B),
-        on_primary_container: Color::from_rgb8(0xEA, 0xDD, 0xFF),
-        primary_fixed: Color::from_rgb8(0xEA, 0xDD, 0xFF),
-        primary_fixed_dim: Color::from_rgb8(0xD0, 0xBC, 0xFF),
-        on_primary_fixed: Color::from_rgb8(0x21, 0x00, 0x5D),
-        on_primary_fixed_variant: Color::from_rgb8(0x4F, 0x37, 0x8B),
-
-        secondary: Color::from_rgb8(0xCC, 0xC2, 0xDC),
-        on_secondary: Color::from_rgb8(0x33, 0x2D, 0x41),
-        secondary_container: Color::from_rgb8(0x4A, 0x44, 0x58),
-        on_secondary_container: Color::from_rgb8(0xE8, 0xDE, 0xF8),
-        secondary_fixed: Color::from_rgb8(0xE8, 0xDE, 0xF8),
-        secondary_fixed_dim: Color::from_rgb8(0xCC, 0xC2, 0xDC),
-        on_secondary_fixed: Color::from_rgb8(0x1D, 0x19, 0x2B),
-        on_secondary_fixed_variant: Color::from_rgb8(0x4A, 0x44, 0x58),
-
-        tertiary: Color::from_rgb8(0xEF, 0xB8, 0xC8),
-        on_tertiary: Color::from_rgb8(0x49, 0x25, 0x32),
-        tertiary_container: Color::from_rgb8(0x63, 0x3B, 0x48),
-        on_tertiary_container: Color::from_rgb8(0xFF, 0xD8, 0xE4),
-        tertiary_fixed: Color::from_rgb8(0xFF, 0xD8, 0xE4),
-        tertiary_fixed_dim: Color::from_rgb8(0xEF, 0xB8, 0xC8),
-        on_tertiary_fixed: Color::from_rgb8(0x31, 0x11, 0x1D),
-        on_tertiary_fixed_variant: Color::from_rgb8(0x63, 0x3B, 0x48),
-
-        error: Color::from_rgb8(0xF2, 0xB8, 0xB5),
-        on_error: Color::from_rgb8(0x60, 0x14, 0x10),
-        error_container: Color::from_rgb8(0x8C, 0x1D, 0x18),
-        on_error_container: Color::from_rgb8(0xF9, 0xDE, 0xDC),
-
-        surface: Color::from_rgb8(0x14, 0x12, 0x18),
-        on_surface: Color::from_rgb8(0xE6, 0xE0, 0xE9),
-        on_surface_variant: Color::from_rgb8(0xCA, 0xC4, 0xD0),
-        surface_dim: Color::from_rgb8(0x14, 0x12, 0x18),
-        surface_bright: Color::from_rgb8(0x3B, 0x38, 0x3E),
-        surface_container_lowest: Color::from_rgb8(0x0F, 0x0D, 0x13),
-        surface_container_low: Color::from_rgb8(0x1D, 0x1B, 0x20),
-        surface_container: Color::from_rgb8(0x21, 0x1F, 0x26),
-        surface_container_high: Color::from_rgb8(0x2B, 0x29, 0x30),
-        surface_container_highest: Color::from_rgb8(0x36, 0x34, 0x3B),
-
-        outline: Color::from_rgb8(0x93, 0x8F, 0x99),
-        outline_variant: Color::from_rgb8(0x49, 0x45, 0x4F),
-        shadow: Color::from_rgb8(0x00, 0x00, 0x00),
-        scrim: Color::from_rgb8(0x00, 0x00, 0x00),
-        inverse_surface: Color::from_rgb8(0xE6, 0xE0, 0xE9),
-        inverse_on_surface: Color::from_rgb8(0x32, 0x2F, 0x35),
-        inverse_primary: Color::from_rgb8(0x67, 0x50, 0xA4),
-        surface_tint: Color::from_rgb8(0xD0, 0xBC, 0xFF),
     }
 }
 
@@ -621,5 +580,15 @@ mod tests {
         assert_eq!(theme.shape, shape_scale());
         assert_eq!(theme.elevation, elevation());
         assert_eq!(theme.motion, motion_scheme());
+    }
+
+    #[test]
+    fn baseline_attaches_both_extensions() {
+        let theme = baseline();
+        assert_eq!(theme.extension::<StatusPalette>(), Some(&status_palette()));
+        assert_eq!(
+            theme.extension::<MaterialTokens>(),
+            Some(&MaterialTokens::material())
+        );
     }
 }
