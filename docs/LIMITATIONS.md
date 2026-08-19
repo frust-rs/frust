@@ -2834,3 +2834,31 @@ narrowed.
 model description and the single-`ShadowSpec` `elevation_level` constructor);
 Material 3 Expressive Phase 1 wave 3 record
 (`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
+
+---
+
+### `material-textfield-filled-wash-unpaintable` — the filled text field's `surfaceContainerHighest` container wash cannot be painted
+
+**Observed**: `frust_material::text_field`'s filled variant is meant to fill
+its container with the `surfaceContainerHighest` role per the M3 reference,
+but the widget only paints decoration around the baseline
+`frust::TextInputView` it wraps, and that baseline field draws its own opaque
+background (the theme's `surface` role) with no transparency seam to override
+or suppress it — a wash painted only in the gutters the child's rounded rect
+misses would leave a visible two-tone seam instead. The filled and outlined
+variants therefore differ only by their stroke (bottom indicator vs full
+outline), not by their container fill.
+
+**Applies to**: any app using `frust_material`'s filled text field expecting
+the reference `surfaceContainerHighest` tint; the container reads as
+`surface` instead.
+
+**Why accepted**: closing the gap needs a transparency seam on the baseline
+`TextInputView`'s background paint — a `frust-widgets` change, not something
+the Phase 2 core-controls port took on. The same class of gap already exists
+for `frust_shadcn::input`'s `dark:bg-input/30` wash, so it isn't
+material-specific.
+
+**Evidence**: `plugins/material/src/text_field.rs` module doc's "Container
+fill: a documented fidelity gap" section; Material 3 Expressive Phase 2 wave 1
+ledger (`workflow/plans/features/material-3-expressive/phase-2/TASKS.md`).
