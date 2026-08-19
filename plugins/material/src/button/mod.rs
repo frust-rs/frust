@@ -534,32 +534,42 @@ impl<State: 'static> View<State> for ButtonView<State> {
 
         // `ButtonDecoration`/`OverflowObserver` are trait objects with
         // nothing to compare by value (the same shape `CardView::rebuild`'s
-        // `on_press` adoption hits), so a same-presence swap — one
-        // decoration for another, both sides `Some` — can't be told apart
-        // from a no-op reinstall by identity alone. Flag `PAINT` whenever a
-        // decoration/observer is installed on *either* side of the rebuild,
-        // not only on an `Option` presence flip: `CardView`'s narrower
-        // presence-only gate is safe there because losing/gaining
-        // `on_press` is the only thing that changes what it paints, but a
-        // decoration or overflow-observer swap changes *what* paints even
-        // while `Some` stays `Some` on both sides — the exact "a decoration
-        // swap can go unpainted" hazard this closes.
-        if self.decoration.is_some() || prev.decoration.is_some() {
+        // `on_press` adoption hits), so a swap must be told apart from a
+        // same-`Rc` reinstall by *pointer* identity, not by bare `Option`
+        // presence: flagging on presence alone repaints/relayouts every
+        // decorated button on every unrelated whole-app rebuild, since
+        // `Some(a)` vs `Some(b)` (a genuine swap) and `Some(a)` vs `Some(a)`
+        // (a no-op reinstall) both read as "present on both sides."
+        let decoration_changed = match (&prev.decoration, &self.decoration) {
+            (Some(a), Some(b)) => !Rc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        };
+        if decoration_changed {
+            // Paint-time only (`ButtonWidget::paint`'s `fill`/`overlay`/
+            // `outlined` reads) — never measured, never read from `event`.
             flags |= ChangeFlags::PAINT;
         }
         element.decoration = self.decoration.clone();
-        if self.overflow.is_some() || prev.overflow.is_some() {
-            flags |= ChangeFlags::PAINT;
+
+        let overflow_changed = match (&prev.overflow, &self.overflow) {
+            (Some(a), Some(b)) => !Rc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        };
+        if overflow_changed {
+            // Consumed at layout (`observer.measured(...)`) and event time
+            // (the `BottomSheet` deferred-press check) — never read from
+            // paint, so this flags `LAYOUT`, paired with `PAINT` the same
+            // way this rebuild's other layout-affecting adoptions above do
+            // (`label`/`size`/`icon_alignment`/`overflow_strategy`).
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         element.overflow = self.overflow.clone();
-        // `haptic` doesn't itself change anything painted, but flagging it
-        // alongside the two seams above keeps every field this rebuild
-        // silently mutates in the "adopts a new value ⇒ flags something"
-        // shape, rather than a bare exception sitting beside two guarded
-        // ones.
-        if prev.haptic != self.haptic {
-            flags |= ChangeFlags::PAINT;
-        }
+
+        // `haptic` is read only from `event` (`ButtonWidget::event`'s `Up`
+        // arm, gated on `HapticSignal::None`) — nothing painted or laid out
+        // depends on it, so adopting a new value needs no invalidation.
         element.haptic = self.haptic;
 
         if prev.overflow_strategy != self.overflow_strategy {
@@ -802,7 +812,24 @@ mod tests {
             View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
         assert!(
             flags.contains(ChangeFlags::PAINT),
-            "a decoration swap must repaint even though the Option stays Some on both sides"
+            "a decoration swap (a distinct Rc on each side) must repaint even \
+             though the Option stays Some on both sides"
+        );
+    }
+
+    #[test]
+    fn rebuild_flags_no_paint_when_the_same_rc_decoration_is_reinstalled() {
+        let deco: Rc<dyn ButtonDecoration> = Rc::new(NoopDecoration);
+        let prev = button::<u32, _>("Save", |_| {}).decoration(deco.clone());
+        let next = button::<u32, _>("Save", |_| {}).decoration(deco);
+        let mut widget = build(&prev);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            !flags.contains(ChangeFlags::PAINT),
+            "reinstalling the identical Rc must not repaint every decorated \
+             button on every unrelated whole-app rebuild"
         );
     }
 
@@ -832,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_flags_paint_on_an_overflow_observer_swap() {
+    fn rebuild_flags_layout_on_an_overflow_observer_swap() {
         let obs_a: Rc<dyn OverflowObserver> = Rc::new(NoopObserver);
         let obs_b: Rc<dyn OverflowObserver> = Rc::new(NoopObserver);
         let prev = button::<u32, _>("Save", |_| {}).overflow_observer(obs_a);
@@ -842,19 +869,48 @@ mod tests {
         let flags =
             View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
         assert!(
-            flags.contains(ChangeFlags::PAINT),
-            "an overflow-observer swap must repaint even though the Option stays Some"
+            flags.contains(ChangeFlags::LAYOUT),
+            "an overflow-observer swap (a distinct Rc on each side) is a \
+             layout-time seam (`measured`/event), not a paint-time one, so \
+             the swap must flag LAYOUT even though the Option stays Some"
         );
     }
 
     #[test]
-    fn rebuild_flags_paint_on_a_haptic_change() {
+    fn rebuild_flags_no_layout_when_the_same_rc_overflow_observer_is_reinstalled() {
+        let obs: Rc<dyn OverflowObserver> = Rc::new(NoopObserver);
+        let prev = button::<u32, _>("Save", |_| {}).overflow_observer(obs.clone());
+        let next = button::<u32, _>("Save", |_| {}).overflow_observer(obs);
+        let mut widget = build(&prev);
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert!(
+            !flags.contains(ChangeFlags::LAYOUT),
+            "reinstalling the identical Rc must not relayout"
+        );
+    }
+
+    #[test]
+    fn rebuild_adopts_a_haptic_change_with_no_invalidation() {
+        // Event-time only (`ButtonWidget::event`'s `Up` arm) — nothing
+        // painted or laid out depends on it, so adopting a new value must
+        // flag nothing, even though the field itself is still adopted.
         let prev = button::<u32, _>("Save", |_| {});
         let next = button::<u32, _>("Save", |_| {}).haptic(HapticSignal::Light);
         let mut widget = build(&prev);
         let mut counter = 0u64;
         let flags =
             View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
-        assert!(flags.contains(ChangeFlags::PAINT));
+        assert_eq!(
+            flags,
+            ChangeFlags::NONE,
+            "a haptic-only change needs no invalidation"
+        );
+        assert_eq!(
+            widget.haptic,
+            HapticSignal::Light,
+            "the value is still adopted despite flagging nothing"
+        );
     }
 }

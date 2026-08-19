@@ -88,21 +88,45 @@ impl SliderRange {
     }
 }
 
-/// Snap `values` into `spec`'s current bounds and re-sort the pair, the
+/// Clamp `value` into `spec`'s bounds — the identity on every in-bounds,
+/// finite pair, never quantizing onto the division grid. The adoption-step
+/// counterpart to [`ValueSpec::snap`]: `snap` resolves a *drag* onto a step,
+/// while this is what [`normalize_range`] uses to keep a controlled
+/// component's already-app-chosen value exactly as supplied.
+fn clamp_into_bounds(spec: &ValueSpec, value: f64) -> f64 {
+    if !(spec.min.is_finite() && spec.max.is_finite() && spec.max > spec.min) {
+        return if spec.min.is_finite() { spec.min } else { 0.0 };
+    }
+    if value.is_nan() {
+        return spec.min;
+    }
+    value.clamp(spec.min, spec.max)
+}
+
+/// Clamp `values` into `spec`'s current bounds and re-sort the pair, the
 /// build/rebuild adoption step that keeps `RangeSliderWidget::accept`'s
 /// `live.start`/`live.end` provably within `spec`'s own bounds.
 ///
-/// Without this, an app-supplied pair the widget has not yet seen against a
-/// freshly widened/narrowed `range()` — `range_slider(SliderRange::new(0.0,
-/// 0.0)).range(20.0, 80.0)`, or a persisted pair replayed against fresh
-/// bounds — would otherwise reach `accept`'s `raw.clamp(self.spec.min,
-/// live.end)` with `live.end < spec.min`, an inverted bound `f64::clamp`
-/// panics on. [`ValueSpec::snap`] already degrades a degenerate `spec`
-/// safely, so this can never itself panic; see [`super::core`]'s Clamp
-/// Discipline section.
+/// **Clamps, never snaps.** [`clamp_into_bounds`] is the identity on every
+/// in-bounds, finite pair — an off-grid app value (`SliderRange::new(30.0,
+/// 70.0)` against `.range(0.0, 100.0).divisions(4)`) must round-trip through
+/// adoption unchanged, not quantize onto the division grid the way
+/// [`ValueSpec::snap`] would: this is a controlled component's *adoption*
+/// step, not a drag's *resolution* step, and snapping here silently
+/// desynced the thumbs from the raw-value indicator labels and never
+/// reported the correction through `on_changed`.
+///
+/// Without this clamp, an app-supplied pair the widget has not yet seen
+/// against a freshly widened/narrowed `range()` — `range_slider(SliderRange
+/// ::new(0.0, 0.0)).range(20.0, 80.0)`, or a persisted pair replayed against
+/// fresh bounds — would otherwise reach `accept`'s no-cross window with
+/// `live.end < spec.min`, an inverted bound `f64::clamp` panics on.
+/// [`clamp_into_bounds`] already degrades a degenerate `spec` safely, so
+/// this can never itself panic; see [`super::core`]'s Clamp Discipline
+/// section.
 fn normalize_range(spec: &ValueSpec, values: SliderRange) -> SliderRange {
-    let start = spec.snap(values.start);
-    let end = spec.snap(values.end);
+    let start = clamp_into_bounds(spec, values.start);
+    let end = clamp_into_bounds(spec, values.end);
     SliderRange {
         start: start.min(end),
         end: start.max(end),
@@ -494,14 +518,25 @@ impl RangeSliderWidget {
 
     /// Apply a raw value to `thumb`: no-cross clamp, snap, then the
     /// deduplication test (`_setThumbValue`). Returns the pair to report, or
-    /// `None` when there is nothing new.
+    /// `None` when there is nothing new — including when the no-cross window
+    /// or `raw` itself cannot be trusted (see below).
     ///
     /// The no-cross window is ordered with `min()`/`max()` right before its
     /// clamp rather than trusted to already be ordered — `live.end < spec.min`
     /// (an unnormalized `live`) would otherwise hand `f64::clamp` an inverted
     /// bound and panic. `build`/`rebuild`'s `normalize_range` keeps `live`
-    /// provably in-bounds in the common case; this is the total-by-construction
-    /// backstop (see [`super::core`]'s Clamp Discipline section).
+    /// provably in-bounds against a *finite* `spec`, but `self.spec` here is
+    /// the raw, unnormalized builder value: a directly non-finite bound
+    /// (`.range(f64::NAN, 100.0)`) reaches this window as-is. `f64::min`/
+    /// `f64::max` already return the non-NaN side when only one operand is
+    /// NaN, so a single-NaN bound never panics the clamp below — it silently
+    /// collapses the window to a single point instead, which is its own
+    /// defect (a value clamped against a spec that was never well-formed
+    /// isn't one worth reporting), not the "both sides NaN at once" case a
+    /// total-by-construction argument would need to rule out. So the ordered
+    /// window is checked finite before it is ever clamped against, and a NaN
+    /// `raw` is rejected the same way — either makes the drag a no-op
+    /// (`None`), never a panic and never a NaN into app state.
     fn accept(&self, thumb: Thumb, raw: f64) -> Option<SliderRange> {
         let live = self.live();
         let (clamped, current) = match thumb {
@@ -509,11 +544,19 @@ impl RangeSliderWidget {
             // the other rather than passing it.
             Thumb::Start => {
                 let (lo, hi) = (self.spec.min, live.end);
-                (raw.clamp(lo.min(hi), lo.max(hi)), live.start)
+                let (wlo, whi) = (lo.min(hi), lo.max(hi));
+                if !(wlo.is_finite() && whi.is_finite()) || raw.is_nan() {
+                    return None;
+                }
+                (raw.clamp(wlo, whi), live.start)
             }
             Thumb::End => {
                 let (lo, hi) = (live.start, self.spec.max);
-                (raw.clamp(lo.min(hi), lo.max(hi)), live.end)
+                let (wlo, whi) = (lo.min(hi), lo.max(hi));
+                if !(wlo.is_finite() && whi.is_finite()) || raw.is_nan() {
+                    return None;
+                }
+                (raw.clamp(wlo, whi), live.end)
             }
         };
         let next = accept_value(&self.spec, current, clamped)?;
@@ -920,7 +963,7 @@ mod tests {
         assert_eq!(
             w.values,
             SliderRange::new(20.0, 80.0),
-            "adoption snaps each side into the new bounds"
+            "adoption clamps each side into the new bounds"
         );
         let mut state = Val::default();
 
@@ -978,6 +1021,111 @@ mod tests {
         let mut state = Val::default();
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0));
+    }
+
+    // -- normalize_range / clamp_into_bounds ---------------------------------
+
+    #[test]
+    fn an_in_bounds_off_grid_pair_survives_adoption_verbatim() {
+        // `normalize_range` must clamp into bounds, never snap onto the
+        // division grid: 30/70 sit strictly inside `.range(0.0, 100.0)
+        // .divisions(4)`'s bounds but off its 25-wide grid
+        // (0/25/50/75/100) — snapping would silently turn this into 25/75,
+        // desyncing the thumbs from the raw-value indicator labels with no
+        // `on_changed` report.
+        let mut w = build(&view(30.0, 70.0).range(0.0, 100.0).divisions(4));
+        assert_eq!(
+            w.values,
+            SliderRange::new(30.0, 70.0),
+            "an in-bounds off-grid pair must round-trip through adoption verbatim"
+        );
+
+        layout(&mut w);
+        let rec = paint(&mut w);
+        let thumbs: Vec<&(Point, Size, f64, Color)> = rec
+            .rrects
+            .iter()
+            .filter(|(_, s, _, _)| s.height == HANDLE_HEIGHT)
+            .collect();
+        assert_eq!(thumbs.len(), 2);
+        // fraction(30) over 0..100 = 0.3 of the 200px track = 60.0;
+        // fraction(70) = 0.7 = 140.0 — the un-snapped painted positions.
+        assert_eq!(thumbs[0].0.x, 60.0 - HANDLE_WIDTH / 2.0, "low thumb at 30");
+        assert_eq!(
+            thumbs[1].0.x,
+            140.0 - HANDLE_WIDTH / 2.0,
+            "high thumb at 70"
+        );
+    }
+
+    #[test]
+    fn normalize_range_clamps_an_out_of_bounds_pair_to_the_bounds() {
+        let spec = ValueSpec {
+            min: 20.0,
+            max: 80.0,
+            divisions: None,
+        };
+        assert_eq!(
+            normalize_range(&spec, SliderRange::new(0.0, 90.0)),
+            SliderRange::new(20.0, 80.0)
+        );
+    }
+
+    #[test]
+    fn normalize_range_pins_a_nan_side_to_min() {
+        let spec = ValueSpec {
+            min: 20.0,
+            max: 80.0,
+            divisions: None,
+        };
+        assert_eq!(
+            normalize_range(
+                &spec,
+                SliderRange {
+                    start: f64::NAN,
+                    end: 50.0,
+                }
+            ),
+            SliderRange::new(20.0, 50.0)
+        );
+    }
+
+    // -- NaN robustness (accept/snap) ----------------------------------------
+
+    #[test]
+    fn a_nan_min_bound_never_panics_or_reports_a_nan_value() {
+        // The refuted-unreachable case: a single NaN bound reaching `accept`'s
+        // no-cross window, not both `lo`/`hi` at once. `.range()`'s own
+        // `debug_assert!` guards the public builder path in a debug/test
+        // build, but that guard compiles out entirely in release — `spec.min`
+        // is set directly here (bypassing the builder) to exercise the
+        // widget-level contract `accept`/`snap` must hold regardless of how a
+        // NaN bound arrives.
+        let mut w = widget(0.3, 0.7);
+        w.spec.min = f64::NAN;
+        w.spec.max = 100.0;
+        let mut state = Val::default();
+
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 60.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 90.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 90.0));
+
+        assert!(
+            state
+                .changes
+                .iter()
+                .all(|v| !v.start.is_nan() && !v.end.is_nan()),
+            "no reported value may carry a NaN: {:?}",
+            state.changes
+        );
+        assert!(
+            state
+                .ends
+                .iter()
+                .all(|v| !v.start.is_nan() && !v.end.is_nan()),
+            "{:?}",
+            state.ends
+        );
     }
 
     #[test]

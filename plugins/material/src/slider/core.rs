@@ -295,10 +295,17 @@ impl ValueSpec {
     /// against the bounds themselves — an inverted `.range(20.0, 10.0)`
     /// builder call or a NaN bound would otherwise crash a shipped app on the
     /// very next drag/press (`snap` sits on both the live drag path and
-    /// `accept_value`). The degenerate case pins at `min`, the documented
-    /// contract (see the [module docs](self)'s Clamp Discipline section).
+    /// `accept_value`). The degenerate case pins at `min` when it is itself
+    /// finite, else `0.0` — a NaN `min` must never propagate out, the
+    /// documented contract (see the [module docs](self)'s Clamp Discipline
+    /// section). A NaN `value` is guarded the same way, ahead of the clamp:
+    /// `f64::clamp` propagates a NaN input through rather than panicking on
+    /// it, and a NaN reaching the grid-snap division below would too.
     pub(crate) fn snap(&self, value: f64) -> f64 {
         if !(self.min.is_finite() && self.max.is_finite() && self.max > self.min) {
+            return if self.min.is_finite() { self.min } else { 0.0 };
+        }
+        if value.is_nan() {
             return self.min;
         }
         let clamped = value.clamp(self.min, self.max);
@@ -752,8 +759,9 @@ pub(crate) fn icon_dock(input: &IconDockInput) -> IconDock {
     // `layout` never lower-bounds itself by `icon_size`) — `min()`/`max()`
     // order the pair so `IconDock::center_at`'s `f64::clamp` never sees an
     // inverted bound (see the [module docs](self)'s Clamp Discipline
-    // section). The icon just centers on the track in that squeeze instead
-    // of panicking.
+    // section). The icon pins to whichever ordered clamp edge its resting/
+    // docked target lands nearest in that squeeze, rather than panicking —
+    // not literally re-centered (see the narrow-track test below).
     IconDock {
         resting_center,
         docked_target,
@@ -1165,10 +1173,21 @@ mod tests {
         assert_eq!(spec(5.0, 5.0, Some(4)).snap(5.0), 5.0);
 
         // NaN either bound — `f64::clamp` panics on a NaN min or max too.
+        // A NaN `min` pins to `0.0` rather than propagating: `min` is the
+        // degenerate case's own pin target, so a non-finite `min` cannot be
+        // used as the pin itself.
         assert_eq!(spec(0.0, f64::NAN, None).snap(3.0), 0.0, "NaN max");
-        assert!(
-            spec(f64::NAN, 10.0, None).snap(3.0).is_nan(),
-            "NaN min propagates rather than panicking"
+        assert_eq!(
+            spec(f64::NAN, 10.0, None).snap(3.0),
+            0.0,
+            "NaN min pins to 0.0 instead of propagating"
+        );
+
+        // NaN `value` against otherwise well-formed bounds pins to `min`.
+        assert_eq!(
+            spec(20.0, 30.0, None).snap(f64::NAN),
+            20.0,
+            "NaN value pins to min"
         );
 
         // A well-formed range is unaffected by the guard.

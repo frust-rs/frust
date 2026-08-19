@@ -499,8 +499,11 @@ impl Widget for RadioWidget {
         // The pod's hover link is authoritative; re-synced every paint — the
         // pointer's departure never reaches `event`, so this is what drops
         // the hover tint the frame it leaves (mirrors `checkbox`/`list_item`'s
-        // identical self-correction).
-        self.state_layer.set_hovered(ctx.is_hovered());
+        // identical self-correction). Enabled-gated the same way
+        // `button::core`'s identical self-correction is: a claim latched
+        // before a mid-hover disable must still be dropped here.
+        self.state_layer
+            .set_hovered(self.enabled && ctx.is_hovered());
 
         self.state_layer.paint(
             ctx,
@@ -1077,6 +1080,91 @@ mod tests {
             "the state-layer's own pressed flag clears too"
         );
         assert!(flags.needs_paint());
+    }
+
+    // ---- through a real RenderRoot: paint self-correction with a live claim -
+    //
+    // Hover is an authoritative read off `PaintCtx`, seeded by the pod chain, so
+    // a bare `PaintCtx` can never fake a *standing* claim — only a real tree can
+    // (the pattern `list_item.rs`'s/`button/core.rs`'s own hover harnesses use).
+
+    const HOVER_DISABLE_WINDOW: Size = Size::new(200.0, 200.0);
+
+    struct HoverDisableHarness {
+        root: frust_core::RenderRoot<GroupState, RadioView<GroupState, Freq>>,
+        state: GroupState,
+        tcx: frust::authoring::text::TextContext,
+        enabled: bool,
+    }
+
+    impl HoverDisableHarness {
+        fn new(enabled: bool) -> Self {
+            let mut h = HoverDisableHarness {
+                root: frust_core::RenderRoot::new(),
+                state: GroupState {
+                    selected: Freq::Daily,
+                    changes: 0,
+                },
+                tcx: frust::authoring::text::TextContext::new(),
+                enabled,
+            };
+            h.sync();
+            h
+        }
+
+        fn sync(&mut self) {
+            let enabled = self.enabled;
+            let mut app = move |_: &mut GroupState| {
+                let view = radio::<GroupState, Freq>(Freq::Weekly, Freq::Daily);
+                if enabled {
+                    view.on_changed(on_changed)
+                } else {
+                    view
+                }
+            };
+            self.root.rebuild(&mut app, &mut self.state);
+            self.root
+                .layout_with_text(HOVER_DISABLE_WINDOW, &mut self.tcx as &mut dyn Any);
+        }
+
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) {
+            self.root.event(&mut self.state, &ev(phase, x, y));
+        }
+
+        fn paint(&mut self) -> Recorder {
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, frust::FrameTime::ZERO);
+            rec
+        }
+    }
+
+    #[test]
+    fn a_disabled_radio_drops_a_standing_hover_claim_at_paint() {
+        let mut h = HoverDisableHarness::new(true);
+
+        // Claim hover while enabled — the pod's hover link is now standing.
+        h.dispatch(PointerPhase::Move, 5.0, 12.0);
+        let rec = h.paint();
+        assert_eq!(
+            rec.rrects.len(),
+            2,
+            "hovered+enabled radio paints the state-layer overlay plus the dot"
+        );
+
+        // Disable via rebuild — no `Down`/`Up`/`Cancel` runs, so nothing ever
+        // tells the widget's own event handler to drop the claim; the pointer's
+        // hover link is still standing (`ctx.is_hovered()` would read `true`)
+        // when the next paint runs.
+        h.enabled = false;
+        h.sync();
+
+        let rec = h.paint();
+        assert_eq!(
+            rec.rrects.len(),
+            1,
+            "paint's self-correction must gate on `enabled`: state_layer.opacity() \
+             drops to 0.0 (the overlay fill is skipped entirely), so only the dot paints"
+        );
     }
 
     // ---- label: presence/text reconciliation -------------------------------
