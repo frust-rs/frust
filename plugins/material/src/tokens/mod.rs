@@ -83,21 +83,32 @@
 
 mod color;
 mod extension;
+mod fonts;
 mod hct;
 mod motion;
 
 pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
 pub use extension::MaterialTokens;
+pub use fonts::font_data;
 pub use hct::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
 pub use motion::{MaterialMotion, MaterialSpring};
 
 use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassScale,
-    MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
-    StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
+    Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
+    GlassScale, MotionDurations, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
+
+/// The family name Roboto Flex's own `name` table reports (`name` ID 1) — what
+/// a font stack must name for the bundled face to resolve. Note it is
+/// `"Roboto Flex"`, matching the variable release.
+pub const ROBOTO_FLEX_FAMILY: &str = "Roboto Flex";
+
+/// The family name Roboto Mono's own `name` table reports (`name` ID 1).
+#[allow(dead_code)]
+pub const ROBOTO_MONO_FAMILY: &str = "Roboto Mono";
 
 /// The Material 3 baseline theme: baseline light/dark color schemes, the M3
 /// type scale (built from `TextStyle::default()`), the M3 shape scale, the M3
@@ -110,6 +121,7 @@ pub fn baseline() -> Theme {
     let mut extensions = ThemeExtensions::new();
     extensions.insert(status_palette());
     extensions.insert(MaterialTokens::material());
+    extensions.insert(native_typefaces());
     Theme {
         light: color_scheme_light(),
         dark: color_scheme_dark(),
@@ -459,6 +471,26 @@ pub const fn motion_scheme() -> MotionScheme {
         },
         reduce_motion: false,
         cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
+    }
+}
+
+/// The native-control typeface binding [`baseline`] attaches: the bundled
+/// Roboto Flex face in both button and body slots.
+///
+/// Material 3 names one sans family for all text (display/heading/body alike),
+/// so both native control slots carry the same face. Both are taken
+/// **out of [`fonts::font_data`]'s own array** rather than re-referenced from
+/// the underlying constants: a native host de-duplicates published payloads by
+/// byte identity (address + length), so a slot's face and the bytes a shell
+/// registers through [`frust::register_app_fonts`] must be the *same*
+/// `&'static [u8]`, not merely equal ones.
+pub fn native_typefaces() -> NativeTypefaces {
+    match fonts::font_data()
+        .get(fonts::ROBOTO_FLEX_VARIABLE_INDEX)
+        .copied()
+    {
+        Some(bytes) => NativeTypefaces::uniform(FontFace::new(ROBOTO_FLEX_FAMILY, bytes)),
+        None => NativeTypefaces::default(),
     }
 }
 

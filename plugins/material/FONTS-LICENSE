@@ -1,0 +1,56 @@
+# Bundled Material typography fonts
+
+Raw variable-TTF bytes embedded into `frust-material` via `include_bytes!`
+(`plugins/material/src/tokens/fonts.rs`), unconditionally — the design-system
+plugin *is* the Material opt-in, so the bytes carry no Cargo feature of their
+own (the `plugins/glyph/fonts/` and `plugins/shadcn/fonts/` precedent).
+
+This crate bundles two typefaces to ship Material 3 typography out of the box:
+**Roboto Flex** for display/heading/body text and **Roboto Mono** for monospace.
+Both families are sourced from Google Fonts and are unmodified.
+
+Roboto Flex declares no Reserved Font Name (the copyright lines carry no "with
+Reserved Font Name" clause), so the unmodified face ships under its original
+name with the full OFL-1.1 license text vendored (`roboto-flex/OFL.txt`), as the
+license's license-inclusion term requires.
+
+Roboto Mono is licensed under Apache 2.0 per Google Fonts distribution (see
+`roboto-mono/APACHE2.txt`). The variable font format carries no additional
+licensing terms beyond the copyright and license text herein.
+
+Both font bytes are pure data: they are only ever returned by
+`frust_material::font_data()`. Registering them into a live `TextContext` is a
+shell's job — `frust_material::install()` pushes them through the facade's
+`register_app_fonts` pending-font queue for the running shell to drain.
+
+## Roboto Flex
+
+- **Upstream**: `github.com/googlefonts/roboto-flex`
+- **Release tag**: v1.2.0 (variable upright release from Google Fonts)
+- **Retrieved**: 2026-08-19
+- **Source**: https://github.com/google/fonts/tree/main/ofl/robotoflex
+- **License**: SIL Open Font License 1.1 (OFL-1.1), no Reserved Font Name
+- **Vendored as**: `roboto-flex/RobotoFlex.ttf`
+- **Size**: 1,684,624 B (~1.61 MiB)
+- **Family name** (`name` ID 1): `Roboto Flex`
+- **Usage**: Headlines, display text, and default body text in Material 3 type scale
+
+## Roboto Mono
+
+- **Upstream**: `github.com/google/fonts/tree/main/ofl/robotomono`
+- **Release**: Variable font from Google Fonts
+- **Retrieved**: 2026-08-19
+- **Source**: https://github.com/google/fonts/tree/main/ofl/robotomono
+- **License**: Apache License 2.0 (Apache-2.0)
+- **Vendored as**: `roboto-mono/RobotoMono.ttf`
+- **Size**: 181,388 B (~177 KiB)
+- **Family name** (`name` ID 1): `Roboto Mono`
+- **Usage**: Monospace text, code, and tabular figures in Material 3 catalog
+
+## Total
+
+**2 faces, 1,866,012 B (~1.78 MiB)** of font bytes, plus license text
+(~1.5 KiB per family). Both faces are *variable* fonts, so this pair covers the
+whole weight range the catalog names instead of one file per weight. Subsetting
+to a narrower glyph range is a documented **deferred optimization**, as it is
+for Glyph and shadcn.

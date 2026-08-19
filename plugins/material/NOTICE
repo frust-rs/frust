@@ -148,8 +148,25 @@ Copyright (c) 2021 Google LLC
 OFL 1.1 License — Roboto Flex Font
 ================================================================================
 
+Copyright (c) 2023 The Roboto Flex Project Authors
+  Upstream: https://github.com/googlefonts/roboto-flex
+  Bundled as: plugins/material/fonts/roboto-flex/RobotoFlex.ttf
+  License: SIL Open Font License 1.1 (no Reserved Font Name)
+
 The Roboto Flex font family is licensed under the SIL Open Font License, Version 1.1.
 See FONTS-LICENSE for the complete OFL 1.1 text.
+
+================================================================================
+Apache License, Version 2.0 — Roboto Mono Font
+================================================================================
+
+Copyright (c) 2015 The Roboto Mono Project Authors
+  Upstream: https://github.com/google/fonts/tree/main/ofl/robotomono
+  Bundled as: plugins/material/fonts/roboto-mono/RobotoMono.ttf
+  License: Apache License, Version 2.0
+
+The Roboto Mono font family is licensed under the Apache License, Version 2.0.
+See FONTS-LICENSE for the complete Apache 2.0 text.
 
 ================================================================================
 Module Attribution Header Convention

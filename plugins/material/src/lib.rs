@@ -30,11 +30,10 @@
 //! # `install()`: this design system's one-line installer
 //!
 //! [`install`] seeds [`frust::set_default_theme`] with this crate's
-//! [`baseline`] token bundle — no bundled fonts (Material's baseline
-//! typography resolves to whatever system font family a `TextStyle` leaves
-//! unset). Call it from [`frust::app!`](frust::app)'s `setup = { .. }` block,
-//! **before** the shell is constructed — the one point a shell reads the
-//! default-theme slot:
+//! [`baseline`] token bundle and registers its bundled Roboto Flex and Roboto
+//! Mono typefaces so Material typography resolves out of the box. Call it from
+//! [`frust::app!`](frust::app)'s `setup = { .. }` block, **before** the shell
+//! is constructed — the one point a shell reads the default-theme slot:
 //!
 //! ```no_run
 //! # use frust::{AnyView, Component, any, text};
@@ -52,7 +51,7 @@
 //! A call after shell construction takes effect only on a later
 //! `clear_app_theme`-driven reseed, which may never happen — so a late call
 //! silently does nothing visible (the same timing contract
-//! `frust::glyph_theme::install` documents).
+//! `frust::glyph_theme::install` and `frust_shadcn::install` document).
 
 pub mod appbar;
 pub mod button_group;
@@ -124,21 +123,41 @@ pub use tokens::{
 
 /// Make Material 3 this app's starting design system.
 ///
-/// One process-global push, an already-public seam:
-/// [`frust::set_default_theme`]`(`[`baseline`]`())` — the *base* a shell
-/// seeds itself with instead of its built-in `Theme::neutral()` fallback.
-/// Deliberately not `frust::set_app_theme`: a seeded default does not pin
-/// brightness, so an app installed this way still follows system dark mode.
+/// Two process-global pushes, both public `frust` seams:
 ///
-/// No font registration: unlike `frust::glyph_theme::install`, Material's
-/// baseline type scale carries no bundled font family of its own — a
-/// `TextStyle` with no family set resolves to the platform's system font.
+/// 1. `frust::set_default_theme(`[`baseline`]`())` — the *base* a shell
+///    seeds itself with instead of its built-in `Theme::neutral()` fallback.
+///    Deliberately not `frust::set_app_theme`: a seeded default does not pin
+///    brightness, so an app installed this way still follows system dark mode.
+/// 2. `frust::register_app_fonts` for both bundled faces (Roboto Flex, Roboto
+///    Mono), so the type scale's Roboto Flex stack and any mono-text component
+///    actually resolve. The faces are compiled in unconditionally (see the
+///    crate docs' font coverage).
 ///
-/// See the [module docs](self) for the full timing contract (call from
-/// [`frust::app!`](frust::app)'s `setup = { .. }` block, before shell
-/// construction).
+/// # Timing: must run before the first frame
+///
+/// A shell reads the default-theme slot and drains the font registry **once, at
+/// construction**, before its first rebuild. A call after that takes effect only
+/// on a later `clear_app_theme`-driven reseed, which may never happen — so a late
+/// call silently does nothing visible.
+///
+/// The supported way to get the timing right on all three platforms is
+/// `frust::app!`'s setup block, which runs immediately before the root
+/// component's `Component::init` and therefore before any shell construction —
+/// see the crate docs for the full example.
+///
+/// # Thread contract and repeat calls
+///
+/// Both underlying seams are plain `Mutex`-guarded process-globals callable from
+/// any thread. Calling `install` twice is harmless but wasteful: the second
+/// `set_default_theme` replaces an identical value, and the font bytes are pushed
+/// (and later re-registered, shadowing the same family names) a second time. Call
+/// it once.
 pub fn install() {
     frust::set_default_theme(baseline());
+    for bytes in tokens::font_data() {
+        frust::register_app_fonts(bytes.to_vec());
+    }
 }
 
 /// Coverage for the generated [`icons`] module — deliberately hand-written
@@ -199,5 +218,54 @@ mod icons_tests {
                 source.d
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use frust::NativeTypefaces;
+
+    /// The baseline theme carries both NativeTypefaces extension (for native
+    /// controls) and the Material tokens.
+    #[test]
+    fn baseline_attaches_native_typefaces_and_material_tokens() {
+        let theme = crate::baseline();
+        assert!(
+            theme.extension::<NativeTypefaces>().is_some(),
+            "baseline theme must attach NativeTypefaces for native-widget font resolution"
+        );
+        assert!(
+            theme.extension::<crate::MaterialTokens>().is_some(),
+            "baseline theme must attach MaterialTokens"
+        );
+    }
+
+    /// Verify that font_data() returns non-empty bytes and basic TTF magic.
+    #[test]
+    fn font_bytes_are_non_empty_and_sniff_as_ttf() {
+        let fonts = crate::tokens::font_data();
+        assert_eq!(fonts.len(), 2, "expected Roboto Flex + Roboto Mono");
+        for (i, bytes) in fonts.iter().enumerate() {
+            assert!(!bytes.is_empty(), "font face {i} bytes must be non-empty");
+            assert!(
+                bytes.len() > 4,
+                "font face {i} must have at least 4 bytes for magic number"
+            );
+            // Check for TTF magic: 0x00010000 (big-endian) or 0x74727565 ('true')
+            let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            assert!(
+                magic == 0x00010000 || magic == 0x74727565,
+                "font face {i} must start with TTF magic bytes"
+            );
+        }
+    }
+
+    /// install() is safe to call twice; the second call is idempotent in terms
+    /// of theme identity (same value set twice) and font registration (faces
+    /// re-registered under the same family names, shadowing the first).
+    #[test]
+    fn install_is_safe_to_call_twice() {
+        crate::install();
+        crate::install();
     }
 }
