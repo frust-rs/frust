@@ -69,6 +69,7 @@ pub mod list_item;
 pub mod list_view;
 pub mod loading_indicator;
 pub mod navbar;
+pub mod overlay;
 mod press;
 pub mod progress;
 pub mod radio;
@@ -126,6 +127,17 @@ pub use loading_indicator::{
 };
 pub use navbar::{
     NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
+};
+pub use overlay::{
+    ANCHORED_ENTER_SCALE, AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP,
+    OVERLAY_DIALOG_MAX_WIDTH, OVERLAY_DIALOG_MIN_WIDTH, OVERLAY_EDGE_FRACTION,
+    OVERLAY_FLING_VELOCITY, OVERLAY_HANDLE_RESERVE, OVERLAY_SCRIM_ALPHA,
+    OVERLAY_SHEET_MAX_HEIGHT_FRACTION, OVERLAY_SIDE_SHEET_MAX_WIDTH, OverlayAlign, OverlayAnchor,
+    OverlayAnchorView, OverlayAnchorWidget, OverlayBorder, OverlayContainer, OverlayCorners,
+    OverlayElevation, OverlayEntrance, OverlayExtent, OverlayGeometry, OverlayLimit,
+    OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
+    OverlayPlacement, OverlayRole, OverlaySide, anchored_overlay, overlay_anchor, overlay_modal,
+    place_anchored, show_overlay_modal,
 };
 pub use progress::{
     CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,

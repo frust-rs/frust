@@ -24,4 +24,9 @@ peniko = { workspace = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
-frust-core = { path = "../../crates/frust-core" }
+# `test-support` compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx`
+# constructor) into the test build, so a clock-dependent widget — the overlay
+# seam's enter/exit ramps — can be painted at a chosen time without a
+# `RenderRoot`; the same dev-dependency shape `frust-shadcn` carries. Test-only:
+# the feature ships in nothing.
+frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
