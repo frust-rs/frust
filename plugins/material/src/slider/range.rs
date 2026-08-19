@@ -88,6 +88,27 @@ impl SliderRange {
     }
 }
 
+/// Snap `values` into `spec`'s current bounds and re-sort the pair, the
+/// build/rebuild adoption step that keeps `RangeSliderWidget::accept`'s
+/// `live.start`/`live.end` provably within `spec`'s own bounds.
+///
+/// Without this, an app-supplied pair the widget has not yet seen against a
+/// freshly widened/narrowed `range()` — `range_slider(SliderRange::new(0.0,
+/// 0.0)).range(20.0, 80.0)`, or a persisted pair replayed against fresh
+/// bounds — would otherwise reach `accept`'s `raw.clamp(self.spec.min,
+/// live.end)` with `live.end < spec.min`, an inverted bound `f64::clamp`
+/// panics on. [`ValueSpec::snap`] already degrades a degenerate `spec`
+/// safely, so this can never itself panic; see [`super::core`]'s Clamp
+/// Discipline section.
+fn normalize_range(spec: &ValueSpec, values: SliderRange) -> SliderRange {
+    let start = spec.snap(values.start);
+    let end = spec.snap(values.end);
+    SliderRange {
+        start: start.min(end),
+        end: start.max(end),
+    }
+}
+
 /// Which thumb a drag owns (`_M3ERangeThumb`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Thumb {
@@ -344,7 +365,7 @@ impl<State: 'static> View<State> for RangeSliderView<State> {
         let mut indicator = Run::new();
         indicator.set_content(&labels.1);
         RangeSliderWidget {
-            values: self.values,
+            values: normalize_range(&self.spec, self.values),
             spec: self.spec,
             ticks: self.spec.tick_fractions(),
             wavy: self.wavy,
@@ -400,14 +421,19 @@ impl<State: 'static> View<State> for RangeSliderView<State> {
             // forces a relayout rather than a bare repaint.
             flags |= ChangeFlags::LAYOUT;
         }
-        if prev.values != self.values {
-            element.values = self.values;
-            element.last_reported = None;
-            flags |= ChangeFlags::PAINT;
-        }
         if prev.spec != self.spec {
             element.spec = self.spec;
             element.ticks = self.spec.tick_fractions();
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.values != self.values || prev.spec != self.spec {
+            // Re-normalize on either edge, not just a `values` write: a
+            // widened/narrowed `range()` call can leave a previously-adopted
+            // pair outside the new bounds even when the app's own `values`
+            // field never moved (`normalize_range`'s doc comment has the
+            // full repro).
+            element.values = normalize_range(&self.spec, self.values);
+            element.last_reported = None;
             flags |= ChangeFlags::PAINT;
         }
         if prev.enabled != self.enabled {
@@ -469,13 +495,26 @@ impl RangeSliderWidget {
     /// Apply a raw value to `thumb`: no-cross clamp, snap, then the
     /// deduplication test (`_setThumbValue`). Returns the pair to report, or
     /// `None` when there is nothing new.
+    ///
+    /// The no-cross window is ordered with `min()`/`max()` right before its
+    /// clamp rather than trusted to already be ordered — `live.end < spec.min`
+    /// (an unnormalized `live`) would otherwise hand `f64::clamp` an inverted
+    /// bound and panic. `build`/`rebuild`'s `normalize_range` keeps `live`
+    /// provably in-bounds in the common case; this is the total-by-construction
+    /// backstop (see [`super::core`]'s Clamp Discipline section).
     fn accept(&self, thumb: Thumb, raw: f64) -> Option<SliderRange> {
         let live = self.live();
         let (clamped, current) = match thumb {
             // The clamp is what keeps the thumbs from swapping: each stops at
             // the other rather than passing it.
-            Thumb::Start => (raw.clamp(self.spec.min, live.end), live.start),
-            Thumb::End => (raw.clamp(live.start, self.spec.max), live.end),
+            Thumb::Start => {
+                let (lo, hi) = (self.spec.min, live.end);
+                (raw.clamp(lo.min(hi), lo.max(hi)), live.start)
+            }
+            Thumb::End => {
+                let (lo, hi) = (live.start, self.spec.max);
+                (raw.clamp(lo.min(hi), lo.max(hi)), live.end)
+            }
         };
         let next = accept_value(&self.spec, current, clamped)?;
         Some(match thumb {
@@ -867,6 +906,78 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 180.0));
         assert_eq!(w.active, None);
         assert_eq!(state.ends, vec![SliderRange::new(0.75, 0.75)]);
+    }
+
+    #[test]
+    fn a_value_pair_outside_a_freshly_widened_range_normalizes_instead_of_panicking() {
+        // The exact repro shape from the review finding: values sit outside
+        // a `range()` call that only widens the bounds afterward. Before the
+        // fix, `accept`'s no-cross window (`spec.min..=live.end` /
+        // `live.start..=spec.max`) would be handed an inverted bound
+        // (`live.end < spec.min`) on the very first press — an `f64::clamp`
+        // panic, not a catchable error.
+        let mut w = build(&view(0.0, 90.0).range(20.0, 80.0));
+        assert_eq!(
+            w.values,
+            SliderRange::new(20.0, 80.0),
+            "adoption snaps each side into the new bounds"
+        );
+        let mut state = Val::default();
+
+        // Press+drag the low thumb (nearer the left edge, position 0).
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0));
+        assert_eq!(w.active, Some(Thumb::Start));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 60.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 60.0));
+        assert!(
+            state
+                .changes
+                .iter()
+                .all(|v| v.start >= 20.0 && v.start <= v.end),
+            "{:?}",
+            state.changes
+        );
+
+        // Press+drag the high thumb (nearer the right edge, position 200)
+        // from a fresh widget over the same out-of-bounds pair.
+        let mut w = build(&view(0.0, 90.0).range(20.0, 80.0));
+        let mut state = Val::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 195.0));
+        assert_eq!(w.active, Some(Thumb::End));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 150.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 150.0));
+        assert!(
+            state
+                .changes
+                .iter()
+                .all(|v| v.end <= 80.0 && v.end >= v.start),
+            "{:?}",
+            state.changes
+        );
+    }
+
+    #[test]
+    fn a_rebuilds_narrowed_bounds_renormalize_a_stale_out_of_bounds_pair() {
+        // "A persisted pair vs fresh bounds": the app's own `values` field
+        // never changes across the rebuild, only `range()` does — the
+        // narrower `if prev.values != self.values` check alone would miss
+        // this edge and leave `element.values` stale and out of the new
+        // bounds, an unnormalized `live` the next press's `accept` call
+        // would panic on.
+        let mut counter = 0u64;
+        let prev = view(0.0, 90.0).range(0.0, 100.0);
+        let mut w = build(&prev);
+        assert_eq!(w.values, SliderRange::new(0.0, 90.0));
+
+        let next = view(0.0, 90.0).range(20.0, 80.0);
+        let flags = View::<Val>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(w.values, SliderRange::new(20.0, 80.0));
+        assert!(flags.needs_paint());
+
+        // The renormalized pair presses and drags without panicking.
+        let mut state = Val::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0));
     }
 
     #[test]

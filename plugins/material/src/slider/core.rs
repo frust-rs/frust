@@ -55,6 +55,36 @@
 //! The drag machine ([`Drag`]) and the haptic scheduler ([`HapticScheduler`])
 //! are thumb-agnostic: a range slider holds one [`Drag`] per thumb and one
 //! shared scheduler.
+//!
+//! # Clamp discipline
+//!
+//! `f64::clamp` panics if `min > max` or either bound is NaN — a hard abort
+//! under `panic = "abort"`, not a catchable error, so every `.clamp(..)` call
+//! in this module tree that clamps against a *computed* (not literal) pair of
+//! bounds must be able to show those bounds are always ordered and finite.
+//! Two shapes cover every site:
+//!
+//! - **Bounds are literal `0.0`/`1.0`** ([`ValueSpec::fraction`],
+//!   [`ValueSpec::value_from_fraction`], [`ValueSpec::value_from_offset`]'s
+//!   own `fraction` clamp, [`TrackMetrics::resolve`]'s two
+//!   `active_start_fraction`/`active_end_fraction` clamps,
+//!   [`super::range::RangeSliderWidget::amplitude_factor`]'s progress clamp,
+//!   [`super::variants::amplitude_factor`]'s ramp clamp) — trivially ordered,
+//!   never a hazard.
+//! - **Bounds are derived and explicitly ordered with `min()`/`max()`
+//!   immediately before the clamp** — [`ValueSpec::snap`] (guarded by an
+//!   early-return degenerate check, mirroring [`ValueSpec::fraction`]'s, for
+//!   `self.min`/`self.max` themselves), [`icon_dock`] (`min_center`/
+//!   `max_center` ordered before [`IconDock::center_at`]'s clamp, covering a
+//!   track laid out narrower than its icon), and
+//!   [`super::range::RangeSliderWidget::accept`] (the no-cross window per
+//!   thumb, ordered right before its clamp rather than trusting `live`/`spec`
+//!   to already be ordered — `super::range`'s `build`/`rebuild` normalizes
+//!   the adopted pair into bounds too, so this is a total-by-construction
+//!   backstop, not the only line of defense).
+//!
+//! A new clamp against a computed bound must fit one of these two shapes, not
+//! introduce a third.
 
 use std::time::Duration;
 
@@ -257,7 +287,20 @@ impl ValueSpec {
 
     /// `value` clamped into the bounds and snapped to the nearest division
     /// step, or merely clamped when continuous (`M3ESliderMath.snap`).
+    ///
+    /// Mirrors [`Self::fraction`]'s degenerate guard rather than reaching
+    /// `value.clamp(self.min, self.max)` unconditionally: `f64::clamp` panics
+    /// when `min > max` or either bound is NaN, and unlike `fraction` (which
+    /// only ever clamps against the literal `0.0..=1.0`), this method clamps
+    /// against the bounds themselves — an inverted `.range(20.0, 10.0)`
+    /// builder call or a NaN bound would otherwise crash a shipped app on the
+    /// very next drag/press (`snap` sits on both the live drag path and
+    /// `accept_value`). The degenerate case pins at `min`, the documented
+    /// contract (see the [module docs](self)'s Clamp Discipline section).
     pub(crate) fn snap(&self, value: f64) -> f64 {
+        if !(self.min.is_finite() && self.max.is_finite() && self.max > self.min) {
+            return self.min;
+        }
         let clamped = value.clamp(self.min, self.max);
         let Some(divisions) = self.divisions.filter(|d| *d > 0) else {
             return clamped;
@@ -704,12 +747,19 @@ pub(crate) fn icon_dock(input: &IconDockInput) -> IconDock {
     } else {
         input.thumb_primary - dock_offset
     };
+    // `icon_half` and `extent - icon_half` invert whenever the track is laid
+    // out narrower than the icon (`extent < icon_size`, reachable since
+    // `layout` never lower-bounds itself by `icon_size`) — `min()`/`max()`
+    // order the pair so `IconDock::center_at`'s `f64::clamp` never sees an
+    // inverted bound (see the [module docs](self)'s Clamp Discipline
+    // section). The icon just centers on the track in that squeeze instead
+    // of panicking.
     IconDock {
         resting_center,
         docked_target,
         docked,
-        min_center: icon_half,
-        max_center: input.extent - icon_half,
+        min_center: icon_half.min(input.extent - icon_half),
+        max_center: icon_half.max(input.extent - icon_half),
     }
 }
 
@@ -1102,6 +1152,30 @@ mod tests {
     }
 
     #[test]
+    fn snap_degrades_to_the_minimum_instead_of_panicking_on_a_bad_bound() {
+        // `.range(20.0, 10.0)` (`max < min`) — `f64::clamp` would panic on
+        // `min > max`; this is the exact repro from the review finding.
+        let inverted = spec(20.0, 10.0, None);
+        assert_eq!(inverted.snap(15.0), 20.0, "pins at min, never panics");
+        assert_eq!(inverted.snap(-5.0), 20.0);
+
+        // Equal bounds: not itself panic-prone for `clamp`, but shares
+        // `fraction`'s degenerate treatment (and sidesteps a `0/0` division
+        // step when discrete).
+        assert_eq!(spec(5.0, 5.0, Some(4)).snap(5.0), 5.0);
+
+        // NaN either bound — `f64::clamp` panics on a NaN min or max too.
+        assert_eq!(spec(0.0, f64::NAN, None).snap(3.0), 0.0, "NaN max");
+        assert!(
+            spec(f64::NAN, 10.0, None).snap(3.0).is_nan(),
+            "NaN min propagates rather than panicking"
+        );
+
+        // A well-formed range is unaffected by the guard.
+        assert_eq!(spec(0.0, 10.0, None).snap(4.0), 4.0);
+    }
+
+    #[test]
     fn tick_fractions_are_divisions_plus_one_marks_endpoints_included() {
         assert_eq!(
             spec(0.0, 1.0, Some(4)).tick_fractions(),
@@ -1448,6 +1522,28 @@ mod tests {
             "resting past the thumb is over the inactive segment"
         );
         assert!(dock.over_active(2.0, 4.0, false));
+    }
+
+    #[test]
+    fn a_track_narrower_than_its_icon_docks_without_panicking() {
+        // `extent` (10px) is well under `ICON_SIZE_DEFAULT` (24px), the exact
+        // shape a slider laid out inside a tight constraint produces —
+        // `icon_half` (12) would otherwise exceed `extent - icon_half` (-2),
+        // inverting `IconDock`'s clamp bounds.
+        let mut input = dock_input(4.0);
+        input.extent = 10.0;
+        let dock = icon_dock(&input);
+        assert_eq!(
+            dock.min_center, -2.0,
+            "ordered: extent - icon_half < icon_half"
+        );
+        assert_eq!(dock.max_center, 12.0);
+        // Both the resting and docked targets fall outside the (now narrow
+        // and inverted-were-it-not-ordered) window, so every dock progress
+        // pins at the same clamped edge instead of panicking.
+        assert_eq!(dock.center_at(0.0), dock.min_center);
+        assert_eq!(dock.center_at(1.0), dock.min_center);
+        assert!(dock.center_at(0.5).is_finite());
     }
 
     #[test]
