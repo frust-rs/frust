@@ -629,7 +629,11 @@ fn glow_spread_inflates_the_shadow_rect_symmetrically() {
         vec![PaintCall::Shadow {
             origin: Point::new(-5.0, -5.0),
             size: Size::new(50.0, 30.0),
-            radius: 0.0,
+            // clamped fill radius (no `.radius(...)` call) is 0; spread(5)
+            // adds on top per the CSS box-shadow spread+border-radius rule
+            // (`.glow`'s doc) — a square caster's shadow still gains rounded
+            // corners equal to the spread distance.
+            radius: 5.0,
             std_dev: 3.0,
             color: Color::BLACK,
         }]
@@ -676,6 +680,85 @@ fn glow_radius_lowers_through_the_largest_corner() {
             origin: Point::ZERO,
             size: Size::new(20.0, 20.0),
             radius: 9.0,
+            std_dev: 1.0,
+            color: Color::BLACK,
+        }]
+    );
+}
+
+#[test]
+fn glow_clamps_a_pill_radius_to_the_fill_geometry_then_adds_spread() {
+    // `.radius(999.0)` is the `RADIUS_FULL` pill/circle idiom (muxr's
+    // sessions-pane pulsing dot). kurbo clamps a `RoundedRect`'s own corner
+    // radius to half the shorter side, so the fill's true rendered corner on
+    // a 10x10 box is 5px, not 999 — the unclamped radius fed straight into
+    // `draw_shadow` was the device-confirmed defect (a thick dark ring
+    // swallowing the pulse ring beneath it).
+    let view: frust_widgets::ContainerView<()> = colored_box()
+        .radius(999.0)
+        .glow(Color::BLACK, 1.0, 2.0)
+        .size(10.0, 10.0);
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+    let rec = paint_at(&mut w, Size::new(10.0, 10.0));
+    assert_eq!(
+        rec.calls,
+        vec![PaintCall::Shadow {
+            origin: Point::new(-2.0, -2.0),
+            size: Size::new(14.0, 14.0),
+            // clamp(999, 10/2 = 5) + spread(2) = 5 + 2 = 7.
+            radius: 7.0,
+            std_dev: 1.0,
+            color: Color::BLACK,
+        }],
+        "a circular fill keeps a circular halo: the shadow radius is the \
+         fill's clamped corner (size.min_side/2) plus spread, never the raw \
+         999 pill radius"
+    );
+}
+
+#[test]
+fn glow_plain_small_radius_keeps_radius_plus_spread() {
+    let view: frust_widgets::ContainerView<()> = colored_box()
+        .radius(4.0)
+        .glow(Color::BLACK, 1.0, 3.0)
+        .size(100.0, 60.0);
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+    let rec = paint_at(&mut w, Size::new(100.0, 60.0));
+    assert_eq!(
+        rec.calls,
+        vec![PaintCall::Shadow {
+            origin: Point::new(-3.0, -3.0),
+            size: Size::new(106.0, 66.0),
+            // A radius well under the box's own half-min-side isn't clamped
+            // at all: clamp(4, 60/2 = 30) + spread(3) = 4 + 3 = 7.
+            radius: 7.0,
+            std_dev: 1.0,
+            color: Color::BLACK,
+        }]
+    );
+}
+
+#[test]
+fn glow_zero_spread_keeps_the_clamped_fill_radius() {
+    let view: frust_widgets::ContainerView<()> = colored_box()
+        .radius(999.0)
+        .glow(Color::BLACK, 1.0, 0.0)
+        .size(10.0, 10.0);
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+    let rec = paint_at(&mut w, Size::new(10.0, 10.0));
+    assert_eq!(
+        rec.calls,
+        vec![PaintCall::Shadow {
+            origin: Point::ZERO,
+            size: Size::new(10.0, 10.0),
+            // clamp(999, 10/2 = 5) + spread(0) = 5.
+            radius: 5.0,
             std_dev: 1.0,
             color: Color::BLACK,
         }]

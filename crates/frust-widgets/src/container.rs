@@ -269,18 +269,32 @@ impl<State: 'static> ContainerView<State> {
     ///   rect directly — `origin` shifts by `-spread` on each axis, `size`
     ///   grows by `2.0 * spread`, clamped to non-negative before reaching
     ///   `draw_shadow`.
+    /// - `border-radius` — a per-corner [`ContainerView::radius`] lowers
+    ///   through [`CornerRadii::largest`] for this call (`draw_shadow` takes a
+    ///   single `f64` radius, the same fallback
+    ///   [`Command::BlurredRoundedRect`](frust_scene::Command::BlurredRoundedRect)'s
+    ///   own doc names for a per-corner shadow caster) — but never
+    ///   *unclamped*: kurbo silently caps a `RoundedRect`'s own corner radius
+    ///   at half its shorter side, so the *fill's* true rendered corner is
+    ///   `radius.largest().min(size.min_side() / 2.0)`, not the raw builder
+    ///   value. Feeding an unclamped radius (e.g. a `.radius(f64::MAX)`-style
+    ///   pill/circle idiom) straight into the blurred-rect primitive on a
+    ///   small box is exactly the CSS `box-shadow` `spread` + `border-radius`
+    ///   interaction: per CSS Backgrounds and Borders 3 § 7.2.1, spreading a
+    ///   shadow grows its corner radii by the spread distance too (clamped at
+    ///   0), so this module adds `spread` on top of the *clamped* fill
+    ///   radius — `shadow_radius = clamped_fill_radius + spread.max(0.0)` —
+    ///   rather than to the raw builder value or to a radius re-clamped
+    ///   against the already-inflated shadow rect. This is what keeps a
+    ///   circular fill's halo circular instead of degenerating into the
+    ///   oversized dark ring a naive `radius.largest()` passthrough painted
+    ///   around a small pulsing-dot circle.
     /// - offset-x/offset-y are **not modeled**: `.glow` is a centered ambient
     ///   glow, not a directional drop shadow like `material::card`'s
     ///   `Elevated` variant (which offsets `origin.y` by the shadow rung's
     ///   `y_offset`). A caller wanting a directional shadow composes an
     ///   explicit `PaintScene::draw_shadow` call instead, following that
     ///   precedent.
-    ///
-    /// A per-corner [`ContainerView::radius`] lowers through
-    /// [`CornerRadii::largest`] for this call — `draw_shadow` takes a single
-    /// `f64` radius, the same fallback
-    /// [`Command::BlurredRoundedRect`](frust_scene::Command::BlurredRoundedRect)'s
-    /// own doc names for a per-corner shadow caster.
     pub fn glow(mut self, color: Color, std_dev: f64, spread: f64) -> Self {
         self.glow = Some((color, std_dev, spread));
         self
@@ -479,13 +493,21 @@ impl Widget for ContainerWidget {
                 (size.width + 2.0 * spread).max(0.0),
                 (size.height + 2.0 * spread).max(0.0),
             );
-            scene.draw_shadow(
-                shadow_origin,
-                shadow_size,
-                self.radius.largest(),
-                std_dev,
-                color,
-            );
+            // Clamp to the *fill's own* rendered corner — kurbo already caps
+            // a `RoundedRect`'s radius at half its shorter side, so an
+            // unclamped `radius.largest()` (e.g. a `.radius(999.0)`
+            // pill/circle idiom) fed straight into the blurred-rect
+            // primitive on a small box paints a dark blob far larger than
+            // the shape it's supposed to halo (see `.glow`'s doc). `spread`
+            // then adds onto this *clamped* radius, not the raw builder
+            // value and not a radius re-clamped against the already-inflated
+            // `shadow_size` — the CSS `box-shadow` spread+border-radius rule
+            // this mirrors grows the caster's own corner, so a circular fill
+            // keeps a circular halo instead of the shadow's roundness being
+            // capped by its own inflated box.
+            let clamped_fill_radius = self.radius.largest().min(size.width.min(size.height) / 2.0);
+            let shadow_radius = clamped_fill_radius + spread.max(0.0);
+            scene.draw_shadow(shadow_origin, shadow_size, shadow_radius, std_dev, color);
         }
         if let Some(fill) = self.fill {
             scene.fill_rounded_rect_radii(origin, size, self.radius, fill);
