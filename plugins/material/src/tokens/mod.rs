@@ -83,9 +83,11 @@
 
 mod color;
 mod extension;
+mod hct;
 
 pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
 pub use extension::MaterialTokens;
+pub use hct::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
 
 use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{

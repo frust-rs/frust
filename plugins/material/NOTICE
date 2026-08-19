@@ -131,6 +131,20 @@ include a readable copy of the attribution notices contained within this
 NOTICE file, excluding notices that do not pertain to the Derivative Work.
 
 ================================================================================
+Apache License, Version 2.0 — Google LLC (material-color-utilities)
+================================================================================
+
+Copyright (c) 2021 Google LLC
+  Upstream: https://github.com/material-foundation/material-color-utilities
+  Version: 0.11.1 (the Dart `material_color_utilities` package Flutter ships)
+  Ported to Rust for: the HCT seed-color engine (src/tokens/hct.rs) — sRGB/XYZ
+                      /L* conversions, CAM16 viewing conditions, the CAM16
+                      forward transform, the HCT solver, tonal and core
+                      palettes, and the Material 3 tone-role table
+  License: Apache License, Version 2.0 — same terms as the section above, whose
+           license text and Section 4(d) attribution requirement apply here too
+
+================================================================================
 OFL 1.1 License — Roboto Flex Font
 ================================================================================
 
