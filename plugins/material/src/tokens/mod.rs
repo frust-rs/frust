@@ -84,15 +84,17 @@
 mod color;
 mod extension;
 mod hct;
+mod motion;
 
 pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
 pub use extension::MaterialTokens;
 pub use hct::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
+pub use motion::{MaterialMotion, MaterialSpring};
 
 use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation, ElevationLevel,
-    GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
+    Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassScale,
+    MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
     StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
@@ -384,76 +386,76 @@ pub const fn elevation() -> Elevation {
 
 // ---- Motion ---------------------------------------------------------------
 
-/// The Material 3 Expressive baseline motion scheme: six spring presets.
+/// The Material 3 Expressive baseline motion scheme: six spring presets
+/// (of [`MaterialMotion`]/[`MaterialSpring`]'s full 34-token M3E table — see
+/// their own module doc for the source citation and the Dart → Rust naming
+/// map).
 ///
-/// Source: material-components-android `docs/theming/Motion.md` (M3
-/// Expressive, verified 2026-07-17): fastSpatial (0.9, 1400), fastEffects
-/// (1.0, 3800), defaultSpatial (0.9, 700), defaultEffects (1.0, 1600),
-/// slowSpatial (0.9, 300), slowEffects (1.0, 800) — `(damping_ratio,
-/// stiffness)`, mass 1 for every preset. "Effects" springs (opacity/color)
-/// are critically damped (`damping_ratio: 1.0`) by design — no bounce;
-/// "spatial" springs (position/size) are `0.9`, allowing a small overshoot.
+/// Spring slots take their values from six of [`MaterialSpring`]'s 11
+/// presets: `fast_spatial`/`default_spatial`/`slow_spatial` from
+/// [`MaterialSpring::SPATIAL_FAST`]/[`SPATIAL_DEFAULT`](MaterialSpring::SPATIAL_DEFAULT)/[`SPATIAL_SLOW`](MaterialSpring::SPATIAL_SLOW),
+/// `fast_effects`/`default_effects`/`slow_effects` from
+/// [`MaterialSpring::EFFECTS_FAST`]/[`EFFECTS_DEFAULT`](MaterialSpring::EFFECTS_DEFAULT)/[`EFFECTS_SLOW`](MaterialSpring::EFFECTS_SLOW).
+/// "Effects" springs (opacity/color) are critically damped
+/// (`damping_ratio: 1.0`) by design — no bounce; "spatial" springs
+/// (position/size) are `0.9`, allowing a small overshoot. The remaining five
+/// [`MaterialSpring`] presets have no slot here and stay reachable directly.
 ///
-/// Duration/easing tokens are sourced from the same
-/// `material-components-android` `docs/theming/Motion.md`, which publishes a
-/// 16-value duration scale in four tiers — Short (50, 100, 150, 200ms),
-/// Medium (250, 300, 350, 400ms), Long (450, 500, 550, 600ms), Extra Long
-/// (700–1000ms) — plus the easing curves below. Glyph's five-slot
-/// `MotionDurations` vocabulary maps onto that scale as: `instant` → Short1
-/// (50ms), `fast` → Short3 (150ms), `base` → Medium2 (300ms, the most
-/// commonly-cited M3 "default" transition duration), `slow` → Long2 (500ms),
-/// `deliberate` → the Extra Long tier's floor (700ms).
+/// Glyph's five-slot `MotionDurations` vocabulary maps onto
+/// [`MaterialMotion`]'s 16-value duration scale as: `instant` →
+/// [`MaterialMotion::SHORT_1`] (50ms), `fast` → [`MaterialMotion::SHORT_3`]
+/// (150ms), `base` → [`MaterialMotion::MEDIUM_2`] (300ms, the most
+/// commonly-cited M3 "default" transition duration), `slow` →
+/// [`MaterialMotion::LONG_2`] (500ms), `deliberate` →
+/// [`MaterialMotion::EXTRA_LONG_1`] (700ms, the Extra Long tier's floor).
 ///
-/// `EasingSet`'s three slots map onto M3's own easing-curve tokens (Jetpack
-/// Compose's `androidx.compose.material3.tokens.MotionTokens` control
-/// points, same source): `spatial` → Emphasized Decelerate
-/// (`cubic-bezier(0.05, 0.7, 0.1, 1.0)`, M3's curve for entering/spatial
-/// transitions — its steep initial deceleration reads as a slight
-/// overshoot-adjacent settle), `effects` → Standard
-/// (`cubic-bezier(0.2, 0.0, 0.0, 1.0)`, M3's curve for opacity/color fades —
-/// never overshoots), `exit` → Standard Accelerate
-/// (`cubic-bezier(0.3, 0.0, 1.0, 1.0)`, M3's curve for elements leaving the
-/// screen).
+/// `EasingSet`'s three slots map onto three of [`MaterialMotion`]'s 7
+/// easings: `spatial` → [`MaterialMotion::EMPHASIZED_DECELERATE`] (M3's
+/// curve for entering/spatial transitions — its steep initial deceleration
+/// reads as a slight overshoot-adjacent settle), `effects` →
+/// [`MaterialMotion::STANDARD`] (M3's curve for opacity/color fades — never
+/// overshoots), `exit` → [`MaterialMotion::STANDARD_ACCELERATE`] (M3's curve
+/// for elements leaving the screen).
 ///
 /// `cosmetic_loop_rate` is this design system's own authored value — 30Hz,
 /// the same cap every built-in baseline declares.
 pub const fn motion_scheme() -> MotionScheme {
     MotionScheme {
         fast_spatial: MotionSpring {
-            damping_ratio: 0.9,
-            stiffness: 1400.0,
+            damping_ratio: MaterialSpring::SPATIAL_FAST.damping_ratio,
+            stiffness: MaterialSpring::SPATIAL_FAST.stiffness,
         },
         fast_effects: MotionSpring {
-            damping_ratio: 1.0,
-            stiffness: 3800.0,
+            damping_ratio: MaterialSpring::EFFECTS_FAST.damping_ratio,
+            stiffness: MaterialSpring::EFFECTS_FAST.stiffness,
         },
         default_spatial: MotionSpring {
-            damping_ratio: 0.9,
-            stiffness: 700.0,
+            damping_ratio: MaterialSpring::SPATIAL_DEFAULT.damping_ratio,
+            stiffness: MaterialSpring::SPATIAL_DEFAULT.stiffness,
         },
         default_effects: MotionSpring {
-            damping_ratio: 1.0,
-            stiffness: 1600.0,
+            damping_ratio: MaterialSpring::EFFECTS_DEFAULT.damping_ratio,
+            stiffness: MaterialSpring::EFFECTS_DEFAULT.stiffness,
         },
         slow_spatial: MotionSpring {
-            damping_ratio: 0.9,
-            stiffness: 300.0,
+            damping_ratio: MaterialSpring::SPATIAL_SLOW.damping_ratio,
+            stiffness: MaterialSpring::SPATIAL_SLOW.stiffness,
         },
         slow_effects: MotionSpring {
-            damping_ratio: 1.0,
-            stiffness: 800.0,
+            damping_ratio: MaterialSpring::EFFECTS_SLOW.damping_ratio,
+            stiffness: MaterialSpring::EFFECTS_SLOW.stiffness,
         },
         durations: MotionDurations {
-            instant: 50.0,
-            fast: 150.0,
-            base: 300.0,
-            slow: 500.0,
-            deliberate: 700.0,
+            instant: MaterialMotion::SHORT_1.as_millis() as f64,
+            fast: MaterialMotion::SHORT_3.as_millis() as f64,
+            base: MaterialMotion::MEDIUM_2.as_millis() as f64,
+            slow: MaterialMotion::LONG_2.as_millis() as f64,
+            deliberate: MaterialMotion::EXTRA_LONG_1.as_millis() as f64,
         },
         easing: EasingSet {
-            spatial: Curve::Cubic(0.05, 0.7, 0.1, 1.0),
-            effects: Curve::Cubic(0.2, 0.0, 0.0, 1.0),
-            exit: Curve::Cubic(0.3, 0.0, 1.0, 1.0),
+            spatial: MaterialMotion::EMPHASIZED_DECELERATE,
+            effects: MaterialMotion::STANDARD,
+            exit: MaterialMotion::STANDARD_ACCELERATE,
         },
         reduce_motion: false,
         cosmetic_loop_rate: CosmeticLoopRate::new(30.0),

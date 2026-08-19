@@ -117,8 +117,9 @@ pub use toolbar::{
 
 pub use tokens::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
 pub use tokens::{
-    MaterialSemanticColors, MaterialTokens, baseline, color_scheme_dark, color_scheme_light,
-    elevation, motion_scheme, shape_scale, status_palette, type_scale,
+    MaterialMotion, MaterialSemanticColors, MaterialSpring, MaterialTokens, baseline,
+    color_scheme_dark, color_scheme_light, elevation, motion_scheme, shape_scale, status_palette,
+    type_scale,
 };
 
 /// Make Material 3 this app's starting design system.
