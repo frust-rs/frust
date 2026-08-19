@@ -11,6 +11,15 @@
 //! `layout` and grows by it — the minimal stand-in for
 //! `frust_glyph::appbar::AppBarWidget`'s self-sizing contract, which
 //! R-B4-inset (`scaffold.rs`'s module docs) is written against.
+//!
+//! Every fixture's `rebuild` is diff-aware (compares `prev` against `self`,
+//! mirroring `frust_widgets::test_support::Leaf`'s own contract) rather than
+//! unconditionally returning `ChangeFlags::LAYOUT` — the single-build tests in
+//! this file never invoke `rebuild` at all (their one pass is always the
+//! unconditional first-build arm), but the second-rebuild coverage further
+//! down does, and an unconditionally-dirty fixture would mask whatever
+//! `ScaffoldWidget`'s own slot reconciliation (`scaffold.rs`'s private
+//! `rebuild_optional_slot`) actually reports.
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, InspectNode, LayoutCtx, PaintCtx, PaintScene,
@@ -40,9 +49,13 @@ impl View<()> for Body {
             intrinsic: self.intrinsic,
         }
     }
-    fn rebuild(&self, _prev: &Self, el: &mut BodyWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
-        el.intrinsic = self.intrinsic;
-        ChangeFlags::LAYOUT
+    fn rebuild(&self, prev: &Self, el: &mut BodyWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        if prev.intrinsic != self.intrinsic {
+            el.intrinsic = self.intrinsic;
+            ChangeFlags::LAYOUT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 impl Widget for BodyWidget {
@@ -71,9 +84,13 @@ impl View<()> for Bar {
             height: self.height,
         }
     }
-    fn rebuild(&self, _prev: &Self, el: &mut BarWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
-        el.height = self.height;
-        ChangeFlags::LAYOUT
+    fn rebuild(&self, prev: &Self, el: &mut BarWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        if prev.height != self.height {
+            el.height = self.height;
+            ChangeFlags::LAYOUT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 impl Widget for BarWidget {
@@ -107,9 +124,13 @@ impl View<()> for Fab {
             intrinsic: self.intrinsic,
         }
     }
-    fn rebuild(&self, _prev: &Self, el: &mut FabWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
-        el.intrinsic = self.intrinsic;
-        ChangeFlags::LAYOUT
+    fn rebuild(&self, prev: &Self, el: &mut FabWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        if prev.intrinsic != self.intrinsic {
+            el.intrinsic = self.intrinsic;
+            ChangeFlags::LAYOUT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 impl Widget for FabWidget {
@@ -120,7 +141,7 @@ impl Widget for FabWidget {
 }
 
 /// Which window edge [`SelfInsetBar`] reads.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum InsetEdge {
     Top,
     Bottom,
@@ -155,13 +176,17 @@ impl View<()> for SelfInsetBar {
     }
     fn rebuild(
         &self,
-        _prev: &Self,
+        prev: &Self,
         el: &mut SelfInsetBarWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        el.content_height = self.content_height;
-        el.edge = self.edge;
-        ChangeFlags::LAYOUT
+        if prev.content_height != self.content_height || prev.edge != self.edge {
+            el.content_height = self.content_height;
+            el.edge = self.edge;
+            ChangeFlags::LAYOUT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 impl Widget for SelfInsetBarWidget {
@@ -196,6 +221,34 @@ fn inspect<V: View<()>>(
     root.set_insets(insets);
     root.layout(window);
     root.inspect()
+}
+
+/// Like [`inspect`], but rebuilds *twice* against `first` then `second` — each
+/// a fresh view the way a real `app_logic` re-runs every frame — running a
+/// REAL second [`RenderRoot::layout`] pass in between, rather than the single
+/// build-then-layout pass every test above exercises. Returns both inspect
+/// snapshots plus the [`ChangeFlags`] the **second** rebuild reported (the
+/// first pass's flags are always the unconditional `LAYOUT | PAINT` of a first
+/// build, so only the second pass's flags say anything about `ScaffoldWidget`'s
+/// own slot reconciliation — the surface this file's second-rebuild tests
+/// exist to cover, `scaffold.rs`'s `rebuild_optional_slot`).
+fn two_pass<V: View<()>>(
+    mut first: impl FnMut(&mut ()) -> V,
+    mut second: impl FnMut(&mut ()) -> V,
+    window: Size,
+    insets: WindowInsets,
+) -> (Vec<InspectNode>, Vec<InspectNode>, ChangeFlags) {
+    let mut root: RenderRoot<(), V> = RenderRoot::new();
+    let mut state = ();
+    root.rebuild(&mut first, &mut state);
+    root.set_insets(insets);
+    root.layout(window);
+    let before = root.inspect();
+
+    let flags = root.rebuild(&mut second, &mut state);
+    root.layout(window);
+    let after = root.inspect();
+    (before, after, flags)
 }
 
 /// Each node's bare type name (no module path/generics) — `visit_children.rs`'s
@@ -404,5 +457,228 @@ fn bottom_bar_self_insets_and_the_fab_floats_above_it_without_double_consuming()
         fab_node.bounds.origin().y,
         400.0 - bar_height - 16.0 - 56.0,
         "the fab must not double-consume the bottom inset once a bottom_bar has self-inset for it"
+    );
+}
+
+// -- Second-rebuild slot reconciliation ---------------------------------------
+//
+// Every test above builds and lays out exactly once. The three optional slots
+// (`app_bar`/`bottom_bar`/`fab`) are reconciled by `scaffold.rs`'s private
+// `rebuild_optional_slot` — the route-derived-chrome pattern `app_bar_opt`/
+// `bottom_bar_opt` exist for — which a single build+layout pass never
+// exercises at all (the first rebuild always takes the unconditional
+// first-build arm). These run a REAL second rebuild, with a REAL second
+// layout pass, through [`two_pass`].
+
+#[test]
+fn app_bar_removed_on_rebuild_expands_the_body_to_full_height() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
+        },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    let body_before = find(&before, "BodyWidget");
+    assert_eq!(body_before.bounds.origin(), Point::new(0.0, 56.0));
+    assert_eq!(body_before.bounds.height(), 400.0 - 56.0);
+
+    assert_eq!(
+        short_names(&after),
+        vec!["ScaffoldWidget", "BodyWidget"],
+        "the app_bar node must be torn down, not merely emptied"
+    );
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(body_after.bounds.origin(), Point::ZERO);
+    assert_eq!(body_after.bounds.height(), 400.0);
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn app_bar_added_on_rebuild_shrinks_the_body_below_it() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
+        },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    assert_eq!(short_names(&before), vec!["ScaffoldWidget", "BodyWidget"]);
+    let body_before = find(&before, "BodyWidget");
+    assert_eq!(body_before.bounds.origin(), Point::ZERO);
+    assert_eq!(body_before.bounds.height(), 400.0);
+
+    let bar_after = find(&after, "BarWidget");
+    assert_eq!(bar_after.bounds.origin(), Point::ZERO);
+    assert_eq!(bar_after.bounds.height(), 56.0);
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(body_after.bounds.origin(), Point::new(0.0, 56.0));
+    assert_eq!(body_after.bounds.height(), 400.0 - 56.0);
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn bottom_bar_removed_on_rebuild_expands_the_body_to_full_height() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
+        },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    let body_before = find(&before, "BodyWidget");
+    assert_eq!(body_before.bounds.origin(), Point::ZERO);
+    assert_eq!(body_before.bounds.height(), 400.0 - 48.0);
+
+    assert_eq!(
+        short_names(&after),
+        vec!["ScaffoldWidget", "BodyWidget"],
+        "the bottom_bar node must be torn down, not merely emptied"
+    );
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(body_after.bounds.origin(), Point::ZERO);
+    assert_eq!(body_after.bounds.height(), 400.0);
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn bottom_bar_added_on_rebuild_shrinks_the_body_above_it() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
+        },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    let body_before = find(&before, "BodyWidget");
+    assert_eq!(body_before.bounds.height(), 400.0);
+
+    let bar_after = find(&after, "BarWidget");
+    assert_eq!(bar_after.bounds.height(), 48.0);
+    assert_eq!(bar_after.bounds.origin(), Point::new(0.0, 400.0 - 48.0));
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(body_after.bounds.origin(), Point::ZERO);
+    assert_eq!(body_after.bounds.height(), 400.0 - 48.0);
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn fab_appearing_on_rebuild_positions_the_fab_without_disturbing_the_body() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).fab(any(fab_leaf(56.0, 56.0)))
+        },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    assert_eq!(short_names(&before), vec!["ScaffoldWidget", "BodyWidget"]);
+    let body_before = find(&before, "BodyWidget");
+
+    assert_eq!(
+        short_names(&after),
+        vec!["ScaffoldWidget", "BodyWidget", "FabWidget"]
+    );
+    let body_after = find(&after, "BodyWidget");
+    let fab_after = find(&after, "FabWidget");
+    assert_eq!(
+        body_before.bounds, body_after.bounds,
+        "the body must not move or resize when the fab appears"
+    );
+    assert_eq!(
+        fab_after.bounds.origin(),
+        Point::new(300.0 - 16.0 - 56.0, 400.0 - 16.0 - 56.0)
+    );
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn fab_disappearing_on_rebuild_leaves_the_body_undisturbed() {
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).fab(any(fab_leaf(56.0, 56.0)))
+        },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)) },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    assert_eq!(
+        short_names(&before),
+        vec!["ScaffoldWidget", "BodyWidget", "FabWidget"]
+    );
+    let body_before = find(&before, "BodyWidget");
+
+    assert_eq!(
+        short_names(&after),
+        vec!["ScaffoldWidget", "BodyWidget"],
+        "the fab node must be torn down, not merely emptied"
+    );
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(
+        body_before.bounds, body_after.bounds,
+        "the body must not move or resize when the fab disappears"
+    );
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn app_bar_content_swap_with_a_different_height_relayouts_the_body() {
+    // Same slot, same view *type* (`Bar`), different `height` — the reconciler
+    // takes the in-place-rebuild arm (`AnyView`'s type stays the same), so this
+    // exercises `rebuild_optional_slot`'s `(Some, Some, Some(pod))` arm, not a
+    // teardown/build swap.
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(any(bar(56.0))) },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(any(bar(80.0))) },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    let bar_before = find(&before, "BarWidget");
+    assert_eq!(bar_before.bounds.height(), 56.0);
+    let body_before = find(&before, "BodyWidget");
+    assert_eq!(body_before.bounds.origin(), Point::new(0.0, 56.0));
+
+    let bar_after = find(&after, "BarWidget");
+    assert_eq!(bar_after.bounds.height(), 80.0);
+    let body_after = find(&after, "BodyWidget");
+    assert_eq!(body_after.bounds.origin(), Point::new(0.0, 80.0));
+    assert_eq!(body_after.bounds.height(), 400.0 - 80.0);
+    assert!(flags.needs_layout());
+}
+
+#[test]
+fn rebuild_with_unchanged_slots_reports_no_change_flags() {
+    // All three optional slots present, and every field identical between the
+    // two passes — the skip path REVIEW_FOCUS calls out for this hot-spot
+    // class: a rebuild that changes nothing must not report LAYOUT/PAINT, or a
+    // shell driven off `RenderRoot::has_pending_change_flags`/
+    // `take_change_flags` would relayout every frame for nothing.
+    let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(50.0, 50.0))
+                .app_bar_opt(Some(any(bar(56.0))))
+                .bottom_bar_opt(Some(any(bar(48.0))))
+                .fab(any(fab_leaf(56.0, 56.0)))
+        },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(50.0, 50.0))
+                .app_bar_opt(Some(any(bar(56.0))))
+                .bottom_bar_opt(Some(any(bar(48.0))))
+                .fab(any(fab_leaf(56.0, 56.0)))
+        },
+        Size::new(300.0, 400.0),
+        WindowInsets::default(),
+    );
+    assert_eq!(
+        before, after,
+        "no node should move, resize, appear, or disappear when every slot is unchanged"
+    );
+    assert!(
+        flags.is_empty(),
+        "a rebuild with unchanged slots must report no ChangeFlags at all, got {flags:?}"
     );
 }
