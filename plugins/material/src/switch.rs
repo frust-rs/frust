@@ -549,6 +549,14 @@ impl<State: 'static> View<State> for SwitchView<State> {
         }
         if prev.enabled != self.enabled {
             element.enabled = self.enabled;
+            if !self.enabled {
+                // A switch disabled mid-press keeps neither the press nor
+                // the capture it was holding (mirrors
+                // `button::ButtonWidget::rebuild`'s identical clear).
+                element.pressed = false;
+                element.captured = false;
+                element.state_layer.set_pressed(false);
+            }
             flags |= ChangeFlags::PAINT;
         }
         if prev.state_layer_size != self.state_layer_size {
@@ -712,7 +720,12 @@ impl Widget for SwitchWidget {
                 if !self.captured {
                     return EventResult::Ignored;
                 }
-                if inside(p.position, ctx.size()) {
+                // Belt-and-braces: `rebuild` already clears `captured` the
+                // moment `enabled` goes false (see the module docs' `enabled`
+                // section), so this only matters if a captured switch is
+                // still `!enabled` some other way — but a disabled control
+                // must fire neither the haptic nor the toggle regardless.
+                if self.enabled && inside(p.position, ctx.size()) {
                     // Same call order as the reference's `_wrapTap`: haptic
                     // first, then the tap's own effect. Fires `None` — see
                     // the module docs' Haptics section.
@@ -912,6 +925,50 @@ mod tests {
             "both flings only start lazily in paint, once a theme is in scope"
         );
         assert!(flags.needs_paint());
+    }
+
+    #[test]
+    fn disabling_mid_press_clears_the_press_and_the_capture() {
+        let mut counter = 0u64;
+        let prev = switch::<ToggleState, _>(false, |_s, _v| {});
+        let mut w = View::<ToggleState>::build(&prev, &mut BuildCtx::new(&mut counter));
+        w.pressed = true;
+        w.captured = true;
+        w.state_layer.set_pressed(true);
+
+        let next = switch::<ToggleState, _>(false, |_s, _v| {}).enabled(false);
+        let flags =
+            View::<ToggleState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(!w.pressed);
+        assert!(!w.captured);
+        assert_eq!(
+            w.state_layer.opacity(),
+            0.0,
+            "the state-layer's own pressed flag clears too"
+        );
+        assert!(flags.needs_paint());
+    }
+
+    #[test]
+    fn disabled_up_fires_no_callback_even_if_still_captured() {
+        // Belt-and-braces coverage for the `Up` arm's own `self.enabled`
+        // guard, isolated from `rebuild`'s clear above: even a switch that
+        // is somehow still `captured` while `!enabled` must not report a
+        // toggle on `Up`. Not independently instrumented for the haptic
+        // (both the haptic fire and the toggle callback sit behind this
+        // same guard — installing a recording hook here would race
+        // `crate::interaction`'s own first-set-wins coverage; see
+        // `SliderView::haptic_sink`'s doc for the identical constraint).
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 12.0));
+        assert!(w.captured);
+        w.enabled = false;
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 12.0));
+        assert_eq!(
+            state.toggles, 0,
+            "a disabled switch must not report a toggle on Up"
+        );
     }
 
     /// Records each rounded rect's `(origin, size, radius, color)` in paint order:

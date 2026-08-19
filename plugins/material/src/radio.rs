@@ -406,6 +406,14 @@ impl<State: 'static, T: PartialEq + Clone + 'static> View<State> for RadioView<S
         let enabled = self.on_changed.is_some();
         if element.enabled != enabled {
             element.enabled = enabled;
+            if !enabled {
+                // A radio disabled mid-press keeps neither the press nor the
+                // capture it was holding (mirrors
+                // `button::ButtonWidget::rebuild`'s identical clear).
+                element.pressed = false;
+                element.captured = false;
+                element.state_layer.set_pressed(false);
+            }
             flags |= ChangeFlags::PAINT;
         }
 
@@ -488,6 +496,12 @@ impl Widget for RadioWidget {
         let center_local = Point::new(HIT_SIZE / 2.0, cy);
         let center_abs = Point::new(o.x + HIT_SIZE / 2.0, o.y + cy);
 
+        // The pod's hover link is authoritative; re-synced every paint — the
+        // pointer's departure never reaches `event`, so this is what drops
+        // the hover tint the frame it leaves (mirrors `checkbox`/`list_item`'s
+        // identical self-correction).
+        self.state_layer.set_hovered(ctx.is_hovered());
+
         self.state_layer.paint(
             ctx,
             scene,
@@ -537,6 +551,17 @@ impl Widget for RadioWidget {
             }
             PointerPhase::Move => {
                 if !self.captured {
+                    // No capture: this is the hover pass — claim whenever
+                    // the pointer is inside, mirroring `list_item`'s
+                    // reference hover-claim implementation (see the module
+                    // docs).
+                    let over = inside(p.position, ctx.size());
+                    if over {
+                        ctx.claim_hover();
+                    }
+                    if self.state_layer.set_hovered(over) {
+                        ctx.request_redraw();
+                    }
                     return EventResult::Ignored;
                 }
                 let inside_now = inside(p.position, ctx.size());
@@ -734,7 +759,46 @@ mod tests {
         let result = w.event(&mut ctx, &ev(PointerPhase::Move, 5.0, 12.0));
         assert!(matches!(result, EventResult::Ignored));
         assert!(!w.pressed);
-        assert!(!ctx.needs_redraw());
+        assert_eq!(state.changes, 0);
+    }
+
+    #[test]
+    fn hover_move_inside_claims_hover_and_requests_redraw_once() {
+        let mut w = built(Freq::Weekly, Freq::Daily, true);
+        let mut state = GroupState {
+            selected: Freq::Daily,
+            changes: 0,
+        };
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(HIT_SIZE, HIT_SIZE));
+        w.event(&mut ctx, &ev(PointerPhase::Move, 5.0, 12.0));
+        assert!(ctx.needs_redraw(), "hover gain must request a redraw");
+        assert_eq!(w.state_layer.opacity(), crate::interaction::HOVER_OPACITY);
+    }
+
+    #[test]
+    fn paint_self_corrects_hover_off_when_the_pod_link_is_gone() {
+        let mut w = built(Freq::Weekly, Freq::Daily, true);
+        let mut state = GroupState {
+            selected: Freq::Daily,
+            changes: 0,
+        };
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(HIT_SIZE, HIT_SIZE));
+        w.event(&mut ctx, &ev(PointerPhase::Move, 5.0, 12.0));
+        assert!(w.state_layer.opacity() > 0.0, "hover claimed");
+
+        // `PaintCtx::is_hovered` reads false with no pod link recorded — the
+        // pointer left with no event ever telling this widget so; paint is
+        // what drops the stale flag.
+        let mut paint_ctx = PaintCtx::new(Point::ZERO, Size::new(HIT_SIZE, HIT_SIZE));
+        let mut rec = Recorder::default();
+        w.paint(&mut paint_ctx, &mut rec);
+        assert_eq!(
+            w.state_layer.opacity(),
+            0.0,
+            "paint self-corrected the flag"
+        );
     }
 
     #[test]
@@ -990,6 +1054,28 @@ mod tests {
         let flags =
             View::<GroupState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
         assert!(w.enabled);
+        assert!(flags.needs_paint());
+    }
+
+    #[test]
+    fn disabling_mid_press_clears_the_press_and_the_capture() {
+        let mut counter = 0u64;
+        let prev = radio::<GroupState, Freq>(Freq::Weekly, Freq::Daily).on_changed(on_changed);
+        let mut w = View::<GroupState>::build(&prev, &mut BuildCtx::new(&mut counter));
+        w.pressed = true;
+        w.captured = true;
+        w.state_layer.set_pressed(true);
+
+        let next = radio::<GroupState, Freq>(Freq::Weekly, Freq::Daily);
+        let flags =
+            View::<GroupState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(!w.pressed);
+        assert!(!w.captured);
+        assert_eq!(
+            w.state_layer.opacity(),
+            0.0,
+            "the state-layer's own pressed flag clears too"
+        );
         assert!(flags.needs_paint());
     }
 
