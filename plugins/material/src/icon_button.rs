@@ -8,9 +8,11 @@
 // port paints the surface directly and constrains/lays out its icon child
 // the same way `super::button` does its own icon child — no ambient
 // recolor, see the module docs' Icon color section. The press/hover shape
-// morph mirrors `crate::button::motion::RadiusPaddingMotion`'s mechanism as
-// a parallel, radius-only port rather than a cross-module import — see this
-// module's `motion` section for why.
+// morph reuses `crate::button::motion::RadiusPaddingMotion` directly (its
+// padding channel pinned to zero — every icon-button call site passes zero
+// `internalLeft/Right/Top/Bottom` to the Dart primitive too) — see this
+// module's `RadiusPaddingMotion reuse` section for why this is now a direct
+// import rather than the parallel port it started as.
 
 //! The Material 3 Expressive **icon button**: 4 variants × 5 sizes × round/
 //! square × 3 widths, with toggle (selected-icon swap), a badge slot, and
@@ -107,36 +109,34 @@
 //! this module keeps every radius a literal per-size constant rather than a
 //! partial, size-inconsistent theme resolution.
 //!
-//! The morph itself is [`RadiusMorph`] — this module's own `motion`
-//! section — flung along the same named spring
+//! The morph itself is [`crate::button::motion::RadiusPaddingMotion`],
+//! reused directly from [`mod@crate::button`] — see this module's
+//! `RadiusPaddingMotion reuse` section — flung along the same named spring
 //! [`mod@crate::button::motion`] uses,
 //! [`crate::tokens::MaterialSpring::EXPRESSIVE_SPATIAL_PRESS`] (380/0.55).
 //!
-//! # `RadiusMorph`: a parallel port of `button::motion::RadiusPaddingMotion`
+//! # `RadiusPaddingMotion` reuse
 //!
 //! [`mod@crate::button`]'s `RadiusPaddingMotion` is the reference's shared
 //! morph primitive (`M3ERadiusAndPaddingMotion`), used by both the Dart
 //! button *and* icon-button families via one imported file
 //! (`m3e_icon_buttons.dart:14`). This crate's own port of that primitive
-//! lives at `button::motion::RadiusPaddingMotion` — `pub(crate)`, but
-//! declared inside a **private** `mod motion;` in `button/mod.rs`, so it is
-//! visible only within `crate::button` and its descendants, not from a
-//! sibling module. Widening that declaration's visibility would mean
-//! editing `button/mod.rs`, a file this task's own scope holds read-only
-//! (`button/` is a parallel wave task's file). [`RadiusMorph`] is therefore
-//! this module's own copy of the *mechanism* — the same named spring, the
-//! same retarget-from-current-value continuity, the same dead-band
-//! tolerance and overshoot clamp — carrying only the radius channel: every
-//! icon-button width/size/variant passes `internalLeft/Right/Top/Bottom: 0`
-//! to `M3ERadiusAndPaddingMotion` (`m3e_icon_button_build.dart:191`-`:194`),
-//! so the padding channel the button family needs never actually moves here
-//! and this port omits it entirely. `press_spring_matches_expressive_spatial_press`
-//! (this module's tests) is the tripwire keeping the two ports' spring
-//! constant identical, the same role `button::motion`'s own tripwire plays
-//! there. This is the crate's established shape for "two widgets share a
-//! reference mechanism but not a Rust module" — [`mod@crate::fab`] and
-//! [`mod@crate::button_group`] each carry their own `PRESS_SPRING` constant
-//! rather than reaching into `button::motion` too, for the same reason.
+//! lives at `button::motion::RadiusPaddingMotion`, `pub(crate)` and now
+//! declared inside a `pub(crate) mod motion;` in `button/mod.rs`, so this
+//! sibling module imports it directly rather than carrying a parallel copy.
+//! An earlier version of this module *did* carry a copy (`RadiusMorph`) —
+//! `button/mod.rs`'s `mod motion;` was still private then, and a same-wave
+//! task held `button/` read-only, so widening it was out of reach; a later
+//! task (owning `button/` for real) closed that gap by widening the
+//! declaration and doing this swap. Every icon-button width/size/variant
+//! passes `internalLeft/Right/Top/Bottom: 0` to `M3ERadiusAndPaddingMotion`
+//! (`m3e_icon_button_build.dart:191`-`:194`), so the padding channel the
+//! button family needs never actually moves here — this module pins it to
+//! `ContentPadding::symmetric(0.0)` on every retarget and never reads
+//! `RadiusPaddingMotion::padding` back. `press_spring_matches_expressive_spatial_press`
+//! (this module's tests) still pins the spring constant this module flings
+//! along against `crate::button::motion::PRESS_SPRING`, now the *same*
+//! constant both families share rather than two copies kept equal by hand.
 //!
 //! # Toggle
 //!
@@ -204,18 +204,18 @@
 //! and its Module Attribution Header Convention.
 
 use std::rc::Rc;
-use std::time::Duration;
 
+use frust::Theme;
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, SemanticsCtx,
     View, Widget,
 };
-use frust::{AnimationController, FrameTime, SpringDesc, Theme};
 use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::button::motion::{ContentPadding, RadiusPaddingMotion};
 use crate::interaction::{HapticSignal, InteractionState, MaterialHaptics};
 use crate::press::presses;
 
@@ -517,107 +517,17 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 
 // ---- The press/hover shape morph -------------------------------------------
 //
-// See the module docs' `RadiusMorph` section for why this is a parallel,
-// radius-only port of `button::motion::RadiusPaddingMotion` rather than a
-// cross-module import.
+// See the module docs' `RadiusPaddingMotion reuse` section: the morph itself
+// is `crate::button::motion::RadiusPaddingMotion`, imported directly rather
+// than reimplemented — this module supplies only the zero-padding target
+// every retarget pins ([`ZERO_PADDING`]) and never reads the padding channel
+// back.
 
-/// The press morph's spring: stiffness 380, damping ratio 0.55, mass 1 —
-/// identical to [`mod@crate::button::motion`]'s `PRESS_SPRING`
-/// (`crate::tokens::MaterialSpring::EXPRESSIVE_SPATIAL_PRESS`).
-const PRESS_SPRING: SpringDesc = SpringDesc {
-    mass: 1.0,
-    stiffness: 380.0,
-    damping_ratio: 0.55,
-};
-
-/// Nominal period seeding the morph [`AnimationController`]'s clock — the
-/// motion is spring-driven via `fling`, so this only backs construction.
-const PRESS_ANIM_PERIOD: Duration = Duration::from_millis(300);
-
-/// Launch velocity (progress-units/sec) handed to each leg's `fling`.
-const FLING_VELOCITY: f64 = 4.0;
-
-/// The dead band (logical px) a new target must exceed before it starts a
-/// new spring leg (mirrors `button::motion::RETARGET_TOLERANCE`).
-const RETARGET_TOLERANCE: f64 = 0.1;
-
-/// How far past its target the spring's progress is allowed to read
-/// (mirrors `button::motion::OVERSHOOT_LIMIT`).
-const OVERSHOOT_LIMIT: f64 = 1.5;
-
-fn lerp(from: f64, to: f64, t: f64) -> f64 {
-    from + (to - from) * t
-}
-
-/// The radius-only press/hover morph a [`IconButtonWidget`] owns.
-#[derive(Debug)]
-struct RadiusMorph {
-    from: f64,
-    to: f64,
-    anim: AnimationController,
-    seeded: bool,
-}
-
-impl RadiusMorph {
-    fn new() -> Self {
-        Self {
-            from: 0.0,
-            to: 0.0,
-            anim: AnimationController::new(PRESS_ANIM_PERIOD),
-            seeded: false,
-        }
-    }
-
-    /// Aim the morph at `radius`, returning whether this started a new
-    /// spring leg. See `button::motion::RadiusPaddingMotion::retarget`'s
-    /// doc for the three-outcome shape (snap / dead-band-ignore / spring)
-    /// this mirrors exactly.
-    fn retarget(&mut self, radius: f64) -> bool {
-        if !self.seeded {
-            self.snap_to(radius);
-            return false;
-        }
-        if (self.to - radius).abs() <= RETARGET_TOLERANCE {
-            return false;
-        }
-        self.from = self.radius();
-        self.to = radius;
-        self.anim = AnimationController::new(PRESS_ANIM_PERIOD);
-        self.anim.fling(FLING_VELOCITY, PRESS_SPRING);
-        true
-    }
-
-    /// Pin the morph to `radius` with no motion, marking it seeded.
-    fn snap_to(&mut self, radius: f64) {
-        self.from = radius;
-        self.to = radius;
-        self.anim = AnimationController::new(PRESS_ANIM_PERIOD);
-        self.seeded = true;
-    }
-
-    fn advance(&mut self, now: FrameTime) -> bool {
-        self.anim.advance(now)
-    }
-
-    fn factor(&self) -> f64 {
-        let raw = self.anim.value();
-        if raw.is_finite() {
-            raw.clamp(0.0, OVERSHOOT_LIMIT)
-        } else {
-            0.0
-        }
-    }
-
-    /// The corner radius to paint this frame (never negative).
-    fn radius(&self) -> f64 {
-        lerp(self.from, self.to, self.factor()).max(0.0)
-    }
-
-    #[cfg(test)]
-    fn target_radius(&self) -> f64 {
-        self.to
-    }
-}
+/// The padding channel [`crate::button::motion::RadiusPaddingMotion`] carries
+/// but this family never animates — every icon-button call site passes zero
+/// `internalLeft/Right/Top/Bottom` to the reference's shared primitive
+/// (`m3e_icon_button_build.dart:191`-`:194`).
+const ZERO_PADDING: ContentPadding = ContentPadding::symmetric(0.0);
 
 // ---- Badge -------------------------------------------------------------
 
@@ -1010,7 +920,10 @@ pub struct IconButtonWidget {
     visual_origin: Point,
     state: InteractionState,
     captured: bool,
-    motion: RadiusMorph,
+    /// The shared button-family press/hover morph, reused directly — see the
+    /// module docs' `RadiusPaddingMotion reuse` section. Its padding channel
+    /// is pinned to [`ZERO_PADDING`] and never read back.
+    motion: RadiusPaddingMotion,
     on_press: frust::authoring::ErasedCallback,
 }
 
@@ -1037,7 +950,7 @@ impl<State: 'static> View<State> for IconButtonView<State> {
             visual_origin: Point::ZERO,
             state: InteractionState::new(),
             captured: false,
-            motion: RadiusMorph::new(),
+            motion: RadiusPaddingMotion::new(),
             on_press: frust::authoring::erase_callback(&self.on_press),
         }
     }
@@ -1184,7 +1097,7 @@ impl Widget for IconButtonWidget {
             (colors, radius, bg, fg)
         };
 
-        if self.motion.retarget(radius_target) {
+        if self.motion.retarget(radius_target, ZERO_PADDING) {
             ctx.request_frame();
         }
         if self.motion.advance(ctx.frame_time()) {
@@ -1327,6 +1240,7 @@ impl Widget for IconButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::FrameTime;
     use frust::authoring::scene::GlyphRun;
     use frust::authoring::{BuildCtx, PointerButton, PointerEvent, View};
     use frust_widgets::test_support::leaf_any;
@@ -1342,7 +1256,7 @@ mod tests {
         FrameTime::from_nanos((s * 1_000_000_000.0) as u64)
     }
 
-    fn settle_motion(motion: &mut RadiusMorph) {
+    fn settle_motion(motion: &mut RadiusPaddingMotion) {
         let mut t = 0.0;
         for _ in 0..600 {
             t += 1.0 / 60.0;
@@ -1726,23 +1640,32 @@ mod tests {
 
     #[test]
     fn press_spring_matches_expressive_spatial_press() {
+        // Now the *same* constant both button families fling along (the
+        // `RadiusPaddingMotion` reuse this module's own docs describe), not
+        // two copies pinned equal by hand — this test still exists as the
+        // tripwire that a future change to either family's spring is felt
+        // here too.
         let token = crate::tokens::MaterialSpring::EXPRESSIVE_SPATIAL_PRESS;
-        assert_eq!(PRESS_SPRING.stiffness, token.stiffness);
-        assert_eq!(PRESS_SPRING.damping_ratio, token.damping_ratio);
-        assert_eq!(PRESS_SPRING.mass, 1.0);
-        assert_eq!(PRESS_SPRING.stiffness, 380.0);
-        assert_eq!(PRESS_SPRING.damping_ratio, 0.55);
+        let spring = crate::button::motion::PRESS_SPRING;
+        assert_eq!(spring.stiffness, token.stiffness);
+        assert_eq!(spring.damping_ratio, token.damping_ratio);
+        assert_eq!(spring.mass, 1.0);
+        assert_eq!(spring.stiffness, 380.0);
+        assert_eq!(spring.damping_ratio, 0.55);
     }
 
     #[test]
     fn the_morph_snaps_on_mount_and_springs_on_a_later_retarget() {
-        let mut motion = RadiusMorph::new();
+        let mut motion = RadiusPaddingMotion::new();
         assert!(
-            !motion.retarget(20.0),
+            !motion.retarget(20.0, ZERO_PADDING),
             "the mount frame seeds, it does not animate"
         );
         assert_eq!(motion.radius(), 20.0);
-        assert!(motion.retarget(8.0), "a later retarget starts a leg");
+        assert!(
+            motion.retarget(8.0, ZERO_PADDING),
+            "a later retarget starts a leg"
+        );
         assert_eq!(motion.radius(), 20.0, "the leg starts where it was");
         settle_motion(&mut motion);
         assert_eq!(motion.radius(), 8.0);
@@ -1750,9 +1673,10 @@ mod tests {
 
     #[test]
     fn a_sub_tolerance_retarget_is_ignored() {
-        let mut motion = RadiusMorph::new();
-        motion.retarget(20.0);
-        assert!(!motion.retarget(20.0 + RETARGET_TOLERANCE / 2.0));
+        let mut motion = RadiusPaddingMotion::new();
+        motion.retarget(20.0, ZERO_PADDING);
+        let tolerance = crate::button::motion::RETARGET_TOLERANCE;
+        assert!(!motion.retarget(20.0 + tolerance / 2.0, ZERO_PADDING));
         assert_eq!(motion.target_radius(), 20.0);
     }
 

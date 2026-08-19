@@ -89,9 +89,9 @@ pub use button::{
     Button, ButtonDecoration, ButtonShape, ButtonSize, ButtonSurface, ButtonVariant, ButtonView,
     ButtonWidget, ContentMetrics, DecorationOutcome, GradientAlignment, GradientButtonDecoration,
     GradientProperty, GradientSpec, GradientStates, IconAlignment, LinearGradientSpec,
-    OverflowObserver, RadialGradientSpec, SweepGradientSpec, button, button_with_icon,
-    constant_gradient, elevated_button, filled_button, implied_stops, outlined_button, text_button,
-    tonal_button,
+    OverflowObserver, OverflowStrategy, RadialGradientSpec, SweepGradientSpec, button,
+    button_with_icon, constant_gradient, elevated_button, filled_button, implied_stops,
+    outlined_button, text_button, tonal_button,
 };
 pub use button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
 pub use card::{

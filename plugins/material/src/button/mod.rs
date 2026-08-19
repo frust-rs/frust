@@ -114,9 +114,13 @@
 //!   `PaintScene` gradient-support finding.
 //! - [`OverflowObserver`] — handed the [`ContentMetrics`] every layout
 //!   resolves, including whether the label's natural width exceeded the width
-//!   actually available to it. The reference's `M3EOverflowStrategy` family
-//!   decides *what to do* about that (scroll, popup, bottom sheet); this seam
-//!   is the measurement it decides on.
+//!   actually available to it. [`overflow::OverflowStrategy`] (installed via
+//!   [`ButtonView::overflow`]) is what now decides *what to do* about that —
+//!   scroll or defer to a bottom sheet, calling back into an installed
+//!   `OverflowObserver` for the latter — porting the reference's
+//!   `M3EOverflowStrategy` family onto this seam; see that module's docs for
+//!   the full mapping (the family is upstream a `ButtonGroup`-level
+//!   abstraction, not a single button's own prop).
 //!
 //! # Mapping Flutter plumbing that has no frust analogue
 //!
@@ -147,7 +151,8 @@
 
 mod core;
 pub mod gradient;
-mod motion;
+pub(crate) mod motion;
+mod overflow;
 
 use std::rc::Rc;
 
@@ -165,6 +170,7 @@ pub use self::gradient::{
     LinearGradientSpec, RadialGradientSpec, SweepGradientSpec, constant_gradient, implied_stops,
 };
 use self::motion::RadiusPaddingMotion;
+pub use self::overflow::OverflowStrategy;
 
 /// Which container treatment a button paints — the reference's
 /// `M3EButtonStyle` (`m3e_button_enums.dart:19`). See the [module docs](self)'
@@ -240,6 +246,7 @@ pub struct ButtonView<State: 'static> {
     haptic: HapticSignal,
     decoration: Option<Rc<dyn ButtonDecoration>>,
     overflow: Option<Rc<dyn OverflowObserver>>,
+    overflow_strategy: OverflowStrategy,
     on_press: OnPress<State>,
 }
 
@@ -267,6 +274,7 @@ pub fn button<State: 'static, F: Fn(&mut State) + 'static>(
         haptic: HapticSignal::None,
         decoration: None,
         overflow: None,
+        overflow_strategy: OverflowStrategy::default(),
         on_press: Rc::new(on_press),
     }
 }
@@ -421,6 +429,16 @@ impl<State: 'static> ButtonView<State> {
         self.overflow = Some(observer);
         self
     }
+
+    /// Select which strategy an overflowing label uses —
+    /// [`OverflowStrategy::None`] (the default) by default. See
+    /// [`OverflowStrategy`]'s own docs for the full three-way contract, and
+    /// [`ButtonView::overflow_observer`] for the hook
+    /// [`OverflowStrategy::BottomSheet`] calls into.
+    pub fn overflow(mut self, strategy: OverflowStrategy) -> Self {
+        self.overflow_strategy = strategy;
+        self
+    }
 }
 
 /// The retained widget for a [`ButtonView`]. Its layout/paint/event core lives
@@ -453,6 +471,18 @@ pub struct ButtonWidget {
     metrics: ContentMetrics,
     decoration: Option<Rc<dyn ButtonDecoration>>,
     overflow: Option<Rc<dyn OverflowObserver>>,
+    /// Which behavior an overflowing label uses — see [`overflow`]'s module
+    /// docs.
+    pub(super) overflow_strategy: OverflowStrategy,
+    /// [`OverflowStrategy::Scroll`]'s live pan offset, logical px from the
+    /// label's leading edge. Clamped every layout to
+    /// `overflow::max_scroll`'s range, and reset to `0` whenever the label
+    /// stops overflowing or the strategy changes away from `Scroll`.
+    pub(super) scroll_offset: f64,
+    /// The pointer's `x` at the last `Move` seen while captured — the
+    /// previous sample [`OverflowStrategy::Scroll`] diffs a new `Move`
+    /// against to find the drag delta. `None` outside a capture.
+    pub(super) drag_last_x: Option<f64>,
     on_press: frust::authoring::ErasedCallback,
 }
 
@@ -482,6 +512,9 @@ impl<State: 'static> View<State> for ButtonView<State> {
             metrics: ContentMetrics::empty(),
             decoration: self.decoration.clone(),
             overflow: self.overflow.clone(),
+            overflow_strategy: self.overflow_strategy,
+            scroll_offset: 0.0,
+            drag_last_x: None,
             on_press: frust::authoring::erase_callback(&self.on_press),
         }
     }
@@ -497,6 +530,14 @@ impl<State: 'static> View<State> for ButtonView<State> {
         element.overflow = self.overflow.clone();
         element.haptic = self.haptic;
         let mut flags = ChangeFlags::NONE;
+
+        if prev.overflow_strategy != self.overflow_strategy {
+            element.overflow_strategy = self.overflow_strategy;
+            // A live pan position from the old strategy means nothing under
+            // the new one.
+            element.scroll_offset = 0.0;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
 
         if prev.label != self.label {
             element.label.set_content(&self.label);
@@ -620,6 +661,7 @@ mod tests {
         assert_eq!(view.haptic, HapticSignal::None);
         assert_eq!(view.icon_alignment, IconAlignment::Start);
         assert!(view.icon.is_none());
+        assert_eq!(view.overflow_strategy, OverflowStrategy::None);
     }
 
     #[test]
@@ -643,7 +685,8 @@ mod tests {
             .icon(leaf_any(32.0, 32.0))
             .icon_alignment(IconAlignment::End)
             .corner_radius(9.0)
-            .pressed_radius(3.0);
+            .pressed_radius(3.0)
+            .overflow(OverflowStrategy::Scroll);
         let widget = build(&view);
         assert_eq!(widget.variant, ButtonVariant::Tonal);
         assert_eq!(widget.size, ButtonSize::Lg);
@@ -654,6 +697,22 @@ mod tests {
         assert_eq!(widget.corner_radius, Some(9.0));
         assert_eq!(widget.pressed_radius, Some(3.0));
         assert!(widget.icon.is_some());
+        assert_eq!(widget.overflow_strategy, OverflowStrategy::Scroll);
+    }
+
+    #[test]
+    fn rebuild_carries_a_changed_overflow_strategy_and_resets_the_scroll_offset() {
+        let prev = button::<u32, _>("Save", |_| {});
+        let next = button::<u32, _>("Save", |_| {}).overflow(OverflowStrategy::BottomSheet);
+        let mut widget = build(&prev);
+        widget.scroll_offset = 12.0;
+        let mut counter = 0u64;
+        let flags =
+            View::<u32>::rebuild(&next, &prev, &mut widget, &mut BuildCtx::new(&mut counter));
+        assert_eq!(widget.overflow_strategy, OverflowStrategy::BottomSheet);
+        assert_eq!(widget.scroll_offset, 0.0);
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        assert!(flags.contains(ChangeFlags::PAINT));
     }
 
     #[test]

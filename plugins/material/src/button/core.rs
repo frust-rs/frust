@@ -27,7 +27,10 @@ use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use super::motion::ContentPadding;
-use super::{ButtonShape, ButtonSize, ButtonVariant, ButtonWidget, IconAlignment};
+use super::overflow::max_scroll;
+use super::{
+    ButtonShape, ButtonSize, ButtonVariant, ButtonWidget, IconAlignment, OverflowStrategy,
+};
 use crate::interaction::{
     DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY, HapticSignal, InteractionState,
     MaterialHaptics,
@@ -566,6 +569,15 @@ impl ContentMetrics {
 pub trait OverflowObserver {
     /// Called at the end of each of the button's layout passes.
     fn measured(&self, metrics: ContentMetrics);
+
+    /// Called instead of firing the normal `on_press` when a press lands on
+    /// an overflowing button whose [`super::OverflowStrategy`] is
+    /// [`super::OverflowStrategy::BottomSheet`] — the hook an app shows its
+    /// own bottom sheet from (see that variant's doc for why the widget
+    /// cannot do so itself). Defaulted to a no-op, mirroring
+    /// [`Self::measured`]'s own "install nothing, behave as if this trait did
+    /// not exist" shape.
+    fn overflow_pressed(&self) {}
 }
 
 // ---- The label run ---------------------------------------------------------
@@ -827,9 +839,18 @@ impl Widget for ButtonWidget {
         };
 
         let natural_label_width = self.label.natural_width(ctx, &label_style);
-        let fit_to = (natural_label_width > available_label_width)
-            .then_some(available_label_width)
-            .filter(|w| w.is_finite());
+        let overflows = natural_label_width > available_label_width;
+        // A `Scroll` strategy shapes the label at its full natural width even
+        // while overflowing — panning needs the whole run, not an ellipsized
+        // stand-in. Every other case (including no strategy at all) keeps
+        // today's ellipsize-to-fit behavior, the reference's one real
+        // single-button overflow behavior (`m3e_base_button_state.dart:177`;
+        // see `overflow`'s module docs).
+        let fit_to = if overflows && self.overflow_strategy != OverflowStrategy::Scroll {
+            Some(available_label_width).filter(|w| w.is_finite())
+        } else {
+            None
+        };
         let label_size = self.label.shape(ctx, &label_style, fit_to);
 
         let content_width = icon_width + gap + label_size.width;
@@ -859,6 +880,10 @@ impl Widget for ButtonWidget {
         if let Some(observer) = &self.overflow {
             observer.measured(self.metrics);
         }
+        // Re-clamp every layout: a resize can shrink `max_scroll` out from
+        // under a live pan position (or, when the label no longer overflows
+        // at all, collapse it to `0`).
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll(self.metrics));
         size
     }
 
@@ -968,10 +993,18 @@ impl Widget for ButtonWidget {
         if let Some(pod) = self.icon.as_mut() {
             pod.paint_child(ctx, scene);
         }
+        // `OverflowStrategy::Scroll`'s live pan, clipped to the container so
+        // the unellipsized run painted below never spills past it — see
+        // `overflow`'s module docs.
+        let panning =
+            self.overflow_strategy == OverflowStrategy::Scroll && self.metrics.overflows();
         let label_origin = Point::new(
-            origin.x + self.label_origin.x,
+            origin.x + self.label_origin.x - if panning { self.scroll_offset } else { 0.0 },
             origin.y + self.label_origin.y,
         );
+        if panning {
+            scene.push_clip(origin, size);
+        }
         match self
             .decoration
             .as_ref()
@@ -979,6 +1012,9 @@ impl Widget for ButtonWidget {
         {
             Some(brush) => self.label.paint_brush(label_origin, &brush, scene),
             None => self.label.paint(label_origin, colors.content, scene),
+        }
+        if panning {
+            scene.pop_clip();
         }
 
         // Outside the container, and only while focused — see the parent
@@ -1005,6 +1041,9 @@ impl Widget for ButtonWidget {
                 }
                 self.state.set_pressed(true);
                 self.captured = true;
+                // Seeds `Scroll`'s drag-delta sample; harmless (and unread)
+                // under every other strategy.
+                self.drag_last_x = Some(p.position.x);
                 ctx.capture_pointer();
                 ctx.request_redraw();
                 EventResult::Handled
@@ -1026,6 +1065,20 @@ impl Widget for ButtonWidget {
                     return EventResult::Ignored;
                 }
                 ctx.set_cursor(CursorIcon::Pointer);
+                // `OverflowStrategy::Scroll`: a captured drag pans the label
+                // by the delta from the last sample, clamped to the pannable
+                // range — the reference's `SingleChildScrollView` is
+                // user-driven, never an auto-marquee (see `overflow`'s
+                // module docs).
+                if self.overflow_strategy == OverflowStrategy::Scroll && self.metrics.overflows() {
+                    if let Some(last_x) = self.drag_last_x {
+                        let dx = p.position.x - last_x;
+                        self.scroll_offset =
+                            (self.scroll_offset - dx).clamp(0.0, max_scroll(self.metrics));
+                        ctx.request_redraw();
+                    }
+                    self.drag_last_x = Some(p.position.x);
+                }
                 if self.state.set_pressed(over) {
                     ctx.request_redraw();
                 }
@@ -1036,18 +1089,35 @@ impl Widget for ButtonWidget {
                     return EventResult::Ignored;
                 }
                 if inside(p.position, ctx.size()) {
-                    // The reference fires its haptic inside the same
-                    // `onPressed` wrapper, ahead of the app callback
-                    // (`m3e_button_content.dart:178`). `None` is defined as a
-                    // no-op, so it is elided rather than routed through the
-                    // process-global hook.
-                    if self.haptic != HapticSignal::None {
-                        MaterialHaptics::fire(self.haptic);
+                    // `OverflowStrategy::BottomSheet`: an overflowing button's
+                    // press defers to the installed `OverflowObserver`
+                    // instead of firing normally — mirroring the reference's
+                    // own overflow trigger, which never fires a hidden action
+                    // directly (see `overflow`'s module docs). No observer
+                    // installed falls back to the normal press rather than
+                    // going silently dead.
+                    let deferred = self.overflow_strategy == OverflowStrategy::BottomSheet
+                        && self.metrics.overflows()
+                        && self.overflow.is_some();
+                    if deferred {
+                        if let Some(observer) = &self.overflow {
+                            observer.overflow_pressed();
+                        }
+                    } else {
+                        // The reference fires its haptic inside the same
+                        // `onPressed` wrapper, ahead of the app callback
+                        // (`m3e_button_content.dart:178`). `None` is defined
+                        // as a no-op, so it is elided rather than routed
+                        // through the process-global hook.
+                        if self.haptic != HapticSignal::None {
+                            MaterialHaptics::fire(self.haptic);
+                        }
+                        (self.on_press)(ctx);
                     }
-                    (self.on_press)(ctx);
                 }
                 self.state.set_pressed(false);
                 self.captured = false;
+                self.drag_last_x = None;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -1057,6 +1127,7 @@ impl Widget for ButtonWidget {
                 }
                 self.state.set_pressed(false);
                 self.captured = false;
+                self.drag_last_x = None;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -1659,6 +1730,244 @@ mod tests {
         let metrics = widget.content_metrics();
         assert_eq!(metrics.available_label_width, f64::INFINITY);
         assert!(!metrics.overflows());
+    }
+
+    // ---- overflow strategies -----------------------------------------------
+
+    const LONG_LABEL: &str = "A label far too long to ever fit inside a narrow button";
+    /// Narrow enough that [`LONG_LABEL`] overflows every button size.
+    const NARROW: f64 = 120.0;
+    /// Roomy enough that no label used in these tests overflows.
+    const ROOMY: f64 = 500.0;
+
+    #[derive(Default)]
+    struct BottomSheetObserver {
+        overflow_presses: RefCell<u32>,
+    }
+
+    impl OverflowObserver for BottomSheetObserver {
+        fn measured(&self, _metrics: ContentMetrics) {}
+        fn overflow_pressed(&self) {
+            *self.overflow_presses.borrow_mut() += 1;
+        }
+    }
+
+    #[test]
+    fn a_fitted_button_behaves_identically_under_every_strategy() {
+        // Acceptance: "fitted case = no-op pinned" — None/Scroll/BottomSheet
+        // must all fire the normal press and pan nothing when the label
+        // never overflowed.
+        for strategy in [
+            OverflowStrategy::None,
+            OverflowStrategy::Scroll,
+            OverflowStrategy::BottomSheet,
+        ] {
+            let presses = Rc::new(RefCell::new(0u32));
+            let counted = presses.clone();
+            let observer = Rc::new(BottomSheetObserver::default());
+            let view = button::<u32, _>("Save", move |_| {
+                *counted.borrow_mut() += 1;
+            })
+            .overflow(strategy)
+            .overflow_observer(observer.clone());
+            let mut widget = build(&view);
+            let size = layout_with(&mut widget, ROOMY, None);
+            assert!(!widget.content_metrics().overflows(), "{strategy:?}");
+
+            let mut state = 0u32;
+            dispatch(
+                &mut widget,
+                &mut state,
+                size,
+                &ev(PointerPhase::Down, 5.0, 5.0),
+            );
+            dispatch(
+                &mut widget,
+                &mut state,
+                size,
+                &ev(PointerPhase::Move, 40.0, 5.0),
+            );
+            dispatch(
+                &mut widget,
+                &mut state,
+                size,
+                &ev(PointerPhase::Up, 40.0, 5.0),
+            );
+
+            assert_eq!(*presses.borrow(), 1, "{strategy:?} fires the normal press");
+            assert_eq!(
+                *observer.overflow_presses.borrow(),
+                0,
+                "{strategy:?} never defers when fitted"
+            );
+            assert_eq!(widget.scroll_offset, 0.0, "{strategy:?} pans nothing");
+        }
+    }
+
+    #[test]
+    fn scroll_shapes_the_label_at_its_full_natural_width_while_overflowing() {
+        let view = button::<u32, _>(LONG_LABEL, |_| {}).overflow(OverflowStrategy::Scroll);
+        let mut widget = build(&view);
+        layout_with(&mut widget, NARROW, None);
+        let m = widget.content_metrics();
+        assert!(m.overflows());
+        assert_eq!(
+            m.painted_label_width, m.natural_label_width,
+            "scroll never ellipsizes — it needs the whole run to pan"
+        );
+    }
+
+    #[test]
+    fn a_drag_pans_an_overflowing_scroll_label_clamped_to_the_hidden_extent() {
+        let view = button::<u32, _>(LONG_LABEL, |_| {}).overflow(OverflowStrategy::Scroll);
+        let mut widget = build(&view);
+        let size = layout_with(&mut widget, NARROW, None);
+        let max = max_scroll(widget.content_metrics());
+        assert!(max > 0.0, "the fixture must actually overflow");
+
+        let mut state = 0u32;
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Down, 100.0, 5.0),
+        );
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Move, 40.0, 5.0),
+        );
+        // Dragging left (finger moves toward negative x) reveals more of the
+        // label's trailing side, i.e. increases the pan offset.
+        assert_eq!(widget.scroll_offset, 60.0);
+
+        // A drag far past the hidden extent clamps rather than overshoots.
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Move, -900.0, 5.0),
+        );
+        assert_eq!(widget.scroll_offset, max);
+
+        // Releasing does not reset the pan position (a real scroll view
+        // keeps its position between gestures).
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Up, -900.0, 5.0),
+        );
+        assert_eq!(widget.scroll_offset, max);
+    }
+
+    #[test]
+    fn a_drag_on_a_fitted_scroll_button_pans_nothing() {
+        let view = button::<u32, _>("Save", |_| {}).overflow(OverflowStrategy::Scroll);
+        let mut widget = build(&view);
+        let size = layout_with(&mut widget, ROOMY, None);
+        assert!(!widget.content_metrics().overflows());
+
+        let mut state = 0u32;
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Down, 40.0, 5.0),
+        );
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Move, 5.0, 5.0),
+        );
+        assert_eq!(widget.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn a_relayout_that_stops_overflowing_resets_the_scroll_offset() {
+        let view = button::<u32, _>(LONG_LABEL, |_| {}).overflow(OverflowStrategy::Scroll);
+        let mut widget = build(&view);
+        let size = layout_with(&mut widget, NARROW, None);
+        let mut state = 0u32;
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Down, 100.0, 5.0),
+        );
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Move, 40.0, 5.0),
+        );
+        assert!(widget.scroll_offset > 0.0);
+
+        layout_with(&mut widget, ROOMY, None);
+        assert_eq!(widget.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn bottom_sheet_defers_an_overflowing_press_to_the_observer_instead_of_on_press() {
+        let presses = Rc::new(RefCell::new(0u32));
+        let counted = presses.clone();
+        let observer = Rc::new(BottomSheetObserver::default());
+        let view = button::<u32, _>(LONG_LABEL, move |_| {
+            *counted.borrow_mut() += 1;
+        })
+        .overflow(OverflowStrategy::BottomSheet)
+        .overflow_observer(observer.clone());
+        let mut widget = build(&view);
+        let size = layout_with(&mut widget, NARROW, None);
+        assert!(widget.content_metrics().overflows());
+
+        let mut state = 0u32;
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Down, 5.0, 5.0),
+        );
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Up, 5.0, 5.0),
+        );
+
+        assert_eq!(*observer.overflow_presses.borrow(), 1);
+        assert_eq!(*presses.borrow(), 0, "on_press does not also fire");
+    }
+
+    #[test]
+    fn bottom_sheet_falls_back_to_a_normal_press_with_no_observer_installed() {
+        let presses = Rc::new(RefCell::new(0u32));
+        let counted = presses.clone();
+        let view = button::<u32, _>(LONG_LABEL, move |_| {
+            *counted.borrow_mut() += 1;
+        })
+        .overflow(OverflowStrategy::BottomSheet);
+        let mut widget = build(&view);
+        let size = layout_with(&mut widget, NARROW, None);
+        assert!(widget.content_metrics().overflows());
+
+        let mut state = 0u32;
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Down, 5.0, 5.0),
+        );
+        dispatch(
+            &mut widget,
+            &mut state,
+            size,
+            &ev(PointerPhase::Up, 5.0, 5.0),
+        );
+
+        assert_eq!(*presses.borrow(), 1, "no observer means no dead press");
     }
 
     // ---- the decoration seam ----------------------------------------------
