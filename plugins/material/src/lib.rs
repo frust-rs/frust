@@ -58,6 +58,7 @@ pub mod badge;
 pub mod button;
 pub mod button_group;
 pub mod card;
+pub mod carousel;
 pub mod checkbox;
 pub mod chips;
 pub mod dialog;
@@ -105,6 +106,11 @@ pub use button_group::{
 };
 pub use card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
+};
+pub use carousel::{
+    CAROUSEL_ITEM_PADDING, CAROUSEL_ITEM_RADIUS, CarouselAxis, CarouselChange, CarouselLayout,
+    CarouselView, CarouselWidget, HeroAlignment, UNCONTAINED_ITEM_EXTENT,
+    UNCONTAINED_SHRINK_EXTENT, carousel, contained_carousel, hero_carousel, uncontained_carousel,
 };
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox, tristate_checkbox};
 pub use chips::{
