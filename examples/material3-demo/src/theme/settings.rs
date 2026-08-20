@@ -24,6 +24,24 @@
 //! not re-inverted until the toggle is pressed again (the shell's
 //! override-wins-over-appearance rule).
 //!
+//! That "observed when the toggle was pressed" value is load-bearing, not
+//! decorative: every mutator's `platform` argument is the brightness
+//! *currently showing* (the ambient [`Theme`] at the call site), and
+//! `set_app_theme` forces that ambient end-to-end — so once inverted, the
+//! ambient reading passed into an unrelated mutator (a seed/font/type-style
+//! change) already *is* the inverted display, not the true platform. Deriving
+//! the resolved brightness by flipping that argument on every call would
+//! therefore flip the app back to the platform brightness on the very next
+//! settings write, silently, with `invert_platform` still recording `true` —
+//! and the next brightness-toggle press would then read the (wrongly
+//! restored) platform brightness and clear inversion against an already
+//! un-inverted display, a dead press. [`ThemeSettings::platform_at_invert`]
+//! is the fix: the true platform brightness is captured exactly once, at the
+//! moment [`ThemeSettings::toggle_brightness`] switches inversion on, and
+//! every [`ThemeSettings::resolved_brightness`] call while inverted reuses
+//! that captured value instead of re-deriving it from whatever ambient
+//! reading the current call happens to carry.
+//!
 //! # Type styles
 //!
 //! The reference offers seven Roboto Flex axis presets (Condensed, Wide,
@@ -139,6 +157,7 @@ pub struct ThemeSettings {
     seed: RwSignal<usize>,
     auto_theming: RwSignal<bool>,
     invert_platform: RwSignal<bool>,
+    platform_at_invert: RwSignal<Brightness>,
     brightness_override: RwSignal<Option<Brightness>>,
     font: RwSignal<DemoFont>,
     type_style: RwSignal<DemoTypeStyle>,
@@ -152,6 +171,9 @@ impl ThemeSettings {
             seed: RwSignal::new(0),
             auto_theming: RwSignal::new(true),
             invert_platform: RwSignal::new(false),
+            // Unread until `invert_platform` first goes true — `toggle_brightness`
+            // overwrites this before anything ever consults it.
+            platform_at_invert: RwSignal::new(Brightness::Light),
             brightness_override: RwSignal::new(None),
             font: RwSignal::new(DemoFont::default()),
             type_style: RwSignal::new(DemoTypeStyle::default()),
@@ -240,11 +262,23 @@ impl ThemeSettings {
     /// Flip light/dark — the app bar's brightness action.
     ///
     /// `platform` is the brightness showing right now (read from the ambient
-    /// [`Theme`] at the call site), the reference's `fallback`.
+    /// [`Theme`] at the call site), the reference's `fallback`. Under
+    /// `auto_theming`, turning inversion *on* is the one moment `platform` is
+    /// trusted as the true platform brightness (nothing has inverted the
+    /// ambient reading yet) — it is captured into
+    /// [`ThemeSettings::platform_at_invert`] for every later
+    /// [`ThemeSettings::resolved_brightness`] call to reuse, since once
+    /// inverted the ambient `platform` argument any *other* mutator receives
+    /// is the already-inverted display, not the platform (see this module's
+    /// docs).
     pub fn toggle_brightness(&self, platform: Brightness) {
         if self.auto_theming.get() {
             self.brightness_override.set(None);
-            self.invert_platform.set(!self.invert_platform.get());
+            let inverting = !self.invert_platform.get();
+            self.invert_platform.set(inverting);
+            if inverting {
+                self.platform_at_invert.set(platform);
+            }
         } else {
             let effective = self.brightness_override.get().unwrap_or(platform);
             self.brightness_override.set(Some(flip(effective)));
@@ -253,9 +287,16 @@ impl ThemeSettings {
     }
 
     /// The brightness to pin, or `None` to let the platform decide.
+    ///
+    /// While inverted, `platform` is deliberately ignored in favor of
+    /// [`ThemeSettings::platform_at_invert`] — see this module's docs for why
+    /// trusting the argument here would self-cancel the inversion on the next
+    /// unrelated settings change.
     pub fn resolved_brightness(&self, platform: Brightness) -> Option<Brightness> {
         if self.auto_theming.get() {
-            self.invert_platform.get().then(|| flip(platform))
+            self.invert_platform
+                .get()
+                .then(|| flip(self.platform_at_invert.get()))
         } else {
             Some(self.brightness_override.get().unwrap_or(platform))
         }
@@ -386,6 +427,41 @@ mod tests {
             settings.resolved_brightness(Brightness::Light),
             Some(Brightness::Dark)
         );
+        settings.toggle_brightness(Brightness::Dark);
+        assert!(!settings.invert_platform());
+        assert_eq!(settings.resolved_brightness(Brightness::Light), None);
+    }
+
+    #[test]
+    fn an_inverted_auto_theme_survives_an_unrelated_settings_change() {
+        let settings = ThemeSettings::new();
+        settings.toggle_brightness(Brightness::Light);
+        assert_eq!(
+            settings.resolved_brightness(Brightness::Light),
+            Some(Brightness::Dark)
+        );
+
+        // A seed change's call site reads the *ambient* brightness, which is
+        // already the inverted Dark display, not the true (Light) platform —
+        // resolving it must not re-derive (and thus flip) from that reading.
+        settings.set_seed(2, Brightness::Dark);
+
+        assert!(settings.invert_platform());
+        assert_eq!(
+            settings.resolved_brightness(Brightness::Dark),
+            Some(Brightness::Dark)
+        );
+    }
+
+    #[test]
+    fn toggling_after_an_unrelated_change_still_lands_back_on_the_platform() {
+        let settings = ThemeSettings::new();
+        settings.toggle_brightness(Brightness::Light);
+        settings.set_seed(2, Brightness::Dark);
+
+        // The next toggle press reads the currently-showing Dark ambient —
+        // it must turn inversion off and hand brightness back to the
+        // platform, not stay silently pinned (a dead press).
         settings.toggle_brightness(Brightness::Dark);
         assert!(!settings.invert_platform());
         assert_eq!(settings.resolved_brightness(Brightness::Light), None);
