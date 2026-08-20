@@ -35,6 +35,12 @@
 //! ([`selection_host`], [`selection_app_bar`]) are flat re-exported as
 //! usual.
 //!
+//! [`date_picker`]'s pure grid-geometry functions (`year_grid_height`,
+//! `calendar_day_view_height`, `year_span`, ...) stay namespaced for the same
+//! reason (`frust_material::date_picker::grid::year_span`); its widgets, value
+//! types ([`MaterialDate`], [`DateRange`], [`DatePickerState`]) and metric
+//! constants are flat re-exported as usual.
+//!
 //! # `install()`: this design system's one-line installer
 //!
 //! [`install`] seeds [`frust::set_default_theme`] with this crate's
@@ -70,6 +76,7 @@ pub mod card_list;
 pub mod carousel;
 pub mod checkbox;
 pub mod chips;
+pub mod date_picker;
 pub mod dialog;
 pub mod dismissible;
 pub mod divider;
@@ -140,6 +147,19 @@ pub use chips::{
     AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
     InputChip, InputChipView, InputChipWidget, SuggestionChip, SuggestionChipView,
     SuggestionChipWidget, assist_chip, filter_chip, input_chip, suggestion_chip,
+};
+pub use date_picker::{
+    ACTIONS_MIN_HEIGHT, ARROW_ICON_SIZE, ARROW_PADDING, CALENDAR_PADDING, CALENDAR_WIDTH,
+    CalendarDatePicker, CalendarDatePickerWidget, DAY_GRID_TOP_PADDING, DAY_ROW_HEIGHT, DAY_SIZE,
+    DAYS_PER_WEEK, DIALOG_PORTRAIT_CALENDAR_WIDTH, DIALOG_PORTRAIT_INPUT_WIDTH,
+    DISABLED_DAY_OPACITY, DateInputError, DateInputField, DateInputFieldWidget, DatePickerDialog,
+    DatePickerEntryMode, DatePickerMode, DatePickerState, DatePickerStrings, DateRange,
+    HEADER_PORTRAIT_HEIGHT, MAX_DAY_PICKER_HEIGHT, MAX_DAY_PICKER_ROW_COUNT, MAX_YEAR, MIN_YEAR,
+    MONTH_NAV_BUTTONS_WIDTH, MONTH_SCROLL_DURATION, MaterialDate, MonthGrid, OnDatePickerChange,
+    RANGE_HIGHLIGHT_ALPHA, SUB_HEADER_HEIGHT, SUB_HEADER_START_INSET, WEEKDAY_ROW_HEIGHT,
+    YEAR_COLUMN_COUNT, YEAR_GRID_PADDING, YEAR_ROW_HEIGHT, YEAR_ROW_SPACING, calendar_date_picker,
+    date_input_field, date_picker_dialog, days_in_month, is_leap_year, parse_bounded,
+    show_date_picker,
 };
 pub use dialog::{
     DialogView, FullScreenDialogView, SelectionDialogView, dialog, full_screen_dialog,
