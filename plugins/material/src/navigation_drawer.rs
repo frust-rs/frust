@@ -141,7 +141,12 @@
 //! every control in this catalog follows. An app that wants the common
 //! real-world dismiss-on-select UX calls `controller.pop()` (or its own
 //! signal write) from inside its own `on_select`, exactly like any other
-//! app-owned dismiss decision in this crate.
+//! app-owned dismiss decision in this crate — but that pop is **unstaged**:
+//! immediate, with no reverse-ramp exit, while every host-chrome dismiss
+//! gesture on the same drawer (scrim tap, `Escape`, an Android back press)
+//! stages one (`docs/LIMITATIONS.md`'s
+//! `material-modal-staged-dismiss-private-to-host`). A user who dismisses by
+//! selecting sees a different exit motion than one who taps the scrim.
 //!
 //! # No edge-swipe-to-open: absent upstream
 //!
@@ -337,6 +342,15 @@ impl Edge {
     fn is_animating(&self) -> bool {
         self.flight.is_some()
     }
+
+    /// Whether this edge's committed target already sits within
+    /// [`GEOMETRY_EPSILON`] of `to` — the reference's `_isAtGeometry` test.
+    /// Distinguishes a real geometry change (needs an immediate jump) from an
+    /// unrelated relayout pass reporting the *same* geometry mid-travel,
+    /// which must not abort the in-flight animation.
+    fn is_at_geometry(&self, to: f64) -> bool {
+        (self.target - to).abs() < GEOMETRY_EPSILON
+    }
 }
 
 /// The drawer's liquid selection indicator: two independently-sprung edge
@@ -366,15 +380,28 @@ impl DrawerIndicator {
     }
 
     /// Adopt the selected row's resting box. `travel` runs the two-phase
-    /// motion; otherwise the pill jumps.
+    /// motion; otherwise the pill jumps — but only if the geometry actually
+    /// moved. An unrelated relayout pass that reports the *same* center with
+    /// `travel: false` (selection unchanged) must not abort an in-flight
+    /// travel; a genuine geometry change (first layout, or the resting box
+    /// itself moving/resizing) still jumps immediately.
     fn sync(&mut self, rest: Rect, travel: bool) {
         self.rest = rest;
         let center = rest.center().y;
-        if !self.ready || !travel {
+        if !self.ready {
             self.lead.snap(center);
             self.trail.snap(center);
             self.last_time = None;
             self.ready = true;
+            return;
+        }
+        if !travel {
+            if self.lead.is_at_geometry(center) && self.trail.is_at_geometry(center) {
+                return;
+            }
+            self.lead.snap(center);
+            self.trail.snap(center);
+            self.last_time = None;
             return;
         }
         if (self.lead.target - center).abs() < GEOMETRY_EPSILON && !self.is_animating() {
@@ -1361,14 +1388,18 @@ impl<State: 'static> OverlayModalContent<State> for NavigationDrawerView<State> 
 /// for you, staged behind the slide-out exit ramp — selecting a destination
 /// is **not** one of them (see the [module docs](self)' Selecting does not
 /// dismiss section); an app that wants that UX pops from inside its own
-/// `on_select`.
+/// `on_select`, but that pop is **unstaged** (no reverse-ramp exit) —
+/// `docs/LIMITATIONS.md`'s `material-modal-staged-dismiss-private-to-host`.
 ///
 /// ```ignore
 /// show_navigation_drawer(
 ///     &state.nav,
 ///     || navigation_drawer(sections.clone(), state.drawer_index, |s: &mut State, i| {
 ///         s.drawer_index = i;
-///         s.nav.pop(); // dismiss-on-select is an app decision, not the default
+///         // Unstaged: dismiss-on-select is an app decision, not the
+///         // default, and this pop skips the staged reverse-ramp exit
+///         // every host-chrome dismiss gesture on this drawer takes.
+///         s.nav.pop();
 ///     }),
 ///     |state: &mut State, _result: PopResult| {},
 /// );
@@ -1668,6 +1699,71 @@ mod tests {
         let pill = w.indicator.pill_rect().expect("indicator is ready");
         assert!((pill.y0 - expected.y0).abs() < 0.5);
         assert!((pill.y1 - expected.y1).abs() < 0.5);
+    }
+
+    // ---- Indicator sync gate: an interleaved no-op layout must not abort a
+    // travel already in flight (a relayout pass that reports the *same*
+    // resting geometry, `travel: false`, is not a geometry change). --------
+
+    #[test]
+    fn an_interleaved_non_travel_sync_at_the_same_geometry_does_not_abort_an_in_flight_travel() {
+        let mut indicator = DrawerIndicator::new();
+        let rest0 = Rect::from_origin_size(Point::new(0.0, 0.0), Size::new(300.0, 56.0));
+        indicator.sync(rest0, false);
+        assert!(!indicator.is_animating(), "first layout jumps, not travels");
+
+        let rest1 = Rect::from_origin_size(Point::new(0.0, 56.0), Size::new(300.0, 56.0));
+        indicator.sync(rest1, true);
+        assert!(
+            indicator.is_animating(),
+            "a selection change starts an in-flight travel"
+        );
+
+        indicator.advance(ft(50));
+        assert!(
+            indicator.is_animating(),
+            "still travelling after a partial advance"
+        );
+
+        // An unrelated relayout mid-travel reports the same geometry with
+        // travel=false (selection.moved was already consumed by the prior
+        // layout pass) — this must not snap the pill onto its target and
+        // abort the stretch/settle animation.
+        indicator.sync(rest1, false);
+        assert!(
+            indicator.is_animating(),
+            "an interleaved no-op layout at the same geometry must not abort \
+             an in-flight travel"
+        );
+
+        indicator.advance(ft(2000));
+        assert!(!indicator.is_animating(), "travel completes normally");
+        let pill = indicator.pill_rect().expect("indicator is ready");
+        assert!((pill.center().y - rest1.center().y).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_non_travel_sync_at_a_genuinely_changed_geometry_still_jumps() {
+        let mut indicator = DrawerIndicator::new();
+        let rest0 = Rect::from_origin_size(Point::new(0.0, 0.0), Size::new(300.0, 56.0));
+        indicator.sync(rest0, false);
+
+        let rest1 = Rect::from_origin_size(Point::new(0.0, 56.0), Size::new(300.0, 56.0));
+        indicator.sync(rest1, true);
+        indicator.advance(ft(50));
+        assert!(indicator.is_animating());
+
+        // A real geometry change (e.g. a width/height resize moving the
+        // resting box to a different center) reported with travel=false must
+        // still jump immediately, not continue the stale travel.
+        let rest2 = Rect::from_origin_size(Point::new(0.0, 200.0), Size::new(300.0, 56.0));
+        indicator.sync(rest2, false);
+        assert!(
+            !indicator.is_animating(),
+            "a genuine geometry change jumps rather than travelling"
+        );
+        let pill = indicator.pill_rect().expect("indicator is ready");
+        assert!((pill.center().y - rest2.center().y).abs() < 0.5);
     }
 
     // ---- Badges: text wins over a dot; a dot paints when text is absent. --
