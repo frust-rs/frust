@@ -92,6 +92,7 @@ pub mod list_view;
 pub mod loading_indicator;
 pub mod menu;
 pub mod navbar;
+pub mod navigation_rail;
 pub mod overlay;
 mod press;
 pub mod progress;
@@ -228,6 +229,13 @@ pub use navbar::{
     NavBarSize, NavItem, NavigationBar, NavigationBarView, NavigationBarWidget,
     TRAIL_SPRING as NAV_INDICATOR_TRAIL_SPRING, UNDERLINE_THICKNESS as NAV_BAR_UNDERLINE_THICKNESS,
     nav_item, navigation_bar,
+};
+pub use navigation_rail::{
+    NavigationRail, NavigationRailModality, NavigationRailType, NavigationRailView,
+    NavigationRailWidget, RAIL_COLLAPSED_WIDTH, RAIL_EXPAND_CURVE, RAIL_EXPAND_DURATION,
+    RAIL_EXPANDED_MAX_WIDTH, RAIL_EXPANDED_MIN_WIDTH, RAIL_ITEM_COLLAPSED_HEIGHT,
+    RAIL_ITEM_EXPANDED_HEIGHT, RAIL_LEAD_SPRING, RAIL_TRAIL_SPRING, RailDestination, RailFab,
+    RailLabelBehavior, RailSection, navigation_rail, rail_destination, rail_fab, rail_section,
 };
 pub use overlay::{
     ANCHORED_ENTER_SCALE, AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP,
