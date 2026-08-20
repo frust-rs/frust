@@ -43,13 +43,40 @@
 //! Knobs live in a page-local [`Knobs`], owned by the nested
 //! [`SplitButtonPlayground`] `Component` (never [`AppState`]) per the page
 //! contract in [`crate::pages::playground`]. `Knobs` derives `Clone` (every
-//! field — `NavigatorController`, `OverlayAnchor`, plain data — already is)
-//! so [`SplitButtonPlayground::build`] can hand [`content`] an owned
-//! snapshot inside the navigator's build closure, which cannot borrow the
-//! live component state.
+//! field — `NavigatorController`, `OverlayAnchor`, `RwSignal`, plain data —
+//! already is) so [`SplitButtonPlayground::build`] can hand [`content`] an
+//! owned clone of the handle set inside the navigator's build closure, which
+//! cannot borrow the live component state.
+//!
+//! # Every knob-VALUE field is an [`RwSignal`], because this page's body is a nav page
+//!
+//! A [`frust::navigator`] captures its **root page builder once**, at build,
+//! and re-runs *that* closure against live state on every later rebuild
+//! (`frust_widgets::nav`'s reconcile loop) — it is never replaced by the
+//! closure a later `Component::build` hands it. [`SplitButtonPlayground::build`]
+//! clones the whole [`Knobs`] into that closure; a plain-data field caught in
+//! that clone would freeze at its first-frame reading — this page shipped
+//! exactly that bug until this fix. `style`/`size`/`shape`/`menu_style`/
+//! `enabled`/`label`/`selected`/`open`/`style_open`/`size_open` are therefore
+//! signal handles [`content`] and its helpers re-read on every pass instead:
+//! the sanctioned "something outside the component's own `build` observes
+//! this write" case in `docs/CODE_STANDARDS.md`'s State & Reactivity
+//! conventions. The reads inside [`content`] and its render-path helpers all
+//! happen inside the rebuild pass, so the shell's own `TrackedScope`
+//! subscribes to them exactly as it would to a read in `build`; the reads
+//! inside event handlers ([`on_open`]/[`on_select`]) are one-off snapshots at
+//! press time, so they use `get_untracked` instead, the same split
+//! [`super::super::view::dialogs`]'s `open_basic` establishes.
+//!
+//! `nav`, `split_anchor`, `style_anchor`, and `size_anchor` need no such
+//! wrapping — [`NavigatorController`] and [`OverlayAnchor`] are already
+//! `Clone` handles over shared interior-mutable state (an `Rc<Cell<..>>` for
+//! the anchor), so cloning either into the frozen closure carries the live
+//! handle forward rather than a value snapshot.
 
 use frust::{
-    AnyView, Component, NavigatorController, PopResult, Stack, any, component, icon, navigator,
+    AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, Stack,
+    any, component, icon, navigator,
 };
 use frust_material::{
     MenuNode, MenuSelection, OverlayAnchor, SplitButtonItem, SplitButtonMenuStyle,
@@ -81,29 +108,29 @@ const MENU_STYLES: [SplitButtonMenuStyle; 2] = [
 #[derive(Clone)]
 struct Knobs {
     nav: NavigatorController<Knobs>,
-    style: SplitButtonVariant,
-    size: SplitButtonSize,
-    shape: SplitButtonShape,
-    menu_style: SplitButtonMenuStyle,
-    enabled: bool,
-    label: String,
+    style: RwSignal<SplitButtonVariant>,
+    size: RwSignal<SplitButtonSize>,
+    shape: RwSignal<SplitButtonShape>,
+    menu_style: RwSignal<SplitButtonMenuStyle>,
+    enabled: RwSignal<bool>,
+    label: RwSignal<String>,
     /// The app-confirmed selected item value (`"draft"`/`"copy"`), reported
     /// through [`on_select`] from either menu route.
-    selected: Option<String>,
+    selected: RwSignal<Option<String>>,
     /// Whether the trailing menu is currently presented — drives the
     /// chevron rotation and the trailing segment's open shape for both
     /// routes, and the anchored popup's own visibility for
     /// [`SplitButtonMenuStyle::Popup`].
-    open: bool,
+    open: RwSignal<bool>,
     /// The trailing segment's own window rect — captures where
     /// [`popup_menu`] places against.
     split_anchor: OverlayAnchor,
     /// Shared with [`style_menu_panel`] — the "Style" dropdown's anchor.
     style_anchor: OverlayAnchor,
-    style_open: bool,
+    style_open: RwSignal<bool>,
     /// Shared with [`size_menu_panel`] — the "Size" dropdown's anchor.
     size_anchor: OverlayAnchor,
-    size_open: bool,
+    size_open: RwSignal<bool>,
 }
 
 impl Default for Knobs {
@@ -111,19 +138,19 @@ impl Default for Knobs {
     fn default() -> Self {
         Self {
             nav: NavigatorController::new(),
-            style: SplitButtonVariant::Filled,
-            size: SplitButtonSize::Sm,
-            shape: SplitButtonShape::Round,
-            menu_style: SplitButtonMenuStyle::Popup,
-            enabled: true,
-            label: "Save".to_string(),
-            selected: None,
-            open: false,
+            style: RwSignal::new(SplitButtonVariant::Filled),
+            size: RwSignal::new(SplitButtonSize::Sm),
+            shape: RwSignal::new(SplitButtonShape::Round),
+            menu_style: RwSignal::new(SplitButtonMenuStyle::Popup),
+            enabled: RwSignal::new(true),
+            label: RwSignal::new("Save".to_string()),
+            selected: RwSignal::new(None),
+            open: RwSignal::new(false),
             split_anchor: OverlayAnchor::new(),
             style_anchor: OverlayAnchor::new(),
-            style_open: false,
+            style_open: RwSignal::new(false),
             size_anchor: OverlayAnchor::new(),
-            size_open: false,
+            size_open: RwSignal::new(false),
         }
     }
 }
@@ -193,7 +220,7 @@ fn sheet_nodes() -> Vec<MenuNode> {
 /// own single `onSelected` regardless of `menuStyle`.
 fn on_select(state: &mut Knobs, selection: MenuSelection) {
     if let Some(value) = selection.value() {
-        state.selected = Some(value.to_string());
+        state.selected.set(Some(value.to_string()));
     }
 }
 
@@ -202,21 +229,21 @@ fn on_select(state: &mut Knobs, selection: MenuSelection) {
 /// open request under [`SplitButtonMenuStyle::BottomSheet`]. See the [module
 /// docs](self) for why the two routes are composed differently.
 fn on_open(state: &mut Knobs) {
-    match state.menu_style {
-        SplitButtonMenuStyle::Popup => state.open = !state.open,
+    match state.menu_style.get_untracked() {
+        SplitButtonMenuStyle::Popup => state.open.set(!state.open.get_untracked()),
         SplitButtonMenuStyle::BottomSheet => {
-            if state.open {
+            if state.open.get_untracked() {
                 return;
             }
-            state.open = true;
+            state.open.set(true);
             let nav = state.nav.clone();
-            let selected = state.selected.clone();
+            let selected = state.selected.get_untracked();
             show_bottom_sheet(
                 &nav,
                 move || {
                     bottom_sheet(menu_panel(sheet_nodes(), on_select).selected(selected.clone()))
                 },
-                |state: &mut Knobs, _result: PopResult| state.open = false,
+                |state: &mut Knobs, _result: PopResult| state.open.set(false),
             );
         }
     }
@@ -226,16 +253,21 @@ fn on_open(state: &mut Knobs) {
 /// [`preview`] and [`split_popup_menu`] (the latter reaches only
 /// [`frust_material::SplitButtonView::popup_menu`] off it).
 fn split_view(state: &Knobs) -> frust_material::SplitButtonView<Knobs> {
-    split_button(state.label.clone(), state.open, |_: &mut Knobs| {}, on_open)
-        .leading_icon(|| any(icon(icons::SAVE)))
-        .variant(state.style)
-        .size(state.size)
-        .shape(state.shape)
-        .enabled(state.enabled)
-        .items(split_items())
-        .selected_value(state.selected.clone())
-        .menu_anchor(&state.split_anchor)
-        .on_select(on_select)
+    split_button(
+        state.label.get(),
+        state.open.get(),
+        |_: &mut Knobs| {},
+        on_open,
+    )
+    .leading_icon(|| any(icon(icons::SAVE)))
+    .variant(state.style.get())
+    .size(state.size.get())
+    .shape(state.shape.get())
+    .enabled(state.enabled.get())
+    .items(split_items())
+    .selected_value(state.selected.get())
+    .menu_anchor(&state.split_anchor)
+    .on_select(on_select)
 }
 
 /// The "Split button" preview.
@@ -260,32 +292,32 @@ fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
         vec![
             play_enum_menu_field(
                 "Style",
-                state.style,
+                state.style.get(),
                 &SplitButtonVariant::ALL,
                 style_label,
                 &state.style_anchor,
-                state.style_open,
-                |state: &mut Knobs, open: bool| state.style_open = open,
+                state.style_open.get(),
+                |state: &mut Knobs, open: bool| state.style_open.set(open),
             ),
             play_enum_menu_field(
                 "Size",
-                state.size,
+                state.size.get(),
                 &SplitButtonSize::ALL,
                 size_label,
                 &state.size_anchor,
-                state.size_open,
-                |state: &mut Knobs, open: bool| state.size_open = open,
+                state.size_open.get(),
+                |state: &mut Knobs, open: bool| state.size_open.set(open),
             ),
             play_enum_segmented(
                 "Shape",
-                state.shape,
+                state.shape.get(),
                 &SHAPES,
                 shape_label,
-                |state: &mut Knobs, next: SplitButtonShape| state.shape = next,
+                |state: &mut Knobs, next: SplitButtonShape| state.shape.set(next),
             ),
             play_enum_segmented(
                 "Menu style",
-                state.menu_style,
+                state.menu_style.get(),
                 &MENU_STYLES,
                 menu_style_label,
                 |state: &mut Knobs, next: SplitButtonMenuStyle| {
@@ -294,8 +326,8 @@ fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
                     // once): switching the route while a menu is showing
                     // would otherwise strand the popup open, so reset
                     // rather than mix the two routes' open state.
-                    state.menu_style = next;
-                    state.open = false;
+                    state.menu_style.set(next);
+                    state.open.set(false);
                 },
             ),
         ],
@@ -309,12 +341,16 @@ fn content_panel(state: &Knobs) -> AnyView<Knobs> {
         vec![
             play_text_field(
                 "Label",
-                state.label.clone(),
-                |state: &mut Knobs, next: String| state.label = next,
+                state.label.get(),
+                |state: &mut Knobs, next: String| state.label.set(next),
             ),
-            play_switch("Enabled", state.enabled, |state: &mut Knobs, next: bool| {
-                state.enabled = next;
-            }),
+            play_switch(
+                "Enabled",
+                state.enabled.get(),
+                |state: &mut Knobs, next: bool| {
+                    state.enabled.set(next);
+                },
+            ),
         ],
     )
 }
@@ -322,26 +358,26 @@ fn content_panel(state: &Knobs) -> AnyView<Knobs> {
 /// The "Style" menu's popup half — mounted at this page's outer [`Stack`].
 fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
     play_enum_menu_panel(
-        state.style,
+        state.style.get(),
         &SplitButtonVariant::ALL,
         style_label,
         &state.style_anchor,
-        state.style_open,
-        |state: &mut Knobs, open: bool| state.style_open = open,
-        |state: &mut Knobs, next: SplitButtonVariant| state.style = next,
+        state.style_open.get(),
+        |state: &mut Knobs, open: bool| state.style_open.set(open),
+        |state: &mut Knobs, next: SplitButtonVariant| state.style.set(next),
     )
 }
 
 /// The "Size" menu's popup half — mounted at this page's outer [`Stack`].
 fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
     play_enum_menu_panel(
-        state.size,
+        state.size.get(),
         &SplitButtonSize::ALL,
         size_label,
         &state.size_anchor,
-        state.size_open,
-        |state: &mut Knobs, open: bool| state.size_open = open,
-        |state: &mut Knobs, next: SplitButtonSize| state.size = next,
+        state.size_open.get(),
+        |state: &mut Knobs, open: bool| state.size_open.set(open),
+        |state: &mut Knobs, next: SplitButtonSize| state.size.set(next),
     )
 }
 
@@ -349,7 +385,7 @@ fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 /// first `_snippets` entry, in Frust rather than Dart (see the [module
 /// docs](self) for why there is no second "Custom M3E menu" snippet).
 fn snippet(state: &Knobs) -> PlaySnippet {
-    let selected = match &state.selected {
+    let selected = match state.selected.get() {
         Some(value) => format!("Some({value:?}.to_string())"),
         None => "None".to_string(),
     };
@@ -362,13 +398,13 @@ fn snippet(state: &Knobs) -> PlaySnippet {
          split_button_item(\"Save a copy\").value(\"copy\"),\n    ])\n    \
          .selected_value({selected})\n    .menu_style(SplitButtonMenuStyle::{menu_style:?})\n    \
          .on_select(on_select);",
-        label = state.label,
-        open = state.open,
-        style = state.style,
-        size = state.size,
-        shape = state.shape,
-        enabled = state.enabled,
-        menu_style = state.menu_style,
+        label = state.label.get(),
+        open = state.open.get(),
+        style = state.style.get(),
+        size = state.size.get(),
+        shape = state.shape.get(),
+        enabled = state.enabled.get(),
+        menu_style = state.menu_style.get(),
     );
     play_snippet("Split button", code)
 }
@@ -383,7 +419,7 @@ fn content(state: &Knobs) -> AnyView<Knobs> {
         vec![appearance_panel(state), content_panel(state)],
     );
     let mut layers = vec![body, style_menu_panel(state), size_menu_panel(state)];
-    if state.menu_style == SplitButtonMenuStyle::Popup {
+    if state.menu_style.get() == SplitButtonMenuStyle::Popup {
         layers.push(split_popup_menu(state));
     }
     any(Stack(layers))
@@ -412,6 +448,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 
 #[cfg(test)]
 mod tests {
+    use frust::{Get, RwSignal, Set};
     use frust_material::{
         SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant,
     };
@@ -420,27 +457,27 @@ mod tests {
 
     #[test]
     fn the_page_builds_across_every_style() {
-        let mut knobs = Knobs::default();
+        let knobs = Knobs::default();
         for style in SplitButtonVariant::ALL {
-            knobs.style = style;
+            knobs.style.set(style);
             let _view = content(&knobs);
         }
     }
 
     #[test]
     fn the_page_builds_across_every_size() {
-        let mut knobs = Knobs::default();
+        let knobs = Knobs::default();
         for size in SplitButtonSize::ALL {
-            knobs.size = size;
+            knobs.size.set(size);
             let _view = content(&knobs);
         }
     }
 
     #[test]
     fn the_page_builds_across_every_shape() {
-        let mut knobs = Knobs::default();
+        let knobs = Knobs::default();
         for shape in [SplitButtonShape::Round, SplitButtonShape::Square] {
-            knobs.shape = shape;
+            knobs.shape.set(shape);
             let _view = content(&knobs);
         }
     }
@@ -448,7 +485,7 @@ mod tests {
     #[test]
     fn the_page_builds_in_the_bottom_sheet_menu_style_with_the_popup_layer_omitted() {
         let knobs = Knobs {
-            menu_style: SplitButtonMenuStyle::BottomSheet,
+            menu_style: RwSignal::new(SplitButtonMenuStyle::BottomSheet),
             ..Knobs::default()
         };
         let _view = content(&knobs);
@@ -457,10 +494,10 @@ mod tests {
     #[test]
     fn the_page_builds_with_the_popup_open_disabled_and_a_confirmed_selection() {
         let knobs = Knobs {
-            open: true,
-            enabled: false,
-            selected: Some("copy".to_string()),
-            label: String::new(),
+            open: RwSignal::new(true),
+            enabled: RwSignal::new(false),
+            selected: RwSignal::new(Some("copy".to_string())),
+            label: RwSignal::new(String::new()),
             ..Knobs::default()
         };
         let _view = content(&knobs);
@@ -469,8 +506,8 @@ mod tests {
     #[test]
     fn the_page_builds_with_both_style_and_size_dropdown_menus_open() {
         let knobs = Knobs {
-            style_open: true,
-            size_open: true,
+            style_open: RwSignal::new(true),
+            size_open: RwSignal::new(true),
             ..Knobs::default()
         };
         let _view = content(&knobs);
@@ -479,17 +516,33 @@ mod tests {
     #[test]
     fn a_popup_tap_toggles_the_open_flag() {
         let mut knobs = Knobs::default();
-        assert!(!knobs.open);
+        assert!(!knobs.open.get());
         on_open(&mut knobs);
-        assert!(knobs.open);
+        assert!(knobs.open.get());
         on_open(&mut knobs);
-        assert!(!knobs.open);
+        assert!(!knobs.open.get());
+    }
+
+    /// A write through any knob's signal must be visible to the next read
+    /// the navigator's frozen closure would perform — the exact round trip
+    /// `SplitButtonPlayground::build`'s `move || content(&snapshot)` relies
+    /// on, since `snapshot` is a clone of the same signal handles.
+    #[test]
+    fn a_knob_write_through_the_signal_is_visible_to_a_cloned_handles_read() {
+        let knobs = Knobs::default();
+        let snapshot = knobs.clone();
+        knobs.style.set(SplitButtonVariant::Outlined);
+        knobs.label.set("Renamed".to_string());
+        knobs.open.set(true);
+        assert_eq!(snapshot.style.get(), SplitButtonVariant::Outlined);
+        assert_eq!(snapshot.label.get(), "Renamed");
+        assert!(snapshot.open.get());
     }
 
     #[test]
     fn the_snippet_reflects_the_confirmed_selection_and_menu_style() {
         let knobs = Knobs {
-            selected: Some("draft".to_string()),
+            selected: RwSignal::new(Some("draft".to_string())),
             ..Knobs::default()
         };
         let snippet = snippet(&knobs);

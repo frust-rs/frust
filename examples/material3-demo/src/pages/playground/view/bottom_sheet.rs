@@ -9,6 +9,20 @@
 //! page shows the supported (always-on) handle and omits the control
 //! entirely rather than inventing one.
 //!
+//! # `body` is an [`RwSignal`], because this page's body is a nav page
+//!
+//! A [`frust::navigator`] captures its **root page builder once**, at build,
+//! and re-runs *that* closure against live state on every later rebuild
+//! (`frust_widgets::nav`'s reconcile loop) — it is never replaced by the
+//! closure a later `Component::build` hands it. A plain `String` cloned into
+//! the closure would therefore freeze at its first-frame reading — this page
+//! shipped exactly that bug until this fix — so `body` is a signal handle the
+//! closure re-reads instead: the sanctioned "something outside the
+//! component's own `build` observes this write" case in
+//! `docs/CODE_STANDARDS.md`'s State & Reactivity conventions. The read
+//! happens inside the rebuild pass, so the shell's own `TrackedScope`
+//! subscribes to it exactly as it would to a read in `build`.
+//!
 //! # Why `page`/`Component::build` aren't tested directly
 //!
 //! `Component::build` mounts a [`frust::navigator`] (the pattern
@@ -20,8 +34,8 @@
 //! navigator touched, and is what this file's tests exercise instead.
 
 use frust::{
-    AnyView, Component, EdgeInsets, NavigatorController, Padding, PopResult, any, component,
-    navigator, text,
+    AnyView, Component, EdgeInsets, Get, NavigatorController, Padding, PopResult, RwSignal, Set,
+    any, component, navigator, text,
 };
 use frust_material::{bottom_sheet, show_bottom_sheet, tonal_button};
 
@@ -36,10 +50,10 @@ use crate::widgets::playground::{
 const DEFAULT_BODY: &str = "A modal bottom sheet with a drag handle.";
 
 /// This page's knob state, plus the navigator [`show_bottom_sheet`] pushes
-/// onto.
+/// onto. `body` is a live handle — see the module docs.
 struct Knobs {
     nav: NavigatorController<Knobs>,
-    body: String,
+    body: RwSignal<String>,
 }
 
 struct BottomSheetPlayground;
@@ -50,14 +64,14 @@ impl Component for BottomSheetPlayground {
     fn init(&self) -> Knobs {
         Knobs {
             nav: NavigatorController::new(),
-            body: DEFAULT_BODY.to_string(),
+            body: RwSignal::new(DEFAULT_BODY.to_string()),
         }
     }
 
     fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
         let nav = state.nav.clone();
-        let body = state.body.clone();
-        any(navigator(&state.nav, move || content(&nav, &body)))
+        let body = state.body;
+        any(navigator(&state.nav, move || content(&nav, &body.get())))
     }
 }
 
@@ -109,7 +123,7 @@ fn controls(body: &str) -> AnyView<Knobs> {
         vec![play_text_field::<Knobs>(
             "Body",
             body.to_string(),
-            |state: &mut Knobs, next: String| state.body = next,
+            |state: &mut Knobs, next: String| state.body.set(next),
         )],
     ))
 }
@@ -137,5 +151,19 @@ mod tests {
         for body in ["", DEFAULT_BODY, "Custom body text for a resized sheet."] {
             let _view = content(&nav, body);
         }
+    }
+
+    /// A write through `body`'s signal must be visible to the next read the
+    /// navigator's frozen closure would perform — the exact round trip
+    /// `Component::build`'s `move || content(&nav, &body.get())` relies on.
+    #[test]
+    fn a_body_write_through_the_signal_is_visible_to_the_next_read() {
+        let knobs = Knobs {
+            nav: NavigatorController::new(),
+            body: RwSignal::new(DEFAULT_BODY.to_string()),
+        };
+        let updated = "Updated via the signal, not a frozen clone.".to_string();
+        knobs.body.set(updated.clone());
+        assert_eq!(knobs.body.get(), updated);
     }
 }

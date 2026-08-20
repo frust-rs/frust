@@ -30,6 +30,26 @@
 //! part that actually varies with this page's knob state, built with no
 //! navigator touched, and is what this file's tests exercise instead.
 //!
+//! # Why `Knobs`' mutable fields are [`RwSignal`]s, not plain data
+//!
+//! A [`frust::navigator`] captures its **root page builder once**, at build,
+//! and re-runs *that* closure against live state on every later rebuild
+//! (`frust_widgets::nav`'s reconcile loop) — it is never replaced by the
+//! closure a later `Component::build` hands it. [`DatePickersPlayground::build`]
+//! used to clone `picker`/`confirmed`/`entry_mode_open`/`calendar_mode_open`
+//! into that closure by value; each would have frozen at its first-frame
+//! reading — this page shipped exactly that bug until this fix. They are
+//! signal handles instead, cloned into the closure and re-read with `.get()`
+//! on every invocation right before the call into [`content`] (whose own
+//! plain-value signature is untouched, so it stays exactly as testable as
+//! before): the sanctioned "something outside the component's own `build`
+//! observes this write" case in `docs/CODE_STANDARDS.md`'s State &
+//! Reactivity conventions. The reads happen inside the rebuild pass, so the
+//! shell's own `TrackedScope` subscribes to them exactly as it would to a
+//! read in `build`. `entry_mode_anchor`/`calendar_mode_anchor` need no such
+//! wrapping — [`OverlayAnchor`] is already a `Clone` handle over shared
+//! interior-mutable state.
+//!
 //! # Descoped: the range dialog
 //!
 //! The reference's second trigger, "Pick range", opens
@@ -50,8 +70,8 @@
 //! app with a real clock source substitutes its own reading.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, NavigatorController, PopResult, SizedBox,
-    Stack, any, component, navigator, text,
+    AnyView, Column, Component, CrossAxisAlignment, Get, GetUntracked, NavigatorController,
+    PopResult, RwSignal, Set, SizedBox, Stack, any, component, navigator, text,
 };
 use frust_material::{
     DatePickerEntryMode, DatePickerMode, DatePickerState, MaterialDate, OverlayAnchor,
@@ -130,14 +150,14 @@ fn calendar_mode_label(mode: DatePickerMode) -> &'static str {
 /// [`Self::confirmed`] are separate.
 struct Knobs {
     nav: NavigatorController<Knobs>,
-    picker: DatePickerState,
-    confirmed: Option<MaterialDate>,
+    picker: RwSignal<DatePickerState>,
+    confirmed: RwSignal<Option<MaterialDate>>,
     /// Shared with the "Entry mode" [`play_enum_menu_panel`].
     entry_mode_anchor: OverlayAnchor,
-    entry_mode_open: bool,
+    entry_mode_open: RwSignal<bool>,
     /// Shared with the "Calendar mode" [`play_enum_menu_panel`].
     calendar_mode_anchor: OverlayAnchor,
-    calendar_mode_open: bool,
+    calendar_mode_open: RwSignal<bool>,
 }
 
 impl Default for Knobs {
@@ -146,12 +166,12 @@ impl Default for Knobs {
         let seed = seed_date();
         Self {
             nav: NavigatorController::new(),
-            picker: DatePickerState::new(Some(seed), today()),
-            confirmed: Some(seed),
+            picker: RwSignal::new(DatePickerState::new(Some(seed), today())),
+            confirmed: RwSignal::new(Some(seed)),
             entry_mode_anchor: OverlayAnchor::new(),
-            entry_mode_open: false,
+            entry_mode_open: RwSignal::new(false),
             calendar_mode_anchor: OverlayAnchor::new(),
-            calendar_mode_open: false,
+            calendar_mode_open: RwSignal::new(false),
         }
     }
 }
@@ -162,7 +182,7 @@ fn calendar_preview(picker: &DatePickerState) -> AnyView<Knobs> {
         picker.clone(),
         first_date(),
         last_date(),
-        |s: &mut Knobs, next: DatePickerState| s.picker = next,
+        |s: &mut Knobs, next: DatePickerState| s.picker.set(next),
     )
     .today(today()))
 }
@@ -191,13 +211,13 @@ fn dialogs_preview(
                     picker.clone(),
                     first_date(),
                     last_date(),
-                    |s: &mut Knobs, next: DatePickerState| s.picker = next,
+                    |s: &mut Knobs, next: DatePickerState| s.picker.set(next),
                 )
                 .today(today())
             },
             |s: &mut Knobs, result: PopResult| {
                 if let Some(date) = result.take::<MaterialDate>() {
-                    s.confirmed = Some(date);
+                    s.confirmed.set(Some(date));
                 }
             },
         );
@@ -267,7 +287,7 @@ fn controls(
                 entry_mode_label,
                 entry_mode_anchor,
                 entry_mode_open,
-                |s: &mut Knobs, open: bool| s.entry_mode_open = open,
+                |s: &mut Knobs, open: bool| s.entry_mode_open.set(open),
             ),
             play_enum_menu_field(
                 "Calendar mode",
@@ -276,7 +296,7 @@ fn controls(
                 calendar_mode_label,
                 calendar_mode_anchor,
                 calendar_mode_open,
-                |s: &mut Knobs, open: bool| s.calendar_mode_open = open,
+                |s: &mut Knobs, open: bool| s.calendar_mode_open.set(open),
             ),
         ],
     )
@@ -295,8 +315,10 @@ fn entry_mode_menu_panel(
         entry_mode_label,
         anchor,
         open,
-        |s: &mut Knobs, open: bool| s.entry_mode_open = open,
-        |s: &mut Knobs, next: DatePickerEntryMode| s.picker = s.picker.with_entry_mode(next),
+        |s: &mut Knobs, open: bool| s.entry_mode_open.set(open),
+        |s: &mut Knobs, next: DatePickerEntryMode| {
+            s.picker.set(s.picker.get_untracked().with_entry_mode(next))
+        },
     )
 }
 
@@ -313,8 +335,10 @@ fn calendar_mode_menu_panel(
         calendar_mode_label,
         anchor,
         open,
-        |s: &mut Knobs, open: bool| s.calendar_mode_open = open,
-        |s: &mut Knobs, next: DatePickerMode| s.picker = s.picker.with_mode(next),
+        |s: &mut Knobs, open: bool| s.calendar_mode_open.set(open),
+        |s: &mut Knobs, next: DatePickerMode| {
+            s.picker.set(s.picker.get_untracked().with_mode(next))
+        },
     )
 }
 
@@ -366,7 +390,7 @@ impl Component for DatePickersPlayground {
 
     fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
         let nav = state.nav.clone();
-        let picker = state.picker.clone();
+        let picker = state.picker;
         let confirmed = state.confirmed;
         let entry_mode_anchor = state.entry_mode_anchor.clone();
         let entry_mode_open = state.entry_mode_open;
@@ -375,12 +399,12 @@ impl Component for DatePickersPlayground {
         any(navigator(&state.nav, move || {
             content(
                 &nav,
-                &picker,
-                confirmed,
+                &picker.get(),
+                confirmed.get(),
                 &entry_mode_anchor,
-                entry_mode_open,
+                entry_mode_open.get(),
                 &calendar_mode_anchor,
-                calendar_mode_open,
+                calendar_mode_open.get(),
             )
         }))
     }
@@ -453,5 +477,26 @@ mod tests {
     fn the_page_fn_builds_from_its_catalog_entry() {
         let entry = crate::catalog::find_by_id("date_pickers").expect("catalog entry exists");
         let _view = super::page(entry);
+    }
+
+    /// A write through any knob's signal must be visible to the next read
+    /// the navigator's frozen closure would perform — the exact round trip
+    /// `DatePickersPlayground::build`'s `move || content(&nav, &picker.get(),
+    /// ..)` relies on.
+    #[test]
+    fn a_knob_write_through_the_signal_is_visible_to_the_next_read() {
+        let knobs = Knobs::default();
+        let confirmed_date = MaterialDate::new(2027, 3, 4);
+        let edited_picker = knobs.picker.get_untracked().with_mode(DatePickerMode::Year);
+
+        knobs.picker.set(edited_picker);
+        knobs.confirmed.set(Some(confirmed_date));
+        knobs.entry_mode_open.set(true);
+        knobs.calendar_mode_open.set(true);
+
+        assert_eq!(knobs.picker.get().mode, DatePickerMode::Year);
+        assert_eq!(knobs.confirmed.get(), Some(confirmed_date));
+        assert!(knobs.entry_mode_open.get());
+        assert!(knobs.calendar_mode_open.get());
     }
 }

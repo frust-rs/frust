@@ -28,10 +28,31 @@
 //! navigator-mounted shell view in a host-side test. [`content`] below is the
 //! part that actually varies with this page's knob state, built with no
 //! navigator touched, and is what this file's tests exercise instead.
+//!
+//! # Why `Knobs`' mutable fields are [`RwSignal`]s, not plain data
+//!
+//! A [`frust::navigator`] captures its **root page builder once**, at build,
+//! and re-runs *that* closure against live state on every later rebuild
+//! (`frust_widgets::nav`'s reconcile loop) — it is never replaced by the
+//! closure a later `Component::build` hands it. [`TimePickersPlayground::build`]
+//! used to clone `time`/`entry_mode`/`use_24_hour`/`entry_mode_open` into
+//! that closure by value; each would have frozen at its first-frame reading —
+//! this page shipped exactly that bug until this fix (the same shape
+//! [`super::date_pickers`] shipped and fixes for the same reason). They are
+//! signal handles instead, cloned into the closure and re-read with `.get()`
+//! on every invocation right before the call into [`content`] (whose own
+//! plain-value signature is untouched, so it stays exactly as testable as
+//! before): the sanctioned "something outside the component's own `build`
+//! observes this write" case in `docs/CODE_STANDARDS.md`'s State &
+//! Reactivity conventions. The reads happen inside the rebuild pass, so the
+//! shell's own `TrackedScope` subscribes to them exactly as it would to a
+//! read in `build`. `entry_mode_anchor` needs no such wrapping —
+//! [`OverlayAnchor`] is already a `Clone` handle over shared
+//! interior-mutable state.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, NavigatorController, PopResult, SizedBox,
-    Stack, any, component, navigator, text,
+    AnyView, Column, Component, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal,
+    Set, SizedBox, Stack, any, component, navigator, text,
 };
 use frust_material::{
     OverlayAnchor, TimeOfDay, TimePickerEntryMode, show_time_picker, time_dial, time_picker,
@@ -69,12 +90,12 @@ fn entry_mode_label(mode: TimePickerEntryMode) -> &'static str {
 /// [`AppState`] (the page contract in [`crate::pages::playground`]).
 struct Knobs {
     nav: NavigatorController<Knobs>,
-    time: TimeOfDay,
-    entry_mode: TimePickerEntryMode,
-    use_24_hour: bool,
+    time: RwSignal<TimeOfDay>,
+    entry_mode: RwSignal<TimePickerEntryMode>,
+    use_24_hour: RwSignal<bool>,
     /// Shared with the "Entry mode" [`play_enum_menu_panel`].
     entry_mode_anchor: OverlayAnchor,
-    entry_mode_open: bool,
+    entry_mode_open: RwSignal<bool>,
 }
 
 impl Default for Knobs {
@@ -82,18 +103,18 @@ impl Default for Knobs {
     fn default() -> Self {
         Self {
             nav: NavigatorController::new(),
-            time: TimeOfDay::new(9, 30),
-            entry_mode: TimePickerEntryMode::Dial,
-            use_24_hour: false,
+            time: RwSignal::new(TimeOfDay::new(9, 30)),
+            entry_mode: RwSignal::new(TimePickerEntryMode::Dial),
+            use_24_hour: RwSignal::new(false),
             entry_mode_anchor: OverlayAnchor::new(),
-            entry_mode_open: false,
+            entry_mode_open: RwSignal::new(false),
         }
     }
 }
 
 /// The "Dial" preview: the inline ring bound to `time`.
 fn dial_preview(time: TimeOfDay, use_24_hour: bool) -> AnyView<Knobs> {
-    any(time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time = next).use_24_hour(use_24_hour))
+    any(time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time.set(next)).use_24_hour(use_24_hour))
 }
 
 /// The "Dialog" preview: a "Pick time" trigger over the current time's label
@@ -120,7 +141,7 @@ fn dialog_preview(
                 time_picker(time)
                     .entry_mode(entry_mode)
                     .use_24_hour(use_24_hour)
-                    .on_change(|s: &mut Knobs, next: TimeOfDay| s.time = next)
+                    .on_change(|s: &mut Knobs, next: TimeOfDay| s.time.set(next))
                     .on_confirm(move |_s: &mut Knobs, confirmed: Option<TimeOfDay>| {
                         if let Some(picked) = confirmed {
                             on_confirm_nav.pop_with_result(PopResult::of(picked));
@@ -130,7 +151,7 @@ fn dialog_preview(
             },
             |s: &mut Knobs, result: PopResult| {
                 if let Some(picked) = result.take::<TimeOfDay>() {
-                    s.time = picked;
+                    s.time.set(picked);
                 }
             },
         );
@@ -201,10 +222,10 @@ fn controls(
                 entry_mode_label,
                 entry_mode_anchor,
                 entry_mode_open,
-                |s: &mut Knobs, open: bool| s.entry_mode_open = open,
+                |s: &mut Knobs, open: bool| s.entry_mode_open.set(open),
             ),
             play_switch("24-hour format", use_24_hour, |s: &mut Knobs, v: bool| {
-                s.use_24_hour = v
+                s.use_24_hour.set(v)
             }),
         ],
     )
@@ -223,8 +244,8 @@ fn entry_mode_menu_panel(
         entry_mode_label,
         anchor,
         open,
-        |s: &mut Knobs, open: bool| s.entry_mode_open = open,
-        |s: &mut Knobs, next: TimePickerEntryMode| s.entry_mode = next,
+        |s: &mut Knobs, open: bool| s.entry_mode_open.set(open),
+        |s: &mut Knobs, next: TimePickerEntryMode| s.entry_mode.set(next),
     )
 }
 
@@ -283,11 +304,11 @@ impl Component for TimePickersPlayground {
         any(navigator(&state.nav, move || {
             content(
                 &nav,
-                time,
-                entry_mode,
-                use_24_hour,
+                time.get(),
+                entry_mode.get(),
+                use_24_hour.get(),
                 &entry_mode_anchor,
-                entry_mode_open,
+                entry_mode_open.get(),
             )
         }))
     }
@@ -340,5 +361,25 @@ mod tests {
     fn the_page_fn_builds_from_its_catalog_entry() {
         let entry = crate::catalog::find_by_id("time_pickers").expect("catalog entry exists");
         let _view = super::page(entry);
+    }
+
+    /// A write through any knob's signal must be visible to the next read
+    /// the navigator's frozen closure would perform — the exact round trip
+    /// `TimePickersPlayground::build`'s `move || content(&nav, time.get(),
+    /// ..)` relies on.
+    #[test]
+    fn a_knob_write_through_the_signal_is_visible_to_the_next_read() {
+        let knobs = Knobs::default();
+        let updated_time = TimeOfDay::new(14, 45);
+
+        knobs.time.set(updated_time);
+        knobs.entry_mode.set(TimePickerEntryMode::InputOnly);
+        knobs.use_24_hour.set(true);
+        knobs.entry_mode_open.set(true);
+
+        assert_eq!(knobs.time.get(), updated_time);
+        assert_eq!(knobs.entry_mode.get(), TimePickerEntryMode::InputOnly);
+        assert!(knobs.use_24_hour.get());
+        assert!(knobs.entry_mode_open.get());
     }
 }
