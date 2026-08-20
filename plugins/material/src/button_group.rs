@@ -7,9 +7,11 @@
 // Porting decisions: the offstage checked/unchecked *measurer* and its
 // `stableAllOverflowMeasured` gate collapse to a plain natural-size layout
 // pass (this framework can lay a child out synchronously, which is the whole
-// problem that machinery exists to work around); the `popup` overflow-menu
-// style and `experimentalPaging` overflow mode are not ported (see the
-// module docs' Overflow section).
+// problem that machinery exists to work around); `experimentalPaging` (and
+// with it `M3EOverflowStrategy`, the custom strategy seam) is not ported (see
+// the module docs' Overflow section). The `popup` overflow-menu style *is*
+// ported, onto `crate::overlay::anchored` + `crate::menu` — see
+// `ButtonGroupOverflow::Popup` and `ButtonGroupView::overflow_menu`.
 
 //! The Material 3 Expressive **button group**: a row (or column) of
 //! [`mod@crate::toggle_button`] members, `standard` (spaced) or `connected`
@@ -100,30 +102,41 @@
 //! |---|---|
 //! | `None` | Lay every member out; content wider than the box simply overflows it (`_buildAnimatedLinearLayout` under an unclipped `LayoutBuilder`). |
 //! | `Scroll` (default) | Lay every member out, clip to the box, and pan along the main axis once the content does not fit (`_linearScrollable`). |
-//! | `BottomSheet` | Show as many members as fit *plus* a trailing overflow trigger, and report the first hidden index through [`ButtonGroupView::on_overflow`] when the trigger is tapped. |
+//! | `BottomSheet` | Show as many members as fit *plus* a trailing overflow trigger, and report the first hidden index through [`ButtonGroupView::on_overflow`] when the trigger is tapped — `M3EButtonGroupOverflow.menu` with `M3EButtonGroupOverflowMenuStyle.bottomSheet`. |
+//! | `Popup` | The same split and trigger as `BottomSheet`, but the hidden tail presents as an anchored menu via [`ButtonGroupView::overflow_menu`] — `M3EButtonGroupOverflow.menu` with `M3EButtonGroupOverflowMenuStyle.popup`. |
 //!
-//! `BottomSheet`'s split is [`visible_count_for_overflow`], the exact
-//! transcription of `M3EButtonGroupOverflowController.computeVisibleCountForMenu`
+//! `BottomSheet` and `Popup` share one split, [`visible_count_for_overflow`],
+//! the exact transcription of
+//! `M3EButtonGroupOverflowController.computeVisibleCountForMenu`
 //! (`m3e_button_group_overflow_controller.dart:61`), including its
 //! `roundConsumed`/`roundAvailable` (ceil/floor) rounding and its rule that
 //! room for the trigger *and* its separator is reserved as soon as anything
 //! would remain hidden.
 //!
-//! **The sheet itself is the app's to present.** [`crate::show_bottom_sheet`]
-//! needs a `NavigatorController` a leaf widget cannot reach, and its `build`
-//! closure is re-invoked on every navigator rebuild — so this module reports
-//! the split and leaves presentation to `on_overflow`, exactly the seam
-//! [`mod@crate::split_button`] uses for its own menu. Two consequences of the
-//! split being a *layout*-time result the view cannot see: the trigger never
-//! reads checked (the reference marks it checked while the hidden range holds
-//! the selection, `_buildOverflowIndicatorButton`), and a group too narrow for
-//! even one member leaves the trigger's leading corner inner rather than
-//! outer (`isFirst: visibleCount == 0`).
+//! **The sheet itself is the app's to present; the popup is this module's.**
+//! [`crate::show_bottom_sheet`] needs a `NavigatorController` a leaf widget
+//! cannot reach, and its `build` closure is re-invoked on every navigator
+//! rebuild — so `BottomSheet` reports the split and leaves presentation to
+//! `on_overflow`, exactly the seam [`mod@crate::split_button`] uses for its
+//! own menu. `Popup` needs no navigator at all: [`mod@crate::overlay::anchored`]
+//! is a plain widget, so [`ButtonGroupView::overflow_menu`] composes one
+//! directly from the same action list `on_overflow` already reports the split
+//! over — the two-piece field/panel shape [`mod@crate::dropdown`] takes,
+//! since the trigger paints inside the group's own box and there is no portal
+//! to reach out through: the app mounts [`ButtonGroupView::overflow_menu`]
+//! separately (typically the top of its own [`frust::Stack`]), anchored to
+//! the [`OverlayAnchor`] handed to [`ButtonGroupView::overflow_anchor`]. This
+//! mirrors upstream's own `_onCustomOverflowPressed` → `showOverflowMenu` →
+//! `onItemSelected` flow (`m3e_toggle_button_group_layout.dart:181`-`:203`):
+//! a trigger tap never fires a hidden action directly, it opens the picker
+//! surface first, and only a row activation inside it reports a real
+//! selection. Two consequences of the split being a *layout*-time result the
+//! view cannot see: the trigger never reads checked (the reference marks it
+//! checked while the hidden range holds the selection,
+//! `_buildOverflowIndicatorButton`), and a group too narrow for even one
+//! member leaves the trigger's leading corner inner rather than outer
+//! (`isFirst: visibleCount == 0`).
 //!
-//! `M3EButtonGroupOverflow.menu`'s **popup** style is deliberately absent
-//! rather than mapped: it needs an anchored, trigger-relative host this
-//! catalog does not have yet, and silently substituting a modal sheet for a
-//! popup would be a different component, not a degraded one.
 //! `experimentalPaging` (and with it `M3EOverflowStrategy`, the custom
 //! strategy seam) is deferred by approved decision.
 //!
@@ -167,6 +180,8 @@ use frust::{AnimationController, SpringDesc, Theme};
 use kurbo::{Point, RoundedRectRadii, Size};
 
 use crate::interaction::HapticSignal;
+use crate::menu::{MenuNode, MenuSelection, menu, menu_toggleable};
+use crate::overlay::{OverlayAnchor, overlay_anchor};
 use crate::press::presses;
 use crate::{ButtonVariant, ToggleButtonSize};
 
@@ -269,7 +284,8 @@ pub enum ButtonGroupDirection {
 
 /// How the group handles members that do not fit — the ported subset of
 /// `M3EButtonGroupOverflow` (`m3e_toggle_button_group_enums.dart:30`). See the
-/// [module docs](self)' Overflow section for the two unported variants.
+/// [module docs](self)' Overflow section for the one unported mode
+/// (`experimentalPaging`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonGroupOverflow {
     /// Do not handle overflow at all — content wider than the box overflows it.
@@ -281,8 +297,14 @@ pub enum ButtonGroupOverflow {
     /// Show only the members that fit plus a trailing overflow trigger,
     /// reporting the first hidden index through
     /// [`ButtonGroupView::on_overflow`] — `M3EButtonGroupOverflow.menu` with
-    /// `M3EButtonGroupOverflowMenuStyle.bottomSheet`.
+    /// `M3EButtonGroupOverflowMenuStyle.bottomSheet`. Presentation is the
+    /// app's own (see [`crate::show_bottom_sheet`]).
     BottomSheet,
+    /// The same split and trigger as [`Self::BottomSheet`], presented instead
+    /// as an anchored popup menu via [`ButtonGroupView::overflow_menu`] —
+    /// `M3EButtonGroupOverflow.menu` with
+    /// `M3EButtonGroupOverflowMenuStyle.popup`.
+    Popup,
 }
 
 impl ButtonGroupDensity {
@@ -569,6 +591,7 @@ pub struct ButtonGroupView<State: 'static> {
     overflow: ButtonGroupOverflow,
     overflow_icon: Option<IconFactory<State>>,
     on_overflow: Option<OnOverflow<State>>,
+    overflow_anchor: Option<OverlayAnchor>,
     semantic_label: Option<String>,
 }
 
@@ -603,6 +626,7 @@ pub fn button_group_actions<State: 'static>(
         overflow: ButtonGroupOverflow::default(),
         overflow_icon: None,
         on_overflow: None,
+        overflow_anchor: None,
         semantic_label: None,
     }
 }
@@ -762,10 +786,22 @@ impl<State: 'static> ButtonGroupView<State> {
 
     /// Fired with the first hidden action's index when the overflow trigger is
     /// tapped — where an app presents [`crate::show_bottom_sheet`] over
-    /// `actions[first_hidden..]`. See the [module docs](self)' Overflow
-    /// section.
+    /// `actions[first_hidden..]` ([`ButtonGroupOverflow::BottomSheet`]) or
+    /// mounts [`Self::overflow_menu`] ([`ButtonGroupOverflow::Popup`]). See
+    /// the [module docs](self)' Overflow section.
     pub fn on_overflow<F: Fn(&mut State, usize) + 'static>(mut self, on_overflow: F) -> Self {
         self.on_overflow = Some(Rc::new(on_overflow));
+        self
+    }
+
+    /// Capture the overflow trigger's window rect into `anchor` on every
+    /// paint — wire this alongside [`ButtonGroupOverflow::Popup`] so
+    /// [`Self::overflow_menu`] has a rect to place against, the same
+    /// [`OverlayAnchor`] handoff [`crate::dropdown::dropdown_field`] takes
+    /// with [`mod@crate::dropdown`]'s panel half. A no-op for every other
+    /// [`ButtonGroupOverflow`] variant.
+    pub fn overflow_anchor(mut self, anchor: &OverlayAnchor) -> Self {
+        self.overflow_anchor = Some(anchor.clone());
         self
     }
 
@@ -853,12 +889,17 @@ impl<State: 'static> ButtonGroupView<State> {
     /// `on_checked_change` is inert: the *group* fires
     /// [`Self::on_overflow`] from its own release arm, since the first hidden
     /// index is only known after layout.
+    ///
+    /// Under [`ButtonGroupOverflow::Popup`] with [`Self::overflow_anchor`]
+    /// wired, the trigger is wrapped in [`overlay_anchor`] so its window rect
+    /// is captured into that anchor on every paint — the trigger half of the
+    /// two-piece shape [`Self::overflow_menu`] presents against.
     fn trigger_view(&self) -> AnyView<State> {
         let icon = match &self.overflow_icon {
             Some(factory) => factory(),
             None => frust::authoring::any::<State, _>(frust::icon(crate::icons::MORE_HORIZ)),
         };
-        frust::authoring::any::<State, _>(
+        let trigger =
             crate::toggle_button::toggle_button::<State, _>(false, |_state: &mut State, _v| {})
                 .variant(self.variant)
                 .size(self.size)
@@ -866,8 +907,13 @@ impl<State: 'static> ButtonGroupView<State> {
                 .group_connected(self.group_type == ButtonGroupType::Connected)
                 .first_in_group(false)
                 .last_in_group(true)
-                .icon(icon),
-        )
+                .icon(icon);
+        match (&self.overflow_anchor, self.overflow) {
+            (Some(anchor), ButtonGroupOverflow::Popup) => {
+                frust::authoring::any::<State, _>(overlay_anchor(anchor, trigger))
+            }
+            _ => frust::authoring::any::<State, _>(trigger),
+        }
     }
 
     /// Every member view, in order.
@@ -879,7 +925,87 @@ impl<State: 'static> ButtonGroupView<State> {
 
     /// The trigger view, when this group can split at all.
     fn maybe_trigger_view(&self) -> Option<AnyView<State>> {
-        (self.overflow == ButtonGroupOverflow::BottomSheet).then(|| self.trigger_view())
+        matches!(
+            self.overflow,
+            ButtonGroupOverflow::BottomSheet | ButtonGroupOverflow::Popup
+        )
+        .then(|| self.trigger_view())
+    }
+
+    /// The popup-style overflow menu for [`ButtonGroupOverflow::Popup`] —
+    /// mount this separately as the top of the app's own [`frust::Stack`]
+    /// (or a transparent navigator page), anchored to the same
+    /// [`OverlayAnchor`] handed to [`Self::overflow_anchor`]. See the
+    /// [module docs](self)' Overflow section for why this is a second,
+    /// app-mounted view rather than something [`ButtonGroupWidget`] paints
+    /// itself.
+    ///
+    /// `first_hidden` is the index [`Self::on_overflow`] reported when the
+    /// trigger was tapped; `open` drives the anchored host's ramp (the
+    /// kept-mounted pattern [`mod@crate::overlay::anchored`] documents — keep
+    /// this view mounted and toggle `open` for the exit ramp rather than
+    /// unmounting it, [`mod@crate::dropdown`]'s own convention).
+    ///
+    /// Each hidden member becomes a [`crate::menu::MenuToggleable`] row,
+    /// checked exactly as [`Self::is_selected`] already resolves it for a
+    /// visible member — upstream's own overflow menu marks a hidden action
+    /// checked the same way
+    /// (`_buildOverflowMenuVisibleItems`/`onItemSelected`,
+    /// `m3e_toggle_button_group_layout.dart:181`-`:203`). Activating one
+    /// routes through this group's own selection fan-out —
+    /// [`Self::on_selected_indices_changed`],
+    /// [`Self::on_selected_index_changed`], or [`Self::on_select`], in that
+    /// precedence — exactly as a visible member's own tap does.
+    ///
+    /// A member's [`ButtonGroupAction::icon`]/[`ButtonGroupAction::checked_icon`]
+    /// is an arbitrary view (a member button can paint anything), which a
+    /// menu row's [`crate::menu::MenuIcon`] slot cannot carry (it names a
+    /// vector path, not a view) — a popup row therefore shows the member's
+    /// label only. An icon-only group (this crate's usual toolbar shape)
+    /// should give its actions a plain [`ButtonGroupAction::label`] alongside
+    /// the icon so an overflowed member still reads in the popup.
+    pub fn overflow_menu(&self, first_hidden: usize, open: bool) -> AnyView<State> {
+        let anchor = self.overflow_anchor.clone().unwrap_or_default();
+        let start = first_hidden.min(self.actions.len());
+        let nodes: Vec<MenuNode> = self.actions[start..]
+            .iter()
+            .enumerate()
+            .map(|(offset, action)| {
+                menu_toggleable(action.accessible_label(), self.is_selected(start + offset))
+                    .enabled(action.enabled)
+                    .into()
+            })
+            .collect();
+
+        let on_indices = self.on_indices_changed.clone();
+        let on_index = self.on_index_changed.clone();
+        let on_select = self.on_select.clone();
+        let current = self.selected_indices.clone().unwrap_or_default();
+
+        frust::authoring::any::<State, _>(
+            menu(nodes, move |state: &mut State, selection: MenuSelection| {
+                let index = start + selection.index;
+                let checked = selection.checked().unwrap_or(true);
+                if let Some(callback) = &on_indices {
+                    let mut next = current.clone();
+                    if checked {
+                        if !next.contains(&index) {
+                            next.push(index);
+                            next.sort_unstable();
+                        }
+                    } else {
+                        next.retain(|i| *i != index);
+                    }
+                    callback(state, next);
+                } else if let Some(callback) = &on_index {
+                    callback(state, checked.then_some(index));
+                } else if let Some(callback) = &on_select {
+                    callback(state, index);
+                }
+            })
+            .anchor(&anchor)
+            .open(open),
+        )
     }
 }
 
@@ -899,7 +1025,7 @@ pub struct ButtonGroupWidget {
     /// One toggle-button pod per action, in order.
     members: Vec<ChildPod>,
     /// The overflow trigger pod (present only in
-    /// [`ButtonGroupOverflow::BottomSheet`]).
+    /// [`ButtonGroupOverflow::BottomSheet`]/[`ButtonGroupOverflow::Popup`]).
     trigger: Option<ChildPod>,
     /// Per-action accessible labels, retained for diagnostics/tests.
     labels: Vec<String>,
@@ -1266,9 +1392,11 @@ impl Widget for ButtonGroupWidget {
             if horizontal { size.width } else { size.height }
         });
 
-        // Overflow split — only the bottom-sheet mode hides anything.
+        // Overflow split — only the trigger-bearing modes hide anything.
         let (visible_count, trigger_visible) = match (self.overflow, trigger_natural) {
-            (ButtonGroupOverflow::BottomSheet, Some(trigger)) if max_main.is_finite() => {
+            (ButtonGroupOverflow::BottomSheet | ButtonGroupOverflow::Popup, Some(trigger))
+                if max_main.is_finite() =>
+            {
                 let fit = visible_count_for_overflow(max_main, &natural, trigger, spacing);
                 if fit >= natural.len() {
                     (natural.len(), false)
@@ -1578,6 +1706,7 @@ mod tests {
     use frust::FrameTime;
     use frust::authoring::text::TextContext;
     use frust_widgets::test_support::leaf_any;
+    use kurbo::Rect;
     use std::any::Any;
     use std::cell::RefCell;
 
@@ -2368,6 +2497,162 @@ mod tests {
             &ev(PointerPhase::Up, trigger_x, 20.0),
         );
         assert_eq!(*seen.borrow(), vec![2]);
+    }
+
+    // ---- overflow popup style ----------------------------------------------
+
+    #[test]
+    fn overflow_popup_group_builds_a_trigger_pod() {
+        let view = button_group_actions(bare_icon_actions(3)).overflow(ButtonGroupOverflow::Popup);
+        let widget = build(&view);
+        assert!(widget.trigger.is_some());
+    }
+
+    #[test]
+    fn overflow_popup_splits_and_shows_a_trigger() {
+        // Same split as `overflow_bottom_sheet_splits_and_shows_a_trigger`
+        // above — `Popup` shares `BottomSheet`'s layout, only the
+        // presentation differs.
+        let mut widget =
+            build(&button_group_actions(bare_icon_actions(6)).overflow(ButtonGroupOverflow::Popup));
+        layout(&mut widget, Size::new(140.0, 200.0));
+        assert_eq!(widget.visible_count, 2);
+        assert!(widget.trigger_visible);
+    }
+
+    #[test]
+    fn the_trigger_captures_its_window_rect_into_the_overflow_anchor_when_wired() {
+        let anchor = OverlayAnchor::new();
+        let cell = anchor.clone();
+        let mut root: frust_core::RenderRoot<(), ButtonGroupView<()>> =
+            frust_core::RenderRoot::new();
+        let mut state = ();
+        let mut logic = move |_s: &mut ()| {
+            button_group_actions(bare_icon_actions(6))
+                .overflow(ButtonGroupOverflow::Popup)
+                .overflow_anchor(&cell)
+        };
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(140.0, 200.0), &mut tcx as &mut dyn Any);
+        let mut scene = NullScene;
+        root.paint(&mut scene, FrameTime::ZERO);
+        let rect = anchor.rect();
+        assert!(
+            rect.width() > 0.0 && rect.height() > 0.0,
+            "the trigger's window rect was captured into the overflow anchor on paint: {rect:?}"
+        );
+    }
+
+    #[derive(Default)]
+    struct OverflowMenuState {
+        selected: Option<usize>,
+    }
+
+    fn overflow_menu_actions() -> Vec<ButtonGroupAction<OverflowMenuState>> {
+        (0..6)
+            .map(|i| button_group_action(format!("Item {i}")))
+            .collect()
+    }
+
+    #[test]
+    fn overflow_menu_shows_hidden_members_checked_state_per_upstream() {
+        // Upstream marks a hidden action checked in the overflow menu the
+        // same way a visible member reads checked
+        // (`_buildOverflowMenuVisibleItems`/`onItemSelected`,
+        // `m3e_toggle_button_group_layout.dart:181`-`:203`); this pins the
+        // port's equivalent via the popup row's own `MenuItemCheckBox`
+        // semantics.
+        let anchor = OverlayAnchor::new();
+        anchor.set(Rect::new(40.0, 100.0, 160.0, 140.0));
+        let cell = anchor.clone();
+        let mut root: frust_core::RenderRoot<
+            OverflowMenuState,
+            frust::StackView<OverflowMenuState>,
+        > = frust_core::RenderRoot::new();
+        let mut state = OverflowMenuState { selected: Some(4) };
+        let mut logic = move |s: &mut OverflowMenuState| {
+            let group = button_group_actions(overflow_menu_actions())
+                .overflow(ButtonGroupOverflow::Popup)
+                .overflow_anchor(&cell)
+                .selected_index(s.selected);
+            // Indices 4 and 5 are the ones `on_overflow` would have reported
+            // hidden; mounted separately as the popup's own two-piece shape
+            // documents.
+            frust::Stack(vec![group.overflow_menu(4, true)])
+        };
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+
+        let boxes: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::MenuItemCheckBox)
+            .collect();
+        assert_eq!(boxes.len(), 2, "only the two hidden members (indices 4, 5)");
+        let checked = boxes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Item 4"))
+            .expect("Item 4 is present");
+        assert_eq!(
+            checked.1.toggled(),
+            Some(frust::authoring::Toggled::True),
+            "the group's own selected index shows checked in the popup"
+        );
+        let unchecked = boxes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Item 5"))
+            .expect("Item 5 is present");
+        assert_eq!(
+            unchecked.1.toggled(),
+            Some(frust::authoring::Toggled::False)
+        );
+    }
+
+    #[test]
+    fn overflow_menu_selection_routes_through_the_groups_own_fan_out() {
+        // One hidden member only, so the click lands on the popup's first
+        // (and only) row, at the same window-space center `crate::menu`'s
+        // own tests pin for a fresh anchored menu.
+        let anchor_rect = Rect::new(40.0, 100.0, 160.0, 140.0);
+        let anchor = OverlayAnchor::new();
+        anchor.set(anchor_rect);
+        let cell = anchor.clone();
+        let mut root: frust_core::RenderRoot<
+            OverflowMenuState,
+            frust::StackView<OverflowMenuState>,
+        > = frust_core::RenderRoot::new();
+        let mut state = OverflowMenuState { selected: None };
+        let mut logic = move |s: &mut OverflowMenuState| {
+            let group = button_group_actions(overflow_menu_actions())
+                .overflow(ButtonGroupOverflow::Popup)
+                .overflow_anchor(&cell)
+                .selected_index(s.selected)
+                .on_selected_index_changed(|s: &mut OverflowMenuState, i| s.selected = i);
+            frust::Stack(vec![group.overflow_menu(5, true)])
+        };
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+
+        let row = Point::new(
+            anchor_rect.x0 + crate::menu::MENU_MIN_WIDTH / 2.0,
+            anchor_rect.y1
+                + crate::overlay::OVERLAY_ANCHOR_GAP
+                + crate::menu::MENU_SURFACE_V_PADDING
+                + (crate::menu::MENU_ITEM_GAP + crate::menu::MENU_ROW_MIN_HEIGHT) / 2.0,
+        );
+        root.event(&mut state, &ev(PointerPhase::Down, row.x, row.y));
+        root.event(&mut state, &ev(PointerPhase::Up, row.x, row.y));
+
+        assert_eq!(
+            state.selected,
+            Some(5),
+            "activating the only hidden member's popup row reports through \
+             `on_selected_index_changed`, exactly as a visible member's own tap does"
+        );
     }
 
     // ---- semantics ---------------------------------------------------------

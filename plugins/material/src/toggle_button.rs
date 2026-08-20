@@ -1442,7 +1442,23 @@ impl Widget for ToggleButtonWidget {
             self.motion
                 .snap_to(resting, ContentPadding::symmetric(h_padding));
         }
-        let padding = self.motion.padding();
+        // The padding target is a pure function of `(self.size, has_label)`
+        // — unlike the radius channel, which also depends on interaction
+        // state only `paint` tracks — so `layout` resolves it directly
+        // (`h_padding`, just above) rather than reading it back off the
+        // morph. Reading `self.motion.padding()` here would lag a runtime
+        // size or label-presence change by a whole pass: `layout` always
+        // runs before `paint` in a frame, and `paint` below is the only
+        // place that ever calls `retarget` with the new padding — its bare
+        // `request_frame` (never `request_layout`) leaves the stale width
+        // standing until an unrelated layout dirty happens along (the exact
+        // hazard `crate::button::core`'s identical fix names). Both props
+        // that move `h_padding` already raise `ChangeFlags::LAYOUT` on
+        // `rebuild` (`size`, and the label text whose emptiness
+        // `has_label` reads), so the value computed here is always
+        // immediately correct, with no in-flight frame that would need its
+        // own `request_layout`.
+        let padding = ContentPadding::symmetric(h_padding);
 
         let icon_size = self.icon.as_mut().map(|pod| {
             pod.layout_child(
@@ -2188,6 +2204,41 @@ mod tests {
         );
         settle_morph(&mut widget);
         assert_eq!(widget.motion.radii().top_left, 12.0, "sm square token");
+    }
+
+    #[test]
+    fn a_runtime_size_change_relayouts_at_the_new_sizes_padding_immediately() {
+        // `ToggleButtonView::rebuild` already raises `ChangeFlags::LAYOUT` on
+        // a `size` change, so the very next `layout` pass must already
+        // reflect the NEW size's (halved, icon-only) padding — it must not
+        // wait for an intervening `paint` to retarget the morph first, since
+        // the crate's per-frame order always runs `layout` before `paint`.
+        // Mutating `size` directly (the same field write `rebuild` performs)
+        // with no `paint` call in between reproduces exactly that ordering —
+        // the same revert-verified shape as `crate::button::core`'s
+        // `a_runtime_size_change_relayouts_at_the_new_sizes_padding_immediately`.
+        let mut widget = build(
+            &toggle_button::<(), _>(false, |_, _| {})
+                .icon(leaf_any(20.0, 20.0))
+                .size(ToggleButtonSize::Sm),
+        );
+        let sm = layout_with(&mut widget, 500.0, None);
+        let sm_metrics = ToggleButtonSize::Sm.metrics();
+        assert_eq!(
+            sm.width,
+            sm_metrics.icon_size + sm_metrics.h_padding, // halved padding, both sides
+            "sm icon-only width"
+        );
+
+        widget.size = ToggleButtonSize::Lg;
+        let lg = layout_with(&mut widget, 500.0, None);
+        let lg_metrics = ToggleButtonSize::Lg.metrics();
+        assert_eq!(
+            lg.width,
+            lg_metrics.icon_size + lg_metrics.h_padding,
+            "layout must resolve the NEW size's padding on its very next pass, \
+             not the stale one only a later paint would have retargeted"
+        );
     }
 
     // ---- Acceptance 3: group-connection corner asymmetry -------------------
