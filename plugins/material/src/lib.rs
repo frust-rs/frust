@@ -299,8 +299,13 @@ pub use toggle_button::{
     tonal_toggle_button,
 };
 pub use toolbar::{
-    DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
-    floating_toolbar,
+    DockedToolbar, FloatingToolbar, TOOLBAR_DOCKED_PAD_X, TOOLBAR_EXPAND_SPRING,
+    TOOLBAR_FAB_BASELINE, TOOLBAR_FAB_MEDIUM, TOOLBAR_FLOATING_PAD, TOOLBAR_GAP, TOOLBAR_HEIGHT,
+    TOOLBAR_MAX_INLINE_ACTIONS, TOOLBAR_REVEAL_FADE_START, TOOLBAR_SCREEN_OFFSET,
+    TOOLBAR_SETTLE_VELOCITY, TOOLBAR_TO_FAB_GAP, ToolbarAction, ToolbarColorStyle, ToolbarColors,
+    ToolbarElevation, ToolbarExitDirection, ToolbarFabPosition, ToolbarMorph, ToolbarPartition,
+    ToolbarScrollHide, ToolbarSize, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
+    floating_toolbar, partition_actions, toolbar_action,
 };
 pub use tooltip::{
     RichTooltipView, TooltipAction, TooltipHover, TooltipTriggerView, TooltipTriggerWidget,
