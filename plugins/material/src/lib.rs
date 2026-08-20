@@ -82,6 +82,7 @@ pub mod segmented_button;
 pub mod shapes;
 pub mod sheet;
 pub mod slider;
+pub mod snackbar;
 pub mod split_button;
 pub mod state_layer;
 pub mod switch;
@@ -175,6 +176,10 @@ pub use slider::{
     SliderTrackKind, SliderView, SliderWidget, centered_slider, range_slider, slider,
     vertical_centered_slider, vertical_slider, wavy_centered_slider, wavy_range_slider,
     wavy_slider,
+};
+pub use snackbar::{
+    SnackbarController, SnackbarHostView, SnackbarHostWidget, SnackbarMessage, snackbar,
+    snackbar_host,
 };
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
