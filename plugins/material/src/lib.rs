@@ -94,6 +94,7 @@ pub mod text_field;
 pub mod toggle_button;
 mod tokens;
 pub mod toolbar;
+pub mod tooltip;
 
 pub use appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
 pub use badge::{BadgeAlignment, BadgeView, BadgeWidget, badge};
@@ -220,6 +221,10 @@ pub use toggle_button::{
 pub use toolbar::{
     DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
     floating_toolbar,
+};
+pub use tooltip::{
+    RichTooltipView, TooltipAction, TooltipHover, TooltipTriggerView, TooltipTriggerWidget,
+    TooltipView, rich_tooltip, tooltip, tooltip_action, tooltip_trigger,
 };
 
 pub use tokens::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
