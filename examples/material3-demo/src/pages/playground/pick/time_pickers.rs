@@ -40,23 +40,45 @@
 //! this page shipped exactly that bug until this fix (the same shape
 //! [`super::date_pickers`] shipped and fixes for the same reason). They are
 //! signal handles instead, cloned into the closure and re-read with `.get()`
-//! on every invocation right before the call into [`content`] (whose own
-//! plain-value signature is untouched, so it stays exactly as testable as
-//! before): the sanctioned "something outside the component's own `build`
-//! observes this write" case in `docs/CODE_STANDARDS.md`'s State &
-//! Reactivity conventions. The reads happen inside the rebuild pass, so the
-//! shell's own `TrackedScope` subscribes to them exactly as it would to a
-//! read in `build`. `entry_mode_anchor` needs no such wrapping —
-//! [`OverlayAnchor`] is already a `Clone` handle over shared
-//! interior-mutable state.
+//! on every invocation right before the call into [`content`]: the sanctioned
+//! "something outside the component's own `build` observes this write" case
+//! in `docs/CODE_STANDARDS.md`'s State & Reactivity conventions. The reads
+//! happen inside the rebuild pass, so the shell's own `TrackedScope`
+//! subscribes to them exactly as it would to a read in `build`.
+//! `entry_mode_anchor` needs no such wrapping — [`OverlayAnchor`] is already
+//! a `Clone` handle over shared interior-mutable state.
+//!
+//! # The *pushed* dialog needs the same live re-read — a second bug, same shape
+//!
+//! [`TimePickersPlayground::build`]'s root fix above only wired the outer
+//! [`frust::navigator`] correctly; [`dialog_preview`]'s "Pick time" trigger
+//! opens [`time_picker`] through [`show_time_picker`], and *that* `build`
+//! argument is itself a `Fn() -> View` a navigator retains and re-invokes
+//! every later rebuild — the same contract, one level deeper (see
+//! [`crate::pages::playground`]'s module docs and
+//! [`super::date_pickers`]'s identical section). This page used to move
+//! plain `time`/`entry_mode`/`use_24_hour` values into the pushed closure at
+//! "Pick time" press time; a dial tap inside the open dialog writes through
+//! `on_change` to `state.time`, but every subsequent rebuild re-painted the
+//! frozen snapshot from press time, so the tap appeared to do nothing. The
+//! fix is [`dialog_view`]: it takes the three `RwSignal` handles and reads
+//! each with `.get()`/[`resolve_time`] inside its own body, so each
+//! re-invocation reads whatever was most recently written — the same
+//! pattern [`super::date_pickers`]'s `date_picker_dialog_view` and
+//! [`super::super::view::dialogs`]'s `open_selection` establish.
+//!
+//! [`TimePickerView`] itself exposes no public accessor for its resolved
+//! `value` (unlike `frust_material::date_picker`'s
+//! `DatePickerDialog::confirmable`), so [`resolve_time`] — the exact read
+//! [`dialog_view`] performs — stands in for it in this file's tests.
 
 use frust::{
     AnyView, Column, Component, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal,
     Set, SizedBox, Stack, any, component, navigator, text,
 };
 use frust_material::{
-    OverlayAnchor, TimeOfDay, TimePickerEntryMode, show_time_picker, time_dial, time_picker,
-    tonal_button,
+    OverlayAnchor, TimeOfDay, TimePickerEntryMode, TimePickerView, show_time_picker, time_dial,
+    time_picker, tonal_button,
 };
 
 use crate::AppState;
@@ -117,13 +139,51 @@ fn dial_preview(time: TimeOfDay, use_24_hour: bool) -> AnyView<Knobs> {
     any(time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time.set(next)).use_24_hour(use_24_hour))
 }
 
+/// The value the pushed dialog resolves on *this* invocation — read inside
+/// [`dialog_view`]'s own body, never before it, so the shell's own
+/// `TrackedScope` subscribes exactly as it would to a read in `build` (see
+/// the [module docs](self)' pushed-dialog section).
+fn resolve_time(time: RwSignal<TimeOfDay>) -> TimeOfDay {
+    time.get()
+}
+
+/// The "Pick time" trigger's pushed dialog — what [`show_time_picker`]'s
+/// `build` argument delegates to on every re-invocation the navigator makes.
+/// Extracted so a test can call it twice around a live `time` write and
+/// confirm the second call resolves the write (via [`resolve_time`]), the
+/// bug class this page shipped until this fix: `time`, `entry_mode`, and
+/// `use_24_hour` used to be plain values moved into the pushed closure at
+/// "Pick time" press time, frozen for the dialog's whole open lifetime.
+fn dialog_view(
+    time: RwSignal<TimeOfDay>,
+    entry_mode: RwSignal<TimePickerEntryMode>,
+    use_24_hour: RwSignal<bool>,
+    on_confirm_nav: NavigatorController<Knobs>,
+    on_cancel_nav: NavigatorController<Knobs>,
+) -> TimePickerView<Knobs> {
+    time_picker(resolve_time(time))
+        .entry_mode(entry_mode.get())
+        .use_24_hour(use_24_hour.get())
+        .on_change(|s: &mut Knobs, next: TimeOfDay| s.time.set(next))
+        .on_confirm(move |_s: &mut Knobs, confirmed: Option<TimeOfDay>| {
+            if let Some(picked) = confirmed {
+                on_confirm_nav.pop_with_result(PopResult::of(picked));
+            }
+        })
+        .on_cancel(move |_s: &mut Knobs| on_cancel_nav.pop())
+}
+
 /// The "Dialog" preview: a "Pick time" trigger over the current time's label
-/// — the reference's `Column` of a button plus its `Text(...)`.
+/// — the reference's `Column` of a button plus its `Text(...)`. `time` is
+/// the plain snapshot for the label; `time_signal`/`entry_mode_signal`/
+/// `use_24_hour_signal` are the live handles the pushed dialog needs (see
+/// [`dialog_view`]).
 fn dialog_preview(
     nav: NavigatorController<Knobs>,
     time: TimeOfDay,
-    entry_mode: TimePickerEntryMode,
-    use_24_hour: bool,
+    time_signal: RwSignal<TimeOfDay>,
+    entry_mode_signal: RwSignal<TimePickerEntryMode>,
+    use_24_hour_signal: RwSignal<bool>,
 ) -> AnyView<Knobs> {
     let theme = ambient_theme();
     let mut body_style = theme.type_scale.body_medium.clone();
@@ -131,23 +191,18 @@ fn dialog_preview(
     let time_label = format!("{:02}:{:02}", time.hour(), time.minute());
 
     let trigger = tonal_button("Pick time", move |_: &mut Knobs| {
-        let nav_confirm = nav.clone();
-        let nav_cancel = nav.clone();
+        let on_confirm_nav = nav.clone();
+        let on_cancel_nav = nav.clone();
         show_time_picker(
             &nav,
             move || {
-                let on_confirm_nav = nav_confirm.clone();
-                let on_cancel_nav = nav_cancel.clone();
-                time_picker(time)
-                    .entry_mode(entry_mode)
-                    .use_24_hour(use_24_hour)
-                    .on_change(|s: &mut Knobs, next: TimeOfDay| s.time.set(next))
-                    .on_confirm(move |_s: &mut Knobs, confirmed: Option<TimeOfDay>| {
-                        if let Some(picked) = confirmed {
-                            on_confirm_nav.pop_with_result(PopResult::of(picked));
-                        }
-                    })
-                    .on_cancel(move |_s: &mut Knobs| on_cancel_nav.pop())
+                dialog_view(
+                    time_signal,
+                    entry_mode_signal,
+                    use_24_hour_signal,
+                    on_confirm_nav.clone(),
+                    on_cancel_nav.clone(),
+                )
             },
             |s: &mut Knobs, result: PopResult| {
                 if let Some(picked) = result.take::<TimeOfDay>() {
@@ -252,36 +307,44 @@ fn entry_mode_menu_panel(
 /// The playground content: both previews, both snippets, and the controls
 /// panel plus its dropdown panel — everything that varies with this page's
 /// knob state, built with no navigator touched (see the [module docs](self)).
+/// `time`/`entry_mode`/`use_24_hour` are the live signal handles — each read
+/// once here with `.get()` for every plain-value use, and `time` threaded
+/// through unread (alongside the other two) to [`dialog_preview`]'s pushed
+/// dialog builder, which needs the *handles* rather than a snapshot (see the
+/// [module docs](self)' pushed-dialog section).
 fn content(
     nav: &NavigatorController<Knobs>,
-    time: TimeOfDay,
-    entry_mode: TimePickerEntryMode,
-    use_24_hour: bool,
+    time: RwSignal<TimeOfDay>,
+    entry_mode: RwSignal<TimePickerEntryMode>,
+    use_24_hour: RwSignal<bool>,
     entry_mode_anchor: &OverlayAnchor,
     entry_mode_open: bool,
 ) -> AnyView<Knobs> {
+    let time_value = time.get();
+    let entry_mode_value = entry_mode.get();
+    let use_24_hour_value = use_24_hour.get();
     let playground = playground_body(
         vec![
-            play_preview_card("Dial", dial_preview(time, use_24_hour)),
+            play_preview_card("Dial", dial_preview(time_value, use_24_hour_value)),
             play_preview_card(
                 "Dialog",
-                dialog_preview(nav.clone(), time, entry_mode, use_24_hour),
+                dialog_preview(nav.clone(), time_value, time, entry_mode, use_24_hour),
             ),
         ],
         vec![
-            dial_snippet(time, use_24_hour),
-            dialog_snippet(time, entry_mode, use_24_hour),
+            dial_snippet(time_value, use_24_hour_value),
+            dialog_snippet(time_value, entry_mode_value, use_24_hour_value),
         ],
         vec![controls(
-            entry_mode,
-            use_24_hour,
+            entry_mode_value,
+            use_24_hour_value,
             entry_mode_anchor,
             entry_mode_open,
         )],
     );
     any(Stack(vec![
         playground,
-        entry_mode_menu_panel(entry_mode, entry_mode_anchor, entry_mode_open),
+        entry_mode_menu_panel(entry_mode_value, entry_mode_anchor, entry_mode_open),
     ]))
 }
 
@@ -304,9 +367,9 @@ impl Component for TimePickersPlayground {
         any(navigator(&state.nav, move || {
             content(
                 &nav,
-                time.get(),
-                entry_mode.get(),
-                use_24_hour.get(),
+                time,
+                entry_mode,
+                use_24_hour,
                 &entry_mode_anchor,
                 entry_mode_open.get(),
             )
@@ -331,27 +394,43 @@ mod tests {
 
         for entry_mode in ENTRY_MODES {
             for use_24_hour in [true, false] {
-                let _view = content(&nav, time, entry_mode, use_24_hour, &anchor, false);
+                let _view = content(
+                    &nav,
+                    RwSignal::new(time),
+                    RwSignal::new(entry_mode),
+                    RwSignal::new(use_24_hour),
+                    &anchor,
+                    false,
+                );
                 let _dial = dial_snippet(time, use_24_hour);
                 let _dialog = dialog_snippet(time, entry_mode, use_24_hour);
             }
         }
 
         // The menu open, and a midnight/noon edge time.
-        let _view = content(&nav, time, TimePickerEntryMode::Dial, false, &anchor, true);
         let _view = content(
             &nav,
-            TimeOfDay::new(0, 0),
-            TimePickerEntryMode::Dial,
-            false,
+            RwSignal::new(time),
+            RwSignal::new(TimePickerEntryMode::Dial),
+            RwSignal::new(false),
+            &anchor,
+            true,
+        );
+        let midnight = TimeOfDay::new(0, 0);
+        let _view = content(
+            &nav,
+            RwSignal::new(midnight),
+            RwSignal::new(TimePickerEntryMode::Dial),
+            RwSignal::new(false),
             &anchor,
             false,
         );
+        let noon_edge = TimeOfDay::new(23, 59);
         let _view = content(
             &nav,
-            TimeOfDay::new(23, 59),
-            TimePickerEntryMode::Dial,
-            true,
+            RwSignal::new(noon_edge),
+            RwSignal::new(TimePickerEntryMode::Dial),
+            RwSignal::new(true),
             &anchor,
             false,
         );
@@ -381,5 +460,35 @@ mod tests {
         assert_eq!(knobs.entry_mode.get(), TimePickerEntryMode::InputOnly);
         assert!(knobs.use_24_hour.get());
         assert!(knobs.entry_mode_open.get());
+    }
+
+    /// The bug this page shipped and this fix closes: a pushed dialog
+    /// builder that closes over a plain, frozen snapshot instead of the live
+    /// signal (see the [module docs](super)' pushed-dialog section). This
+    /// calls [`dialog_view`] — the exact fn [`dialog_preview`]'s "Pick time"
+    /// trigger delegates to — twice around a live `time` write, asserting
+    /// [`resolve_time`] (the read `dialog_view` performs internally) reflects
+    /// the write on the second call; [`TimePickerView`] itself exposes no
+    /// public accessor, so this is the closest public assertion available
+    /// (see the [module docs](super)). Each call also builds the real
+    /// product to prove the fix compiles and runs against a live signal, not
+    /// just a snapshot.
+    #[test]
+    fn the_pushed_dialog_builder_rereads_the_live_time_signal_each_invocation() {
+        let time = RwSignal::new(TimeOfDay::new(9, 30));
+        let entry_mode = RwSignal::new(TimePickerEntryMode::Dial);
+        let use_24_hour = RwSignal::new(false);
+        let nav: NavigatorController<Knobs> = NavigatorController::new();
+
+        assert_eq!(resolve_time(time), TimeOfDay::new(9, 30));
+        let _first: TimePickerView<Knobs> =
+            dialog_view(time, entry_mode, use_24_hour, nav.clone(), nav.clone());
+
+        let updated = TimeOfDay::new(14, 45);
+        time.set(updated);
+
+        assert_eq!(resolve_time(time), updated);
+        let _second: TimePickerView<Knobs> =
+            dialog_view(time, entry_mode, use_24_hour, nav.clone(), nav.clone());
     }
 }

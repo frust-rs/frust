@@ -73,13 +73,36 @@
 //! `Clone` handles over shared interior-mutable state (an `Rc<Cell<..>>` for
 //! the anchor), so cloning either into the frozen closure carries the live
 //! handle forward rather than a value snapshot.
+//!
+//! # The bottom-sheet route's checkmark needs the same live re-read
+//!
+//! [`on_open`]'s [`SplitButtonMenuStyle::BottomSheet`] arm pushes a menu
+//! through [`show_bottom_sheet`], whose `build` argument is itself a
+//! `Fn() -> View` a navigator retains and re-invokes every later rebuild —
+//! the same contract [`SplitButtonPlayground::build`]'s root fix above
+//! covers, one level deeper (see [`crate::pages::playground`]'s module docs
+//! and `super::super::pick::date_pickers`'s identical section). This page
+//! used to read `state.selected` once with `get_untracked`, *before*
+//! calling [`show_bottom_sheet`], and clone that frozen snapshot into the
+//! pushed closure; a row tap inside the open sheet reports through
+//! [`on_select`], which writes `state.selected`, but every subsequent
+//! rebuild kept painting the stale snapshot's checkmark. The fix is
+//! [`bottom_sheet_menu_view`]: it takes the `RwSignal<Option<String>>`
+//! handle and reads it with [`resolve_selected`] inside its own body, the
+//! same pattern `date_pickers.rs`'s `date_picker_dialog_view` and
+//! [`super::super::view::dialogs`]'s `open_selection` establish.
+//! [`frust_material::menu_panel`]'s `MenuPanelView` exposes no public
+//! accessor for its `selected` field (unlike `frust_material::date_picker`'s
+//! `DatePickerDialog::confirmable`), so [`resolve_selected`] — the exact
+//! read [`bottom_sheet_menu_view`] performs — stands in for it in this
+//! file's tests.
 
 use frust::{
     AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, Stack,
     any, component, icon, navigator,
 };
 use frust_material::{
-    MenuNode, MenuSelection, OverlayAnchor, SplitButtonItem, SplitButtonMenuStyle,
+    BottomSheetView, MenuNode, MenuSelection, OverlayAnchor, SplitButtonItem, SplitButtonMenuStyle,
     SplitButtonShape, SplitButtonSize, SplitButtonVariant, bottom_sheet, icons, menu_panel,
     menu_selectable, show_bottom_sheet, split_button, split_button_item,
 };
@@ -224,6 +247,26 @@ fn on_select(state: &mut Knobs, selection: MenuSelection) {
     }
 }
 
+/// The value the pushed bottom-sheet menu resolves for its checkmark on
+/// *this* invocation — read inside [`bottom_sheet_menu_view`]'s own body,
+/// never before it, so the shell's own `TrackedScope` subscribes exactly as
+/// it would to a read in `build` (see the [module docs](self)' bottom-sheet
+/// section).
+fn resolve_selected(selected: RwSignal<Option<String>>) -> Option<String> {
+    selected.get()
+}
+
+/// [`on_open`]'s bottom-sheet route — what [`show_bottom_sheet`]'s `build`
+/// argument delegates to on every re-invocation the navigator makes.
+/// Extracted so a test can call it twice around a live `selected` write and
+/// confirm the second call resolves the write (via [`resolve_selected`]),
+/// the bug class this page shipped until this fix: a frozen
+/// `Option<String>` snapshot captured once, outside the returned closure, at
+/// open time.
+fn bottom_sheet_menu_view(selected: RwSignal<Option<String>>) -> BottomSheetView<Knobs> {
+    bottom_sheet(menu_panel(sheet_nodes(), on_select).selected(resolve_selected(selected)))
+}
+
 /// The trailing segment's tap handler: toggle the anchored popup directly
 /// under [`SplitButtonMenuStyle::Popup`], or push the bottom sheet once per
 /// open request under [`SplitButtonMenuStyle::BottomSheet`]. See the [module
@@ -237,12 +280,10 @@ fn on_open(state: &mut Knobs) {
             }
             state.open.set(true);
             let nav = state.nav.clone();
-            let selected = state.selected.get_untracked();
+            let selected = state.selected;
             show_bottom_sheet(
                 &nav,
-                move || {
-                    bottom_sheet(menu_panel(sheet_nodes(), on_select).selected(selected.clone()))
-                },
+                move || bottom_sheet_menu_view(selected),
                 |state: &mut Knobs, _result: PopResult| state.open.set(false),
             );
         }
@@ -453,7 +494,7 @@ mod tests {
         SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant,
     };
 
-    use super::{Knobs, content, on_open, snippet};
+    use super::{Knobs, bottom_sheet_menu_view, content, on_open, resolve_selected, snippet};
 
     #[test]
     fn the_page_builds_across_every_style() {
@@ -537,6 +578,30 @@ mod tests {
         assert_eq!(snapshot.style.get(), SplitButtonVariant::Outlined);
         assert_eq!(snapshot.label.get(), "Renamed");
         assert!(snapshot.open.get());
+    }
+
+    /// The bug this page shipped and this fix closes: [`on_open`]'s
+    /// bottom-sheet route used to close over a plain, frozen `selected`
+    /// snapshot instead of the live signal (see the [module docs](super)'
+    /// bottom-sheet section). This calls [`bottom_sheet_menu_view`] — the
+    /// exact fn [`on_open`] delegates to — twice around a live `selected`
+    /// write, asserting [`resolve_selected`] (the read `bottom_sheet_menu_view`
+    /// performs internally) reflects the write on the second call;
+    /// `MenuPanelView` exposes no public accessor, so this is the closest
+    /// public assertion available. Each call also builds the real product
+    /// to prove the fix compiles and runs against a live signal, not just a
+    /// snapshot.
+    #[test]
+    fn the_pushed_bottom_sheet_menu_rereads_the_live_selected_signal() {
+        let selected: RwSignal<Option<String>> = RwSignal::new(None);
+
+        assert_eq!(resolve_selected(selected), None);
+        let _first = bottom_sheet_menu_view(selected);
+
+        selected.set(Some("draft".to_string()));
+
+        assert_eq!(resolve_selected(selected), Some("draft".to_string()));
+        let _second = bottom_sheet_menu_view(selected);
     }
 
     #[test]

@@ -40,15 +40,32 @@
 //! into that closure by value; each would have frozen at its first-frame
 //! reading — this page shipped exactly that bug until this fix. They are
 //! signal handles instead, cloned into the closure and re-read with `.get()`
-//! on every invocation right before the call into [`content`] (whose own
-//! plain-value signature is untouched, so it stays exactly as testable as
-//! before): the sanctioned "something outside the component's own `build`
-//! observes this write" case in `docs/CODE_STANDARDS.md`'s State &
-//! Reactivity conventions. The reads happen inside the rebuild pass, so the
-//! shell's own `TrackedScope` subscribes to them exactly as it would to a
-//! read in `build`. `entry_mode_anchor`/`calendar_mode_anchor` need no such
-//! wrapping — [`OverlayAnchor`] is already a `Clone` handle over shared
-//! interior-mutable state.
+//! on every invocation right before the call into [`content`]: the sanctioned
+//! "something outside the component's own `build` observes this write" case
+//! in `docs/CODE_STANDARDS.md`'s State & Reactivity conventions. The reads
+//! happen inside the rebuild pass, so the shell's own `TrackedScope`
+//! subscribes to them exactly as it would to a read in `build`.
+//! `entry_mode_anchor`/`calendar_mode_anchor` need no such wrapping —
+//! [`OverlayAnchor`] is already a `Clone` handle over shared interior-mutable
+//! state.
+//!
+//! # The *pushed* dialog needs the same live re-read — a second bug, same shape
+//!
+//! [`DatePickersPlayground::build`]'s root fix above only wired the outer
+//! [`frust::navigator`] correctly; [`dialogs_preview`]'s "Pick date" trigger
+//! opens [`date_picker_dialog`] through [`show_date_picker`], and *that*
+//! `build` argument is itself a `Fn() -> View` a navigator retains and
+//! re-invokes every later rebuild — the same contract, one level deeper (see
+//! [`crate::pages::playground`]'s module docs). This page used to move a
+//! plain, already-snapshotted `DatePickerState` into the pushed closure at
+//! "Pick date" press time; every subsequent rebuild (including the one the
+//! dialog's own calendar tap causes, via `on_change`) re-painted that frozen
+//! snapshot, so a tap inside the open dialog appeared to do nothing. The
+//! fix is [`date_picker_dialog_view`]: it takes the `RwSignal<DatePickerState>`
+//! handle and calls `.get()` inside its own body, so each re-invocation reads
+//! whatever `on_change` most recently wrote — the exact pattern
+//! [`super::super::view::dialogs`]'s `open_selection` establishes for its own
+//! pushed `.selected(selected.get())` read.
 //!
 //! # Descoped: the range dialog
 //!
@@ -74,8 +91,8 @@ use frust::{
     PopResult, RwSignal, Set, SizedBox, Stack, any, component, navigator, text,
 };
 use frust_material::{
-    DatePickerEntryMode, DatePickerMode, DatePickerState, MaterialDate, OverlayAnchor,
-    calendar_date_picker, date_picker_dialog, show_date_picker, tonal_button,
+    DatePickerDialog, DatePickerEntryMode, DatePickerMode, DatePickerState, MaterialDate,
+    OverlayAnchor, calendar_date_picker, date_picker_dialog, show_date_picker, tonal_button,
 };
 
 use crate::AppState;
@@ -187,12 +204,29 @@ fn calendar_preview(picker: &DatePickerState) -> AnyView<Knobs> {
     .today(today()))
 }
 
+/// The "Pick date" trigger's pushed dialog — what [`show_date_picker`]'s
+/// `build` argument delegates to on every re-invocation the navigator makes
+/// (see the [module docs](self)' pushed-dialog section). Extracted so a test
+/// can call it twice around a live `picker` write and confirm the second
+/// product's [`DatePickerDialog::confirmable`] reflects the write, the bug
+/// class this page shipped until this fix: a frozen [`DatePickerState`]
+/// snapshot captured once, outside this fn, at "Pick date" press time.
+fn date_picker_dialog_view(picker: RwSignal<DatePickerState>) -> DatePickerDialog<Knobs> {
+    date_picker_dialog(
+        picker.get(),
+        first_date(),
+        last_date(),
+        |s: &mut Knobs, next: DatePickerState| s.picker.set(next),
+    )
+    .today(today())
+}
+
 /// The "Dialogs" preview: a "Pick date" trigger over the currently confirmed
 /// date's label — the reference's `Wrap` of buttons plus its `Text(...)`
 /// pair, minus the descoped range trigger (see the [module docs](self)).
 fn dialogs_preview(
     nav: NavigatorController<Knobs>,
-    picker: DatePickerState,
+    picker: RwSignal<DatePickerState>,
     confirmed: Option<MaterialDate>,
 ) -> AnyView<Knobs> {
     let theme = ambient_theme();
@@ -203,18 +237,9 @@ fn dialogs_preview(
         .unwrap_or_else(|| "none".to_string());
 
     let trigger = tonal_button("Pick date", move |_: &mut Knobs| {
-        let picker = picker.clone();
         show_date_picker(
             &nav,
-            move || {
-                date_picker_dialog(
-                    picker.clone(),
-                    first_date(),
-                    last_date(),
-                    |s: &mut Knobs, next: DatePickerState| s.picker.set(next),
-                )
-                .today(today())
-            },
+            move || date_picker_dialog_view(picker),
             |s: &mut Knobs, result: PopResult| {
                 if let Some(date) = result.take::<MaterialDate>() {
                     s.confirmed.set(Some(date));
@@ -345,27 +370,32 @@ fn calendar_mode_menu_panel(
 /// The playground content: both previews, both snippets, and the controls
 /// panel plus its two dropdown panels — everything that varies with this
 /// page's knob state, built with no navigator touched (see the [module
-/// docs](self)).
+/// docs](self)). `picker` is the live signal handle — read once here with
+/// `.get()` for every plain-value use, and threaded through unread to
+/// [`dialogs_preview`]'s pushed dialog builder, which needs the *handle*
+/// rather than a snapshot (see the [module docs](self)' pushed-dialog
+/// section).
 fn content(
     nav: &NavigatorController<Knobs>,
-    picker: &DatePickerState,
+    picker: RwSignal<DatePickerState>,
     confirmed: Option<MaterialDate>,
     entry_mode_anchor: &OverlayAnchor,
     entry_mode_open: bool,
     calendar_mode_anchor: &OverlayAnchor,
     calendar_mode_open: bool,
 ) -> AnyView<Knobs> {
+    let picker_value = picker.get();
     let playground = playground_body(
         vec![
-            play_preview_card("Calendar", calendar_preview(picker)),
-            play_preview_card(
-                "Dialogs",
-                dialogs_preview(nav.clone(), picker.clone(), confirmed),
-            ),
+            play_preview_card("Calendar", calendar_preview(&picker_value)),
+            play_preview_card("Dialogs", dialogs_preview(nav.clone(), picker, confirmed)),
         ],
-        vec![calendar_snippet(picker), dialog_snippet(picker)],
+        vec![
+            calendar_snippet(&picker_value),
+            dialog_snippet(&picker_value),
+        ],
         vec![controls(
-            picker,
+            &picker_value,
             entry_mode_anchor,
             entry_mode_open,
             calendar_mode_anchor,
@@ -374,8 +404,8 @@ fn content(
     );
     any(Stack(vec![
         playground,
-        entry_mode_menu_panel(picker.entry_mode, entry_mode_anchor, entry_mode_open),
-        calendar_mode_menu_panel(picker.mode, calendar_mode_anchor, calendar_mode_open),
+        entry_mode_menu_panel(picker_value.entry_mode, entry_mode_anchor, entry_mode_open),
+        calendar_mode_menu_panel(picker_value.mode, calendar_mode_anchor, calendar_mode_open),
     ]))
 }
 
@@ -399,7 +429,7 @@ impl Component for DatePickersPlayground {
         any(navigator(&state.nav, move || {
             content(
                 &nav,
-                &picker.get(),
+                picker,
                 confirmed.get(),
                 &entry_mode_anchor,
                 entry_mode_open.get(),
@@ -429,7 +459,7 @@ mod tests {
             let picker = base.clone().with_entry_mode(entry_mode);
             let _view = content(
                 &nav,
-                &picker,
+                RwSignal::new(picker.clone()),
                 Some(seed_date()),
                 &anchor,
                 false,
@@ -441,17 +471,33 @@ mod tests {
         }
         for calendar_mode in CALENDAR_MODES {
             let picker = base.clone().with_mode(calendar_mode);
-            let _view = content(&nav, &picker, None, &anchor, false, &anchor, false);
+            let _view = content(
+                &nav,
+                RwSignal::new(picker.clone()),
+                None,
+                &anchor,
+                false,
+                &anchor,
+                false,
+            );
         }
 
         // Both menu panels open at once.
-        let _view = content(&nav, &base, Some(seed_date()), &anchor, true, &anchor, true);
+        let _view = content(
+            &nav,
+            RwSignal::new(base.clone()),
+            Some(seed_date()),
+            &anchor,
+            true,
+            &anchor,
+            true,
+        );
 
         // A month-paged, year-sub-view picker still builds.
         let paged = base.clone().stepped_month(3, first_date(), last_date());
         let _view = content(
             &nav,
-            &paged,
+            RwSignal::new(paged.clone()),
             Some(seed_date()),
             &anchor,
             false,
@@ -461,7 +507,7 @@ mod tests {
         let year_view = base.clone().with_mode(DatePickerMode::Year);
         let _view = content(
             &nav,
-            &year_view,
+            RwSignal::new(year_view.clone()),
             Some(seed_date()),
             &anchor,
             false,
@@ -470,7 +516,15 @@ mod tests {
         );
 
         // No confirmation yet.
-        let _view = content(&nav, &base, None, &anchor, false, &anchor, false);
+        let _view = content(
+            &nav,
+            RwSignal::new(base.clone()),
+            None,
+            &anchor,
+            false,
+            &anchor,
+            false,
+        );
     }
 
     #[test]
@@ -498,5 +552,30 @@ mod tests {
         assert_eq!(knobs.confirmed.get(), Some(confirmed_date));
         assert!(knobs.entry_mode_open.get());
         assert!(knobs.calendar_mode_open.get());
+    }
+
+    /// The bug p5-16 shipped and this fix closes: a pushed dialog builder
+    /// that closes over a plain, frozen snapshot instead of the live signal
+    /// (see the [module docs](super)' pushed-dialog section). This calls
+    /// [`date_picker_dialog_view`] — the exact fn [`dialogs_preview`]'s
+    /// "Pick date" trigger delegates to — twice around a live `picker`
+    /// write, and asserts the *second* product's own `confirmable()` (a
+    /// public read of the dialog's resolved selection) reflects the write
+    /// rather than the first call's snapshot. A frozen-snapshot regression
+    /// would make both assertions see the seed date.
+    #[test]
+    fn the_pushed_dialog_builder_reads_the_live_signal_not_a_frozen_snapshot() {
+        let seed = seed_date();
+        let picker = RwSignal::new(DatePickerState::new(Some(seed), today()));
+
+        let first = date_picker_dialog_view(picker);
+        assert_eq!(first.confirmable(), Some(seed));
+
+        let picked = MaterialDate::new(2028, 2, 14);
+        picker.set(DatePickerState::new(Some(picked), today()));
+
+        let second = date_picker_dialog_view(picker);
+        assert_eq!(second.confirmable(), Some(picked));
+        assert_ne!(second.confirmable(), first.confirmable());
     }
 }
