@@ -1,16 +1,344 @@
 //! Time pickers: the reference's `TimePickersPlayground`.
 //!
-//! A placeholder until this section's batch ports the real playground —
-//! everything around it (the catalog row, the routes, both host layouts) is
-//! already live.
+//! Two previews sharing one [`TimeOfDay`] knob: an inline [`time_dial`], and
+//! a "Pick time" trigger opening [`time_picker`] through [`show_time_picker`]
+//! — the module's own worked example almost verbatim (one `state.time` field
+//! feeds the dial directly and seeds the dialog; the dialog's own edits write
+//! back into it through `on_change`, and a confirmed OK writes the same field
+//! again through the pop-result round trip). One knob-menu control ("Entry
+//! mode") gets its own [`OverlayAnchor`] via the two-piece
+//! [`play_enum_menu_field`]/[`play_enum_menu_panel`] control.
+//!
+//! # `show_time_picker` does not auto-wire OK/Cancel
+//!
+//! Unlike `frust_material::date_picker`'s `show_date_picker` ("wires
+//! OK/Cancel/back for you"), `show_time_picker`'s own module docs are
+//! explicit that confirm and cancel are the *caller's* actions: this page's
+//! trigger closure calls `nav.pop_with_result`/`nav.pop()` itself from
+//! `TimePickerView::on_confirm`/`TimePickerView::on_cancel`, exactly as the
+//! module doc's own example does — scrim tap/Escape/back stay the host's own
+//! staged pop.
+//!
+//! # Why `page`/`Component::build` aren't tested directly
+//!
+//! `Component::build` mounts a [`frust::navigator`] (the pattern
+//! [`crate::pages::playground`]'s module docs point to for an overlay-owning
+//! page), which auto-wires back handling against the process's running
+//! reactive runtime — the same reason `main.rs` never builds its own
+//! navigator-mounted shell view in a host-side test. [`content`] below is the
+//! part that actually varies with this page's knob state, built with no
+//! navigator touched, and is what this file's tests exercise instead.
 
-use frust::AnyView;
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, NavigatorController, PopResult, SizedBox,
+    Stack, any, component, navigator, text,
+};
+use frust_material::{
+    OverlayAnchor, TimeOfDay, TimePickerEntryMode, show_time_picker, time_dial, time_picker,
+    tonal_button,
+};
 
 use crate::AppState;
 use crate::catalog::DemoEntry;
-use crate::widgets::coming_soon;
+use crate::widgets::playground::{
+    PlaySnippet, ambient_theme, control_panel, play_enum_menu_field, play_enum_menu_panel,
+    play_preview_card, play_snippet, play_switch, playground_body,
+};
+
+/// Every [`TimePickerEntryMode`] the "Entry mode" menu offers, the
+/// reference's own `M3ETimePickerEntryMode.values` order.
+const ENTRY_MODES: [TimePickerEntryMode; 4] = [
+    TimePickerEntryMode::Dial,
+    TimePickerEntryMode::Input,
+    TimePickerEntryMode::DialOnly,
+    TimePickerEntryMode::InputOnly,
+];
+
+/// Entry-mode label for the menu/snippet — the reference's
+/// `M3ETimePickerEntryMode.name`.
+fn entry_mode_label(mode: TimePickerEntryMode) -> &'static str {
+    match mode {
+        TimePickerEntryMode::Dial => "dial",
+        TimePickerEntryMode::Input => "input",
+        TimePickerEntryMode::DialOnly => "dialOnly",
+        TimePickerEntryMode::InputOnly => "inputOnly",
+    }
+}
+
+/// This page's own knob state — held by [`TimePickersPlayground`], never
+/// [`AppState`] (the page contract in [`crate::pages::playground`]).
+struct Knobs {
+    nav: NavigatorController<Knobs>,
+    time: TimeOfDay,
+    entry_mode: TimePickerEntryMode,
+    use_24_hour: bool,
+    /// Shared with the "Entry mode" [`play_enum_menu_panel`].
+    entry_mode_anchor: OverlayAnchor,
+    entry_mode_open: bool,
+}
+
+impl Default for Knobs {
+    /// The reference's own `_TimePickersPlaygroundState` field initializers.
+    fn default() -> Self {
+        Self {
+            nav: NavigatorController::new(),
+            time: TimeOfDay::new(9, 30),
+            entry_mode: TimePickerEntryMode::Dial,
+            use_24_hour: false,
+            entry_mode_anchor: OverlayAnchor::new(),
+            entry_mode_open: false,
+        }
+    }
+}
+
+/// The "Dial" preview: the inline ring bound to `time`.
+fn dial_preview(time: TimeOfDay, use_24_hour: bool) -> AnyView<Knobs> {
+    any(time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time = next).use_24_hour(use_24_hour))
+}
+
+/// The "Dialog" preview: a "Pick time" trigger over the current time's label
+/// — the reference's `Column` of a button plus its `Text(...)`.
+fn dialog_preview(
+    nav: NavigatorController<Knobs>,
+    time: TimeOfDay,
+    entry_mode: TimePickerEntryMode,
+    use_24_hour: bool,
+) -> AnyView<Knobs> {
+    let theme = ambient_theme();
+    let mut body_style = theme.type_scale.body_medium.clone();
+    body_style.color = theme.scheme().on_surface_variant;
+    let time_label = format!("{:02}:{:02}", time.hour(), time.minute());
+
+    let trigger = tonal_button("Pick time", move |_: &mut Knobs| {
+        let nav_confirm = nav.clone();
+        let nav_cancel = nav.clone();
+        show_time_picker(
+            &nav,
+            move || {
+                let on_confirm_nav = nav_confirm.clone();
+                let on_cancel_nav = nav_cancel.clone();
+                time_picker(time)
+                    .entry_mode(entry_mode)
+                    .use_24_hour(use_24_hour)
+                    .on_change(|s: &mut Knobs, next: TimeOfDay| s.time = next)
+                    .on_confirm(move |_s: &mut Knobs, confirmed: Option<TimeOfDay>| {
+                        if let Some(picked) = confirmed {
+                            on_confirm_nav.pop_with_result(PopResult::of(picked));
+                        }
+                    })
+                    .on_cancel(move |_s: &mut Knobs| on_cancel_nav.pop())
+            },
+            |s: &mut Knobs, result: PopResult| {
+                if let Some(picked) = result.take::<TimeOfDay>() {
+                    s.time = picked;
+                }
+            },
+        );
+    });
+
+    any(Column(vec![
+        any(trigger),
+        any(SizedBox::<Knobs>(None, Some(12.0))),
+        any(text(format!("Time: {time_label}")).style(body_style)),
+    ])
+    .cross_axis(CrossAxisAlignment::Start))
+}
+
+/// The paste-ready "Dial" snippet for the current knob state.
+fn dial_snippet(time: TimeOfDay, use_24_hour: bool) -> PlaySnippet {
+    let code = format!(
+        "time_dial(TimeOfDay::new({hour}, {minute}), on_changed)\n    .use_24_hour({use_24_hour});",
+        hour = time.hour(),
+        minute = time.minute(),
+    );
+    play_snippet("Dial", code)
+}
+
+/// The paste-ready "Dialog" snippet for the current knob state.
+fn dialog_snippet(
+    time: TimeOfDay,
+    entry_mode: TimePickerEntryMode,
+    use_24_hour: bool,
+) -> PlaySnippet {
+    let code = format!(
+        "show_time_picker(\n    \
+             &nav,\n    \
+             || time_picker(TimeOfDay::new({hour}, {minute}))\n        \
+                 .entry_mode(TimePickerEntryMode::{entry_mode:?})\n        \
+                 .use_24_hour({use_24_hour})\n        \
+                 .on_change(|state, next| state.time = next)\n        \
+                 .on_confirm(|_state, confirmed| {{\n            \
+                     if let Some(picked) = confirmed {{\n                \
+                         nav.pop_with_result(PopResult::of(picked));\n            \
+                     }}\n        \
+                 }}),\n    \
+             |state, result| {{\n        \
+                 if let Some(picked) = result.take::<TimeOfDay>() {{\n            \
+                     state.time = picked;\n        \
+                 }}\n    \
+             }},\n\
+         );",
+        hour = time.hour(),
+        minute = time.minute(),
+    );
+    play_snippet("Dialog", code)
+}
+
+/// "Picker" controls: entry mode, 24-hour format.
+fn controls(
+    entry_mode: TimePickerEntryMode,
+    use_24_hour: bool,
+    entry_mode_anchor: &OverlayAnchor,
+    entry_mode_open: bool,
+) -> AnyView<Knobs> {
+    control_panel(
+        "Picker",
+        vec![
+            play_enum_menu_field(
+                "Entry mode",
+                entry_mode,
+                &ENTRY_MODES,
+                entry_mode_label,
+                entry_mode_anchor,
+                entry_mode_open,
+                |s: &mut Knobs, open: bool| s.entry_mode_open = open,
+            ),
+            play_switch("24-hour format", use_24_hour, |s: &mut Knobs, v: bool| {
+                s.use_24_hour = v
+            }),
+        ],
+    )
+}
+
+/// The "Entry mode" menu's popup half — mounted at this page's outer
+/// [`Stack`].
+fn entry_mode_menu_panel(
+    value: TimePickerEntryMode,
+    anchor: &OverlayAnchor,
+    open: bool,
+) -> AnyView<Knobs> {
+    play_enum_menu_panel(
+        value,
+        &ENTRY_MODES,
+        entry_mode_label,
+        anchor,
+        open,
+        |s: &mut Knobs, open: bool| s.entry_mode_open = open,
+        |s: &mut Knobs, next: TimePickerEntryMode| s.entry_mode = next,
+    )
+}
+
+/// The playground content: both previews, both snippets, and the controls
+/// panel plus its dropdown panel — everything that varies with this page's
+/// knob state, built with no navigator touched (see the [module docs](self)).
+fn content(
+    nav: &NavigatorController<Knobs>,
+    time: TimeOfDay,
+    entry_mode: TimePickerEntryMode,
+    use_24_hour: bool,
+    entry_mode_anchor: &OverlayAnchor,
+    entry_mode_open: bool,
+) -> AnyView<Knobs> {
+    let playground = playground_body(
+        vec![
+            play_preview_card("Dial", dial_preview(time, use_24_hour)),
+            play_preview_card(
+                "Dialog",
+                dialog_preview(nav.clone(), time, entry_mode, use_24_hour),
+            ),
+        ],
+        vec![
+            dial_snippet(time, use_24_hour),
+            dialog_snippet(time, entry_mode, use_24_hour),
+        ],
+        vec![controls(
+            entry_mode,
+            use_24_hour,
+            entry_mode_anchor,
+            entry_mode_open,
+        )],
+    );
+    any(Stack(vec![
+        playground,
+        entry_mode_menu_panel(entry_mode, entry_mode_anchor, entry_mode_open),
+    ]))
+}
+
+struct TimePickersPlayground;
+
+impl Component for TimePickersPlayground {
+    type State = Knobs;
+
+    fn init(&self) -> Knobs {
+        Knobs::default()
+    }
+
+    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+        let nav = state.nav.clone();
+        let time = state.time;
+        let entry_mode = state.entry_mode;
+        let use_24_hour = state.use_24_hour;
+        let entry_mode_anchor = state.entry_mode_anchor.clone();
+        let entry_mode_open = state.entry_mode_open;
+        any(navigator(&state.nav, move || {
+            content(
+                &nav,
+                time,
+                entry_mode,
+                use_24_hour,
+                &entry_mode_anchor,
+                entry_mode_open,
+            )
+        }))
+    }
+}
 
 /// See the page contract in [`crate::pages::playground`].
-pub fn page(entry: DemoEntry) -> AnyView<AppState> {
-    coming_soon(entry)
+pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
+    any(component(TimePickersPlayground))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_builds_across_every_reachable_control_state() {
+        let nav: NavigatorController<Knobs> = NavigatorController::new();
+        let anchor = OverlayAnchor::new();
+        let time = TimeOfDay::new(9, 30);
+
+        for entry_mode in ENTRY_MODES {
+            for use_24_hour in [true, false] {
+                let _view = content(&nav, time, entry_mode, use_24_hour, &anchor, false);
+                let _dial = dial_snippet(time, use_24_hour);
+                let _dialog = dialog_snippet(time, entry_mode, use_24_hour);
+            }
+        }
+
+        // The menu open, and a midnight/noon edge time.
+        let _view = content(&nav, time, TimePickerEntryMode::Dial, false, &anchor, true);
+        let _view = content(
+            &nav,
+            TimeOfDay::new(0, 0),
+            TimePickerEntryMode::Dial,
+            false,
+            &anchor,
+            false,
+        );
+        let _view = content(
+            &nav,
+            TimeOfDay::new(23, 59),
+            TimePickerEntryMode::Dial,
+            true,
+            &anchor,
+            false,
+        );
+    }
+
+    #[test]
+    fn the_page_fn_builds_from_its_catalog_entry() {
+        let entry = crate::catalog::find_by_id("time_pickers").expect("catalog entry exists");
+        let _view = super::page(entry);
+    }
 }
