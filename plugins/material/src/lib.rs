@@ -283,7 +283,13 @@ pub use snackbar::{
     SnackbarController, SnackbarHostView, SnackbarHostWidget, SnackbarMessage, snackbar,
     snackbar_host,
 };
-pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
+pub use split_button::{
+    CHEVRON_OPEN_TURNS, CHEVRON_ROTATION_DURATION, SPLIT_ELEVATED_INNER_GAP,
+    SPLIT_FOCUS_RING_OUTSET, SPLIT_INNER_GAP, SPLIT_MIN_TAP_TARGET, SPLIT_SHAPE_SPRING,
+    SplitButton, SplitButtonItem, SplitButtonMenuRoute, SplitButtonMenuStyle, SplitButtonShape,
+    SplitButtonSize, SplitButtonTrailingAlignment, SplitButtonVariant, SplitButtonView,
+    SplitButtonWidget, TRAILING_SELECTED_CORNER_PERCENT, split_button, split_button_item,
+};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
 pub use tabs::{MIN_TABS, Tab, Tabs, TabsVariant, TabsView, TabsWidget, tab, tabs};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
