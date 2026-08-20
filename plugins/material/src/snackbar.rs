@@ -145,10 +145,19 @@
 //!   clearance the upstream host reads from `MediaQuery`). A future revision
 //!   can fold `LayoutCtx::window_insets`/`PaintCtx::window_insets` in
 //!   additively.
-//! - **Hit-testing uses the bar's resting rect for its whole visible
-//!   lifetime**, not a slide-adjusted one — a tap during the ~200-300ms
-//!   entrance/exit ramp is accepted (or swallowed) at the bar's final
-//!   position even though it may still be sliding into place visually.
+//!
+//! # Hit region
+//!
+//! Hit-testing (the initial `Down` classification and every subsequent
+//! `to_local` call while captured) reads [`ActiveSnackbar::visual_bar_rect`]
+//! — [`ActiveSnackbar::bar_rect`]'s resting position shifted by the same
+//! vertical offset [`Widget::paint`] applies — never the raw resting rect. A
+//! press during the ~200-300ms entrance/exit ramp is therefore tested against
+//! where the bar is actually painted (including nowhere at all, at
+//! `progress <= 0.0`, when nothing is drawn yet), the same "hit-testing
+//! follows the painted position, not a paint-only transform" contract
+//! [`mod@crate::overlay::modal`]'s slide entrance documents for its own
+//! panel.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -661,6 +670,29 @@ impl ActiveSnackbar {
             cb(ctx);
         }
     }
+
+    /// The vertical slide offset [`Widget::paint`] currently applies on top of
+    /// [`Self::bar_rect`]'s resting position — `0.0` at rest, growing toward
+    /// the bar's own [`HIDDEN_MARGIN`]-past-fully-hidden offset as `progress`
+    /// falls during the entrance/exit ramp (mirrors `paint`'s own `dy`
+    /// formula exactly, so [`Self::visual_bar_rect`] never drifts from what is
+    /// actually drawn).
+    fn visual_dy(&self) -> f64 {
+        let hidden_offset = self.bar_rect.height() + BOTTOM_INSET + HIDDEN_MARGIN;
+        hidden_offset * (1.0 - self.progress.clamp(0.0, 1.0))
+    }
+
+    /// [`Self::bar_rect`] shifted by [`Self::visual_dy`] — the bar's actual
+    /// on-screen box for this frame. Both [`Widget::paint`] and every
+    /// hit-testing entry point ([`begin_press`]/[`to_local`]) read this rather
+    /// than the raw resting rect, so a press during the entrance/exit ramp is
+    /// tested against where the bar visually is (fully or partially off its
+    /// resting position, or off-screen entirely at `progress <= 0.0`) instead
+    /// of lagging behind at its final position — see the module docs' Hit
+    /// region note.
+    fn visual_bar_rect(&self) -> Rect {
+        self.bar_rect + Vec2::new(0.0, self.visual_dy())
+    }
 }
 
 /// The retained widget for a [`SnackbarHostView`]. See the [module docs](self).
@@ -769,9 +801,7 @@ impl Widget for SnackbarHostWidget {
 
         let theme = Theme::from_paint_ctx(ctx);
         let bar_size = active.bar_rect.size();
-        let hidden_offset = bar_size.height + BOTTOM_INSET + HIDDEN_MARGIN;
-        let dy = hidden_offset * (1.0 - progress);
-        let origin = ctx.origin() + active.bar_rect.origin().to_vec2() + Vec2::new(0.0, dy);
+        let origin = ctx.origin() + active.visual_bar_rect().origin().to_vec2();
 
         let radius = theme.map_or(FALLBACK_RADIUS, |t| t.shape.extra_small);
         let (blur, y_off, shadow_color) = theme.map_or(
@@ -872,7 +902,7 @@ impl Widget for SnackbarHostWidget {
         if p.phase == PointerPhase::Down
             && presses(p)
             && let Some(active) = self.current.as_mut()
-            && active.bar_rect.contains(p.position)
+            && active.visual_bar_rect().contains(p.position)
         {
             return begin_press(active, ctx, p.position);
         }
@@ -909,21 +939,27 @@ impl Widget for SnackbarHostWidget {
     frust::authoring::visit_children!(app);
 }
 
-/// The bar's own local box (relative to [`ActiveSnackbar::bar_rect`]'s
-/// origin) — the hit region for [`BarRegion::Background`].
+/// The bar's own local box (relative to whichever origin [`to_local`] is
+/// resolving positions against) — the hit region for [`BarRegion::Background`].
 fn local_bar_rect(active: &ActiveSnackbar) -> Rect {
     Rect::from_origin_size(Point::ZERO, active.bar_rect.size())
 }
 
+/// Translate a host-local `position` into bar-local coordinates, against
+/// [`ActiveSnackbar::visual_bar_rect`] rather than the raw resting
+/// [`ActiveSnackbar::bar_rect`] — so `action_rect`/`close_rect` (already
+/// bar-local, unaffected by the vertical slide) line up with a press landing
+/// on the bar wherever it is currently painted, not where it will rest. Used
+/// by both [`begin_press`] and [`handle_captured`], so a captured drag
+/// interrupted by an auto-dismiss mid-gesture still tracks the bar sliding
+/// out from under it.
 fn to_local(active: &ActiveSnackbar, position: Point) -> Point {
-    Point::new(
-        position.x - active.bar_rect.x0,
-        position.y - active.bar_rect.y0,
-    )
+    let rect = active.visual_bar_rect();
+    Point::new(position.x - rect.x0, position.y - rect.y0)
 }
 
-/// A fresh `Down` inside [`ActiveSnackbar::bar_rect`]: classify which region
-/// it landed in and capture the gesture.
+/// A fresh `Down` inside [`ActiveSnackbar::visual_bar_rect`]: classify which
+/// region it landed in and capture the gesture.
 fn begin_press(active: &mut ActiveSnackbar, ctx: &mut EventCtx, position: Point) -> EventResult {
     let local = to_local(active, position);
     let region = if active.close_rect.is_some_and(|r| r.contains(local)) {
@@ -1301,6 +1337,13 @@ mod tests {
         let view = snackbar_host(&controller, probe(7).into_any());
         let mut w = build(&view);
         layout(&mut w);
+        // Settle the entrance ramp first: an un-advanced widget is still at
+        // `progress == 0.0` (nothing painted yet), which is itself the ramp
+        // window the "Hit region tracks the paint-time translation" tests
+        // below cover — their whole point is that a press lands nowhere
+        // during it.
+        frame(&mut w, 0.0);
+        frame(&mut w, 350.0); // fully shown
 
         let bar_rect = w.current.as_ref().unwrap().bar_rect;
         let press_at = Point::new(bar_rect.center().x, bar_rect.center().y);
@@ -1347,6 +1390,152 @@ mod tests {
         let result = dispatch(&mut w, &mut state, &key);
         assert_eq!(result, EventResult::Ignored);
         assert!(state.is_empty(), "nothing was focused, so nothing fired");
+    }
+
+    // ---- Hit region tracks the paint-time translation -----------------------
+
+    /// How far `progress` must fall below `1.0` before the resting rect's own
+    /// center point lands outside [`ActiveSnackbar::visual_bar_rect`] — derived
+    /// from the same geometry [`ActiveSnackbar::visual_dy`] uses, so this stays
+    /// correct regardless of the ramp's easing curve.
+    fn miss_threshold(bar_rect: Rect) -> f64 {
+        1.0 - (bar_rect.height() / 2.0) / (bar_rect.height() + BOTTOM_INSET + HIDDEN_MARGIN)
+    }
+
+    #[test]
+    fn a_press_at_the_resting_rect_mid_entrance_is_not_captured_and_reaches_app_content() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("hi"));
+        let view = snackbar_host(&controller, probe(7).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+
+        let bar_rect = w.current.as_ref().unwrap().bar_rect;
+        let threshold = miss_threshold(bar_rect);
+
+        // Seed the ramp, then sample it well inside ENTER_DURATION (300ms) —
+        // progress is well below rest, so the bar is painted far from (or, on
+        // the very first frame, not painted anywhere near) its resting box.
+        frame(&mut w, 0.0);
+        frame(&mut w, 60.0);
+        let progress = w.current.as_ref().unwrap().progress;
+        assert!(
+            progress < threshold,
+            "sanity: still well into the entrance ramp (progress={progress}, threshold={threshold})"
+        );
+
+        let press_at = bar_rect.center();
+        let mut state: Vec<u32> = Vec::new();
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, press_at.x, press_at.y),
+        );
+
+        assert_eq!(
+            result,
+            EventResult::Handled,
+            "the press falls through to the probe beneath, which claims it"
+        );
+        assert_eq!(
+            state,
+            vec![7],
+            "a press at the resting rect mid-entrance reaches app content, not the bar"
+        );
+        assert!(
+            w.current.as_ref().unwrap().captured_region.is_none(),
+            "the bar must not capture a press landing on its future, not current, position"
+        );
+        assert!(
+            !w.current.as_ref().unwrap().action_pressed,
+            "no sub-region latched a press either"
+        );
+    }
+
+    #[test]
+    fn a_press_at_the_resting_rect_during_the_exit_ramp_is_not_captured_and_reaches_app_content() {
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("hi").dismissible());
+        let view = snackbar_host(&controller, probe(7).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        frame(&mut w, 0.0);
+        frame(&mut w, 350.0); // fully shown
+
+        let bar_rect = w.current.as_ref().unwrap().bar_rect;
+        let close_rect = w.current.as_ref().unwrap().close_rect.unwrap();
+        let close_at = bar_rect.origin() + close_rect.center().to_vec2();
+
+        let mut state: Vec<u32> = Vec::new();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, close_at.x, close_at.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, close_at.x, close_at.y),
+        );
+        assert!(
+            w.current.as_ref().unwrap().exiting,
+            "the close press starts the exit ramp"
+        );
+
+        // Seed the fresh exit ramp, then sample it well inside EXIT_DURATION
+        // (200ms).
+        frame(&mut w, 380.0);
+        frame(&mut w, 450.0);
+        let progress = w.current.as_ref().unwrap().progress;
+        let threshold = miss_threshold(bar_rect);
+        assert!(
+            progress < threshold,
+            "sanity: still well into the exit ramp (progress={progress}, threshold={threshold})"
+        );
+
+        let press_at = bar_rect.center();
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, press_at.x, press_at.y),
+        );
+
+        assert_eq!(
+            result,
+            EventResult::Handled,
+            "the press falls through to the probe beneath, which claims it"
+        );
+        assert_eq!(
+            state,
+            vec![7],
+            "a press at the resting rect during the exit ramp reaches app content, not the bar"
+        );
+        assert!(w.current.as_ref().unwrap().captured_region.is_none());
+    }
+
+    #[test]
+    fn a_settled_press_still_hits_the_bar_action_and_close_as_before() {
+        // A control against the two tests above: once the entrance ramp has
+        // fully settled, the resting rect and the visual rect coincide again,
+        // so ordinary presses on the action/close sub-rects keep working
+        // exactly like `an_action_press_fires_the_callback_and_dismisses_the_message`
+        // and `a_close_press_dismisses_without_firing_on_action` already cover
+        // end-to-end — this only re-asserts the geometry those rely on.
+        let controller: SnackbarController<Vec<u32>> = SnackbarController::new();
+        controller.show(snackbar("hi").dismissible());
+        let view = snackbar_host(&controller, probe(7).into_any());
+        let mut w = build(&view);
+        layout(&mut w);
+        frame(&mut w, 0.0);
+        frame(&mut w, 350.0); // fully shown
+
+        let active = w.current.as_ref().unwrap();
+        assert_eq!(active.progress, 1.0);
+        assert_eq!(
+            active.visual_bar_rect(),
+            active.bar_rect,
+            "at rest, the visual and resting rects coincide"
+        );
     }
 
     // ---- Width behavior ------------------------------------------------------
