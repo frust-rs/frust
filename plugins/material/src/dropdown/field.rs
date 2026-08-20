@@ -483,6 +483,7 @@ impl DropdownFieldWidget {
         let mut settled: Vec<usize> = Vec::new();
         let mut chips_moved = false;
         for (i, chip) in self.chips.iter_mut().enumerate() {
+            let progress_before = chip.progress;
             if !chip.started {
                 chip.started = true;
                 if reduce {
@@ -496,6 +497,15 @@ impl DropdownFieldWidget {
                     chip.scale.stop();
                 }
                 chip.progress = if chip.removing { 0.0 } else { 1.0 };
+                // The reduce-motion snap is still a layout-relevant value
+                // change (`layout_scale` feeds the chip's box/delete-hit-box
+                // sizing) — most commonly a freshly-mounted chip going
+                // 0.0 → 1.0, since `layout` already ran this frame against
+                // the pre-snap value. Request the same relayout the animating
+                // arm below requests for an in-flight ramp.
+                if chip.progress != progress_before {
+                    chips_moved = true;
+                }
             } else if chip.scale.is_animating() {
                 if chip.scale.advance(now) {
                     animating = true;
@@ -1526,6 +1536,49 @@ mod tests {
         assert!(w.chips[0].progress < 1.0, "the entrance starts from zero");
         settle(&mut w);
         assert!((w.chips[0].progress - 1.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn reduce_motion_gives_a_freshly_added_chip_a_real_box_after_relayout() {
+        // Regression guard: a chip added under reduce_motion snaps `progress`
+        // straight to `1.0` in `paint`, but `layout_chips` sizes the chip's
+        // rect and its delete hit box off `progress` — without a relayout
+        // request the new chip keeps the zero-width box `Chip::new` seeds
+        // (its label would still paint at full scale, and its delete hit
+        // box would stay empty) until some unrelated change happened to
+        // trigger one.
+        let mut theme = crate::baseline().with_brightness(Brightness::Light);
+        theme.motion.reduce_motion = true;
+
+        let prev = view().multi(true);
+        let mut w = ready(&prev);
+        let next = view().multi(true).selected(vec!["apple".to_string()]);
+        rebuild(&mut w, &prev, &next);
+        assert_eq!(w.chip_count(), 1);
+        assert_eq!(w.chips[0].rect, Rect::ZERO, "not yet laid out");
+
+        let mut rec = Recorder::default();
+        let size = Size::new(w.width, w.height);
+        let mut ctx =
+            PaintCtx::for_test(Point::ORIGIN, size, FrameTime::ZERO).with_theme(&theme as &dyn Any);
+        w.paint(&mut ctx, &mut rec);
+        assert_eq!(w.chips[0].progress, 1.0, "snapped straight to visible");
+        assert!(
+            ctx.needs_layout(),
+            "the snap changed a layout-relevant value, so it must request a relayout"
+        );
+
+        // The relayout a real shell would run on seeing `needs_layout`.
+        layout(&mut w, AREA);
+        assert!(
+            w.chips[0].rect.width() > 0.0,
+            "the chip's box reflects the snapped-in progress after the requested relayout"
+        );
+        assert_ne!(
+            w.chips[0].delete,
+            Rect::ZERO,
+            "the delete glyph gets a real hit box, not an empty one"
+        );
     }
 
     #[test]

@@ -44,8 +44,13 @@
 //! turning. While any item's reveal is still animating, `paint` therefore calls
 //! [`PaintCtx::request_layout`] (which implies `request_frame`) — the next
 //! frame relayouts and picks up the freshly-advanced fraction, on every platform,
-//! gated or not. `Theme.motion.reduce_motion` snaps straight to the target and
-//! requests neither. This is the same mechanism `frust_glyph::accordion`
+//! gated or not. `Theme.motion.reduce_motion` snaps straight to the target
+//! instead of springing, but the snap is still a layout-relevant value change:
+//! if the snap actually moved `value` away from what `layout` last saw, `paint`
+//! requests exactly one relayout the same way (never an ongoing frame request,
+//! since the driver is already stopped by the time the snap runs) — otherwise
+//! the item's geometry would stay pinned to its pre-toggle height indefinitely.
+//! This is the same mechanism `frust_glyph::accordion`
 //! documents, and `paint_requests_layout_on_every_reveal_frame` is its
 //! regression guard here.
 //!
@@ -834,14 +839,18 @@ impl Widget for ExpandableListWidget {
         // request, not merely another frame (see the module docs).
         let now = ctx.frame_time();
         let mut animating = false;
+        let mut snapped = false;
         for reveal in &mut self.reveals {
             if reduce_motion {
+                if reveal.value != reveal.target {
+                    snapped = true;
+                }
                 reveal.snap();
             } else if reveal.advance(now) {
                 animating = true;
             }
         }
-        if animating {
+        if animating || snapped {
             ctx.request_layout();
         }
 
@@ -1258,12 +1267,19 @@ mod tests {
     }
 
     #[test]
-    fn reduce_motion_snaps_the_reveal_and_requests_nothing() {
+    fn reduce_motion_snaps_the_reveal_and_requests_one_relayout_no_animation() {
+        // Regression guard for the reduce-motion layout-staleness bug: `paint`
+        // snaps the reveal's `value` straight to `target`, but `layout` already
+        // ran earlier this same frame against the pre-snap value, so the snap
+        // must still ask for exactly one relayout — never an ongoing animation
+        // frame, since the driver is already stopped once snapped.
         let mut theme = crate::baseline();
         theme.motion.reduce_motion = true;
         let collapsed: ExpandableListView<()> = expandable_list(items(1));
         let mut w = build(&collapsed);
-        layout(&mut w);
+        let collapsed_h = layout(&mut w).height;
+        assert_eq!(collapsed_h, header_height(), "starts fully collapsed");
+
         let expanded: ExpandableListView<()> = expandable_list(items(1)).expanded([0]);
         let mut counter = 0u64;
         <ExpandableListView<()> as View<()>>::rebuild(
@@ -1272,9 +1288,30 @@ mod tests {
             &mut w,
             &mut BuildCtx::new(&mut counter),
         );
+
         let (_, needs_layout) = paint_at(&mut w, 0, Some(&theme));
         assert_eq!(w.reveals[0].value, 1.0, "snapped straight to the target");
-        assert!(!needs_layout, "a snapped reveal asks for no further layout");
+        assert!(
+            needs_layout,
+            "the snap changed a layout-relevant value, so it must request one relayout"
+        );
+
+        // The relayout a real shell would run on seeing `needs_layout` — this
+        // is the assertion the bug used to skip: the item's laid-out height
+        // must reach the target on the frame the reveal snaps.
+        let expanded_h = header_height() + body_height();
+        let snapped_h = layout(&mut w).height;
+        assert_eq!(
+            snapped_h, expanded_h,
+            "the item's height reaches the target on the snap frame, not some later one"
+        );
+
+        // Settled: no ongoing animation frames follow the one relayout.
+        let (_, still) = paint_at(&mut w, 16, Some(&theme));
+        assert!(
+            !still,
+            "a snap requests exactly one relayout, never an ongoing frame request"
+        );
     }
 
     #[test]

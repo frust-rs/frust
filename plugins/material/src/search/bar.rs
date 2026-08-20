@@ -54,7 +54,10 @@
 //! geometry, so hit-testing follows it), which is why a running spring asks for
 //! a relayout rather than a bare repaint.
 //!
-//! `Theme.motion.reduce_motion` snaps the inset to its target with no ramp.
+//! `Theme.motion.reduce_motion` snaps the inset to its target with no ramp —
+//! and, since the inset is a layout value, a snap that actually moves it
+//! requests the same one relayout a running spring does, so the pill (and its
+//! hit region) don't lag a frame behind the snap.
 //!
 //! # Interaction
 //!
@@ -527,9 +530,16 @@ impl Widget for SearchBarWidget {
             )
         };
         // The inset is a *layout* value, so a running spring asks for a
-        // relayout, not a bare repaint.
+        // relayout, not a bare repaint — and a reduce-motion snap that
+        // actually moves the value does too, since `layout` already ran this
+        // frame against the pre-snap inset and would otherwise keep painting
+        // (and hit-testing) the resting inset indefinitely.
         if reduce {
+            let before = self.expand.value();
             self.expand.snap();
+            if self.expand.value() != before {
+                ctx.request_layout();
+            }
         } else if self.expand.advance(ctx.frame_time()) {
             ctx.request_layout();
             ctx.request_frame();
@@ -1023,6 +1033,7 @@ mod tests {
         let view = bar("").on_tap(|s: &mut App| s.taps += 1);
         let mut w = build(&view);
         layout(&mut w, &BoxConstraints::tight(Size::new(400.0, 56.0)));
+        assert_eq!(w.pill.x0, EXPAND_REST, "starts at the resting inset");
 
         let mut state = App::default();
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, 28.0));
@@ -1030,6 +1041,22 @@ mod tests {
         let mut pctx = PaintCtx::for_test(Point::ZERO, WINDOW, FrameTime::ZERO).with_theme(&theme);
         w.paint(&mut pctx, &mut rec);
         assert_eq!(w.expand_inset(), EXPAND_ACTIVE);
+        assert!(
+            pctx.needs_layout(),
+            "the snap moved a layout-relevant value (the pill inset), so it must request a relayout"
+        );
+
+        // Regression guard: the bug snapped `self.expand`'s live value but
+        // requested no relayout, so `self.pill` — the *painted* rect and hit
+        // region, computed only in `layout` — kept the resting inset
+        // indefinitely even though `expand_inset()` above already read the
+        // focused one. Run the relayout a real shell would run on seeing
+        // `needs_layout` and check the pill itself reaches it.
+        layout(&mut w, &BoxConstraints::tight(Size::new(400.0, 56.0)));
+        assert_eq!(
+            w.pill.x0, EXPAND_ACTIVE,
+            "the painted/hit-tested pill reaches the snapped inset after the requested relayout"
+        );
     }
 
     // ---- Semantics ----
