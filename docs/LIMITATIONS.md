@@ -2433,24 +2433,32 @@ upstream-parity requirement forcing it into v1.
 
 ---
 
-### `overlay-no-auto-focus-on-appear` — a newly opened modal or anchored overlay does not claim keyboard focus itself
+### `overlay-no-auto-focus-on-appear` — the framework has no seam to claim focus (widget or IME) on mount
 
-**Observed**: neither `frust-shadcn`'s `modal` host nor its `anchored` host claims focus when it
-appears; both claim focus only in response to a `Down` inside themselves, so Escape (wired to fire
-only once the host holds focus) does nothing until a caller completes one pointer interaction with
-the overlay first. This is not new to shadcn — `frust_material::dialog` carries the identical gap
-— because the framework itself exposes no auto-focus-on-appear hook a widget can call on mount.
+**Observed**: the framework exposes no auto-focus-on-appear hook a widget can call on mount —
+`EventCtx::request_focus` is reachable only from a widget's own event pass, which never runs for
+something nobody has touched yet. Two independent consequences: (1) neither `frust-shadcn`'s
+`modal`/`anchored` hosts nor `frust_material::dialog` claim focus when they appear — both claim
+focus only in response to a `Down` inside themselves, so Escape (wired to fire only once the host
+holds focus) does nothing until a caller completes one pointer interaction with the overlay first;
+(2) `frust::TextInputView` has no `autofocus`/`request_focus` builder either, so
+`frust_material::search`'s full-screen view — whose upstream reference opens with `autoFocus: true`
+to raise the keyboard immediately — instead opens with no IME up until the user taps its field once.
 
 **Applies to**: `frust_shadcn::overlay::modal`/`anchored` and every component built on them
 (dialog, alert-dialog, sheet, drawer, command, popover, dropdown/context menu, select, combobox);
-`frust_material::dialog`.
+`frust_material::dialog` (same gap); `frust_material::search`'s header field (IME-autofocus
+manifestation — no widget anywhere can claim focus programmatically on mount, text input included).
 
-**Why accepted**: a framework-level focus-management primitive (claim focus on mount) does not
-exist yet; every current design-system caller works around it the same documented way rather than
-inventing a per-crate special case.
+**Why accepted**: a framework-level focus-management primitive (claim focus, or the text-input-
+specific `autofocus`, on mount) does not exist yet; every current design-system caller works around
+it the same documented way rather than inventing a per-crate special case. Closing the IME half
+needs a `frust-widgets` seam on `TextInputView` (an `autofocus` builder or a reachable
+`request_focus`); closing the general half needs a framework-wide claim-on-mount hook.
 
 **Evidence**: `plugins/shadcn/src/overlay/modal.rs` and `plugins/shadcn/src/overlay/anchored.rs`
-module docs ("there is no auto-focus-on-appear hook in the framework").
+module docs ("there is no auto-focus-on-appear hook in the framework"); `plugins/material/src/search/mod.rs`
+module doc's "IME: no programmatic focus" section (explicitly names this as "the same framework gap").
 
 ---
 
@@ -2562,27 +2570,32 @@ disclosure for sidebar_menu_sub … sub-list permanently open in demo").
 
 ---
 
-### `shadcn-anchored-exit-needs-kept-mounted` — an anchored overlay's exit ramp requires the app to keep it mounted
+### `shadcn-anchored-exit-needs-kept-mounted` — a framework-level anchored overlay's exit ramp requires the app to keep it mounted
 
-**Observed**: `frust_shadcn::overlay::anchored` drives its exit ramp from a builder-level
-`.open(bool)`, not from mount/unmount — the framework has no seam for keeping a conditionally-mounted
-view alive past the rebuild that unmounts it, so an exit animation is only reachable for a host the
-app mounts *unconditionally* and toggles closed via `open(false)` (the *kept-mounted pattern*). An
-app that instead mounts the host only while its own flag is set and drops it when the flag clears
-gets the entrance ramp but no exit — the widget is gone by the next frame, so any in-flight ramp is
-simply truncated.
+**Observed**: an `anchored`-host overlay drives its exit ramp from a builder-level `.open(bool)`,
+not from mount/unmount — the framework has no seam for keeping a conditionally-mounted view alive
+past the rebuild that unmounts it, so an exit animation is only reachable for a host the app mounts
+*unconditionally* and toggles closed via `open(false)` (the *kept-mounted pattern*). An app that
+instead mounts the host only while its own flag is set and drops it when the flag clears gets the
+entrance ramp but no exit — the widget is gone by the next frame, so any in-flight ramp is simply
+truncated. This is a framework gap, not a per-catalog one: `frust_shadcn::overlay::anchored`
+originated it, and `frust_material::overlay::anchored` (a Phase-3 sibling port, ported rather than
+depended on) hits the identical gap and cites this same id as "the framework-wide gap it is".
 
-**Applies to**: every component built on `frust_shadcn::overlay::anchored` (popover, tooltip,
-hover-card, dropdown/context menu, select, combobox) — the `modal` host is unaffected, since its
-exit is staged through the navigator's own pop-result machinery instead of a mount flag.
+**Applies to**: every component built on either catalog's `overlay::anchored` host — shadcn's
+popover, tooltip, hover-card, dropdown/context menu, select, combobox; material's menu (incl.
+submenu), dropdown, tooltip, and the search view's docked panel. Each catalog's `modal` host is
+unaffected, since its exit is staged through the navigator's own pop-result/back-press machinery
+instead of a mount flag.
 
 **Why accepted**: this is the framework-level trade the pattern makes explicit, not an oversight — a
-kept-mounted host costs one layout of its content per frame while closed and nothing else, which the
-crate accepts as the price of a real exit ramp with no framework support for outliving a rebuild.
+kept-mounted host costs one layout of its content per frame while closed and nothing else, which
+both catalogs accept as the price of a real exit ramp with no framework support for outliving a
+rebuild.
 
-**Evidence**: `plugins/shadcn/src/overlay/anchored.rs` module docs ("Mounting, and what an exit
-animation costs" — "The framework has no seam for keeping a conditionally-mounted view alive past
-the rebuild that unmounts it").
+**Evidence**: `plugins/shadcn/src/overlay/anchored.rs` and `plugins/material/src/overlay/anchored.rs`
+module docs ("Mounting, and what an exit animation costs" — "The framework has no seam for keeping a
+conditionally-mounted view alive past the rebuild that unmounts it").
 
 ---
 
@@ -2900,3 +2913,92 @@ port.
 limitations" section (the "A `Down` on an interactive slot blurs the field"
 bullet); Material 3 Expressive Phase 2 review round 0, confirmed Major 5
 (`workflow/reviews/features/material-3-expressive-phase-2/REVIEW.md`).
+
+---
+
+### `material-picker-strings-no-i18n-seam` — the date/time pickers ship English-default strings with no path to a real locale
+
+**Observed**: `frust_material::date_picker` and `time_picker` take every label, weekday name, and
+the first-day-of-week index from a caller-fillable `DatePickerStrings`/`TimePickerStrings` struct,
+defaulted to `DatePickerStrings::ENGLISH`/`TimePickerStrings::default()` (Flutter
+`MaterialLocalizations`' own `en_US` values). This is an *adaptation* of the reference's
+localization, not a port of it: a design-system plugin may not depend on a sibling plugin
+(`docs/PLUGINS_ARCHITECTURE.md`'s Layer Dependencies), so `frust-i18n` is out of reach from
+`plugins/material`, and there is no seam connecting one to the other even at the app layer. The date
+picker's input-mode parse/format (`MaterialDate::format_compact`, `mm/dd/yyyy`) is narrower still:
+it is the fixed `en_US` compact form, and **not overridable in v1** even via the strings struct —
+unlike every other label, a non-`mm/dd/yyyy` input format cannot be substituted at all.
+
+**Applies to**: any app shipping `frust_material::date_picker`/`time_picker` in a non-English
+locale. An app translates the label surface itself (`..DatePickerStrings::ENGLISH`/
+`TimePickerStrings::default()` for the fields it doesn't override) and reformats displayed dates on
+its own, but the date picker's typed-entry mode stays `mm/dd/yyyy` regardless.
+
+**Why accepted**: closing this needs either an i18n-aware seam threaded from an app's own
+`frust-i18n` locale into the picker (a cross-plugin bridge the charter above doesn't provide today)
+or a second, locale-parametrized compact-date format — both out of scope for the Phase 3 port,
+which prioritized reference-accurate calendar/dial math over a localization bridge no other
+design-system plugin has either.
+
+**Evidence**: `plugins/material/src/date_picker/mod.rs` module doc's "Localization: English
+defaults plus an override struct" section; `plugins/material/src/time_picker/mod.rs` module doc's
+"Strings: English defaults, overridable as a bundle" section; `docs/PLUGINS_ARCHITECTURE.md`'s
+Layer Dependencies (no design-system plugin may depend on a sibling plugin).
+
+---
+
+### `material-modal-staged-dismiss-private-to-host` — a modal panel's content cannot request the staged exit ramp its own close affordance should use
+
+**Observed**: `frust_material::overlay::modal`'s staged-exit machine (scrim tap, Escape, close
+button, drag, Android back all reverse-ramp before the app's dismissal fires) is driven by a
+`dismiss_signal: Rc<Cell<u64>>` cell that `show_overlay_modal` creates and keeps to itself — it is
+handed to the host widget, never to the content the caller builds. A panel's *own* content-owned
+close affordance (e.g. `frust_material::search`'s full-screen view's back button) can only call
+`NavigatorController::pop()` directly through the `on_modal_dismiss`/`on_close` wiring, which pops
+**unstaged** — immediately, with no reverse ramp — while every host-chrome dismiss gesture on the
+same panel stages one. A user closing the same panel two different ways sees two different exit
+motions.
+
+**Applies to**: any `frust_material` component built on `overlay::modal` whose content wants its own
+close control (confirmed today in `search`'s full-screen view back button; latent in any future
+component that adds an in-content close affordance rather than relying only on the host chrome's
+close button/scrim/Escape/drag/back).
+
+**Why accepted**: `show_overlay_modal` is the only place `dismiss_signal` is constructed and it is a
+crate-private field on the host widget by design (no public setter). Fixing this needs a public
+`request_staged_dismiss`-shaped seam on the modal host so a caller-built content view can bump the
+same signal the chrome gestures do, which is a host-API addition, not a component-level fix — out
+of scope for the Phase 3 port that found it.
+
+**Evidence**: `plugins/material/src/overlay/modal.rs`'s `show_overlay_modal` (the `dismiss_signal`
+cell constructed and threaded to the widget, never exposed to `build`'s content) and its `on_close`/
+`on_modal_dismiss` doc comments (staged vs. unstaged); `plugins/material/src/search/view.rs`'s back
+affordance (wired to the unstaged pop, doc-noted as such).
+
+---
+
+### `material-refresh-no-hold-offset-during-refresh` — `ScrollView` has no seam to pin scroll position while a pull-to-refresh is in flight
+
+**Observed**: `frust_material::refresh_indicator` overlays the pull indicator at its resting offset
+via paint-time compositing (`PaintScene::push_transform`) rather than by holding the underlying
+scroll content there, because `frust::ScrollView`'s public API has no "pin the offset until
+released" affordance — its own release-settle always eases back to the clamped edge once the
+pointer lifts, independent of whatever a wrapping widget is doing. The reference instead ties the
+pulled content's held position to the same controller driving the indicator, so upstream's content
+visibly stays pulled down for the whole refresh; this port's content is free to settle and scroll
+normally underneath the overlaid indicator instead. A second, narrower gap in the same area:
+`ScrollView::on_scroll` delivers the release-settle one event late, so the indicator cannot ride the
+baseline's own settle motion and instead runs independent `snap`/`retract` animation controllers
+seeded from the pull distance observed at release/cancel.
+
+**Applies to**: any app using `frust_material::refresh_indicator` — the pulled content underneath
+does not visually "hold" at the indicator's offset the way the M3 reference does, and the indicator
+never inherits the scroll view's own settle easing.
+
+**Why accepted**: per the design-system charter, `plugins/material` may not patch `frust-widgets` to
+add the missing seam (`docs/PLUGINS_ARCHITECTURE.md`'s Design-System Plugins charter). A real fix is
+a `frust-widgets`/`ScrollView` addition — a hold-until-released offset seam, and/or a same-frame
+settle-delivery fix — filed as a FINDING candidate rather than attempted in-crate.
+
+**Evidence**: `plugins/material/src/refresh_indicator.rs` module doc's "Documented seam gap: the
+scroll offset is not held during a refresh" section (incl. the `on_scroll` one-event-late note).
