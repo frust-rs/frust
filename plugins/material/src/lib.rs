@@ -92,6 +92,7 @@ pub mod list_view;
 pub mod loading_indicator;
 pub mod menu;
 pub mod navbar;
+pub mod navigation_drawer;
 pub mod navigation_rail;
 pub mod overlay;
 mod press;
@@ -229,6 +230,11 @@ pub use navbar::{
     NavBarSize, NavItem, NavigationBar, NavigationBarView, NavigationBarWidget,
     TRAIL_SPRING as NAV_INDICATOR_TRAIL_SPRING, UNDERLINE_THICKNESS as NAV_BAR_UNDERLINE_THICKNESS,
     nav_item, navigation_bar,
+};
+pub use navigation_drawer::{
+    DRAWER_WIDTH, DrawerContentView, DrawerContentWidget, DrawerDestination, DrawerSection,
+    NavigationDrawer, NavigationDrawerView, drawer_destination, drawer_section, navigation_drawer,
+    navigation_drawer_content, show_navigation_drawer,
 };
 pub use navigation_rail::{
     NavigationRail, NavigationRailModality, NavigationRailType, NavigationRailView,
