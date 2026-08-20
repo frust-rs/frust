@@ -106,6 +106,10 @@ system installed falls back to `Theme::neutral()`.
 `cd`/standalone gate needed) opens the `frust-shadcn` catalog's desktop gallery: the manual visual
 gate for shadcn/ui component changes, the same shape as huddle's above.
 
+**material3 gallery.** `cargo run -p material3-demo` (also a root-workspace member) opens the
+`frust-material` catalog's desktop gallery: the manual visual gate for Material 3 Expressive
+component changes and theme configuration.
+
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):
 
