@@ -181,10 +181,24 @@ pub const TRAIL_SPRING: SpringDesc = SpringDesc {
 /// order of magnitude below anything a display can resolve, and stopping there
 /// saves the long analytic tail of frames that changes nothing on screen.
 const PILL_REST_EPSILON: f64 = 0.01;
-/// Main-axis movement below this (logical px) is not worth a travel — a
-/// re-selection of the already-selected destination, or a rounding-scale slot
-/// shift (`_M3ENavSelectionIndicatorState`'s own 0.5px `_isAtGeometry` test).
+/// Movement below this (logical px) doesn't count as a geometry change — the
+/// reference's own 0.5px `_isAtGeometry` test
+/// (`_M3ENavSelectionIndicatorState`). Gates two things: a travel retarget
+/// within this of the live lead position is skipped (a re-selection of the
+/// already-selected destination, or a rounding-scale slot shift), and
+/// [`geometry_unchanged`] uses it to tell a genuine resize/add/remove apart
+/// from a same-geometry relayout in [`LiquidIndicator::sync`]'s jump branch.
 const GEOMETRY_EPSILON: f64 = 0.5;
+
+/// Whether `a` and `b` are the same resting rect within [`GEOMETRY_EPSILON`]
+/// on every edge — the "did this relayout actually move anything" test
+/// gating [`LiquidIndicator::sync`]'s non-travel jump.
+fn geometry_unchanged(a: Rect, b: Rect) -> bool {
+    (a.x0 - b.x0).abs() < GEOMETRY_EPSILON
+        && (a.x1 - b.x1).abs() < GEOMETRY_EPSILON
+        && (a.y0 - b.y0).abs() < GEOMETRY_EPSILON
+        && (a.y1 - b.y1).abs() < GEOMETRY_EPSILON
+}
 
 /// One spring-driven edge of the liquid pill, in container-local **main-axis**
 /// px — a bare scalar, so it carries over to a vertical consumer unchanged.
@@ -292,12 +306,23 @@ impl LiquidEdge {
 ///
 /// [`Self::sync`] takes the same fork the reference's `_sync(forceJump:)` does:
 /// a **selection change** animates (`didUpdateWidget`'s `selectedIndex` arm),
-/// while anything else that moves the geometry — a width change, an item
+/// while anything else that *moves the geometry* — a width change, an item
 /// added/removed, first layout, reduced motion — **jumps**
 /// (`_trackLayoutChange`/`_scheduleMeasure(forceJump: true)`). Measuring is
 /// synchronous here, so the reference's retry/suspicious-jump guards
 /// (`_measureAttempts`, `_isSuspiciousJump`) have no analogue: there is no
 /// frame in which the geometry is not yet knowable.
+///
+/// A non-travel call whose `rest` reproduces the last-synced one (within
+/// [`GEOMETRY_EPSILON`]) is a **no-op**, matching the reference's own
+/// `_isAtGeometry` guard (`m3e_nav_selection_indicator.dart`). `layout` runs
+/// on every full-tree layout pass, not just the one where the selection
+/// actually moved — an animating sibling's `request_layout`, or any other
+/// app-side relayout, re-enters [`Self::sync`] with `travel == false` while a
+/// previously-started travel is still mid-flight. Since the resting rect
+/// hasn't actually changed, this must leave the in-flight travel (or a
+/// settled pill) exactly as it was — only a call that reproduces a *genuinely
+/// different* resting rect jumps.
 ///
 /// # Reuse across the nav family
 ///
@@ -333,22 +358,40 @@ impl LiquidIndicator {
     }
 
     /// Adopt the selected item's resting box. `travel` runs the two-phase
-    /// motion; otherwise the pill jumps (see the type docs' two sync paths).
+    /// motion; otherwise the pill jumps to a *genuine* geometry change and is
+    /// a no-op against a reproduction of the last-synced one (see the type
+    /// docs' two sync paths).
     pub(crate) fn sync(&mut self, rest: Rect, travel: bool) {
-        self.rest = rest;
         let center = rest.center().x;
-        if !self.ready || !travel {
+        if !self.ready {
+            self.rest = rest;
             self.lead.snap(center);
             self.trail.snap(center);
             self.last_time = None;
             self.ready = true;
             return;
         }
-        if (self.lead.target - center).abs() < GEOMETRY_EPSILON && !self.is_animating() {
+        if travel {
+            self.rest = rest;
+            if (self.lead.target - center).abs() < GEOMETRY_EPSILON && !self.is_animating() {
+                return;
+            }
+            self.lead.retarget(center);
+            self.trail.retarget(center);
+            self.last_time = None;
             return;
         }
-        self.lead.retarget(center);
-        self.trail.retarget(center);
+        // Not a selection-driven travel. A relayout that reproduces the
+        // resting rect already synced (an unrelated widget's animating
+        // frame, any other app-side LAYOUT flag) touches nothing — snapping
+        // here would cancel an in-flight travel mid-stretch. Only a rect
+        // that actually differs — a resize, an item add/remove — jumps.
+        if geometry_unchanged(self.rest, rest) {
+            return;
+        }
+        self.rest = rest;
+        self.lead.snap(center);
+        self.trail.snap(center);
         self.last_time = None;
     }
 
@@ -1516,6 +1559,71 @@ mod tests {
         );
         // Item 2 spans x in [200, 300): its pill is centred at 250.
         assert!((origin.x + size.width / 2.0 - 250.0).abs() < 1e-6);
+    }
+
+    /// `layout` re-enters on every full-tree layout pass, not just the one
+    /// where the selection actually moved — an animating sibling's own
+    /// `request_layout`, or any other app-side LAYOUT flag, produces exactly
+    /// this shape: a relayout that reproduces the *same* resting geometry
+    /// while a travel is already mid-flight. It must not snap the pill.
+    #[test]
+    fn a_same_geometry_relayout_mid_travel_does_not_snap_the_pill() {
+        let bar = Size::new(300.0, HEIGHT_SMALL);
+        let mut counter = 0u64;
+        let prev: NavigationBarView<()> = navigation_bar(three_items(), 0, |_s: &mut (), _i| {});
+        let mut w = View::<()>::build(&prev, &mut ctx(&mut counter));
+        layout(&mut w, &BoxConstraints::loose(bar));
+        paint_at(&mut w, bar, ft(0.0));
+
+        let next: NavigationBarView<()> = navigation_bar(three_items(), 2, |_s: &mut (), _i| {});
+        View::<()>::rebuild(&next, &prev, &mut w, &mut ctx(&mut counter));
+        layout(&mut w, &BoxConstraints::loose(bar));
+        assert!(w.indicator.is_animating(), "the travel started at layout");
+
+        // Run a few paint frames so the pill is genuinely mid-stretch, not
+        // just launched.
+        paint_at(&mut w, bar, ft(16.0));
+        paint_at(&mut w, bar, ft(32.0));
+        let (scene, _) = paint_at(&mut w, bar, ft(48.0));
+        let mid_flight_width = scene.rounded[0].1.width;
+        assert!(
+            mid_flight_width > INDICATOR_W + 1.0,
+            "must actually be stretched before the interleaved layout, got {mid_flight_width}"
+        );
+
+        // An unrelated relayout — same items, same selection, same
+        // constraints — reproduces the exact same resting rect. Pre-fix,
+        // `sync`'s non-travel branch snapped unconditionally here.
+        layout(&mut w, &BoxConstraints::loose(bar));
+        assert!(
+            w.indicator.is_animating(),
+            "a same-geometry relayout mid-travel must not cancel the travel"
+        );
+        let (scene, _) = paint_at(&mut w, bar, ft(64.0));
+        let width_after = scene.rounded[0].1.width;
+        assert!(
+            width_after > INDICATOR_W + 1.0,
+            "the pill must still be mid-flight after the interleaved layout, \
+             not snapped to rest (got {width_after})"
+        );
+
+        // The interrupted travel still settles correctly afterward.
+        let mut settled = false;
+        for frame in 5..240 {
+            let (scene, needs_frame) = paint_at(&mut w, bar, ft(16.0 * frame as f64));
+            if !needs_frame {
+                let (origin, size, _) = scene.rounded[0];
+                assert!((size.width - INDICATOR_W).abs() < 1e-6);
+                // Item 2 spans x in [200, 300): its pill is centred at 250.
+                assert!((origin.x + size.width / 2.0 - 250.0).abs() < 1e-6);
+                settled = true;
+                break;
+            }
+        }
+        assert!(
+            settled,
+            "the pill still settles within 240 frames despite the interleave"
+        );
     }
 
     #[test]
