@@ -65,6 +65,7 @@ pub mod checkbox;
 pub mod chips;
 pub mod dialog;
 pub mod divider;
+pub mod dropdown;
 pub mod fab;
 pub mod fab_menu;
 pub mod icon_button;
@@ -133,6 +134,20 @@ pub use dialog::{
     selection_dialog, show_dialog, show_full_screen_dialog, show_selection_dialog,
 };
 pub use divider::{DividerView, DividerWidget, divider};
+pub use dropdown::{
+    DROPDOWN_CHIP_H_PADDING, DROPDOWN_CHIP_ICON_SIZE, DROPDOWN_CHIP_LABEL_GAP,
+    DROPDOWN_CHIP_RADIUS, DROPDOWN_CHIP_RUN_SPACING, DROPDOWN_CHIP_SPACING,
+    DROPDOWN_CHIP_V_PADDING, DROPDOWN_CONTENT_PADDING, DROPDOWN_EMPTY_TEXT,
+    DROPDOWN_FIELD_H_PADDING, DROPDOWN_FIELD_HOVER_ALPHA, DROPDOWN_FIELD_LOADING_SIZE,
+    DROPDOWN_FIELD_LOADING_STROKE, DROPDOWN_FIELD_PRESSED_ALPHA, DROPDOWN_FIELD_V_PADDING,
+    DROPDOWN_HINT, DROPDOWN_ICON_GAP, DROPDOWN_ICON_SIZE, DROPDOWN_ITEM_GAP,
+    DROPDOWN_ITEM_H_PADDING, DROPDOWN_ITEM_HOVER_RADIUS, DROPDOWN_ITEM_INNER_RADIUS,
+    DROPDOWN_ITEM_OUTER_RADIUS, DROPDOWN_ITEM_PRESSED_RADIUS, DROPDOWN_ITEM_V_PADDING,
+    DROPDOWN_LOADING_PADDING, DROPDOWN_MESSAGE_PADDING, DROPDOWN_PANEL_GAP,
+    DROPDOWN_PANEL_MAX_HEIGHT, DROPDOWN_SEARCH_HINT, DropdownColors, DropdownFieldView,
+    DropdownFieldWidget, DropdownItem, DropdownPanelView, DropdownPanelWidget, DropdownView,
+    dropdown, dropdown_field, dropdown_filter, dropdown_item, dropdown_matches, dropdown_panel,
+};
 pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
 pub use icon_button::{
