@@ -28,6 +28,13 @@
 //! not flat re-exported at the crate root — see that module's own doc for
 //! provenance and the regen command.
 //!
+//! [`selection`]'s pure index-set controller functions (`is_selected`,
+//! `toggle`, `select_all`, ...) stay namespaced the same way
+//! (`frust_material::selection::toggle`) — their names are too generic to
+//! flatten safely without shadowing. The module's own widget types
+//! ([`selection_host`], [`selection_app_bar`]) are flat re-exported as
+//! usual.
+//!
 //! # `install()`: this design system's one-line installer
 //!
 //! [`install`] seeds [`frust::set_default_theme`] with this crate's
@@ -82,6 +89,7 @@ pub mod progress;
 pub mod radio;
 pub mod refresh_indicator;
 pub mod segmented_button;
+pub mod selection;
 pub mod shapes;
 pub mod sheet;
 pub mod side_sheet;
@@ -196,6 +204,10 @@ pub use refresh_indicator::{RefreshIndicatorView, RefreshIndicatorWidget, refres
 pub use segmented_button::{
     MAX_SEGMENTS, MIN_SEGMENTS, Segment, SegmentedButton, SegmentedButtonView,
     SegmentedButtonWidget, segment, segmented_button,
+};
+pub use selection::{
+    SelectionAppBarView, SelectionAppBarWidget, SelectionHostView, SelectionHostWidget,
+    selection_app_bar, selection_host,
 };
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
