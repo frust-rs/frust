@@ -100,6 +100,10 @@ mod tests {
 
     struct TestState;
 
+    fn clipboard_tests_opted_in() -> bool {
+        std::env::var("FRUST_CLIPBOARD_TESTS").as_deref() == Ok("1")
+    }
+
     #[test]
     fn snippet_builder_captures_label_and_code() {
         let snippet = play_snippet("Filled", "filled_button(\"Go\", |_| {})");
@@ -115,6 +119,14 @@ mod tests {
 
     #[test]
     fn copy_round_trips_through_the_platform_clipboard() {
+        if !clipboard_tests_opted_in() {
+            eprintln!(
+                "skipping material3-demo copy_round_trips: destructive \
+                 (overwrites the real host clipboard) — opt in with \
+                 `FRUST_CLIPBOARD_TESTS=1 cargo test -p material3-demo`"
+            );
+            return;
+        }
         let payload = "frust_material::filled_button(\"Go\", |_| {})";
         if copy_to_clipboard(payload).is_err() {
             // No clipboard mechanism reachable in this environment (e.g. a
