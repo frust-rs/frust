@@ -72,6 +72,7 @@ pub mod interaction;
 pub mod list_item;
 pub mod list_view;
 pub mod loading_indicator;
+pub mod menu;
 pub mod navbar;
 pub mod overlay;
 mod press;
@@ -135,6 +136,12 @@ pub use list_item::{
 pub use loading_indicator::{
     LoadingIndicator, LoadingIndicatorVariant, LoadingIndicatorView, LoadingIndicatorWidget,
     loading_indicator,
+};
+pub use menu::{
+    MenuAction, MenuColorStyle, MenuColors, MenuEntry, MenuGroup, MenuIcon, MenuNode,
+    MenuPanelView, MenuPanelWidget, MenuSelectable, MenuSelection, MenuSubmenu, MenuToggleable,
+    MenuView, menu, menu_entry, menu_group, menu_panel, menu_selectable, menu_submenu,
+    menu_toggleable,
 };
 pub use navbar::{
     NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
