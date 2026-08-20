@@ -2960,7 +2960,8 @@ same panel stages one. A user closing the same panel two different ways sees two
 motions.
 
 **Applies to**: any `frust_material` component built on `overlay::modal` whose content wants its own
-close control (confirmed today in `search`'s full-screen view back button; latent in any future
+close control (confirmed today in `search`'s full-screen view back button and
+`navigation_drawer`'s app-driven dismiss-on-select `on_select` handler; latent in any future
 component that adds an in-content close affordance rather than relying only on the host chrome's
 close button/scrim/Escape/drag/back).
 
@@ -3055,7 +3056,7 @@ scroll offset is not held during a refresh" section (incl. the `on_scroll` one-e
 **Observed**: `FabWidget` lays its icon out against its `FabSize` tier's own container box, not the
 widget's actual constrained box. A FAB rendered at a tight-constrained size that doesn't match its
 nominal tier paints its icon off-center inside the visually smaller box. Measured on
-`plugins/material/src/toolbar/`'s scroll-hide FAB morph (80dp→56dp, tight-constrained rather than
+`plugins/material/src/toolbar.rs`'s scroll-hide FAB morph (80dp→56dp, tight-constrained rather than
 paint-rescaled so layout/visual/hit rects stay one): ~12dp of icon offset at the 80dp end. The
 Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
 was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
@@ -3064,7 +3065,7 @@ this degrade on a second surface. That leaves `corner_radius` with zero consumer
 pending a keep-or-remove call.
 
 **Applies to**: any FAB rendered at a size other than its nominal `FabSize` tier — today only
-`toolbar/`'s 80dp→56dp scroll morph. `fab_menu`'s trigger avoids the class entirely by not using the
+`toolbar.rs`'s 80dp→56dp scroll morph. `fab_menu`'s trigger avoids the class entirely by not using the
 seam.
 
 **Why accepted / fix direction**: closing it needs a `FabView` seam that exposes the actual
@@ -3074,6 +3075,36 @@ toolbars rework. `corner_radius`'s now-zero-consumer status is a separate, pendi
 for a future consumer that accepts this degrade, or remove it) — recorded here so the two facts
 travel together instead of being lost between phases.
 
-**Evidence**: `plugins/material/src/toolbar/` module doc (FAB morph section); `plugins/material/src/fab_menu.rs`
+**Evidence**: `plugins/material/src/toolbar.rs` module doc (FAB morph section); `plugins/material/src/fab_menu.rs`
 module doc (trigger-morph rationale); Phase-4 ledger,
 `workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
+
+---
+
+### `material-rail-modal-no-back-dismiss` — a modal `NavigationRail`'s expanded state dismisses on scrim tap only, no Escape or Android back
+
+**Observed**: with `NavigationRailModality::Modal`, the expanded rail overlays content behind a
+scrim and reports `NavigationRailView::on_dismiss_modal` on a scrim press — the only dismissal
+wired. Neither Escape nor an Android back press closes it, matching the reference exactly: upstream
+wires only `GestureDetector(onTap: widget.onDismissModal)` around its scrim, with no `Focus` and no
+key handling, despite `M3ENavigationRailModality.modal`'s own doc comment falsely claiming it
+"dismisses on tap/esc". This port matches upstream's code, not its comment.
+
+**Applies to**: any `frust_material` app using `navigation_rail` with `NavigationRailModality::Modal`
+— an expanded modal rail has no key-driven dismiss path; an app that wants Escape/back handling must
+wire it at the mount itself (a `frust::BackHandler` or its own key handling) and flip the dismiss
+prop from there.
+
+**Why accepted / fix direction**: the modal rail's scrim is deliberately painted in-widget rather
+than routed through `crate::overlay::modal`, the catalog's modal host — that host is route-like (a
+transparent navigator page with its own `BackPolicy`-staged exit ramp turning Escape/Android back
+into a dismiss), while the reference's modal rail is an ordinary in-tree widget whose lifetime is
+entirely a function of the `modality`/`type` props the app already owns; routing it through the
+modal host would hand the navigator authority over a lifetime the app is already controlling. Upstream
+parity plus that app-owned-modality design is why the gap is accepted as-is rather than patched to
+match its own doc comment. A real fix is either routing the modal rail through the modal host (and
+accepting the lifetime-authority conflict that motivated staying in-widget) or adding a standalone
+key-dismiss arm (a `BackHandler`-shaped Escape/back listener) alongside the existing scrim tap.
+
+**Evidence**: `plugins/material/src/navigation_rail.rs` module doc's "Modal presentation: painted
+in-widget, not through the modal host" section (incl. the upstream doc-comment-vs-code note).
