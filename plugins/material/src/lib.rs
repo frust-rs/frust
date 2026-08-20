@@ -222,7 +222,12 @@ pub use menu::{
     menu_toggleable,
 };
 pub use navbar::{
-    NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
+    HEIGHT_MEDIUM as NAV_BAR_HEIGHT_MEDIUM, HEIGHT_SMALL as NAV_BAR_HEIGHT_SMALL,
+    INDICATOR_H as NAV_BAR_INDICATOR_H, INDICATOR_W as NAV_BAR_INDICATOR_W,
+    LEAD_SPRING as NAV_INDICATOR_LEAD_SPRING, NavBarIndicatorStyle, NavBarLabelBehavior,
+    NavBarSize, NavItem, NavigationBar, NavigationBarView, NavigationBarWidget,
+    TRAIL_SPRING as NAV_INDICATOR_TRAIL_SPRING, UNDERLINE_THICKNESS as NAV_BAR_UNDERLINE_THICKNESS,
+    nav_item, navigation_bar,
 };
 pub use overlay::{
     ANCHORED_ENTER_SCALE, AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP,
