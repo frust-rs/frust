@@ -254,6 +254,40 @@
 //!   focus-routed key event still can, which an app avoids by not focusing a
 //!   hidden bar.
 //!
+//! # Clamp discipline
+//!
+//! `f64::clamp` panics if `min > max` or either bound is NaN — a hard abort
+//! under `panic = "abort"`, not a catchable error (see [`crate::slider`]'s own
+//! core for the same rule stated at length, which this one mirrors). Two
+//! caller-fed values are the module's non-finite entry points, and both are
+//! funneled to a safe value right where they enter (the module's private
+//! `finite_or_zero`) rather than trusted downstream:
+//!
+//! * [`ToolbarScrollHide::new`] (and [`ToolbarScrollHide::for_bar`], which
+//!   delegates to it) funnels its `exit_extent`/`cross_extent` construction
+//!   parameter through `finite_or_zero` before it can reach `limit` — an
+//!   unguarded non-finite `limit` would abort `set_offset`'s clamp on the
+//!   very next [`ToolbarScrollHide::scroll`].
+//! * `ToolbarWidget::layout`'s `extent` (the resolved
+//!   [`ToolbarView::exit_extent`] prop) is the same `finite_or_zero` funnel:
+//!   unguarded, a non-finite `exit_extent` would carry through `shift` into
+//!   `pill_origin`, which `reveal_window` then clamps *against* (`x0` is the
+//!   second clamp's `min` bound) — a caller-fed extent reaching a clamp
+//!   *bound*, not just a clamped value.
+//!
+//! That leaves two clamp shapes in the module tree:
+//!
+//! - **Bounds are literal `0.0`/`1.0` (or another literal constant)**
+//!   (`clamp01`, `layout`'s `progress.clamp(0.0, REVEAL_OVERSHOOT)`) —
+//!   trivially ordered, never a hazard.
+//! - **Bounds are already-finite by construction, funneled at the one point
+//!   caller input enters** (`set_offset`'s `self.limit`, `reveal_window`'s
+//!   `box_size.width`/`x0`) — both trace back to a `finite_or_zero` funnel
+//!   rather than a re-check at every site.
+//!
+//! A new clamp against a computed bound must fit one of these two shapes, not
+//! introduce a third.
+//!
 //! # Attribution
 //!
 //! See `plugins/material/NOTICE`'s "MIT License — Additional Copyright Holders
@@ -736,16 +770,22 @@ pub struct ToolbarScrollHide {
 
 impl ToolbarScrollHide {
     /// A controller with a fixed exit distance — upstream's `exitExtent`,
-    /// which pins `offsetLimit` to `-|extent|`.
+    /// which pins `offsetLimit` to `-|extent|`. A non-finite `exit_extent`
+    /// (NaN or ±∞) degrades to a resting `0.0` exit distance rather than
+    /// carrying a non-finite `limit` into [`Self::set_offset`]'s clamp — see
+    /// the [module docs](self)' clamp discipline.
     pub fn new(exit_extent: f64) -> Self {
         Self {
-            limit: -exit_extent.abs(),
+            limit: -finite_or_zero(exit_extent).abs(),
             offset: 0.0,
         }
     }
 
     /// A controller whose exit distance is measured off the bar — upstream's
-    /// `M3EToolbarMeasureSize` rule, `-(cross_extent + screenOffset)`.
+    /// `M3EToolbarMeasureSize` rule, `-(cross_extent + screenOffset)`. A
+    /// non-finite `cross_extent` degrades the same way [`Self::new`]'s own
+    /// guard does — this delegates to it, so the guard applies whether the
+    /// non-finite value reaches `new` directly or through here.
     pub fn for_bar(cross_extent: f64) -> Self {
         Self::new(cross_extent.abs() + TOOLBAR_SCREEN_OFFSET)
     }
@@ -1866,13 +1906,17 @@ impl Widget for ToolbarWidget {
         // the pill origin `paint` fills against) so hit-testing follows the
         // visual exactly.
         let hidden = self.hidden();
-        let extent = self
-            .exit_extent
-            .unwrap_or(if self.exit_direction.is_vertical() {
+        // `finite_or_zero`-funneled: `exit_extent` is caller-fed, and a
+        // non-finite value here would carry through `shift` into
+        // `pill_origin` and, from there, into `reveal_window`'s clamp bound
+        // — see the [module docs](self)' clamp discipline.
+        let extent = finite_or_zero(self.exit_extent.unwrap_or(
+            if self.exit_direction.is_vertical() {
                 box_size.height + TOOLBAR_SCREEN_OFFSET
             } else {
                 box_size.width + TOOLBAR_SCREEN_OFFSET
-            });
+            },
+        ));
         let shift = self.exit_direction.offset(hidden * extent.abs());
         self.pill_origin = pill_origin + shift;
 
@@ -2254,6 +2298,36 @@ mod tests {
         assert!(window_origin.x >= w.pill_origin.x + w.pill_size.width);
     }
 
+    /// A NaN `exit_extent` prop must not corrupt `pill_origin` into a value
+    /// `reveal_window`'s clamp would abort on — `x0` becomes the second
+    /// clamp's `min` bound there, so an unguarded NaN reaching it panics on
+    /// `assert!(min <= max)`, not merely on the clamped value itself. This is
+    /// the layout/paint counterpart to the constructor guard above; see the
+    /// module docs' clamp discipline.
+    #[test]
+    fn a_non_finite_exit_extent_prop_reaches_layout_and_paint_without_panicking() {
+        for extent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let view: ToolbarView<()> = floating_toolbar()
+                .leading(vec![leaf_any(24.0, 24.0)])
+                .fab(leaf_any(40.0, 40.0))
+                .expanded(false)
+                .exit_extent(Some(extent));
+            let mut w = build(&view);
+            let size = layout(&mut w, &BoxConstraints::loose(Size::new(800.0, 200.0)));
+
+            assert!(w.pill_origin.x.is_finite());
+            assert!(w.pill_origin.y.is_finite());
+
+            let (window_origin, window_size) = w.reveal_window(size);
+            assert!(window_origin.x.is_finite());
+            assert!(window_size.width.is_finite());
+
+            // Painting must not panic either — the same clamp reruns inside
+            // `paint`.
+            paint_at(&mut w, 0, None);
+        }
+    }
+
     #[test]
     fn an_expanded_bar_lays_its_fab_out_at_the_56dp_end_beside_the_pill() {
         let view: ToolbarView<()> = floating_toolbar()
@@ -2395,6 +2469,38 @@ mod tests {
 
         // An explicit extent pins the limit instead, sign-independently.
         assert_eq!(ToolbarScrollHide::new(-40.0).offset_limit(), -40.0);
+    }
+
+    /// A degenerate (NaN/∞) construction parameter must degrade to a resting
+    /// controller, never panic — the module docs' clamp-discipline
+    /// funnel-at-entry rule, exercised through both constructors and a
+    /// following `scroll()` sequence (the site that would otherwise abort on
+    /// a non-finite `limit`).
+    #[test]
+    fn a_non_finite_construction_parameter_degrades_instead_of_panicking() {
+        for degenerate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut hide = ToolbarScrollHide::new(degenerate);
+            assert_eq!(hide.offset_limit(), 0.0, "degrades to a resting limit");
+            // A subsequent scroll/settle/toggle sequence must not panic —
+            // the site that would otherwise abort on a non-finite `limit` —
+            // and every reachable state stays finite.
+            hide.scroll(40.0);
+            hide.scroll(-1_000.0);
+            hide.settle(1_000.0);
+            hide.toggle();
+            assert!(hide.offset().is_finite());
+
+            let mut hide = ToolbarScrollHide::for_bar(degenerate);
+            assert_eq!(
+                hide.offset_limit(),
+                0.0,
+                "for_bar degrades the same way, delegating to new"
+            );
+            hide.scroll(degenerate);
+            hide.scroll(40.0);
+            hide.toggle();
+            assert!(hide.offset().is_finite());
+        }
     }
 
     #[test]
