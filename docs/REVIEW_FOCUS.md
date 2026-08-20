@@ -16,10 +16,11 @@
    have one). Check any new default-feature wiring against a package-scoped
    `cargo build -p <crate> --no-default-features`, not against `cargo build --workspace`.
 3. **Version-pin and hand-sync discipline in manifests.** The `vello`/`wgpu` pins are coupled and
-   must move together. The `[profile.*]` blocks are hand-synced across the root `Cargo.toml`,
-   `templates/app/Cargo.toml.tmpl`, and `examples/huddle/Cargo.toml` — there is no single source of
-   truth, only the tripwire test `cargo test -p frust-cli --test profile_sync`. Flag any manifest
-   edit that touches one copy without the others.
+   must move together. The `[profile.*]` blocks are hand-synced across five manifests (root
+   `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, `examples/huddle/Cargo.toml`,
+   `examples/glyph-catalog/Cargo.toml`, `examples/material3-demo/Cargo.toml`) — there is no single
+   source of truth, only the tripwire test `cargo test -p frust-cli --test profile_sync`. Flag any
+   manifest edit that touches one copy without the others.
 4. **Plugin backend parity.** A new public API surface on the shared-preferences, secure-storage,
    or camera plugin must extend the shared cross-platform conformance suite, not land against a
    single platform backend. A one-sided addition is a parity gap, not a complete feature.

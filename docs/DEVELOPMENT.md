@@ -56,13 +56,14 @@ cargo build --workspace --locked
 
 `--locked` must always pass — it is part of the verify gate below and is how
 manifest/lockfile drift is caught (see *Version-Pin Policy*). **Dev-profile shader-stack
-overrides.** The root `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, and
-`examples/huddle/Cargo.toml` each carry a `[profile.dev.package.*]` override (`opt-level
-= 2`) for the shader/render crates: debug-profile (`opt-level = 0`) shader
-compilation/translation is slow enough on mobile CPUs to trip the iOS launch watchdog.
-The three manifests are hand-synced (`cargo test -p frust-cli --test profile_sync` is
-the tripwire); a `[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every
-other dependency's debug optimization the same way.
+overrides.** The five manifests the `profile_sync` tripwire checks (root `Cargo.toml`,
+`templates/app/Cargo.toml.tmpl`, `examples/huddle/Cargo.toml`,
+`examples/glyph-catalog/Cargo.toml`, `examples/material3-demo/Cargo.toml`) each carry a
+`[profile.dev.package.*]` override (`opt-level = 2`) for the shader/render crates:
+debug-profile (`opt-level = 0`) shader compilation/translation is slow enough on mobile
+CPUs to trip the iOS launch watchdog. They stay hand-synced via that tripwire (`cargo
+test -p frust-cli --test profile_sync`); a `[profile.dev.package."*"]` wildcard
+(`opt-level = 1`) widens every other dependency's debug optimization the same way.
 
 **Release-profile hardening.** `[profile.release]` (root, template, huddle) sets `lto =
 "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
