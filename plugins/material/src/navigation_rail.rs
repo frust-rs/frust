@@ -221,7 +221,9 @@ use frust::authoring::{
     View, Widget, any, build_child, erase_callback, rebuild_child, route_event, route_event_single,
     teardown_child, visit_children,
 };
-use frust::{AnimationController, Curve, FrameTime, IconSource, SpringDesc, Theme, Tween, icon};
+use frust::{
+    AnimationController, Curve, FrameTime, IconSource, Spring, SpringDesc, Theme, Tween, icon,
+};
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
@@ -347,16 +349,11 @@ pub const RAIL_TRAIL_SPRING: SpringDesc = SpringDesc {
     damping_ratio: 0.55,
 };
 
-/// Nominal period seeding a travel [`AnimationController`]'s clock; the motion
-/// is spring-driven via `fling`, so this backs construction only.
-const TRAVEL_PERIOD: Duration = Duration::from_millis(300);
-
-/// Launch velocity for a travel leg. Sub-visible on purpose: a spring's shape
-/// comes from its displacement, so only the sign matters, and it is always
-/// positive here because a leg runs `0 → 1` in progress space (the
-/// [`Tween`] maps it onto the real travel) — the same sign-only convention
-/// [`crate::expandable_list`]'s `REVEAL_LAUNCH_VELOCITY` documents.
-const TRAVEL_LAUNCH_VELOCITY: f64 = 1e-3;
+/// Rest threshold for a travelling edge, in logical px (and px/s for its
+/// velocity) — both are checked, per `Spring::is_at_rest`'s own contract —
+/// the same value `crate::navbar`'s module-private `PILL_REST_EPSILON` uses
+/// for the sibling liquid indicators.
+const TRAVEL_REST_EPSILON: f64 = 0.01;
 
 /// Distance in logical px under which two indicator positions count as the
 /// same place (a retarget guard, so an unchanged layout never relaunches a
@@ -824,14 +821,30 @@ impl WidthMotion {
 
 /// One edge of the liquid selection indicator: a spring-driven main-axis
 /// center.
+///
+/// Built directly on the analytic [`Spring`] rather than a duration-seeded
+/// [`AnimationController`] fling — the same shape as [`crate::navbar`]'s
+/// `LiquidEdge`, which this type transcribes (see that module's own doc
+/// comment for why `navbar.rs` itself stays read-only here). A [`Spring`]
+/// solves *displacement from equilibrium*, so the live position is `target +
+/// spring.position(elapsed)`; [`Self::travel_to`] re-solves from the current
+/// position **and velocity**, which is what keeps a fast double-tap between
+/// destinations reversing smoothly instead of relaunching from a near-zero
+/// rate.
 struct TravelAxis {
     /// The edge center this frame, in rail-local px.
     value: f64,
     /// The center the current leg is heading for.
     target: f64,
-    /// Maps the controller's `0 → 1` leg onto `from → target`.
-    tween: Tween<f64>,
-    driver: AnimationController,
+    /// The in-flight analytic solution, or `None` once settled/jumped.
+    flight: Option<Spring>,
+    /// Seconds since [`Self::flight`] was solved.
+    elapsed: f64,
+    /// The last-solved instantaneous velocity, px/s — `0.0` once settled,
+    /// carried into the next [`Self::travel_to`]'s initial condition.
+    velocity: f64,
+    /// Clock for `advance`'s delta; `None` re-seeds it on the next call.
+    last_time: Option<FrameTime>,
 }
 
 impl TravelAxis {
@@ -839,8 +852,10 @@ impl TravelAxis {
         Self {
             value: 0.0,
             target: 0.0,
-            tween: Tween::new(0.0, 0.0),
-            driver: AnimationController::new(TRAVEL_PERIOD),
+            flight: None,
+            elapsed: 0.0,
+            velocity: 0.0,
+            last_time: None,
         }
     }
 
@@ -849,36 +864,57 @@ impl TravelAxis {
     fn jump(&mut self, to: f64) {
         self.value = to;
         self.target = to;
-        self.tween = Tween::new(to, to);
-        self.driver.stop();
+        self.flight = None;
+        self.elapsed = 0.0;
+        self.velocity = 0.0;
+        self.last_time = None;
     }
 
     /// Launch a fresh leg toward `to` on `spring` (a no-op if already heading
-    /// there), starting from wherever the edge currently reads so an
-    /// interrupted travel reverses smoothly.
+    /// there), re-solving from wherever the edge currently reads **and its
+    /// current velocity** so an interrupted travel reverses smoothly — the
+    /// [`crate::navbar`] `LiquidEdge::retarget` carry, transcribed.
     fn travel_to(&mut self, to: f64, spring: SpringDesc) {
         if (self.target - to).abs() < TRAVEL_EPSILON {
             return;
         }
+        self.flight = Some(Spring::new(spring, self.value - to, self.velocity));
         self.target = to;
-        self.tween = Tween::new(self.value, to);
-        self.driver = AnimationController::new(TRAVEL_PERIOD);
-        self.driver.fling(TRAVEL_LAUNCH_VELOCITY, spring);
+        self.elapsed = 0.0;
+        self.last_time = None;
     }
 
-    /// Advance one frame, returning whether the leg is still in flight.
+    /// Advance to frame time `now`, returning whether the leg is still in
+    /// flight.
     ///
-    /// The controller's value is read **unclamped**: the lead spring is
-    /// under-damped on purpose and its overshoot past the target is the
-    /// stretch that makes the pill read as liquid.
+    /// The position is read **unclamped**: the lead spring is under-damped on
+    /// purpose and its overshoot past the target is the stretch that makes
+    /// the pill read as liquid.
     fn advance(&mut self, now: FrameTime) -> bool {
-        let animating = self.driver.advance(now);
-        self.value = self.tween.lerp(self.driver.value());
-        animating
+        let Some(spring) = self.flight else {
+            return false;
+        };
+        let dt = match self.last_time {
+            Some(last) => now.saturating_sub(last).as_secs_f64(),
+            None => 0.0,
+        };
+        self.last_time = Some(now);
+        self.elapsed += dt;
+        if spring.is_at_rest(self.elapsed, TRAVEL_REST_EPSILON) {
+            self.value = self.target;
+            self.velocity = 0.0;
+            self.flight = None;
+            self.elapsed = 0.0;
+            self.last_time = None;
+            return false;
+        }
+        self.value = self.target + spring.position(self.elapsed);
+        self.velocity = spring.velocity(self.elapsed);
+        true
     }
 
     fn is_animating(&self) -> bool {
-        self.driver.is_animating()
+        self.flight.is_some()
     }
 }
 
@@ -2781,6 +2817,70 @@ mod tests {
         // The lead edge is the less damped of the two — that is the stretch.
         assert_eq!(RAIL_LEAD_SPRING.damping_ratio, 0.45);
         assert_eq!(RAIL_TRAIL_SPRING.damping_ratio, 0.55);
+    }
+
+    #[test]
+    fn an_interrupted_retarget_carries_the_edges_real_velocity() {
+        // Regression for the near-zero relaunch bug: before the fix,
+        // `travel_to` rebuilt a fresh `AnimationController::fling` at a fixed
+        // near-zero launch velocity on every retarget, discarding whatever
+        // rate the interrupted leg was actually moving at — a fast
+        // double-tap between destinations would visibly pause/kink instead
+        // of reversing smoothly.
+        let mut axis = TravelAxis::new();
+        axis.travel_to(200.0, RAIL_LEAD_SPRING);
+
+        // A few real frames into the first leg, the edge has built up real
+        // (well above near-zero) velocity toward its target.
+        let mut now = FrameTime::from_nanos(0);
+        for step in 1..=3u64 {
+            now = FrameTime::from_nanos(step * 16_000_000);
+            assert!(axis.advance(now), "the leg should still be in flight");
+        }
+        let pre_retarget_velocity = axis.velocity;
+        assert!(
+            pre_retarget_velocity.abs() > 10.0,
+            "a few frames into a 200px travel should already be moving well \
+             above a near-zero relaunch rate, got {pre_retarget_velocity}"
+        );
+
+        // Interrupt with a fresh target before the first leg settles.
+        axis.travel_to(0.0, RAIL_LEAD_SPRING);
+
+        // The freshly solved spring's velocity at its own t=0 is exactly its
+        // initial condition `v0` — asserting it equals the pre-retarget
+        // reading is the direct "carried, not reset" check.
+        let carried = axis
+            .flight
+            .expect("travel_to launches a fresh leg")
+            .velocity(0.0);
+        assert!(
+            (carried - pre_retarget_velocity).abs() < 1e-6,
+            "retarget must carry the interrupted leg's real velocity into the \
+             new spring's initial condition, got carried={carried} \
+             pre_retarget={pre_retarget_velocity}"
+        );
+
+        // And the first *moving* post-retarget frame's displacement is
+        // consistent with that carried rate, not a near-zero relaunch (a
+        // 16ms frame at the near-zero pre-fix launch velocity of 1e-3 would
+        // move a vanishing fraction of a pixel). `advance`'s own contract
+        // seeds its delta clock on the first call after a motion starts
+        // (zero delta, per `AnimationController::advance`'s doc, which
+        // `TravelAxis::travel_to` mirrors by clearing `last_time`) — so the
+        // seed frame is expected to read the same position, and the frame
+        // after it is where the carried rate actually shows.
+        axis.advance(now);
+        let value_before_retarget = axis.value;
+        let next = FrameTime::from_nanos(now.as_nanos() + 16_000_000);
+        axis.advance(next);
+        let post_retarget_displacement = (axis.value - value_before_retarget).abs();
+        assert!(
+            post_retarget_displacement > 0.5,
+            "the first post-retarget frame should move visibly, matching the \
+             carried rate rather than pausing/kinking near zero, got \
+             displacement={post_retarget_displacement}"
+        );
     }
 
     #[test]
