@@ -174,6 +174,31 @@
 //! [`open_progress`](OverlayModalWidget::open_progress) instead of continuing
 //! into the exit ramp ([`settle_drag`](OverlayModalWidget::settle_drag)) — the
 //! same reachability rule the Escape handler applies.
+//!
+//! # Clamp discipline
+//!
+//! `f64::clamp` panics if `min > max` or either bound is NaN — a hard abort
+//! under `panic = "abort"`, not a catchable error (see [`crate::slider`]'s own
+//! core for the same rule stated at length, which this one mirrors).
+//! [`OverlayModalView::snap_points`] is the one place caller input enters
+//! this module, and it drops any non-finite point right there — the rest of
+//! the module (`normalize_snap`, `snap_targets`, `open_progress`) trusts
+//! [`OverlayModalWidget::snap_points`] to already be all-finite rather than
+//! re-checking. That leaves two clamp shapes in the module tree:
+//!
+//! - **Bounds are literal `0.0`/`1.0`** (`normalize_snap`'s two clamps,
+//!   [`begin_ramp`](OverlayModalWidget::begin_ramp)'s fraction clamp) —
+//!   trivially ordered, never a hazard.
+//! - **A computed bound clamped with the ordering-visible `.max()`/`.min()`
+//!   shape instead of `.clamp()`** —
+//!   [`drag_move`](OverlayModalWidget::drag_move)'s scrub target against the
+//!   live `open` snap-target bound: `f64::max`/`f64::min` can't panic even if
+//!   a NaN somehow reached one side (IEEE `minNum`/`maxNum` semantics return
+//!   the other, non-NaN operand), which `clamp`'s internal
+//!   `assert!(min <= max)` would.
+//!
+//! A new clamp against a computed bound must fit one of these two shapes, not
+//! introduce a third.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -709,8 +734,17 @@ impl<State: 'static> OverlayModalView<State> {
     /// opens to the first point — **except** a first point of `0.0` itself,
     /// which [`OverlayModalWidget::open_progress`] treats as absent (fully
     /// open) rather than authoring a panel that opens already closed.
+    ///
+    /// A non-finite point (NaN or infinite — never a meaningful fraction or
+    /// px extent) is dropped here, at the boundary, rather than stored: this
+    /// is the one place caller input enters the widget, and every downstream
+    /// consumer (`normalize_snap`, `snap_targets`, `open_progress`) trusts
+    /// [`OverlayModalWidget::snap_points`] to already be all-finite rather
+    /// than re-checking (see the [module docs](self)'s Clamp Discipline
+    /// section). A caller-authored NaN/∞ behaves as if that point were never
+    /// passed at all.
     pub fn snap_points(mut self, points: &[f64]) -> Self {
-        self.snap_points = points.to_vec();
+        self.snap_points = points.iter().copied().filter(|p| p.is_finite()).collect();
         self
     }
 }
@@ -1228,7 +1262,12 @@ impl OverlayModalWidget {
         // pushed no further open than its own furthest resting point.
         let open = self.snap_targets().last().copied().unwrap_or(1.0);
         let target = self.drag_from - self.close_sign() * delta / extent;
-        self.scrub(ctx, target.clamp(0.0, open));
+        // Ordered explicitly rather than `clamp`: `open` is computed from the
+        // live snap targets, and clamp bounds must be provably ordered and
+        // finite (see the [module docs](self)'s Clamp Discipline section).
+        // `f64::max`/`f64::min` also can't panic the way `clamp`'s internal
+        // `assert!(min <= max)` would if a NaN ever reached `open`.
+        self.scrub(ctx, target.max(0.0).min(open));
     }
 
     /// The resting point a release settles to: the nearest one, or — past
@@ -3514,6 +3553,105 @@ mod tests {
         assert!(
             (w.panel_rect().y0 - (WINDOW.height - 60.0)).abs() < 1e-9,
             "60 logical px of the sheet are on screen"
+        );
+    }
+
+    #[test]
+    fn snap_points_drops_non_finite_values_at_the_boundary() {
+        let (view, _closed) = staged(sheet_config());
+        let view = view.snap_points(&[f64::NAN, f64::INFINITY]);
+        assert!(
+            view.snap_points.is_empty(),
+            "NaN and infinity are both non-finite: dropped by the builder, \
+             never stored"
+        );
+    }
+
+    #[test]
+    fn non_finite_snap_points_behave_as_absent_through_a_drag_and_never_panic() {
+        // Same shape as `a_drag_past_the_midpoint_closes_and_a_shorter_one_
+        // springs_back`, but with degenerate snap points: NaN/∞ are dropped
+        // at the boundary (`OverlayModalView::snap_points`), so
+        // `snap_targets()` is exactly the no-snap-points default `{0.0, 1.0}`
+        // and the drag clamp's `open` bound is never NaN — the crash this
+        // guards against is `f64::clamp`'s internal `assert!(min <= max)`
+        // panicking on a NaN bound, an abort under `panic = "abort"`.
+        let (view, closed) = staged(sheet_config());
+        let mut w = build(&view.snap_points(&[f64::NAN, f64::INFINITY]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!(
+            (w.progress() - 1.0).abs() < 1e-9,
+            "opens fully, same as no snap points at all: {}",
+            w.progress()
+        );
+
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.9),
+        );
+        assert!(
+            w.progress().is_finite(),
+            "no NaN reached progress mid-drag: {}",
+            w.progress()
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.9),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!(w.progress().is_finite());
+        assert_eq!(
+            closed.get(),
+            1,
+            "past the midpoint it commits, same as the no-snap-points default"
+        );
+    }
+
+    #[test]
+    fn degenerate_snap_points_dont_strand_the_barrier_on_a_tap_dismiss() {
+        // A handle tap (not a drag) still routes through the same exit-ramp
+        // settle check (`settled_exit`'s `progress <= PROGRESS_EPSILON`).
+        // Degenerate snap points must not leave a NaN in `progress` that
+        // would never satisfy that comparison and strand the barrier open
+        // forever.
+        let (view, closed) = staged(sheet_config());
+        let mut w = build(&view.snap_points(&[f64::NAN, f64::INFINITY]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let handle = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, handle.x, handle.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, handle.x, handle.y),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!(
+            w.progress().is_finite(),
+            "no NaN reached progress: {}",
+            w.progress()
+        );
+        assert_eq!(w.progress(), 0.0, "settled fully closed, not stranded");
+        assert_eq!(
+            closed.get(),
+            1,
+            "the barrier settled and fired on_close, not left stuck open"
         );
     }
 
