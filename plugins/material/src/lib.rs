@@ -81,6 +81,7 @@ pub mod radio;
 pub mod segmented_button;
 pub mod shapes;
 pub mod sheet;
+pub mod side_sheet;
 pub mod slider;
 pub mod snackbar;
 pub mod split_button;
@@ -174,6 +175,7 @@ pub use segmented_button::{
 };
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
+pub use side_sheet::{SIDE_SHEET_WIDTH, SideSheetView, show_side_sheet, side_sheet};
 pub use slider::{
     RangeSliderView, RangeSliderWidget, Slider, SliderIconPosition, SliderRange, SliderTrackIcons,
     SliderTrackKind, SliderView, SliderWidget, centered_slider, range_slider, slider,
