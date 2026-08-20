@@ -26,7 +26,10 @@ pub struct DemoEntry {
     pub subtitle: &'static str,
     /// Leading icon.
     pub icon: IconSource,
-    /// Parent gallery section.
+    /// Parent gallery section. Redundant at runtime (`for_section` serves
+    /// per-section const tables) but read by the misfiling invariant test —
+    /// every entry must sit in the table matching this field.
+    #[allow(dead_code)]
     pub section: DemoSection,
     /// Builds the playground body (no chrome — the host supplies that).
     pub build: PlaygroundBuilder,

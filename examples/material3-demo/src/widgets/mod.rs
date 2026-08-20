@@ -1,10 +1,9 @@
 //! Widgets shared across playgrounds.
 //!
-//! [`coming_soon()`] is what an un-ported entry renders; [`playground`] is the
-//! reference's playground kit (preview cards, control panel, code snippets),
-//! which lands with the first batch of real pages.
+//! [`playground`] is the reference's playground kit (preview cards, control
+//! panel, code snippets) that every catalog page builds on. The former
+//! `coming_soon` placeholder — what an un-ported entry rendered while the
+//! catalog was landing — was deleted once the 39th real page replaced its
+//! last caller.
 
-mod coming_soon;
 pub mod playground;
-
-pub use coming_soon::coming_soon;

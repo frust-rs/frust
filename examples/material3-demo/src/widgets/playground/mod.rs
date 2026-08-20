@@ -43,20 +43,6 @@
 //!   page here writes its Rust snippet text as a plain string literal
 //!   instead, so there is nothing left for them to help with.
 //!
-//! # `#![allow(dead_code)]`: landed ahead of its callers
-//!
-//! `material3-demo` is a `bin` crate (no `lib.rs`), so `dead_code` tracks
-//! reachability from `fn main` — a `pub` item earns no exemption the way a
-//! library crate's public API does. Every one of the 39 pages still returns
-//! [`crate::widgets::coming_soon`] (p5-01's placeholder), so nothing outside
-//! this module's own unit tests calls into the kit yet; wiring a page to it
-//! is the next task's job, not this one's (`docs/DEVELOPMENT.md`'s standard
-//! verify gate — `cargo clippy --all-targets -- -D warnings` — would
-//! otherwise fail on every symbol here). The re-export lines below trip the
-//! same reachability check as plain `unused_imports`, so both lints are
-//! allowed here. Drop this once the first real playground page lands.
-#![allow(dead_code, unused_imports)]
-
 mod body;
 mod code_snippet;
 mod control_panel;
@@ -64,7 +50,7 @@ mod controls;
 mod preview_card;
 
 pub use body::playground_body;
-pub use code_snippet::{PlaySnippet, copy_to_clipboard, play_code_snippet, play_snippet};
+pub use code_snippet::{PlaySnippet, play_snippet};
 pub use control_panel::control_panel;
 pub use controls::{
     play_enum_menu_field, play_enum_menu_panel, play_enum_segmented, play_slider, play_switch,
