@@ -233,15 +233,19 @@ Additionally run:
   && (cd examples/design-system-sample && cargo test) \
   && (cd examples/design-system-sample && cargo clippy --all-targets -- -D warnings) \
   && (cd examples/design-system-sample && cargo fmt --check) \
+  && (cd examples/material3-demo && cargo test) \
+  && (cd examples/material3-demo && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/material3-demo && cargo fmt --check) \
   && (cd plugins/clean-signals-frust && cargo test) \
   && (cd plugins/clean-signals-frust && cargo clippy --all-targets -- -D warnings)
 ```
 
-`examples/huddle`, `examples/playground`, `examples/design-system-sample`, and
+`examples/huddle`, `examples/playground`, `examples/design-system-sample`,
+`examples/material3-demo`, and
 `plugins/clean-signals-frust` each gate from their own directory rather than `-p` from the repo
-root because all four are standalone workspaces excluded from the root one (*Version-Pin
-Policy*) — the same shape `examples/shadertoy`, `examples/glyph-catalog`, and
-`examples/material3-demo` gate under, from their own directories, per their own READMEs.
+root because all five are standalone workspaces excluded from the root one (*Version-Pin
+Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog`
+gate under, from their own directories, per their own READMEs.
 `huddle` and `clean-signals-frust` git+rev-pin
 `clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
 `design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
