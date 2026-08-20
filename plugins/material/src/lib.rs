@@ -109,6 +109,7 @@ pub mod split_button;
 pub mod state_layer;
 pub mod switch;
 pub mod text_field;
+pub mod time_picker;
 pub mod toggle_button;
 mod tokens;
 pub mod toolbar;
@@ -266,6 +267,12 @@ pub use snackbar::{
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
+pub use time_picker::{
+    DIAL_SIZE, DIAL_SLOTS, DIALOG_LANDSCAPE_WIDTH, DIALOG_PORTRAIT_WIDTH, HEADER_LANDSCAPE_WIDTH,
+    TimeDialView, TimeDialWidget, TimeEntry, TimeInputView, TimeInputWidget, TimeOfDay, TimePicker,
+    TimePickerEntryMode, TimePickerMode, TimePickerOrientation, TimePickerStrings, TimePickerView,
+    show_time_picker, time_dial, time_input, time_picker,
+};
 pub use toggle_button::{
     ToggleButton, ToggleButtonSize, ToggleButtonView, ToggleButtonWidget, elevated_toggle_button,
     filled_toggle_button, outlined_toggle_button, text_toggle_button, toggle_button,
