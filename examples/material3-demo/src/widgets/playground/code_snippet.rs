@@ -121,9 +121,10 @@ mod tests {
     fn copy_round_trips_through_the_platform_clipboard() {
         if !clipboard_tests_opted_in() {
             eprintln!(
-                "skipping material3-demo copy_round_trips: destructive \
+                "skipping material3demo copy_round_trips: destructive \
                  (overwrites the real host clipboard) — opt in with \
-                 `FRUST_CLIPBOARD_TESTS=1 cargo test -p material3-demo`"
+                 `FRUST_CLIPBOARD_TESTS=1 cargo test` from this example's \
+                 own directory (it is a standalone workspace)"
             );
             return;
         }

@@ -8,10 +8,11 @@
 //!
 //! # Why this isn't a literal port
 //!
-//! Same constraint as `widget_test.rs` (read that file's module doc first):
-//! this crate has no `src/lib.rs`, so `tests/` cannot reach `crate::theme`'s
-//! `ThemeSettings` or `crate::pages::theme_config_page` at all. Every case
-//! below instead calls straight into `frust_material::theme_from_seed` (and
+//! Same choice as `widget_test.rs` (read that file's module doc first):
+//! `crate::theme`'s `ThemeSettings` and `crate::pages::theme_config_page` are
+//! crate-private, so reaching them from here would mean exporting app
+//! internals as API. Every case below instead calls straight into
+//! `frust_material::theme_from_seed` (and
 //! `frust_material`'s widget constructors for the two construction checks),
 //! the production primitive `ThemeSettings` is itself a thin wrapper over —
 //! see `src/theme/settings.rs`'s `ThemeSettings::theme`, which composes
@@ -41,7 +42,7 @@ const ROSE_SEED: Color = Color::from_rgb8(0xA1, 0x00, 0x3C);
 /// unreachable here (see this module's doc and `widget_test.rs`'s); what's
 /// pinned instead: a settings-route path resolves independently of any
 /// enclosing shell — the same "pushed over it, not nested in it" shape
-/// `src/main.rs`'s own in-crate tests already pin for the real
+/// `src/lib.rs`'s own in-crate tests already pin for the real
 /// `THEME_ROUTE` — and the settings screen's toggle rows (mirroring
 /// `theme_config_page.rs`'s `toggles()`, headlined the same way as two of
 /// the Dart case's four expected labels: "Auto theming"/"Dynamic color")

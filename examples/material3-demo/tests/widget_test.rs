@@ -4,20 +4,23 @@
 //!
 //! # Why this isn't a literal port
 //!
-//! `material3-demo` is a single-binary crate with no `src/lib.rs`: a Cargo
-//! integration test under `tests/` cannot import `crate::` internals at all
-//! — there is no compiled library artifact to link against, regardless of
-//! item visibility. So this file cannot reach `crate::catalog`,
-//! `crate::pages`, or `crate::AppState`; every fixture below is instead
-//! built fresh from `frust`'s public surface (`Router`/`Route`/
-//! `shell_route`/`NavigatorController`) plus `frust_material`'s widget
-//! constructors, reproducing the *shape* of `src/main.rs`'s own route table
-//! — sections declared as children of a pathless shell route, a
-//! `/playground/:id` route declared ahead of it so the shell's own
-//! empty-segment match can't shadow it — rather than depending on it. The
-//! section paths/labels and the one playground id below mirror
-//! `src/catalog/section.rs`/`src/catalog/entries.rs` as read at
+//! Every fixture below is built fresh from `frust`'s public surface
+//! (`Router`/`Route`/`shell_route`/`NavigatorController`) plus
+//! `frust_material`'s widget constructors, reproducing the *shape* of
+//! `src/lib.rs`'s own route table — sections declared as children of a
+//! pathless shell route, a `/playground/:id` route declared ahead of it so
+//! the shell's own empty-segment match can't shadow it — rather than
+//! depending on it. The section paths/labels and the one playground id below
+//! mirror `src/catalog/section.rs`/`src/catalog/entries.rs` as read at
 //! implementation time; they are not imported from there.
+//!
+//! Reproduction is a choice, not a constraint. The crate ships an `rlib`
+//! (`Cargo.toml`'s `[lib] crate-type`, needed anyway for the desktop preview
+//! binary), so `material3demo::` *is* linkable from here — but `routes` and
+//! the section/entry tables it reads are crate-private, and widening them to
+//! `pub` purely to let a test observe them would export app internals as API.
+//! Rebuilding the same shape from the public surface pins the router
+//! contract this app depends on without that.
 //!
 //! # What's pinned vs. what's out of reach
 //!
@@ -35,7 +38,7 @@
 //!
 //! Also out of scope for a route-table reproduction: mounting a
 //! [`frust::navigator`] itself. A view that does can't build outside a
-//! running `ReactiveRuntime` (back-glue wiring panics — see `src/main.rs`'s
+//! running `ReactiveRuntime` (back-glue wiring panics — see `src/lib.rs`'s
 //! own test-module doc), so the shell page below composes the same chrome
 //! `gallery_shell` does (`frust_material::{app_bar, navigation_bar,
 //! nav_item}`) without mounting an inner navigator.
@@ -69,7 +72,7 @@ const ENTRY_ID: &str = "buttons";
 
 /// The gallery shell's chrome — a top app bar plus a bottom navigation bar,
 /// the same two `frust_material` constructors `gallery_shell` composes in
-/// `src/main.rs`. Its content slot is a placeholder rather than a mounted
+/// `src/lib.rs`. Its content slot is a placeholder rather than a mounted
 /// inner navigator (see this module's docs).
 fn shell_page(_params: &RouteParams) -> AnyView<St> {
     let bar = app_bar::<St>("Material 3 Expressive");
