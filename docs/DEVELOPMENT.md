@@ -106,9 +106,10 @@ system installed falls back to `Theme::neutral()`.
 `cd`/standalone gate needed) opens the `frust-shadcn` catalog's desktop gallery: the manual visual
 gate for shadcn/ui component changes, the same shape as huddle's above.
 
-**material3 gallery.** `cargo run -p material3-demo` (also a root-workspace member) opens the
-`frust-material` catalog's desktop gallery: the manual visual gate for Material 3 Expressive
-component changes and theme configuration.
+**material3 gallery.** `cd examples/material3-demo && cargo run` (a standalone workspace, unlike
+`shadcn-demo` above — no `-p`) opens the `frust-material` catalog's desktop gallery: the manual
+visual gate for Material 3 Expressive component changes and theme configuration; `frust run -d
+<device-id>` builds/installs/launches it on Android or iOS from the same directory.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -239,8 +240,9 @@ Additionally run:
 `examples/huddle`, `examples/playground`, `examples/design-system-sample`, and
 `plugins/clean-signals-frust` each gate from their own directory rather than `-p` from the repo
 root because all four are standalone workspaces excluded from the root one (*Version-Pin
-Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog` gate under, from
-their own directories, per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin
+Policy*) — the same shape `examples/shadertoy`, `examples/glyph-catalog`, and
+`examples/material3-demo` gate under, from their own directories, per their own READMEs.
+`huddle` and `clean-signals-frust` git+rev-pin
 `clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
 `design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
 (from its own directory) to print **no** `frust feature "..."` line — no longer a catalog-off

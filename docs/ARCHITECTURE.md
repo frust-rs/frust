@@ -38,7 +38,7 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
 | `examples/design-system-sample` | Out-of-tree design-system proof, built on `frust`'s public API alone; standalone workspace |
 | `examples/shadcn-demo` | `frust-shadcn` catalog gallery (desktop-only); root-workspace member |
-| `examples/material3-demo` | `frust-material` catalog gallery — Material 3 Expressive design system (desktop-only); root-workspace member |
+| `examples/material3-demo` | `frust-material` catalog gallery — Material 3 Expressive design system; standalone workspace |
 
 `benchmarks/` is separate from the examples above: flutter-vs-frust comparative benchmarking
 only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
