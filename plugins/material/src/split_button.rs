@@ -1310,11 +1310,12 @@ impl<State: 'static> View<State> for SegmentView<State> {
             enabled: self.enabled,
             open: self.open,
             trailing_alignment: self.trailing_alignment,
-            label: LabelRun::new(if self.kind == SegmentKind::Leading {
-                self.label.clone()
-            } else {
-                String::new()
-            }),
+            // Both kinds carry their resolved label: the leading half paints
+            // it, the trailing half only exposes it through semantics (the
+            // menu-trigger's accessible name) — [`SplitButtonView::trailing_view`]
+            // already resolved `trailing_label` against
+            // [`DEFAULT_TRAILING_LABEL`] before this view was built.
+            label: LabelRun::new(self.label.clone()),
             label_origin: Point::ZERO,
             icon: self.icon.as_ref().map(|icon| build_child(icon, ctx)),
             haptic: self.haptic,
@@ -1375,9 +1376,17 @@ impl<State: 'static> View<State> for SegmentView<State> {
             }
             flags |= ChangeFlags::PAINT;
         }
-        if self.kind == SegmentKind::Leading && prev.label != self.label {
+        if prev.label != self.label {
             element.label.set_content(&self.label);
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            flags |= if self.kind == SegmentKind::Leading {
+                // The leading half paints its label, so a change reflows it.
+                ChangeFlags::LAYOUT | ChangeFlags::PAINT
+            } else {
+                // The trailing half's label is accessibility-only (the menu
+                // trigger's accessible name) — no child to reconcile, the
+                // same shape `fab.rs`'s icon-only-FAB label rebuild takes.
+                ChangeFlags::PAINT
+            };
         }
 
         match (prev.icon.as_ref(), self.icon.as_ref()) {
@@ -1647,12 +1656,19 @@ impl Widget for SegmentWidget {
         // section). The leading icon child is decoration and is not forwarded,
         // matching the plain button.
         ctx.push_node(Role::Button, |node| {
-            if !self.label.content().is_empty() {
-                node.set_label(self.label.content());
-            }
             if self.is_trailing() {
-                node.set_label(DEFAULT_TRAILING_LABEL);
+                // The carried name (`SplitButtonView::trailing_label`, already
+                // resolved by `trailing_view`) wins; `DEFAULT_TRAILING_LABEL`
+                // is only the last-resort fallback for an explicitly-empty
+                // custom label.
+                node.set_label(if self.label.content().is_empty() {
+                    DEFAULT_TRAILING_LABEL
+                } else {
+                    self.label.content()
+                });
                 node.set_expanded(self.open);
+            } else if !self.label.content().is_empty() {
+                node.set_label(self.label.content());
             }
             if self.enabled {
                 node.add_action(Action::Click);
@@ -2957,6 +2973,82 @@ mod tests {
             "the trailing half reports its own disabled state"
         );
         assert!(!trailing.1.supports_action(Action::Expand));
+    }
+
+    #[test]
+    fn trailing_label_reaches_the_trailing_nodes_semantics() {
+        // Revert-verify: pre-fix, `trailing_label` was stored but dropped
+        // before the trailing `SegmentWidget` ever saw it, so this node
+        // always reported the hardcoded `DEFAULT_TRAILING_LABEL` regardless
+        // of what was set here.
+        fn logic(_s: &mut ()) -> SplitButtonView<()> {
+            split_button::<(), _, _>("Save", true, |_s: &mut ()| {}, |_s: &mut ()| {})
+                .trailing_label("More actions")
+        }
+        let mut root: frust_core::RenderRoot<(), SplitButtonView<()>> =
+            frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(400.0, 80.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+
+        let trailing = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("More actions"))
+            .expect("the custom trailing label reaches the trailing node");
+        assert_eq!(trailing.1.is_expanded(), Some(true));
+        assert!(
+            update
+                .nodes
+                .iter()
+                .all(|(_, n)| n.label() != Some(DEFAULT_TRAILING_LABEL)),
+            "a custom trailing label replaces the default, not just adds to it"
+        );
+    }
+
+    #[test]
+    fn rebuild_with_a_changed_trailing_label_updates_the_node() {
+        // A struct (not a bare `String`) so `logic`'s `&mut` parameter stays
+        // clean of clippy's `ptr_arg` lint.
+        struct LabelState {
+            label: &'static str,
+        }
+        fn logic(s: &mut LabelState) -> SplitButtonView<LabelState> {
+            split_button::<LabelState, _, _>(
+                "Save",
+                true,
+                |_s: &mut LabelState| {},
+                |_s: &mut LabelState| {},
+            )
+            .trailing_label(s.label)
+        }
+        let mut root: frust_core::RenderRoot<LabelState, SplitButtonView<LabelState>> =
+            frust_core::RenderRoot::new();
+        let mut state = LabelState { label: "First" };
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(Size::new(400.0, 80.0), &mut tcx as &mut dyn Any);
+        let before = root.semantics();
+        assert!(
+            before.nodes.iter().any(|(_, n)| n.label() == Some("First")),
+            "the initial trailing label reaches the node"
+        );
+
+        state.label = "Second";
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(Size::new(400.0, 80.0), &mut tcx as &mut dyn Any);
+        let after = root.semantics();
+
+        assert!(
+            after.nodes.iter().any(|(_, n)| n.label() == Some("Second")),
+            "the rebuilt trailing label reaches the node"
+        );
+        assert!(
+            after.nodes.iter().all(|(_, n)| n.label() != Some("First")),
+            "the stale label is gone after rebuild"
+        );
     }
 
     // ---- 5. the two menu styles --------------------------------------------
