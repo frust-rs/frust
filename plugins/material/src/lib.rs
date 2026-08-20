@@ -120,7 +120,10 @@ pub use chips::{
     InputChip, InputChipView, InputChipWidget, SuggestionChip, SuggestionChipView,
     SuggestionChipWidget, assist_chip, filter_chip, input_chip, suggestion_chip,
 };
-pub use dialog::{DialogView, DialogWidget, dialog, show_dialog};
+pub use dialog::{
+    DialogView, FullScreenDialogView, SelectionDialogView, dialog, full_screen_dialog,
+    selection_dialog, show_dialog, show_full_screen_dialog, show_selection_dialog,
+};
 pub use divider::{DividerView, DividerWidget, divider};
 pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
