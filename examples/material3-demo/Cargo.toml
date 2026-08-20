@@ -1,0 +1,28 @@
+# `material3-demo`: the Material 3 Expressive design-system plugin's desktop
+# gallery — a root-workspace member (covered by the root `Cargo.toml`'s
+# `examples/*` glob, and deliberately not added to that manifest's `exclude`
+# list) rather than a standalone workspace like `examples/huddle`/`playground`:
+# it is desktop-only, scaffolds no per-project Android/iOS build output that
+# would need its own `target/` dir, and carries no out-of-tree git+rev
+# dependency — none of the three reasons the standalone examples give for
+# excluding themselves apply here. Riding the root workspace also means
+# `cargo test --workspace`/`cargo clippy --workspace --all-targets -- -D
+# warnings` covers it automatically, with no separate per-example gate to
+# remember. `examples/shadcn-demo` is the precedent this mirrors exactly.
+#
+# Single-crate, desktop-only shape (no `lib.rs`/`android`/`ios`/`cdylib`).
+#
+# `frust-clipboard` is declared ahead of its first use: the playground kit's
+# code-snippet card copies a sample to the clipboard, so the dependency is
+# fixed here once rather than re-opened per page.
+[package]
+name = "material3-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+frust = { workspace = true }
+frust-material = { path = "../../plugins/material" }
+frust-clipboard = { path = "../../plugins/clipboard" }
