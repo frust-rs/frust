@@ -88,6 +88,7 @@ mod press;
 pub mod progress;
 pub mod radio;
 pub mod refresh_indicator;
+pub mod search;
 pub mod segmented_button;
 pub mod selection;
 pub mod shapes;
@@ -201,6 +202,12 @@ pub use progress::{
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use refresh_indicator::{RefreshIndicatorView, RefreshIndicatorWidget, refresh_indicator};
+pub use search::{
+    DockedSearchViewView, FULL_SCREEN_HEADER_HEIGHT, SEARCH_BAR_MIN_HEIGHT, SEARCH_BAR_MIN_WIDTH,
+    SEARCH_VIEW_COMPACT_MAX_WIDTH, SEARCH_VIEW_HEIGHT_FRACTION, SEARCH_VIEW_MIN_HEIGHT,
+    SEARCH_VIEW_MIN_WIDTH, SearchBarView, SearchBarWidget, SearchView, SearchViewContentWidget,
+    SearchViewMode, SearchViewView, search_bar, search_view, show_search_view,
+};
 pub use segmented_button::{
     MAX_SEGMENTS, MIN_SEGMENTS, Segment, SegmentedButton, SegmentedButtonView,
     SegmentedButtonWidget, segment, segmented_button,
