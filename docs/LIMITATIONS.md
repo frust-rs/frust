@@ -3047,3 +3047,33 @@ settle-delivery fix — filed as a FINDING candidate rather than attempted in-cr
 
 **Evidence**: `plugins/material/src/refresh_indicator.rs` module doc's "Documented seam gap: the
 scroll offset is not held during a refresh" section (incl. the `on_scroll` one-event-late note).
+
+---
+
+### `material-fab-fixed-tier-icon-centering` — a tight-constrained FAB paints its icon off-center
+
+**Observed**: `FabWidget` lays its icon out against its `FabSize` tier's own container box, not the
+widget's actual constrained box. A FAB rendered at a tight-constrained size that doesn't match its
+nominal tier paints its icon off-center inside the visually smaller box. Measured on
+`plugins/material/src/toolbar/`'s scroll-hide FAB morph (80dp→56dp, tight-constrained rather than
+paint-rescaled so layout/visual/hit rects stay one): ~12dp of icon offset at the 80dp end. The
+Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
+was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
+its own morph via `shapes::Morph` instead of consuming that seam, specifically to avoid reproducing
+this degrade on a second surface. That leaves `corner_radius` with zero consumers in the tree,
+pending a keep-or-remove call.
+
+**Applies to**: any FAB rendered at a size other than its nominal `FabSize` tier — today only
+`toolbar/`'s 80dp→56dp scroll morph. `fab_menu`'s trigger avoids the class entirely by not using the
+seam.
+
+**Why accepted / fix direction**: closing it needs a `FabView` seam that exposes the actual
+container size continuously (a `container_size` prop) so icon layout can track the constrained box
+instead of the nominal tier — deferred as a FINDING candidate rather than attempted inside the
+toolbars rework. `corner_radius`'s now-zero-consumer status is a separate, pending decision (keep it
+for a future consumer that accepts this degrade, or remove it) — recorded here so the two facts
+travel together instead of being lost between phases.
+
+**Evidence**: `plugins/material/src/toolbar/` module doc (FAB morph section); `plugins/material/src/fab_menu.rs`
+module doc (trigger-morph rationale); Phase-4 ledger,
+`workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
