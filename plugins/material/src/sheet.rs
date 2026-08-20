@@ -81,17 +81,24 @@
 //! public builder method.
 //!
 //! The alternative was letting the navigator animate the pop, by pushing with
-//! a slide-up page transition instead of [`TransitionSpec::NONE`]. That is not
-//! expressible: a [`TransitionSpec`] is one spec per page, applied to the push
-//! *and* the pop alike, so a pop-side slide-down necessarily brings a push-side
-//! slide-up back with it — double-animating the entrance the widget's own
-//! spring already runs. An asymmetric (pop-only) spec would mean editing
-//! `frust-widgets`, which a design-system plugin never does. So the entrance
-//! and the exit stay under one owner, the widget, and the navigator contributes
-//! no page offset in either direction.
+//! a slide-up page transition instead of [`TransitionSpec::NONE`]. It **is**
+//! expressible, and was rejected on its merits rather than for lack of a seam:
+//! a [`TransitionSpec`] is one spec per page, applied to the push *and* the pop
+//! alike, so a *preset* pop-side slide-down necessarily brings its push-side
+//! slide-up back with it — double-animating the entrance the widget's own spring
+//! already runs — but [`frust::PageTransition::Custom`] is handed `is_pop` and
+//! maps it onto the `(entering, leaving)` layer pair itself, so an asymmetric,
+//! pop-only spec is a plain use of that public seam, with no `frust-widgets`
+//! edit involved. What decides it is ownership: the entrance is already a spring
+//! *inside* this widget, and a navigator-driven exit starts from the page
+//! transition's own `0..=1`, knowing nothing of the `progress` a live handle drag
+//! left behind — the drag-release settle could no longer pick up where the finger
+//! stopped, and the sheet's motion would live in two places at once. So both
+//! halves stay under one owner, the widget, and the navigator contributes no page
+//! offset in either direction.
 //!
 //! Staging costs no public surface because the pop it defers is **state-free**:
-//! [`show_bottom_sheet`] wires an internal `on_close` (a plain `Fn()` calling
+//! [`show_bottom_sheet`] wires an internal `on_close` (a [`StagedPop`] around
 //! `controller.pop()`) onto the view the same private way it already wires the
 //! back-press [`dismiss_signal`](PushOptions::dismiss_signal) cell — neither is
 //! a builder method, and neither is reachable from outside this module. Every
@@ -100,8 +107,22 @@
 //! `paint` fire the pop exactly once the spring has settled at `progress == 0`
 //! (a `closed` latch makes that firing terminal, so a trigger landing in the
 //! frames between the enqueued pop and the rebuild that drains it cannot pop
-//! the page underneath). `reduce_motion` collapses the wait rather than
-//! skipping it: the exit snaps to `0` and fires on the next paint.
+//! the page underneath). Symmetrically, a leg aimed back *open* — a drag caught
+//! mid-exit, a release short of the dismiss threshold, a `Cancel` — clears
+//! `exiting` again, since a leg targeting `1.0` is by definition not a
+//! dismissal; leaving it set would strand the sheet at rest with a staged exit
+//! that can only fire at the closed end, refusing every later trigger.
+//! `reduce_motion` collapses the wait rather than skipping it: the exit snaps to
+//! `0` and fires on the next paint.
+//!
+//! The deferred pop is identity-guarded, not blind. It takes the navigator's
+//! *top* page, and the ramp it waits out is long enough for the app to push
+//! another one (a deep link, an async completion) — which a bare `pop()` would
+//! then take instead of this sheet. The hook is therefore a
+//! [`StagedPop`]: armed with the stack's identity when the exit is staged, and
+//! refusing to fire if that identity moved. A refused pop is *reported* rather
+//! than swallowed — the sheet springs back open and stays dismissible, instead
+//! of latching `closed` over a page it never removed.
 //!
 //! **A mount with no `on_close` — a standalone [`frust::Stack`] mount, or any
 //! sheet built by [`bottom_sheet`] alone — keeps the immediate, state-touching
@@ -224,6 +245,7 @@ use frust::{
 };
 
 use super::press::presses;
+use crate::overlay::modal::StagedPop;
 use crate::overlay::{OverlayContainer, container, on_surface_variant, radius, scrim};
 use crate::tokens::MaterialSpring;
 
@@ -311,7 +333,12 @@ type OnDismiss<State> = Rc<dyn Fn(&mut State)>;
 /// The state-free navigator pop the exit spring stages, fired from `paint` on
 /// settle — see the [module docs](self)' *Who owns the exit*. State-free is
 /// what makes staging possible at all: `paint` carries no app state.
-type OnClose = Rc<dyn Fn()>;
+///
+/// The [`StagedPop`] shared with [`crate::overlay::modal`] (the same convergence
+/// as this module's theme accessors — one implementation of the guard, so both
+/// hosts provably behave the same): it carries the stack identity the exit was
+/// staged against and refuses a pop the stack moved out from under.
+type OnClose = Rc<StagedPop>;
 
 /// A declarative modal M3 bottom sheet wrapping a single content child. See the
 /// [module docs](self).
@@ -394,7 +421,11 @@ pub fn show_bottom_sheet<State, B, R>(
     R: Fn(&mut State, PopResult) + 'static,
 {
     let dismiss_ctrl = controller.clone();
-    let close_ctrl = controller.clone();
+    // Built **once**, outside the page builder below, and only cloned into each
+    // build: that builder re-runs on every navigator rebuild, and a fresh hook
+    // per pass would throw away the stack identity an in-flight staged exit
+    // armed (see [`StagedPop`]).
+    let staged: OnClose = Rc::new(StagedPop::navigator_pop(controller));
     // Peeked once, at show-time: the back policy/dismiss-signal wiring is
     // fixed for the life of this pushed page (mirrors the navigator's
     // push-time `PushOptions` contract, and
@@ -418,9 +449,8 @@ pub fn show_bottom_sheet<State, B, R>(
     controller.push_with_options(
         move || {
             let ctrl = dismiss_ctrl.clone();
-            let close = close_ctrl.clone();
             let mut view = build().on_dismiss(move |_state: &mut State| ctrl.pop());
-            view.on_close = Some(Rc::new(move || close.pop()) as OnClose);
+            view.on_close = Some(staged.clone());
             view.dismiss_signal = widget_signal.clone();
             any::<State, _>(view)
         },
@@ -446,15 +476,20 @@ pub struct BottomSheetWidget {
     /// wired, or a `Veto`/non-dismissable sheet).
     last_seen_dismiss: u64,
     /// Whether the running spring leg ends in a dismissal — set the moment a
-    /// trigger stages one, cleared by a drag that catches the closing panel and
-    /// by the settle that fires the pop.
+    /// trigger stages one ([`Self::stage_exit`]), cleared by the settle that
+    /// fires the pop and by every leg aimed back open: a drag that catches the
+    /// closing panel, a release short of the dismiss threshold, a `Cancel`
+    /// ([`Self::spring_open`]).
     exiting: bool,
-    /// One-shot latch set the instant the staged `on_close` fires. Terminal for
-    /// this widget's mounted lifetime: the hook only *enqueues* a navigator pop,
-    /// so the sheet stays mounted (and still a modal barrier) for one or more
-    /// frames after firing, during which a further dismiss trigger must not
-    /// re-fire it — that would pop whatever page is now underneath. Nothing ever
-    /// clears it back to `false`.
+    /// One-shot latch set the instant the staged `on_close` actually pops.
+    /// Terminal for this widget's mounted lifetime: the hook only *enqueues* a
+    /// navigator pop, so the sheet stays mounted (and still a modal barrier) for
+    /// one or more frames after firing, during which a further dismiss trigger
+    /// must not re-fire it — that would pop whatever page is now underneath.
+    /// Nothing ever clears it back to `false`, which is exactly why a
+    /// [`StagedPop`] that *refused* its pop must not set it: no page was
+    /// removed, so latching would brick a still-live sheet instead of recording
+    /// a finished dismissal.
     closed: bool,
 
     /// The content's measured size from the last real `layout` — cached so a
@@ -597,8 +632,7 @@ impl BottomSheetWidget {
         if self.exiting || self.closed || self.on_close.is_none() {
             return;
         }
-        self.spring_to(-SPRING_KICK);
-        self.exiting = true;
+        self.stage_exit(-SPRING_KICK);
         ctx.request_frame();
     }
 
@@ -615,19 +649,39 @@ impl BottomSheetWidget {
     /// dirty-driven desktop shell (`ControlFlow::Wait`) idles and the mobile
     /// frame gate `Skip`s the next tick, so the enqueued pop never drains until
     /// an unrelated later frame.
-    fn fire_staged_close(&mut self, ctx: &mut PaintCtx) {
+    ///
+    /// **The refused pop.** The hook may decline to pop at all, when the stack
+    /// moved out from under the staged exit (see [`StagedPop`]) — a page pushed
+    /// while the ramp ran would otherwise be popped in this sheet's place. A
+    /// refusal must not latch [`Self::closed`]: that latch is terminal, and
+    /// setting it over a page this widget never removed would leave an
+    /// invisible, permanently undismissable barrier. The sheet springs back
+    /// open instead (`reduce_motion` snaps it), and a later dismiss stages a
+    /// fresh, correctly-armed exit.
+    fn fire_staged_close(&mut self, ctx: &mut PaintCtx, reduce: bool) {
         if !self.exiting || self.anim.is_animating() || self.progress > SETTLED_EPSILON {
             return;
         }
         self.exiting = false;
         self.progress = 0.0;
-        if let Some(on_close) = &self.on_close {
+        // Cloned out of `self` so the recovery arm below can take `&mut self`;
+        // it is an `Rc`, and this runs once per staged exit.
+        let Some(on_close) = self.on_close.clone() else {
+            return;
+        };
+        if on_close.fire() {
             self.closed = true;
-            on_close();
             // Guarantee the enqueued pop one draining rebuild — see the
             // `Scheduling the draining frame` note above.
             ctx.request_frame();
+            return;
         }
+        if reduce {
+            self.progress = 1.0;
+        } else {
+            self.spring_open(SPRING_KICK);
+        }
+        ctx.request_frame();
     }
 
     /// Start a fresh spring leg, launched with `velocity`
@@ -647,6 +701,31 @@ impl BottomSheetWidget {
         self.anim.fling(velocity, SHEET_SPRING);
     }
 
+    /// Launch a fresh leg aimed back **open** (`velocity` positive), cancelling
+    /// any staged exit it overtakes.
+    ///
+    /// Clearing `exiting` is the point: a leg targeting `1.0` is by definition
+    /// not a dismissal, and a staged exit left flagged across one would settle at
+    /// rest where [`Self::fire_staged_close`] can never fire it, while
+    /// [`Self::request_dismiss`] and [`Self::observe_dismiss_signal`] both
+    /// hard-return on the flag — every later scrim tap, `Escape` and back press
+    /// dead, with the sheet still a modal barrier.
+    fn spring_open(&mut self, velocity: f64) {
+        self.exiting = false;
+        self.spring_to(velocity);
+    }
+
+    /// Stage an exit: launch the closing leg at `velocity`, flag it, and arm the
+    /// staged pop against the navigator stack as it stands right now (see
+    /// [`StagedPop`]). The one choke point every staging path goes through.
+    fn stage_exit(&mut self, velocity: f64) {
+        self.spring_to(velocity);
+        self.exiting = true;
+        if let Some(on_close) = &self.on_close {
+            on_close.arm();
+        }
+    }
+
     /// Take a dismiss trigger (scrim tap, Escape, or a handle-drag release
     /// decided closed): kick the closing spring at `velocity`, then either
     /// **stage** the navigator pop behind it (the [`show_bottom_sheet`] path,
@@ -663,14 +742,14 @@ impl BottomSheetWidget {
         if self.exiting || self.closed {
             return;
         }
-        self.spring_to(velocity);
         if self.on_close.is_some() {
-            self.exiting = true;
+            self.stage_exit(velocity);
             // The spring's own frames come from `paint`, but only once one runs
             // — ask for that first one here.
             ctx.request_redraw();
             return;
         }
+        self.spring_to(velocity);
         if let Some(on_dismiss) = self.on_dismiss.as_mut() {
             on_dismiss(ctx);
         }
@@ -765,7 +844,7 @@ impl Widget for BottomSheetWidget {
             self.progress = self.anim.value();
         }
         // A settled exit is where the staged pop is finally fired.
-        self.fire_staged_close(ctx);
+        self.fire_staged_close(ctx, reduce);
         // Keep the geometry in step with whatever `progress` this frame
         // settled on — the spring above (and `observe_dismiss_signal`) only
         // ever touches `progress` itself, so re-derive the panel/handle/
@@ -868,7 +947,11 @@ impl Widget for BottomSheetWidget {
                     if stay_open || !self.dismissable {
                         // `dismissable(false)`: a past-threshold drag springs
                         // back open instead of firing — see the module docs.
-                        self.spring_to(raw.max(SPRING_KICK));
+                        // `spring_open` (not `spring_to`) because a back press
+                        // may have staged an exit *under* this live drag: this
+                        // leg overrules it, and a staged exit left flagged here
+                        // would settle at rest and refuse every later dismiss.
+                        self.spring_open(raw.max(SPRING_KICK));
                     } else {
                         self.request_dismiss(ctx, raw.min(-SPRING_KICK));
                     }
@@ -876,10 +959,13 @@ impl Widget for BottomSheetWidget {
                 }
                 PointerPhase::Cancel => {
                     // A `Cancel` arm never touches state — clear the drag flag
-                    // and, if it had actually moved, spring back open.
+                    // and, if it had actually moved, spring back open (a leg
+                    // that also cancels any exit staged under the drag, exactly
+                    // as the `Up` reopening leg above does; an Android back
+                    // *gesture* delivers this `Cancel` itself).
                     self.drag_captured = false;
                     if self.drag_moved {
-                        self.spring_to(SPRING_KICK);
+                        self.spring_open(SPRING_KICK);
                     }
                     EventResult::Handled
                 }
@@ -956,6 +1042,16 @@ impl Widget for BottomSheetWidget {
                         == EventResult::Handled
                     {
                         return EventResult::Handled;
+                    }
+                    // An invisible sheet absorbs nothing — the anchored
+                    // overlay host's own closed-state gate, ported: at
+                    // `progress == 0` the scrim is fully transparent and the
+                    // panel sits off-screen, and a widget still mounted behind
+                    // an enqueued pop (or one whose entrance has not drawn its
+                    // first frame) paints exactly that. A barrier that swallows
+                    // what it does not show is an invisible input trap.
+                    if self.progress <= SETTLED_EPSILON {
+                        return EventResult::Ignored;
                     }
                     // Falls to the modal barrier: swallow, arming a scrim dismiss
                     // when the press started outside the panel. A secondary
@@ -1561,7 +1657,11 @@ mod tests {
 
     #[test]
     fn scrim_tap_outside_panel_dismisses() {
-        let mut w = laid_out_flag_sheet();
+        // Settled, not merely laid out: the barrier only swallows what it
+        // shows, so a sheet whose entrance has not drawn a frame yet
+        // (`progress == 0`) is input-transparent by design — see the Down arm's
+        // visibility gate.
+        let mut w = settled_flag_sheet();
         let mut state = Flag::default();
         // (5, 5) is in the top scrim, above the bottom-anchored panel.
         assert!(!w.panel.contains(Point::new(5.0, 5.0)));
@@ -1612,7 +1712,10 @@ mod tests {
             );
         }
         root.rebuild(&mut app, &mut state);
-        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+        // Settle the entrance before tapping: the barrier only swallows what it
+        // shows, so a sheet that has not drawn a frame yet is input-transparent
+        // by design (the Down arm's visibility gate).
+        settle_navigator_frame(&mut root, Size::new(400.0, 600.0));
 
         // Tap the top scrim, above the bottom-anchored sheet.
         root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
@@ -2175,6 +2278,232 @@ mod tests {
             "reduce_motion still dismisses — it only skips the ramp"
         );
         assert_eq!(controller.depth(), 1);
+    }
+
+    /// The staged pop waits out a whole exit ramp, and a navigator pop always
+    /// takes the *top* page: a page the app pushes inside that window must not
+    /// be popped in the sheet's place — and the sheet must stay dismissible
+    /// afterwards rather than latching itself closed over a page it never
+    /// removed.
+    #[test]
+    fn a_page_pushed_during_the_exit_ramp_survives_and_the_sheet_stays_dismissable() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_bottom_sheet(
+            &controller,
+            || bottom_sheet(bg_page(400.0, 200.0)),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        settle_navigator_frame(&mut root, area);
+
+        // A scrim tap stages the exit…
+        root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(controller.depth(), 2, "the tap only stages");
+
+        // …and one frame into the ramp the app pushes a page of its own (a deep
+        // link, an async completion landing — it cannot come from the user,
+        // since the sheet is a barrier). Transparent, so the sheet keeps
+        // painting underneath it and its ramp really does reach the settle that
+        // fires the staged pop; an opaque page would cull the sheet's paint and
+        // the pop would simply never fire.
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft(1000));
+        controller.push_transparent(|| core_any::<NavState, _>(bg_page(400.0, 100.0)));
+
+        for i in 0..40u64 {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(1020 + i * 20));
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            controller.depth(),
+            3,
+            "the pushed page survives — the staged pop was refused, not aimed at it"
+        );
+        assert!(
+            state.results.is_empty(),
+            "and the sheet reported no dismissal it never made"
+        );
+
+        // Recoverable, not bricked: back out of the pushed page, then dismiss
+        // the sheet again. The fresh exit is staged against the stack it
+        // actually pops, so this one lands.
+        controller.request_back();
+        for i in 0..40u64 {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(2000 + i * 20));
+        }
+        assert_eq!(controller.depth(), 2, "the pushed page backs out normally");
+
+        controller.request_back();
+        for i in 0..40u64 {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(3000 + i * 20));
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+        assert_eq!(
+            state.results,
+            vec![None],
+            "the sheet is still dismissible after the refused pop"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    // --- The staging flags: what cancels a staged exit, and what a refused pop
+    //     must not latch. ---
+
+    /// A sheet wired the way [`show_bottom_sheet`] wires one — the state-free
+    /// close hook plus the shared back-press dismiss cell — but mounted
+    /// directly, so a test can drive its event and paint passes without a
+    /// navigator. Returns the widget, the back-press generation cell, and a
+    /// count of the hook's own firings.
+    fn staged_flag_sheet() -> (BottomSheetWidget, Rc<Cell<u64>>, Rc<Cell<u32>>) {
+        let signal = Rc::new(Cell::new(0u64));
+        let pops = Rc::new(Cell::new(0u32));
+        let counter = pops.clone();
+        let mut view: BottomSheetView<Flag> =
+            bottom_sheet(leaf_any_flag(300.0, 200.0)).on_dismiss(|s: &mut Flag| s.dismissed += 1);
+        view.on_close = Some(Rc::new(StagedPop::unguarded(move || {
+            counter.set(counter.get() + 1);
+        })));
+        view.dismiss_signal = Some(signal.clone());
+        let mut w = build_flag(&view);
+        settle(&mut w, Size::new(400.0, 600.0));
+        (w, signal, pops)
+    }
+
+    /// Pump `paint` frames from wherever `w`'s own clock currently sits until
+    /// its spring settles — [`settle`]'s continuation, for a test that has
+    /// already driven the widget past its entrance. A second `settle` would
+    /// rewind the clock behind `w.last_frame_time` and corrupt the spring's own
+    /// timeline (the same hazard [`tick`] exists to avoid).
+    fn settle_from_here(w: &mut BottomSheetWidget, area: Size) {
+        for _ in 0..60u64 {
+            tick(w, area, 20);
+            if !w.anim.is_animating() {
+                return;
+            }
+        }
+        panic!("sheet spring failed to settle within the test bound");
+    }
+
+    /// A back press landing *while a handle drag is live* stages an exit under
+    /// that drag — and the release then aims a fresh leg back open. That leg
+    /// must cancel the staging: an exit left flagged over a sheet resting at
+    /// `1.0` can never fire (the settle only fires at the closed end), while
+    /// every later trigger hard-returns on the flag — scrim tap, `Escape` and
+    /// back all dead, with the sheet still a modal barrier.
+    #[test]
+    fn a_release_back_open_cancels_an_exit_staged_under_the_drag() {
+        for cancelled in [false, true] {
+            let (mut w, signal, pops) = staged_flag_sheet();
+            let area = Size::new(400.0, 600.0);
+            let mut state = Flag::default();
+            let handle_y = w.panel.y0 + 10.0;
+
+            // A live handle drag, short of the dismiss threshold (30px of a
+            // 248px panel).
+            dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+            dispatch(
+                &mut w,
+                &mut state,
+                &ev(PointerPhase::Move, 200.0, handle_y + 30.0),
+            );
+            assert!(w.progress > DRAG_DISMISS_FRACTION);
+
+            // An Android back press lands mid-drag: the next paint observes the
+            // bumped cell and stages the exit with the finger still down
+            // (`observe_dismiss_signal` has no drag guard, by design — the
+            // release below is what decides).
+            signal.set(signal.get() + 1);
+            tick(&mut w, area, 16);
+            assert!(w.exiting, "the back press stages an exit under the drag");
+
+            // Then the finger lifts above the dismiss threshold — or the OS
+            // cancels the gesture outright, which an Android back *gesture*
+            // does. Either way the panel springs back open.
+            let phase = if cancelled {
+                PointerPhase::Cancel
+            } else {
+                PointerPhase::Up
+            };
+            dispatch(&mut w, &mut state, &ev(phase, 200.0, handle_y + 30.0));
+            assert!(
+                !w.exiting,
+                "a leg aimed back open cancels the staged exit (cancelled: {cancelled})"
+            );
+
+            settle_from_here(&mut w, area);
+            assert!(
+                (w.progress - 1.0).abs() < 1e-6,
+                "the sheet is back at rest, open: {}",
+                w.progress
+            );
+            assert_eq!(pops.get(), 0, "nothing popped — the sheet reopened");
+
+            // The regression itself: the sheet is still dismissible.
+            dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+            dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+            settle_from_here(&mut w, area);
+            assert_eq!(
+                pops.get(),
+                1,
+                "a scrim tap after the reopen still dismisses (cancelled: {cancelled})"
+            );
+        }
+    }
+
+    /// A sheet that has finished its exit paints nothing — no scrim (alpha
+    /// rides `progress`), no panel (off-screen) — but stays mounted until the
+    /// enqueued pop drains. It must not go on swallowing presses there: an
+    /// invisible barrier is an input trap with nothing on screen to explain it.
+    #[test]
+    fn a_sheet_that_has_finished_its_exit_swallows_no_press() {
+        let (mut w, _signal, pops) = staged_flag_sheet();
+        let area = Size::new(400.0, 600.0);
+        let mut state = Flag::default();
+        let over_panel = Point::new(200.0, w.panel.y0 + 100.0);
+
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        settle_from_here(&mut w, area);
+        assert_eq!(pops.get(), 1, "the staged pop fired");
+        assert!(w.closed, "and latched — the sheet is on its way out");
+        assert!(w.progress <= SETTLED_EPSILON, "painting nothing");
+
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Down, over_panel.x, over_panel.y),
+        );
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "an invisible sheet absorbs nothing"
+        );
+        assert!(!w.scrim_captured, "and arms no scrim dismiss either");
     }
 
     /// The mirror pin for the entrance: it belongs to the widget's spring

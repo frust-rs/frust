@@ -117,6 +117,13 @@
 //! so staging one would leave an invisible barrier standing. `reduce_motion`
 //! collapses the exit the same way it collapses the entrance.
 //!
+//! Deferring the pop by a whole ramp is also why the hook is a [`StagedPop`]
+//! rather than a bare `Fn()`: a pop takes the *top* page, so a page pushed while
+//! the ramp runs would be popped instead of this one. The hook is armed with the
+//! stack's identity when the exit is staged and refuses to fire if it moved —
+//! and the refusal is reported, so a refused exit ramps back open instead of
+//! latching `closed` over a page it never removed.
+//!
 //! # Back-dismiss: the `DismissAnimated` tier
 //!
 //! [`show_overlay_modal`] pushes its transparent page with
@@ -625,8 +632,102 @@ impl OverlayModalConfig {
 type OnDismiss<State> = Rc<dyn Fn(&mut State)>;
 
 /// A state-free close hook, fired from `paint` when an exit ramp settles (see
-/// the [module docs](self)).
-pub type OnClose = Rc<dyn Fn()>;
+/// the [module docs](self)) — a [`StagedPop`], so a deferred navigator pop can
+/// refuse to fire onto a stack that moved under it.
+pub type OnClose = Rc<StagedPop>;
+
+/// The state-free close a staged exit fires on settle, paired with the navigator
+/// stack identity the exit was staged against.
+///
+/// Staging puts a whole exit ramp — hundreds of milliseconds — between the
+/// *decision* to dismiss and the [`NavigatorController::pop`] that carries it
+/// out, and a pop always takes the **top** page. Anything pushed inside that
+/// window (a deep link, an async completion landing) therefore ends up popped
+/// *instead of* this panel — and since nav ops drain FIFO, the deferred pop
+/// queues up behind that push rather than racing it, so it loses every time.
+/// `arm` snapshots the stack the exit was staged against; `fire` re-reads it and
+/// refuses the pop if it moved, *reporting* the refusal so the widget can
+/// recover instead of latching itself closed over a page it never removed.
+///
+/// **Why depth, not `route_generation`.** Both are public identities on
+/// [`NavigatorController`], but what makes a deferred pop wrong here is
+/// precisely that a page was pushed *on top of* this one — and a push is exactly
+/// what moves [`NavigatorController::depth`]. Nothing else can change this
+/// widget's standing while it is alive to fire at all: a pop takes this very
+/// page and tears the widget down with it, and a page below cannot be removed
+/// out from under it.
+/// [`route_generation`](NavigatorController::route_generation) answers a
+/// different question — whether the stack's *route content* changed — which is a
+/// superset signal here (it also moves for a route edit that leaves this page on
+/// top). Both share the same advisory staleness: they publish at the last
+/// rebuild, so a push enqueued *after* the rebuild preceding the settling paint
+/// is still invisible. That narrows the exposure from the ramp's whole length to
+/// a single frame; it does not erase it.
+///
+/// Public only because it names the [`OnClose`] alias; it is built for a caller
+/// by [`show_overlay_modal`], by [`crate::sheet`]'s own `show_bottom_sheet`, or
+/// by [`OverlayModalView::on_close`] wrapping an app's hook — never directly.
+pub struct StagedPop {
+    /// Reads the navigator's live page-stack depth — `None` for a hook with no
+    /// navigator behind it (an app-wired [`OverlayModalView::on_close`] on a
+    /// `Stack` mount), whose close is always authoritative.
+    depth: Option<Box<dyn Fn() -> usize>>,
+    /// The close itself: `controller.pop()` on the navigator path.
+    close: Box<dyn Fn()>,
+    /// The depth [`arm`](Self::arm) last snapshotted; `None` until it runs.
+    staged_depth: Cell<Option<usize>>,
+}
+
+impl StagedPop {
+    /// A navigator pop, guarded by the stack identity above.
+    pub(crate) fn navigator_pop<State: 'static>(controller: &NavigatorController<State>) -> Self {
+        let depth_ctrl = controller.clone();
+        let pop_ctrl = controller.clone();
+        Self {
+            depth: Some(Box::new(move || depth_ctrl.depth())),
+            close: Box::new(move || pop_ctrl.pop()),
+            staged_depth: Cell::new(None),
+        }
+    }
+
+    /// A close hook with no navigator identity to check — an app's own
+    /// [`OverlayModalView::on_close`], which may be a signal write rather than a
+    /// pop at all and is not this module's to second-guess.
+    pub(crate) fn unguarded<F: Fn() + 'static>(close: F) -> Self {
+        Self {
+            depth: None,
+            close: Box::new(close),
+            staged_depth: Cell::new(None),
+        }
+    }
+
+    /// Snapshot the stack this exit is being staged against.
+    ///
+    /// Called by the widget the moment a trigger stages an exit — deliberately
+    /// **not** at construction: the page builder re-runs on every navigator
+    /// rebuild, so a construction-time snapshot would simply be re-taken after
+    /// the very push it exists to catch.
+    pub(crate) fn arm(&self) {
+        self.staged_depth
+            .set(self.depth.as_ref().map(|depth| depth()));
+    }
+
+    /// Fire the close unless the stack moved since [`arm`](Self::arm) — returns
+    /// whether it actually fired.
+    ///
+    /// An unarmed hook fires unconditionally: an unstaged close lands in the same
+    /// turn its trigger arrives, leaving no window for the stack to move.
+    #[must_use]
+    pub(crate) fn fire(&self) -> bool {
+        if let (Some(depth), Some(staged)) = (&self.depth, self.staged_depth.get())
+            && depth() != staged
+        {
+            return false;
+        }
+        (self.close)();
+        true
+    }
+}
 
 /// A modal component that [`show_overlay_modal`] can wire a navigator pop into.
 ///
@@ -724,8 +825,11 @@ impl<State: 'static> OverlayModalView<State> {
     /// Pinned at `build`: a directly constructed (non-staged) view's later
     /// rebuilds neither update nor clear this hook once installed — see
     /// [`OverlayModalWidget`]'s `on_close` field doc for why.
+    ///
+    /// An app hook is wrapped *unguarded*: only the navigator pop
+    /// [`show_overlay_modal`] wires has a stack identity to check.
     pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
-        self.on_close = Some(Rc::new(on_close));
+        self.on_close = Some(Rc::new(StagedPop::unguarded(on_close)));
         self
     }
 
@@ -794,7 +898,10 @@ pub fn show_overlay_modal<State, V, B, R>(
     R: Fn(&mut State, PopResult) + 'static,
 {
     let dismiss_ctrl = controller.clone();
-    let close_ctrl = controller.clone();
+    // Built **once**, outside the page builder, and only cloned into each build:
+    // the builder re-runs on every navigator rebuild, and a fresh hook per pass
+    // would throw away the identity an in-flight exit armed (see [`StagedPop`]).
+    let staged: OnClose = Rc::new(StagedPop::navigator_pop(controller));
     let dismissable = build().modal_dismissable();
     // A `Veto` page is pushed with no cell at all: the navigator consumes the
     // back press and fires nothing.
@@ -814,10 +921,9 @@ pub fn show_overlay_modal<State, V, B, R>(
     controller.push_with_options(
         move || {
             let ctrl = dismiss_ctrl.clone();
-            let close = close_ctrl.clone();
             any::<State, _>(StagedExit {
                 inner: build().on_modal_dismiss(Rc::new(move |_state: &mut State| ctrl.pop())),
-                on_close: Rc::new(move || close.pop()) as OnClose,
+                on_close: staged.clone(),
                 dismiss_signal: widget_signal.clone(),
             })
         },
@@ -925,6 +1031,10 @@ pub struct OverlayModalWidget {
     /// — that would pop whatever page is now underneath this one.
     /// `request_dismiss` refuses every trigger once set; nothing ever clears it
     /// back to `false`.
+    ///
+    /// Set only when the hook actually closed: a [`StagedPop`] that *refused*
+    /// its pop removed no page, so latching here would brick a still-live
+    /// widget rather than record a finished dismissal.
     closed: bool,
     /// A scrim/panel-background press is in flight (the modal barrier).
     scrim_captured: bool,
@@ -1093,10 +1203,18 @@ impl OverlayModalWidget {
     /// Start a ramp from the current progress to `to`, over the entrance's own
     /// duration scaled by how much of the travel is left, eased by its own
     /// direction's curve.
+    ///
+    /// The one choke point every staging path goes through, so it is also where
+    /// the staged pop is armed against the stack as it stands right now (see
+    /// [`StagedPop`]); a leg aimed anywhere but closed is not a dismissal and
+    /// arms nothing.
     fn begin_ramp(&mut self, to: f64, exiting: bool) {
         let from = self.progress;
         self.ramp = (from, to);
         self.exiting = exiting;
+        if exiting && let Some(on_close) = &self.on_close {
+            on_close.arm();
+        }
         let fraction = (to - from).abs().clamp(0.0, 1.0);
         let duration = self.config.entrance.duration().mul_f64(fraction);
         self.anim =
@@ -1147,8 +1265,9 @@ impl OverlayModalWidget {
             if let Some(on_dismiss) = self.on_dismiss.as_mut() {
                 on_dismiss(ctx);
             } else if let Some(on_close) = &self.on_close {
-                self.closed = true;
-                on_close();
+                // Unstaged: fired in the same turn the trigger arrived, so the
+                // hook is unarmed and always closes (see [`StagedPop::fire`]).
+                self.closed = on_close.fire();
             }
             return;
         }
@@ -1181,8 +1300,7 @@ impl OverlayModalWidget {
         }
         if !self.stageable() {
             if let Some(on_close) = &self.on_close {
-                self.closed = true;
-                on_close();
+                self.closed = on_close.fire();
                 ctx.request_frame();
             }
             return;
@@ -1646,10 +1764,22 @@ impl Widget for OverlayModalWidget {
         if self.exiting && !self.anim.is_animating() && self.progress <= PROGRESS_EPSILON {
             self.exiting = false;
             self.progress = 0.0;
-            if let Some(on_close) = &self.on_close {
-                self.closed = true;
-                on_close();
-                ctx.request_frame();
+            // Cloned out of `self` so the recovery arm below can take `&mut
+            // self`; it is an `Rc`, and this runs once per exit.
+            if let Some(on_close) = self.on_close.clone() {
+                if on_close.fire() {
+                    self.closed = true;
+                    ctx.request_frame();
+                } else {
+                    // The stack moved under the staged pop, so it was refused
+                    // ([`StagedPop`]). Do **not** latch `closed`: that latch is
+                    // terminal and would leave an invisible, undismissable
+                    // barrier standing over a page this widget never removed.
+                    // Ramp back open instead — the panel is recoverable, and a
+                    // later dismiss stages a fresh, correctly-armed exit.
+                    self.begin_ramp(self.open_progress(), false);
+                    self.request_continuation(ctx);
+                }
             }
         }
         let progress = self.progress;
@@ -1839,6 +1969,14 @@ impl Widget for OverlayModalWidget {
                     self.handle_captured = true;
                     ctx.capture_pointer();
                     return EventResult::Handled;
+                }
+                // An invisible panel absorbs nothing — `super::anchored`'s own
+                // closed-state gate, ported: a widget still mounted behind an
+                // enqueued pop (or one whose entrance has not drawn its first
+                // frame) paints no scrim and no panel, and a barrier that
+                // swallows what it does not show is an invisible input trap.
+                if self.progress <= PROGRESS_EPSILON {
+                    return EventResult::Ignored;
                 }
                 // The modal barrier: swallow, and remember whether the press
                 // started outside the panel.
@@ -2705,6 +2843,39 @@ mod tests {
         assert_eq!(state.dismissed, 0);
     }
 
+    /// A panel that has finished its exit paints nothing — the scrim's alpha
+    /// rides `progress` and a `FadeScale` panel composites at it — but stays
+    /// mounted until the enqueued pop drains. It must not go on swallowing
+    /// presses there: an invisible barrier is an input trap with nothing on
+    /// screen to explain it (the `super::anchored` gate, ported).
+    #[test]
+    fn a_panel_that_has_finished_its_exit_swallows_no_press() {
+        let (view, closed) = staged(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH));
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let over_panel = w.panel_rect().center();
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0);
+        frame(&mut w, 5000.0);
+        assert_eq!(closed.get(), 1, "the staged close fired");
+        assert_eq!(w.progress(), 0.0, "and the panel paints nothing");
+
+        let result = dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, over_panel.x, over_panel.y),
+        );
+        assert_eq!(
+            result,
+            EventResult::Ignored,
+            "an invisible panel absorbs nothing"
+        );
+        assert!(!w.scrim_captured, "and arms no scrim dismiss either");
+    }
+
     #[test]
     fn the_staged_close_hook_survives_a_rebuild_and_still_fires_exactly_once() {
         // `OverlayModalView::rebuild` never writes `element.on_close` at all
@@ -2717,7 +2888,7 @@ mod tests {
         let hook1 = closed.clone();
         let v1 = StagedExit {
             inner: view(config),
-            on_close: Rc::new(move || hook1.set(hook1.get() + 1)) as OnClose,
+            on_close: Rc::new(StagedPop::unguarded(move || hook1.set(hook1.get() + 1))),
             dismiss_signal: None,
         };
         let mut counter = 0u64;
@@ -2730,7 +2901,7 @@ mod tests {
         let hook2 = closed.clone();
         let v2 = StagedExit {
             inner: view(config),
-            on_close: Rc::new(move || hook2.set(hook2.get() + 1)) as OnClose,
+            on_close: Rc::new(StagedPop::unguarded(move || hook2.set(hook2.get() + 1))),
             dismiss_signal: None,
         };
         View::<Flags>::rebuild(&v2, &v1, &mut w, &mut BuildCtx::new(&mut counter));
@@ -2910,7 +3081,7 @@ mod tests {
         let signal = Rc::new(Cell::new(0u64));
         let staged = StagedExit {
             inner: view(config),
-            on_close: Rc::new(move || hook.set(hook.get() + 1)) as OnClose,
+            on_close: Rc::new(StagedPop::unguarded(move || hook.set(hook.get() + 1))),
             dismiss_signal: Some(signal.clone()),
         };
         let mut counter = 0u64;
@@ -2972,7 +3143,7 @@ mod tests {
         let signal = Rc::new(Cell::new(0u64));
         let staged = StagedExit {
             inner: view(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH)).dismissable(false),
-            on_close: Rc::new(move || hook.set(hook.get() + 1)) as OnClose,
+            on_close: Rc::new(StagedPop::unguarded(move || hook.set(hook.get() + 1))),
             dismiss_signal: Some(signal.clone()),
         };
         let mut counter = 0u64;
@@ -2993,7 +3164,7 @@ mod tests {
         let signal = Rc::new(Cell::new(7u64));
         let staged = StagedExit {
             inner: view(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH)),
-            on_close: Rc::new(move || hook.set(hook.get() + 1)) as OnClose,
+            on_close: Rc::new(StagedPop::unguarded(move || hook.set(hook.get() + 1))),
             dismiss_signal: Some(signal.clone()),
         };
         let mut counter = 0u64;
@@ -3122,6 +3293,75 @@ mod tests {
         );
         h.drive(3000);
         assert_eq!(h.state.results, vec![None], "popped with an empty result");
+        assert_eq!(h.controller.depth(), 1);
+    }
+
+    /// The staged pop waits out a whole exit ramp, and a navigator pop always
+    /// takes the *top* page: a page the app pushes inside that window must not
+    /// be popped in the modal's place, and the modal must stay dismissible
+    /// afterwards rather than latching `closed` over a page it never removed.
+    #[test]
+    fn a_page_pushed_during_the_exit_ramp_is_not_popped_in_the_modals_place() {
+        let mut h = NavHarness::new();
+        show_overlay_modal(
+            &h.controller,
+            || {
+                overlay_modal(
+                    Block(Size::new(200.0, 120.0)),
+                    OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
+                )
+            },
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        h.pass();
+        h.drive(0);
+
+        // A scrim tap stages the exit…
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Down, 5.0, 5.0));
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Up, 5.0, 5.0));
+
+        // …and one frame into the ramp the app pushes a page of its own (a deep
+        // link, an async completion landing). Transparent, so the modal keeps
+        // painting underneath it and its ramp really does reach the settle that
+        // fires the staged pop; an opaque page would cull the modal's paint and
+        // the pop would never fire at all.
+        h.pass();
+        h.paint(3000);
+        h.controller
+            .push_transparent(|| core_any::<NavState, _>(BgPage(Size::new(400.0, 100.0))));
+        h.drive(3100);
+
+        assert_eq!(
+            h.controller.depth(),
+            3,
+            "the pushed page survives — the staged pop was refused, not aimed at it"
+        );
+        assert!(
+            h.state.results.is_empty(),
+            "and nothing reported a dismissal"
+        );
+
+        // Recoverable, not bricked: back out of the pushed page, then dismiss
+        // the modal again — the fresh exit is staged against the stack it
+        // actually pops.
+        h.controller.request_back();
+        h.drive(6000);
+        assert_eq!(
+            h.controller.depth(),
+            2,
+            "the pushed page backs out normally"
+        );
+        h.controller.request_back();
+        h.drive(9000);
+        assert_eq!(
+            h.state.results,
+            vec![None],
+            "the modal is still dismissible after the refused pop"
+        );
         assert_eq!(h.controller.depth(), 1);
     }
 
