@@ -108,6 +108,7 @@ pub mod snackbar;
 pub mod split_button;
 pub mod state_layer;
 pub mod switch;
+pub mod tabs;
 pub mod text_field;
 pub mod time_picker;
 pub mod toggle_button;
@@ -271,6 +272,7 @@ pub use snackbar::{
 };
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
+pub use tabs::{MIN_TABS, Tab, Tabs, TabsVariant, TabsView, TabsWidget, tab, tabs};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
 pub use time_picker::{
     DIAL_SIZE, DIAL_SLOTS, DIALOG_LANDSCAPE_WIDTH, DIALOG_PORTRAIT_WIDTH, HEADER_LANDSCAPE_WIDTH,
