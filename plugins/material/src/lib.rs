@@ -71,8 +71,10 @@ pub mod carousel;
 pub mod checkbox;
 pub mod chips;
 pub mod dialog;
+pub mod dismissible;
 pub mod divider;
 pub mod dropdown;
+pub mod expandable_list;
 pub mod fab;
 pub mod fab_menu;
 pub mod icon_button;
@@ -143,6 +145,12 @@ pub use dialog::{
     DialogView, FullScreenDialogView, SelectionDialogView, dialog, full_screen_dialog,
     selection_dialog, show_dialog, show_full_screen_dialog, show_selection_dialog,
 };
+pub use dismissible::{
+    DISMISS_ACTION_GAP, DISMISS_BACKGROUND_RADIUS, DISMISS_COLLAPSE_HANDOFF,
+    DISMISS_FLING_VELOCITY, DISMISS_FLY_OVERSHOOT, DISMISS_ICON_SIZE, DISMISS_THRESHOLD,
+    DismissBackground, DismissDirection, DismissibleView, DismissibleWidget, dismiss_background,
+    dismissible, speed_multiplier,
+};
 pub use divider::{DividerView, DividerWidget, divider};
 pub use dropdown::{
     DROPDOWN_CHIP_H_PADDING, DROPDOWN_CHIP_ICON_SIZE, DROPDOWN_CHIP_LABEL_GAP,
@@ -157,6 +165,12 @@ pub use dropdown::{
     DROPDOWN_PANEL_MAX_HEIGHT, DROPDOWN_SEARCH_HINT, DropdownColors, DropdownFieldView,
     DropdownFieldWidget, DropdownItem, DropdownPanelView, DropdownPanelWidget, DropdownView,
     dropdown, dropdown_field, dropdown_filter, dropdown_item, dropdown_matches, dropdown_panel,
+};
+pub use expandable_list::{
+    EXPANDABLE_GAP, EXPANDABLE_HOVER_RADIUS, EXPANDABLE_ICON_ROTATION, EXPANDABLE_INNER_RADIUS,
+    EXPANDABLE_OUTER_RADIUS, EXPANDABLE_PRESSED_RADIUS, ExpandMode, ExpandableItem,
+    ExpandableListView, ExpandableListWidget, REVEAL_SPRING, expandable_item, expandable_list,
+    is_expanded, toggle_expanded,
 };
 pub use fab::{FabColor, FabSize, FabView, FabWidget, extended_fab, fab};
 pub use fab_menu::{FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item};
