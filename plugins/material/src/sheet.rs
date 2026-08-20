@@ -1,32 +1,113 @@
+// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments),
+// whose `lib/components/bottom_sheets/` tree is `m3e_bottom_sheets.dart` +
+// `styles/m3e_bottom_sheet_theme.dart`.
+// Porting decision: the reference's own drag handling is velocity-only
+// (`_handleDragEnd` fires past a fling threshold with no live position
+// tracking) and its entrance is a plain duration+curve `SlideTransition`
+// (`M3EMotion.long1` + `emphasizedDecelerate`). This port instead tracks the
+// drag interactively (the panel follows the finger) and drives the
+// entrance/exit/drag-settle with a physical spring
+// (`crate::tokens::MaterialSpring::EXPRESSIVE_SPATIAL_DEFAULT`), matching the
+// spring machinery the rest of this crate's M3E-flavored motion already uses
+// (`crate::button::motion`, `crate::loading_indicator`) rather than the
+// reference's simpler duration+curve ramp.
+
 //! The modal M3 `BottomSheet`: a full-area widget = **scrim** (32%
-//! scrim-color fill; tap outside the sheet dismisses) + a **bottom-anchored
+//! scrim-color fill, fading with the panel's own spring) + a **bottom-anchored
 //! panel** (top corners extra-large 28dp, `surfaceContainerLow`, a centered
 //! drag handle **32dp wide × 4dp tall** in a 48dp touch target), pushed as a
 //! transparent navigator page via
-//! [`NavigatorController::push_transparent_for_result`] and entering via the
-//! [`PageTransition::SlideUp`] preset.
+//! [`NavigatorController::push_transparent_for_result`]. [`show_bottom_sheet`]
+//! wraps the push.
 //!
 //! # Navigator-modal architecture
 //!
 //! Like [`mod@crate::dialog`], the scrim is part of *this* widget (the
 //! navigator provides none and routes input only to the top page), and the
 //! sheet is designed to be pushed as a transparent page over a static
-//! background. [`show_bottom_sheet`] wraps the push. Dismissal is always
-//! `controller.pop()`, wired to two gestures:
+//! background. Dismissal is always `controller.pop()`, wired to three
+//! gestures:
 //!
 //! * a **scrim tap** (a press+release outside the panel) pops with an *empty*
 //!   [`PopResult`];
-//! * a **drag-down on the handle** past a threshold pops.
+//! * a **drag-release on the handle**, decided by position and velocity (see
+//!   below);
+//! * **Escape**, once the sheet holds focus (see *Keyboard operability*).
 //!
-//! ## Drag-to-dismiss is threshold-simple (v1)
+//! # Interactive drag + spring settle
 //!
-//! The handle-drag dismiss is intentionally *not* a full interactive settle like
-//! the navigator's edge-swipe: the sheet does **not** follow the finger frame by
-//! frame and does **not** spring back on a short drag. Instead, a press that
-//! starts in the handle's 48dp touch strip and releases more than
-//! `DRAG_DISMISS_FRACTION` of the sheet height lower simply pops; a shorter
-//! drag does nothing. A richer interactive settle (mirroring
-//! `NavigatorWidget`'s held-transition edge-swipe) is deferred.
+//! Unlike the reference, the panel **follows the finger**: a press in the
+//! 48dp handle strip captures the pointer, and once the gesture passes
+//! [`frust::input::TOUCH_SLOP`] every `Move` scrubs [`BottomSheetWidget`]'s
+//! internal `progress` (`0.0` fully closed/off-screen, `1.0` at rest) by the
+//! drag's own fraction of the panel's height — the panel translates with the
+//! pointer, clamped to `0.0..=1.0`. A release below [`TOUCH_SLOP`] is a *tap*:
+//! unchanged from v1, nothing dismisses (only a real drag can).
+//!
+//! On release, the panel's fate is decided by **position and velocity**,
+//! mirroring [`overlay::modal`](crate::overlay::modal)'s own drag-settle: a
+//! release speed at or above [`FLING_VELOCITY`] commits in the direction it
+//! was flung (a fast downward flick dismisses even from near the top; a fast
+//! upward one stays open even from near the bottom); otherwise the position
+//! alone decides — past half the sheet's own height ([`DRAG_DISMISS_FRACTION`])
+//! dismisses, short of it springs back open. Either way, the panel
+//! **springs** to its resting point (open or closed) rather than snapping or
+//! easing on a fixed duration — [`BottomSheetWidget::spring_to`] launches a
+//! fresh leg of [`SHEET_SPRING`] (`MaterialSpring::EXPRESSIVE_SPATIAL_DEFAULT`)
+//! from wherever `progress` currently reads, at the release's own measured
+//! speed (boosted to at least [`SPRING_KICK`] in the decided direction when
+//! the raw reading is too weak or the wrong sign to read as a deliberate
+//! commit).
+//!
+//! # Spring entrance/exit
+//!
+//! The sheet no longer rides the navigator's own page-transition slide
+//! ([`show_bottom_sheet`] pushes with [`TransitionSpec::NONE`] — the widget
+//! stages its own motion, the [`crate::overlay::modal`] precedent): on its
+//! first `paint`, [`BottomSheetWidget`] kicks [`SHEET_SPRING`] from `progress
+//! = 0.0` toward `1.0`, so **the first frame is invisible** (the panel is off
+//! -screen) and the slide-up becomes visible only from the second frame
+//! onward — the same one-frame lag [`crate::overlay::modal`]'s own ramp
+//! documents. A dismiss trigger with no drag behind it (a scrim tap, Escape,
+//! an Android back press) kicks the same spring the other way, at
+//! [`SPRING_KICK`]. `Theme.motion.reduce_motion` collapses both to a jump:
+//! `paint` stops the spring and snaps `progress` straight to its target.
+//!
+//! **Dismissal itself stays immediate and state-touching, not staged behind
+//! the exit spring** — a deliberate divergence from
+//! [`crate::overlay::modal`]'s paint-fired `on_close` hook. Every dismiss
+//! trigger here calls [`BottomSheetView::on_dismiss`] (a `Fn(&mut State)`)
+//! **and** kicks the closing spring in the same event, rather than firing the
+//! callback only once the spring settles: adopting the staged shape would
+//! mean firing from `paint`, which carries no app state, forcing a second,
+//! state-free close-hook builder method the way `overlay::modal::on_close`
+//! is — new public surface this rework is not scoped to add (see the *Public
+//! API* note below). In practice the enqueued `controller.pop()` typically
+//! drains on the very next rebuild regardless (documented further down), so
+//! the exit spring's own visible run is short via the navigator path; a
+//! standalone (non-navigator) `Stack` mount that leaves the widget mounted
+//! sees it settle in full. Behavior parity with the existing,
+//! extensively-tested dismiss/back-press contract is what earns this
+//! divergence — see *Convergence with `overlay::modal`* below.
+//!
+//! # Convergence with `overlay::modal`
+//!
+//! [`crate::overlay::modal`] is the merged host built on top of *this*
+//! module's own `BackPolicy`/`dismiss_signal` mechanisms, and now carries a
+//! more general drag-to-close-with-snap-points machine of its own. This
+//! module does **not** rebuild itself on top of that host: `overlay::modal`
+//! stages its `on_dismiss` behind a *second*, state-free `on_close` hook
+//! fired from `paint`, and generalizes to arbitrary snap points via a
+//! duration+curve ramp — adopting either would either change this module's
+//! dismiss-firing timing (a real behavior change against the tests below,
+//! several of which pin the exact frame the pop drains on) or grow its
+//! public builder surface, and the task scope is explicitly public-API-stable.
+//! What *does* converge, because it carries no such risk: the theme-role
+//! resolution now reads [`crate::overlay`]'s shared accessors
+//! (`scrim`/`container`/`on_surface_variant`/`radius`) instead of duplicating
+//! them locally — pure functions with identical fallback values, so pulling
+//! them in shrinks this module without touching dismiss ordering, back
+//! behavior, or the public surface at all.
 //!
 //! # Panel anatomy
 //!
@@ -34,7 +115,9 @@
 //! two corners rounded to the extra-large (28dp) shape and its bottom corners
 //! square (they sit at the screen edge). It sizes to its content plus the 48dp
 //! handle strip at the top; the visual drag-handle indicator is 32×4dp, centered
-//! horizontally within that strip.
+//! horizontally within that strip. The panel's own extent never changes with
+//! `progress` — only its Y offset does, so a drag scrub or a spring-advanced
+//! frame repositions it (`BottomSheetWidget::reposition`) without a relayout.
 //!
 //! # Standalone use
 //!
@@ -80,27 +163,32 @@
 //!
 //! [`BottomSheetView::dismissable`] (default `true`) is Flutter's
 //! `isDismissible`+`enableDrag` collapsed into one v1 flag (spec parity):
-//! `false` disables the scrim tap, the handle drag (a drag
-//! past the threshold simply settles back without firing `on_dismiss`), and
-//! `Escape`, and [`show_bottom_sheet`] pushes the page with
-//! [`frust::BackPolicy::Veto`] so a back
-//! press is consumed with no effect. `true` pushes
-//! [`frust::BackPolicy::DismissAnimated`]:
-//! unlike `frust_glyph::dialog`, this sheet has no widget-internal
-//! enter/exit staging to route through — a back press instead fires the same
-//! state-free pop [`show_bottom_sheet`] wires the scrim/drag/Escape paths to,
-//! observed from `paint` (`observe_dismiss_signal`) against the shared
-//! dismiss-signal cell [`NavigatorController::request_back`] bumps (see
-//! [`frust::BackPolicy`]'s documented observation
-//! seam). Because that pop only *enqueues* a `NavOp::Pop` (it writes no tracked
-//! signal), the same paint requests the next frame
-//! ([`PaintCtx::request_frame`]) so the enqueued pop is guaranteed a draining
-//! rebuild — otherwise a dirty-driven desktop shell idles and the mobile frame
-//! gate skips, leaving the back press dead until an unrelated later frame (see
-//! `observe_dismiss_signal`).
+//! `false` disables the scrim tap, the handle drag (a drag past the
+//! dismiss threshold instead **springs back open** — the panel already
+//! tracked the finger down toward closed, so a bare no-op would leave it
+//! resting there as an invisible full-window barrier), and `Escape`, and
+//! [`show_bottom_sheet`] pushes the page with [`frust::BackPolicy::Veto`] so a
+//! back press is consumed with no effect. `true` pushes
+//! [`frust::BackPolicy::DismissAnimated`]: a back press bumps the shared
+//! dismiss-signal cell [`NavigatorController::request_back`] writes,
+//! observed from `paint` (`observe_dismiss_signal`) — which kicks the same
+//! closing spring every other dismiss trigger does and fires the pop
+//! immediately (see *Dismissal itself stays immediate* above). Because that
+//! pop only *enqueues* a `NavOp::Pop` (it writes no tracked signal), the same
+//! paint requests the next frame ([`PaintCtx::request_frame`]) so the
+//! enqueued pop is guaranteed a draining rebuild — otherwise a dirty-driven
+//! desktop shell idles and the mobile frame gate skips, leaving the back
+//! press dead until an unrelated later frame (see `observe_dismiss_signal`).
+//!
+//! # Public API
+//!
+//! [`bottom_sheet`], [`show_bottom_sheet`], and every [`BottomSheetView`]
+//! builder method are unchanged from v1 — this rework is entirely internal to
+//! [`BottomSheetWidget`].
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use frust::Theme;
 use frust::authoring::Role;
@@ -108,21 +196,19 @@ use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
+use frust::input::{TOUCH_SLOP, VelocityTracker};
 use kurbo::{Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
 use peniko::{Brush, Color};
 
 use frust::{
-    BackPolicy, NavigatorController, PageTransition, PopResult, PushOptions, TransitionSpec,
+    AnimationController, BackPolicy, FrameTime, NavigatorController, PopResult, PushOptions,
+    SpringDesc, TransitionSpec,
 };
 
 use super::press::presses;
+use crate::overlay::{OverlayContainer, container, on_surface_variant, radius, scrim};
+use crate::tokens::MaterialSpring;
 
-/// Scrim opacity behind a modal bottom sheet (M3 spec: 32%, matching the
-/// dialog scrim).
-const SCRIM_ALPHA: f32 = 0.32;
-/// Unthemed-fallback panel top-corner radius (a theme resolves this from
-/// `shape.extra_large`, a 28dp token).
-const RADIUS: f64 = 28.0;
 /// Drag-handle visual indicator width, in logical px (M3 token
 /// `m3_comp_sheet_bottom_docked_drag_handle_width`).
 const HANDLE_WIDTH: f64 = 32.0;
@@ -137,67 +223,62 @@ const HANDLE_TOUCH_TARGET: f64 = 48.0;
 /// value for on-screen corner radii — the [`crate::card`] precedent).
 const PATH_TOLERANCE: f64 = 0.1;
 
-/// Fraction of the sheet's own height a handle-drag must exceed to dismiss.
+/// Fraction of the sheet's own height a handle-drag must have closed past to
+/// dismiss on release, when the release speed is below [`FLING_VELOCITY`]
+/// (i.e. `progress < DRAG_DISMISS_FRACTION` dismisses,
+/// `progress >= DRAG_DISMISS_FRACTION` springs back open) — see the [module
+/// docs](self)' Interactive drag section.
 ///
 /// **Community-approximate**: Material's bottom-sheet dismiss threshold is a
 /// fling/drag heuristic with no single published constant; half the sheet
 /// height is the conventional drag-past-the-midpoint commit point (the same
-/// 0.5 the navigator's edge-swipe uses).
+/// 0.5 the navigator's edge-swipe uses, and the same value
+/// [`crate::overlay::modal`]'s own no-snap-points default reduces to).
 const DRAG_DISMISS_FRACTION: f64 = 0.5;
 
-/// Unthemed-fallback panel container fill (a theme resolves this from
-/// `colors.surface_container_low`).
-const CONTAINER: Color = Color::from_rgb8(0xF7, 0xF2, 0xFA);
-/// Unthemed-fallback drag-handle color (a theme resolves this from
-/// `colors.on_surface_variant`, the M3 drag-handle color role).
-const HANDLE_COLOR: Color = Color::from_rgb8(0x49, 0x45, 0x4F);
-/// Unthemed-fallback scrim base color (a theme resolves this from
-/// `colors.scrim`); applied at [`SCRIM_ALPHA`].
-const SCRIM: Color = Color::from_rgb8(0x00, 0x00, 0x00);
+/// Release speed (logical px/s along the drag axis) at or above which a
+/// handle drag commits in the direction it was flung, overriding the
+/// position-based decision above.
+///
+/// **Community-approximate**: Material publishes no fling threshold for a
+/// sheet dismiss — mirrors [`crate::overlay::modal::OVERLAY_FLING_VELOCITY`],
+/// an order of magnitude above `frust::input::FLING_STOP`'s 30 px/s "this
+/// fling is over" floor.
+const FLING_VELOCITY: f64 = 400.0;
 
-/// Return `color` with its alpha channel replaced by `alpha`.
-fn with_alpha(color: Color, alpha: f32) -> Color {
-    let c = color.components;
-    Color::new([c[0], c[1], c[2], alpha])
-}
+/// Launch velocity (`progress`-units/sec, `0..=1` scale) for a spring leg
+/// with no real pointer velocity behind it — the entrance, and every non-drag
+/// dismiss (scrim tap, Escape, an Android back press) — and the floor a drag
+/// release's own measured velocity is boosted to when it is too weak, or the
+/// wrong sign, to read as a deliberate commit in the decided direction. The
+/// same modest-kick convention `crate::button::motion::FLING_VELOCITY` uses
+/// for its own `AnimationController::fling`.
+const SPRING_KICK: f64 = 4.0;
 
-/// The resolved scrim fill. Themed: `colors.scrim` at [`SCRIM_ALPHA`].
-fn resolve_scrim(theme: Option<&Theme>) -> Color {
-    let base = match theme {
-        Some(theme) => theme.scheme().scrim,
-        None => SCRIM,
-    };
-    with_alpha(base, SCRIM_ALPHA)
-}
-
-/// The resolved panel container fill. Themed: `colors.surface_container_low`.
-fn resolve_container(theme: Option<&Theme>) -> Color {
-    match theme {
-        Some(theme) => theme.scheme().surface_container_low,
-        None => CONTAINER,
-    }
-}
-
-/// The resolved drag-handle color. Themed: `colors.on_surface_variant`.
-fn resolve_handle(theme: Option<&Theme>) -> Color {
-    match theme {
-        Some(theme) => theme.scheme().on_surface_variant,
-        None => HANDLE_COLOR,
-    }
-}
-
-/// The resolved top-corner radius. Themed: `shape.extra_large`.
-fn resolve_radius(theme: Option<&Theme>) -> f64 {
-    match theme {
-        Some(theme) => theme.shape.extra_large,
-        None => RADIUS,
-    }
-}
+/// The spring driving the sheet's entrance, its dismiss, and a drag settle —
+/// M3E's `expressiveSpatialDefault` preset
+/// ([`MaterialSpring::EXPRESSIVE_SPATIAL_DEFAULT`], stiffness 380 / damping
+/// ratio 0.8): the same spatial-motion default this crate already uses
+/// elsewhere for a position/shape change (`crate::loading_indicator`'s morph,
+/// `crate::carousel`'s snap).
+const SHEET_SPRING: SpringDesc = SpringDesc {
+    mass: 1.0,
+    stiffness: MaterialSpring::EXPRESSIVE_SPATIAL_DEFAULT.stiffness,
+    damping_ratio: MaterialSpring::EXPRESSIVE_SPATIAL_DEFAULT.damping_ratio,
+};
 
 /// Coerce a possibly-infinite constraint dimension to a finite value (a sheet
 /// expects bounded constraints — a navigator page or a full-screen `Stack`).
 fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
+}
+
+/// Return `color` with its own alpha scaled by `factor` — how the scrim rides
+/// the spring (`crate::overlay::modal`'s own `scale_alpha`, ported in rather
+/// than shared: a two-line pure function, not worth a `pub(crate)` seam for).
+fn scale_alpha(color: Color, factor: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], c[3] * factor])
 }
 
 /// A view-held, typed scrim/drag-dismiss callback (erased on build).
@@ -235,7 +316,7 @@ pub fn bottom_sheet<State: 'static, V: View<State>>(content: V) -> BottomSheetVi
 
 impl<State: 'static> BottomSheetView<State> {
     /// Set the dismiss callback — invoked with `&mut State` on a scrim tap or a
-    /// handle drag-down past the threshold. [`show_bottom_sheet`] wires this to
+    /// handle drag release decided closed. [`show_bottom_sheet`] wires this to
     /// `controller.pop()` automatically.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.on_dismiss = Some(Rc::new(on_dismiss));
@@ -253,9 +334,11 @@ impl<State: 'static> BottomSheetView<State> {
     }
 }
 
-/// Push `build`'s sheet as a transparent navigator page (the page below stays
-/// visible under the scrim), entering via [`PageTransition::SlideUp`], and
-/// register `on_result` for the value the sheet pops with.
+/// Push `build`'s sheet as a transparent navigator page and register
+/// `on_result` for the value the sheet pops with. The sheet stages its own
+/// spring entrance ([module docs](self)), so the page transition itself is
+/// [`TransitionSpec::NONE`] — a page-level transition on top would animate
+/// the same slide twice.
 ///
 /// The sheet's dismiss (scrim tap + handle drag) is wired to `controller.pop()`
 /// for you (dismiss pops with an *empty* [`PopResult`], overriding any
@@ -289,7 +372,7 @@ pub fn show_bottom_sheet<State, B, R>(
     let signal = dismissable.then(|| Rc::new(Cell::new(0u64)));
     let widget_signal = signal.clone();
     let mut options = PushOptions::transparent()
-        .transition(TransitionSpec::duration(PageTransition::SlideUp))
+        .transition(TransitionSpec::NONE)
         .back(if dismissable {
             BackPolicy::DismissAnimated
         } else {
@@ -325,18 +408,50 @@ pub struct BottomSheetWidget {
     /// The last generation observed from `dismiss_signal` (0 with no signal
     /// wired, or a `Veto`/non-dismissable sheet).
     last_seen_dismiss: u64,
+
+    /// The content's measured size from the last real `layout` — cached so a
+    /// drag scrub or a spring-advanced paint frame can reposition the panel
+    /// without a full relayout (the panel's own extent never changes with
+    /// `progress`, only its Y offset does).
+    content_size: Size,
     /// The bottom-anchored panel rect in the widget's own local coordinate
-    /// space (computed at layout, read for scrim/handle hit-testing at event
-    /// time).
+    /// space, at its full (unclamped) extent — translated by `progress`, not
+    /// resized by it (computed by [`Self::reposition`], read for scrim/handle
+    /// hit-testing at event time).
     panel: Rect,
     /// The full-width 48dp drag-handle touch strip at the top of the panel
-    /// (local coords).
+    /// (local coords, tracks the panel's own translation).
     handle_target: Rect,
-    /// A handle drag is in flight (the sheet captured the pointer on a `Down`
-    /// in the handle strip).
-    drag_active: bool,
+
+    /// `0.0` fully closed/off-screen, `1.0` at rest (open) — may transiently
+    /// read outside that range mid-spring (an under-damped spring's overshoot
+    /// past its target is real, intended motion; see
+    /// `crates/frust-core/src/anim.rs`'s `AnimationController` docs).
+    progress: f64,
+    /// The spring engine driving `progress` between legs — freshly re-seeded
+    /// at the start of every new leg ([`Self::spring_to`]) from whatever
+    /// `progress` currently reads, and left untouched (not advanced) while a
+    /// drag is scrubbing `progress` directly.
+    anim: AnimationController,
+    /// Whether the first paint has kicked off the entrance spring.
+    started: bool,
+
+    /// A handle-strip press is in flight (the sheet captured the pointer on a
+    /// `Down` in the handle strip).
+    drag_captured: bool,
     /// The `Down` y the drag distance is measured from.
     drag_start_y: f64,
+    /// `progress` at the start of this drag — the scrub's own baseline.
+    drag_from: f64,
+    /// Whether the gesture has passed [`TOUCH_SLOP`] into a real drag; below
+    /// it a release is a tap and nothing dismisses (unchanged from v1).
+    drag_moved: bool,
+    /// The release-velocity estimator, clocked from the last painted frame —
+    /// pointer events carry no timestamp of their own (`frust_widgets::scroll`'s
+    /// precedent, also `crate::overlay::modal`'s).
+    tracker: VelocityTracker,
+    last_frame_time: FrameTime,
+
     /// A scrim/panel-background press is in flight (the modal barrier).
     scrim_captured: bool,
     /// Whether that press started outside the panel (only an outside press
@@ -361,10 +476,18 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
                 .as_ref()
                 .map(|(sig, _)| sig.get())
                 .unwrap_or(0),
+            content_size: Size::ZERO,
             panel: Rect::ZERO,
             handle_target: Rect::ZERO,
-            drag_active: false,
+            progress: 0.0,
+            anim: AnimationController::new(Duration::ZERO),
+            started: false,
+            drag_captured: false,
             drag_start_y: 0.0,
+            drag_from: 0.0,
+            drag_moved: false,
+            tracker: VelocityTracker::new(),
+            last_frame_time: FrameTime::ZERO,
             scrim_captured: false,
             scrim_down_outside: false,
         }
@@ -402,11 +525,10 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
 
 impl BottomSheetWidget {
     /// Observe the shared back-press dismiss-signal cell (see the
-    /// `dismiss_signal` field docs) and fire its state-free pop exactly once
-    /// per bump — the `BackPolicy::DismissAnimated` seam's widget-side half
-    /// (`nav::navigator::BackPolicy`'s documented observation seam). Unlike
-    /// `frust_glyph::dialog`, this sheet has no enter/exit staging to route
-    /// through, so the fire is immediate (mirrors a scrim tap/handle drag).
+    /// `dismiss_signal` field docs), kick the closing spring, and fire its
+    /// state-free pop exactly once per bump — the `BackPolicy::DismissAnimated`
+    /// seam's widget-side half (`nav::navigator::BackPolicy`'s documented
+    /// observation seam).
     ///
     /// **Scheduling the draining frame.** `fire()` only *enqueues* a
     /// `NavOp::Pop` on the controller; it writes no tracked reactive signal, so
@@ -419,58 +541,152 @@ impl BottomSheetWidget {
     /// tick (the back request's `PAINT` flag was consumed by *this* frame), so
     /// the enqueued pop never drains until an unrelated later frame.
     fn observe_dismiss_signal(&mut self, ctx: &mut PaintCtx) {
-        if let Some((signal, fire)) = &self.dismiss_signal {
-            let current = signal.get();
-            if current != self.last_seen_dismiss {
-                self.last_seen_dismiss = current;
-                fire();
-                // Guarantee the enqueued pop one draining rebuild — see the
-                // `Scheduling the draining frame` note above.
-                ctx.request_frame();
-            }
+        // Cloned (two cheap `Rc` bumps) rather than matched by reference: the
+        // borrow of `self.dismiss_signal` would otherwise still be live when
+        // `self.spring_to` below needs `&mut self`.
+        let Some((signal, fire)) = self.dismiss_signal.clone() else {
+            return;
+        };
+        let current = signal.get();
+        if current != self.last_seen_dismiss {
+            self.last_seen_dismiss = current;
+            self.spring_to(-SPRING_KICK);
+            fire();
+            // Guarantee the enqueued pop one draining rebuild — see the
+            // `Scheduling the draining frame` note above.
+            ctx.request_frame();
         }
+    }
+
+    /// Start a fresh spring leg, launched with `velocity`
+    /// (`progress`-units/sec — positive opens, negative closes; see
+    /// [`AnimationController::fling`]), always picking up from wherever
+    /// `progress` currently reads — even when that was just set directly by a
+    /// drag scrub rather than by this engine's own last leg.
+    ///
+    /// `AnimationController` exposes no direct value setter; a zero-duration
+    /// `animate_to` is the sanctioned snap instead — with `duration <= 0.0`,
+    /// `start_duration` assigns the value immediately, with no motion in
+    /// between (`crates/frust-core/src/anim.rs`).
+    fn spring_to(&mut self, velocity: f64) {
+        let mut seed = AnimationController::new(Duration::ZERO);
+        seed.animate_to(self.progress);
+        self.anim = seed;
+        self.anim.fling(velocity, SHEET_SPRING);
+    }
+
+    /// Fire the dismiss callback — immediate and state-touching, the existing
+    /// v1 contract every caller depends on (see the [module docs](self)'
+    /// *Spring entrance/exit* section for why this stays self-hosted rather
+    /// than staging the pop behind the spring the way `overlay::modal` does)
+    /// — and kick the closing spring at `velocity` alongside it.
+    fn fire_dismiss(&mut self, ctx: &mut EventCtx, velocity: f64) {
+        self.spring_to(velocity);
+        if let Some(on_dismiss) = self.on_dismiss.as_mut() {
+            on_dismiss(ctx);
+        }
+    }
+
+    /// The last painted frame time in milliseconds — the event pass's clock,
+    /// since a pointer event carries none.
+    fn event_time_ms(&self) -> f64 {
+        self.last_frame_time.as_secs_f64() * 1000.0
+    }
+
+    /// Recompute the panel/handle-strip rects and the content's origin for the
+    /// current `progress`, without a relayout — the panel's own extent (fixed
+    /// by the last real layout) never changes with `progress`, only its Y
+    /// offset does. Used by `layout`, by every spring-advanced `paint` frame,
+    /// and by the drag scrub (`event`, which has no `request_layout` to reach
+    /// for — `EventCtx` carries none).
+    fn reposition(&mut self, area: Size) {
+        let panel_h = (HANDLE_TOUCH_TARGET + self.content_size.height).min(area.height);
+        let panel_y = area.height - panel_h * self.progress;
+        self.panel =
+            Rect::from_origin_size(Point::new(0.0, panel_y), Size::new(area.width, panel_h));
+        self.handle_target = Rect::new(0.0, panel_y, area.width, panel_y + HANDLE_TOUCH_TARGET);
+        let content_x = ((area.width - self.content_size.width) / 2.0).max(0.0);
+        self.content
+            .set_origin(Point::new(content_x, panel_y + HANDLE_TOUCH_TARGET));
     }
 }
 
 impl Widget for BottomSheetWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let area_w = finite_or_zero(bc.max().width);
-        let area_h = finite_or_zero(bc.max().height);
+        let area = Size::new(
+            finite_or_zero(bc.max().width),
+            finite_or_zero(bc.max().height),
+        );
 
         // Content lays out full-width, below the handle strip, in the room left
         // under it.
-        let content_max_h = (area_h - HANDLE_TOUCH_TARGET).max(0.0);
-        let content_bc = BoxConstraints::loose(Size::new(area_w, content_max_h));
-        let content_size = self.content.layout_child(ctx, &content_bc);
+        let content_max_h = (area.height - HANDLE_TOUCH_TARGET).max(0.0);
+        let content_bc = BoxConstraints::loose(Size::new(area.width, content_max_h));
+        self.content_size = self.content.layout_child(ctx, &content_bc);
 
-        let panel_h = (HANDLE_TOUCH_TARGET + content_size.height).min(area_h);
-        let panel_y = area_h - panel_h;
-        self.panel = Rect::new(0.0, panel_y, area_w, area_h);
-        self.handle_target = Rect::new(0.0, panel_y, area_w, panel_y + HANDLE_TOUCH_TARGET);
+        self.reposition(area);
 
-        // Center the content horizontally under the handle strip.
-        let content_x = ((area_w - content_size.width) / 2.0).max(0.0);
-        self.content
-            .set_origin(Point::new(content_x, panel_y + HANDLE_TOUCH_TARGET));
-
-        bc.constrain(Size::new(area_w, area_h))
+        bc.constrain(area)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         self.observe_dismiss_signal(ctx);
-        let theme = Theme::from_paint_ctx(ctx);
-        // Scrim over the whole area.
-        scene.fill_rect(ctx.origin(), ctx.size(), resolve_scrim(theme));
+        self.last_frame_time = ctx.frame_time();
+        // Every theme read in one scope: `Theme::from_paint_ctx` ties its
+        // returned reference to *this* borrow of `ctx`, and the frame-request/
+        // reposition calls below need `ctx`/`self` mutably (the
+        // `crate::overlay::modal` precedent for the same shape).
+        let (reduce, panel_radius, scrim_color, container_color, handle_color) = {
+            let theme = Theme::from_paint_ctx(ctx);
+            (
+                theme.is_some_and(|t| t.motion.reduce_motion),
+                radius(theme),
+                scrim(theme),
+                container(theme, OverlayContainer::Low),
+                on_surface_variant(theme),
+            )
+        };
+
+        if !self.started {
+            self.started = true;
+            if reduce {
+                self.progress = 1.0;
+            } else {
+                self.spring_to(SPRING_KICK);
+            }
+        }
+        if reduce {
+            if self.anim.is_animating() {
+                self.anim.stop();
+            }
+        } else if self.anim.is_animating() {
+            if self.anim.advance(self.last_frame_time) {
+                ctx.request_frame();
+            }
+            self.progress = self.anim.value();
+        }
+        // Keep the geometry in step with whatever `progress` this frame
+        // settled on — the spring above (and `observe_dismiss_signal`) only
+        // ever touches `progress` itself, so re-derive the panel/handle/
+        // content placement here rather than waiting a frame for the next
+        // `layout`.
+        self.reposition(ctx.size());
+
+        // Scrim over the whole area, fading with the panel's own progress.
+        scene.fill_rect(
+            ctx.origin(),
+            ctx.size(),
+            scale_alpha(scrim_color, self.progress.clamp(0.0, 1.0) as f32),
+        );
 
         // Panel: full-width, bottom-anchored, top corners rounded and bottom
         // corners square (the bottom sits at the screen edge). No stroked/
         // per-corner rounded-rect primitive exists on `PaintScene`, so build the
         // path with `kurbo` and fill it — the `card` module's precedent.
-        let radius = resolve_radius(theme);
         let panel_local = Rect::new(self.panel.x0, self.panel.y0, self.panel.x1, self.panel.y1);
-        let radii = RoundedRectRadii::new(radius, radius, 0.0, 0.0);
+        let radii = RoundedRectRadii::new(panel_radius, panel_radius, 0.0, 0.0);
         let path = RoundedRect::from_rect(panel_local, radii).to_path(PATH_TOLERANCE);
-        scene.fill_path(ctx.origin(), &path, &Brush::Solid(resolve_container(theme)));
+        scene.fill_path(ctx.origin(), &path, &Brush::Solid(container_color));
 
         // Drag handle: 32×4dp indicator, centered horizontally within the top
         // strip, with fully-rounded ends.
@@ -480,7 +696,7 @@ impl Widget for BottomSheetWidget {
             Point::new(ctx.origin().x + handle_x, ctx.origin().y + handle_y),
             Size::new(HANDLE_WIDTH, HANDLE_HEIGHT),
             HANDLE_HEIGHT / 2.0,
-            resolve_handle(theme),
+            handle_color,
         );
 
         self.content.paint_child(ctx, scene);
@@ -496,32 +712,70 @@ impl Widget for BottomSheetWidget {
             return EventResult::Ignored;
         }
         // 1. An in-flight handle drag owns the pointer stream.
-        if self.drag_active {
+        if self.drag_captured {
             let InputEvent::Pointer(p) = event else {
                 return EventResult::Handled;
             };
             match p.phase {
                 PointerPhase::Move => {
-                    // Threshold-simple: the sheet does not follow the finger.
+                    self.tracker.record(self.event_time_ms(), p.position.y);
+                    let dy = p.position.y - self.drag_start_y;
+                    if !self.drag_moved && dy.abs() > TOUCH_SLOP {
+                        self.drag_moved = true;
+                    }
+                    if self.drag_moved {
+                        let extent = self.panel.height().max(1.0);
+                        let target = (self.drag_from - dy / extent).clamp(0.0, 1.0);
+                        self.progress = target;
+                        self.reposition(ctx.size());
+                        ctx.request_redraw();
+                    }
                     EventResult::Handled
                 }
                 PointerPhase::Up => {
-                    let dy = p.position.y - self.drag_start_y;
-                    let threshold = self.panel.height() * DRAG_DISMISS_FRACTION;
-                    // dismissable(false): drag-to-dismiss is disabled — a past-
-                    // threshold drag simply settles back without firing.
-                    if self.dismissable
-                        && dy > threshold
-                        && let Some(on_dismiss) = self.on_dismiss.as_mut()
-                    {
-                        on_dismiss(ctx);
+                    self.drag_captured = false;
+                    if !self.drag_moved {
+                        // A tap on the handle with no real movement: unchanged
+                        // from v1 — nothing dismisses (only a real drag past
+                        // the threshold, or a fling, can).
+                        return EventResult::Handled;
                     }
-                    self.drag_active = false;
+                    let velocity = self.tracker.velocity();
+                    let extent = self.panel.height().max(1.0);
+                    let stay_open = if velocity.abs() >= FLING_VELOCITY {
+                        // A flick toward the closing edge (positive velocity,
+                        // moving down) commits closed; away from it, open.
+                        velocity < 0.0
+                    } else {
+                        self.progress >= DRAG_DISMISS_FRACTION
+                    };
+                    // Reparametrize the release speed (px/s along the drag
+                    // axis) into `progress`-units/sec, then clamp its sign to
+                    // match the decided direction — a raw reading pointing
+                    // the other way (a slow release with a stray twitch) must
+                    // not fling the spring toward the wrong target, since
+                    // `fling`'s own target is derived purely from the sign it
+                    // is handed.
+                    let raw = -velocity / extent;
+                    if stay_open || !self.dismissable {
+                        // `dismissable(false)`: a past-threshold drag springs
+                        // back open instead of firing — see the module docs.
+                        self.spring_to(raw.max(SPRING_KICK));
+                    } else {
+                        self.spring_to(raw.min(-SPRING_KICK));
+                        if let Some(on_dismiss) = self.on_dismiss.as_mut() {
+                            on_dismiss(ctx);
+                        }
+                    }
                     EventResult::Handled
                 }
                 PointerPhase::Cancel => {
-                    // A Cancel never touches state — just clear the drag flag.
-                    self.drag_active = false;
+                    // A `Cancel` arm never touches state — clear the drag flag
+                    // and, if it had actually moved, spring back open.
+                    self.drag_captured = false;
+                    if self.drag_moved {
+                        self.spring_to(SPRING_KICK);
+                    }
                     EventResult::Handled
                 }
                 PointerPhase::Down => EventResult::Handled,
@@ -535,12 +789,8 @@ impl Widget for BottomSheetWidget {
             match p.phase {
                 PointerPhase::Up => {
                     let released_outside = !self.panel.contains(p.position);
-                    if self.dismissable
-                        && self.scrim_down_outside
-                        && released_outside
-                        && let Some(on_dismiss) = self.on_dismiss.as_mut()
-                    {
-                        on_dismiss(ctx);
+                    if self.dismissable && self.scrim_down_outside && released_outside {
+                        self.fire_dismiss(ctx, -SPRING_KICK);
                     }
                     self.scrim_captured = false;
                     EventResult::Handled
@@ -564,9 +814,9 @@ impl Widget for BottomSheetWidget {
                     && self.dismissable
                     && key_event.key == Key::Named(NamedKey::Escape)
                     && !self.content.is_focused()
-                    && let Some(on_dismiss) = self.on_dismiss.as_mut()
+                    && self.on_dismiss.is_some()
                 {
-                    on_dismiss(ctx);
+                    self.fire_dismiss(ctx, -SPRING_KICK);
                     return EventResult::Handled;
                 }
                 // Everything else focus-routed goes to the content.
@@ -587,8 +837,12 @@ impl Widget for BottomSheetWidget {
                     // A Down in the handle strip begins a drag — primary only:
                     // a secondary press drags nothing.
                     if presses(p) && self.handle_target.contains(p.position) {
-                        self.drag_active = true;
+                        self.drag_captured = true;
                         self.drag_start_y = p.position.y;
+                        self.drag_from = self.progress;
+                        self.drag_moved = false;
+                        self.tracker.clear();
+                        self.tracker.record(self.event_time_ms(), p.position.y);
                         ctx.capture_pointer();
                         return EventResult::Handled;
                     }
@@ -633,7 +887,6 @@ impl Widget for BottomSheetWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::FrameTime;
     use frust::NavigatorView;
     use frust::TransitionSpec;
     use frust::authoring::text::TextContext;
@@ -693,68 +946,114 @@ mod tests {
         }
     }
 
+    /// Drive `w` through a generous, bounded schedule of `paint` calls (each
+    /// seeded with an advancing [`FrameTime`] via [`PaintCtx::for_test`])
+    /// until its spring settles — every test below that needs the sheet at
+    /// rest calls this first, since `layout`/`paint` position the panel by
+    /// `progress`, and `progress` only reaches its target once enough spring
+    /// frames have run (the [module docs](super)' "first frame is invisible"
+    /// contract).
+    fn settle(w: &mut BottomSheetWidget, area: Size) {
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+        for i in 0..40u64 {
+            let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(i * 20));
+            w.paint(&mut pctx, &mut Recorder::default());
+            if !w.anim.is_animating() {
+                return;
+            }
+        }
+        panic!("sheet spring failed to settle within the test bound");
+    }
+
+    /// Advance `w`'s own clock by `delta_ms` from wherever it currently sits
+    /// (`w.last_frame_time`, most recently stamped by `settle`) via a no-op
+    /// `paint` — the velocity tests below need at least one clock tick
+    /// between a `Down` and a `Move` for `VelocityTracker` to read a real,
+    /// non-zero speed (a pointer event carries no timestamp of its own, and a
+    /// hardcoded absolute `FrameTime` here would regress *behind*
+    /// `settle`'s own advancing clock, corrupting the tracker's window).
+    fn tick(w: &mut BottomSheetWidget, area: Size, delta_ms: u64) {
+        let next_ms = w.last_frame_time.as_nanos() / 1_000_000 + delta_ms;
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(next_ms));
+        w.paint(&mut pctx, &mut Recorder::default());
+    }
+
     #[test]
-    fn layout_anchors_panel_to_bottom_with_handle_strip() {
+    fn layout_starts_fully_offscreen_before_the_entrance_settles() {
         let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let area = Size::new(400.0, 600.0);
         let size = w.layout(&mut lctx, &BoxConstraints::tight(area));
         assert_eq!(size, area, "the sheet fills the whole area (scrim)");
+        // `progress` starts at 0.0 (build default) — the panel sits fully
+        // below the fold until the first `paint` kicks the entrance spring.
+        assert_eq!(w.panel.y0, area.height);
+    }
+
+    #[test]
+    fn layout_anchors_panel_to_bottom_with_handle_strip_once_settled() {
+        let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
+        let mut w = build(&view);
+        let area = Size::new(400.0, 600.0);
+        settle(&mut w, area);
 
         // Panel: full width, bottom-anchored, sized to content + handle strip.
         assert_eq!(w.panel.x0, 0.0);
         assert_eq!(w.panel.x1, area.width);
-        assert_eq!(w.panel.y1, area.height, "panel bottom is the screen edge");
-        assert_eq!(w.panel.height(), HANDLE_TOUCH_TARGET + 200.0);
+        assert!(
+            (w.panel.y1 - area.height).abs() < 1e-6,
+            "panel bottom is the screen edge once at rest"
+        );
+        assert!((w.panel.height() - (HANDLE_TOUCH_TARGET + 200.0)).abs() < 1e-6);
         // The handle strip is the top 48dp of the panel.
         assert_eq!(w.handle_target.y0, w.panel.y0);
         assert_eq!(w.handle_target.height(), HANDLE_TOUCH_TARGET);
         // Content sits below the handle strip.
-        assert_eq!(w.content.origin().y, w.panel.y0 + HANDLE_TOUCH_TARGET);
+        assert!((w.content.origin().y - (w.panel.y0 + HANDLE_TOUCH_TARGET)).abs() < 1e-6);
     }
 
     #[test]
-    fn unthemed_paint_draws_scrim_panel_and_handle() {
+    fn unthemed_paint_draws_scrim_panel_and_handle_once_settled() {
         let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
         let mut w = build(&view);
-        let mut lctx = LayoutCtx::new();
         let area = Size::new(400.0, 600.0);
-        w.layout(&mut lctx, &BoxConstraints::tight(area));
+        settle(&mut w, area);
 
         let mut rec = Recorder::default();
-        let mut pctx = PaintCtx::new(Point::ZERO, area);
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(1000));
         w.paint(&mut pctx, &mut rec);
 
-        // Scrim: full-area fill at 32% of the fallback scrim.
+        // Scrim: full-area fill at 32% of the fallback scrim, fully faded in
+        // now that the sheet is at rest.
         assert_eq!(rec.rects[0].1, area);
-        assert_eq!(rec.rects[0].2, with_alpha(SCRIM, SCRIM_ALPHA));
+        assert_eq!(rec.rects[0].2, scrim(None));
         // Panel: a filled top-rounded path in the fallback container color.
-        assert_eq!(rec.paths, vec![CONTAINER]);
+        assert_eq!(rec.paths, vec![container(None, OverlayContainer::Low)]);
         // Handle: a 32×4 rounded indicator in the fallback handle color.
         let handle = rec
             .rrects
             .iter()
             .find(|(_, s, _, _)| *s == Size::new(HANDLE_WIDTH, HANDLE_HEIGHT))
             .expect("the drag handle is painted");
-        assert_eq!(handle.3, HANDLE_COLOR);
+        assert_eq!(handle.3, on_surface_variant(None));
     }
 
     #[test]
-    fn themed_paint_resolves_r16_tokens() {
+    fn themed_paint_resolves_tokens_once_settled() {
         let theme = crate::baseline();
         let scheme = theme.scheme();
         let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
         let mut w = build(&view);
-        let mut lctx = LayoutCtx::new();
         let area = Size::new(400.0, 600.0);
-        w.layout(&mut lctx, &BoxConstraints::tight(area));
+        settle(&mut w, area);
 
         let mut rec = Recorder::default();
-        let mut pctx = PaintCtx::new(Point::ZERO, area).with_theme(&theme);
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(1000)).with_theme(&theme);
         w.paint(&mut pctx, &mut rec);
 
-        assert_eq!(rec.rects[0].2, with_alpha(scheme.scrim, SCRIM_ALPHA));
+        assert_eq!(rec.rects[0].2, scrim(Some(&theme)));
         assert_eq!(rec.paths, vec![scheme.surface_container_low]);
         let handle = rec
             .rrects
@@ -764,7 +1063,83 @@ mod tests {
         assert_eq!(handle.3, scheme.on_surface_variant);
     }
 
-    // --- Drag-to-dismiss (threshold-simple). ---
+    // --- Spring entrance/exit pinned. ---
+
+    #[test]
+    fn the_entrance_progresses_smoothly_rather_than_jumping() {
+        let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
+        let mut w = build(&view);
+        let area = Size::new(400.0, 600.0);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        // First paint: seeds the spring, but only seeds the clock too (zero
+        // delta) — progress stays exactly where it started.
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(0));
+        w.paint(&mut pctx, &mut Recorder::default());
+        assert_eq!(w.progress, 0.0, "the first frame is invisible");
+        assert!(w.anim.is_animating());
+
+        // A handful of frames in, the panel has moved but not yet arrived —
+        // a real (spring) ramp, not an instant snap.
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(80));
+        w.paint(&mut pctx, &mut Recorder::default());
+        assert!(
+            w.progress > 0.0 && w.progress < 1.2,
+            "mid-flight progress {} should sit between the endpoints (allowing \
+             a modest expressive overshoot)",
+            w.progress
+        );
+
+        settle(&mut w, area);
+        assert!((w.progress - 1.0).abs() < 1e-6, "settles exactly at rest");
+    }
+
+    #[test]
+    fn a_dismiss_trigger_springs_the_panel_closed_over_several_frames() {
+        let view: BottomSheetView<Flag> =
+            bottom_sheet(leaf_any_flag(300.0, 200.0)).on_dismiss(|s: &mut Flag| s.dismissed += 1);
+        let area = Size::new(400.0, 600.0);
+        let mut counter = 0u64;
+        let mut w = View::<Flag>::build(&view, &mut BuildCtx::new(&mut counter));
+        settle(&mut w, area);
+        assert_eq!(w.progress, 1.0);
+
+        // A scrim tap outside the panel dismisses immediately (state-touching,
+        // per the module docs) but also kicks a real closing spring — the
+        // widget doesn't just vanish or snap to 0 on the spot.
+        let mut state = Flag::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 1);
+        // The closing spring is kicked (`self.anim`), but `progress` itself
+        // only moves once a `paint` advances it — the same "first frame is
+        // invisible" contract the entrance carries (`event` has no clock of
+        // its own to advance against).
+        assert!(w.anim.is_animating());
+        assert_eq!(w.progress, 1.0, "progress hasn't moved yet — no paint ran");
+
+        // Left mounted (the standalone/`Stack` use case), it settles fully
+        // closed rather than snapping — and visibly moves along the way.
+        let mut saw_partial_progress = false;
+        for i in 0..40u64 {
+            let mut pctx = PaintCtx::for_test(Point::ZERO, area, ft(i * 20));
+            w.paint(&mut pctx, &mut Recorder::default());
+            if w.progress > 1e-3 && w.progress < 1.0 - 1e-3 {
+                saw_partial_progress = true;
+            }
+            if !w.anim.is_animating() {
+                break;
+            }
+        }
+        assert!(
+            saw_partial_progress,
+            "the exit is a real ramp, not an instant snap to 0"
+        );
+        assert!((w.progress - 0.0).abs() < 1e-6);
+    }
+
+    // --- Drag-to-dismiss (interactive, position + velocity). ---
 
     #[derive(Default)]
     struct Flag {
@@ -788,6 +1163,18 @@ mod tests {
         let mut w = build_flag(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+        w
+    }
+
+    /// The same fixture, already settled at rest (`progress == 1.0`) — the
+    /// tests below that assert *live position-tracking* need a clean open
+    /// baseline to scrub down from.
+    fn settled_flag_sheet() -> BottomSheetWidget {
+        let view: BottomSheetView<Flag> =
+            bottom_sheet(leaf_any_flag(300.0, 200.0)).on_dismiss(|s: &mut Flag| s.dismissed += 1);
+        let mut counter = 0u64;
+        let mut w = View::<Flag>::build(&view, &mut BuildCtx::new(&mut counter));
+        settle(&mut w, Size::new(400.0, 600.0));
         w
     }
 
@@ -821,13 +1208,67 @@ mod tests {
     }
 
     #[test]
+    fn mid_drag_progress_tracks_the_pointer() {
+        let mut w = settled_flag_sheet();
+        let mut state = Flag::default();
+        let handle_y = w.panel.y0 + 10.0;
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        assert_eq!(w.progress, 1.0, "no movement yet");
+
+        // Past `TOUCH_SLOP` (18px): the panel starts following the finger.
+        let extent = w.panel.height();
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 40.0),
+        );
+        let expected = (1.0 - 40.0 / extent).clamp(0.0, 1.0);
+        assert!(
+            (w.progress - expected).abs() < 1e-6,
+            "progress {} should track the 40px drag exactly ({} expected)",
+            w.progress,
+            expected
+        );
+        assert_eq!(state.dismissed, 0, "still mid-drag — nothing decided yet");
+
+        // Moving back up retraces the same live mapping.
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 10.0),
+        );
+        let expected = (1.0 - 10.0 / extent).clamp(0.0, 1.0);
+        assert!((w.progress - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_sub_slop_move_does_not_move_the_panel() {
+        let mut w = settled_flag_sheet();
+        let mut state = Flag::default();
+        let handle_y = w.panel.y0 + 10.0;
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 10.0), // < TOUCH_SLOP (18)
+        );
+        assert_eq!(w.progress, 1.0, "below the slop the panel doesn't move yet");
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 200.0, handle_y + 10.0),
+        );
+        assert_eq!(state.dismissed, 0, "a tap-shaped release does not dismiss");
+    }
+
+    #[test]
     fn handle_drag_past_threshold_dismisses() {
         let mut w = laid_out_flag_sheet();
         // panel height = 48 + 200 = 248; threshold = 124.
         let handle_y = w.panel.y0 + 10.0; // inside the 48dp handle strip
         let mut state = Flag::default();
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
-        assert!(w.drag_active);
+        assert!(w.drag_captured);
         dispatch(
             &mut w,
             &mut state,
@@ -856,14 +1297,95 @@ mod tests {
     }
 
     #[test]
-    fn scrim_tap_outside_panel_dismisses() {
-        let mut w = laid_out_flag_sheet();
+    fn a_drag_released_under_the_dismiss_threshold_springs_back_open() {
+        let mut w = settled_flag_sheet();
         let mut state = Flag::default();
-        // (5, 5) is in the top scrim, above the bottom-anchored panel.
-        assert!(!w.panel.contains(Point::new(5.0, 5.0)));
-        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
-        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
-        assert_eq!(state.dismissed, 1);
+        let handle_y = w.panel.y0 + 10.0;
+        let extent = w.panel.height();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        // 30px is past TOUCH_SLOP but well short of the 50%-of-extent
+        // dismiss threshold (124px on a 248px-tall panel).
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 30.0),
+        );
+        assert!(w.progress < 1.0 && w.progress > DRAG_DISMISS_FRACTION);
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 200.0, handle_y + 30.0),
+        );
+        assert_eq!(state.dismissed, 0, "under the threshold — stays open");
+        assert!(
+            w.anim.is_animating(),
+            "a real spring leg back toward 1.0 is running, not an instant snap"
+        );
+        let _ = extent;
+    }
+
+    #[test]
+    fn a_fast_downward_flick_dismisses_regardless_of_position() {
+        let mut w = settled_flag_sheet();
+        let mut state = Flag::default();
+        let handle_y = w.panel.y0 + 10.0;
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        // Advance the clock 16ms between samples so the velocity tracker has
+        // a real, non-zero reading — a small (30px) but *fast* downward move.
+        tick(&mut w, Size::new(400.0, 600.0), 16);
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 30.0),
+        );
+        // Position alone (30px of a 248px extent) would stay open, but the
+        // ~1875px/s downward flick overrides it.
+        assert!(w.progress > DRAG_DISMISS_FRACTION);
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 200.0, handle_y + 30.0),
+        );
+        assert_eq!(state.dismissed, 1, "a fast downward flick dismisses");
+    }
+
+    #[test]
+    fn a_fast_upward_flick_stays_open_regardless_of_position() {
+        let mut w = settled_flag_sheet();
+        let mut state = Flag::default();
+        let handle_y = w.panel.y0 + 10.0;
+        let area = Size::new(400.0, 600.0);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        // Drag well past the dismiss threshold first…
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 200.0),
+        );
+        assert!(w.progress < DRAG_DISMISS_FRACTION);
+        // …then flick back upward. `VelocityTracker` reads off a trailing
+        // window (`VELOCITY_WINDOW_MS`, 100ms), not an instantaneous
+        // derivative, so age the downward sample out of that window first —
+        // otherwise the still-in-window `Down`→+200 leg would dominate the
+        // net reading despite the recent upward motion.
+        tick(&mut w, area, 150);
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 150.0),
+        );
+        tick(&mut w, area, 16);
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 100.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 200.0, handle_y + 100.0),
+        );
+        assert_eq!(state.dismissed, 0, "a fast upward flick stays open");
     }
 
     // --- `dismissable(false)` gates the scrim + drag together. ---
@@ -899,6 +1421,10 @@ mod tests {
             state.dismissed, 0,
             "dismissable(false): a past-threshold drag settles back without firing"
         );
+        assert!(
+            w.anim.is_animating(),
+            "it springs back open rather than staying stuck where the drag left it"
+        );
     }
 
     #[test]
@@ -909,6 +1435,17 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
         assert_eq!(state.dismissed, 0, "dismissable(false) gates the scrim tap");
+    }
+
+    #[test]
+    fn scrim_tap_outside_panel_dismisses() {
+        let mut w = laid_out_flag_sheet();
+        let mut state = Flag::default();
+        // (5, 5) is in the top scrim, above the bottom-anchored panel.
+        assert!(!w.panel.contains(Point::new(5.0, 5.0)));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 1);
     }
 
     // --- Navigator integration: scrim tap pops with an empty result. ---
@@ -971,6 +1508,23 @@ mod tests {
 
     // --- Focus + Escape opt-in. ---
 
+    /// Settle the navigator's own frame loop (a bounded pump of `paint`
+    /// calls) so the sheet's internal entrance spring is fully at rest before
+    /// a test relies on rest-position geometry (`handle_y` computed from the
+    /// sheet's fixed panel height) — the entrance now lives inside the widget
+    /// rather than riding the navigator's own page transition, so it needs
+    /// its own settle pass here too.
+    fn settle_navigator_frame<State, V>(root: &mut RenderRoot<State, V>, area: Size)
+    where
+        V: frust::authoring::View<State>,
+    {
+        let mut tcx = TextContext::new();
+        for i in 0..40u64 {
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(i * 20));
+        }
+    }
+
     #[test]
     fn escape_after_a_short_handle_press_claims_focus_and_dismisses_via_navigator() {
         let controller: NavigatorController<NavState> = NavigatorController::new();
@@ -1005,7 +1559,7 @@ mod tests {
             );
         }
         root.rebuild(&mut app, &mut state);
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        settle_navigator_frame(&mut root, area);
 
         // panel height = 48 (handle strip) + 200 (content) = 248; panel_y = 352.
         // A short handle-strip drag (well under the 124px dismiss threshold)
@@ -1167,8 +1721,7 @@ mod tests {
         let area = Size::new(400.0, 600.0);
 
         root.rebuild(&mut field_sheet_logic, &mut state);
-        let mut tcx = TextContext::new();
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        settle_navigator_frame(&mut root, area);
 
         // Focus the field with a tap inside the content slot (panel height
         // 248, so content spans y in [400, 600] — well clear of the handle
@@ -1239,7 +1792,7 @@ mod tests {
             );
         }
         root.rebuild(&mut app, &mut state);
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        settle_navigator_frame(&mut root, area);
 
         // A short handle-strip press claims focus (unaffected by
         // `dismissable`), but the subsequent Escape is gated.
@@ -1287,11 +1840,10 @@ mod tests {
             },
         );
         root.rebuild(&mut app, &mut state);
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
-        // Settle the SlideUp entrance (300ms M3 default).
-        for t in [0u64, 100, 200, 300, 350] {
-            root.paint(&mut Recorder::default(), ft(t));
-        }
+        // Settle the sheet's own internal spring entrance (it no longer rides
+        // a navigator page transition — the entrance moved inside the widget,
+        // see the module docs' *Spring entrance/exit* section).
+        settle_navigator_frame(&mut root, area);
 
         assert!(
             controller.back_interest(),
@@ -1312,7 +1864,7 @@ mod tests {
         // here BEFORE any further rebuild (the honest contract; the old test
         // hand-called `rebuild()` here, hiding exactly this gap). The stack is
         // still unchanged: the pop is enqueued, not yet drained.
-        let outcome = root.paint(&mut Recorder::default(), ft(400));
+        let outcome = root.paint(&mut Recorder::default(), ft(900));
         assert!(
             outcome.needs_frame,
             "the back-dismiss paint schedules the frame that drains its enqueued pop"
@@ -1331,7 +1883,7 @@ mod tests {
         loop {
             root.rebuild(&mut app, &mut state);
             root.layout_with_text(area, &mut tcx as &mut dyn Any);
-            let outcome = root.paint(&mut Recorder::default(), ft(500 + frames * 100));
+            let outcome = root.paint(&mut Recorder::default(), ft(1000 + frames * 100));
             frames += 1;
             assert!(
                 frames < 20,
@@ -1376,10 +1928,7 @@ mod tests {
             },
         );
         root.rebuild(&mut app, &mut state);
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
-        for t in [0u64, 100, 200, 300, 350] {
-            root.paint(&mut Recorder::default(), ft(t));
-        }
+        settle_navigator_frame(&mut root, area);
 
         assert!(
             controller.back_interest(),
@@ -1390,8 +1939,8 @@ mod tests {
         root.rebuild(&mut app, &mut state);
         assert_eq!(controller.depth(), 2, "Veto leaves the stack unchanged");
 
-        root.paint(&mut Recorder::default(), ft(450));
-        root.paint(&mut Recorder::default(), ft(900));
+        root.paint(&mut Recorder::default(), ft(950));
+        root.paint(&mut Recorder::default(), ft(1400));
         assert!(
             state.results.is_empty(),
             "a non-dismissable sheet never pops on a back request"
