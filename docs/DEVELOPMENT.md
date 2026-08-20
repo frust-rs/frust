@@ -65,7 +65,8 @@ CPUs to trip the iOS launch watchdog. They stay hand-synced via that tripwire (`
 test -p frust-cli --test profile_sync`); a `[profile.dev.package."*"]` wildcard
 (`opt-level = 1`) widens every other dependency's debug optimization the same way.
 
-**Release-profile hardening.** `[profile.release]` (root, template, huddle) sets `lto =
+**Release-profile hardening.** `[profile.release]` (the same five hand-synced
+manifests) sets `lto =
 "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
 `opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a
 5% bar against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh`
