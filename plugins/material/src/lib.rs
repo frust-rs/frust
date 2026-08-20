@@ -79,6 +79,7 @@ pub mod overlay;
 mod press;
 pub mod progress;
 pub mod radio;
+pub mod refresh_indicator;
 pub mod segmented_button;
 pub mod shapes;
 pub mod sheet;
@@ -175,6 +176,7 @@ pub use progress::{
     linear_progress, linear_wavy_progress,
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
+pub use refresh_indicator::{RefreshIndicatorView, RefreshIndicatorWidget, refresh_indicator};
 pub use segmented_button::{
     MAX_SEGMENTS, MIN_SEGMENTS, Segment, SegmentedButton, SegmentedButtonView,
     SegmentedButtonWidget, segment, segmented_button,
