@@ -182,7 +182,9 @@ toolkit they all build against). Their shared charter:
   every other dismiss gesture takes, a back-dismiss tier `frust-shadcn`'s modal host lacks.
 - **Both plugins' overlay hosts animate their exit, not just their entrance.** Each `modal` host
   stages every dismiss (scrim tap, Escape, close button, drag, and — material only — back) as a
-  reverse ramp and fires the app's dismissal only once it settles; `frust-shadcn`'s drawer
+  reverse ramp and fires the app's dismissal only once it settles — material's staged pop is
+  identity-guarded against the navigator stack and refuses to fire (ramping the surface back open
+  instead) if the stack moved during the ramp; `frust-shadcn`'s drawer
   additionally supports drag-to-close on all four pinned edges with a velocity-flick threshold and
   Base UI-style snap points. Each `anchored` host takes the same shape through a builder-level
   `.open(bool)`: an app that wants an exit ramp must keep the host mounted and toggle `open` rather

@@ -2977,6 +2977,51 @@ affordance (wired to the unstaged pop, doc-noted as such).
 
 ---
 
+### `material-staged-pop-one-frame-race` — a staged modal/sheet pop's identity guard still has a one-frame race window
+
+**Observed**: `StagedPop` (`plugins/material/src/overlay/modal.rs`, shared by `sheet.rs`'s bottom
+sheet) arms itself against `NavigatorController::depth()` when an exit stages and refuses the
+deferred pop if depth moved by the time the ramp settles — the p3r2 closure fix that narrowed a
+wrong-page-pop from the whole ~300ms exit ramp down to a single frame. Depth is still read as
+published at the *last rebuild*, though: a push enqueued after the rebuild immediately preceding
+the settling paint, and before that paint runs, is invisible to the guard. The same wrong-page-pop
+the guard exists to prevent can still happen in that narrowed window.
+
+**Applies to**: any `frust_material` app dismissing a dialog/alert dialog/bottom/side sheet/
+full-screen search/picker while racing an app-driven push (deep link, async completion) against
+that dismissal's settle.
+
+**Why accepted / fix direction**: `NavigatorController` publishes no signal a widget can observe
+between rebuild and paint — `depth()` and `route_generation()` share the same publish-at-last-
+rebuild timing, so neither closes the gap from inside `StagedPop`. A real fix is a navigator-level
+seam for identity-checked pops (e.g. `pop_if`/`pop_route(id)`) in `frust-widgets` that resolves
+identity at the pop itself rather than off a paint-time snapshot.
+
+**Evidence**: `plugins/material/src/overlay/modal.rs`'s `StagedPop` doc comment ("Both share the
+same advisory staleness … narrows the exposure … does not erase it").
+
+---
+
+### `material-sheet-dismissal-pop-is-staged` — a modal/sheet dismissal delivers the navigator pop ~250-300ms after the gesture, not immediately
+
+**Observed**: every dismiss trigger on `frust_material::overlay::modal`/`sheet` (scrim tap, close
+button, handle tap, drag commit, Escape, Android back) stages an exit ramp and fires the navigator
+pop only once that ramp settles, at the M3 exit-motion durations (`MaterialMotion::SHORT_4`/
+`LONG_2`, 200-500ms scaled by remaining travel). An app timing work off the dismiss gesture — e.g.
+firing a side effect from `on_result` — sees that delay rather than an immediate pop.
+
+**Applies to**: any `frust_material` app wiring `on_result`/pop-result handling on a modal or sheet
+push.
+
+**Why accepted**: deliberate design, not a bug — the exit animation owns the pop timing so the
+navigator page (and its input barrier) stays mounted for the whole reverse ramp; popping on the
+gesture instead would tear the page down mid-animation.
+
+**Evidence**: `plugins/material/src/overlay/modal.rs` module doc's "Exit motion, and why the close
+hook is state-free" section; `plugins/material/src/sheet.rs`'s equivalent staged-exit machine.
+
+---
+
 ### `material-refresh-no-hold-offset-during-refresh` — `ScrollView` has no seam to pin scroll position while a pull-to-refresh is in flight
 
 **Observed**: `frust_material::refresh_indicator` overlays the pull indicator at its resting offset
