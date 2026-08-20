@@ -120,8 +120,8 @@ use frust::authoring::text::{FontWeight, LineHeight, TextContext, TextLayout, Te
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size,
-    View, Widget, any, build_child, rebuild_child, rebuild_children, route_event_single,
-    teardown_child, visit_children,
+    View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
+    route_event_single, teardown_child, visit_children,
 };
 use frust::{FrameTime, GestureDetector, SizedBox, Theme};
 
@@ -987,18 +987,11 @@ impl Widget for RichPanelWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if event.is_broadcast() {
-            for pod in &mut self.action_pods {
-                pod.event_child(ctx, event);
-            }
-            return EventResult::Ignored;
-        }
-        for pod in &mut self.action_pods {
-            if pod.event_child(ctx, event) == EventResult::Handled {
-                return EventResult::Handled;
-            }
-        }
-        EventResult::Ignored
+        // `route_event` supplies what a hand-rolled first-Handled-wins loop
+        // skips: the broadcast fan-out (folded in below), the `pod.contains`
+        // hit test, focus-path gating for `Key`/`Ime`, and capture (`is_active`)
+        // bookkeeping — see `docs/CODE_STANDARDS.md`'s Interaction Semantics.
+        route_event(&mut self.action_pods, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -1371,6 +1364,114 @@ mod tests {
 
         let outcome = root.event(&mut state, &down(5.0, 5.0));
         assert!(outcome.handled, "the host's own light dismiss consumes it");
+    }
+
+    // ---- Rich: action-row routing (`route_event`, not a hand-rolled loop) ---
+    //
+    // Regression coverage for `RichPanelWidget::event` forwarding via
+    // `route_event` instead of a first-`Handled`-wins loop over
+    // `ChildPod::event_child` — the loop skipped `route_event`'s hit test,
+    // capture bookkeeping, and per-child arming, so a press anywhere in the
+    // panel armed only action #0 and any later action was unreachable.
+
+    #[derive(Default)]
+    struct Presses {
+        fired: Vec<usize>,
+    }
+
+    /// A two-(or `count`-)action `RichPanelWidget`, laid out at a fixed width —
+    /// real post-layout action-pod bounds, not hardcoded metrics.
+    fn rich_panel_with_actions(count: usize) -> RichPanelWidget {
+        let actions: Vec<TooltipAction<Presses>> = (0..count)
+            .map(|i| {
+                tooltip_action(format!("Action {i}"), move |s: &mut Presses| {
+                    s.fired.push(i)
+                })
+            })
+            .collect();
+        let view: RichPanel<Presses> = RichPanel {
+            title: Some("Title".into()),
+            message: "Body copy long enough to occupy real space above the actions".into(),
+            actions,
+        };
+        let mut counter = 0u64;
+        let mut w = View::<Presses>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(400.0, 400.0)));
+        w
+    }
+
+    fn dispatch_rich(
+        w: &mut RichPanelWidget,
+        state: &mut Presses,
+        phase: PointerPhase,
+        pos: AuthoringPoint,
+    ) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(400.0, 400.0));
+        w.event(
+            &mut ctx,
+            &InputEvent::Pointer(PointerEvent {
+                phase,
+                position: pos,
+                button: PointerButton::Primary,
+            }),
+        )
+    }
+
+    /// A point inside the panel's title/body region, above every action pod.
+    fn body_point(w: &RichPanelWidget) -> AuthoringPoint {
+        AuthoringPoint::new(RICH_PAD + 1.0, w.body_origin.y + 1.0)
+    }
+
+    /// The center of action pod `index`, post-layout.
+    fn action_center(w: &RichPanelWidget, index: usize) -> AuthoringPoint {
+        let pod = &w.action_pods[index];
+        let (o, s) = (pod.origin(), pod.size());
+        AuthoringPoint::new(o.x + s.width / 2.0, o.y + s.height / 2.0)
+    }
+
+    #[test]
+    fn a_press_on_the_body_fires_no_action_and_captures_nothing() {
+        let mut w = rich_panel_with_actions(2);
+        let mut state = Presses::default();
+        let p = body_point(&w);
+        dispatch_rich(&mut w, &mut state, PointerPhase::Down, p);
+        dispatch_rich(&mut w, &mut state, PointerPhase::Up, p);
+        assert!(state.fired.is_empty(), "no action pod sits under the body");
+        assert!(
+            w.action_pods.iter().all(|pod| !pod.is_active()),
+            "nothing captured a press outside every action's own bounds"
+        );
+    }
+
+    #[test]
+    fn press_release_on_the_second_action_fires_it() {
+        let mut w = rich_panel_with_actions(2);
+        let mut state = Presses::default();
+        let p = action_center(&w, 1);
+        dispatch_rich(&mut w, &mut state, PointerPhase::Down, p);
+        assert!(
+            w.action_pods[1].is_active(),
+            "the hit-tested pod captures the press, not action #0"
+        );
+        dispatch_rich(&mut w, &mut state, PointerPhase::Up, p);
+        assert_eq!(state.fired, vec![1], "action #1 fires — previously dead");
+    }
+
+    #[test]
+    fn down_on_body_up_over_action_0_does_not_fire() {
+        let mut w = rich_panel_with_actions(2);
+        let mut state = Presses::default();
+        let down_p = body_point(&w);
+        let up_p = action_center(&w, 0);
+        dispatch_rich(&mut w, &mut state, PointerPhase::Down, down_p);
+        dispatch_rich(&mut w, &mut state, PointerPhase::Up, up_p);
+        assert!(
+            state.fired.is_empty(),
+            "up-inside without down-inside must not fire (the press contract)"
+        );
     }
 
     // ---- Attribution smoke: MaterialTokens-only ------------------------------
