@@ -3065,26 +3065,36 @@ scale/center its glyph inside its own laid-out box. At *this* call site's `Mediu
 (`self.size.icon_size()` = 24dp) the fix is genuinely a no-op, since the icon's own default
 configured size is also 24dp — but that is a fact about the `Medium` tier only, not "every current
 caller." The fix **does** change rendering at every non-natural tier (box ≠ the caller's configured
-24dp default) across every sized-component family that tight-constrains a caller-supplied
-default-24 icon and is reachable via the demo's live Size knobs: [`fab`] (`FabSize`,
-tight-constrained at `fab.rs:860`) — Small/Medium 24dp (natural), Large 36dp (`LARGE_ICON`,
-`fab.rs:182`) non-natural; `button/core.rs` (`ButtonSize::metrics`, `:101-129`, tight-constrained at
-`:838`) — Xs/Sm 20dp, Md 24dp (natural), Lg 32dp, Xl 40dp, all four non-`Md` tiers non-natural;
-`toggle_button.rs` (`ToggleButtonSize::metrics`, `:259-283`, tight-constrained at `:1466`) — Sm
-20dp, Md 24dp (natural), Lg 32dp non-natural; `icon_button.rs` (`icon_glyph_size`, `:226-233`,
-tight-constrained at `:1060`) — Xs 20dp, Sm/Md 24dp (natural), Lg 32dp, Xl 40dp non-natural. At
-every non-natural tier the fix now paints a glyph scaled and centered to that tier's box instead of
-the pre-fix 24dp corner-anchored placement — the demo's fabs/buttons/button_group/icon_buttons
-playground pages each expose the relevant Size knob live (e.g.
+24dp default) in the sized-component families verified below — the product of a full sweep of every
+production `BoxConstraints::tight` icon site in `crates/frust-widgets` and the four design-system
+plugins (conductor + phase-6 review, 2026-08-21), recorded here as the verified set rather than a
+claim of universality: `fab` (`FabSize`, tight-constrained at `fab.rs:860`) — Small/Medium 24dp
+(natural), Large 36dp (`LARGE_ICON`, `fab.rs:182`) non-natural; `button/core.rs`
+(`ButtonSize::metrics`, `:101-129`, tight-constrained at `:838`) — Xs/Sm 20dp, Md 24dp (natural),
+Lg 32dp, Xl 40dp, all four non-`Md` tiers non-natural; `toggle_button.rs`
+(`ToggleButtonSize::metrics`, `:259-283`, tight-constrained at `:1466`) — Sm 20dp, Md 24dp
+(natural), Lg 32dp non-natural; `icon_button.rs` (`icon_glyph_size`, `:226-233`, tight-constrained
+at `:1060`) — Xs 20dp, Sm/Md 24dp (natural), Lg 32dp, Xl 40dp non-natural; `split_button.rs`
+(`SplitButtonSize::icon_size`, `:355-362`, tight-constrained at `:1438`, around the caller-supplied
+`leading_icon`) — Xs 20dp, Sm/Md 24dp (natural), Lg 32dp, Xl 40dp non-natural. Sites the same sweep
+verified NATURAL and therefore unaffected, recorded so the sweep is auditable: `navigation_rail.rs`
+(`ICON_SIZE` 24, tight at `:1299`/`:1335`), `fab.rs`'s extended path (`EXTENDED_ICON` 24, `:214`),
+`fab_menu.rs`'s item icons (`ITEM_ICON` 24, `:261`), and baseline
+`crates/frust-widgets/src/icon_button.rs` (its `mark_view` sizes its own icon to the constraint at
+`:111`, so box and configured size match by construction). At every non-natural tier the fix now
+paints a glyph scaled and centered to that tier's box instead of the pre-fix 24dp corner-anchored
+placement — the demo's fabs/buttons/button_group/icon_buttons/split_button playground pages each
+expose the relevant Size knob live (e.g.
 `examples/material3-demo/src/pages/playground/do_/fabs.rs:84`'s `any(icon(icons::ADD))` under a
-selectable `FabSize::Large`). This is believed net-positive — the same glyph-vs-box contract
+selectable `FabSize::Large`; `do_/split_button.rs:303`'s `.leading_icon(|| any(icon(icons::SAVE)))`
+with all five tiers offered). This is believed net-positive — the same glyph-vs-box contract
 violation the fix closes, corrected everywhere it recurs, not only at the FAB — but **unverified on
 device**: the widened re-verify scope is recorded against `G12` in the phase's device-gate ledger
 (`workflow/reviews/features/material-3-expressive-gate/GATE.md`). None of this touches the
 `FabWidget` mechanism above: that mismatch is entirely `FabWidget`'s own `container` variable, which
 stays the nominal tier size regardless of `bc`, independent of whatever the icon inside it is doing.
-The Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
-was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
+The Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride
+it — was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
 its own morph via `shapes::Morph` instead of consuming that seam, specifically to avoid reproducing
 this degrade on a second surface. That leaves `corner_radius` with zero consumers in this crate
 today — resolved as **keep** (see *Why accepted*), not a signal to remove it.
