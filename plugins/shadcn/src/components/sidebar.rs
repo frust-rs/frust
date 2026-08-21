@@ -85,7 +85,7 @@ use frust::authoring::{
 };
 use frust::{
     AnimationController, Axis, Column, CrossAxisAlignment, CursorIcon, Curve, EdgeInsets, FlexView,
-    Padding, SizedBox, Theme, flexible, inflexible, scroll_view,
+    Padding, RubberBand, SizedBox, Theme, flexible, inflexible, scroll_view,
 };
 
 use crate::components::input::FALLBACK;
@@ -1256,9 +1256,12 @@ pub fn sidebar_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<
 /// Create the scrolling middle band: `flex-1 gap-2 overflow-auto`.
 ///
 /// Scrolling itself is the framework's own [`frust::scroll_view`]; this slot
-/// contributes the stacking and the gap.
+/// contributes the stacking and the gap. Pinned to [`RubberBand`] rather than
+/// the workspace's platform-adaptive default — the same deliberate,
+/// desktop-first choice [`scroll_area`](crate::components::scroll_area)
+/// documents.
 pub fn sidebar_content<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
-    any(scroll_view(Column(interleave(children, SLOT_GAP))))
+    any(scroll_view(Column(interleave(children, SLOT_GAP))).physics(RubberBand::new()))
 }
 
 /// Create a group: `flex-col p-2`, the unit a label plus a menu lives in.

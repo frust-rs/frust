@@ -15,6 +15,17 @@
 //! viewport are all its behavior, and this widget composes it as its child rather
 //! than reimplementing any of it. What it adds is the *indicator*.
 //!
+//! # A deliberate physics pin, not an inherited default
+//!
+//! [`scroll_area`] installs [`RubberBand`](frust::RubberBand) on the surface
+//! it wraps, not the workspace's platform-adaptive default (bouncing
+//! everywhere but Android) every other `frust::scroll_view` call picks up
+//! automatically. shadcn/ui is a desktop-first, web-derived design language
+//! whose scroll surfaces have never bounced; keeping the flat rubber-band
+//! feel here is a deliberate choice for this catalog, not an oversight in
+//! the platform-adaptive seam. [`ScrollAreaView::physics`] is the opt-out
+//! for a consumer that wants a different physics installed instead.
+//!
 //! # Two honest limits
 //!
 //! - **The indicator is controlled.** `ScrollWidget`'s position is readable only
@@ -30,14 +41,14 @@
 //!   ordinary drag on the surface underneath). Wheel, trackpad and touch drag all
 //!   work, because they are the child's.
 
-use std::rc::Rc;
+use std::cell::{Cell, OnceCell};
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, any,
     build_child, rebuild_child, route_event_single, teardown_child, visit_children,
 };
-use frust::{ScrollInfo, Theme, scroll_view};
+use frust::{RubberBand, ScrollInfo, ScrollPhysics, ScrollView, Theme, scroll_view};
 
 use crate::components::input::FALLBACK;
 
@@ -52,14 +63,28 @@ const THUMB_INSET: f64 = 1.0;
 /// one); this is the port's stated choice.
 const MIN_THUMB_HEIGHT: f64 = 16.0;
 
-/// A view-held, typed scroll-observation callback.
-type OnScroll<State> = Rc<dyn Fn(&mut State, ScrollInfo)>;
-
 /// A declarative shadcn scroll area. See the [module docs](self).
 pub struct ScrollAreaView<State: 'static> {
-    /// The wrapped [`frust::scroll_view`], already carrying the app's
-    /// observation callback (erased once, at construction).
-    scroll: AnyView<State>,
+    /// The wrapped [`frust::scroll_view`], not yet erased: [`ScrollAreaView::physics`]
+    /// still needs to be able to reach in and replace the installed
+    /// [`ScrollPhysics`] before this view is handed to the tree. Every other
+    /// single-child wrapper in this catalog erases its child at construction
+    /// (nothing downstream ever needs to reach back in); this one can't,
+    /// because [`ScrollView::physics`] only takes effect through an owned
+    /// `.physics(...)` call on the (still-concrete) [`ScrollView`] itself —
+    /// once erased into an [`AnyView`], there is no way back in.
+    ///
+    /// `Cell`, not a plain field: [`View::build`]/[`View::rebuild`]/
+    /// [`View::teardown`] only ever get `&self`, so the one-time move into
+    /// [`ScrollAreaView::erased`]'s `any(...)` call has to happen through
+    /// interior mutability rather than ownership.
+    pending: Cell<Option<ScrollView<State>>>,
+    /// The erased form, memoized the first time [`ScrollAreaView::erased`]
+    /// runs and reused for the rest of this view's build/rebuild/teardown
+    /// lifetime — `rebuild`'s `prev` argument needs its *own* already-erased
+    /// form to still be around, which is why this can't just be a local built
+    /// fresh inside `build`/`rebuild`.
+    scroll: OnceCell<AnyView<State>>,
     offset: f64,
     max_offset: f64,
 }
@@ -67,7 +92,9 @@ pub struct ScrollAreaView<State: 'static> {
 /// Wrap `child` in a scroll area, reporting every scroll through
 /// `on_scroll(state, info)`.
 ///
-/// Feed the reported [`ScrollInfo`] back through
+/// Defaults to [`RubberBand`] rather than the workspace's platform-adaptive
+/// physics — see the [module docs](self)' *A deliberate physics pin* — and
+/// feeds the reported [`ScrollInfo`] back through
 /// [`position`](ScrollAreaView::position) to move the thumb — the indicator is
 /// controlled (see the [module docs](self)).
 pub fn scroll_area<State: 'static, V, F>(child: V, on_scroll: F) -> ScrollAreaView<State>
@@ -75,17 +102,31 @@ where
     V: View<State>,
     F: Fn(&mut State, ScrollInfo) + 'static,
 {
-    let on_scroll: OnScroll<State> = Rc::new(on_scroll);
     ScrollAreaView {
-        scroll: any(
-            scroll_view(child).on_scroll(move |state: &mut State, info| on_scroll(state, info))
-        ),
+        pending: Cell::new(Some(
+            scroll_view(child)
+                .physics(RubberBand::new())
+                .on_scroll(on_scroll),
+        )),
+        scroll: OnceCell::new(),
         offset: 0.0,
         max_offset: 0.0,
     }
 }
 
 impl<State: 'static> ScrollAreaView<State> {
+    /// The wrapped surface, erased and memoized on first access. Safe to call
+    /// more than once (idempotent past the first call) and from a different
+    /// instance's `rebuild` reading `prev`'s own already-erased form.
+    fn erased(&self) -> &AnyView<State> {
+        self.scroll.get_or_init(|| {
+            let scroll = self.pending.take().expect(
+                "a ScrollAreaView is erased at most once, by its own build/rebuild/teardown",
+            );
+            any(scroll)
+        })
+    }
+
     /// Set the thumb's position: the current `offset` and the surface's
     /// `max_offset`, both straight off the [`ScrollInfo`] the callback reported.
     /// A `max_offset` of zero (nothing to scroll) paints no scrollbar at all,
@@ -93,6 +134,21 @@ impl<State: 'static> ScrollAreaView<State> {
     pub fn position(mut self, offset: f64, max_offset: f64) -> Self {
         self.max_offset = max_offset.max(0.0);
         self.offset = offset.clamp(0.0, self.max_offset);
+        self
+    }
+
+    /// Install a different [`ScrollPhysics`] on the wrapped surface, forwarding
+    /// to the inner [`frust::scroll_view`] — the opt-out from this catalog's
+    /// pinned default (see the [module docs](self)' *A deliberate physics
+    /// pin*) for a consumer that wants app content to scroll with something
+    /// other than the flat rubber-band feel: a platform-parity physics, a
+    /// chained composition, or any other [`ScrollPhysics`] implementation.
+    pub fn physics(self, physics: impl ScrollPhysics + 'static) -> Self {
+        let scroll = self
+            .pending
+            .take()
+            .expect("physics() runs before this view is ever erased for build/rebuild");
+        self.pending.set(Some(scroll.physics(physics)));
         self
     }
 }
@@ -109,7 +165,7 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ScrollAreaWidget {
         ScrollAreaWidget {
-            scroll: build_child(&self.scroll, ctx),
+            scroll: build_child(self.erased(), ctx),
             offset: self.offset,
             max_offset: self.max_offset,
         }
@@ -121,7 +177,7 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
         element: &mut ScrollAreaWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let mut flags = rebuild_child(&prev.scroll, &self.scroll, &mut element.scroll, ctx);
+        let mut flags = rebuild_child(prev.erased(), self.erased(), &mut element.scroll, ctx);
         if element.offset != self.offset || element.max_offset != self.max_offset {
             element.offset = self.offset;
             element.max_offset = self.max_offset;
@@ -131,7 +187,7 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
     }
 
     fn teardown(&self, element: &mut ScrollAreaWidget, ctx: &mut BuildCtx<'_>) {
-        teardown_child(&self.scroll, &mut element.scroll, ctx);
+        teardown_child(self.erased(), &mut element.scroll, ctx);
     }
 }
 
@@ -501,5 +557,107 @@ mod tests {
         let theme = crate::theme().with_brightness(Brightness::Dark);
         assert_eq!(scrollbar_color(Some(&theme)), theme.scheme().outline);
         assert_eq!(scrollbar_color(None), FALLBACK.border);
+    }
+
+    #[test]
+    fn scroll_area_defaults_to_the_flat_rubber_band() {
+        // `ScrollWidget`'s installed physics is a private, `pub(crate)` field
+        // inside `frust-widgets` — unreachable even from this crate's
+        // `frust-widgets` dev-dependency, so this asserts the *documented*,
+        // distinguishing behavior instead: `RubberBand`'s past-edge drag
+        // mapping is a flat `raw * 0.5` scale (`OVERSCROLL_RESISTANCE`),
+        // unlike the workspace's depth-aware `Bouncing` default.
+        use frust::input::TOUCH_SLOP;
+
+        let mut root: RenderRoot<AppState, ScrollAreaView<AppState>> = RenderRoot::new();
+        let mut state = AppState::default();
+        let mut tcx = TextContext::new();
+        let mut logic = |_s: &mut AppState| view(0.0, CONTENT_H - VIEWPORT.height);
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(VIEWPORT, &mut tcx as &mut dyn Any);
+
+        let x = 50.0;
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(x, 0.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        // Crosses the slop: takes the gesture over, no scroll effect of its
+        // own (mirrors `a_press_on_the_thumb_is_an_ordinary_drag_on_the_surface_underneath`'s
+        // two-move shape above).
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(x, TOUCH_SLOP + 1.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        // A clean 40px pull further down, past the already-topmost edge.
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(x, TOUCH_SLOP + 1.0 + 40.0),
+                button: PointerButton::Primary,
+            }),
+        );
+
+        let info = state.info.expect("the drag reported a scroll");
+        assert_eq!(
+            info.overscroll, -20.0,
+            "RubberBand's flat 0.5 resistance: -40px pulled past the top settles at -20px"
+        );
+    }
+
+    #[test]
+    fn scroll_area_physics_pass_through_reaches_the_inner_scroll() {
+        use frust::NeverScrollable;
+        use frust::input::TOUCH_SLOP;
+
+        let mut root: RenderRoot<AppState, ScrollAreaView<AppState>> = RenderRoot::new();
+        let mut state = AppState::default();
+        let mut tcx = TextContext::new();
+        let mut logic = |_s: &mut AppState| {
+            scroll_area(
+                Block(Size::new(VIEWPORT.width, CONTENT_H)),
+                |s: &mut AppState, info| s.info = Some(info),
+            )
+            .physics(NeverScrollable::new())
+            .position(0.0, CONTENT_H - VIEWPORT.height)
+        };
+        root.rebuild(&mut logic, &mut state);
+        root.layout_with_text(VIEWPORT, &mut tcx as &mut dyn Any);
+
+        let x = 50.0;
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(x, 10.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        // Same two-move shape as every other drag test here, well past the
+        // slop — `NeverScrollable` refuses the takeover outright, so neither
+        // move ever reaches `apply_drag_offset`.
+        for y in [10.0 + TOUCH_SLOP + 1.0, 10.0 + TOUCH_SLOP + 41.0] {
+            root.event(
+                &mut state,
+                &InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: Point::new(x, y),
+                    button: PointerButton::Primary,
+                }),
+            );
+        }
+        assert!(
+            state.info.is_none(),
+            "NeverScrollable, installed through the pass-through builder, refused the drag \
+             outright: the inner scroll_view never reported a scroll"
+        );
     }
 }
