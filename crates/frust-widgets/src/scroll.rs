@@ -25,6 +25,28 @@
 //! [`Simulation`] gets driven by the generic ballistic driver in
 //! [`ScrollWidget::pump_fling`] instead.
 //!
+//! # Overscroll visuals
+//!
+//! *What* a past-edge pull looks like is a separate axis from the physics that
+//! computes it: [`OverscrollEffect`] selects between moving the content with
+//! the pull ([`OverscrollEffect::Translate`], the default and this module's
+//! long-standing behavior), the Material-3-Expressive
+//! [`OverscrollEffect::Stretch`], and no visual at all. The offset itself
+//! evolves identically under all three — only the paint changes.
+//!
+//! Stretch is a **paint-only** vertical scale about the held edge
+//! ([`stretch_about_edge`], driven by [`ScrollWidget::edge_pull`] so a
+//! clamping physics stretches too): the content origin stays where an in-range
+//! offset would put it, and no layout pass reads the pull or the intensity
+//! derived from it. It is an affine approximation of Android 12's overscroll
+//! *shader* — the same approximation Flutter's non-Impeller
+//! `StretchingOverscrollIndicator` makes — so roughly 60–70% of the real
+//! effect: a whole-viewport scale cannot reproduce the shader's per-pixel
+//! falloff, and Android's own release spring (ω = 24.657, ζ = 0.98) is not
+//! ported either — the stretch decays on the same release settle the
+//! displacement rides. Both are accepted approximations, for
+//! `docs/LIMITATIONS.md`'s register rather than a fix here.
+//!
 //! # Gesture takeover
 //!
 //! ScrollView captures the pointer on `Down` and forwards events to the child
@@ -57,7 +79,7 @@ use frust_core::{
     PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
     Widget, any, fling_decay, fling_displacement,
 };
-use kurbo::{Point, Rect, Size};
+use kurbo::{Affine, Point, Rect, Size};
 
 use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
@@ -122,6 +144,71 @@ pub(crate) const METRICS_FALLBACK_DPR: f64 = 1.0;
 /// comparisons drifting apart.
 pub(crate) fn crossed_refresh_trigger(overscroll: f64) -> bool {
     overscroll < -REFRESH_TRIGGER_PX
+}
+
+/// The scale [`OverscrollEffect::Stretch`] adds per unit of normalized pull —
+/// the linear term's slope and, equally, the exponential term's ceiling, so a
+/// full-viewport pull stretches by at most `2 · STRETCH_INTENSITY`.
+///
+/// **Published value**, not a guess: Flutter's `_StretchController`
+/// (`widgets/overscroll_indicator.dart`) uses exactly this in its port of
+/// Android 12's overscroll effect, and the port here is term-for-term the
+/// same curve. Shared with [`crate::list_view::ListViewWidget`] like every
+/// constant above.
+pub(crate) const STRETCH_INTENSITY: f64 = 0.016;
+
+/// How fast [`stretch_intensity`]'s exponential term saturates. Flutter's
+/// `_StretchController.exponentialScalar` verbatim (`e / 0.33`): the pull is
+/// ~95% of the way to the term's ceiling at a third of a viewport.
+pub(crate) const STRETCH_EXP_SCALAR: f64 = std::f64::consts::E / 0.33;
+
+/// The added scale [`OverscrollEffect::Stretch`] paints for a pull of
+/// `edge_pull` (signed, in the [`ScrollWidget::edge_pull`] sense) against a
+/// viewport `viewport_dimension` px along the scroll axis: a linear plus a
+/// saturating-exponential term over the normalized pull
+/// `x = |edge_pull| / viewport_dimension`, clamped to `[0, 1]`.
+///
+/// Magnitude-only — which edge is held decides the anchor
+/// ([`stretch_about_edge`]), never the amount. `0.0` for an unpulled surface
+/// or a degenerate (zero-height) viewport, and never above
+/// `2 · STRETCH_INTENSITY`.
+pub(crate) fn stretch_intensity(edge_pull: f64, viewport_dimension: f64) -> f64 {
+    if viewport_dimension <= 0.0 {
+        return 0.0;
+    }
+    let x = (edge_pull.abs() / viewport_dimension).clamp(0.0, 1.0);
+    STRETCH_INTENSITY * x + STRETCH_INTENSITY * (1.0 - (-x * STRETCH_EXP_SCALAR).exp())
+}
+
+/// The paint-side affine [`OverscrollEffect::Stretch`] wraps a viewport's
+/// content in: a scroll-axis-only scale of `1 + stretch_intensity(…)` about
+/// the **held** edge — the viewport's top for a pull past the top (negative
+/// `edge_pull`), its bottom edge otherwise — so the content grows away from
+/// the finger while the edge under it stays pinned.
+///
+/// `origin`/`size` are the viewport's absolute paint geometry
+/// ([`PaintCtx::origin`]/[`PaintCtx::size`]), which is the space
+/// [`PaintScene::push_transform`] composes in. `None` when there is nothing to
+/// paint (no pull, or a degenerate viewport), so a caller pushes no transform
+/// at all rather than an identity one.
+pub(crate) fn stretch_about_edge(origin: Point, size: Size, edge_pull: f64) -> Option<Affine> {
+    let intensity = stretch_intensity(edge_pull, size.height);
+    if intensity == 0.0 {
+        return None;
+    }
+    let anchor = if edge_pull < 0.0 {
+        origin.y
+    } else {
+        origin.y + size.height
+    };
+    // The standard scale-about-a-point sandwich (`motion::animated`'s
+    // `scale_about`, `nav::transition`'s `rect_to_rect`), non-uniform so only
+    // the scroll axis stretches.
+    Some(
+        Affine::translate((0.0, anchor))
+            * Affine::scale_non_uniform(1.0, 1.0 + intensity)
+            * Affine::translate((0.0, -anchor)),
+    )
 }
 
 /// A scroll observation snapshot handed to [`ScrollView::on_scroll`].
@@ -257,8 +344,9 @@ pub struct ScrollWidget {
     pub(crate) physics: Box<dyn ScrollPhysics>,
     /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — the
     /// content moving with the pull — is what this widget has always done and
-    /// stays the default; the paint-side alternatives are read by the effect
-    /// consumer, not here.
+    /// stays the default; the alternatives are read at paint alone (see
+    /// [`ScrollWidget::painted_offset`] and the module docs' *Overscroll
+    /// visuals*), never by layout or by the physics.
     pub(crate) effect: OverscrollEffect,
     /// The signed pull past an edge, in the same sense as
     /// [`ScrollInfo::overscroll`]: **negative past the top**, positive past the
@@ -445,8 +533,26 @@ impl ScrollWidget {
         self.offset = value.clamp(0.0, self.max_offset());
     }
 
+    /// The offset the content is actually **painted** at, which is the live
+    /// `offset` — past-edge displacement and all — only under
+    /// [`OverscrollEffect::Translate`]. [`OverscrollEffect::Stretch`] paints
+    /// the pull as a scale about the held edge instead, and
+    /// [`OverscrollEffect::None`] paints it not at all, so both leave the
+    /// content exactly where an in-range offset would put it.
+    ///
+    /// Subtracted back off rather than never computed: the offset itself still
+    /// moves precisely as the physics dictates under every effect (the module
+    /// docs' *Overscroll visuals*), so only this one read differs.
+    fn painted_offset(&self) -> f64 {
+        match self.effect {
+            OverscrollEffect::Translate => self.offset,
+            OverscrollEffect::Stretch | OverscrollEffect::None => self.offset - self.displacement(),
+        }
+    }
+
     fn sync_child_origin(&mut self) {
-        self.child.set_origin(Point::new(0.0, -self.offset));
+        self.child
+            .set_origin(Point::new(0.0, -self.painted_offset()));
     }
 
     /// A snapshot of the current scroll position for [`ScrollView::on_scroll`]:
@@ -939,7 +1045,30 @@ impl Widget for ScrollWidget {
         // the fold — suppressing offscreen animators' frame requests. Intersects
         // (never widens) any rect an outer scroll surface already threaded down.
         ctx.constrain_visible_rect(Rect::from_origin_size(ctx.origin(), ctx.size()));
+        // The stretch is PAINT-ONLY, and load-bearingly so: no layout pass
+        // reads `edge_pull` or the intensity derived from it, and none may
+        // start to. A layout-affecting animation must request a relayout on
+        // every frame of its motion or the mobile shell's intra-frame layout
+        // skip leaves it frozen (`docs/WIDGETS_CODE_STANDARDS.md`'s
+        // animation-pacing rule) — keeping the stretch out of every layout
+        // read is what makes that irrelevant here, and is why there is no
+        // `request_layout` in this path either: the settle/ballistic pump
+        // above already asks for every frame the decaying stretch needs.
+        // Pushed INSIDE the viewport clip so stretched content can never
+        // paint past the viewport's edges.
+        let stretch = match self.effect {
+            OverscrollEffect::Stretch => {
+                stretch_about_edge(ctx.origin(), ctx.size(), self.edge_pull)
+            }
+            OverscrollEffect::Translate | OverscrollEffect::None => None,
+        };
+        if let Some(transform) = stretch {
+            scene.push_transform(transform);
+        }
         self.child.paint_child(ctx, scene);
+        if stretch.is_some() {
+            scene.pop_transform();
+        }
         scene.pop_clip();
     }
 
@@ -1782,5 +1911,249 @@ mod tests {
         let mut w = laid_out(200.0, 100.0, 5000.0);
         let (first, second) = fling_then_refling(&mut w);
         assert_eq!(second, first, "RubberBand starts every fling cold");
+    }
+
+    // --- The M3E stretch effect: a paint-side affine about the pulled edge,
+    //     with the content origin left where an in-range offset puts it. See
+    //     the module docs' *Overscroll visuals*. ---
+
+    /// `Down`, a 40px past-slop takeover drag, then 20px further past the
+    /// already-at-top edge — the same gesture the overscroll tests above use,
+    /// so every effect below sees byte-identical input.
+    fn drag_20px_past_top(w: &mut ScrollWidget) {
+        dispatch(w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
+        dispatch(w, &ev(PointerPhase::Move, 110.0), 32.0);
+    }
+
+    /// Scroll to the bottom, then drag 60px past that edge.
+    fn drag_60px_past_bottom(w: &mut ScrollWidget) {
+        dispatch(w, &scroll(50.0, false, 5000.0), 0.0); // clamp to max_offset
+        dispatch(w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(w, &ev(PointerPhase::Move, 60.0), 16.0); // takeover
+        dispatch(w, &ev(PointerPhase::Move, 0.0), 32.0);
+    }
+
+    /// Paint `w` into a recording scene and read back the one transform the
+    /// stretch pushed, as `(anchor_y, scale_y)` in absolute paint space —
+    /// painted-scene inspection, no test-only accessor. The affine is
+    /// `translate(anchor)·scale(1, s)·translate(−anchor)`, whose coefficients
+    /// are `[1, 0, 0, s, 0, anchor·(1 − s)]`, so both terms read straight back
+    /// off it. `None` when the paint pushed no transform at all.
+    fn painted_stretch(w: &mut ScrollWidget) -> Option<(f64, f64)> {
+        let mut ctx = PaintCtx::new(Point::ZERO, w.viewport);
+        let mut scene = crate::test_support::RecordingScene::default();
+        w.paint(&mut ctx, &mut scene);
+        assert_eq!(
+            scene.transforms.len(),
+            scene.transform_pops as usize,
+            "every pushed transform must be popped in the same paint"
+        );
+        assert!(
+            scene.transforms.len() <= 1,
+            "the stretch pushes at most one transform"
+        );
+        assert_eq!(scene.rects.len(), 1, "the child paints either way");
+        let [a, b, c, d, e, f] = scene.transforms.first()?.as_coeffs();
+        assert_eq!(
+            [a, b, c, e],
+            [1.0, 0.0, 0.0, 0.0],
+            "a scroll-axis-only scale: no x scale, no skew, no x translation"
+        );
+        Some((f / (1.0 - d), d))
+    }
+
+    #[test]
+    fn stretch_intensity_curve_pins() {
+        // An unpulled surface stretches not at all.
+        assert_eq!(stretch_intensity(0.0, 100.0), 0.0);
+
+        // x = 0.1, hand-computed from the two constants:
+        //   0.016·0.1 + 0.016·(1 − e^(−0.1·e/0.33))
+        // = 0.0016   + 0.016·(1 − e^−0.8237217661997105)
+        // = 0.01057927172144907
+        assert!(
+            (stretch_intensity(-10.0, 100.0) - 0.010_579_271_721_449_07).abs() < 1e-9,
+            "the curve drifted from its pinned constants: {}",
+            stretch_intensity(-10.0, 100.0)
+        );
+        assert_eq!(
+            stretch_intensity(10.0, 100.0),
+            stretch_intensity(-10.0, 100.0),
+            "magnitude-only: the sign picks the anchor, never the amount"
+        );
+
+        // Strictly increasing across the whole normalized range.
+        let mut previous = 0.0;
+        for step in 1..=100 {
+            let intensity = stretch_intensity(step as f64, 100.0);
+            assert!(
+                intensity > previous,
+                "the curve must increase monotonically (step {step}): {intensity} <= {previous}"
+            );
+            previous = intensity;
+        }
+
+        // Bounded by the sum of the two terms' ceilings, and clamped past a
+        // full-viewport pull rather than growing without limit.
+        assert!(stretch_intensity(100.0, 100.0) <= 2.0 * STRETCH_INTENSITY);
+        assert_eq!(
+            stretch_intensity(500.0, 100.0),
+            stretch_intensity(100.0, 100.0),
+            "the normalized pull clamps at 1.0"
+        );
+        assert_eq!(
+            stretch_intensity(-10.0, 0.0),
+            0.0,
+            "a degenerate viewport stretches nothing"
+        );
+    }
+
+    #[test]
+    fn stretch_keeps_child_origin_fixed() {
+        // The identical drag under each effect. The offset is the physics'
+        // answer and must not vary; only what paint does with it does.
+        let mut translate = laid_out(200.0, 100.0, 1000.0);
+        drag_20px_past_top(&mut translate);
+        let mut stretch = laid_out(200.0, 100.0, 1000.0);
+        stretch.effect = OverscrollEffect::Stretch;
+        drag_20px_past_top(&mut stretch);
+        let mut none = laid_out(200.0, 100.0, 1000.0);
+        none.effect = OverscrollEffect::None;
+        drag_20px_past_top(&mut none);
+
+        assert_eq!(stretch.offset(), -10.0, "the resisted overscroll, as ever");
+        assert_eq!(translate.offset(), stretch.offset());
+        assert_eq!(none.offset(), stretch.offset());
+        assert_eq!(translate.edge_pull, stretch.edge_pull);
+
+        // Translate paints the displacement into the child origin; Stretch and
+        // None leave it exactly where an in-range offset would put it.
+        assert_eq!(translate.child.origin().y, 10.0);
+        assert_eq!(stretch.child.origin().y, 0.0);
+        assert_eq!(none.child.origin().y, 0.0);
+        assert_eq!(
+            translate.child.origin().y - stretch.child.origin().y,
+            -stretch.displacement(),
+            "the two fixtures differ by exactly the overscroll displacement"
+        );
+
+        // …and only Stretch paints a transform for it.
+        assert_eq!(painted_stretch(&mut translate), None);
+        assert_eq!(painted_stretch(&mut none), None);
+        assert!(painted_stretch(&mut stretch).is_some());
+    }
+
+    #[test]
+    fn stretch_anchor_follows_pulled_edge() {
+        let mut top = laid_out(200.0, 100.0, 1000.0);
+        top.effect = OverscrollEffect::Stretch;
+        drag_20px_past_top(&mut top);
+        assert_eq!(top.edge_pull, -10.0, "pulled past the top");
+        let (anchor, scale) = painted_stretch(&mut top).expect("a held pull stretches");
+        assert!(
+            anchor.abs() < 1e-9,
+            "a top pull scales about the viewport's top edge: {anchor}"
+        );
+        assert!(
+            (scale - (1.0 + stretch_intensity(-10.0, 100.0))).abs() < 1e-12,
+            "scale is 1 + the curve's intensity: {scale}"
+        );
+        assert!(scale > 1.0, "the content grows, never shrinks");
+
+        let mut bottom = laid_out(200.0, 100.0, 1000.0);
+        bottom.effect = OverscrollEffect::Stretch;
+        drag_60px_past_bottom(&mut bottom);
+        assert_eq!(bottom.edge_pull, 30.0, "pulled past the bottom");
+        let (anchor, scale) = painted_stretch(&mut bottom).expect("a held pull stretches");
+        assert!(
+            (anchor - 100.0).abs() < 1e-9,
+            "a bottom pull scales about the viewport's bottom edge: {anchor}"
+        );
+        assert!((scale - (1.0 + stretch_intensity(30.0, 100.0))).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stretch_settles_back_to_identity() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        w.effect = OverscrollEffect::Stretch;
+        drag_20px_past_top(&mut w);
+        let (_, held) = painted_stretch(&mut w).expect("the held pull stretches");
+
+        dispatch(&mut w, &ev(PointerPhase::Up, 110.0), 48.0);
+        assert!(w.settling, "an overscrolled release settles, effect or not");
+        let (_, releasing) = painted_stretch(&mut w).expect("the settle still stretches");
+        assert!(
+            releasing <= held,
+            "the stretch decays with the pull, never grows: {releasing} > {held}"
+        );
+
+        let mut steps = 0;
+        while w.settle_tick(16.0) {
+            steps += 1;
+            assert!(steps < 10_000, "settle failed to terminate");
+        }
+        assert_eq!(w.edge_pull, 0.0, "a completed settle leaves no pull");
+        assert_eq!(
+            painted_stretch(&mut w),
+            None,
+            "…so paint pushes no transform at all — back to identity"
+        );
+
+        // And with nothing left to animate, the pump stops asking for frames.
+        let mut ctx = PaintCtx::new(Point::ZERO, w.viewport);
+        let mut scene = crate::test_support::RecordingScene::default();
+        w.paint(&mut ctx, &mut scene);
+        assert!(
+            !ctx.needs_frame(),
+            "a settled stretch stops requesting frames"
+        );
+    }
+
+    /// A toy clamping physics: it rejects 100% of any past-edge proposal, so
+    /// the position never leaves range and the entire pull is reported as
+    /// boundary rejection instead — the Android-style clamping-plus-stretch
+    /// pairing, exercised here without depending on any composed default.
+    #[derive(Debug)]
+    struct RejectPastEdge;
+    impl ScrollPhysics for RejectPastEdge {
+        fn apply_boundary_conditions(&self, metrics: &ScrollMetrics, value: f64) -> f64 {
+            value - value.clamp(metrics.min_scroll_extent, metrics.max_scroll_extent)
+        }
+    }
+
+    #[test]
+    fn stretch_under_boundary_rejection_uses_edge_pull() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        w.effect = OverscrollEffect::Stretch;
+        w.physics = Box::new(RejectPastEdge);
+        drag_20px_past_top(&mut w);
+
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "a clamping physics never lets the position leave range"
+        );
+        assert_eq!(
+            w.scroll_info().overscroll,
+            0.0,
+            "…so there is no displacement for Translate to have shown"
+        );
+        // The whole raw 20px is rejected excess (this physics maps the drag
+        // itself with the trait's identity default — no rubber-band halving).
+        assert_eq!(w.edge_pull, -20.0, "the pull is still reported in full");
+
+        let (anchor, scale) = painted_stretch(&mut w).expect("a rejected pull still stretches");
+        assert!(
+            anchor.abs() < 1e-9,
+            "anchored at the pulled (top) edge: {anchor}"
+        );
+        assert!((scale - (1.0 + stretch_intensity(-20.0, 100.0))).abs() < 1e-12);
+        assert!(scale > 1.0, "clamping + stretch is a visible effect");
+        assert_eq!(
+            w.child.origin().y,
+            0.0,
+            "and the content itself never moves"
+        );
     }
 }

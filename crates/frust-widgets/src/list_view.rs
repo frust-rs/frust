@@ -276,6 +276,14 @@
 //! position — ever sees the out-of-range number. The content edge visually
 //! displaces; no row is ever materialized outside `[0, item_count)`.
 //!
+//! **How the pull is visualized is a separate axis**, shared verbatim with
+//! `ScrollView` (see its *Overscroll visuals*): under the default
+//! [`OverscrollEffect::Translate`] the displacement is what
+//! [`ListViewWidget::painted_offset`] layers in, above; under
+//! [`OverscrollEffect::Stretch`] the rows stay where the windowing offset puts
+//! them and [`Widget::paint`] scales them about the held edge from
+//! [`ListViewWidget::edge_pull`] instead — paint-only either way.
+//!
 //! **Resistance uses the *current*, converging `max_offset`.** Every drag `Move`
 //! recomputes `overscroll` against a freshly-read [`ListViewWidget::max_offset`],
 //! not a value cached at takeover, so a bottom-edge overscroll in variable-extent
@@ -322,6 +330,7 @@ use crate::physics::rubber_band::RubberBand;
 use crate::physics::{ScrollMetrics, ScrollPhysics, Simulation};
 use crate::scroll::{
     BallisticState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX, crossed_refresh_trigger,
+    stretch_about_edge,
 };
 
 /// Extra items materialized above and below the visible window, so a small
@@ -1109,8 +1118,9 @@ pub struct ListViewWidget {
     pub(crate) physics: Box<dyn ScrollPhysics>,
     /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — what
     /// [`ListViewWidget::painted_offset`] already does with `overscroll` — is
-    /// the default; the paint-side alternatives are read by the effect
-    /// consumer, not here.
+    /// the default; the alternatives are read at paint alone (see
+    /// [`ListViewWidget::painted_offset`] and `scroll.rs`'s *Overscroll
+    /// visuals*), never by layout, windowing, or the physics.
     pub(crate) effect: OverscrollEffect,
     /// The signed pull past an edge, negative past the top: the displacement
     /// the physics allowed ([`ListViewWidget::overscroll`]) plus whatever
@@ -1357,8 +1367,20 @@ impl ListViewWidget {
     /// allowed to show, so the content edge visually displaces while no row
     /// is ever asked to materialize outside `[0, item_count)`. See the
     /// [module docs](self)' *Overscroll and pull-to-refresh* section.
+    ///
+    /// The displacement is layered in only under
+    /// [`OverscrollEffect::Translate`]: [`OverscrollEffect::Stretch`] paints
+    /// the pull as a scale about the held edge instead (see
+    /// [`Widget::paint`]) and [`OverscrollEffect::None`] paints it not at all,
+    /// so under both the content — and the position semantics reports for it —
+    /// stays exactly where the in-range windowing offset puts it. `overscroll`
+    /// itself still evolves identically under every effect; only this read
+    /// differs (`scroll.rs`'s *Overscroll visuals*).
     fn painted_offset(&self) -> f64 {
-        self.placement_offset() + self.overscroll
+        match self.effect {
+            OverscrollEffect::Translate => self.placement_offset() + self.overscroll,
+            OverscrollEffect::Stretch | OverscrollEffect::None => self.placement_offset(),
+        }
     }
 
     /// Commit the pending measured correction into [`ListViewWidget::offset`] —
@@ -2481,8 +2503,32 @@ impl Widget for ListViewWidget {
         self.pump_fling(ctx);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origins();
+        // The stretch is PAINT-ONLY, and load-bearingly so: no layout pass
+        // (nor the windowing math) reads `edge_pull` or the intensity derived
+        // from it, and none may start to. A layout-affecting animation must
+        // request a relayout on every frame of its motion or the mobile
+        // shell's intra-frame layout skip leaves it frozen
+        // (`docs/WIDGETS_CODE_STANDARDS.md`'s animation-pacing rule) —
+        // keeping the stretch out of every layout read is what makes that
+        // irrelevant here, and is why there is no `request_layout` in this
+        // path either: the settle/ballistic pump above already asks for every
+        // frame the decaying stretch needs. Pushed INSIDE the viewport clip
+        // so stretched rows can never paint past the viewport's edges.
+        // Mirrors `ScrollWidget::paint`, over this widget's own `edge_pull`.
+        let stretch = match self.effect {
+            OverscrollEffect::Stretch => {
+                stretch_about_edge(ctx.origin(), ctx.size(), self.edge_pull)
+            }
+            OverscrollEffect::Translate | OverscrollEffect::None => None,
+        };
+        if let Some(transform) = stretch {
+            scene.push_transform(transform);
+        }
         for pod in &mut self.children {
             pod.paint_child(ctx, scene);
+        }
+        if stretch.is_some() {
+            scene.pop_transform();
         }
         scene.pop_clip();
         // If the (now-known) viewport needs rows the materialized window does not
@@ -5790,5 +5836,141 @@ mod tests {
         frame(&mut root, &mut logic, &mut (), KEYED_WINDOW, 0.0);
         collide.set(true);
         frame(&mut root, &mut logic, &mut (), KEYED_WINDOW, 16.0);
+    }
+
+    // --- (13) The M3E stretch effect, the twin of `scroll.rs`'s own group:
+    //      rows stay where the windowing offset puts them and the pull is
+    //      painted as an affine about the held edge instead. ---
+
+    /// [`overscroll_logic`] with [`OverscrollEffect::Stretch`] selected on the
+    /// view, so the effect reaches the widget through the real build/rebuild
+    /// path rather than being poked onto the element.
+    fn stretch_logic(item_count: usize) -> impl FnMut(&mut ()) -> ListView<()> {
+        move |_: &mut ()| {
+            let mut view = list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i)));
+            view.effect = OverscrollEffect::Stretch;
+            view
+        }
+    }
+
+    /// Drive the shared past-top drag: `Down`, a 40px past-slop takeover, then
+    /// 20px further past the already-at-top edge (`scroll.rs`'s fixture
+    /// gesture), painting a frame between each so the tree stays live.
+    fn drag_20px_past_top(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        state: &mut (),
+        window: Size,
+    ) {
+        frame(root, logic, state, window, 0.0);
+        frame(root, logic, state, window, 16.0);
+        root.event(state, &ev(PointerPhase::Down, 50.0));
+        frame(root, logic, state, window, 32.0);
+        root.event(state, &ev(PointerPhase::Move, 90.0)); // 40px > slop → takeover
+        frame(root, logic, state, window, 48.0);
+        root.event(state, &ev(PointerPhase::Move, 110.0));
+    }
+
+    /// Paint the live tree into a recording scene and hand back the transforms
+    /// the stretch pushed (mirrors `scroll.rs`'s `painted_stretch` observable).
+    fn painted_transforms(root: &mut RenderRoot<(), ListView<()>>, ms: f64) -> Vec<kurbo::Affine> {
+        let mut scene = crate::test_support::RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos((ms * 1_000_000.0) as u64));
+        assert_eq!(
+            scene.transforms.len(),
+            scene.transform_pops as usize,
+            "every pushed transform must be popped in the same paint"
+        );
+        scene.transforms
+    }
+
+    #[test]
+    fn stretch_keeps_row_origins_fixed() {
+        let window = Size::new(200.0, 200.0);
+
+        // The same drag under each effect: the physics' answer is identical,
+        // only what paint does with it differs.
+        let mut translated: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        drag_20px_past_top(
+            &mut translated,
+            &mut overscroll_logic(1000),
+            &mut (),
+            window,
+        );
+        let mut stretched: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        drag_20px_past_top(&mut stretched, &mut stretch_logic(1000), &mut (), window);
+
+        let translate = list_widget(&translated);
+        let stretch = list_widget(&stretched);
+        assert_eq!(stretch.offset(), 0.0, "the windowing offset never moves");
+        assert_eq!(
+            stretch.overscroll, -10.0,
+            "the resisted displacement is the physics' answer, effect or not"
+        );
+        assert_eq!(translate.overscroll, stretch.overscroll);
+        assert_eq!(translate.edge_pull, stretch.edge_pull);
+
+        // Row 0 sits at content y = 0: Translate paints it 10px down (the
+        // displacement), Stretch leaves it at the viewport's top edge.
+        assert_eq!(translate.children[0].origin().y, 10.0);
+        assert_eq!(stretch.children[0].origin().y, 0.0);
+        assert_eq!(
+            translate.children[0].origin().y - stretch.children[0].origin().y,
+            -stretch.overscroll,
+            "the two fixtures differ by exactly the overscroll displacement"
+        );
+
+        // …and only the stretched one paints a transform for the pull, about
+        // the pulled (top) edge: `[1, 0, 0, s, 0, anchor·(1 − s)]`.
+        assert!(painted_transforms(&mut translated, 64.0).is_empty());
+        let transforms = painted_transforms(&mut stretched, 64.0);
+        assert_eq!(
+            transforms.len(),
+            1,
+            "one stretch transform for the viewport"
+        );
+        let [a, b, c, d, e, f] = transforms[0].as_coeffs();
+        assert_eq!([a, b, c, e], [1.0, 0.0, 0.0, 0.0], "scroll-axis-only scale");
+        assert!(
+            (d - (1.0 + crate::scroll::stretch_intensity(-10.0, 200.0))).abs() < 1e-12,
+            "scale is 1 + the shared curve's intensity: {d}"
+        );
+        assert!(
+            f.abs() < 1e-9,
+            "a top pull scales about the viewport's top edge: {f}"
+        );
+    }
+
+    #[test]
+    fn stretch_settles_back_to_identity() {
+        let window = Size::new(200.0, 200.0);
+        let mut logic = stretch_logic(1000);
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        drag_20px_past_top(&mut root, &mut logic, &mut state, window);
+        assert_eq!(painted_transforms(&mut root, 64.0).len(), 1);
+
+        // Release under the refresh trigger → the settle decays the pull, and
+        // the stretch with it (no `request_layout` anywhere: the pump's own
+        // continuation frames are what keep it animating).
+        root.event(&mut state, &ev(PointerPhase::Up, 110.0));
+        assert!(list_widget(&root).settling);
+        let mut ms = 80.0;
+        for _ in 0..30 {
+            frame(&mut root, &mut logic, &mut state, window, ms);
+            ms += 16.0;
+            if !list_widget(&root).settling {
+                break;
+            }
+        }
+        let w = list_widget(&root);
+        assert!(!w.settling, "the settle terminated");
+        assert_eq!(w.edge_pull, 0.0, "a completed settle leaves no pull");
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(w.children[0].origin().y, 0.0, "the rows never moved");
+        assert!(
+            painted_transforms(&mut root, ms).is_empty(),
+            "…so paint pushes no transform at all — back to identity"
+        );
     }
 }
