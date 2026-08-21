@@ -115,6 +115,20 @@
 //! starts *collapsed* (`.extended(false)`) has no such quirk, since a
 //! never-`forward()`-ed controller stays exactly at its resting `0.0`.
 //!
+//! **The layout-skip trap.** The reveal fraction above is a **layout**
+//! value — [`FabWidget::layout`]'s extended branch lerps pad/gap/label width
+//! straight off `label_anim.value_clamped()` — so an in-flight reveal needs
+//! an explicit relayout request from `paint`, not merely another frame: on
+//! the mobile intra-frame layout skip (`docs/SHELLS_ARCHITECTURE.md`'s
+//! `frame_gate`), layout does not re-run merely because paint asked for
+//! another frame. `FabWidget::paint` therefore calls
+//! [`frust::authoring::PaintCtx::request_layout`] (which implies
+//! `request_frame`) while `label_anim` is in flight — the same trap
+//! [`mod@super::navigation_rail`]'s width motion and
+//! [`mod@super::expandable_list`]'s reveal both document at length. Unlike
+//! those two, this widget has no `Theme.motion.reduce_motion` handling for
+//! `label_anim` at all yet — a v1 gap, not part of this fix.
+//!
 //! # Haptics: verified none
 //!
 //! `M3ETappable` defaults to `haptic: M3EHapticFeedback.none`
@@ -871,8 +885,24 @@ impl Widget for FabWidget {
         };
         let scale = Tween::new(1.0, pressed_scale).lerp(self.press_anim.value());
 
-        if self.label_anim.advance(ctx.frame_time()) {
-            ctx.request_frame();
+        // The label reveal is a **layout** value — `FabWidget::layout`'s
+        // extended branch lerps pad/gap/label width straight off
+        // `label_anim.value_clamped()` — so an in-flight reveal needs an
+        // explicit relayout request, not merely another frame: on the
+        // mobile intra-frame layout skip (`docs/SHELLS_ARCHITECTURE.md`'s
+        // `frame_gate`), layout does not re-run merely because paint asked
+        // for another frame. This mirrors the trap
+        // [`mod@super::navigation_rail`]'s width motion and
+        // [`mod@super::expandable_list`]'s reveal both document at length;
+        // comparing the value before/after (rather than trusting
+        // `advance`'s return alone) catches the exact settling frame, where
+        // `advance` reports "done" but `value` still moved to its final
+        // target on this call — the same reason `WidthMotion`'s caller does
+        // the same comparison.
+        let label_before = self.label_anim.value_clamped();
+        let label_animating = self.label_anim.advance(ctx.frame_time());
+        if label_animating || self.label_anim.value_clamped() != label_before {
+            ctx.request_layout();
         }
 
         let o = ctx.origin();
@@ -1233,6 +1263,87 @@ mod tests {
             collapsed_size.width,
             EXTENDED_PAD_COLLAPSED * 2.0 + EXTENDED_ICON
         );
+    }
+
+    /// The regression guard for the layout-skip trap (see the module docs'
+    /// Extended FAB section): the pill's width is computed in `layout` from
+    /// `label_anim.value_clamped()`, so every in-flight reveal frame must ask
+    /// for a relayout — a paint-only frame request would freeze the pill at
+    /// its collapsed (~56dp) square width under the mobile intra-frame
+    /// layout skip, exactly the screenshot-confirmed device defect this test
+    /// pins.
+    #[test]
+    fn paint_requests_layout_while_label_reveal_is_in_flight_and_stops_once_settled() {
+        fn layout_at(w: &mut FabWidget) -> Size {
+            let mut tcx = frust::authoring::text::TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)))
+        }
+        fn paint_at(w: &mut FabWidget, size: Size, t: f64) -> (Recorder, bool) {
+            let mut rec = Recorder::default();
+            let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_secs(t));
+            w.paint(&mut ctx, &mut rec);
+            let needs_layout = ctx.needs_layout();
+            (rec, needs_layout)
+        }
+
+        let collapsed: FabView<()> = extended_fab("Compose", |_s: &mut ()| {})
+            .icon(leaf_any(24.0, 24.0))
+            .extended(false);
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&collapsed, &mut BuildCtx::new(&mut counter));
+        let mut size = layout_at(&mut w);
+        let collapsed_width = size.width;
+
+        // Rebuild into the extended state: this starts the reveal
+        // (`label_anim.forward()`) but hasn't advanced it yet — layout still
+        // reads the untouched `0.0`, matching the collapsed width exactly
+        // (the module docs' known v1 mount quirk).
+        let expanded: FabView<()> =
+            extended_fab("Compose", |_s: &mut ()| {}).icon(leaf_any(24.0, 24.0));
+        View::<()>::rebuild(
+            &expanded,
+            &collapsed,
+            &mut w,
+            &mut BuildCtx::new(&mut counter),
+        );
+        size = layout_at(&mut w);
+        assert_eq!(size.width, collapsed_width);
+
+        let mut widths = vec![size.width];
+        let mut frames = 0u32;
+        let mut t = 0.0;
+        loop {
+            let (_, needs_layout) = paint_at(&mut w, size, t);
+            if !needs_layout {
+                break;
+            }
+            frames += 1;
+            // A real shell relayouts on seeing `needs_layout` — this is the
+            // exact step the pre-fix code never asked for, freezing the pill
+            // at `collapsed_width` while the label kept painting past it.
+            size = layout_at(&mut w);
+            widths.push(size.width);
+            t += 1.0 / 60.0;
+            assert!(
+                frames < 600,
+                "the reveal should settle well inside 600 frames"
+            );
+        }
+        assert!(frames > 1, "the reveal spans more than one frame");
+        assert!(
+            widths.windows(2).all(|pair| pair[1] + 1e-9 >= pair[0]),
+            "the pill's laid-out width never shrinks while opening: {widths:?}"
+        );
+        let last = *widths.last().expect("at least one frame recorded");
+        assert!(
+            last > collapsed_width,
+            "the settled pill is wider than the frozen collapsed square: {last} > {collapsed_width}"
+        );
+
+        // A settled pill stops asking for layout.
+        let (_, still) = paint_at(&mut w, size, t + 1.0 / 60.0);
+        assert!(!still, "settled: no more layout requests");
     }
 
     #[test]

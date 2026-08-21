@@ -29,9 +29,20 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(NavigationRailPlayground))
 }
 
-/// Fixed preview height, in logical px — the reference's own
-/// `SizedBox(height: 320)`.
-const PREVIEW_HEIGHT: f64 = 320.0;
+/// Fixed preview height, in logical px.
+///
+/// The reference keeps its own `SizedBox(height: 320)` because upstream's
+/// rail scrolls its destination column internally; this port's rail does
+/// not (`plugins/material/src/navigation_rail.rs`'s module docs list that
+/// column under *Not ported*), so at 320 the expanded rail — menu button +
+/// FAB + all four destinations — overflow-paints past the frame instead of
+/// scrolling. The frame is sized to the content instead, derived from
+/// `navigation_rail.rs`'s own layout constants for that worst case: `TOP_GAP`
+/// (36) + the menu button row (~40) + `SECTION_PADDING_BOTTOM` (12) + the FAB
+/// (`EXTENDED_HEIGHT`, 56) + `SECTION_PADDING_BOTTOM` (12) + 4 destinations ×
+/// (`ITEM_VERTICAL_GAP` × 2 + `RAIL_ITEM_EXPANDED_HEIGHT`, 4+40+4 = 48) ≈
+/// 348dp, rounded up for headroom.
+const PREVIEW_HEIGHT: f64 = 400.0;
 
 const RAIL_TYPES: [NavigationRailType; 4] = [
     NavigationRailType::Collapsed,
@@ -137,13 +148,23 @@ fn sections() -> Vec<RailSection<RailState>> {
     ])]
 }
 
+/// The rail's own in-rail menu-button toggle — without this the button
+/// renders and presses but nothing observes the request
+/// ([`frust_material::navigation_rail`]'s own doc). Wires to the same
+/// `rail_type` knob the Type dropdown edits (`appearance_panel`'s
+/// `play_enum_menu_field`), so both controls stay a single source of truth.
+fn apply_rail_type(state: &mut RailState, next: NavigationRailType) {
+    state.rail_type = next;
+}
+
 fn preview(theme: &Theme, state: &RailState) -> AnyView<RailState> {
     let mut rail = navigation_rail(sections(), state.selected, |s: &mut RailState, index| {
         s.selected = index
     })
     .rail_type(state.rail_type)
     .modality(NavigationRailModality::Standard)
-    .label_behavior(state.label_behavior);
+    .label_behavior(state.label_behavior)
+    .on_type_changed(apply_rail_type);
     if state.show_fab {
         rail = rail.fab(rail_fab(icons::ADD, "Compose", |_: &mut RailState| {}));
     }
@@ -251,5 +272,20 @@ mod tests {
         state.type_open = true;
         state.label_open = true;
         let _view = body(&state);
+    }
+
+    /// The in-rail menu button's callback (`preview`'s `.on_type_changed`)
+    /// writes the same `rail_type` field the Type dropdown does — a plain fn,
+    /// so it's cheap to drive directly rather than through a simulated press.
+    #[test]
+    fn the_rail_s_own_menu_button_drives_the_rail_type_knob() {
+        let mut state = base_state();
+        assert_eq!(state.rail_type, NavigationRailType::Expanded);
+
+        apply_rail_type(&mut state, NavigationRailType::Collapsed);
+        assert_eq!(state.rail_type, NavigationRailType::Collapsed);
+
+        apply_rail_type(&mut state, NavigationRailType::AlwaysExpand);
+        assert_eq!(state.rail_type, NavigationRailType::AlwaysExpand);
     }
 }
