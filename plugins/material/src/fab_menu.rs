@@ -88,6 +88,14 @@
 //! length. `Theme::motion.reduce_motion` snaps the morph straight to its
 //! resting shape instead of animating through it.
 //!
+//! The morph spring rings around its closed target the way an item's does
+//! (see the Cascade stagger section's retreat clamp below) but is left
+//! **unclamped in both directions**: at [`FAB_SHAPE_SPRING`]'s damping its
+//! first rebound past zero peaks near `+0.0021`, worth ~0.05px of container
+//! size — nothing to see, and this value drives an opaque container's *size*
+//! rather than an opacity, so it has no bare-content failure mode to begin
+//! with. The measurement is pinned by a test rather than assumed.
+//!
 //! # Cascade stagger
 //!
 //! Each item reveals with its own spring ([`ITEM_SPRING`] — upstream's
@@ -115,6 +123,31 @@
 //! timer uses) rather than real timers, since a retained `Widget` has none to
 //! spawn. `Theme::motion.reduce_motion` snaps every item straight to its
 //! resting opacity, skipping the stagger entirely.
+//!
+//! An item's reveal value is an **opacity**, and three rules keep a
+//! partly-revealed item from reading as a bare icon+label row with no pill
+//! behind it — the failure this component actually shipped:
+//!
+//! 1. **The item fades as one unit.** Container, icon, and label composite
+//!    through a single [`frust::authoring::PaintScene::push_layer`] at the
+//!    item's own progress, with the container painted at full alpha inside
+//!    it. Fading only the container leaves the two child pods painting
+//!    opaque at every progress, so a near-zero-progress item shows its
+//!    content over an invisible pill.
+//! 2. **A widget built at rest never flings** — [`View::build`] seeds *both*
+//!    directions (resting value + `cascade_launched`), not just the open one.
+//!    An unseeded closed mount lets the first `paint`'s
+//!    [`FabMenuWidget::advance_cascade`] fling every item from rest with the
+//!    retreat velocity, which dips below zero and rebounds back above it.
+//! 3. **The retreat clamps *and stops* at zero.** [`ITEM_SPRING`] is
+//!    under-damped, so a closing item's spring rings around its `0.0` target
+//!    instead of stopping at it; [`AnimationController::value_clamped`] hides
+//!    only the negative half of that ring, so each rebound re-enters `t > 0`
+//!    and flashes the item back on after the collapse has visually settled.
+//!    `advance_cascade` snaps a retreating spring to rest the first frame it
+//!    reaches zero — Flutter's controllers settle at a bound rather than
+//!    oscillating through it. Only the retreat: the reveal's overshoot past
+//!    `1.0` is real motion, and the clamped alpha read absorbs it.
 //!
 //! # Item colors ("contrasting… primary-container family")
 //!
@@ -644,8 +677,10 @@ impl FabMenuWidget {
 
     /// Advance the cascade timeline to frame time `now`: launches any item
     /// whose stagger delay has elapsed and hasn't fired yet (continuing from
-    /// its current value), then advances every item spring. Returns whether
-    /// anything moved (paint's "needs another frame" signal).
+    /// its current value), then advances every item spring, stopping a
+    /// *retreating* one dead at `0.0` (see the [module docs](self)' Cascade
+    /// stagger section). Returns whether anything moved (paint's "needs
+    /// another frame" signal).
     fn advance_cascade(&mut self, now: FrameTime) -> bool {
         let epoch = *self.cascade_epoch.get_or_insert(now);
         let elapsed = now.saturating_sub(epoch);
@@ -662,6 +697,18 @@ impl FabMenuWidget {
                 self.cascade_launched[i] = true;
             }
             moved |= self.item_anim[i].advance(now);
+            // Retreat clamp: [`ITEM_SPRING`] is under-damped, so a closing
+            // item's spring rings *around* its `0.0` target rather than
+            // stopping at it. `value_clamped` hides only the negative half of
+            // that ring — every rebound re-enters `t > 0` and flashes the item
+            // back on. Stop it at the bound the first frame it gets there, the
+            // way Flutter's own controllers settle at a bound instead of
+            // oscillating through it. The reveal direction is deliberately not
+            // clamped: its overshoot past `1.0` is real motion the alpha read
+            // already absorbs.
+            if !self.open && self.item_anim[i].is_animating() && self.item_anim[i].value() <= 0.0 {
+                snap_anim(&mut self.item_anim[i], false, now);
+            }
         }
         moved
     }
@@ -686,17 +733,16 @@ impl<State: 'static> View<State> for FabMenuView<State> {
         let mut item_anim: Vec<AnimationController> = (0..n)
             .map(|_| AnimationController::new(ANIM_PERIOD))
             .collect();
-        let mut cascade_launched = vec![false; n];
-        // Seed the resting state so a menu built already-open shows its
-        // items without needing a frame to spring into them — see the
-        // [`snap_anim`] doc.
-        if self.open {
-            snap_anim(&mut fab_morph, true, FrameTime::ZERO);
-            for a in item_anim.iter_mut() {
-                snap_anim(a, true, FrameTime::ZERO);
-            }
-            cascade_launched = vec![true; n];
+        // Seed the resting state in *both* directions (see the [`snap_anim`]
+        // doc): a menu built already-open shows its items without needing a
+        // frame to spring into them, and a menu built closed is marked
+        // fully-launched so it never flings at all — see the [module docs](self)'
+        // Cascade stagger section for why an unseeded closed mount blinks.
+        snap_anim(&mut fab_morph, self.open, FrameTime::ZERO);
+        for a in item_anim.iter_mut() {
+            snap_anim(a, self.open, FrameTime::ZERO);
         }
+        let cascade_launched = vec![true; n];
 
         FabMenuWidget {
             icon: frust::authoring::build_child(&self.icon, ctx),
@@ -774,14 +820,14 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             element.item_anim = (0..n)
                 .map(|_| AnimationController::new(ANIM_PERIOD))
                 .collect();
-            element.cascade_launched = vec![false; n];
             element.cascade_epoch = None;
-            if element.open {
-                for a in element.item_anim.iter_mut() {
-                    snap_anim(a, true, FrameTime::ZERO);
-                }
-                element.cascade_launched = vec![true; n];
+            // Both directions, exactly like `build`'s own seed: a fresh item
+            // set mounted while *closed* must rest at zero rather than fling
+            // toward it.
+            for a in element.item_anim.iter_mut() {
+                snap_anim(a, element.open, FrameTime::ZERO);
             }
+            element.cascade_launched = vec![true; n];
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else {
             for (i, (prev_item, next_item)) in prev.items.iter().zip(self.items.iter()).enumerate()
@@ -942,15 +988,19 @@ impl Widget for FabMenuWidget {
             if t <= 0.0 {
                 continue;
             }
-            let container = with_alpha(item_colors[i], t as f32);
-            scene.fill_rounded_rect(
-                Point::new(origin.x + rect.x0, origin.y + rect.y0),
-                rect.size(),
-                item_radius,
-                container,
-            );
+            // The item fades as ONE unit — container, icon, and label
+            // composited through a single layer at the item's own progress,
+            // with the container itself painted at full alpha inside it.
+            // Fading only the container (the pods paint opaque regardless)
+            // is what made a low-`t` item read as a bare icon+label row with
+            // no pill behind it. See the [module docs](self)' Cascade stagger
+            // section.
+            let item_origin = Point::new(origin.x + rect.x0, origin.y + rect.y0);
+            scene.push_layer(item_origin, rect.size(), t as f32);
+            scene.fill_rounded_rect(item_origin, rect.size(), item_radius, item_colors[i]);
             pod.icon.paint_child(ctx, scene);
             pod.label.paint_child(ctx, scene);
+            scene.pop_layer();
         }
 
         // Trigger FAB: always painted, on top of the scrim/items — the
@@ -1793,6 +1843,10 @@ mod tests {
         rrects: Vec<(Point, Size, f64, Color)>,
         rects: Vec<(Point, Size, Color)>,
         fills: Vec<BezPath>,
+        /// One entry per `push_layer` — the item-fade contract (see the
+        /// module docs' Cascade stagger section).
+        layers: Vec<(Point, Size, f32)>,
+        pops: usize,
     }
     impl PaintScene for RectRecorder {
         fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
@@ -1805,6 +1859,42 @@ mod tests {
         fn fill_path(&mut self, _origin: Point, path: &BezPath, _brush: &Brush) {
             self.fills.push(path.clone());
         }
+        fn push_layer(&mut self, o: Point, s: Size, alpha: f32) {
+            self.layers.push((o, s, alpha));
+        }
+        fn pop_layer(&mut self) {
+            self.pops += 1;
+        }
+    }
+
+    /// Paint one frame at `millis` into `rec` (the cascade's own clock is
+    /// seeded from the first such paint — see [`FabMenuWidget::advance_cascade`]).
+    fn paint_at(w: &mut FabMenuWidget, millis: u64, rec: &mut RectRecorder) {
+        let mut pctx = PaintCtx::for_test(
+            Point::ZERO,
+            Size::new(400.0, 600.0),
+            FrameTime::from_nanos(millis * 1_000_000),
+        );
+        w.paint(&mut pctx, rec);
+    }
+
+    /// Flip the controlled `open` prop through a rebuild — the only way it
+    /// moves (see the module docs).
+    fn set_open(w: &mut FabMenuWidget, from: bool, to: bool, item_count: usize) {
+        let prev = fab_menu::<Log, _>(
+            icon_stub(),
+            from,
+            (0..item_count).map(item).collect(),
+            |_s: &mut Log| {},
+        );
+        let next = fab_menu::<Log, _>(
+            icon_stub(),
+            to,
+            (0..item_count).map(item).collect(),
+            |_s: &mut Log| {},
+        );
+        let mut counter = 0u64;
+        View::<Log>::rebuild(&next, &prev, w, &mut BuildCtx::new(&mut counter));
     }
 
     #[test]
@@ -1816,6 +1906,7 @@ mod tests {
         w.paint(&mut pctx, &mut rec);
         assert!(rec.rects.is_empty(), "no scrim while closed");
         assert!(rec.rrects.is_empty(), "no item containers while closed");
+        assert!(rec.layers.is_empty(), "no item fade layers while closed");
         assert_eq!(rec.fills.len(), 1, "only the trigger's morphed outline");
     }
 
@@ -1830,8 +1921,17 @@ mod tests {
         assert_eq!(rec.rects.len(), 1, "one full-area scrim fill");
         assert_eq!(rec.rrects.len(), 2, "2 item containers");
         assert_eq!(rec.fills.len(), 1, "the trigger's morphed outline");
-        assert_eq!(rec.rrects[0].3, with_alpha(PRIMARY_CONTAINER, 1.0));
-        assert_eq!(rec.rrects[1].3, with_alpha(SECONDARY_CONTAINER, 1.0));
+        // Fully-revealed items still composite through their own layer (one
+        // per visible item, at their own progress) — the container itself
+        // carries the role color unmodified, never an alpha-scaled copy.
+        assert_eq!(rec.layers.len(), 2, "one fade layer per visible item");
+        assert_eq!(rec.pops, 2, "every pushed layer is popped again");
+        assert!(
+            rec.layers.iter().all(|l| l.2 == 1.0),
+            "settled open: t == 1"
+        );
+        assert_eq!(rec.rrects[0].3, PRIMARY_CONTAINER);
+        assert_eq!(rec.rrects[1].3, SECONDARY_CONTAINER);
         // Upstream's own scrimOpacity default is 0.0 — see the module docs'
         // Scrim section.
         assert_eq!(rec.rects[0].2, with_alpha(SCRIM_FALLBACK, 0.0));
@@ -1848,14 +1948,150 @@ mod tests {
         w.paint(&mut pctx, &mut rec);
 
         let scheme = theme.scheme();
-        assert_eq!(rec.rrects[0].3, with_alpha(scheme.primary_container, 1.0));
-        assert_eq!(rec.rrects[1].3, with_alpha(scheme.secondary_container, 1.0));
-        assert_eq!(rec.rrects[2].3, with_alpha(scheme.tertiary_container, 1.0));
+        assert_eq!(rec.rrects[0].3, scheme.primary_container);
+        assert_eq!(rec.rrects[1].3, scheme.secondary_container);
+        assert_eq!(rec.rrects[2].3, scheme.tertiary_container);
     }
 
     #[test]
     fn item_shape_is_a_full_pill() {
         assert_eq!(item_radius(), ITEM_HEIGHT / 2.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reveal-opacity contract: no bare-content flash, in either direction.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_mid_cascade_item_fades_as_one_unit_through_its_own_layer() {
+        let mut w = build_menu(false, 2);
+        laid_out(&mut w);
+        set_open(&mut w, false, true, 2);
+
+        let mut rec = RectRecorder::default();
+        // The first paint only seeds the cascade clock and flings item 0
+        // (`advance`'s zero-delta contract); the second lands it mid-reveal,
+        // while item 1's own 30ms delay hasn't elapsed.
+        paint_at(&mut w, 0, &mut rec);
+        rec = RectRecorder::default();
+        paint_at(&mut w, 20, &mut rec);
+
+        let t = w.item_anim[0].value_clamped();
+        assert!(t > 0.0 && t < 1.0, "item 0 is mid-reveal (t={t})");
+        assert_eq!(
+            w.item_anim[1].value_clamped(),
+            0.0,
+            "item 1 hasn't launched"
+        );
+
+        assert_eq!(rec.layers.len(), 1, "one fade layer per *visible* item");
+        assert_eq!(rec.pops, 1, "and it is popped again");
+        assert_eq!(
+            rec.layers[0].2, t as f32,
+            "the layer carries the item's own reveal progress"
+        );
+        let item = w.item_rects[0];
+        assert_eq!(rec.layers[0].0, item.origin(), "layer covers the item row");
+        assert_eq!(rec.layers[0].1, item.size());
+        assert_eq!(rec.rrects.len(), 1, "only the revealed item's container");
+        assert_eq!(
+            rec.rrects[0].3, PRIMARY_CONTAINER,
+            "the container paints at full alpha INSIDE the layer — fading it \
+             again there would double-fade it, and fading it alone (while the \
+             icon/label pods paint opaque regardless) is what made a low-`t` \
+             item read as a bare content row with no pill behind it"
+        );
+    }
+
+    #[test]
+    fn a_menu_built_closed_never_flings_and_never_paints_an_item() {
+        let mut w = build_menu(false, 3);
+        laid_out(&mut w);
+        assert_eq!(
+            w.cascade_launched,
+            vec![true; 3],
+            "a widget built at rest mounts fully-launched: an unseeded closed \
+             mount lets the first paint fling every item from rest with the \
+             retreat velocity, dipping below zero and rebounding back above it"
+        );
+        assert!(
+            w.item_anim
+                .iter()
+                .all(|a| !a.is_animating() && a.value() == 0.0),
+            "every item spring rests exactly at 0"
+        );
+        assert!(!w.fab_morph.is_animating() && w.fab_morph.value() == 0.0);
+
+        let mut rec = RectRecorder::default();
+        for frame in 0..40u64 {
+            paint_at(&mut w, frame * 16, &mut rec);
+        }
+        assert!(rec.rrects.is_empty(), "no item container ever paints");
+        assert!(rec.layers.is_empty(), "no item fade layer ever pushes");
+        assert!(
+            w.item_anim.iter().all(|a| !a.is_animating()),
+            "and no item spring ever launched"
+        );
+    }
+
+    #[test]
+    fn the_closing_retreat_stops_at_zero_instead_of_ringing_back_above_it() {
+        let mut w = build_menu(true, 1);
+        laid_out(&mut w);
+        open_fully(&mut w);
+        set_open(&mut w, true, false, 1);
+
+        // ITEM_SPRING is under-damped (0.55): released from 1.0 at
+        // -FLING_VELOCITY it first reaches zero around 124ms, then — unclamped
+        // — rings back *above* zero twice before its energy dies.
+        let mut rec = RectRecorder::default();
+        for frame in 0..13u64 {
+            paint_at(&mut w, frame * 16, &mut rec); // through 192ms
+        }
+        assert!(
+            !w.item_anim[0].is_animating(),
+            "the retreating spring stops the frame it reaches zero"
+        );
+        assert_eq!(w.item_anim[0].value(), 0.0, "and stops exactly *at* zero");
+
+        let mut after = RectRecorder::default();
+        for frame in 13..60u64 {
+            paint_at(&mut w, frame * 16, &mut after); // through ~950ms
+        }
+        assert!(
+            after.rrects.is_empty() && after.layers.is_empty(),
+            "no rebound ever paints the item back on"
+        );
+    }
+
+    #[test]
+    fn the_trigger_morphs_retreat_rebound_is_imperceptible_so_it_stays_unclamped() {
+        // The trigger morph rings around its 0.0 target exactly like an item's
+        // spring does, but it drives a *layout* size rather than an opacity and
+        // FAB_SHAPE_SPRING is damped at 0.7 rather than 0.55. Measured here
+        // rather than assumed: the first rebound above zero peaks near
+        // `+0.0021`, worth ~0.05px of container size, so there is nothing to
+        // clamp away. This pins the measurement the no-clamp decision rests on
+        // — re-take it if either spring constant moves.
+        let mut anim = AnimationController::new(ANIM_PERIOD);
+        snap_anim(&mut anim, true, FrameTime::ZERO);
+        anim.fling(-FLING_VELOCITY, FAB_SHAPE_SPRING);
+        let (mut crossed, mut peak) = (false, 0.0f64);
+        for frame in 0..1000u64 {
+            anim.advance(FrameTime::from_nanos(frame * 1_000_000)); // 1ms steps
+            let v = anim.value();
+            crossed |= v <= 0.0;
+            if crossed {
+                peak = peak.max(v);
+            }
+        }
+        assert!(crossed, "the retreat does cross its target");
+        let px = MAIN_CONTAINER_CLOSED - lerp(MAIN_CONTAINER_CLOSED, MAIN_CONTAINER_OPEN, peak);
+        assert!(
+            px < 0.1,
+            "rebound peak {peak} = {px}px of container size — big enough to see, \
+             so the retreat clamp now needs to cover the morph too"
+        );
     }
 
     #[test]
