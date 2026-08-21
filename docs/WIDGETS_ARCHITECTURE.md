@@ -21,6 +21,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
+| `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
@@ -243,6 +244,48 @@ set by modifying the script's source list, not the generated output.
 parley's `PlainEditor` exposes no text-alignment hook. This is a parley limitation, not a frust
 design decision; users cannot work around it per-field. `TextView` does honor `align`.
 
+### Scroll Physics
+`ScrollView`/`ListView` (`scroll.rs`/`list_view.rs`) share a pluggable scroll-motion strategy
+(`crate::physics`, mirroring Flutter's `ScrollPhysics`) rather than a hard-coded feel: a
+`ScrollPhysics` trait (drag mapping, boundary rejection, ballistic simulation, fling thresholds,
+spring — composed by parenting via `.chain(parent)`, never inheritance) is orthogonal to
+`OverscrollEffect` (how a rejected/held displacement paints — `Translate`/`Stretch`/`None`) and to
+`Simulation` (the ballistic curve a physics hands back — Friction/Spring/Clamping/Bouncing ports of
+Flutter's own). `default_physics()`/`default_overscroll_effect()` (`crate::physics`) select the
+installed pair platform-adaptively — Android: `Clamping` + `Stretch`; every other platform:
+`Bouncing` + `Translate` — and both surfaces install that pair unless an app names its own.
+`RubberBand`, the flat-resistance feel both surfaces used to hard-code, is no longer any platform's
+default; it remains reachable as an explicit `.physics(RubberBand::new())` opt-in, and is the only
+physics still driving both widgets' legacy hand-rolled fling/settle path
+(`create_ballistic_simulation` returns `None` by design). Wheel input stays a physics-independent
+hard clamp on both surfaces.
+
+Every drag `Move` hands the physics *that move's* raw finger delta against the live position
+(Flutter's own per-move convention): a depth-aware curve (`Bouncing`) reads a real overscroll depth
+instead of a fixed zero, at the cost of the mapping being path-dependent — the same total pull split
+across a different number of moves need not land on the same pixel. Both widgets accumulate the
+physics' boundary-rejected excess as their own `edge_pull` state, outside the trait: a clamping
+physics rejects the whole excess (the position itself never leaves range), but `edge_pull` still
+grows — so pull-to-refresh (`on_refresh_release`, `REFRESH_TRIGGER_PX`) and
+`OverscrollEffect::Stretch`'s paint-side intensity both fire under a clamping physics at zero
+displacement, not only a bouncing one. Stretch is a paint-only affine scale about the held edge; no
+layout pass reads the pull or its intensity.
+
+**Nested-scroll arbitration** (`scroll.rs`) runs the same ambient-claim shape as the navigator's
+edge-swipe arming (**R-B3-inner**, `nav::ambient`'s `SWIPE_CLAIM`, see *Data Flow* above): a scroll
+surface pushes a fresh claim cell around the `Down` it forwards (`with_scroll_claim`), the nearest
+scrollable reached underneath reports what it could do with the gesture into it (`InnerScrollState`,
+nearest-inner pairing — a claim always lands in its immediate enclosing surface's cell, never a
+grandparent's), and the outer reads that back at the touch-slop takeover, deferring instead of
+taking over when the inner can consume the drag's direction. The report is a `Down`-time snapshot
+and the outer's defer decision is sticky for the rest of the gesture — content that becomes (or
+stops being) scrollable mid-drag never registers, and a deferred gesture never hands back — the same
+class of accepted tradeoff the navigator's own Down-time claim already lives with.
+
+`ScrollInfo`'s shape, wheel handling, and its consumers — `frust-shadcn`'s `scroll_area`,
+`frust-glyph`'s `app_bar` scroll-collapse — are unaffected: the seam changes only what computes
+drag/post-release motion, never `ScrollInfo`'s contract.
+
 ### Virtualized ListView (baseline)
 `ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`), not a
 design-system catalog — the facade re-exports them unconditionally regardless of which (if any)
@@ -278,9 +321,14 @@ corrected through the same rebuild-time anchoring path — recorded at layout, c
 following rebuild so the anchor row never visibly moves. A correction observed mid-fling
 accumulates and commits only once the fling settles, so it never fights the fling pump.
 
-**Refresh/overscroll parity with ScrollView.** `on_refresh_release` and drag rubber-band overscroll
-share `scroll.rs`'s `pub(crate)` resistance/trigger/settle constants with `ScrollView` verbatim, so
-`ScrollView` is no longer the framework's only pull-to-refresh-capable widget.
+**Refresh/overscroll parity with ScrollView** (see *Scroll Physics*, above, for the shared seam
+itself). `on_refresh_release` and drag overscroll share `scroll.rs`'s `pub(crate)`
+resistance/trigger/settle constants *and* nested-scroll claim cells with `ScrollView`, not just the
+constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
+widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band. The
+clamped-windowing/paint-only-overscroll split (`list_view.rs`'s module doc, *Windowing offset vs.
+painted offset*) survives every installed physics unchanged: only what computes the past-edge
+displacement differs, never how this widget stores or paints it.
 
 Virtualization exists because eager materialization doesn't scale: an in-repo host bench
 (`crates/frust-widgets/tests/list_virtualization_bench.rs`) shows `ListView`'s rebuild+layout cost
