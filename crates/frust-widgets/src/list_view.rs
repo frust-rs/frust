@@ -346,7 +346,8 @@ use crate::ChildKey;
 use crate::authoring::{ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
 use crate::physics::{
-    ScrollMetrics, ScrollPhysics, Simulation, default_overscroll_effect, default_physics,
+    MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
+    default_overscroll_effect, default_physics,
 };
 use crate::scroll::{
     BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
@@ -1576,9 +1577,24 @@ impl ListViewWidget {
     /// [`ScrollPhysics::carried_momentum`] carries over from the motion this
     /// gesture's `Down` interrupted (`0.0` under
     /// [`RubberBand`](crate::RubberBand), leaving `release` untouched).
-    /// Mirrors `ScrollWidget::fling_start_velocity`.
+    /// Mirrors `ScrollWidget::fling_start_velocity`, gate included: momentum
+    /// is carried only onto a release that plainly continues the interrupted
+    /// motion — same sign, and faster than
+    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of its speed — since the
+    /// carried term is comparable in magnitude to an ordinary release and
+    /// would otherwise cancel out or reverse a flick back the other way.
+    /// Flutter's third guard, dropping the carried velocity when the finger
+    /// held still before letting go, is an accepted gap here too (see that
+    /// method for the full contract).
     fn fling_start_velocity(&self, release: f64) -> f64 {
-        release + self.physics.carried_momentum(self.carried_velocity)
+        let carried = self.carried_velocity;
+        let continues_it = release.signum() == carried.signum()
+            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * carried.abs();
+        if continues_it {
+            release + self.physics.carried_momentum(carried)
+        } else {
+            release
+        }
     }
 
     /// Ask the installed physics for post-release motion, bounded by its own
@@ -3918,6 +3934,56 @@ mod tests {
         );
         assert_eq!(w.offset(), 0.0, "…and the windowing offset never moves");
         assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+    }
+
+    /// The signed start velocity of whatever post-release motion the last `Up`
+    /// produced — the physics-supplied curve's own, the legacy fling's, or
+    /// `0.0` for a release that started no motion at all. The `ScrollView`
+    /// twin of this helper reads the same two fields.
+    fn release_velocity(w: &ListViewWidget) -> f64 {
+        match w.ballistic.as_ref() {
+            Some(state) => state.sim.dx(0.0),
+            None => w.fling.unwrap_or(0.0),
+        }
+    }
+
+    /// The `ScrollView` twin of this test lives in `scroll.rs`, beside
+    /// `default_carried_momentum_compounds_a_refling` — the same-direction pin
+    /// this one is the mirror image of.
+    #[test]
+    fn reverse_refling_keeps_the_fingers_velocity() {
+        // A bare list (no rows materialized — this pins release velocity, not
+        // windowing), parked mid-content so neither edge is in play.
+        let mut w = ListViewWidget::new(1000, 50.0);
+        w.viewport = Size::new(200.0, 200.0);
+        dispatch_list(&mut w, &wheel(1000.0), 0.0);
+        assert_eq!(w.offset(), 1000.0, "the fixture parked mid-content");
+
+        // A downward fling: 50px of finger travel up over 32ms.
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 50.0), 32.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 50.0), 32.0);
+        assert_close(release_velocity(&w), 1562.5, 1e-9, "the first release");
+
+        // The finger lands on that live curve and flicks back the other way,
+        // just as fast. The interrupted motion's momentum must not be added to
+        // a release pointing the other way — it would cancel the flick out (or
+        // reverse it), and the list would ignore the finger entirely.
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 125.0), 64.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 150.0), 80.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 150.0), 80.0);
+        assert_close(
+            release_velocity(&w),
+            -1562.5,
+            1e-9,
+            "the reverse re-fling runs at the finger's own velocity",
+        );
+        assert!(
+            w.ballistic.is_some(),
+            "…as a real ballistic curve, not a stalled remnant"
+        );
     }
 
     // --- Pull-to-refresh under both shipped defaults — the twins of

@@ -211,6 +211,16 @@ pub const MIN_FLING_VELOCITY: f64 = 50.0;
 /// `kMaxFlingVelocity`. A release faster than this clamps to it.
 pub const MAX_FLING_VELOCITY: f64 = 8000.0;
 
+/// The fraction of an interrupted motion's speed a new release must exceed
+/// before any [`ScrollPhysics::carried_momentum`] is added to it — Flutter's
+/// `ScrollDragController.momentumRetainVelocityThresholdFactor`. Paired with a
+/// same-sign check at the carry site, it keeps a release that is not plainly
+/// continuing the interrupted motion from inheriting that motion's momentum.
+///
+/// `pub(crate)`: the two scroll surfaces apply it, each in its own
+/// `fling_start_velocity` — never redeclare a second copy of the number.
+pub(crate) const MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR: f64 = 0.5;
+
 /// A pluggable scroll-motion strategy — Flutter's `ScrollPhysics` contract.
 ///
 /// # Chaining

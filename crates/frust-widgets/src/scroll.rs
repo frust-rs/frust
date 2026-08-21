@@ -119,7 +119,8 @@ use kurbo::{Affine, Point, Rect, Size};
 use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
 use crate::physics::{
-    ScrollMetrics, ScrollPhysics, Simulation, default_overscroll_effect, default_physics,
+    MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
+    default_overscroll_effect, default_physics,
 };
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag
@@ -794,8 +795,32 @@ impl ScrollWidget {
     /// [`ScrollWidget::carried_velocity`] (and always writes it), so the
     /// remembered value is never stale; [`RubberBand`](crate::RubberBand)
     /// carries `0.0`, leaving `release` untouched.
+    ///
+    /// **Momentum is carried only onto a release that plainly continues the
+    /// interrupted motion**: same sign, and faster than
+    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of its speed (Flutter's
+    /// two `ScrollDragController.end` guards). Both are load-bearing, not
+    /// polish — the carried term is comparable in magnitude to an ordinary
+    /// release, so adding it to a flick back the other way cancels the
+    /// finger's own velocity out or reverses it outright.
+    ///
+    /// **Accepted gap**: Flutter drops the carried velocity a third way, when
+    /// the finger held still before letting go (`_maybeLoseMomentum`); that
+    /// guard is not ported. A press that stalls live motion, pauses, then
+    /// releases slowly in the same direction still carries momentum here.
+    ///
+    /// The single carry site for both release branches — the generic
+    /// ballistic driver ([`ScrollWidget::release_simulation`]) and the legacy
+    /// fling — so neither can grow a rule of its own.
     fn fling_start_velocity(&self, release: f64) -> f64 {
-        release + self.physics.carried_momentum(self.carried_velocity)
+        let carried = self.carried_velocity;
+        let continues_it = release.signum() == carried.signum()
+            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * carried.abs();
+        if continues_it {
+            release + self.physics.carried_momentum(carried)
+        } else {
+            release
+        }
     }
 
     /// Ask the installed physics for post-release motion at the release
@@ -2410,6 +2435,87 @@ mod tests {
             "the re-fling carries Bouncing::carried_momentum(first)",
         );
         assert!(second > first, "…which is a genuine speed-up");
+    }
+
+    /// The signed start velocity of whatever post-release motion the last `Up`
+    /// produced — the physics-supplied curve's own, the legacy fling's, or
+    /// `0.0` for a release that started no motion at all. Reads all three
+    /// outcomes through one number so a direction assertion does not depend on
+    /// which release path caught the gesture.
+    fn release_velocity(w: &ScrollWidget) -> f64 {
+        match w.ballistic.as_ref() {
+            Some(state) => state.sim.dx(0.0),
+            None => w.fling.unwrap_or(0.0),
+        }
+    }
+
+    #[test]
+    fn reverse_refling_keeps_the_fingers_velocity() {
+        // Parked mid-content, so both releases are judged on velocity alone
+        // with no edge spring in play.
+        let mut w = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut w, &scroll(50.0, false, 1000.0), 0.0);
+
+        // A downward fling: 50px of finger travel up over 32ms.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 50.0), 32.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 50.0), 32.0);
+        assert_close(release_velocity(&w), 1562.5, 1e-9, "the first release");
+
+        // The finger lands on that live curve and flicks back the other way,
+        // just as fast. The interrupted motion's momentum must not be added to
+        // a release pointing the other way — it would cancel the flick out (or
+        // reverse it), and the surface would ignore the finger entirely.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 125.0), 64.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 150.0), 80.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 150.0), 80.0);
+        assert_close(
+            release_velocity(&w),
+            -1562.5,
+            1e-9,
+            "the reverse re-fling runs at the finger's own velocity",
+        );
+        assert!(
+            w.ballistic.is_some(),
+            "…as a real ballistic curve, not a stalled remnant"
+        );
+    }
+
+    #[test]
+    fn small_reverse_flick_is_not_inverted() {
+        let mut w = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut w, &scroll(50.0, false, 1000.0), 0.0);
+
+        // Live downward motion at 1000 px/s: 32px of finger travel over 32ms.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 78.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the live motion");
+
+        // A *modest* drag back the other way — 24px down over 60ms, 400 px/s,
+        // well under the interrupted motion's own speed. Slower than what it
+        // interrupted, but still unambiguously the other way: the surface must
+        // never answer it by accelerating onward in the old direction.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 108.0), 68.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 116.0), 88.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 124.0), 108.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Up, 124.0), 108.0);
+        let released = release_velocity(&w);
+        assert!(
+            released <= 0.0,
+            "a reverse flick must never relaunch the surface the way it was \
+             already going: {released}"
+        );
+        assert_close(
+            released,
+            -400.0,
+            1e-9,
+            "…it runs at the finger's own velocity instead",
+        );
     }
 
     #[test]
