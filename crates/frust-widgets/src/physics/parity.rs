@@ -1,2 +1,2 @@
-//! Platform-default physics composition (e.g. Android's clamping-plus-stretch
-//! pairing). Empty scaffold — filled in scroll-physics arc task 04.
+//! Flutter-parity concrete physics (Bouncing/Clamping/Always/NeverScrollable).
+//! Empty scaffold awaiting the parity implementations.
