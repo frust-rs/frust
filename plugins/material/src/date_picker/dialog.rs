@@ -9,7 +9,9 @@
 // Porting decisions (documented in the module docs below): the portrait layout
 // only; the panel is content on the merged modal host rather than its own
 // `Material` + `showGeneralDialog`; the OK/Cancel result plumbing runs through
-// the navigator's own pop-with-result seam; and Cancel pops unstaged.
+// the navigator's own pop-with-result seam; and OK/Cancel dismiss through the
+// host's public staged-dismiss handle rather than popping the navigator
+// themselves.
 
 //! The modal **date picker dialog**: [`date_picker_dialog`] builds the panel,
 //! [`show_date_picker`] pushes it and delivers the picked date back through the
@@ -48,15 +50,19 @@
 //! exactly as `_handleOk`'s `if (!form.validate()) { return; }` does. The field
 //! is already showing why (see [`mod@super::input`]'s live validation).
 //!
-//! # Cancel pops unstaged
+//! # OK and Cancel animate out, like every other exit
 //!
-//! The host's staged exit ramp is driven by a method private to
-//! [`mod@crate::overlay::modal`], out of reach of content — so the Cancel
-//! button fires the same dismiss callback [`show_date_picker`] wires to
-//! `controller.pop()`, an immediate pop that skips the fade-out. `Escape`, the
-//! scrim and an Android back press still take the full staged exit. This is the
-//! shape [`crate::dialog`]'s own full-screen header close already documents,
-//! followed here rather than worked around.
+//! Both actions sit *inside* the panel, so neither can reach the host's exit
+//! ramp on its own: popping the navigator from a button takes the page out from
+//! under the host and the panel vanishes mid-fade. [`show_date_picker`]
+//! therefore mints a [`ModalDismiss`] and hands it to the dialog
+//! ([`DatePickerDialog::dismiss_handle`]) — OK dismisses with its
+//! [`PopResult`], Cancel dismisses empty, and both take the same staged exit
+//! the scrim tap, `Escape`, and an Android back press take.
+//!
+//! With no handle installed (a `Stack`-mounted dialog, or one pushed by hand),
+//! Cancel falls back to firing [`DatePickerDialog::on_dismiss`] directly, which
+//! is unstaged — the only route open to it.
 //!
 //! # Deliberate cuts
 //!
@@ -87,8 +93,8 @@ use crate::button::{button, text_button};
 use crate::divider::divider;
 use crate::icon_button::icon_button;
 use crate::overlay::{
-    OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget, overlay_modal,
-    show_overlay_modal,
+    ModalDismiss, OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
+    overlay_modal, show_overlay_modal,
 };
 
 /// The panel's inset on all four edges, in logical px (`M3EDialogTheme.padding`,
@@ -138,7 +144,20 @@ fn confirm_action<State: 'static>(
 }
 
 /// The **Cancel** action's whole body — see [`confirm_action`].
-fn dismiss_action<State: 'static>(on_dismiss: Option<&OnDismiss<State>>, app: &mut State) {
+///
+/// A handle takes precedence over the callback rather than firing alongside it:
+/// on the [`show_date_picker`] path that callback *is* the host's raw
+/// `controller.pop()`, so running both would pop the page out from under the
+/// exit ramp the handle just staged.
+fn cancel_action<State: 'static>(
+    dismiss: Option<&ModalDismiss>,
+    on_dismiss: Option<&OnDismiss<State>>,
+    app: &mut State,
+) {
+    if let Some(dismiss) = dismiss {
+        dismiss.dismiss();
+        return;
+    }
     if let Some(on_dismiss) = on_dismiss {
         on_dismiss(app);
     }
@@ -156,6 +175,7 @@ pub struct DatePickerDialog<State: 'static> {
     on_confirm: Option<OnConfirm<State>>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Create a controlled date picker dialog over `state`, bounded by
@@ -205,6 +225,7 @@ where
         on_confirm: None,
         dismissable: true,
         on_dismiss: None,
+        dismiss_handle: None,
     }
 }
 
@@ -230,9 +251,10 @@ impl<State: 'static> DatePickerDialog<State> {
         self
     }
 
-    /// Observe OK. [`show_date_picker`] wires this to
-    /// `controller.pop_with_result(..)`; a caller mounting the dialog directly
-    /// (in a `Stack`, with no navigator) wires its own.
+    /// Observe OK. [`show_date_picker`] wires this to a staged dismissal
+    /// carrying the picked date ([`ModalDismiss::dismiss_with`]); a caller
+    /// mounting the dialog directly (in a `Stack`, with no navigator) wires its
+    /// own.
     pub fn on_confirm<F: Fn(&mut State, Option<MaterialDate>) + 'static>(
         mut self,
         on_confirm: F,
@@ -249,11 +271,23 @@ impl<State: 'static> DatePickerDialog<State> {
         self
     }
 
-    /// Observe a dismissal — the same callback the **Cancel** button fires (see
-    /// the [module docs](self)' unstaged note). [`show_date_picker`] wires it
-    /// to `controller.pop()`.
+    /// Observe a dismissal — the callback the **Cancel** button fires when no
+    /// [`dismiss_handle`](Self::dismiss_handle) is installed (see the [module
+    /// docs](self)' OK-and-Cancel section). [`show_date_picker`] installs a
+    /// handle, so on that path Cancel stages the host's exit instead and this
+    /// callback is the *host's* own unstaged fallback, nothing more.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.on_dismiss = Some(Rc::new(on_dismiss));
+        self
+    }
+
+    /// Install the app-triggered staged-dismiss handle, so **Cancel** closes
+    /// the dialog through the host's exit ramp instead of firing
+    /// [`on_dismiss`](Self::on_dismiss) into an immediate pop (see
+    /// [`ModalDismiss`]). [`show_date_picker`] installs one for you — and wires
+    /// OK to it too, since OK's own pop is its to make.
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
         self
     }
 
@@ -361,12 +395,14 @@ impl<State: 'static> DatePickerDialog<State> {
         }
     }
 
-    /// Cancel — fires the dismiss callback (see the [module docs](self)).
+    /// Cancel — stages the host's exit through the dismiss handle, or fires
+    /// the dismiss callback when there is none (see the [module docs](self)).
     fn cancel_view(&self) -> AnyView<State> {
         let on_dismiss = self.on_dismiss.clone();
+        let dismiss = self.dismiss_handle.clone();
         any::<State, _>(text_button(
             self.strings.cancel_label,
-            move |app: &mut State| dismiss_action(on_dismiss.as_ref(), app),
+            move |app: &mut State| cancel_action(dismiss.as_ref(), on_dismiss.as_ref(), app),
         ))
     }
 
@@ -399,7 +435,7 @@ impl<State: 'static> DatePickerDialog<State> {
 
     /// Run the **Cancel** action's body directly — see [`Self::confirm`].
     pub fn cancel(&self, app: &mut State) {
-        dismiss_action(self.on_dismiss.as_ref(), app);
+        cancel_action(self.dismiss_handle.as_ref(), self.on_dismiss.as_ref(), app);
     }
 
     /// Compose the host-facing modal view fresh from the current fields — the
@@ -424,6 +460,9 @@ impl<State: 'static> DatePickerDialog<State> {
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));
+        }
+        if let Some(dismiss) = &self.dismiss_handle {
+            view = view.dismiss_handle(dismiss.clone());
         }
         view
     }
@@ -468,6 +507,12 @@ impl<State: 'static> OverlayModalContent<State> for DatePickerDialog<State> {
 /// `PopResult::of(`[`MaterialDate`]`)` when it resolves to a date, and every
 /// other exit pops empty — so `result.take::<MaterialDate>()` is `Some` exactly
 /// for a confirmed pick.
+///
+/// Both in-panel actions dismiss through one [`ModalDismiss`] minted here (the
+/// module docs' OK-and-Cancel section), so they animate out exactly like the
+/// scrim tap does. It is minted **outside** the page builder on purpose: the
+/// builder re-runs on every navigator rebuild, and the handle must stay the one
+/// the mounted host latched.
 pub fn show_date_picker<State, B, R>(
     controller: &NavigatorController<State>,
     build: B,
@@ -477,17 +522,19 @@ pub fn show_date_picker<State, B, R>(
     B: Fn() -> DatePickerDialog<State> + 'static,
     R: Fn(&mut State, PopResult) + 'static,
 {
-    let confirm_ctrl = controller.clone();
+    let dismiss = ModalDismiss::new();
     show_overlay_modal(
         controller,
         move || {
-            let ctrl = confirm_ctrl.clone();
-            build().on_confirm(
-                move |_state: &mut State, picked: Option<MaterialDate>| match picked {
-                    Some(date) => ctrl.pop_with_result(PopResult::of(date)),
-                    None => ctrl.pop(),
-                },
-            )
+            let confirm_dismiss = dismiss.clone();
+            build()
+                .on_confirm(
+                    move |_state: &mut State, picked: Option<MaterialDate>| match picked {
+                        Some(date) => confirm_dismiss.dismiss_with(PopResult::of(date)),
+                        None => confirm_dismiss.dismiss(),
+                    },
+                )
+                .dismiss_handle(dismiss.clone())
         },
         on_result,
     );
@@ -852,6 +899,11 @@ impl Widget for DatePickerPanelWidget {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+    use std::cell::Cell;
+
+    use frust::FrameTime;
+
     use super::super::{DatePickerEntryMode, DatePickerMode};
     use super::*;
 
@@ -983,6 +1035,64 @@ mod tests {
         dialog(seeded()).cancel(&mut app);
         assert_eq!(app.dismissed, 1);
         assert!(app.confirmed.is_empty());
+    }
+
+    #[test]
+    fn cancel_stages_through_the_dismiss_handle_when_one_is_installed() {
+        // The `show_date_picker` path: the callback Cancel used to fire is the
+        // host's own raw `controller.pop()`, so with a handle installed Cancel
+        // asks the host to animate out instead — and fires nothing itself.
+        let dismiss = ModalDismiss::new();
+        let mut app = App::default();
+        dialog(seeded())
+            .dismiss_handle(dismiss.clone())
+            .cancel(&mut app);
+        assert_eq!(app.dismissed, 0, "the unstaged callback is not fired");
+        assert!(app.confirmed.is_empty());
+
+        // The request is real: mounted the way `show_date_picker` mounts it (a
+        // staged close hook on the host), Cancel's body makes the host animate
+        // out and pop only on settle, instead of the panel vanishing at once.
+        let dismiss = ModalDismiss::new();
+        let picker = dialog(seeded()).dismiss_handle(dismiss.clone());
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let view = picker.compose().on_close(move || hook.set(hook.get() + 1));
+        let mut counter = 0u64;
+        let mut w = View::<App>::build(&view, &mut BuildCtx::new(&mut counter));
+        let window = Size::new(600.0, 800.0);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(window));
+        for ms in [0.0, 400.0] {
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, window, ft_ms(ms));
+            w.paint(&mut ctx, &mut NoopScene);
+        }
+        assert!(!w.is_exiting(), "entered");
+
+        picker.cancel(&mut app);
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, window, ft_ms(500.0));
+        w.paint(&mut ctx, &mut NoopScene);
+        assert!(w.is_exiting(), "Cancel stages the host's exit ramp");
+        assert_eq!(closed.get(), 0, "and pops nothing mid-ramp");
+
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, window, ft_ms(2000.0));
+        w.paint(&mut ctx, &mut NoopScene);
+        assert_eq!(closed.get(), 1, "the pop lands when the ramp settles");
+        assert_eq!(app.dismissed, 0, "never through the unstaged callback");
+    }
+
+    /// A frame time `ms` milliseconds in.
+    fn ft_ms(ms: f64) -> FrameTime {
+        FrameTime::from_nanos((ms * 1_000_000.0) as u64)
+    }
+
+    /// A paint sink for a test that only needs the pass to run.
+    struct NoopScene;
+
+    impl PaintScene for NoopScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
     }
 
     #[test]

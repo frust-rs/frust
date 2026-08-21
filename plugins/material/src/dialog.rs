@@ -116,9 +116,9 @@ use crate::checkbox::checkbox;
 use crate::divider::divider;
 use crate::icon_button::icon_button;
 use crate::overlay::{
-    OVERLAY_DIALOG_MAX_WIDTH, OverlayCorners, OverlayElevation, OverlayExtent, OverlayLimit,
-    OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget, OverlaySide,
-    overlay_modal, show_overlay_modal,
+    ModalDismiss, OVERLAY_DIALOG_MAX_WIDTH, OverlayCorners, OverlayElevation, OverlayExtent,
+    OverlayLimit, OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
+    OverlaySide, overlay_modal, show_overlay_modal,
 };
 use crate::radio::radio;
 
@@ -565,6 +565,7 @@ pub struct DialogView<State: 'static> {
     actions: Vec<SharedAction<State>>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Create an empty dialog. Chain [`DialogView::title`]/[`DialogView::body`]/
@@ -578,6 +579,7 @@ pub fn dialog<State: 'static>() -> DialogView<State> {
         actions: Vec::new(),
         dismissable: true,
         on_dismiss: None,
+        dismiss_handle: None,
     }
 }
 
@@ -625,6 +627,17 @@ impl<State: 'static> DialogView<State> {
         self
     }
 
+    /// Install the app-triggered staged-dismiss handle, so a Cancel/Confirm
+    /// action closes the dialog through the **same** exit ramp the scrim tap,
+    /// `Escape`, and a back press take — rather than a raw
+    /// `controller.pop()`, which dismisses on the spot with no ramp. See
+    /// [`ModalDismiss`]; mint the handle outside [`show_dialog`]'s page
+    /// builder.
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
+        self
+    }
+
     /// Compose the host-facing [`OverlayModalView`] fresh from the current
     /// fields (see the module docs' *Why actions are `Rc`-wrapped
     /// internally*).
@@ -648,6 +661,9 @@ impl<State: 'static> DialogView<State> {
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));
+        }
+        if let Some(dismiss) = &self.dismiss_handle {
+            view = view.dismiss_handle(dismiss.clone());
         }
         view
     }
@@ -733,6 +749,7 @@ pub struct SelectionDialogView<State: 'static> {
     on_confirm: Option<OnDismiss<State>>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Create a selection dialog titled `title`, offering `options` (single-select
@@ -752,6 +769,7 @@ pub fn selection_dialog<State: 'static>(
         on_confirm: None,
         dismissable: true,
         on_dismiss: None,
+        dismiss_handle: None,
     }
 }
 
@@ -815,6 +833,14 @@ impl<State: 'static> SelectionDialogView<State> {
         self
     }
 
+    /// Install the app-triggered staged-dismiss handle, so the confirm action
+    /// closes the dialog through the host's exit ramp instead of a raw,
+    /// unstaged `controller.pop()` — see [`DialogView::dismiss_handle`].
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
+        self
+    }
+
     fn compose(&self) -> OverlayModalView<State> {
         let list = SelectionListView {
             options: self.options.clone(),
@@ -860,6 +886,9 @@ impl<State: 'static> SelectionDialogView<State> {
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));
+        }
+        if let Some(dismiss) = &self.dismiss_handle {
+            view = view.dismiss_handle(dismiss.clone());
         }
         view
     }
@@ -1150,6 +1179,7 @@ pub struct FullScreenDialogView<State: 'static> {
     action: Option<Rc<AnyView<State>>>,
     dismissable: bool,
     on_dismiss: Option<OnDismiss<State>>,
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Create a full-screen dialog titled `title`, filling its body slot with
@@ -1165,6 +1195,7 @@ pub fn full_screen_dialog<State: 'static, V: View<State>>(
         action: None,
         dismissable: true,
         on_dismiss: None,
+        dismiss_handle: None,
     }
 }
 
@@ -1193,6 +1224,17 @@ impl<State: 'static> FullScreenDialogView<State> {
         self
     }
 
+    /// Install the app-triggered staged-dismiss handle, so the header's own
+    /// trailing action (a "Save") closes the dialog through the host's exit
+    /// ramp instead of a raw, unstaged `controller.pop()` — see
+    /// [`DialogView::dismiss_handle`]. The header's *close* affordance is not
+    /// routed through it: it fires `on_dismiss` directly (see
+    /// [`Self::dismissable`]), which is this family's own unstaged exit.
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
+        self
+    }
+
     fn config() -> OverlayModalConfig {
         OverlayModalConfig::edge(OverlaySide::Bottom)
             .extent(OverlayExtent::Fraction(1.0), OverlayLimit::None)
@@ -1215,6 +1257,9 @@ impl<State: 'static> FullScreenDialogView<State> {
         if let Some(on_dismiss) = &self.on_dismiss {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));
+        }
+        if let Some(dismiss) = &self.dismiss_handle {
+            view = view.dismiss_handle(dismiss.clone());
         }
         view
     }
@@ -1943,6 +1988,40 @@ mod tests {
         h.pass();
         h.settle();
         assert!(!h.state.confirmed);
+    }
+
+    #[test]
+    fn every_variant_forwards_an_installed_dismiss_handle_to_the_host() {
+        // Each variant recomposes its host view from its own fields every
+        // pass; a variant that forgot to carry the handle across would drop an
+        // action's staged dismiss on the floor with nothing else to show for
+        // it. The staging itself is the host's, and tested there.
+        let dismiss = ModalDismiss::new();
+        assert!(
+            dialog::<NavState>()
+                .dismiss_handle(dismiss.clone())
+                .compose()
+                .dismiss_handle
+                .is_some()
+        );
+        assert!(
+            selection_dialog::<NavState>("Pick", vec!["A".into()])
+                .dismiss_handle(dismiss.clone())
+                .compose()
+                .dismiss_handle
+                .is_some()
+        );
+        assert!(
+            full_screen_dialog::<NavState, _>("Edit", body_view::<NavState>("body"))
+                .dismiss_handle(dismiss)
+                .compose()
+                .dismiss_handle
+                .is_some()
+        );
+        assert!(
+            dialog::<NavState>().compose().dismiss_handle.is_none(),
+            "and none is invented for a variant that was handed none"
+        );
     }
 
     // --- 3. Existing consumer compile shape (mirrors `examples/huddle`). ---

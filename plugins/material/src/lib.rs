@@ -244,8 +244,8 @@ pub use navigation_rail::{
     RailLabelBehavior, RailSection, navigation_rail, rail_destination, rail_fab, rail_section,
 };
 pub use overlay::{
-    ANCHORED_ENTER_SCALE, AnchoredOverlayView, AnchoredOverlayWidget, OVERLAY_ANCHOR_GAP,
-    OVERLAY_DIALOG_MAX_WIDTH, OVERLAY_DIALOG_MIN_WIDTH, OVERLAY_EDGE_FRACTION,
+    ANCHORED_ENTER_SCALE, AnchoredOverlayView, AnchoredOverlayWidget, ModalDismiss,
+    OVERLAY_ANCHOR_GAP, OVERLAY_DIALOG_MAX_WIDTH, OVERLAY_DIALOG_MIN_WIDTH, OVERLAY_EDGE_FRACTION,
     OVERLAY_FLING_VELOCITY, OVERLAY_HANDLE_RESERVE, OVERLAY_SCRIM_ALPHA,
     OVERLAY_SHEET_MAX_HEIGHT_FRACTION, OVERLAY_SIDE_SHEET_MAX_WIDTH, OverlayAlign, OverlayAnchor,
     OverlayAnchorView, OverlayAnchorWidget, OverlayBorder, OverlayContainer, OverlayCorners,

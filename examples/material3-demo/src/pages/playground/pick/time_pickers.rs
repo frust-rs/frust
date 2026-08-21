@@ -14,10 +14,13 @@
 //! Unlike `frust_material::date_picker`'s `show_date_picker` ("wires
 //! OK/Cancel/back for you"), `show_time_picker`'s own module docs are
 //! explicit that confirm and cancel are the *caller's* actions: this page's
-//! trigger closure calls `nav.pop_with_result`/`nav.pop()` itself from
-//! `TimePickerView::on_confirm`/`TimePickerView::on_cancel`, exactly as the
-//! module doc's own example does — scrim tap/Escape/back stay the host's own
-//! staged pop.
+//! trigger closure dismisses from
+//! `TimePickerView::on_confirm`/`TimePickerView::on_cancel` itself, exactly as
+//! the module doc's own example does — scrim tap/Escape/back stay the host's
+//! own staged pop. Both actions go through a
+//! [`frust_material::ModalDismiss`] rather than `nav.pop_with_result`/
+//! `nav.pop()`: a direct pop takes the page out from under the host, so the
+//! dialog vanishes instead of animating out the way every other exit does.
 //!
 //! # Why `page`/`Component::build` aren't tested directly
 //!
@@ -77,8 +80,8 @@ use frust::{
     Set, SizedBox, Stack, any, component, navigator, text,
 };
 use frust_material::{
-    OverlayAnchor, TimeOfDay, TimePickerEntryMode, TimePickerView, show_time_picker, time_dial,
-    time_picker, tonal_button,
+    ModalDismiss, OverlayAnchor, TimeOfDay, TimePickerEntryMode, TimePickerView, show_time_picker,
+    time_dial, time_picker, tonal_button,
 };
 
 use crate::AppState;
@@ -158,19 +161,21 @@ fn dialog_view(
     time: RwSignal<TimeOfDay>,
     entry_mode: RwSignal<TimePickerEntryMode>,
     use_24_hour: RwSignal<bool>,
-    on_confirm_nav: NavigatorController<Knobs>,
-    on_cancel_nav: NavigatorController<Knobs>,
+    dismiss: &ModalDismiss,
 ) -> TimePickerView<Knobs> {
+    let on_confirm = dismiss.clone();
+    let on_cancel = dismiss.clone();
     time_picker(resolve_time(time))
         .entry_mode(entry_mode.get())
         .use_24_hour(use_24_hour.get())
         .on_change(|s: &mut Knobs, next: TimeOfDay| s.time.set(next))
         .on_confirm(move |_s: &mut Knobs, confirmed: Option<TimeOfDay>| {
             if let Some(picked) = confirmed {
-                on_confirm_nav.pop_with_result(PopResult::of(picked));
+                on_confirm.dismiss_with(PopResult::of(picked));
             }
         })
-        .on_cancel(move |_s: &mut Knobs| on_cancel_nav.pop())
+        .on_cancel(move |_s: &mut Knobs| on_cancel.dismiss())
+        .dismiss_handle(dismiss.clone())
 }
 
 /// The "Dialog" preview: a "Pick time" trigger over the current time's label
@@ -191,19 +196,12 @@ fn dialog_preview(
     let time_label = format!("{:02}:{:02}", time.hour(), time.minute());
 
     let trigger = tonal_button("Pick time", move |_: &mut Knobs| {
-        let on_confirm_nav = nav.clone();
-        let on_cancel_nav = nav.clone();
+        // Minted once, outside the page builder below — which re-runs on every
+        // navigator rebuild.
+        let dismiss = ModalDismiss::new();
         show_time_picker(
             &nav,
-            move || {
-                dialog_view(
-                    time_signal,
-                    entry_mode_signal,
-                    use_24_hour_signal,
-                    on_confirm_nav.clone(),
-                    on_cancel_nav.clone(),
-                )
-            },
+            move || dialog_view(time_signal, entry_mode_signal, use_24_hour_signal, &dismiss),
             |s: &mut Knobs, result: PopResult| {
                 if let Some(picked) = result.take::<TimeOfDay>() {
                     s.time.set(picked);
@@ -237,17 +235,19 @@ fn dialog_snippet(
     use_24_hour: bool,
 ) -> PlaySnippet {
     let code = format!(
-        "show_time_picker(\n    \
+        "let dismiss = ModalDismiss::new();\n\
+         show_time_picker(\n    \
              &nav,\n    \
-             || time_picker(TimeOfDay::new({hour}, {minute}))\n        \
+             move || time_picker(TimeOfDay::new({hour}, {minute}))\n        \
                  .entry_mode(TimePickerEntryMode::{entry_mode:?})\n        \
                  .use_24_hour({use_24_hour})\n        \
                  .on_change(|state, next| state.time = next)\n        \
-                 .on_confirm(|_state, confirmed| {{\n            \
+                 .on_confirm(move |_state, confirmed| {{\n            \
                      if let Some(picked) = confirmed {{\n                \
-                         nav.pop_with_result(PopResult::of(picked));\n            \
+                         confirm.dismiss_with(PopResult::of(picked));\n            \
                      }}\n        \
-                 }}),\n    \
+                 }})\n        \
+                 .dismiss_handle(dismiss.clone()),\n    \
              |state, result| {{\n        \
                  if let Some(picked) = result.take::<TimeOfDay>() {{\n            \
                      state.time = picked;\n        \
@@ -478,17 +478,15 @@ mod tests {
         let time = RwSignal::new(TimeOfDay::new(9, 30));
         let entry_mode = RwSignal::new(TimePickerEntryMode::Dial);
         let use_24_hour = RwSignal::new(false);
-        let nav: NavigatorController<Knobs> = NavigatorController::new();
+        let dismiss = ModalDismiss::new();
 
         assert_eq!(resolve_time(time), TimeOfDay::new(9, 30));
-        let _first: TimePickerView<Knobs> =
-            dialog_view(time, entry_mode, use_24_hour, nav.clone(), nav.clone());
+        let _first: TimePickerView<Knobs> = dialog_view(time, entry_mode, use_24_hour, &dismiss);
 
         let updated = TimeOfDay::new(14, 45);
         time.set(updated);
 
         assert_eq!(resolve_time(time), updated);
-        let _second: TimePickerView<Knobs> =
-            dialog_view(time, entry_mode, use_24_hour, nav.clone(), nav.clone());
+        let _second: TimePickerView<Knobs> = dialog_view(time, entry_mode, use_24_hour, &dismiss);
     }
 }

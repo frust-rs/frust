@@ -124,6 +124,51 @@
 //! and the refusal is reported, so a refused exit ramps back open instead of
 //! latching `closed` over a page it never removed.
 //!
+//! # App-initiated dismiss: the [`ModalDismiss`] handle
+//!
+//! The staged exit above is the *host's* to trigger — its own chrome (scrim,
+//! close button, handle, Escape, back) reaches it, the caller-built content
+//! inside the panel does not. A panel's own action button ("Apply", "Save",
+//! "Cancel") therefore used to have exactly one route open to it, a direct
+//! [`NavigatorController::pop`], which dismisses **unstaged**: the same panel
+//! closed two different ways played two different exit motions.
+//!
+//! [`ModalDismiss`] is that missing seam. An app mints one, installs it with
+//! [`OverlayModalView::dismiss_handle`] (or a family wrapper's own forward of
+//! it), clones it into whatever control it likes, and
+//! [`dismiss`](ModalDismiss::dismiss) then runs the **same** staged exit the
+//! chrome gestures run — [`stage_dismiss`](OverlayModalWidget::stage_dismiss)
+//! is the one staging core all of them share, so there is no second exit path
+//! to keep in step.
+//!
+//! Three decisions worth stating outright:
+//!
+//! * **An app dismiss is not a *user* dismissal, so it ignores
+//!   [`dismissable`](OverlayModalView::dismissable).** That flag exists to take
+//!   the *user's* exits away (a sheet that demands an explicit choice) —
+//!   leaving only "an explicit control the app wires inside its own content",
+//!   which is precisely this handle. Gating the handle on it would make the
+//!   one documented escape hatch the one thing that cannot close a
+//!   non-dismissable panel.
+//! * **It can carry the pop result.**
+//!   [`dismiss_with`](ModalDismiss::dismiss_with) hands a [`PopResult`] to the
+//!   deferred pop, so a staged "Apply" still reaches the pusher's `on_result`
+//!   — the payload rides the [`StagedPop`], which is the only thing that knows
+//!   whether a navigator is behind the hook at all (an app-wired
+//!   [`OverlayModalView::on_close`] takes no payload, and drops it).
+//! * **Mint it outside the page builder.** `show_*`'s `build` closure re-runs
+//!   on every navigator rebuild; a handle minted *inside* it would be a fresh
+//!   cell each pass. The widget defends against that anyway (it re-seeds on a
+//!   handle whose identity changed, see
+//!   [`OverlayModalView::rebuild`]) — but a handle the app cannot also hold
+//!   from outside is of no use to the control it was minted for.
+//!
+//! A request is observed in **both** passes, latched by generation so it acts
+//! exactly once: in `event`, right after the content routing that likely raised
+//! it (so the dismissal stages in the very pass that asked for it), and in
+//! `paint` as the backstop for a request raised anywhere else (an async
+//! completion, a timer).
+//!
 //! # Back-dismiss: the `DismissAnimated` tier
 //!
 //! [`show_overlay_modal`] pushes its transparent page with
@@ -207,7 +252,7 @@
 //! A new clamp against a computed bound must fit one of these two shapes, not
 //! introduce a third.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -672,31 +717,39 @@ pub struct StagedPop {
     /// navigator behind it (an app-wired [`OverlayModalView::on_close`] on a
     /// `Stack` mount), whose close is always authoritative.
     depth: Option<Box<dyn Fn() -> usize>>,
-    /// The close itself: `controller.pop()` on the navigator path.
-    close: Box<dyn Fn()>,
+    /// The close itself: `controller.pop_with_result(..)` on the navigator
+    /// path, which is `pop()` exactly when the payload is
+    /// [`PopResult::empty`]. A hook with no navigator behind it takes no
+    /// payload and drops it (see [`unguarded`](Self::unguarded)).
+    close: Box<dyn Fn(PopResult)>,
     /// The depth [`arm`](Self::arm) last snapshotted; `None` until it runs.
     staged_depth: Cell<Option<usize>>,
 }
 
 impl StagedPop {
-    /// A navigator pop, guarded by the stack identity above.
+    /// A navigator pop, guarded by the stack identity above, carrying whatever
+    /// payload [`fire_with`](Self::fire_with) is handed (empty for every
+    /// gesture dismissal — only [`ModalDismiss::dismiss_with`] supplies one).
     pub(crate) fn navigator_pop<State: 'static>(controller: &NavigatorController<State>) -> Self {
         let depth_ctrl = controller.clone();
         let pop_ctrl = controller.clone();
         Self {
             depth: Some(Box::new(move || depth_ctrl.depth())),
-            close: Box::new(move || pop_ctrl.pop()),
+            close: Box::new(move |result| pop_ctrl.pop_with_result(result)),
             staged_depth: Cell::new(None),
         }
     }
 
     /// A close hook with no navigator identity to check — an app's own
     /// [`OverlayModalView::on_close`], which may be a signal write rather than a
-    /// pop at all and is not this module's to second-guess.
+    /// pop at all and is not this module's to second-guess. It takes no
+    /// argument, so a [`ModalDismiss::dismiss_with`] payload has nowhere to go
+    /// on this path and is dropped: there is no pusher `on_result` behind a
+    /// `Stack` mount to deliver it to.
     pub(crate) fn unguarded<F: Fn() + 'static>(close: F) -> Self {
         Self {
             depth: None,
-            close: Box::new(close),
+            close: Box::new(move |_result| close()),
             staged_depth: Cell::new(None),
         }
     }
@@ -712,20 +765,124 @@ impl StagedPop {
             .set(self.depth.as_ref().map(|depth| depth()));
     }
 
-    /// Fire the close unless the stack moved since [`arm`](Self::arm) — returns
-    /// whether it actually fired.
+    /// Fire the close with no payload — every gesture dismissal's path. See
+    /// [`fire_with`](Self::fire_with).
+    #[must_use]
+    pub(crate) fn fire(&self) -> bool {
+        self.fire_with(&mut None)
+    }
+
+    /// Fire the close, handing it `result`'s payload, unless the stack moved
+    /// since [`arm`](Self::arm) — returns whether it actually fired.
     ///
     /// An unarmed hook fires unconditionally: an unstaged close lands in the same
     /// turn its trigger arrives, leaving no window for the stack to move.
+    ///
+    /// `result` is taken **only when the pop actually happens**: a refused pop
+    /// removed no page and delivered no result, so the payload stays with the
+    /// caller to ride the exit that eventually lands (the panel ramps back open
+    /// rather than closing — see [`OverlayModalWidget::pending_result`]).
     #[must_use]
-    pub(crate) fn fire(&self) -> bool {
+    pub(crate) fn fire_with(&self, result: &mut Option<PopResult>) -> bool {
         if let (Some(depth), Some(staged)) = (&self.depth, self.staged_depth.get())
             && depth() != staged
         {
             return false;
         }
-        (self.close)();
+        (self.close)(result.take().unwrap_or_else(PopResult::empty));
         true
+    }
+}
+
+/// A cloneable handle an app triggers to dismiss a modal **through the host's
+/// own staged exit ramp** — the public half of a machine whose triggers were
+/// otherwise all host-chrome-internal (see the [module docs](self)'
+/// app-initiated dismiss section).
+///
+/// Mint one per presentation, install it on the modal view with
+/// [`OverlayModalView::dismiss_handle`] (or the family wrapper's forward of
+/// it), and clone it into the panel's own controls:
+///
+/// ```ignore
+/// let dismiss = ModalDismiss::new();
+/// let apply = dismiss.clone();
+/// show_side_sheet(
+///     &nav,
+///     move || side_sheet("Filters", body(), vec![
+///         any(filled_button("Apply", move |_: &mut State| {
+///             apply.dismiss_with(PopResult::of(Filters::current()))
+///         })),
+///     ])
+///     .dismiss_handle(dismiss.clone()),
+///     |state: &mut State, result: PopResult| { /* ... */ },
+/// );
+/// ```
+///
+/// A request is a generation bump on a shared cell, not a callback: the widget
+/// latches the last generation it saw, so a trigger fires exactly once however
+/// many passes observe it, and a bump raised before the widget existed is not a
+/// request aimed at it. Triggering while an exit is already staging is a no-op
+/// — the ramp in flight is the dismissal.
+#[derive(Clone, Default)]
+pub struct ModalDismiss(Rc<DismissRequest>);
+
+/// [`ModalDismiss`]' shared cell: the request counter, plus the payload the
+/// next staged pop carries.
+#[derive(Default)]
+struct DismissRequest {
+    generation: Cell<u64>,
+    result: RefCell<Option<PopResult>>,
+}
+
+impl ModalDismiss {
+    /// A fresh handle, with no request raised on it yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the modal to dismiss itself, animating out, popping with an empty
+    /// result.
+    pub fn dismiss(&self) {
+        self.request(None);
+    }
+
+    /// Ask the modal to dismiss itself, animating out, popping with `result`
+    /// for the pusher's own `on_result` callback (`show_*`'s third argument).
+    ///
+    /// A payload only reaches an `on_result` where a navigator is behind the
+    /// modal; a `Stack`-mounted modal's app-wired
+    /// [`OverlayModalView::on_close`] takes none and drops it
+    /// ([`StagedPop::unguarded`]).
+    pub fn dismiss_with(&self, result: PopResult) {
+        self.request(Some(result));
+    }
+
+    /// Stash any payload, then bump the generation the widget latches against.
+    /// The bump is last so a paint racing the write can never see the request
+    /// without its payload.
+    fn request(&self, result: Option<PopResult>) {
+        if result.is_some() {
+            *self.0.result.borrow_mut() = result;
+        }
+        self.0
+            .generation
+            .set(self.0.generation.get().wrapping_add(1));
+    }
+
+    /// The live request generation.
+    fn generation(&self) -> u64 {
+        self.0.generation.get()
+    }
+
+    /// Take the pending payload, if the request carried one.
+    fn take_result(&self) -> Option<PopResult> {
+        self.0.result.borrow_mut().take()
+    }
+
+    /// Whether both handles share one cell — an *identity* check, not an
+    /// equality one (see [`OverlayModalView::rebuild`]'s re-seed).
+    fn same_cell(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -769,6 +926,7 @@ pub fn overlay_modal<State: 'static, V: View<State>>(
         dismissable: true,
         on_dismiss: None,
         on_close: None,
+        dismiss_handle: None,
         snap_points: Vec::new(),
     }
 }
@@ -786,6 +944,7 @@ pub struct OverlayModalView<State: 'static> {
     pub(crate) dismissable: bool,
     pub(crate) on_dismiss: Option<OnDismiss<State>>,
     pub(crate) on_close: Option<OnClose>,
+    pub(crate) dismiss_handle: Option<ModalDismiss>,
     pub(crate) snap_points: Vec<f64>,
 }
 
@@ -830,6 +989,19 @@ impl<State: 'static> OverlayModalView<State> {
     /// [`show_overlay_modal`] wires has a stack identity to check.
     pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
         self.on_close = Some(Rc::new(StagedPop::unguarded(on_close)));
+        self
+    }
+
+    /// Install the app-triggered staged-dismiss handle: the panel's own
+    /// content can then close it through the very ramp the host chrome uses,
+    /// instead of the raw, unstaged `controller.pop()` that was its only route
+    /// before (see the [module docs](self)' app-initiated dismiss section, and
+    /// [`ModalDismiss`] for the worked example).
+    ///
+    /// Mint the handle *outside* a `show_*` page builder and clone it in — the
+    /// builder re-runs on every navigator rebuild.
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
         self
     }
 
@@ -981,6 +1153,30 @@ impl<State: 'static, V: View<State, Element = OverlayModalWidget>> View<State> f
     }
 }
 
+/// Who asked for a dismissal, the one thing
+/// [`OverlayModalWidget::stage_dismiss`] treats differently between triggers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DismissSource {
+    /// A user gesture, or a back press — gated on
+    /// [`OverlayModalView::dismissable`].
+    User,
+    /// The app's own [`ModalDismiss`] handle, which that flag does not gate
+    /// (see the module docs' app-initiated dismiss section).
+    App,
+}
+
+/// What a [`OverlayModalWidget::stage_dismiss`] attempt left for its caller to
+/// finish, since only the caller knows which pass it holds.
+enum DismissStage {
+    /// Nothing to do: already exiting, already closed, or not permitted.
+    Refused,
+    /// The exit ramp is running — ask for the pass its motion needs.
+    Ramping,
+    /// Nothing to stage (no close hook to fire from `paint`, or no entrance to
+    /// reverse): the caller dismisses on the spot, however its own pass can.
+    Unstaged,
+}
+
 /// The retained widget for an [`OverlayModalView`].
 pub struct OverlayModalWidget {
     content: ChildPod,
@@ -1007,6 +1203,22 @@ pub struct OverlayModalWidget {
     /// The last generation observed from `dismiss_signal` (0 with no signal
     /// wired — a `Stack` mount, or a `Veto` page).
     last_seen_dismiss: u64,
+    /// The app's own staged-dismiss handle, installed by
+    /// [`OverlayModalView::dismiss_handle`] (see the module docs'
+    /// app-initiated dismiss section).
+    dismiss_handle: Option<ModalDismiss>,
+    /// The last request generation observed from `dismiss_handle` — seeded from
+    /// the handle's own generation at build, so a request raised before this
+    /// widget existed is not aimed at it.
+    last_seen_request: u64,
+    /// The payload a [`ModalDismiss::dismiss_with`] request armed, handed to
+    /// the staged pop when the exit settles.
+    ///
+    /// Held here rather than left in the handle for the length of the ramp so
+    /// that a *refused* pop (the stack moved — see [`StagedPop::fire_with`])
+    /// keeps it: that dismissal delivered nothing, the panel ramps back open,
+    /// and the payload rides whichever exit finally lands.
+    pending_result: Option<PopResult>,
     /// The drag's resting points, as authored (see
     /// [`OverlayModalView::snap_points`]).
     snap_points: Vec<f64>,
@@ -1246,33 +1458,127 @@ impl OverlayModalWidget {
         self.on_close.is_some() && self.config.entrance != OverlayEntrance::None
     }
 
-    /// Stage the dismissal: run the entrance ramp backwards and fire the close
-    /// hook when it settles.
+    /// Stage the dismissal — the one staging core **every** trigger goes
+    /// through: the pointer/key gestures ([`Self::request_dismiss`]), the back
+    /// press ([`Self::observe_dismiss_signal`]), and the app's own
+    /// [`ModalDismiss`] handle ([`Self::observe_dismiss_request`]).
     ///
-    /// Falls back to firing [`OverlayModalView::on_dismiss`] on the spot when
-    /// there is nothing to stage — no close hook to fire from `paint`, or no
-    /// entrance to reverse. A trigger arriving while an exit is already running,
-    /// after `on_close` has already fired once ([`Self::closed`]), or on a
-    /// non-dismissable modal is a no-op — the `closed` latch guards a trigger
-    /// landing between the enqueued pop and the rebuild that drains it, when the
-    /// widget is still mounted and would otherwise stage (or immediately fire) a
-    /// second, spurious close.
-    fn request_dismiss(&mut self, ctx: &mut EventCtx) {
-        if self.exiting || self.closed || !self.dismissable {
-            return;
+    /// A trigger arriving while an exit is already running, or after `on_close`
+    /// has already fired once ([`Self::closed`]), is a no-op — the `closed`
+    /// latch guards a trigger landing between the enqueued pop and the rebuild
+    /// that drains it, when the widget is still mounted and would otherwise
+    /// stage (or immediately fire) a second, spurious close. A *user* trigger
+    /// on a non-dismissable modal is a no-op too; an app one is not (the module
+    /// docs' app-initiated dismiss section states why).
+    ///
+    /// What it cannot do is finish an unstaged dismissal, since only the caller
+    /// knows which pass it holds — hence [`DismissStage::Unstaged`].
+    fn stage_dismiss(&mut self, source: DismissSource) -> DismissStage {
+        if self.exiting || self.closed {
+            return DismissStage::Refused;
+        }
+        if source == DismissSource::User && !self.dismissable {
+            return DismissStage::Refused;
         }
         if !self.stageable() {
-            if let Some(on_dismiss) = self.on_dismiss.as_mut() {
-                on_dismiss(ctx);
-            } else if let Some(on_close) = &self.on_close {
-                // Unstaged: fired in the same turn the trigger arrived, so the
-                // hook is unarmed and always closes (see [`StagedPop::fire`]).
-                self.closed = on_close.fire();
-            }
-            return;
+            return DismissStage::Unstaged;
         }
         self.begin_ramp(0.0, true);
-        ctx.request_redraw();
+        DismissStage::Ramping
+    }
+
+    /// Fire the state-free close hook now, with any payload a
+    /// [`ModalDismiss::dismiss_with`] request armed — the unstaged close, in
+    /// the same turn its trigger arrived, so the hook is unarmed and always
+    /// closes (see [`StagedPop::fire_with`]). Returns whether it fired.
+    fn fire_close_now(&mut self) -> bool {
+        let Some(on_close) = self.on_close.clone() else {
+            return false;
+        };
+        let fired = on_close.fire_with(&mut self.pending_result);
+        self.closed = fired;
+        fired
+    }
+
+    /// Stage the dismissal from a user gesture (a scrim tap, the close
+    /// affordance, the handle, `Escape`), falling back to firing
+    /// [`OverlayModalView::on_dismiss`] on the spot when there is nothing to
+    /// stage — no close hook to fire from `paint`, or no entrance to reverse.
+    fn request_dismiss(&mut self, ctx: &mut EventCtx) {
+        match self.stage_dismiss(DismissSource::User) {
+            DismissStage::Refused => {}
+            DismissStage::Ramping => ctx.request_redraw(),
+            DismissStage::Unstaged => {
+                if let Some(on_dismiss) = self.on_dismiss.as_mut() {
+                    on_dismiss(ctx);
+                } else {
+                    self.fire_close_now();
+                }
+            }
+        }
+    }
+
+    /// Latch the [`ModalDismiss`] handle's request generation, taking any
+    /// payload it carries — `true` when a request this widget has not seen
+    /// before is pending.
+    ///
+    /// The payload is taken here, at observation, rather than at the settle
+    /// that consumes it: the handle is the app's and may be re-armed for a
+    /// later presentation, while this exit's payload belongs to this exit.
+    fn take_dismiss_request(&mut self) -> bool {
+        let Some(handle) = &self.dismiss_handle else {
+            return false;
+        };
+        let current = handle.generation();
+        if current == self.last_seen_request {
+            return false;
+        }
+        self.last_seen_request = current;
+        if let Some(result) = handle.take_result() {
+            self.pending_result = Some(result);
+        }
+        true
+    }
+
+    /// Observe the app's [`ModalDismiss`] handle in the *event* pass, right
+    /// after the content routing that most likely raised the request (a panel
+    /// action button), so an app dismissal stages in the very pass that asked
+    /// for it rather than waiting on a paint nothing scheduled.
+    ///
+    /// The unstaged fallback here is deliberately the state-free `on_close`,
+    /// never `on_dismiss`: the app asked for *this* dismissal and may have
+    /// attached a payload to it, and only `on_close` carries one.
+    fn observe_dismiss_request(&mut self, ctx: &mut EventCtx) {
+        if !self.take_dismiss_request() {
+            return;
+        }
+        match self.stage_dismiss(DismissSource::App) {
+            DismissStage::Refused => {}
+            DismissStage::Ramping => ctx.request_redraw(),
+            DismissStage::Unstaged => {
+                self.fire_close_now();
+            }
+        }
+    }
+
+    /// The paint-pass twin of [`Self::observe_dismiss_request`] — the backstop
+    /// for a request raised outside an event (an async completion, a timer).
+    /// Firing an unstaged close from here must itself request the frame whose
+    /// rebuild drains the enqueued pop (the drain gotcha the module docs spell
+    /// out).
+    fn observe_paint_dismiss_request(&mut self, ctx: &mut PaintCtx) {
+        if !self.take_dismiss_request() {
+            return;
+        }
+        match self.stage_dismiss(DismissSource::App) {
+            DismissStage::Refused => {}
+            DismissStage::Ramping => self.request_continuation(ctx),
+            DismissStage::Unstaged => {
+                if self.fire_close_now() {
+                    ctx.request_frame();
+                }
+            }
+        }
     }
 
     /// Observe the shared back-press dismiss-signal cell and stage the exit
@@ -1281,11 +1587,11 @@ impl OverlayModalWidget {
     /// request flags `PAINT`, so this always runs before the next frame is
     /// shown.
     ///
-    /// The paint-pass twin of [`Self::request_dismiss`]: identical guards,
-    /// except that the unstaged fallback can only reach the state-free
-    /// `on_close` (no `&mut State` exists here), and firing it must itself
-    /// request the frame whose rebuild drains the enqueued pop — the drain
-    /// gotcha the module docs spell out.
+    /// The paint-pass twin of [`Self::request_dismiss`]: the same
+    /// [`Self::stage_dismiss`] core, except that the unstaged fallback can only
+    /// reach the state-free `on_close` (no `&mut State` exists here), and
+    /// firing it must itself request the frame whose rebuild drains the
+    /// enqueued pop — the drain gotcha the module docs spell out.
     fn observe_dismiss_signal(&mut self, ctx: &mut PaintCtx) {
         let Some(signal) = &self.dismiss_signal else {
             return;
@@ -1295,18 +1601,15 @@ impl OverlayModalWidget {
             return;
         }
         self.last_seen_dismiss = current;
-        if self.exiting || self.closed || !self.dismissable {
-            return;
-        }
-        if !self.stageable() {
-            if let Some(on_close) = &self.on_close {
-                self.closed = on_close.fire();
-                ctx.request_frame();
+        match self.stage_dismiss(DismissSource::User) {
+            DismissStage::Refused => {}
+            DismissStage::Ramping => self.request_continuation(ctx),
+            DismissStage::Unstaged => {
+                if self.fire_close_now() {
+                    ctx.request_frame();
+                }
             }
-            return;
         }
-        self.begin_ramp(0.0, true);
-        self.request_continuation(ctx);
     }
 
     /// Move the panel to `progress` without animating — the drag scrub. The
@@ -1459,6 +1762,15 @@ impl<State: 'static> View<State> for OverlayModalView<State> {
             on_close: self.on_close.clone(),
             dismiss_signal: None,
             last_seen_dismiss: 0,
+            // Seeded from the handle's *current* generation: a request raised
+            // before this widget existed is not aimed at it (the same rule
+            // `StagedExit` applies to the back-press cell).
+            last_seen_request: self
+                .dismiss_handle
+                .as_ref()
+                .map_or(0, ModalDismiss::generation),
+            dismiss_handle: self.dismiss_handle.clone(),
+            pending_result: None,
             snap_points: self.snap_points.clone(),
             panel: Rect::ZERO,
             anim: AnimationController::new(self.config.entrance.duration())
@@ -1508,6 +1820,23 @@ impl<State: 'static> View<State> for OverlayModalView<State> {
         if element.snap_points != self.snap_points {
             element.snap_points = self.snap_points.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // The app's dismiss handle follows the view whenever the view still
+        // carries one: an app that mints one per page-builder pass (rather than
+        // once, outside it — see `ModalDismiss`) would otherwise leave the
+        // widget latched to the first pass's dead cell while its buttons bump
+        // the newest one. Re-seeding is gated on *identity*, so the live
+        // request generation survives every rebuild that hands the same handle
+        // back; a view that stopped carrying one leaves the installed handle
+        // standing, the same pinning `on_close` documents.
+        if let Some(handle) = &self.dismiss_handle
+            && !element
+                .dismiss_handle
+                .as_ref()
+                .is_some_and(|installed| installed.same_cell(handle))
+        {
+            element.last_seen_request = handle.generation();
+            element.dismiss_handle = Some(handle.clone());
         }
         // `on_dismiss` is reinstalled unconditionally (cheap — closures aren't
         // comparable, so this is what every interactive widget does).
@@ -1693,8 +2022,11 @@ impl Widget for OverlayModalWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         // The back-press seam, first: a bump staged here rides the very same
-        // ramp the pointer/key gestures below drive.
+        // ramp the pointer/key gestures below drive. The app's own handle is
+        // observed alongside it, as the backstop for a request raised outside
+        // an event pass.
         self.observe_dismiss_signal(ctx);
+        self.observe_paint_dismiss_request(ctx);
         // Authoritative hover read: a pointer that left this widget sends it no
         // event at all, so the chrome's latched flags are cleared whenever the
         // hover path no longer runs through here. It cannot *set* them — the
@@ -1767,7 +2099,9 @@ impl Widget for OverlayModalWidget {
             // Cloned out of `self` so the recovery arm below can take `&mut
             // self`; it is an `Rc`, and this runs once per exit.
             if let Some(on_close) = self.on_close.clone() {
-                if on_close.fire() {
+                // With whatever payload an app dismissal armed; a refused pop
+                // leaves it here for the exit that eventually lands.
+                if on_close.fire_with(&mut self.pending_result) {
                     self.closed = true;
                     ctx.request_frame();
                 } else {
@@ -1891,6 +2225,10 @@ impl Widget for OverlayModalWidget {
         let own_gesture = captured && matches!(event, InputEvent::Pointer(_));
         if !own_gesture && route_event_single(&mut self.content, ctx, event) == EventResult::Handled
         {
+            // An action the content just ran may have asked to dismiss through
+            // the app's own handle: stage it in this pass rather than leaving
+            // it to a paint the content did not necessarily schedule.
+            self.observe_dismiss_request(ctx);
             return EventResult::Handled;
         }
         if let InputEvent::Key(key) = event {
@@ -3178,6 +3516,262 @@ mod tests {
         assert_eq!(closed.get(), 0);
     }
 
+    // ---- the app-initiated dismiss (`ModalDismiss`) seam --------------------
+
+    /// A staged modal (wired the way [`show_overlay_modal`] wires one) with an
+    /// app dismiss handle installed, already fully entered — plus that handle
+    /// and the close counter.
+    fn app_dismissable(
+        config: OverlayModalConfig,
+        dismissable: bool,
+    ) -> (OverlayModalWidget, ModalDismiss, Rc<Cell<u32>>) {
+        let (view, closed) = staged(config);
+        let dismiss = ModalDismiss::new();
+        let view = view
+            .dismissable(dismissable)
+            .dismiss_handle(dismiss.clone());
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        (w, dismiss, closed)
+    }
+
+    #[test]
+    fn a_dismiss_request_stages_the_same_exit_ramp_every_gesture_takes() {
+        let (mut w, dismiss, closed) =
+            app_dismissable(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH), true);
+        assert!((w.progress() - 1.0).abs() < 1e-9, "entered");
+
+        dismiss.dismiss();
+        frame(&mut w, 3000.0);
+        assert!(w.is_exiting(), "the request stages the exit, not a pop");
+        assert_eq!(closed.get(), 0, "and fires nothing yet");
+        frame(
+            &mut w,
+            3000.0 + MaterialMotion::SHORT_4.as_millis() as f64 / 2.0,
+        );
+        assert!(w.progress() > 0.0 && w.progress() < 1.0, "mid-exit");
+        frame(&mut w, 5000.0);
+        assert_eq!(closed.get(), 1, "the pop fires when the ramp settles");
+
+        // A stale re-observation of the same generation changes nothing.
+        frame(&mut w, 6000.0);
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[test]
+    fn a_second_dismiss_request_while_exiting_is_a_no_op() {
+        let (mut w, dismiss, closed) =
+            app_dismissable(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH), true);
+        dismiss.dismiss();
+        frame(&mut w, 3000.0);
+        frame(
+            &mut w,
+            3000.0 + MaterialMotion::SHORT_4.as_millis() as f64 / 2.0,
+        );
+        let mid = w.progress();
+        assert!(mid < 1.0, "the ramp is running");
+
+        // A double-tapped action button: the second request neither restarts
+        // the ramp nor fires a second pop.
+        dismiss.dismiss();
+        frame(
+            &mut w,
+            3000.0 + MaterialMotion::SHORT_4.as_millis() as f64 / 2.0,
+        );
+        assert!(w.is_exiting(), "still the one exit");
+        frame(&mut w, 5000.0);
+        assert_eq!(closed.get(), 1, "one close for two requests");
+
+        // …and one more after the settle, in the window before the enqueued pop
+        // drains, is refused by the `closed` latch like every other trigger.
+        dismiss.dismiss();
+        frame(&mut w, 7000.0);
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[test]
+    fn a_dismiss_request_closes_a_non_dismissable_modal() {
+        // The decision the module docs state: `dismissable(false)` takes the
+        // *user's* exits away and leaves "an explicit control the app wires
+        // inside its own content" — which is exactly this handle. A back-press
+        // bump on the same modal stays refused (see the back-press tier).
+        let (mut w, dismiss, closed) = app_dismissable(
+            OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
+            false,
+        );
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        assert!(!w.is_exiting(), "the user's own exits are still gone");
+
+        dismiss.dismiss();
+        frame(&mut w, 3000.0);
+        assert!(w.is_exiting(), "but the app's own control still closes it");
+        frame(&mut w, 5000.0);
+        assert_eq!(closed.get(), 1);
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn a_request_that_predates_the_widget_is_not_aimed_at_it() {
+        let (view, closed) = staged(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH));
+        let dismiss = ModalDismiss::new();
+        // A handle re-used from an earlier presentation: its generation is
+        // already non-zero when this modal mounts.
+        dismiss.dismiss();
+        dismiss.dismiss();
+        let mut w = build(&view.dismiss_handle(dismiss.clone()));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!(!w.is_exiting(), "the standing generation is the baseline");
+        assert_eq!(closed.get(), 0);
+
+        // The next request is, though.
+        dismiss.dismiss();
+        frame(&mut w, 3000.0);
+        assert!(w.is_exiting());
+    }
+
+    #[test]
+    fn an_unstageable_modal_fires_the_request_at_once_and_schedules_its_drain() {
+        // No entrance to reverse: the close fires on the spot, and the very
+        // paint that fires it must request the frame whose rebuild drains the
+        // enqueued pop (the drain gotcha).
+        let (view, closed) = staged(settled(OverlayModalConfig::centered(
+            OVERLAY_DIALOG_MAX_WIDTH,
+        )));
+        let dismiss = ModalDismiss::new();
+        let mut w = build(&view.dismiss_handle(dismiss.clone()));
+        layout(&mut w);
+        dismiss.dismiss();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(3000.0));
+        w.paint(&mut ctx, &mut Recorder::default());
+        assert_eq!(closed.get(), 1);
+        assert!(
+            ctx.needs_frame(),
+            "the firing paint schedules the draining frame"
+        );
+    }
+
+    /// Panel content that dismisses through the app handle when pressed — an
+    /// action button's shape, minus the button (it captures the `Down` and
+    /// acts on the `Up`, so the host never takes the gesture for itself).
+    struct Trigger(ModalDismiss);
+
+    /// The retained half of [`Trigger`].
+    struct TriggerWidget(ModalDismiss);
+
+    impl<S: 'static> View<S> for Trigger {
+        type Element = TriggerWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TriggerWidget {
+            TriggerWidget(self.0.clone())
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut TriggerWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.0 = self.0.clone();
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for TriggerWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, 120.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Down => EventResult::Handled,
+                PointerPhase::Up => {
+                    self.0.dismiss();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    #[test]
+    fn a_content_action_stages_its_dismiss_in_the_same_event_pass() {
+        // The event-pass observation: the content handled the press, so no
+        // paint is owed by anything else — the host must still see the request
+        // and ask for the frame its ramp needs.
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let dismiss = ModalDismiss::new();
+        let view = overlay_modal::<Flags, _>(
+            Trigger(dismiss.clone()),
+            OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
+        )
+        .on_close(move || hook.set(hook.get() + 1))
+        .dismiss_handle(dismiss);
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+
+        let hit = w.panel_rect().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, hit.x, hit.y),
+        );
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
+        let result = w.event(&mut ctx, &pointer(PointerPhase::Up, hit.x, hit.y));
+        assert_eq!(result, EventResult::Handled);
+        assert!(w.is_exiting(), "staged inside the pass that asked for it");
+        assert!(
+            ctx.needs_redraw(),
+            "and the ramp's first frame is asked for"
+        );
+        assert_eq!(closed.get(), 0, "nothing pops mid-ramp");
+
+        frame(&mut w, 3000.0);
+        frame(&mut w, 5000.0);
+        assert_eq!(closed.get(), 1);
+        assert_eq!(state.dismissed, 0, "the staged path, not the unstaged one");
+    }
+
+    #[test]
+    fn a_rebuild_that_swaps_the_handle_relatches_against_the_new_cell() {
+        // An app that mints its handle *inside* the page builder hands the
+        // widget a fresh cell every rebuild; the widget follows the newest one
+        // rather than latching onto a dead cell (and re-seeds, so the swap
+        // itself is not read as a request).
+        let (first_view, closed) = staged(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH));
+        let first = ModalDismiss::new();
+        let first_view = first_view.dismiss_handle(first.clone());
+        let mut w = build(&first_view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+
+        let second = ModalDismiss::new();
+        second.dismiss();
+        let second_view = view(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH))
+            .dismiss_handle(second.clone());
+        rebuild(&second_view, &first_view, &mut w);
+        frame(&mut w, 3000.0);
+        assert!(!w.is_exiting(), "the swap itself is not a request");
+
+        // The stale handle is inert…
+        first.dismiss();
+        frame(&mut w, 3100.0);
+        assert!(!w.is_exiting());
+        // …and the live one drives the exit.
+        second.dismiss();
+        frame(&mut w, 3200.0);
+        assert!(w.is_exiting());
+        frame(&mut w, 6000.0);
+        assert_eq!(closed.get(), 1);
+    }
+
     // ---- navigator integration ---------------------------------------------
 
     #[derive(Default)]
@@ -3442,6 +4036,46 @@ mod tests {
             "a non-dismissable modal never pops on a back request"
         );
         assert_eq!(h.controller.depth(), 2);
+    }
+
+    #[test]
+    fn a_dismiss_request_pops_with_its_result_only_once_the_ramp_settles() {
+        let mut h = NavHarness::new();
+        let dismiss = ModalDismiss::new();
+        let installed = dismiss.clone();
+        show_overlay_modal(
+            &h.controller,
+            move || {
+                overlay_modal(
+                    Block(Size::new(200.0, 120.0)),
+                    OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
+                )
+                .dismiss_handle(installed.clone())
+            },
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        h.pass();
+        h.drive(0);
+        assert_eq!(h.controller.depth(), 2, "the modal is up");
+
+        // The panel's own "Apply": a staged dismissal carrying a value.
+        dismiss.dismiss_with(PopResult::of(7));
+        h.pass();
+        h.paint(3000);
+        assert_eq!(
+            h.controller.depth(),
+            2,
+            "nothing pops during the exit ramp itself"
+        );
+        h.drive(3100);
+        assert_eq!(
+            h.state.results,
+            vec![Some(7)],
+            "the payload rides the staged pop to the pusher's on_result"
+        );
+        assert_eq!(h.controller.depth(), 1);
     }
 
     // ---- drag-to-close and snap points --------------------------------------

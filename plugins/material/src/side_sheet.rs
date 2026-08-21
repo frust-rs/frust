@@ -73,7 +73,10 @@
 //!   app-provided `actions`, inset [`MaterialSpacing::LG`] (16dp) on every
 //!   edge (`M3ESideSheetTheme`'s `actionsPadding`). The reference's own
 //!   `Row(children: actions)` carries no inter-action gap; this module
-//!   matches that exactly rather than inventing one.
+//!   matches that exactly rather than inventing one. An action that closes
+//!   the sheet does it through [`SideSheetView::dismiss_handle`]'s
+//!   [`ModalDismiss`], not a raw `controller.pop()`: the handle stages the
+//!   host's slide-out ramp, a raw pop dismisses on the spot.
 //!
 //! # Content is fixed at construction
 //!
@@ -85,7 +88,8 @@
 //! shared-ownership indirection this module has no other reason to carry, or
 //! reaching into the host's own private fields (a coupling this module
 //! deliberately avoids — see [`SideSheetView`]'s builder methods, which
-//! reach only the host's *public* `dismissable`/`on_dismiss` seam). Matches
+//! reach only the host's *public*
+//! `dismissable`/`on_dismiss`/`dismiss_handle` seam). Matches
 //! the reference's own constructor shape too: `M3ESideSheet({required title,
 //! required body, actions = const []})` takes `actions` as one parameter,
 //! never incrementally built either.
@@ -117,8 +121,8 @@ use frust::text;
 use kurbo::{Point, Size};
 
 use crate::overlay::{
-    OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent, OverlayModalView,
-    OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
+    ModalDismiss, OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent,
+    OverlayModalView, OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
 };
 use crate::tokens::MaterialSpacing;
 use frust::{NavigatorController, PopResult};
@@ -455,6 +459,26 @@ impl<State: 'static> SideSheetView<State> {
         self.0 = self.0.on_dismiss(on_dismiss);
         self
     }
+
+    /// Install the app-triggered staged-dismiss handle, so an `actions` button
+    /// ("Apply", "Reset") closes the sheet through the **same** slide-out ramp
+    /// the close affordance, the scrim tap, `Escape`, and a back press take —
+    /// rather than the raw `controller.pop()` that dismisses on the spot. See
+    /// [`ModalDismiss`], and mint the handle outside [`show_side_sheet`]'s page
+    /// builder.
+    ///
+    /// ```ignore
+    /// let dismiss = ModalDismiss::new();
+    /// let apply = dismiss.clone();
+    /// side_sheet(title, body, vec![
+    ///     any(filled_button("Apply", move |_: &mut State| apply.dismiss())),
+    /// ])
+    /// .dismiss_handle(dismiss.clone())
+    /// ```
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.0 = self.0.dismiss_handle(dismiss);
+        self
+    }
 }
 
 impl<State: 'static> View<State> for SideSheetView<State> {
@@ -498,6 +522,10 @@ impl<State: 'static> OverlayModalContent<State> for SideSheetView<State> {
 /// `Escape`, and an Android back press are all wired to `controller.pop()`
 /// for you, staged behind the slide-out exit ramp (see
 /// [`mod@crate::overlay::modal`]'s Exit motion / Back-dismiss sections).
+///
+/// The sheet's own `actions` reach that same ramp through
+/// [`SideSheetView::dismiss_handle`] — minted here, outside `build`, and
+/// cloned into both the sheet and its buttons.
 ///
 /// ```ignore
 /// show_side_sheet(
@@ -992,6 +1020,83 @@ mod tests {
             state.results,
             vec![None],
             "a back request dismisses the sheet"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    #[test]
+    fn an_actions_dismiss_handle_stages_the_slide_out_instead_of_popping_at_once() {
+        // The sheet's own Reset/Apply buttons: a raw `controller.pop()` from
+        // one takes the page out from under the host and the panel vanishes
+        // mid-slide. Through the handle it takes the very same staged exit the
+        // scrim tap above takes — and can carry the pop result with it.
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || {
+                    core_any::<NavState, _>(bg_page(WINDOW.width, WINDOW.height))
+                })
+            }
+        };
+        let mut state = NavState::default();
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+
+        // Minted outside the page builder, exactly as an app does it.
+        let dismiss = ModalDismiss::new();
+        let installed = dismiss.clone();
+        show_side_sheet(
+            &controller,
+            move || {
+                side_sheet("Filters", bg_page(100.0, 100.0), Vec::new())
+                    .dismiss_handle(installed.clone())
+            },
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        for t in [0u64, 100, 200, 300, 400, 550] {
+            root.paint(&mut Recorder::default(), ft(t));
+        }
+        assert_eq!(controller.depth(), 2, "the sheet is up");
+
+        // "Apply".
+        dismiss.dismiss_with(PopResult::of(3));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft(600));
+        assert_eq!(
+            controller.depth(),
+            2,
+            "nothing pops while the slide-out runs"
+        );
+
+        let mut frames = 0u64;
+        loop {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            let outcome = root.paint(&mut Recorder::default(), ft(700 + frames * 100));
+            frames += 1;
+            assert!(
+                frames < 30,
+                "the staged exit settles within a bounded number of frames"
+            );
+            if !outcome.needs_frame {
+                break;
+            }
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![Some(3)],
+            "the action's own result rides the staged pop"
         );
         assert_eq!(controller.depth(), 1);
     }

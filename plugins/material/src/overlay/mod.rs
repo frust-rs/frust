@@ -84,7 +84,7 @@ pub use anchored::{
     OverlaySide, anchored_overlay, overlay_anchor, place_anchored,
 };
 pub use modal::{
-    OVERLAY_DIALOG_MAX_WIDTH, OVERLAY_DIALOG_MIN_WIDTH, OVERLAY_EDGE_FRACTION,
+    ModalDismiss, OVERLAY_DIALOG_MAX_WIDTH, OVERLAY_DIALOG_MIN_WIDTH, OVERLAY_EDGE_FRACTION,
     OVERLAY_FLING_VELOCITY, OVERLAY_HANDLE_RESERVE, OVERLAY_SHEET_MAX_HEIGHT_FRACTION,
     OVERLAY_SIDE_SHEET_MAX_WIDTH, OverlayBorder, OverlayCorners, OverlayEntrance, OverlayExtent,
     OverlayGeometry, OverlayLimit, OverlayModalConfig, OverlayModalContent, OverlayModalView,

@@ -28,7 +28,9 @@ use frust::{
     AnyView, Component, EdgeInsets, Get, NavigatorController, Padding, PopResult, RwSignal, Set,
     any, component, navigator, text,
 };
-use frust_material::{filled_button, show_side_sheet, side_sheet, text_button, tonal_button};
+use frust_material::{
+    ModalDismiss, filled_button, show_side_sheet, side_sheet, text_button, tonal_button,
+};
 
 use crate::AppState;
 use crate::catalog::DemoEntry;
@@ -113,15 +115,18 @@ fn trigger_preview(
         tonal_button("Show side sheet", move |_: &mut Knobs| {
             let title = title.clone();
             let body = body.clone();
-            let actions_nav = nav.clone();
+            // Minted once, here, outside the page builder below — which
+            // re-runs on every navigator rebuild (see [`ModalDismiss`]).
+            let dismiss = ModalDismiss::new();
             show_side_sheet(
                 &nav,
                 move || {
                     side_sheet(
                         title.clone(),
                         sheet_body::<Knobs>(&body),
-                        sheet_actions::<Knobs>(actions_nav.clone(), show_actions),
+                        sheet_actions::<Knobs>(&dismiss, show_actions),
                     )
+                    .dismiss_handle(dismiss.clone())
                 },
                 |_state: &mut Knobs, _result: PopResult| {},
             );
@@ -142,18 +147,24 @@ fn sheet_body<State: 'static>(body: &str) -> AnyView<State> {
 }
 
 /// The optional Reset/Apply footer — the reference's own two `M3EButton`s,
-/// both popping the sheet.
+/// both closing the sheet.
+///
+/// Both go through the sheet's [`ModalDismiss`] rather than
+/// `NavigatorController::pop`: a raw pop takes the page out from under the
+/// host with no exit ramp, so the sheet vanishes instead of sliding out the
+/// way every other dismissal does.
 fn sheet_actions<State: 'static>(
-    nav: NavigatorController<State>,
+    dismiss: &ModalDismiss,
     show_actions: bool,
 ) -> Vec<AnyView<State>> {
     if !show_actions {
         return Vec::new();
     }
-    let reset_nav = nav.clone();
+    let reset = dismiss.clone();
+    let apply = dismiss.clone();
     vec![
-        any(text_button("Reset", move |_: &mut State| reset_nav.pop())),
-        any(filled_button("Apply", move |_: &mut State| nav.pop())),
+        any(text_button("Reset", move |_: &mut State| reset.dismiss())),
+        any(filled_button("Apply", move |_: &mut State| apply.dismiss())),
     ]
 }
 
@@ -184,8 +195,8 @@ fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {
     let actions = if show_actions {
         "\n\
          \u{20}   vec![\n\
-         \u{20}       any(text_button(\"Reset\", |_: &mut State| nav.pop())),\n\
-         \u{20}       any(filled_button(\"Apply\", |_: &mut State| nav.pop())),\n\
+         \u{20}       any(text_button(\"Reset\", move |_: &mut State| reset.dismiss())),\n\
+         \u{20}       any(filled_button(\"Apply\", move |_: &mut State| apply.dismiss())),\n\
          \u{20}   ],"
     } else {
         "\n    Vec::new(),"
@@ -193,10 +204,12 @@ fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {
     play_snippet(
         "Side sheet",
         format!(
-            "show_side_sheet(\n\
+            "let dismiss = ModalDismiss::new();\n\
+             show_side_sheet(\n\
              \u{20}   &nav,\n\
-             \u{20}   || side_sheet({title:?}, text({body:?}),{actions}\n\
-             \u{20}   ),\n\
+             \u{20}   move || side_sheet({title:?}, text({body:?}),{actions}\n\
+             \u{20}   )\n\
+             \u{20}   .dismiss_handle(dismiss.clone()),\n\
              \u{20}   |_state, _result| {{}},\n\
              );"
         ),

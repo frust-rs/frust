@@ -5,7 +5,9 @@
 //! and [`frust_material::show_full_screen_dialog`] — each opened through the
 //! documented `show_*` route onto this page's own navigator, so every
 //! dismissal (scrim tap, `Escape`, Android back) takes the modal host's
-//! staged exit ramp rather than an unstaged pop.
+//! staged exit ramp rather than an unstaged pop — and so do the panels' own
+//! action buttons, through the [`frust_material::ModalDismiss`] each trigger
+//! mints (a raw `nav.pop()` from an action would skip the ramp).
 //!
 //! # Descoped: `icon`, `topDivider`, `bottomDivider`
 //!
@@ -54,8 +56,8 @@ use frust::{
     navigator, text,
 };
 use frust_material::{
-    MaterialSpacing, dialog, filled_button, full_screen_dialog, selection_dialog, show_dialog,
-    show_full_screen_dialog, show_selection_dialog, text_button, tonal_button,
+    MaterialSpacing, ModalDismiss, dialog, filled_button, full_screen_dialog, selection_dialog,
+    show_dialog, show_full_screen_dialog, show_selection_dialog, text_button, tonal_button,
 };
 
 use crate::AppState;
@@ -142,23 +144,26 @@ fn next_selection(current: &[String], option: &str, multi_select: bool) -> Vec<S
 /// Open the basic centered dialog — the reference's `_showBasic`. Like the
 /// reference's own `onPressed`, it reads each knob once, at press time.
 fn open_basic(state: &Knobs) {
-    let nav = state.nav.clone();
     let title = state.title.get_untracked();
     let body = state.content.get_untracked();
     let dismissable = state.barrier_dismissible.get_untracked();
+    // Minted once, outside the page builder below — which re-runs on every
+    // navigator rebuild.
+    let dismiss = ModalDismiss::new();
     show_dialog(
         &state.nav,
         move || {
-            let cancel_nav = nav.clone();
-            let confirm_nav = nav.clone();
+            let cancel = dismiss.clone();
+            let confirm = dismiss.clone();
             dialog()
                 .title(title.clone())
                 .body(body.clone())
                 .dismissable(dismissable)
+                .dismiss_handle(dismiss.clone())
                 .actions(vec![
-                    any(text_button("Cancel", move |_: &mut Knobs| cancel_nav.pop())),
+                    any(text_button("Cancel", move |_: &mut Knobs| cancel.dismiss())),
                     any(filled_button("Confirm", move |_: &mut Knobs| {
-                        confirm_nav.pop()
+                        confirm.dismiss()
                     })),
                 ])
         },
@@ -168,15 +173,15 @@ fn open_basic(state: &Knobs) {
 
 /// Open the option-list dialog — the reference's `_showSelection`.
 fn open_selection(state: &Knobs) {
-    let nav = state.nav.clone();
     let title = state.title.get_untracked();
     let dismissable = state.barrier_dismissible.get_untracked();
     let multi_select = state.multi_select.get_untracked();
     let selected = state.selected;
+    let dismiss = ModalDismiss::new();
     show_selection_dialog(
         &state.nav,
         move || {
-            let confirm_nav = nav.clone();
+            let confirm = dismiss.clone();
             selection_dialog(
                 title.clone(),
                 OPTIONS.iter().map(|o| (*o).to_string()).collect(),
@@ -189,7 +194,8 @@ fn open_selection(state: &Knobs) {
                 let next = next_selection(&state.selected.get_untracked(), &option, multi_select);
                 state.selected.set(next);
             })
-            .on_confirm(move |_: &mut Knobs| confirm_nav.pop())
+            .on_confirm(move |_: &mut Knobs| confirm.dismiss())
+            .dismiss_handle(dismiss.clone())
         },
         |_state: &mut Knobs, _result: PopResult| {},
     );
@@ -197,13 +203,13 @@ fn open_selection(state: &Knobs) {
 
 /// Open the edge-to-edge dialog — the reference's `_showFullScreen`.
 fn open_full_screen(state: &Knobs) {
-    let nav = state.nav.clone();
     let title = state.title.get_untracked();
     let body = state.content.get_untracked();
+    let dismiss = ModalDismiss::new();
     show_full_screen_dialog(
         &state.nav,
         move || {
-            let save_nav = nav.clone();
+            let save = dismiss.clone();
             full_screen_dialog(
                 title.clone(),
                 Padding(
@@ -212,8 +218,9 @@ fn open_full_screen(state: &Knobs) {
                 ),
             )
             .action(any(text_button("Save", move |_: &mut Knobs| {
-                save_nav.pop()
+                save.dismiss()
             })))
+            .dismiss_handle(dismiss.clone())
         },
         |_state: &mut Knobs, _result: PopResult| {},
     );
@@ -314,15 +321,17 @@ fn dialog_snippet(state: &Knobs) -> PlaySnippet {
     play_snippet(
         "Dialog",
         format!(
-            "show_dialog(\n\
+            "let dismiss = ModalDismiss::new();\n\
+             show_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || dialog()\n\
              \u{20}       .title({title:?})\n\
              \u{20}       .body({body:?})\n\
              \u{20}       .dismissable({dismissable})\n\
+             \u{20}       .dismiss_handle(dismiss.clone())\n\
              \u{20}       .actions(vec![\n\
-             \u{20}           any(text_button(\"Cancel\", |_| nav.pop())),\n\
-             \u{20}           any(filled_button(\"Confirm\", |_| nav.pop())),\n\
+             \u{20}           any(text_button(\"Cancel\", move |_| cancel.dismiss())),\n\
+             \u{20}           any(filled_button(\"Confirm\", move |_| confirm.dismiss())),\n\
              \u{20}       ]),\n\
              \u{20}   |_state, _result| {{}},\n\
              );",
@@ -339,7 +348,8 @@ fn selection_snippet(state: &Knobs) -> PlaySnippet {
     play_snippet(
         "Selection",
         format!(
-            "show_selection_dialog(\n\
+            "let dismiss = ModalDismiss::new();\n\
+             show_selection_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || selection_dialog({title:?}, options())\n\
              \u{20}       .multi_select({multi})\n\
@@ -347,7 +357,8 @@ fn selection_snippet(state: &Knobs) -> PlaySnippet {
              \u{20}       .selected(selected.get())\n\
              \u{20}       .confirm_label({confirm:?})\n\
              \u{20}       .on_toggle(|state, option| state.selected.set(next(option)))\n\
-             \u{20}       .on_confirm(|_| nav.pop()),\n\
+             \u{20}       .on_confirm(move |_| confirm.dismiss())\n\
+             \u{20}       .dismiss_handle(dismiss.clone()),\n\
              \u{20}   |_state, _result| {{}},\n\
              );",
             title = state.title.get(),
@@ -361,13 +372,15 @@ fn full_screen_snippet(state: &Knobs) -> PlaySnippet {
     play_snippet(
         "Full screen",
         format!(
-            "show_full_screen_dialog(\n\
+            "let dismiss = ModalDismiss::new();\n\
+             show_full_screen_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || full_screen_dialog(\n\
              \u{20}       {title:?},\n\
              \u{20}       Padding(EdgeInsets::all(24.0), text({body:?})),\n\
              \u{20}   )\n\
-             \u{20}   .action(any(text_button(\"Save\", |_| nav.pop()))),\n\
+             \u{20}   .action(any(text_button(\"Save\", move |_| save.dismiss())))\n\
+             \u{20}   .dismiss_handle(dismiss.clone()),\n\
              \u{20}   |_state, _result| {{}},\n\
              );",
             title = state.title.get(),

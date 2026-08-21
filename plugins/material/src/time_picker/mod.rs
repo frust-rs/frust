@@ -22,19 +22,24 @@
 //! ```ignore
 //! // `time`/`entry`/`entry_mode`/`autovalidate` all live in the app's own
 //! // state; the picker only ever *reports* the change it wants.
-//! let nav = state.nav.clone();
 //! let time = state.time;
+//! // Minted outside the page builder: OK/Cancel dismiss through the host's
+//! // exit ramp rather than popping the navigator from inside the panel.
+//! let dismiss = ModalDismiss::new();
 //! show_time_picker(
 //!     &state.nav,
 //!     move || {
-//!         let nav = nav.clone();
+//!         let confirm = dismiss.clone();
+//!         let cancel = dismiss.clone();
 //!         time_picker(time)
 //!             .on_change(|s: &mut State, t| s.time = t)
 //!             .on_confirm(move |s: &mut State, confirmed| match confirmed {
-//!                 Some(picked) => nav.pop_with_result(PopResult::of(picked)),
+//!                 Some(picked) => confirm.dismiss_with(PopResult::of(picked)),
 //!                 // The typed entry didn't parse — light the error lines up.
 //!                 None => s.time_autovalidate = true,
 //!             })
+//!             .on_cancel(move |_s: &mut State| cancel.dismiss())
+//!             .dismiss_handle(dismiss.clone())
 //!     },
 //!     |state: &mut State, result: PopResult| {
 //!         if let Some(picked) = result.take::<TimeOfDay>() {
@@ -120,8 +125,8 @@ use crate::button::{button, text_button};
 use crate::divider::divider;
 use crate::icon_button::icon_button;
 use crate::overlay::{
-    OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget, overlay_modal,
-    show_overlay_modal,
+    ModalDismiss, OverlayModalConfig, OverlayModalContent, OverlayModalView, OverlayModalWidget,
+    overlay_modal, show_overlay_modal,
 };
 
 /// Panel padding on all four edges (`M3EDialogTheme.padding`, the padding the
@@ -920,6 +925,7 @@ pub struct TimePickerView<State: 'static> {
     on_cancel: Option<OnAction<State>>,
     dismissable: bool,
     on_dismiss: Option<OnAction<State>>,
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Create a time picker showing `value`. Chain
@@ -942,6 +948,7 @@ pub fn time_picker<State: 'static>(value: TimeOfDay) -> TimePickerView<State> {
         on_cancel: None,
         dismissable: true,
         on_dismiss: None,
+        dismiss_handle: None,
     }
 }
 
@@ -1054,6 +1061,19 @@ impl<State: 'static> TimePickerView<State> {
         self
     }
 
+    /// Install the app-triggered staged-dismiss handle, so the OK/Cancel
+    /// callbacks can close the dialog through the host's exit ramp
+    /// ([`ModalDismiss::dismiss_with`] / [`ModalDismiss::dismiss`]) instead of
+    /// popping the navigator themselves, which skips the ramp entirely.
+    ///
+    /// Unlike [`crate::show_date_picker`], this family leaves both actions to
+    /// the caller (the module docs' worked example), so the handle is the
+    /// caller's to mint and wire — outside [`show_time_picker`]'s page builder.
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
+        self
+    }
+
     /// The entry form's current contents — the caller's own, or one seeded
     /// from `value`.
     fn resolved_entry(&self) -> TimeEntry {
@@ -1156,6 +1176,9 @@ impl<State: 'static> TimePickerView<State> {
             let on_dismiss = on_dismiss.clone();
             view = view.on_dismiss(move |state: &mut State| on_dismiss(state));
         }
+        if let Some(dismiss) = &self.dismiss_handle {
+            view = view.dismiss_handle(dismiss.clone());
+        }
         view
     }
 }
@@ -1199,9 +1222,12 @@ impl<State: 'static> OverlayModalContent<State> for TimePickerView<State> {
 ///
 /// Dismissal (scrim tap, `Escape`, Android back) is wired to
 /// `controller.pop()` for you, staged behind the host's exit ramp. Confirm and
-/// cancel are the caller's own actions: pop with a value from
-/// [`TimePickerView::on_confirm`]'s `Some` arm (see the [module docs](self)'
-/// worked example), and pop bare from [`TimePickerView::on_cancel`].
+/// cancel are the caller's own actions: dismiss with a value from
+/// [`TimePickerView::on_confirm`]'s `Some` arm and bare from
+/// [`TimePickerView::on_cancel`], both through a [`ModalDismiss`] the caller
+/// mints and installs with [`TimePickerView::dismiss_handle`] (see the [module
+/// docs](self)' worked example) — a direct `controller.pop()` from either
+/// action would skip that ramp.
 pub fn show_time_picker<State, B, R>(
     controller: &NavigatorController<State>,
     build: B,
@@ -1866,6 +1892,28 @@ mod tests {
             h.state.value,
             TimeOfDay::new(12, 45),
             "12 o'clock in the PM half is 12:45"
+        );
+    }
+
+    #[test]
+    fn an_installed_dismiss_handle_reaches_the_host_view() {
+        // OK/Cancel are the caller's own here, so the handle they dismiss
+        // through has to survive the recompose; the staging itself is the
+        // host's, and tested there.
+        let dismiss = ModalDismiss::new();
+        assert!(
+            time_picker::<NavState>(TimeOfDay::new(9, 30))
+                .dismiss_handle(dismiss)
+                .compose()
+                .dismiss_handle
+                .is_some()
+        );
+        assert!(
+            time_picker::<NavState>(TimeOfDay::new(9, 30))
+                .compose()
+                .dismiss_handle
+                .is_none(),
+            "and none is invented for a picker that was handed none"
         );
     }
 }
