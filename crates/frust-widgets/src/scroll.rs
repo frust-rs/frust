@@ -4,26 +4,42 @@
 //! [`scroll_view`] wraps a child that is laid out with unbounded height; the
 //! view itself takes the incoming constraints and paints the child offset by
 //! `-scroll_offset` inside a clip. Offsets settle within `[0, content −
-//! viewport]`; a pointer *drag* past an edge is allowed out of range with
-//! iOS-style rubber-band resistance ([`OVERSCROLL_RESISTANCE`]) and settles back
-//! on release (wheel and fling stay hard-clamped). See [`ScrollView::on_scroll`]
-//! for scroll observation and [`ScrollView::on_refresh_release`] for the
-//! pull-to-refresh trigger.
+//! viewport]`; what a pointer *drag* past an edge does is the installed
+//! physics' call (wheel stays hard-clamped whatever it says). See
+//! [`ScrollView::on_scroll`] for scroll observation and
+//! [`ScrollView::on_refresh_release`] for the pull-to-refresh trigger.
 //!
 //! # Physics seam
 //!
-//! The feel above is not wired in directly: the drag mapping, the
+//! The feel is not wired in directly: the drag mapping, the
 //! boundary-rejection rule, and post-release ballistic motion are asked of a
-//! [`ScrollPhysics`] ([`crate::physics`]) the widget holds, installed as
-//! [`RubberBand`] — the extracted spelling of exactly the constants and math
-//! this module used to apply inline, so the default surface behaves
-//! identically. Two things stay widget-side on purpose: the **legacy
-//! fling/settle path** (`RubberBand::create_ballistic_simulation` returns
-//! `None`, so [`ScrollWidget::tick`]/[`ScrollWidget::settle_tick`] still own
-//! post-release motion for it), and the **wheel path**, which is a
+//! [`ScrollPhysics`] ([`crate::physics`]) the widget holds. The installed
+//! default is the platform-adaptive pairing
+//! ([`crate::physics::default_physics`]): Android gets clamping-plus-stretch,
+//! every other platform bouncing-plus-translate.
+//! [`RubberBand`](crate::RubberBand) — the pre-seam feel, a flat
+//! [`OVERSCROLL_RESISTANCE`] rubber band with the legacy fling — is an opt-in
+//! via [`ScrollView::physics`]. Two things stay widget-side on purpose: the
+//! **legacy fling/settle path** (a physics whose
+//! `create_ballistic_simulation` returns `None` — `RubberBand` always does —
+//! leaves post-release motion to [`ScrollWidget::tick`]/
+//! [`ScrollWidget::settle_tick`]), and the **wheel path**, which is a
 //! physics-independent hard clamp. A physics that *does* hand back a
 //! [`Simulation`] gets driven by the generic ballistic driver in
 //! [`ScrollWidget::pump_fling`] instead.
+//!
+//! ## Drag convention: a per-move delta against the live position
+//!
+//! Every drag `Move` hands [`ScrollPhysics::apply_physics_to_user_offset`]
+//! *that move's* raw finger delta, with metrics reporting the surface's real
+//! current position — past-edge displacement and all
+//! ([`ScrollWidget::apply_drag_offset`]). This is Flutter's own convention,
+//! and it is what makes a depth-aware friction curve work: a physics whose
+//! resistance tightens with overscroll depth (`Bouncing`) reads a real depth
+//! rather than a permanent zero. The consequence is that the mapping is
+//! **path-dependent** — the same total pull delivered in two moves and in four
+//! need not land on the same pixel for a non-linear physics — which is
+//! inherent to progressive tension, not a defect of this seam.
 //!
 //! # Overscroll visuals
 //!
@@ -102,11 +118,15 @@ use kurbo::{Affine, Point, Rect, Size};
 
 use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
-use crate::physics::rubber_band::RubberBand;
-use crate::physics::{ScrollMetrics, ScrollPhysics, Simulation};
+use crate::physics::{
+    ScrollMetrics, ScrollPhysics, Simulation, default_overscroll_effect, default_physics,
+};
 
-/// iOS-style rubber-band resistance applied to the past-edge portion of a drag:
-/// the visible out-of-range displacement is `raw_excess * OVERSCROLL_RESISTANCE`.
+/// iOS-style rubber-band resistance applied to the past-edge portion of a drag
+/// under [`RubberBand`](crate::RubberBand): the visible out-of-range
+/// displacement is `raw_excess * OVERSCROLL_RESISTANCE`. No longer any
+/// platform's default — the platform-parity physics carry their own curves —
+/// but still the constant the opt-in pre-seam feel is defined by.
 ///
 /// **Community-approximate**: UIScrollView's rubber-banding is a
 /// diminishing-returns curve (roughly `d·(1 − 1/(1 + d/dim·c))`), not a
@@ -121,8 +141,10 @@ use crate::physics::{ScrollMetrics, ScrollPhysics, Simulation};
 /// (lazy-list 06) — never redeclare a second copy there.
 pub(crate) const OVERSCROLL_RESISTANCE: f64 = 0.5;
 
-/// Pull-past-top distance (logical px, measured on the *resisted* overscroll)
-/// beyond which releasing fires [`ScrollView::on_refresh_release`] (and
+/// Pull-past-top distance (logical px, measured on [`ScrollWidget::edge_pull`]
+/// — the physics-mapped pull, so a resisting physics needs proportionally more
+/// raw finger travel to reach it and a clamping one exactly this much) beyond
+/// which releasing fires [`ScrollView::on_refresh_release`] (and
 /// `ListView::on_refresh_release`, which shares this constant and
 /// [`crossed_refresh_trigger`]) — the pull-to-refresh trigger.
 ///
@@ -360,10 +382,10 @@ pub(crate) fn ambient_scroll_claim() -> Option<Rc<Cell<InnerScrollState>>> {
 /// one-pixel [`CLAIM_PROBE_PX`] probe of
 /// [`ScrollPhysics::apply_boundary_conditions`] — nothing rejected means the
 /// surface can answer the drag with a rubber-band even pinned against the edge
-/// (the bouncing/[`RubberBand`] family), while a clamping physics rejects the
-/// probe and genuinely has nothing to give. `registered` is the physics' own
-/// drag gate, the same one the takeover site consults, so a
-/// `NeverScrollable` inner never takes a drag from its host.
+/// (the `Bouncing`/[`RubberBand`](crate::RubberBand) family), while a clamping
+/// physics rejects the probe and genuinely has nothing to give. `registered`
+/// is the physics' own drag gate, the same one the takeover site consults, so
+/// a `NeverScrollable` inner never takes a drag from its host.
 pub(crate) fn inner_claim_state(
     physics: &dyn ScrollPhysics,
     metrics: &ScrollMetrics,
@@ -438,7 +460,7 @@ impl<State: 'static> ScrollView<State> {
             on_scroll: None,
             on_refresh_release: None,
             physics: None,
-            effect: OverscrollEffect::default(),
+            effect: default_overscroll_effect(),
         }
     }
 
@@ -465,9 +487,10 @@ impl<State: 'static> ScrollView<State> {
 
     /// Install a custom [`ScrollPhysics`] strategy — the pluggable
     /// drag-mapping/boundary-rejection/post-release-motion contract described
-    /// in [`crate::physics`], with [`RubberBand`] and the platform-parity
-    /// physics ([`crate::physics::parity`]'s `Bouncing`/`Clamping`/
-    /// `AlwaysScrollable`/`NeverScrollable`) as the built-in implementations.
+    /// in [`crate::physics`], with the platform-parity physics
+    /// ([`crate::physics::parity`]'s `Bouncing`/`Clamping`/
+    /// `AlwaysScrollable`/`NeverScrollable`) and the pre-seam
+    /// [`RubberBand`](crate::RubberBand) as the built-in implementations.
     ///
     /// ```
     /// use frust_widgets::{NeverScrollable, ScrollView, scroll_view, text};
@@ -482,15 +505,18 @@ impl<State: 'static> ScrollView<State> {
     /// a trait object isn't comparable, so this reinstalls unconditionally
     /// rather than diffing. A view built (or rebuilt) *without*
     /// `.physics(...)` leaves whatever the widget already has installed
-    /// untouched: a fresh `build` still starts the widget at [`RubberBand`]
-    /// (the widget's own constructor default), but rebuilding *from* a
-    /// `.physics(...)`-carrying view *to* a plain one does not revert it —
-    /// there is no spelling for "go back to the default" versus "no opinion
-    /// this rebuild", and this picks the latter, the same shape
-    /// [`ScrollWidget::effect`] already followed before this method existed.
+    /// untouched: a fresh `build` still starts the widget at
+    /// [`crate::physics::default_physics`] (the widget's own constructor
+    /// default), but rebuilding *from* a `.physics(...)`-carrying view *to* a
+    /// plain one does not revert it — there is no spelling for "go back to the
+    /// default" versus "no opinion this rebuild", and this picks the latter,
+    /// the same shape [`ScrollWidget::effect`] already followed before this
+    /// method existed.
     ///
-    /// Defaults to the extracted rubber-band feel ([`RubberBand`]) if never
-    /// called.
+    /// Defaults to the platform-adaptive physics
+    /// ([`crate::physics::default_physics`] — Android clamping, elsewhere
+    /// bouncing) if never called; `.physics(RubberBand::new())` is how an app
+    /// asks for the pre-seam rubber-band feel instead.
     pub fn physics(mut self, physics: impl ScrollPhysics + 'static) -> Self {
         self.physics = Some(Rc::new(physics));
         self
@@ -511,8 +537,10 @@ impl<State: 'static> ScrollView<State> {
     /// build/rebuild carries the current value down to
     /// [`ScrollWidget::effect`] unconditionally.
     ///
-    /// Defaults to translate overscroll ([`OverscrollEffect::Translate`]) if
-    /// never called.
+    /// Defaults to the effect paired with the platform's default physics
+    /// ([`crate::physics::default_overscroll_effect`]): the M3E
+    /// [`OverscrollEffect::Stretch`] on Android, translate overscroll
+    /// ([`OverscrollEffect::Translate`]) everywhere else.
     pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
         self.effect = effect;
         self
@@ -563,28 +591,30 @@ pub struct ScrollWidget {
     content: Size,
     /// Whether we have taken the gesture over as a scroll drag.
     scrolling: bool,
-    /// The raw (un-resisted) drag position accumulated during an active scroll
-    /// drag; seeded from `offset` at takeover and moved by each drag delta.
-    /// [`OVERSCROLL_RESISTANCE`] is applied to its out-of-range portion to derive
-    /// the effective `offset`, so the resistance never compounds across moves.
-    drag_raw: f64,
+    /// The physics-mapped drag position accumulated during an active scroll
+    /// drag, **before** boundary rejection: seeded from `offset` at takeover
+    /// and advanced by each move's mapped delta
+    /// ([`ScrollWidget::apply_drag_offset`]). It equals `offset` under any
+    /// physics that rejects nothing, and runs off past the edge under a
+    /// clamping one — which is exactly what lets a pinned surface still report
+    /// how hard the finger is pulling.
+    drag_position: f64,
     /// Whether a release-settle animation is returning an overscrolled surface to
     /// its clamped edge (driven at paint via [`ScrollWidget::settle_tick`]).
     settling: bool,
-    /// The installed scroll physics — [`RubberBand`] unless
-    /// [`ScrollView::physics`] replaces it, which is what keeps this
-    /// surface's shipped feel the default. `Rc`, not `Box`: every
-    /// [`ScrollPhysics`] method takes `&self`, so a shared, immutable handle
-    /// is both cheap to (re)install (a `Rc::clone`, not a fresh
-    /// reconstruction — `Box<dyn ScrollPhysics>` isn't `Clone`) and
-    /// sufficient, since nothing here ever needs `&mut` access to it.
+    /// The installed scroll physics — [`crate::physics::default_physics`]'s
+    /// platform-adaptive choice unless [`ScrollView::physics`] replaces it.
+    /// `Rc`, not `Box`: every [`ScrollPhysics`] method takes `&self`, so a
+    /// shared, immutable handle is both cheap to (re)install (a `Rc::clone`,
+    /// not a fresh reconstruction — `Box<dyn ScrollPhysics>` isn't `Clone`)
+    /// and sufficient, since nothing here ever needs `&mut` access to it.
     /// Survives a rebuild whose view carries no `.physics(...)` call
     /// untouched; see [`ScrollView::physics`] for the full contract and the
     /// [module docs](self)' *Physics seam*.
     pub(crate) physics: Rc<dyn ScrollPhysics>,
-    /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — the
-    /// content moving with the pull — is what this widget has always done and
-    /// stays the default; the alternatives are read at paint alone (see
+    /// How past-edge pull is visualized —
+    /// [`crate::physics::default_overscroll_effect`]'s platform pairing unless
+    /// [`ScrollView::overscroll_effect`] names one. Read at paint alone (see
     /// [`ScrollWidget::painted_offset`] and the module docs' *Overscroll
     /// visuals*), never by layout or by the physics.
     pub(crate) effect: OverscrollEffect,
@@ -595,19 +625,21 @@ pub struct ScrollWidget {
     /// [`ScrollPhysics::apply_boundary_conditions`] *rejected* while the
     /// position was pinned at the edge — so a clamping physics, whose position
     /// never leaves range, still reports how hard the finger is pulling
-    /// (`physics`' design ruling). Under [`RubberBand`] nothing is ever
-    /// rejected, so this is exactly the overscroll, which is why re-basing the
-    /// [`REFRESH_TRIGGER_PX`] check on it changes no trigger distance.
+    /// (`physics`' design ruling). Under a physics that rejects nothing
+    /// (`Bouncing`, [`RubberBand`](crate::RubberBand)) this is exactly the
+    /// overscroll, which is why basing the [`REFRESH_TRIGGER_PX`] check on it
+    /// changes no trigger distance for either of them.
     ///
-    /// Re-derived from the raw drag accumulator on every drag move (never
-    /// summed across moves, which would double-count a steady pull), re-seeded
-    /// from the live displacement on `Down`, decayed by the release-settle, and
-    /// zeroed by the wheel/`Cancel` hard clamps.
+    /// Re-derived from [`ScrollWidget::drag_position`] on every drag move
+    /// (never summed across moves, which would strand a rejected pull the
+    /// finger has since eased back), re-seeded from the live displacement on
+    /// `Down`, decayed by the release-settle, and zeroed by the wheel/`Cancel`
+    /// hard clamps.
     pub(crate) edge_pull: f64,
     /// A generic ballistic simulation handed back by
     /// [`ScrollPhysics::create_ballistic_simulation`] on release, or `None` —
-    /// always `None` under [`RubberBand`], which keeps the legacy
-    /// [`ScrollWidget::fling`]/[`ScrollWidget::settling`] path instead.
+    /// always `None` under [`RubberBand`](crate::RubberBand), which keeps the
+    /// legacy [`ScrollWidget::fling`]/[`ScrollWidget::settling`] path instead.
     ballistic: Option<BallisticState>,
     /// Velocity (px/s of offset) of the motion a new `Down` interrupted, fed to
     /// [`ScrollPhysics::carried_momentum`] at the next fling start. `Down` is
@@ -675,10 +707,10 @@ impl ScrollWidget {
             viewport: Size::ZERO,
             content: Size::ZERO,
             scrolling: false,
-            drag_raw: 0.0,
+            drag_position: 0.0,
             settling: false,
-            physics: Rc::new(RubberBand::new()),
-            effect: OverscrollEffect::default(),
+            physics: default_physics(),
+            effect: default_overscroll_effect(),
             edge_pull: 0.0,
             ballistic: None,
             carried_velocity: 0.0,
@@ -709,7 +741,8 @@ impl ScrollWidget {
 
     /// Whether post-release motion is in flight — the legacy fling, or a
     /// physics-supplied [`Simulation`] the generic driver is running (never
-    /// both, and never either one under [`RubberBand`]'s legacy-only path).
+    /// both, and never either one under [`RubberBand`](crate::RubberBand)'s
+    /// legacy-only path).
     pub fn is_flinging(&self) -> bool {
         self.fling.is_some() || self.ballistic.is_some()
     }
@@ -759,8 +792,8 @@ impl ScrollWidget {
     /// [`ScrollPhysics::carried_momentum`] carries over from the motion this
     /// gesture's `Down` interrupted. `Down` is the only writer of
     /// [`ScrollWidget::carried_velocity`] (and always writes it), so the
-    /// remembered value is never stale; [`RubberBand`] carries `0.0`, leaving
-    /// `release` untouched.
+    /// remembered value is never stale; [`RubberBand`](crate::RubberBand)
+    /// carries `0.0`, leaving `release` untouched.
     fn fling_start_velocity(&self, release: f64) -> f64 {
         release + self.physics.carried_momentum(self.carried_velocity)
     }
@@ -773,7 +806,8 @@ impl ScrollWidget {
     /// clamps. **Those bounds govern the generic driver only** — the legacy
     /// fling path keeps its own pinned [`FLING_STOP`] threshold and no upper
     /// clamp, so installing a physics that returns `None` here (as
-    /// [`RubberBand`] does) cannot change a single shipped fling.
+    /// [`RubberBand`](crate::RubberBand) does) cannot change a single shipped
+    /// fling.
     fn release_simulation(&self) -> Option<Box<dyn Simulation>> {
         // The offset moves opposite the finger, like every other release path.
         let released = self.fling_start_velocity(-self.tracker.velocity());
@@ -850,29 +884,27 @@ impl ScrollWidget {
         }
     }
 
-    /// Derive the effective `offset` and [`ScrollWidget::edge_pull`] from the
-    /// raw drag position by asking the physics, rather than applying
-    /// [`OVERSCROLL_RESISTANCE`] here: the raw position clamped into range is
-    /// the base the physics maps *from*, and everything past it is the drag
-    /// delta it maps. Keeping the raw position separate means the mapping is
-    /// applied once per frame from the accumulator, not compounded across
-    /// successive drag moves — under [`RubberBand`] that reproduces this
-    /// module's original arithmetic exactly, term for term.
-    fn apply_drag_offset(&mut self) {
-        let raw = self.drag_raw;
-        let base = raw.clamp(0.0, self.max_offset());
-        let past_edge = raw - base;
-        let metrics = self.metrics_at(base);
-        // What the physics lets the past-edge pull move the position by, minus
-        // whatever it then rejects at the boundary (`0.0` for a physics that
-        // allows displacement, the whole of it for a clamping one).
-        let mapped = self
-            .physics
-            .apply_physics_to_user_offset(&metrics, past_edge);
+    /// Advance the drag by `delta` px of raw finger travel in offset space
+    /// (positive = the content scrolls down), asking the physics what that
+    /// delta is worth from where the surface actually sits — the module docs'
+    /// *Drag convention*.
+    ///
+    /// Three steps, in order: the physics maps the raw delta at metrics
+    /// reporting the **live** position (so a depth-aware curve reads a real
+    /// overscroll depth); the mapped delta accumulates into
+    /// [`ScrollWidget::drag_position`]; and the boundary rule decides how much
+    /// of that accumulated position the surface may actually hold. What it
+    /// rejects never reaches `offset` but is still reported through
+    /// [`ScrollWidget::edge_pull`], which is what lets a clamping surface drive
+    /// pull-to-refresh and a stretch effect.
+    fn apply_drag_offset(&mut self, delta: f64) {
+        let metrics = self.metrics_at(self.offset);
+        let mapped = self.physics.apply_physics_to_user_offset(&metrics, delta);
+        self.drag_position += mapped;
         let rejected = self
             .physics
-            .apply_boundary_conditions(&metrics, base + mapped);
-        self.offset = base + (mapped - rejected);
+            .apply_boundary_conditions(&metrics, self.drag_position);
+        self.offset = self.drag_position - rejected;
         // Read the allowed half back off the offset rather than reusing the
         // term above, so this is the *same* number `scroll_info` reports and
         // the two can never disagree by a rounding step at the bottom edge.
@@ -969,7 +1001,8 @@ impl ScrollWidget {
     /// `on_scroll` notification delivered on the next event.
     ///
     /// The three are mutually exclusive by construction — a release picks one —
-    /// and under [`RubberBand`] the simulation arm is never taken at all.
+    /// and under [`RubberBand`](crate::RubberBand) the simulation arm is never
+    /// taken at all.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
         if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
             self.last_anim = None;
@@ -1124,11 +1157,10 @@ impl ScrollWidget {
                     if self.scrolling {
                         let dy = p.position.y - self.last_drag.y;
                         self.last_drag = p.position;
-                        // Accumulate the raw drag position (unclamped) and derive
-                        // the resisted effective offset — a drag past an edge shows
-                        // an iOS-style rubber-band overscroll.
-                        self.drag_raw -= dy;
-                        self.apply_drag_offset();
+                        // Hand the physics this move's raw delta (the offset
+                        // moves opposite the finger) and let it decide what
+                        // reaches the position past an edge.
+                        self.apply_drag_offset(-dy);
                         self.sync_child_origin();
                         self.notify_scroll(ctx);
                         ctx.request_redraw();
@@ -1150,15 +1182,17 @@ impl ScrollWidget {
                             // Take the gesture over: cancel the child, stop
                             // forwarding — unless the physics refuses drags
                             // outright, in which case the move keeps flowing to
-                            // the child. `RubberBand` accepts unconditionally
-                            // (even content that fits rubber-bands), so that
-                            // gate is inert on the default feel.
+                            // the child. `Bouncing`/`RubberBand` accept
+                            // unconditionally (even content that fits
+                            // rubber-bands), so that gate is inert on the
+                            // bouncing-family default.
                             self.scrolling = true;
                             self.settling = false;
                             self.last_drag = p.position;
-                            // Seed the raw drag position from the current
-                            // (in-range) offset so overscroll accrues from here.
-                            self.drag_raw = self.offset;
+                            // Seed the drag accumulator from the live position
+                            // — including a mid-bounce displacement, so a
+                            // regrab continues from what is on screen.
+                            self.drag_position = self.offset;
                             self.send_child_cancel(ctx, p.position);
                             self.child.set_active(false);
                             ctx.request_redraw();
@@ -1406,7 +1440,8 @@ impl Widget for ScrollWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::parity::{Clamping, NeverScrollable};
+    use crate::physics::parity::{Bouncing, Clamping, DecelerationRate, NeverScrollable};
+    use crate::physics::rubber_band::RubberBand;
     use crate::test_support::leaf;
     use std::any::Any;
 
@@ -1418,6 +1453,18 @@ mod tests {
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(vw, vh)));
+        w
+    }
+
+    /// [`laid_out`] with the pre-seam [`RubberBand`] feel pinned explicitly —
+    /// the fixture every *rubber-band* pin below builds from now that the
+    /// widget's own default is the platform-adaptive physics (bouncing here,
+    /// clamping on Android), each with curves of its own. A test whose
+    /// assertions are a `0.5`-resisted displacement, a `SETTLE_DECAY` trace or
+    /// a legacy-fling trace is pinning *this* physics, not the default.
+    fn laid_out_rubber_band(vw: f64, vh: f64, content_h: f64) -> ScrollWidget {
+        let mut w = laid_out(vw, vh, content_h);
+        w.physics = Rc::new(RubberBand::new());
         w
     }
 
@@ -1625,7 +1672,7 @@ mod tests {
 
     #[test]
     fn fling_after_release_decays_and_clamps() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
         dispatch(&mut w, &ev(PointerPhase::Move, 50.0), 32.0); // scroll, builds velocity
@@ -1643,7 +1690,7 @@ mod tests {
 
     #[test]
     fn pump_fling_signals_needs_frame_until_at_rest() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         // Drive a release-with-velocity to start a fling (deterministic seam).
         dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
@@ -1814,7 +1861,7 @@ mod tests {
 
     #[test]
     fn drag_past_top_overscrolls_with_resistance_then_settles_back() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         // Down, then a drag downward crossing the slop takes the gesture over.
         dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
@@ -1898,6 +1945,14 @@ mod tests {
         w
     }
 
+    /// [`observed`] with the pre-seam [`RubberBand`] feel pinned explicitly,
+    /// for the same reason [`laid_out_rubber_band`] exists.
+    fn observed_rubber_band(with_refresh: bool) -> ScrollWidget {
+        let mut w = observed(with_refresh);
+        w.physics = Rc::new(RubberBand::new());
+        w
+    }
+
     fn run_log(w: &mut ScrollWidget, state: &mut ScrollLog, e: &InputEvent, t: f64) {
         let sa: &mut dyn Any = state;
         let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
@@ -1926,7 +1981,7 @@ mod tests {
     #[test]
     fn on_refresh_release_fires_only_past_trigger_and_only_on_release() {
         // A small pull (under the trigger) does not fire on release.
-        let mut w = observed(true);
+        let mut w = observed_rubber_band(true);
         let mut state = ScrollLog::default();
         run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
         run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
@@ -1939,7 +1994,7 @@ mod tests {
         );
 
         // A large pull past the trigger fires exactly once, on release.
-        let mut w = observed(true);
+        let mut w = observed_rubber_band(true);
         let mut state = ScrollLog::default();
         run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
         run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
@@ -1952,7 +2007,7 @@ mod tests {
 
     #[test]
     fn cancel_during_overscroll_never_fires_refresh_and_snaps_back() {
-        let mut w = observed(true);
+        let mut w = observed_rubber_band(true);
         let mut state = ScrollLog::default();
         run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
         run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
@@ -1974,7 +2029,7 @@ mod tests {
 
     #[test]
     fn layout_mid_drag_preserves_top_overscroll() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
         assert!(w.scrolling);
@@ -2003,7 +2058,7 @@ mod tests {
 
     #[test]
     fn layout_mid_settle_preserves_decaying_overscroll() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
         dispatch(&mut w, &ev(PointerPhase::Move, 290.0), 32.0); // raw -200 → -100
@@ -2043,7 +2098,7 @@ mod tests {
 
     #[test]
     fn edge_pull_equals_overscroll_under_rubber_band() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
         // 20px past the already-at-top edge: resistance halves it, and nothing
@@ -2072,7 +2127,7 @@ mod tests {
         assert_eq!(w.scroll_info().overscroll, 0.0);
 
         // The bottom edge is the same story with the opposite sign.
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         dispatch(&mut w, &scroll(50.0, false, 5000.0), 0.0); // clamp to max_offset
         dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
         dispatch(&mut w, &ev(PointerPhase::Move, 60.0), 16.0); // takeover
@@ -2213,11 +2268,260 @@ mod tests {
             "a fling started during live motion carries the physics' momentum"
         );
 
-        // The default physics carries nothing, so the identical sequence
-        // produces the identical velocity twice.
-        let mut w = laid_out(200.0, 100.0, 5000.0);
+        // `RubberBand` carries nothing, so the identical sequence produces
+        // the identical velocity twice (and keeps the legacy fling the helper
+        // above reads — the bouncing default hands back a simulation instead,
+        // pinned by `default_carried_momentum_compounds_a_refling`).
+        let mut w = laid_out_rubber_band(200.0, 100.0, 5000.0);
         let (first, second) = fling_then_refling(&mut w);
         assert_eq!(second, first, "RubberBand starts every fling cold");
+    }
+
+    // --- The platform default (`physics::default_physics`): bouncing on this
+    //     host, clamping on Android. What a surface that names no physics of
+    //     its own actually does — the depth-aware drag curve, the spring-back
+    //     release, carried momentum, and the fling gate. ---
+
+    fn assert_close(actual: f64, expected: f64, epsilon: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < epsilon,
+            "{what}: {actual} is not within {epsilon} of {expected}"
+        );
+    }
+
+    /// The host default, named once so every test below reads as "the default"
+    /// rather than "Bouncing" — and so the pairing itself is asserted.
+    #[test]
+    fn a_fresh_surface_installs_the_platform_default() {
+        let w = laid_out(200.0, 100.0, 1000.0);
+        assert_eq!(
+            format!("{:?}", w.physics),
+            format!("{:?}", crate::physics::default_physics())
+        );
+        assert_eq!(w.effect, crate::physics::default_overscroll_effect());
+    }
+
+    #[test]
+    fn default_drag_tension_tightens_with_depth() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
+
+        // 20px past the already-at-top edge, from zero depth: the friction
+        // factor is 0.52·(1 − 0)² = 0.52, so 20 · 0.52 = 10.4 shows.
+        dispatch(&mut w, &ev(PointerPhase::Move, 110.0), 32.0);
+        let first = w.offset();
+        assert_close(
+            first,
+            -20.0 * DecelerationRate::NORMAL_FRICTION,
+            1e-12,
+            "the first past-edge move, at zero depth",
+        );
+
+        // 20px more. The surface now sits 10.4px out of a 100px viewport, so
+        // the factor has tightened to 0.52·(1 − 0.104)² = 0.41746432 and this
+        // move only adds 20 · 0.41746432 = 8.3492864 — a total of 18.7492864.
+        dispatch(&mut w, &ev(PointerPhase::Move, 130.0), 48.0);
+        let second = w.offset() - first;
+        assert_close(second, -8.349_286_4, 1e-9, "the second, deeper move");
+        assert_close(w.offset(), -18.749_286_4, 1e-9, "the accumulated pull");
+        assert!(
+            second.abs() < first.abs(),
+            "the deeper pull must displace LESS per raw px: {second} vs {first}"
+        );
+        // The whole pull is displacement, none of it boundary-rejected.
+        assert_eq!(w.edge_pull, w.scroll_info().overscroll);
+    }
+
+    #[test]
+    fn default_release_past_the_edge_springs_back_to_the_boundary() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 110.0), 32.0);
+        assert!(w.offset() < 0.0, "the drag left the surface past its top");
+
+        dispatch(&mut w, &ev(PointerPhase::Up, 110.0), 48.0);
+        assert!(
+            w.ballistic.is_some(),
+            "the default physics owns the release with a spring"
+        );
+        assert!(w.fling.is_none() && !w.settling, "…so no legacy path runs");
+        assert!(w.is_flinging(), "post-release motion is live");
+
+        // Pump the shared frame clock until the spring reports itself done.
+        let mut ms = 100.0;
+        let mut steps = 0;
+        let mut moved = false;
+        while w.is_flinging() {
+            let before = w.offset();
+            let mut ctx = PaintCtx::for_test(Point::ZERO, w.viewport, frame_time(ms));
+            w.pump_fling(&mut ctx);
+            moved |= w.offset() != before;
+            ms += 16.0;
+            steps += 1;
+            assert!(steps < 2_000, "the bounce-back never settled");
+        }
+        assert!(moved, "the spring must actually animate, not snap");
+        assert!(
+            w.offset().abs() < 1e-6,
+            "the spring converges onto the boundary: {}",
+            w.offset()
+        );
+        assert!(
+            w.edge_pull.abs() < 1e-6,
+            "…and leaves no pull behind: {}",
+            w.edge_pull
+        );
+    }
+
+    #[test]
+    fn default_carried_momentum_compounds_a_refling() {
+        let mut w = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 50.0), 32.0); // builds velocity
+        dispatch(&mut w, &ev(PointerPhase::Up, 50.0), 32.0);
+        let first = w
+            .ballistic
+            .as_ref()
+            .expect("a release above the fling minimum is ballistic")
+            .sim
+            .dx(0.0);
+        // 50px of finger travel over 32ms, and the offset moves opposite it.
+        assert_close(first, 1562.5, 1e-9, "the first release velocity");
+
+        // The second press lands on that live curve, so its release carries
+        // the physics' own fitted share of it forward.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 64.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 50.0), 80.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 50.0), 80.0);
+        let second = w
+            .ballistic
+            .as_ref()
+            .expect("the second release is ballistic too")
+            .sim
+            .dx(0.0);
+        assert_close(
+            second,
+            first + Bouncing::new().carried_momentum(first),
+            1e-9,
+            "the re-fling carries Bouncing::carried_momentum(first)",
+        );
+        assert!(second > first, "…which is a genuine speed-up");
+    }
+
+    #[test]
+    fn default_min_fling_gate_is_one_hundred() {
+        // Both halves start parked mid-content, so the release is judged on
+        // velocity alone — an out-of-range release always gets its spring back
+        // whatever the speed (`default_release_past_the_edge_springs_back…`).
+        let mut slow = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut slow, &scroll(50.0, false, 1000.0), 0.0);
+        dispatch(&mut slow, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut slow, &ev(PointerPhase::Move, 80.0), 16.0); // takeover
+        // 6px of finger travel over the tracker's whole 100ms window: 60 px/s.
+        dispatch(&mut slow, &ev(PointerPhase::Move, 94.0), 100.0);
+        dispatch(&mut slow, &ev(PointerPhase::Up, 94.0), 100.0);
+        assert!(
+            slow.ballistic.is_none(),
+            "60 px/s is under the bouncing minimum (100), so no ballistic"
+        );
+        // The physics declining leaves the release on the widget's own legacy
+        // path, whose threshold is the pinned FLING_STOP (30 px/s) instead —
+        // the one place the two ladders disagree, pinned so it cannot drift
+        // unnoticed.
+        assert_close(
+            slow.fling.expect("the legacy fling catches it instead"),
+            60.0,
+            1e-9,
+            "the legacy fallback runs at the raw release velocity",
+        );
+
+        let mut fast = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut fast, &scroll(50.0, false, 1000.0), 0.0);
+        dispatch(&mut fast, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut fast, &ev(PointerPhase::Move, 80.0), 16.0); // takeover
+        // 15px over the same window: 150 px/s, over the minimum.
+        dispatch(&mut fast, &ev(PointerPhase::Move, 85.0), 100.0);
+        dispatch(&mut fast, &ev(PointerPhase::Up, 85.0), 100.0);
+        let sim = fast
+            .ballistic
+            .as_ref()
+            .expect("150 px/s clears the bouncing minimum");
+        assert_close(sim.sim.dx(0.0), 150.0, 1e-9, "…at the release velocity");
+        assert!(fast.fling.is_none(), "and the legacy fling stays out of it");
+        assert_eq!(Bouncing::new().min_fling_velocity(), 100.0);
+    }
+
+    // --- Pull-to-refresh under both shipped defaults: the trigger is measured
+    //     on `edge_pull`, which a bouncing surface fills with displacement and
+    //     a clamping one with boundary-rejected pull. ---
+
+    #[test]
+    fn refresh_trigger_under_the_bouncing_default() {
+        // 110px of raw pull at zero depth maps to 110 · 0.52 = 57.2, under the
+        // 64px trigger.
+        let mut w = observed(true);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 200.0), 32.0);
+        assert_close(w.edge_pull, -57.2, 1e-9, "under the trigger");
+        assert_eq!(
+            w.edge_pull,
+            w.scroll_info().overscroll,
+            "a bouncing surface rejects nothing, so the pull IS the displacement"
+        );
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 200.0), 48.0);
+        assert_eq!(state.refreshes, 0, "release under the trigger never fires");
+
+        // 150px of raw pull maps to 78.0 — past it, so the release fires once.
+        let mut w = observed(true);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 240.0), 32.0);
+        assert_close(w.edge_pull, -78.0, 1e-9, "past the trigger");
+        assert!(crossed_refresh_trigger(w.edge_pull));
+        assert_eq!(state.refreshes, 0, "no fire before release");
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 240.0), 48.0);
+        assert_eq!(state.refreshes, 1, "release past the trigger fires once");
+    }
+
+    #[test]
+    fn refresh_trigger_under_a_clamping_physics() {
+        // Android's default, simulated on the host: the position never leaves
+        // range, so the trigger is reached at the RAW pull distance.
+        let mut w = observed(true);
+        w.physics = Rc::new(Clamping::new());
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 140.0), 32.0);
+        assert_eq!(w.offset(), 0.0, "a clamping surface never displaces");
+        assert_eq!(w.scroll_info().overscroll, 0.0);
+        assert_eq!(w.edge_pull, -50.0, "…but reports the whole rejected pull");
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 140.0), 48.0);
+        assert_eq!(state.refreshes, 0, "50px of raw pull is under the trigger");
+
+        let mut w = observed(true);
+        w.physics = Rc::new(Clamping::new());
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 190.0), 32.0);
+        assert_eq!(w.offset(), 0.0);
+        assert_eq!(w.edge_pull, -100.0, "100px of raw pull, none of it shown");
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 190.0), 48.0);
+        assert_eq!(state.refreshes, 1, "past 64px of raw pull, it fires once");
+        // Nothing to spring back (the position never moved), so the rejected
+        // pull decays on the settle instead — which is what keeps a stretch
+        // effect from snapping off at release.
+        assert!(w.settling, "the rejected pull settles rather than springs");
+        while w.settle_tick(16.0) {}
+        assert_eq!(w.edge_pull, 0.0);
     }
 
     // --- The M3E stretch effect: a paint-side affine about the pulled edge,
@@ -2320,12 +2624,12 @@ mod tests {
     fn stretch_keeps_child_origin_fixed() {
         // The identical drag under each effect. The offset is the physics'
         // answer and must not vary; only what paint does with it does.
-        let mut translate = laid_out(200.0, 100.0, 1000.0);
+        let mut translate = laid_out_rubber_band(200.0, 100.0, 1000.0);
         drag_20px_past_top(&mut translate);
-        let mut stretch = laid_out(200.0, 100.0, 1000.0);
+        let mut stretch = laid_out_rubber_band(200.0, 100.0, 1000.0);
         stretch.effect = OverscrollEffect::Stretch;
         drag_20px_past_top(&mut stretch);
-        let mut none = laid_out(200.0, 100.0, 1000.0);
+        let mut none = laid_out_rubber_band(200.0, 100.0, 1000.0);
         none.effect = OverscrollEffect::None;
         drag_20px_past_top(&mut none);
 
@@ -2353,7 +2657,7 @@ mod tests {
 
     #[test]
     fn stretch_anchor_follows_pulled_edge() {
-        let mut top = laid_out(200.0, 100.0, 1000.0);
+        let mut top = laid_out_rubber_band(200.0, 100.0, 1000.0);
         top.effect = OverscrollEffect::Stretch;
         drag_20px_past_top(&mut top);
         assert_eq!(top.edge_pull, -10.0, "pulled past the top");
@@ -2368,7 +2672,7 @@ mod tests {
         );
         assert!(scale > 1.0, "the content grows, never shrinks");
 
-        let mut bottom = laid_out(200.0, 100.0, 1000.0);
+        let mut bottom = laid_out_rubber_band(200.0, 100.0, 1000.0);
         bottom.effect = OverscrollEffect::Stretch;
         drag_60px_past_bottom(&mut bottom);
         assert_eq!(bottom.edge_pull, 30.0, "pulled past the bottom");
@@ -2382,7 +2686,7 @@ mod tests {
 
     #[test]
     fn stretch_settles_back_to_identity() {
-        let mut w = laid_out(200.0, 100.0, 1000.0);
+        let mut w = laid_out_rubber_band(200.0, 100.0, 1000.0);
         w.effect = OverscrollEffect::Stretch;
         drag_20px_past_top(&mut w);
         let (_, held) = painted_stretch(&mut w).expect("the held pull stretches");
@@ -2567,6 +2871,21 @@ mod tests {
         w
     }
 
+    /// [`nest_surface`] with the pre-seam [`RubberBand`] feel pinned
+    /// explicitly — the variant the nested tests that assert a `0.5`-resisted
+    /// number build their feel-carrying layer from (see
+    /// [`laid_out_rubber_band`]); the arbitration itself is physics-agnostic,
+    /// so every other layer stays on the platform default.
+    fn nest_surface_rubber_band(
+        child: impl View<Nest>,
+        viewport_h: f64,
+        layer: usize,
+    ) -> ScrollWidget {
+        let mut w = nest_surface(child, viewport_h, layer);
+        w.physics = Rc::new(RubberBand::new());
+        w
+    }
+
     /// Wire `inner` in as `outer`'s single child — the nesting a real tree
     /// builds through a bounded-height wrapper (see [`nest_surface`]).
     fn nest(outer: &mut ScrollWidget, inner: ScrollWidget) {
@@ -2666,7 +2985,7 @@ mod tests {
 
     #[test]
     fn outer_takes_over_when_inner_pinned() {
-        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let mut outer = nest_surface_rubber_band(spacer_content(), 200.0, OUTER);
         let seen = Rc::new(Cell::new(ContentSeen::default()));
         let mut inner = nest_surface(nest_content(&seen), 120.0, INNER);
         // At its top under a physics that rejects every past-edge proposal:
@@ -2718,9 +3037,10 @@ mod tests {
     fn bouncing_inner_wins_even_at_edge() {
         let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
         let seen = Rc::new(Cell::new(ContentSeen::default()));
-        // The default `RubberBand` install, at the very top: it rejects
-        // nothing, so it can still answer a downward pull with a rubber-band.
-        let inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        // A `RubberBand` inner at the very top: like the bouncing default it
+        // rejects nothing, so it can still answer a downward pull with a
+        // rubber-band — and its resisted number is the one pinned below.
+        let inner = nest_surface_rubber_band(nest_content(&seen), 120.0, INNER);
         nest(&mut outer, inner);
 
         let mut state = Nest::default();
@@ -2826,7 +3146,7 @@ mod tests {
         // gesture — including the release that fires the refresh.
         let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
         let seen = Rc::new(Cell::new(ContentSeen::default()));
-        let inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        let inner = nest_surface_rubber_band(nest_content(&seen), 120.0, INNER);
         nest(&mut outer, inner);
 
         let mut state = Nest::default();
@@ -2905,7 +3225,7 @@ mod tests {
 
     #[test]
     fn a_pinned_nested_list_view_hands_the_drag_back_to_the_scroll_view() {
-        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let mut outer = nest_surface_rubber_band(spacer_content(), 200.0, OUTER);
         let mut list = nested_list(150.0);
         list.physics = Rc::new(Clamping::new());
         outer.child = ChildPod::new(Box::new(list));
@@ -2974,9 +3294,18 @@ mod tests {
         let w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         assert_eq!(w.effect, OverscrollEffect::Stretch);
 
-        // A default-built twin keeps the module's long-standing default.
+        // A default-built twin takes the platform pairing instead — asserted
+        // against the selector rather than a literal, so this reads the same
+        // on the Android arm (Stretch) as on this one (Translate).
         let default_view: ScrollView<()> = scroll_view(leaf(200.0, 1000.0));
         let default_w = View::<()>::build(&default_view, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            default_w.effect,
+            crate::physics::default_overscroll_effect()
+        );
+        // …which on this host is translate overscroll; the Android arm is
+        // pinned beside the selector itself, in `physics`' own tests.
+        #[cfg(not(target_os = "android"))]
         assert_eq!(default_w.effect, OverscrollEffect::Translate);
     }
 

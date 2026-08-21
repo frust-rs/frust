@@ -18,11 +18,12 @@
 //! * [`simulation`] — concrete [`Simulation`] implementations (the ballistic
 //!   decay/spring curves a physics hands back from
 //!   [`ScrollPhysics::create_ballistic_simulation`]).
-//! * [`rubber_band`] — the bouncing (iOS-style rubber-band) and clamping
-//!   (Android-style hard-stop) [`ScrollPhysics`] implementations.
-//! * [`parity`] — the platform-default composition (e.g. Android's
-//!   clamping-plus-stretch pairing) and any facade-level convenience
-//!   constructors over the two above.
+//! * [`rubber_band`] — the pre-seam rubber-band feel, now an opt-in.
+//! * [`parity`] — the platform-parity physics (`Bouncing`/`Clamping`/
+//!   `AlwaysScrollable`/`NeverScrollable`) both scroll surfaces default to.
+//! * This file also carries the platform-adaptive default selection itself —
+//!   [`default_physics`]/[`default_overscroll_effect`], what a `ScrollView`/
+//!   `ListView` installs when the app names no physics of its own.
 //!
 //! # Design ruling: rejected excess is reported, not absorbed
 //!
@@ -42,6 +43,49 @@ pub mod effect;
 pub mod parity;
 pub mod rubber_band;
 pub mod simulation;
+
+use std::rc::Rc;
+
+/// The physics a scroll surface installs when the app names none: **Android →
+/// [`parity::Clamping`]** (paired with [`effect::OverscrollEffect::Stretch`],
+/// the Material-3-Expressive edge stretch), **everywhere else →
+/// [`parity::Bouncing`]** at [`parity::DecelerationRate::Normal`] (paired with
+/// [`effect::OverscrollEffect::Translate`]).
+///
+/// [`rubber_band::RubberBand`] — the feel both surfaces used to hard-code — is
+/// no longer any platform's default; it stays reachable as an explicit
+/// `.physics(RubberBand::new())` opt-in.
+///
+/// `Rc<dyn ScrollPhysics>`, matching what the two scroll widgets store, so
+/// installing the default is one allocation and every later (re)install is an
+/// `Rc::clone`.
+///
+/// Selection is a `cfg!` **expression**, not a `#[cfg]` block: both arms
+/// type-check on every host, so a change here cannot compile on desktop and
+/// break the Android build.
+pub fn default_physics() -> Rc<dyn ScrollPhysics> {
+    if cfg!(target_os = "android") {
+        Rc::new(parity::Clamping::new())
+    } else {
+        Rc::new(parity::Bouncing::new())
+    }
+}
+
+/// The overscroll visual paired with [`default_physics`]: Android's clamping
+/// position never leaves the range, so the pull shows as
+/// [`effect::OverscrollEffect::Stretch`]; a bouncing surface moves with the
+/// pull instead, so it shows as [`effect::OverscrollEffect::Translate`].
+///
+/// Independent of [`effect::OverscrollEffect::default()`] (`Translate`, the
+/// enum's own neutral value) on purpose: this is the *platform* pairing, and a
+/// caller naming an effect explicitly always wins over it.
+pub fn default_overscroll_effect() -> effect::OverscrollEffect {
+    if cfg!(target_os = "android") {
+        effect::OverscrollEffect::Stretch
+    } else {
+        effect::OverscrollEffect::Translate
+    }
+}
 
 /// A read-only snapshot of a scroll surface's extent/position, the argument
 /// every [`ScrollPhysics`] method reasons over (Flutter's `ScrollMetrics`).
@@ -403,6 +447,68 @@ mod tests {
         };
         assert_eq!(overriding.min_fling_velocity(), 999.0);
         assert_eq!(overriding.apply_boundary_conditions(&m, 50.0), 7.0);
+    }
+
+    /// The non-Android arm of [`default_physics`]/[`default_overscroll_effect`]
+    /// — read back behaviorally (the doubled fling minimum, nothing rejected
+    /// past an edge, the depth-aware friction at zero depth) rather than by
+    /// downcasting, plus the `Debug` name so a swap to another
+    /// nothing-rejected physics still trips this.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn non_android_default_is_bouncing_plus_translate() {
+        let physics = default_physics();
+        assert!(
+            format!("{physics:?}").starts_with("Bouncing"),
+            "the desktop/iOS default is Bouncing, got {physics:?}"
+        );
+        assert_eq!(
+            physics.min_fling_velocity(),
+            parity::Bouncing::MIN_FLING_VELOCITY
+        );
+        let m = metrics(0.0, 500.0, 1.0);
+        assert_eq!(
+            physics.apply_boundary_conditions(&m, -30.0),
+            0.0,
+            "a bouncing surface rejects nothing — it holds the displacement"
+        );
+        let mapped = physics.apply_physics_to_user_offset(&m, -20.0);
+        assert!(
+            (mapped - -20.0 * parity::DecelerationRate::NORMAL_FRICTION).abs() < 1e-12,
+            "the past-edge pull is scaled by the normal-rate friction: {mapped}"
+        );
+        assert_eq!(
+            default_overscroll_effect(),
+            effect::OverscrollEffect::Translate
+        );
+    }
+
+    /// The Android arm of the same pair. Compiled only for an Android target,
+    /// so an ordinary host `cargo test` never runs it — a real device/emulator
+    /// build is what exercises this half.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn android_default_is_clamping_plus_stretch() {
+        let physics = default_physics();
+        assert!(
+            format!("{physics:?}").starts_with("Clamping"),
+            "the Android default is Clamping, got {physics:?}"
+        );
+        let m = metrics(0.0, 500.0, 1.0);
+        assert_eq!(
+            physics.apply_boundary_conditions(&m, -30.0),
+            -30.0,
+            "a clamping surface rejects the whole past-edge excess"
+        );
+        assert_eq!(
+            physics.apply_physics_to_user_offset(&m, -20.0),
+            -20.0,
+            "…and resists the drag itself not at all (the trait's identity map)"
+        );
+        assert_eq!(
+            default_overscroll_effect(),
+            effect::OverscrollEffect::Stretch
+        );
     }
 
     #[test]

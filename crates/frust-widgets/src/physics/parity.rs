@@ -8,21 +8,18 @@
 //! bouncing friction curve and the clamping hard stop — are what make a fling
 //! land where the platform's own would.
 //!
-//! # How a drag reaches [`Bouncing`], and what that costs
+//! # How a drag reaches [`Bouncing`]
 //!
 //! Flutter feeds `applyPhysicsToUserOffset` a *per-frame delta* against a
 //! position that may itself be out of range, so its friction tightens as the
-//! pull deepens. Both frust scroll surfaces instead re-map from a **clamped
-//! base** every frame ([`crate::scroll::ScrollWidget`]'s drag path): the
-//! metrics they pass always report an in-range `pixels`, and the offset is the
-//! whole accumulated past-edge excursion, not a delta. [`Bouncing`] answers
-//! either convention correctly — it derives the resisted portion from the
-//! metrics it is handed rather than assuming one — but under the clamped-base
-//! convention the overscroll it reads is always `0.0`, so the factor it applies
-//! is always [`DecelerationRate::NORMAL_FRICTION`]'s value at zero depth: a
-//! *linear* rubber band at `0.52`, not a tightening one. Progressive tension
-//! needs the surface to hand over its real out-of-range position, which is a
-//! change to those widgets, not to this module.
+//! pull deepens. Both frust scroll surfaces now use that same convention
+//! ([`crate::scroll::ScrollWidget`]'s drag path, its module docs' *Drag
+//! convention*): each `Move` hands over its own raw finger delta with metrics
+//! reporting the live position, displacement and all. [`Bouncing`] derives the
+//! resisted portion from the metrics it is handed rather than assuming a
+//! convention, so what it reads is a real depth and the factor it applies
+//! genuinely tightens from [`DecelerationRate::NORMAL_FRICTION`] at the edge
+//! toward zero a viewport out.
 //!
 //! # Why [`Clamping`] needs no clamped simulation adapter
 //!
@@ -149,8 +146,8 @@ fn split_overscroll_travel(start: f64, end: f64) -> (f64, f64) {
 /// friction curve that hands over to a rubber-band spring at whichever edge it
 /// reaches.
 ///
-/// See the [module docs](self) for how the surfaces' drag convention flattens
-/// the friction curve, and for the deviations from the Dart source.
+/// See the [module docs](self) for the drag convention the surfaces hand this
+/// curve its depth through, and for the deviations from the Dart source.
 #[derive(Debug, Default)]
 pub struct Bouncing {
     rate: DecelerationRate,
@@ -226,8 +223,7 @@ impl ScrollPhysics for Bouncing {
     /// already held, and travel easing back toward the range passes through
     /// untouched too. That asymmetry is the signature of the feel: pulling
     /// further out gets progressively heavier, letting it back never fights
-    /// the finger — though the depth term reads `0.0` under the surfaces'
-    /// clamped-base drag convention (see the [module docs](self)).
+    /// the finger.
     fn apply_physics_to_user_offset(&self, metrics: &ScrollMetrics, offset: f64) -> f64 {
         let min = metrics.min_scroll_extent;
         let max = metrics.max_scroll_extent;

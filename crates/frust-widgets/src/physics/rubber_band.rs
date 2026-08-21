@@ -1,9 +1,11 @@
 //! [`RubberBand`] — the iOS-style rubber-band feel `ScrollView`/`ListView`
-//! have always had, lifted out of those two widgets and behind the
-//! [`ScrollPhysics`] seam unchanged. It is what both surfaces still install by
-//! default, so extracting it moved no pixels; a platform-parity default
-//! (clamping-plus-stretch on Android) is a separate composition that will make
-//! this an explicit opt-in.
+//! used to have wired in, lifted out of those two widgets and behind the
+//! [`ScrollPhysics`] seam unchanged. It is **no longer any platform's
+//! default**: both surfaces now install
+//! [`crate::physics::default_physics`]'s platform-parity choice, and this is
+//! the opt-in an app names (`.physics(RubberBand::new())`) to keep the
+//! pre-seam feel — a flat resistance with the widgets' own legacy
+//! fling/settle, rather than a depth-aware curve with a ballistic spring.
 //!
 //! # What lives here, and what deliberately does not
 //!
@@ -28,6 +30,22 @@
 //! behavior-preserving extraction. [`OVERSCROLL_RESISTANCE`] likewise keeps its
 //! existing home beside them: it is one definition, imported here, so both
 //! widgets' `pub(crate)` paths to it are untouched.
+//!
+//! # Under the surfaces' per-move drag convention
+//!
+//! The scroll surfaces hand every physics *this move's* delta measured from
+//! the live position (`scroll.rs`'s *Drag convention*). Because the mapping
+//! above is linear, a pull delivered over any number of moves telescopes to
+//! exactly the `0.5 × raw pull` the pre-seam whole-excursion re-map produced —
+//! every shipped rubber-band number is unchanged. The one place the two
+//! conventions part is a **pull-and-return inside a single gesture**: with no
+//! easing/tensioning split of its own (unlike `Bouncing`), this physics
+//! resists the past-edge part of a *returning* delta too, so bringing the
+//! finger all the way back leaves the surface slightly scrolled instead of
+//! exactly at rest. Pinned by `per_move_deltas_telescope_to_the_pre_seam_pull`
+//! rather than papered over — it is the cost of one convention for every
+//! physics, and the tensioning direction (all of pull-to-refresh, overscroll
+//! and stretch) is untouched by it.
 
 use super::{ScrollMetrics, ScrollPhysics, Simulation};
 use crate::scroll::OVERSCROLL_RESISTANCE;
@@ -167,6 +185,34 @@ mod tests {
             physics.apply_physics_to_user_offset(&metrics(0.0, 0.0), 40.0),
             20.0
         );
+    }
+
+    /// The per-move delta convention, traced across a whole gesture — see the
+    /// [module docs](self)' section on it.
+    #[test]
+    fn per_move_deltas_telescope_to_the_pre_seam_pull() {
+        let physics = RubberBand::new();
+
+        // Four 10px moves past the top, each mapped from where the last left
+        // the position: 5px each, summing to exactly the 0.5 × 40 the
+        // whole-excursion re-map produced in one go.
+        let mut position = 0.0;
+        for _ in 0..4 {
+            position += physics.apply_physics_to_user_offset(&metrics(position, 900.0), -10.0);
+        }
+        assert_eq!(position, -20.0);
+        assert_eq!(
+            physics.apply_physics_to_user_offset(&metrics(0.0, 900.0), -40.0),
+            -20.0,
+            "…the same number the whole pull in one move gives"
+        );
+
+        // Easing back is not symmetric: the past-edge part of the returning
+        // delta is resisted too, so the finger coming all the way back leaves
+        // the surface 10px scrolled rather than exactly at rest.
+        let returned =
+            position + physics.apply_physics_to_user_offset(&metrics(position, 900.0), 40.0);
+        assert_eq!(returned, 10.0);
     }
 
     #[test]

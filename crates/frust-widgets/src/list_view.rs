@@ -256,9 +256,10 @@
 //! `ScrollWidget` has no windowing concept to keep separate from.
 //!
 //! **The feel itself comes from a [`ScrollPhysics`]** ([`crate::physics`]),
-//! installed as [`RubberBand`] — the same seam, the same default, and the same
-//! parity rule as `ScrollView` (see its *Physics seam*): the drag mapping and
-//! boundary rejection are asked of the physics, while the legacy
+//! installed as [`crate::physics::default_physics`]'s platform-adaptive choice
+//! — the same seam, the same default, the same per-move drag convention, and
+//! the same parity rule as `ScrollView` (see its *Physics seam*): the drag
+//! mapping and boundary rejection are asked of the physics, while the legacy
 //! fling/settle path and the hard-clamped wheel path stay here. What is local
 //! to this widget is only how the answer is *stored* — split across a clamped
 //! windowing offset and a paint-only displacement, below.
@@ -285,9 +286,12 @@
 //! [`ListViewWidget::edge_pull`] instead — paint-only either way.
 //!
 //! **Resistance uses the *current*, converging `max_offset`.** Every drag `Move`
-//! recomputes `overscroll` against a freshly-read [`ListViewWidget::max_offset`],
-//! not a value cached at takeover, so a bottom-edge overscroll in variable-extent
-//! mode tracks the content extent as in-flight measurements revise it.
+//! re-splits the drag position against a freshly-read
+//! [`ListViewWidget::max_offset`], not a value cached at takeover, so a
+//! bottom-edge overscroll in variable-extent mode tracks the content extent as
+//! in-flight measurements revise it — content that grows under the finger
+//! absorbs the displacement it had already produced instead of the surface
+//! jumping by it.
 //!
 //! **`on_refresh_release` only ever arms at the top edge**, mirroring
 //! `ScrollView`: it fires on `Up` when `overscroll < -REFRESH_TRIGGER_PX`, a
@@ -304,7 +308,8 @@
 //! [`ListViewWidget::tick`]'s at-bound
 //! check stops a fling the instant `offset` reaches `0`/`max_offset`. (The
 //! generic ballistic driver is the one other writer, and only for a physics
-//! whose simulation is *allowed* past an edge — `RubberBand` builds none.) A new
+//! whose simulation is *allowed* past an edge — the bouncing default's spring
+//! is exactly that, `RubberBand` builds none.) A new
 //! `Down` does *not* reset it, only cancelling any in-progress settle
 //! (`ListViewWidget::settling = false`), so a regrab mid-bounce continues from
 //! wherever the surface sits rather than snapping first — mirroring
@@ -340,8 +345,9 @@ use kurbo::{Point, Size};
 use crate::ChildKey;
 use crate::authoring::{ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
-use crate::physics::rubber_band::RubberBand;
-use crate::physics::{ScrollMetrics, ScrollPhysics, Simulation};
+use crate::physics::{
+    ScrollMetrics, ScrollPhysics, Simulation, default_overscroll_effect, default_physics,
+};
 use crate::scroll::{
     BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
     ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state, stretch_about_edge,
@@ -516,7 +522,7 @@ impl<State: 'static> ListView<State> {
             near_end_threshold: 0.0,
             on_refresh_release: None,
             physics: None,
-            effect: OverscrollEffect::default(),
+            effect: default_overscroll_effect(),
         }
     }
 
@@ -574,7 +580,7 @@ impl<State: 'static> ListView<State> {
             near_end_threshold: 0.0,
             on_refresh_release: None,
             physics: None,
-            effect: OverscrollEffect::default(),
+            effect: default_overscroll_effect(),
         }
     }
 
@@ -684,8 +690,9 @@ impl<State: 'static> ListView<State> {
 
     /// Install a custom [`ScrollPhysics`] strategy — the same seam
     /// [`crate::ScrollView::physics`] installs, sharing `scroll.rs`'s
-    /// resistance/trigger/settle constants and this crate's [`RubberBand`]/
-    /// [`crate::physics::parity`] implementations.
+    /// resistance/trigger/settle constants and this crate's
+    /// [`crate::physics::parity`]/[`RubberBand`](crate::RubberBand)
+    /// implementations.
     ///
     /// ```
     /// use frust_widgets::{ListView, NeverScrollable, text};
@@ -701,11 +708,14 @@ impl<State: 'static> ListView<State> {
     /// Identical to [`crate::ScrollView::physics`]: a view built (or
     /// rebuilt) *with* `.physics(...)` reinstalls it on the widget every
     /// time; a view built (or rebuilt) *without* it leaves the widget's
-    /// currently-installed physics untouched (a fresh `build` still starts
-    /// at [`RubberBand`], the widget's own constructor default).
+    /// currently-installed physics untouched (a fresh `build` still starts at
+    /// [`crate::physics::default_physics`], the widget's own constructor
+    /// default).
     ///
-    /// Defaults to the extracted rubber-band feel ([`RubberBand`]) if never
-    /// called.
+    /// Defaults to the platform-adaptive physics
+    /// ([`crate::physics::default_physics`] — Android clamping, elsewhere
+    /// bouncing) if never called; `.physics(RubberBand::new())` is how an app
+    /// asks for the pre-seam rubber-band feel instead.
     pub fn physics(mut self, physics: impl ScrollPhysics + 'static) -> Self {
         self.physics = Some(Rc::new(physics));
         self
@@ -728,8 +738,10 @@ impl<State: 'static> ListView<State> {
     /// build/rebuild carries the current value down to
     /// [`ListViewWidget::effect`] unconditionally.
     ///
-    /// Defaults to translate overscroll ([`OverscrollEffect::Translate`]) if
-    /// never called.
+    /// Defaults to the effect paired with the platform's default physics
+    /// ([`crate::physics::default_overscroll_effect`]): the M3E
+    /// [`OverscrollEffect::Stretch`] on Android, translate overscroll
+    /// ([`OverscrollEffect::Translate`]) everywhere else.
     pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
         self.effect = effect;
         self
@@ -1157,22 +1169,22 @@ pub struct ListViewWidget {
     /// the [module docs](self)' *Overscroll and pull-to-refresh* section for
     /// where a drag past an edge is represented instead.
     offset: f64,
-    /// The raw (un-resisted) drag position accumulated during an active scroll
-    /// drag, in the same **raw-offset space** [`ListViewWidget::offset`] itself
-    /// lives in — never [`ListViewWidget::placement_offset`]'s
-    /// pending-corrected space, since [`ListViewWidget::apply_drag_offset`]
-    /// writes it straight into `offset` by absolute assignment. Seeded at
-    /// takeover from `offset + overscroll` (the raw offset plus the live
-    /// overscroll displacement — the intentional regrab-mid-bounce term, so a
-    /// regrab mid-bounce continues smoothly from what is on screen) and moved
-    /// by each drag delta thereafter; deliberately **not**
+    /// The physics-mapped drag position accumulated during an active scroll
+    /// drag, **before** boundary rejection, in the same **raw-offset space**
+    /// [`ListViewWidget::offset`] itself lives in — never
+    /// [`ListViewWidget::placement_offset`]'s pending-corrected space, since
+    /// [`ListViewWidget::apply_drag_offset`] splits it straight into `offset`
+    /// plus `overscroll` by absolute assignment. Seeded at takeover from
+    /// `offset + overscroll` (the raw offset plus the live displacement — the
+    /// intentional regrab-mid-bounce term, so a regrab mid-bounce continues
+    /// smoothly from what is on screen) and advanced by each move's mapped
+    /// delta thereafter; deliberately **not**
     /// [`ListViewWidget::painted_offset`], which would also fold in a nonzero
     /// [`ListViewWidget::pending_correction`] and double-count it once
     /// `placement_offset` re-adds it on the first post-takeover move.
-    /// The installed physics maps its out-of-range portion into
-    /// [`ListViewWidget::overscroll`], so the resistance never compounds
-    /// across moves (mirrors `ScrollWidget`'s field of the same name).
-    drag_raw: f64,
+    /// Mirrors `ScrollWidget::drag_position`, including the part that runs off
+    /// past an edge under a clamping physics.
+    drag_position: f64,
     /// The signed, resisted past-edge visual displacement a drag shows beyond
     /// the windowing [`ListViewWidget::offset`]: negative past the top,
     /// positive past the bottom, `0.0` while in range. Only a drag ever sets
@@ -1185,9 +1197,9 @@ pub struct ListViewWidget {
     /// [`ListViewWidget::overscroll`] back to `0.0` (driven at paint via
     /// [`ListViewWidget::settle_tick`], mirrors `ScrollWidget::settling`).
     settling: bool,
-    /// The installed scroll physics — [`RubberBand`] unless
-    /// [`ListView::physics`] replaces it, which is what keeps this surface's
-    /// shipped feel the default and its parity with `ScrollView`. `Rc`, not
+    /// The installed scroll physics — [`crate::physics::default_physics`]'s
+    /// platform-adaptive choice unless [`ListView::physics`] replaces it, the
+    /// same default `ScrollView` takes. `Rc`, not
     /// `Box`: every [`ScrollPhysics`] method takes `&self`, so a shared,
     /// immutable handle is both cheap to (re)install and sufficient (mirrors
     /// `ScrollWidget::physics` — see its doc for the full rationale).
@@ -1195,24 +1207,25 @@ pub struct ListViewWidget {
     /// untouched; see [`ListView::physics`] for the full contract and the
     /// [module docs](self)' *Overscroll and pull-to-refresh* section.
     pub(crate) physics: Rc<dyn ScrollPhysics>,
-    /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — what
-    /// [`ListViewWidget::painted_offset`] already does with `overscroll` — is
-    /// the default; the alternatives are read at paint alone (see
+    /// How past-edge pull is visualized —
+    /// [`crate::physics::default_overscroll_effect`]'s platform pairing unless
+    /// [`ListView::overscroll_effect`] names one. Read at paint alone (see
     /// [`ListViewWidget::painted_offset`] and `scroll.rs`'s *Overscroll
     /// visuals*), never by layout, windowing, or the physics.
     pub(crate) effect: OverscrollEffect,
     /// The signed pull past an edge, negative past the top: the displacement
     /// the physics allowed ([`ListViewWidget::overscroll`]) plus whatever
     /// [`ScrollPhysics::apply_boundary_conditions`] rejected while the position
-    /// was pinned at the edge. Under [`RubberBand`] nothing is ever rejected,
-    /// so it *is* `overscroll` — which is why re-basing the refresh trigger on
-    /// it changes no trigger distance. Same field, same contract, same sign as
+    /// was pinned at the edge. Under a physics that rejects nothing
+    /// (`Bouncing`, [`RubberBand`](crate::RubberBand)) it *is* `overscroll` —
+    /// which is why basing the refresh trigger on it changes no trigger
+    /// distance for either. Same field, same contract, same sign as
     /// `ScrollWidget::edge_pull`; see it for the full rule.
     pub(crate) edge_pull: f64,
     /// A generic ballistic simulation handed back by
     /// [`ScrollPhysics::create_ballistic_simulation`] on release, or `None` —
-    /// always `None` under [`RubberBand`], which keeps the legacy
-    /// [`ListViewWidget::fling`] path instead.
+    /// always `None` under [`RubberBand`](crate::RubberBand), which keeps the
+    /// legacy [`ListViewWidget::fling`] path instead.
     ballistic: Option<BallisticState>,
     /// Velocity (px/s of offset) of the motion a new `Down` interrupted, fed to
     /// [`ScrollPhysics::carried_momentum`] at the next fling start. Always
@@ -1290,11 +1303,11 @@ impl ListViewWidget {
             item_count,
             item_extent,
             offset: 0.0,
-            drag_raw: 0.0,
+            drag_position: 0.0,
             overscroll: 0.0,
             settling: false,
-            physics: Rc::new(RubberBand::new()),
-            effect: OverscrollEffect::default(),
+            physics: default_physics(),
+            effect: default_overscroll_effect(),
             edge_pull: 0.0,
             ballistic: None,
             carried_velocity: 0.0,
@@ -1512,7 +1525,8 @@ impl ListViewWidget {
 
     /// Whether post-release motion is in flight — the legacy fling, or a
     /// physics-supplied [`Simulation`] the generic driver is running (never
-    /// both, and never either one under [`RubberBand`]'s legacy-only path).
+    /// both, and never either one under [`RubberBand`](crate::RubberBand)'s
+    /// legacy-only path).
     pub fn is_flinging(&self) -> bool {
         self.fling.is_some() || self.ballistic.is_some()
     }
@@ -1560,8 +1574,9 @@ impl ListViewWidget {
 
     /// A new fling's starting velocity: the `release` velocity plus whatever
     /// [`ScrollPhysics::carried_momentum`] carries over from the motion this
-    /// gesture's `Down` interrupted (`0.0` under [`RubberBand`], leaving
-    /// `release` untouched). Mirrors `ScrollWidget::fling_start_velocity`.
+    /// gesture's `Down` interrupted (`0.0` under
+    /// [`RubberBand`](crate::RubberBand), leaving `release` untouched).
+    /// Mirrors `ScrollWidget::fling_start_velocity`.
     fn fling_start_velocity(&self, release: f64) -> f64 {
         release + self.physics.carried_momentum(self.carried_velocity)
     }
@@ -1596,33 +1611,32 @@ impl ListViewWidget {
         self.set_offset(self.offset);
     }
 
-    /// Derive the windowing [`ListViewWidget::offset`], the
+    /// Advance the drag by `delta` px of raw finger travel in offset space
+    /// (positive = the content scrolls down) and re-split the result across the
+    /// windowing [`ListViewWidget::offset`], the
     /// [`ListViewWidget::overscroll`] displacement and
-    /// [`ListViewWidget::edge_pull`] from the raw drag position by asking the
-    /// physics, mirroring [`crate::ScrollWidget::apply_drag_offset`]: the raw
-    /// position clamped into range is both the base the physics maps *from*
-    /// and — because this widget's windowing offset may never leave range (see
-    /// the [module docs](self)' *Overscroll and pull-to-refresh* section) — the
-    /// offset itself, while whatever the physics makes of the past-edge portion
-    /// lands in `overscroll` for paint alone. That split is why nothing here
-    /// needs a re-clamp: the two halves are written from different terms rather
-    /// than one being derived back out of a summed position.
+    /// [`ListViewWidget::edge_pull`], mirroring
+    /// [`crate::ScrollWidget::apply_drag_offset`] (see `scroll.rs`'s *Drag
+    /// convention* for why the physics is handed a per-move delta at the live
+    /// position rather than a whole excursion from a clamped base).
     ///
-    /// `max_offset` is read fresh every call, so a variable-extent list's
-    /// still-converging content extent is always what the physics maps against.
-    fn apply_drag_offset(&mut self) {
-        let raw = self.drag_raw;
-        let base = raw.clamp(0.0, self.max_offset());
-        let past_edge = raw - base;
-        let metrics = self.metrics_at(base);
-        let mapped = self
-            .physics
-            .apply_physics_to_user_offset(&metrics, past_edge);
+    /// The one thing local to this widget: because its windowing offset may
+    /// never leave range (the [module docs](self)' *Overscroll and
+    /// pull-to-refresh* section), the position the physics allows is clamped
+    /// into `offset` and whatever is left over lands in `overscroll` for paint
+    /// alone. `max_offset` is read fresh every call, so a variable-extent
+    /// list's still-converging content extent is always what that split runs
+    /// against.
+    fn apply_drag_offset(&mut self, delta: f64) {
+        let metrics = self.metrics();
+        let mapped = self.physics.apply_physics_to_user_offset(&metrics, delta);
+        self.drag_position += mapped;
         let rejected = self
             .physics
-            .apply_boundary_conditions(&metrics, base + mapped);
-        self.offset = base;
-        self.overscroll = mapped - rejected;
+            .apply_boundary_conditions(&metrics, self.drag_position);
+        let allowed = self.drag_position - rejected;
+        self.offset = allowed.clamp(0.0, self.max_offset());
+        self.overscroll = allowed - self.offset;
         self.edge_pull = self.overscroll + rejected;
     }
 
@@ -2069,7 +2083,8 @@ impl ListViewWidget {
     /// it needs the request purely to keep painting the animation.
     ///
     /// The three are mutually exclusive by construction — a release picks one —
-    /// and under [`RubberBand`] the simulation arm is never taken at all.
+    /// and under [`RubberBand`](crate::RubberBand) the simulation arm is never
+    /// taken at all.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
         if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
             self.last_anim = None;
@@ -2227,14 +2242,12 @@ impl ListViewWidget {
                     if self.scrolling {
                         let dy = p.position.y - self.last_drag.y;
                         self.last_drag = p.position;
-                        // Accumulate the raw drag position (unclamped) and derive
-                        // the resisted windowing offset + overscroll — a drag past
-                        // an edge shows an iOS-style rubber-band overscroll, but
-                        // never a windowing offset outside `[0, max_offset]` (see
-                        // the module docs' *Overscroll and pull-to-refresh*
-                        // section).
-                        self.drag_raw -= dy;
-                        self.apply_drag_offset();
+                        // Hand the physics this move's raw delta (the offset
+                        // moves opposite the finger); whatever it makes of a
+                        // past-edge pull lands in `overscroll`, never in a
+                        // windowing offset outside `[0, max_offset]` (see the
+                        // module docs' *Overscroll and pull-to-refresh*).
+                        self.apply_drag_offset(-dy);
                         self.sync_child_origins();
                         self.fire_near_start(ctx);
                         self.fire_near_end(ctx);
@@ -2266,12 +2279,12 @@ impl ListViewWidget {
                             self.scrolling = true;
                             self.settling = false;
                             self.last_drag = p.position;
-                            // Seed the raw drag position from the raw offset
+                            // Seed the drag accumulator from the raw offset
                             // plus any live overscroll — never
                             // `painted_offset`, which also folds in
-                            // `pending_correction`: `apply_drag_offset` writes
-                            // `drag_raw` straight into `offset` by absolute
-                            // assignment, and `placement_offset`
+                            // `pending_correction`: `apply_drag_offset` splits
+                            // `drag_position` straight into `offset` by
+                            // absolute assignment, and `placement_offset`
                             // unconditionally re-adds `pending_correction` on
                             // top, so seeding from painted space would
                             // double-count a nonzero pending correction on the
@@ -2279,7 +2292,7 @@ impl ListViewWidget {
                             // (not just `offset`) is the intentional
                             // regrab-mid-bounce term, so a regrab mid-bounce
                             // still continues smoothly from what is on screen.
-                            self.drag_raw = self.offset + self.overscroll;
+                            self.drag_position = self.offset + self.overscroll;
                             self.cancel_children(ctx, p.position);
                             ctx.request_redraw();
                         }
@@ -2733,7 +2746,8 @@ impl Widget for ListViewWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::parity::NeverScrollable;
+    use crate::physics::parity::{Clamping, DecelerationRate, NeverScrollable};
+    use crate::physics::rubber_band::RubberBand;
     use crate::scroll::ScrollWidget;
     use frust_core::{RenderRoot, any};
     use std::any::Any;
@@ -3355,6 +3369,20 @@ mod tests {
         move |_: &mut ()| list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i)))
     }
 
+    /// [`overscroll_logic`] with the pre-seam [`RubberBand`] feel pinned
+    /// explicitly — the fixture every *rubber-band* pin in this file builds
+    /// from now that the widget's own default is the platform-adaptive physics
+    /// (bouncing here, clamping on Android), each with curves of its own. A
+    /// test whose assertions are a `0.5`-resisted displacement or a
+    /// `SETTLE_DECAY` trace is pinning *this* physics, not the default; the
+    /// `ScrollView` twin of this fixture is `scroll.rs`'s
+    /// `laid_out_rubber_band`.
+    fn rubber_band_logic(item_count: usize) -> impl FnMut(&mut ()) -> ListView<()> {
+        move |_: &mut ()| {
+            list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i))).physics(RubberBand::new())
+        }
+    }
+
     #[test]
     fn top_overscroll_resists_never_moves_the_windowing_offset_and_settles_with_no_refresh() {
         let refreshes = Rc::new(Cell::new(0u32));
@@ -3362,6 +3390,7 @@ mod tests {
         let mut logic = move |_: &mut ()| -> ListView<()> {
             let refreshes = refreshes_l.clone();
             list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(RubberBand::new())
                 .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
         };
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
@@ -3435,6 +3464,7 @@ mod tests {
         let mut logic = move |_: &mut ()| -> ListView<()> {
             let refreshes = refreshes_l.clone();
             list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(RubberBand::new())
                 .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
         };
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
@@ -3470,6 +3500,7 @@ mod tests {
         let mut logic = move |_: &mut ()| -> ListView<()> {
             let refreshes = refreshes_l.clone();
             list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(RubberBand::new())
                 .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
         };
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
@@ -3549,6 +3580,7 @@ mod tests {
         let mut logic = move |_: &mut ()| -> ListView<()> {
             let refreshes = refreshes_l.clone();
             list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(RubberBand::new())
                 .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
         };
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
@@ -3678,7 +3710,7 @@ mod tests {
     fn overscroll_resistance_tracks_a_max_offset_that_grows_mid_drag() {
         // A short list (10 rows * 50px = 500 content over a 200px viewport,
         // max_offset = 300) scrolled to the bottom, then overscrolled past it.
-        let mut logic = overscroll_logic(10);
+        let mut logic = rubber_band_logic(10);
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
         let mut state = ();
         let window = Size::new(200.0, 200.0);
@@ -3705,12 +3737,17 @@ mod tests {
 
         // Grow the content mid-drag (still `w.scrolling`): 20 rows now, content
         // 1000px, max_offset 800 — a rebuild interleaved into the same drag.
-        logic = overscroll_logic(20);
+        logic = rubber_band_logic(20);
         frame(&mut root, &mut logic, &mut state, window, 64.0);
         assert_eq!(list_widget(&root).max_offset(), 800.0);
 
         // The *same* continuing drag now reads the new, larger max_offset: 20
-        // more px up lands the raw drag position back in range.
+        // more px up lands the drag position back in range. The surface was
+        // *showing* content y 330 (offset 300 + the 30px it was displaced by),
+        // so the grown extent makes that 330 a real in-range offset and the
+        // next 20px of finger takes it to 350 — the drag position is a
+        // physics-mapped accumulator, so what the resistance already swallowed
+        // is not handed back when the content grows under the finger.
         root.event(&mut state, &ev(PointerPhase::Move, 80.0));
         let w = list_widget(&root);
         assert_eq!(
@@ -3719,8 +3756,8 @@ mod tests {
         );
         assert_eq!(
             w.offset(),
-            380.0,
-            "the windowing offset advanced by the raw drag delta, now in range"
+            350.0,
+            "the windowing offset advanced by exactly the finger delta, now in range"
         );
     }
 
@@ -3731,7 +3768,7 @@ mod tests {
 
     #[test]
     fn rubber_band_drag_mapping_matches_legacy_math() {
-        let mut logic = overscroll_logic(1000);
+        let mut logic = rubber_band_logic(1000);
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
         let mut state = ();
         let window = Size::new(200.0, 200.0);
@@ -3774,7 +3811,7 @@ mod tests {
 
     #[test]
     fn edge_pull_equals_overscroll_under_rubber_band() {
-        let mut logic = overscroll_logic(1000);
+        let mut logic = rubber_band_logic(1000);
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
         let mut state = ();
         let window = Size::new(200.0, 200.0);
@@ -3816,6 +3853,175 @@ mod tests {
         assert!(!w.settling, "the settle terminates");
         assert_eq!(w.overscroll, 0.0);
         assert_eq!(w.edge_pull, 0.0, "a completed settle leaves no pull");
+    }
+
+    // --- The platform default (`physics::default_physics`): bouncing on this
+    //      host, clamping on Android. The `ScrollView` twins of this group
+    //      live in `scroll.rs`; these pin that the windowing/displacement
+    //      split reaches the same numbers through this widget's own drag
+    //      path. ---
+
+    fn assert_close(actual: f64, expected: f64, epsilon: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < epsilon,
+            "{what}: {actual} is not within {epsilon} of {expected}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_list_installs_the_platform_default() {
+        let mut logic = overscroll_logic(1000);
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut (), Size::new(200.0, 200.0), 0.0);
+        let w = list_widget(&root);
+        assert_eq!(
+            format!("{:?}", w.physics),
+            format!("{:?}", crate::physics::default_physics())
+        );
+        assert_eq!(w.effect, crate::physics::default_overscroll_effect());
+    }
+
+    #[test]
+    fn default_drag_tension_tightens_with_depth() {
+        let mut logic = overscroll_logic(1000);
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // 40px > slop → takeover
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+
+        // 20px past the top from zero depth: 20 · 0.52 = 10.4 displaced, and
+        // the windowing offset still pinned at 0.
+        root.event(&mut state, &ev(PointerPhase::Move, 110.0));
+        let first = list_widget(&root).overscroll;
+        assert_eq!(list_widget(&root).offset(), 0.0);
+        assert_close(
+            first,
+            -20.0 * DecelerationRate::NORMAL_FRICTION,
+            1e-12,
+            "the first past-edge move",
+        );
+
+        // 20px more, now 10.4px deep in a 200px viewport: the factor tightens
+        // to 0.52·(1 − 0.052)² = 0.46732608, adding 9.3465216 for a total of
+        // 19.7465216.
+        root.event(&mut state, &ev(PointerPhase::Move, 130.0));
+        let w = list_widget(&root);
+        assert_close(w.overscroll, -19.746_521_6, 1e-9, "the accumulated pull");
+        assert!(
+            (w.overscroll - first).abs() < first.abs(),
+            "the deeper pull displaces less per raw px"
+        );
+        assert_eq!(w.offset(), 0.0, "…and the windowing offset never moves");
+        assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+    }
+
+    // --- Pull-to-refresh under both shipped defaults — the twins of
+    //      `scroll.rs`'s pair, over this widget's own `edge_pull`. ---
+
+    #[test]
+    fn refresh_trigger_under_the_bouncing_default() {
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // 110px of raw pull at zero depth maps to 57.2 — under the trigger.
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 200.0));
+        let w = list_widget(&root);
+        assert_close(w.edge_pull, -57.2, 1e-9, "under the trigger");
+        assert_eq!(
+            w.edge_pull, w.overscroll,
+            "a bouncing surface rejects nothing, so the pull IS the displacement"
+        );
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0));
+        assert_eq!(refreshes.get(), 0, "release under the trigger never fires");
+
+        // 150px of raw pull maps to 78.0 — past it.
+        root.event(&mut state, &ev(PointerPhase::Cancel, 200.0));
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 240.0));
+        let w = list_widget(&root);
+        assert_close(w.edge_pull, -78.0, 1e-9, "past the trigger");
+        assert!(crossed_refresh_trigger(w.edge_pull));
+        assert_eq!(refreshes.get(), 0, "no fire before release");
+        root.event(&mut state, &ev(PointerPhase::Up, 240.0));
+        assert_eq!(refreshes.get(), 1, "release past the trigger fires once");
+    }
+
+    #[test]
+    fn refresh_trigger_under_a_clamping_physics() {
+        // Android's default, simulated on the host.
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(Clamping::new())
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 140.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 0.0, "a clamping surface never displaces");
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(w.edge_pull, -50.0, "…but reports the whole rejected pull");
+        root.event(&mut state, &ev(PointerPhase::Up, 140.0));
+        assert_eq!(refreshes.get(), 0, "50px of raw pull is under the trigger");
+
+        root.event(&mut state, &ev(PointerPhase::Cancel, 140.0));
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 190.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 0.0);
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(w.edge_pull, -100.0, "100px of raw pull, none of it shown");
+        assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+        root.event(&mut state, &ev(PointerPhase::Up, 190.0));
+        assert_eq!(refreshes.get(), 1, "past 64px of raw pull, it fires once");
+        assert!(
+            list_widget(&root).settling,
+            "the rejected pull settles rather than springs — nothing displaced"
+        );
+
+        let mut ms = 64.0;
+        for _ in 0..40 {
+            frame(&mut root, &mut logic, &mut state, window, ms);
+            ms += 16.0;
+            if !list_widget(&root).settling {
+                break;
+            }
+        }
+        let w = list_widget(&root);
+        assert!(!w.settling, "the settle terminated");
+        assert_eq!(w.edge_pull, 0.0, "…leaving no pull for a stretch to paint");
     }
 
     // --- (07) The public builder surface: `.physics(...)` — the ListView twin
@@ -3881,7 +4087,7 @@ mod tests {
     #[test]
     fn variable_extent_top_overscroll_never_materializes_before_index_zero() {
         let fx = VarRows::new(tall_ids(60));
-        let mut logic = fx.logic();
+        let mut logic = fx.logic_rubber_band();
         let mut root = converged_var(&mut logic, &fx);
         assert_eq!(list_widget(&root).window()[0], 0);
 
@@ -4883,6 +5089,13 @@ mod tests {
                 )
                 .estimated_item_extent(ESTIMATE)
             }
+        }
+
+        /// [`VarRows::logic`] with the pre-seam [`RubberBand`] feel pinned
+        /// explicitly, for the same reason [`rubber_band_logic`] exists.
+        fn logic_rubber_band(&self) -> impl FnMut(&mut ()) -> ListView<()> + use<> {
+            let mut inner = self.logic();
+            move |state: &mut ()| inner(state).physics(RubberBand::new())
         }
 
         /// The true total content height of the current data.
@@ -6191,12 +6404,17 @@ mod tests {
     //      rows stay where the windowing offset puts them and the pull is
     //      painted as an affine about the held edge instead. ---
 
-    /// [`overscroll_logic`] with [`OverscrollEffect::Stretch`] selected on the
+    /// [`rubber_band_logic`] with [`OverscrollEffect::Stretch`] selected on the
     /// view, so the effect reaches the widget through the real build/rebuild
-    /// path rather than being poked onto the element.
+    /// path rather than being poked onto the element. Pinned to `RubberBand`
+    /// like the rest of the feel fixtures — the pull *values* the stretch is
+    /// read from are this physics' (the effect itself is physics-agnostic, and
+    /// `stretch_under_boundary_rejection_uses_edge_pull` covers the clamping
+    /// pairing the Android default ships).
     fn stretch_logic(item_count: usize) -> impl FnMut(&mut ()) -> ListView<()> {
         move |_: &mut ()| {
-            let mut view = list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i)));
+            let mut view = list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .physics(RubberBand::new());
             view.effect = OverscrollEffect::Stretch;
             view
         }
@@ -6242,7 +6460,7 @@ mod tests {
         let mut translated: RenderRoot<(), ListView<()>> = RenderRoot::new();
         drag_20px_past_top(
             &mut translated,
-            &mut overscroll_logic(1000),
+            &mut rubber_band_logic(1000),
             &mut (),
             window,
         );

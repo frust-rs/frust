@@ -2055,8 +2055,9 @@ mod scroll_physics_reexport {
             .physics(Bouncing::new())
             .overscroll_effect(OverscrollEffect::Stretch);
         let _ = view;
-        // RubberBand — the shipped default physics — is directly constructible
-        // through the facade too, not just reachable as a widget-side default.
+        // RubberBand — the pre-seam feel, now an opt-in rather than any
+        // platform's default — is directly constructible through the facade
+        // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
     }
 }
