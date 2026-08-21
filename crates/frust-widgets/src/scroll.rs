@@ -416,9 +416,17 @@ pub struct ScrollView<State: 'static> {
     /// Fired on pointer `Up` when the past-top overscroll exceeded
     /// [`REFRESH_TRIGGER_PX`]. See [`ScrollView::on_refresh_release`].
     on_refresh_release: Option<OnRefresh<State>>,
+    /// A custom [`ScrollPhysics`] installed via [`ScrollView::physics`], or
+    /// `None` to leave whatever is already installed on the widget alone.
+    /// `Rc`, not `Box`: [`ScrollWidget::physics`] is shared-immutable widget
+    /// state, so a cheap `Rc::clone` is what a `rebuild` (which only ever sees
+    /// `&self`) can hand across without a `Box<dyn ScrollPhysics>`-isn't-`Clone`
+    /// reconstruction problem. See [`ScrollView::physics`] for the full
+    /// build/rebuild contract.
+    physics: Option<Rc<dyn ScrollPhysics>>,
     /// How past-edge pull is visualized, carried down to
-    /// [`ScrollWidget::effect`] on every build/rebuild. No public builder sets
-    /// it yet — it is the default until one lands.
+    /// [`ScrollWidget::effect`] on every build/rebuild. See
+    /// [`ScrollView::overscroll_effect`].
     pub(crate) effect: OverscrollEffect,
 }
 
@@ -429,6 +437,7 @@ impl<State: 'static> ScrollView<State> {
             child: any(child),
             on_scroll: None,
             on_refresh_release: None,
+            physics: None,
             effect: OverscrollEffect::default(),
         }
     }
@@ -451,6 +460,61 @@ impl<State: 'static> ScrollView<State> {
     /// reimplementing overscroll thresholding. Never fires on a `Cancel`.
     pub fn on_refresh_release<F: Fn(&mut State) + 'static>(mut self, callback: F) -> Self {
         self.on_refresh_release = Some(Rc::new(callback));
+        self
+    }
+
+    /// Install a custom [`ScrollPhysics`] strategy — the pluggable
+    /// drag-mapping/boundary-rejection/post-release-motion contract described
+    /// in [`crate::physics`], with [`RubberBand`] and the platform-parity
+    /// physics ([`crate::physics::parity`]'s `Bouncing`/`Clamping`/
+    /// `AlwaysScrollable`/`NeverScrollable`) as the built-in implementations.
+    ///
+    /// ```
+    /// use frust_widgets::{NeverScrollable, ScrollView, scroll_view, text};
+    /// let view: ScrollView<()> = scroll_view(text("hi")).physics(NeverScrollable::new());
+    /// # let _ = view;
+    /// ```
+    ///
+    /// # Build/rebuild semantics
+    ///
+    /// A view built (or rebuilt) *with* `.physics(...)` installs it on the
+    /// widget every time — like [`ScrollView::on_scroll`]'s erased callback,
+    /// a trait object isn't comparable, so this reinstalls unconditionally
+    /// rather than diffing. A view built (or rebuilt) *without*
+    /// `.physics(...)` leaves whatever the widget already has installed
+    /// untouched: a fresh `build` still starts the widget at [`RubberBand`]
+    /// (the widget's own constructor default), but rebuilding *from* a
+    /// `.physics(...)`-carrying view *to* a plain one does not revert it —
+    /// there is no spelling for "go back to the default" versus "no opinion
+    /// this rebuild", and this picks the latter, the same shape
+    /// [`ScrollWidget::effect`] already followed before this method existed.
+    ///
+    /// Defaults to the extracted rubber-band feel ([`RubberBand`]) if never
+    /// called.
+    pub fn physics(mut self, physics: impl ScrollPhysics + 'static) -> Self {
+        self.physics = Some(Rc::new(physics));
+        self
+    }
+
+    /// Select how past-edge pull is visualized. See [`OverscrollEffect`]
+    /// ([`crate::physics::effect`]) for the full contract: move the content
+    /// with the pull, paint a Material-3-Expressive edge stretch about the
+    /// held edge, or show no visual at all.
+    ///
+    /// ```
+    /// use frust_widgets::{OverscrollEffect, ScrollView, scroll_view, text};
+    /// let view: ScrollView<()> = scroll_view(text("hi")).overscroll_effect(OverscrollEffect::Stretch);
+    /// # let _ = view;
+    /// ```
+    ///
+    /// Plain view-owned data, unlike [`ScrollView::physics`]: every
+    /// build/rebuild carries the current value down to
+    /// [`ScrollWidget::effect`] unconditionally.
+    ///
+    /// Defaults to translate overscroll ([`OverscrollEffect::Translate`]) if
+    /// never called.
+    pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
+        self.effect = effect;
         self
     }
 }
@@ -507,11 +571,17 @@ pub struct ScrollWidget {
     /// Whether a release-settle animation is returning an overscrolled surface to
     /// its clamped edge (driven at paint via [`ScrollWidget::settle_tick`]).
     settling: bool,
-    /// The installed scroll physics — [`RubberBand`] unless something replaces
-    /// it, which is what keeps this surface's shipped feel. Survives rebuild
-    /// untouched (the view carries no physics yet; see the [module
-    /// docs](self)' *Physics seam*).
-    pub(crate) physics: Box<dyn ScrollPhysics>,
+    /// The installed scroll physics — [`RubberBand`] unless
+    /// [`ScrollView::physics`] replaces it, which is what keeps this
+    /// surface's shipped feel the default. `Rc`, not `Box`: every
+    /// [`ScrollPhysics`] method takes `&self`, so a shared, immutable handle
+    /// is both cheap to (re)install (a `Rc::clone`, not a fresh
+    /// reconstruction — `Box<dyn ScrollPhysics>` isn't `Clone`) and
+    /// sufficient, since nothing here ever needs `&mut` access to it.
+    /// Survives a rebuild whose view carries no `.physics(...)` call
+    /// untouched; see [`ScrollView::physics`] for the full contract and the
+    /// [module docs](self)' *Physics seam*.
+    pub(crate) physics: Rc<dyn ScrollPhysics>,
     /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — the
     /// content moving with the pull — is what this widget has always done and
     /// stays the default; the alternatives are read at paint alone (see
@@ -607,7 +677,7 @@ impl ScrollWidget {
             scrolling: false,
             drag_raw: 0.0,
             settling: false,
-            physics: Box::new(RubberBand::new()),
+            physics: Rc::new(RubberBand::new()),
             effect: OverscrollEffect::default(),
             edge_pull: 0.0,
             ballistic: None,
@@ -1188,6 +1258,9 @@ impl<State: 'static> View<State> for ScrollView<State> {
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
+        if let Some(physics) = self.physics.clone() {
+            widget.physics = physics;
+        }
         widget.effect = self.effect;
         widget
     }
@@ -1207,9 +1280,15 @@ impl<State: 'static> View<State> for ScrollView<State> {
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
-        // The visual effect is plain data the view owns; the installed physics
-        // is widget state the view carries no spelling for yet, so a rebuild
-        // leaves it alone.
+        // A `.physics(...)`-carrying view reinstalls it every rebuild, like the
+        // erased callbacks above; a view with no opinion (`None`) leaves the
+        // widget's currently-installed physics alone — see
+        // `ScrollView::physics`'s doc for the full contract.
+        if let Some(physics) = self.physics.clone() {
+            element.physics = physics;
+        }
+        // The visual effect is plain data the view owns and is always carried
+        // down unconditionally.
         element.effect = self.effect;
         crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
@@ -1327,7 +1406,7 @@ impl Widget for ScrollWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::parity::Clamping;
+    use crate::physics::parity::{Clamping, NeverScrollable};
     use crate::test_support::leaf;
     use std::any::Any;
 
@@ -2042,7 +2121,7 @@ mod tests {
     #[test]
     fn ballistic_driver_runs_generic_simulation() {
         let mut w = observed(false);
-        w.physics = Box::new(RampPhysics);
+        w.physics = Rc::new(RampPhysics);
         let mut state = ScrollLog::default();
         run_log(&mut w, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
         run_log(&mut w, &mut state, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
@@ -2126,7 +2205,7 @@ mod tests {
     #[test]
     fn carried_momentum_hook_feeds_new_fling() {
         let mut w = laid_out(200.0, 100.0, 5000.0);
-        w.physics = Box::new(CarryPhysics);
+        w.physics = Rc::new(CarryPhysics);
         let (first, second) = fling_then_refling(&mut w);
         assert_eq!(
             second,
@@ -2354,7 +2433,7 @@ mod tests {
     fn stretch_under_boundary_rejection_uses_edge_pull() {
         let mut w = laid_out(200.0, 100.0, 1000.0);
         w.effect = OverscrollEffect::Stretch;
-        w.physics = Box::new(RejectPastEdge);
+        w.physics = Rc::new(RejectPastEdge);
         drag_20px_past_top(&mut w);
 
         assert_eq!(
@@ -2592,7 +2671,7 @@ mod tests {
         let mut inner = nest_surface(nest_content(&seen), 120.0, INNER);
         // At its top under a physics that rejects every past-edge proposal:
         // there is nothing a downward drag can do here.
-        inner.physics = Box::new(Clamping::new());
+        inner.physics = Rc::new(Clamping::new());
         nest(&mut outer, inner);
 
         let mut state = Nest::default();
@@ -2828,7 +2907,7 @@ mod tests {
     fn a_pinned_nested_list_view_hands_the_drag_back_to_the_scroll_view() {
         let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
         let mut list = nested_list(150.0);
-        list.physics = Box::new(Clamping::new());
+        list.physics = Rc::new(Clamping::new());
         outer.child = ChildPod::new(Box::new(list));
 
         let mut state = Nest::default();
@@ -2850,5 +2929,105 @@ mod tests {
             0.0,
             "the nested list never moved"
         );
+    }
+
+    // --- (07) The public builder surface: `.physics(...)`/`.overscroll_effect(...)` ---
+
+    #[test]
+    fn physics_builder_installs_custom_physics() {
+        let view: ScrollView<()> = scroll_view(leaf(200.0, 1000.0)).physics(NeverScrollable::new());
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        // Same slop-crossing shape as `drag_past_slop_scrolls_the_offset`, but
+        // `NeverScrollable` refuses the drag outright.
+        dispatch(&mut w, &ev(PointerPhase::Move, 70.0), 16.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 40.0), 32.0);
+        assert_eq!(w.offset(), 0.0, "NeverScrollable must refuse the drag");
+        assert!(
+            !w.scrolling,
+            "NeverScrollable must never take the gesture over"
+        );
+
+        // A default-built twin (no `.physics(...)` call) still scrolls normally
+        // under `RubberBand` — proving the builder, not some global default
+        // change, is what reached the widget above.
+        let mut default_w = laid_out(200.0, 100.0, 1000.0);
+        dispatch(&mut default_w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut default_w, &ev(PointerPhase::Move, 70.0), 16.0);
+        dispatch(&mut default_w, &ev(PointerPhase::Move, 40.0), 32.0);
+        assert_eq!(
+            default_w.offset(),
+            30.0,
+            "the default twin scrolls normally"
+        );
+    }
+
+    #[test]
+    fn effect_builder_reaches_widget() {
+        let view: ScrollView<()> =
+            scroll_view(leaf(200.0, 1000.0)).overscroll_effect(OverscrollEffect::Stretch);
+        let mut counter = 0u64;
+        let w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        assert_eq!(w.effect, OverscrollEffect::Stretch);
+
+        // A default-built twin keeps the module's long-standing default.
+        let default_view: ScrollView<()> = scroll_view(leaf(200.0, 1000.0));
+        let default_w = View::<()>::build(&default_view, &mut BuildCtx::new(&mut counter));
+        assert_eq!(default_w.effect, OverscrollEffect::Translate);
+    }
+
+    #[test]
+    fn rebuild_preserves_builder_physics() {
+        let physics_view: ScrollView<()> =
+            scroll_view(leaf(200.0, 1000.0)).physics(NeverScrollable::new());
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&physics_view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+
+        // Rebuilding against an identical `.physics(...)`-carrying view
+        // reinstalls it (unconditionally, like the erased callbacks) — still
+        // refuses the drag.
+        View::<()>::rebuild(
+            &physics_view,
+            &physics_view,
+            &mut w,
+            &mut BuildCtx::new(&mut counter),
+        );
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 70.0), 16.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 40.0), 32.0);
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "still installed after a re-asserting rebuild"
+        );
+        assert!(!w.scrolling);
+        // Clear the armed gesture before the next rebuild's own probe.
+        dispatch(&mut w, &ev(PointerPhase::Cancel, 40.0), 48.0);
+
+        // Rebuilding against a view with no `.physics(...)` call at all leaves
+        // the widget's currently-installed physics untouched — it does not
+        // revert to the `RubberBand` default.
+        let plain_view: ScrollView<()> = scroll_view(leaf(200.0, 1000.0));
+        View::<()>::rebuild(
+            &plain_view,
+            &physics_view,
+            &mut w,
+            &mut BuildCtx::new(&mut counter),
+        );
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 70.0), 16.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 40.0), 32.0);
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "a rebuild whose view carries no .physics(...) leaves the widget's physics untouched"
+        );
+        assert!(!w.scrolling);
     }
 }

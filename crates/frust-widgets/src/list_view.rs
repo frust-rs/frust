@@ -463,10 +463,15 @@ pub struct ListView<State: 'static> {
     /// `REFRESH_TRIGGER_PX` (shared with [`crate::ScrollView`]). See
     /// [`ListView::on_refresh_release`].
     on_refresh_release: Option<OnRefresh<State>>,
+    /// A custom [`ScrollPhysics`] installed via [`ListView::physics`], or
+    /// `None` to leave whatever is already installed on the widget alone —
+    /// mirrors [`crate::ScrollView`]'s field of the same name/contract; see
+    /// [`ListView::physics`] for the full build/rebuild semantics.
+    physics: Option<Rc<dyn ScrollPhysics>>,
     /// How past-edge pull is visualized, carried down to
-    /// [`ListViewWidget::effect`] on every build/rebuild. No public builder
-    /// sets it yet — it is the default until one lands (mirrors
-    /// [`crate::ScrollView`]'s field of the same name).
+    /// [`ListViewWidget::effect`] on every build/rebuild. See
+    /// [`ListView::overscroll_effect`] (mirrors [`crate::ScrollView`]'s field
+    /// of the same name).
     pub(crate) effect: OverscrollEffect,
 }
 
@@ -510,6 +515,7 @@ impl<State: 'static> ListView<State> {
             on_near_end: None,
             near_end_threshold: 0.0,
             on_refresh_release: None,
+            physics: None,
             effect: OverscrollEffect::default(),
         }
     }
@@ -567,6 +573,7 @@ impl<State: 'static> ListView<State> {
             on_near_end: None,
             near_end_threshold: 0.0,
             on_refresh_release: None,
+            physics: None,
             effect: OverscrollEffect::default(),
         }
     }
@@ -672,6 +679,59 @@ impl<State: 'static> ListView<State> {
     /// section.
     pub fn on_refresh_release<F: Fn(&mut State) + 'static>(mut self, callback: F) -> Self {
         self.on_refresh_release = Some(Rc::new(callback));
+        self
+    }
+
+    /// Install a custom [`ScrollPhysics`] strategy — the same seam
+    /// [`crate::ScrollView::physics`] installs, sharing `scroll.rs`'s
+    /// resistance/trigger/settle constants and this crate's [`RubberBand`]/
+    /// [`crate::physics::parity`] implementations.
+    ///
+    /// ```
+    /// use frust_widgets::{ListView, NeverScrollable, text};
+    /// let view: ListView<()> = ListView::builder(3, 40.0, |i| {
+    ///     frust_core::any::<(), _>(text(i.to_string()))
+    /// })
+    /// .physics(NeverScrollable::new());
+    /// # let _ = view;
+    /// ```
+    ///
+    /// # Build/rebuild semantics
+    ///
+    /// Identical to [`crate::ScrollView::physics`]: a view built (or
+    /// rebuilt) *with* `.physics(...)` reinstalls it on the widget every
+    /// time; a view built (or rebuilt) *without* it leaves the widget's
+    /// currently-installed physics untouched (a fresh `build` still starts
+    /// at [`RubberBand`], the widget's own constructor default).
+    ///
+    /// Defaults to the extracted rubber-band feel ([`RubberBand`]) if never
+    /// called.
+    pub fn physics(mut self, physics: impl ScrollPhysics + 'static) -> Self {
+        self.physics = Some(Rc::new(physics));
+        self
+    }
+
+    /// Select how past-edge pull is visualized. See [`OverscrollEffect`]
+    /// ([`crate::physics::effect`]) for the full contract — the same
+    /// selector [`crate::ScrollView::overscroll_effect`] installs.
+    ///
+    /// ```
+    /// use frust_widgets::{ListView, OverscrollEffect, text};
+    /// let view: ListView<()> = ListView::builder(3, 40.0, |i| {
+    ///     frust_core::any::<(), _>(text(i.to_string()))
+    /// })
+    /// .overscroll_effect(OverscrollEffect::Stretch);
+    /// # let _ = view;
+    /// ```
+    ///
+    /// Plain view-owned data, unlike [`ListView::physics`]: every
+    /// build/rebuild carries the current value down to
+    /// [`ListViewWidget::effect`] unconditionally.
+    ///
+    /// Defaults to translate overscroll ([`OverscrollEffect::Translate`]) if
+    /// never called.
+    pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
+        self.effect = effect;
         self
     }
 }
@@ -1125,12 +1185,16 @@ pub struct ListViewWidget {
     /// [`ListViewWidget::overscroll`] back to `0.0` (driven at paint via
     /// [`ListViewWidget::settle_tick`], mirrors `ScrollWidget::settling`).
     settling: bool,
-    /// The installed scroll physics — [`RubberBand`] unless something replaces
-    /// it, which is what keeps this surface's shipped feel and its parity with
-    /// `ScrollView`. Survives rebuild untouched (the view carries no physics
-    /// yet; see the [module docs](self)' *Overscroll and pull-to-refresh*
-    /// section).
-    pub(crate) physics: Box<dyn ScrollPhysics>,
+    /// The installed scroll physics — [`RubberBand`] unless
+    /// [`ListView::physics`] replaces it, which is what keeps this surface's
+    /// shipped feel the default and its parity with `ScrollView`. `Rc`, not
+    /// `Box`: every [`ScrollPhysics`] method takes `&self`, so a shared,
+    /// immutable handle is both cheap to (re)install and sufficient (mirrors
+    /// `ScrollWidget::physics` — see its doc for the full rationale).
+    /// Survives a rebuild whose view carries no `.physics(...)` call
+    /// untouched; see [`ListView::physics`] for the full contract and the
+    /// [module docs](self)' *Overscroll and pull-to-refresh* section.
+    pub(crate) physics: Rc<dyn ScrollPhysics>,
     /// How past-edge pull is visualized. [`OverscrollEffect::Translate`] — what
     /// [`ListViewWidget::painted_offset`] already does with `overscroll` — is
     /// the default; the alternatives are read at paint alone (see
@@ -1229,7 +1293,7 @@ impl ListViewWidget {
             drag_raw: 0.0,
             overscroll: 0.0,
             settling: false,
-            physics: Box::new(RubberBand::new()),
+            physics: Rc::new(RubberBand::new()),
             effect: OverscrollEffect::default(),
             edge_pull: 0.0,
             ballistic: None,
@@ -2317,6 +2381,9 @@ impl<State: 'static> View<State> for ListView<State> {
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
+        if let Some(physics) = self.physics.clone() {
+            widget.physics = physics;
+        }
         widget.effect = self.effect;
         // The key function and the unmeasured-row estimate are widget state (the
         // window math and layout's measurement both run without the view in
@@ -2372,9 +2439,15 @@ impl<State: 'static> View<State> for ListView<State> {
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
-        // The visual effect is plain data the view owns; the installed physics
-        // is widget state the view carries no spelling for yet, so a rebuild
-        // leaves it alone.
+        // A `.physics(...)`-carrying view reinstalls it every rebuild, like the
+        // erased callbacks above; a view with no opinion (`None`) leaves the
+        // widget's currently-installed physics alone — see `ListView::physics`'s
+        // doc for the full contract.
+        if let Some(physics) = self.physics.clone() {
+            element.physics = physics;
+        }
+        // The visual effect is plain data the view owns and is always carried
+        // down unconditionally.
         element.effect = self.effect;
         // Closures are not comparable either — reinstall the key function the
         // widget's own passes key indices with (never the builder; see the
@@ -2660,6 +2733,7 @@ impl Widget for ListViewWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::parity::NeverScrollable;
     use crate::scroll::ScrollWidget;
     use frust_core::{RenderRoot, any};
     use std::any::Any;
@@ -3744,6 +3818,62 @@ mod tests {
         assert_eq!(w.edge_pull, 0.0, "a completed settle leaves no pull");
     }
 
+    // --- (07) The public builder surface: `.physics(...)` — the ListView twin
+    //      of `scroll.rs`'s own group of the same name. ---
+
+    #[test]
+    fn physics_builder_installs_custom_physics() {
+        let window = Size::new(200.0, 200.0);
+
+        // A ListView built with `.physics(NeverScrollable::new())`: a drag
+        // past slop does not scroll.
+        let mut never_logic = move |_: &mut ()| -> ListView<()> {
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i))).physics(NeverScrollable::new())
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        frame(&mut root, &mut never_logic, &mut state, window, 0.0);
+        frame(&mut root, &mut never_logic, &mut state, window, 16.0);
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 160.0)); // would cross slop
+        root.event(&mut state, &ev(PointerPhase::Move, 100.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 0.0, "NeverScrollable must refuse the drag");
+        assert!(
+            !w.scrolling,
+            "NeverScrollable must never take the gesture over"
+        );
+
+        // A default-built twin (no `.physics(...)` call) still scrolls
+        // normally under `RubberBand` — same numbers as
+        // `rubber_band_drag_mapping_matches_legacy_math`.
+        let mut default_logic = overscroll_logic(1000);
+        let mut default_root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut default_state = ();
+        frame(
+            &mut default_root,
+            &mut default_logic,
+            &mut default_state,
+            window,
+            0.0,
+        );
+        frame(
+            &mut default_root,
+            &mut default_logic,
+            &mut default_state,
+            window,
+            16.0,
+        );
+        default_root.event(&mut default_state, &ev(PointerPhase::Down, 200.0));
+        default_root.event(&mut default_state, &ev(PointerPhase::Move, 160.0));
+        default_root.event(&mut default_state, &ev(PointerPhase::Move, 100.0));
+        assert_eq!(
+            list_widget(&default_root).offset(),
+            60.0,
+            "the default twin scrolls normally"
+        );
+    }
+
     // --- (8d) Variable-extent overscroll: the same bounds hold when rows
     //      size themselves (see the *Variable extents* module docs section
     //      for `estimated_item_extent`). ---
@@ -3917,7 +4047,7 @@ mod tests {
         let mut row = nested_scroll(200.0);
         // At its own top under a physics that rejects every past-edge
         // proposal: a downward drag has nothing to do there.
-        row.physics = Box::new(crate::physics::parity::Clamping::new());
+        row.physics = Rc::new(crate::physics::parity::Clamping::new());
         wire_row(&mut outer, 2, Box::new(row));
 
         dispatch_list(&mut outer, &ev(PointerPhase::Down, 100.0), 0.0);
