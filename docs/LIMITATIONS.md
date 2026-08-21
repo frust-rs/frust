@@ -3059,13 +3059,31 @@ FabWidget::layout` never re-derives the icon-centering math from the incoming `b
 at a tight-constrained size that doesn't match its nominal tier paints its icon off-center inside
 the visually smaller (or larger) box. Measured on `plugins/material/src/toolbar.rs`'s scroll-hide
 FAB morph (80dp→56dp, tight-constrained rather than paint-rescaled so layout/visual/hit rects stay
-one): ~12dp of icon offset at the 80dp end — unaffected by the separate baseline icon-centering fix
+one): ~12dp of icon offset at the 80dp end — independent of the separate baseline icon-centering fix
 (`crates/frust-widgets/src/icon.rs`, gate round 4, merge `568ff5ab`): that fix makes `IconWidget`
-scale/center its glyph inside its own laid-out box, but here the icon's own tight box
-(`self.size.icon_size()`, e.g. 24dp for `Medium`) already matches its configured requested size in
-every current caller, so the fix is a no-op at this call site — the mismatch is entirely
-`FabWidget`'s own `container` variable, which stays the nominal tier size regardless of `bc`. The
-Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
+scale/center its glyph inside its own laid-out box. At *this* call site's `Medium` tier
+(`self.size.icon_size()` = 24dp) the fix is genuinely a no-op, since the icon's own default
+configured size is also 24dp — but that is a fact about the `Medium` tier only, not "every current
+caller." The fix **does** change rendering at every non-natural tier (box ≠ the caller's configured
+24dp default) across every sized-component family that tight-constrains a caller-supplied
+default-24 icon and is reachable via the demo's live Size knobs: [`fab`] (`FabSize`,
+tight-constrained at `fab.rs:860`) — Small/Medium 24dp (natural), Large 36dp (`LARGE_ICON`,
+`fab.rs:182`) non-natural; `button/core.rs` (`ButtonSize::metrics`, `:101-129`, tight-constrained at
+`:838`) — Xs/Sm 20dp, Md 24dp (natural), Lg 32dp, Xl 40dp, all four non-`Md` tiers non-natural;
+`toggle_button.rs` (`ToggleButtonSize::metrics`, `:259-283`, tight-constrained at `:1466`) — Sm
+20dp, Md 24dp (natural), Lg 32dp non-natural; `icon_button.rs` (`icon_glyph_size`, `:226-233`,
+tight-constrained at `:1060`) — Xs 20dp, Sm/Md 24dp (natural), Lg 32dp, Xl 40dp non-natural. At
+every non-natural tier the fix now paints a glyph scaled and centered to that tier's box instead of
+the pre-fix 24dp corner-anchored placement — the demo's fabs/buttons/button_group/icon_buttons
+playground pages each expose the relevant Size knob live (e.g.
+`examples/material3-demo/src/pages/playground/do_/fabs.rs:84`'s `any(icon(icons::ADD))` under a
+selectable `FabSize::Large`). This is believed net-positive — the same glyph-vs-box contract
+violation the fix closes, corrected everywhere it recurs, not only at the FAB — but **unverified on
+device**: the widened re-verify scope is recorded against `G12` in the phase's device-gate ledger
+(`workflow/reviews/features/material-3-expressive-gate/GATE.md`). None of this touches the
+`FabWidget` mechanism above: that mismatch is entirely `FabWidget`'s own `container` variable, which
+stays the nominal tier size regardless of `bc`, independent of whatever the icon inside it is doing.
+The Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
 was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
 its own morph via `shapes::Morph` instead of consuming that seam, specifically to avoid reproducing
 this degrade on a second surface. That leaves `corner_radius` with zero consumers in this crate
@@ -3087,10 +3105,18 @@ bug and the seam's resolved fate — travel together instead of being lost betwe
 
 **Evidence**: `plugins/material/src/toolbar.rs` module doc (FAB morph section);
 `plugins/material/src/fab.rs` (`Widget for FabWidget::layout`'s `self.size.container()`;
-`FabView::corner_radius` at `fab.rs:556` and its module doc's "Corner-radius override seam"
-section); `plugins/material/src/fab_menu.rs` module doc (trigger-morph rationale);
-`crates/frust-widgets/src/icon.rs` (gate round 4 fix, merge `568ff5ab` — independence check);
-Phase-4 ledger, `workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
+`LARGE_ICON` at `fab.rs:182`; the icon tight-constrain at `fab.rs:860`; `FabView::corner_radius` at
+`fab.rs:556` and its module doc's "Corner-radius override seam" section);
+`plugins/material/src/fab_menu.rs` module doc (trigger-morph rationale);
+`crates/frust-widgets/src/icon.rs` (gate round 4 fix, merge `568ff5ab` — `Widget for
+IconWidget::layout`/`paint`, the natural-vs-tight-box divergence); `plugins/material/src/button/
+core.rs:101-129` (`ButtonSize::metrics`, tight-constrain at `:838`);
+`plugins/material/src/toggle_button.rs:259-283` (`ToggleButtonSize::metrics`, tight-constrain at
+`:1466`); `plugins/material/src/icon_button.rs:226-233` (`icon_glyph_size`, tight-constrain at
+`:1060`); `examples/material3-demo/src/pages/playground/do_/fabs.rs:84` (default-24 icon under a
+selectable `FabSize::Large`); `workflow/reviews/features/material-3-expressive-gate/GATE.md` (`G12`
+re-verify scope); Phase-4 ledger,
+`workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
 
 ---
 
