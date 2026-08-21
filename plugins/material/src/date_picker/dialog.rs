@@ -64,6 +64,14 @@
 //! Cancel falls back to firing [`DatePickerDialog::on_dismiss`] directly, which
 //! is unstaged — the only route open to it.
 //!
+//! With a handle installed but nothing to stage behind it — a `Stack`-mounted
+//! dialog the app handed a handle anyway — Cancel reaches that same
+//! `on_dismiss`, but through the *host*: the request is raised here and the
+//! host, which alone knows whether a staged close hook exists, delivers the
+//! unstaged fallback in the event pass (`crate::overlay::modal`'s *What a
+//! request consumes*). Both mounts dismiss, exactly once, whichever way the
+//! dialog was mounted.
+//!
 //! # Deliberate cuts
 //!
 //! The landscape layout (`calendarLandscapeDialogSize`, a side header) is not
@@ -149,6 +157,16 @@ fn confirm_action<State: 'static>(
 /// on the [`show_date_picker`] path that callback *is* the host's raw
 /// `controller.pop()`, so running both would pop the page out from under the
 /// exit ramp the handle just staged.
+///
+/// **The unstaged fallback is the host's, not this function's.** A handle
+/// raises a request; whether that request can be *staged* depends on how the
+/// dialog is mounted, which only the host knows — with no staged close hook
+/// behind it (a `Stack` mount), the host falls back to firing
+/// [`DatePickerDialog::on_dismiss`] itself, in the event pass, so Cancel still
+/// dismisses (`crate::overlay::modal`'s *What a request consumes*). Firing the
+/// callback from here as well would dismiss twice on the mount that *can*
+/// stage, and this function cannot tell the two apart — the host observes the
+/// request after this returns.
 fn cancel_action<State: 'static>(
     dismiss: Option<&ModalDismiss>,
     on_dismiss: Option<&OnDismiss<State>>,
@@ -903,6 +921,7 @@ mod tests {
     use std::cell::Cell;
 
     use frust::FrameTime;
+    use frust::authoring::{PointerButton, PointerEvent, PointerPhase};
 
     use super::super::{DatePickerEntryMode, DatePickerMode};
     use super::*;
@@ -1080,6 +1099,56 @@ mod tests {
         w.paint(&mut ctx, &mut NoopScene);
         assert_eq!(closed.get(), 1, "the pop lands when the ramp settles");
         assert_eq!(app.dismissed, 0, "never through the unstaged callback");
+    }
+
+    #[test]
+    fn cancel_with_a_handle_but_no_staged_route_still_dismisses() {
+        // A `Stack`-mounted picker the app handed a handle anyway: there is no
+        // close hook behind it to stage, so the host — the only party that
+        // knows that — delivers the unstaged `on_dismiss` itself, in the event
+        // pass. Without that fallback the handle is inert and Cancel does
+        // nothing at all on this mount.
+        let dismiss = ModalDismiss::new();
+        let picker = dialog(seeded()).dismiss_handle(dismiss.clone());
+        let mut counter = 0u64;
+        let mut w = View::<App>::build(&picker, &mut BuildCtx::new(&mut counter));
+        let window = Size::new(600.0, 800.0);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(window));
+        for ms in [0.0, 400.0] {
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, window, ft_ms(ms));
+            w.paint(&mut ctx, &mut NoopScene);
+        }
+
+        let mut app = App::default();
+        picker.cancel(&mut app);
+        assert_eq!(
+            app.dismissed, 0,
+            "Cancel fires nothing itself — the handle owns the dismissal"
+        );
+
+        // The paint backstop reaches no app state, so it leaves the request
+        // pending rather than swallowing it…
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, window, ft_ms(500.0));
+        w.paint(&mut ctx, &mut NoopScene);
+        assert_eq!(app.dismissed, 0);
+        assert!(!w.is_exiting(), "there is nothing to stage on this mount");
+
+        // …and the next event pass delivers it, exactly once.
+        for _ in 0..2 {
+            let state_any: &mut dyn Any = &mut app;
+            let mut ectx = EventCtx::new(state_any, Point::ORIGIN, window);
+            w.event(
+                &mut ectx,
+                &InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Move,
+                    position: Point::new(5.0, 5.0),
+                    button: PointerButton::Primary,
+                }),
+            );
+        }
+        assert_eq!(app.dismissed, 1, "Cancel is not dead on a `Stack` mount");
     }
 
     /// A frame time `ms` milliseconds in.

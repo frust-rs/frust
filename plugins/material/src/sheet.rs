@@ -242,6 +242,16 @@
 //! gate itself; every *gesture* caller (the scrim tap, the handle-drag
 //! release, `Escape`) gates it at its own call site instead.
 //!
+//! What an observation *consumes* mirrors that host too, rule for rule (see
+//! its own *What a request consumes*): the generation is latched by whichever
+//! pass saw the request, accepted or refused, so it acts exactly once; the
+//! payload is taken only where a dismissal was actually accepted **and** has a
+//! staged pop to carry it, never by a refusal (which would retarget the ramp
+//! already in flight) and never by the unstaged `on_dismiss` route (which
+//! carries no [`PopResult`] at all); and the one pass that latches nothing is
+//! the `paint` backstop on a `Stack` mount, which can deliver neither and
+//! leaves the request for the event pass rather than swallowing it.
+//!
 //! # Public API
 //!
 //! [`bottom_sheet`], [`show_bottom_sheet`], and every [`BottomSheetView`]
@@ -554,11 +564,15 @@ pub struct BottomSheetWidget {
     /// The payload a [`ModalDismiss::dismiss_with`] request armed, handed to
     /// the staged pop when the spring settles closed.
     ///
-    /// Held here rather than left in the handle for the length of the exit
-    /// so that a *refused* pop (the stack moved — see
-    /// [`StagedPop::fire_with`]) keeps it: that dismissal delivered nothing,
-    /// the sheet springs back open, and the payload rides whichever exit
-    /// finally lands.
+    /// **Scoped to the exit its own request staged, and to no other** — the
+    /// rule `crate::overlay::modal::OverlayModalWidget`'s own `pending_result`
+    /// states at length. It is taken from the handle only by the observation
+    /// that *accepted* the request ([`Self::accept_dismiss_request`]), and
+    /// dropped by every leg that ends that exit without a landed pop: a
+    /// refused pop (the stack moved — see [`StagedPop::fire_with`]), a drag
+    /// that catches the closing sheet, any leg aimed back open
+    /// ([`Self::spring_open`]). Left standing across one of those, it would be
+    /// delivered by whatever dismissal happened to land next.
     pending_result: Option<PopResult>,
     /// Whether the running spring leg ends in a dismissal — set the moment a
     /// trigger stages one ([`Self::stage_exit`]), cleared by the settle that
@@ -746,28 +760,51 @@ impl BottomSheetWidget {
         ctx.request_frame();
     }
 
-    /// Latch the app's [`ModalDismiss`] handle's request generation, taking
-    /// any payload it carries — `true` when a request this widget has not
-    /// seen before is pending.
+    /// The app's [`ModalDismiss`] handle's live request generation, when a
+    /// request this widget has not seen before is pending — the *peek* half of
+    /// the observe pattern.
     ///
     /// Mirrors `crate::overlay::modal::OverlayModalWidget`'s own
-    /// `take_dismiss_request` exactly: the payload is taken here, at
-    /// observation, rather than at the settle that consumes it, since the
-    /// handle is the app's and may be re-armed for a later presentation,
-    /// while this exit's payload belongs to this exit.
-    fn take_dismiss_request(&mut self) -> bool {
-        let Some(handle) = &self.dismiss_handle else {
-            return false;
-        };
+    /// `pending_dismiss_request` exactly, and for the same reason: only the
+    /// caller knows what became of the request, so nothing is consumed until
+    /// it does (see that module's *What a request consumes*).
+    fn pending_dismiss_request(&self) -> Option<u64> {
+        let handle = self.dismiss_handle.as_ref()?;
         let current = handle.generation();
-        if current == self.last_seen_request {
-            return false;
-        }
-        self.last_seen_request = current;
-        if let Some(result) = handle.take_result() {
-            self.pending_result = Some(result);
-        }
-        true
+        (current != self.last_seen_request).then_some(current)
+    }
+
+    /// Record `generation` as seen — so the request acts exactly once however
+    /// many passes observe it — **without** taking its payload.
+    ///
+    /// What a *refused* request gets (an exit already in flight, or a sheet
+    /// already closed), and what the unstaged [`BottomSheetView::on_dismiss`]
+    /// route gets too: neither delivers a [`PopResult`], so the payload stays
+    /// with the handle instead of retargeting an exit that was never asked to
+    /// carry it.
+    fn latch_dismiss_request(&mut self, generation: u64) {
+        self.last_seen_request = generation;
+    }
+
+    /// Latch `generation` *and* take the payload it carried, for the staged
+    /// pop to fire with on settle (see [`Self::pending_result`]).
+    ///
+    /// The payload is taken here, at acceptance, rather than at the settle
+    /// that consumes it: the handle is the app's and may be re-armed for a
+    /// later presentation, while this exit's payload belongs to this exit.
+    fn accept_dismiss_request(&mut self, generation: u64) {
+        self.latch_dismiss_request(generation);
+        self.pending_result = self
+            .dismiss_handle
+            .as_ref()
+            .and_then(|handle| handle.take_result(generation));
+    }
+
+    /// Whether a dismiss trigger would be refused outright right now — the
+    /// guard [`Self::request_dismiss`] applies, peeked so an app request can be
+    /// refused *without* being mistaken for one that was acted on.
+    fn refuses_dismiss(&self) -> bool {
+        self.exiting || self.closed
     }
 
     /// Observe the app's [`ModalDismiss`] handle in the *event* pass, right
@@ -782,9 +819,24 @@ impl BottomSheetWidget {
     /// dismiss is correctly ungated here for free — matching
     /// [`mod@crate::overlay::modal`]'s own documented rule that an app
     /// dismiss ignores [`BottomSheetView::dismissable`].
+    ///
+    /// The staged route is the only one that can carry the request's payload;
+    /// with no `on_close` wired, `request_dismiss` falls back to the unstaged,
+    /// state-bearing [`BottomSheetView::on_dismiss`] — the fallback that keeps
+    /// a handle live on a `Stack` mount, which
+    /// [`mod@crate::overlay::modal`]'s host now applies identically.
     fn observe_dismiss_request(&mut self, ctx: &mut EventCtx) {
-        if !self.take_dismiss_request() {
+        let Some(request) = self.pending_dismiss_request() else {
             return;
+        };
+        if self.refuses_dismiss() {
+            self.latch_dismiss_request(request);
+            return;
+        }
+        if self.on_close.is_some() {
+            self.accept_dismiss_request(request);
+        } else {
+            self.latch_dismiss_request(request);
         }
         self.request_dismiss(ctx, -SPRING_KICK);
     }
@@ -795,18 +847,24 @@ impl BottomSheetWidget {
     /// keyed off the handle's own generation instead of the back-press cell.
     ///
     /// No unstaged fallback exists here, by design: `PaintCtx` carries no app
-    /// state to invoke [`BottomSheetView::on_dismiss`] with — the same gap
-    /// [`mod@crate::overlay::modal`]'s own paint-pass twin documents (its
-    /// `Unstaged` arm only ever reaches the state-free `on_close`). A request
-    /// raised here with no `on_close` wired (a `Stack` mount with no
-    /// navigator behind it) is silently dropped.
+    /// state to invoke [`BottomSheetView::on_dismiss`] with — the same limit
+    /// [`mod@crate::overlay::modal`]'s own paint-pass twin works under. A
+    /// request arriving here with no `on_close` wired (a `Stack` mount with no
+    /// navigator behind it) is therefore left **pending**, not swallowed: the
+    /// event pass can still deliver it through `on_dismiss`, and consuming it
+    /// here would make the handle silently inert on that mount.
     fn observe_paint_dismiss_request(&mut self, ctx: &mut PaintCtx) {
-        if !self.take_dismiss_request() {
+        let Some(request) = self.pending_dismiss_request() else {
+            return;
+        };
+        if self.refuses_dismiss() {
+            self.latch_dismiss_request(request);
             return;
         }
-        if self.exiting || self.closed || self.on_close.is_none() {
+        if self.on_close.is_none() {
             return;
         }
+        self.accept_dismiss_request(request);
         self.stage_exit(-SPRING_KICK);
         ctx.request_frame();
     }
@@ -836,8 +894,11 @@ impl BottomSheetWidget {
     ///
     /// **The carried payload.** [`Self::pending_result`], armed by a
     /// [`ModalDismiss::dismiss_with`] request, rides this fire via
-    /// [`StagedPop::fire_with`] — taken only when the pop actually happens,
-    /// so a refused pop leaves it for whichever exit eventually lands.
+    /// [`StagedPop::fire_with`] — taken only when the pop actually happens.
+    /// A refused pop drops it instead of holding it: it was scoped to *this*
+    /// exit's pop, which never happened, and a payload left standing would be
+    /// delivered by whatever dismissal landed next (a scrim tap, `Escape`, a
+    /// back press) to a pusher that was never handed it.
     fn fire_staged_close(&mut self, ctx: &mut PaintCtx, reduce: bool) {
         if !self.exiting || self.anim.is_animating() || self.progress > SETTLED_EPSILON {
             return;
@@ -856,6 +917,10 @@ impl BottomSheetWidget {
             ctx.request_frame();
             return;
         }
+        // Refused: the payload goes with the exit that did not land (see the
+        // `The carried payload` note above; `spring_open` clears it on the
+        // animated leg, this covers the `reduce_motion` snap too).
+        self.pending_result = None;
         if reduce {
             self.progress = 1.0;
         } else {
@@ -890,8 +955,13 @@ impl BottomSheetWidget {
     /// [`Self::request_dismiss`] and [`Self::observe_dismiss_signal`] both
     /// hard-return on the flag — every later scrim tap, `Escape` and back press
     /// dead, with the sheet still a modal barrier.
+    ///
+    /// A cancelled exit takes its payload with it: [`Self::pending_result`] is
+    /// scoped to the pop *that* exit was staged for, and must not be left
+    /// standing for whichever dismissal eventually lands.
     fn spring_open(&mut self, velocity: f64) {
         self.exiting = false;
+        self.pending_result = None;
         self.spring_to(velocity);
     }
 
@@ -928,7 +998,7 @@ impl BottomSheetWidget {
     /// does not, so an app dismiss reaches this unconditionally (see the
     /// [module docs](self)' app-initiated dismiss section).
     fn request_dismiss(&mut self, ctx: &mut EventCtx, velocity: f64) {
-        if self.exiting || self.closed {
+        if self.refuses_dismiss() {
             return;
         }
         if self.on_close.is_some() {
@@ -1104,11 +1174,13 @@ impl Widget for BottomSheetWidget {
                         self.progress = target;
                         // A live drag takes the panel over from whatever leg was
                         // running, a staged exit included: catching a closing
-                        // sheet cancels its dismissal, and the release below
-                        // decides again from where the finger left it. (Once the
-                        // pop has actually fired, `closed` is terminal and no
-                        // drag resurrects the sheet.)
+                        // sheet cancels its dismissal — payload and all, the
+                        // same scoping rule `spring_open` applies — and the
+                        // release below decides again from where the finger
+                        // left it. (Once the pop has actually fired, `closed`
+                        // is terminal and no drag resurrects the sheet.)
                         self.exiting = false;
+                        self.pending_result = None;
                         self.reposition(ctx.size());
                         ctx.request_redraw();
                     }
@@ -2719,6 +2791,184 @@ mod tests {
             "exactly one pop, however many requests were raised"
         );
         assert_eq!(controller.depth(), 1);
+    }
+
+    /// The `Stack`-mount half of the handle contract, which must read exactly
+    /// like `crate::overlay::modal`'s: with no staged close hook behind it, a
+    /// request still dismisses — through the unstaged, state-bearing
+    /// `on_dismiss` — and the `paint` backstop, which can reach neither hook,
+    /// leaves the request for the event pass instead of swallowing it.
+    #[test]
+    fn a_stack_mounted_sheets_handle_reaches_the_unstaged_on_dismiss() {
+        let dismiss = ModalDismiss::new();
+        let view: BottomSheetView<Flag> = bottom_sheet(leaf_any_flag(300.0, 200.0))
+            .on_dismiss(|s: &mut Flag| s.dismissed += 1)
+            .dismiss_handle(dismiss.clone());
+        let mut w = build_flag(&view);
+        let area = Size::new(400.0, 600.0);
+        settle(&mut w, area);
+
+        dismiss.dismiss();
+        tick(&mut w, area, 20);
+        let mut state = Flag::default();
+        assert_eq!(state.dismissed, 0, "nothing dismisses from a paint");
+
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+        assert_eq!(
+            state.dismissed, 1,
+            "a `Stack` mount's handle is not inert — it dismisses unstaged"
+        );
+
+        // Exactly once, however many further passes observe the same request.
+        tick(&mut w, area, 20);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 6.0, 6.0));
+        assert_eq!(state.dismissed, 1);
+    }
+
+    /// A navigator rooted on an opaque page with one `show_bottom_sheet`
+    /// presentation, driven frame by frame — the shared shape of the
+    /// payload-scoping tests below (`crate::overlay::modal`'s own `NavHarness`,
+    /// in this module's idiom).
+    struct SheetRig {
+        controller: NavigatorController<NavState>,
+        root: RenderRoot<NavState, NavigatorView<NavState>>,
+        state: NavState,
+        tcx: TextContext,
+        /// The clock the frames advance; never rewound (see [`tick`]).
+        ms: u64,
+    }
+
+    impl SheetRig {
+        /// A rig with the sheet presented, settled open, and the app's dismiss
+        /// handle installed on it — minted outside the page builder, the way
+        /// an app mints one.
+        fn presented() -> (Self, ModalDismiss) {
+            let mut rig = SheetRig {
+                controller: NavigatorController::new(),
+                root: RenderRoot::new(),
+                state: NavState::default(),
+                tcx: TextContext::new(),
+                ms: 0,
+            };
+            rig.frame();
+            let dismiss = ModalDismiss::new();
+            let installed = dismiss.clone();
+            show_bottom_sheet(
+                &rig.controller,
+                move || bottom_sheet(bg_page(400.0, 200.0)).dismiss_handle(installed.clone()),
+                |state: &mut NavState, result: PopResult| {
+                    state.results.push(result.take::<i32>());
+                },
+            );
+            rig.drive(40);
+            (rig, dismiss)
+        }
+
+        fn app(&self) -> impl FnMut(&mut NavState) -> NavigatorView<NavState> + use<> {
+            let ctrl = self.controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        }
+
+        /// One shell-shaped frame: rebuild → layout → paint, on an advancing
+        /// clock.
+        fn frame(&mut self) {
+            let area = Size::new(400.0, 600.0);
+            let mut app = self.app();
+            self.root.rebuild(&mut app, &mut self.state);
+            self.root
+                .layout_with_text(area, &mut self.tcx as &mut dyn Any);
+            self.ms += 20;
+            self.root.paint(&mut Recorder::default(), ft(self.ms));
+        }
+
+        fn drive(&mut self, frames: u64) {
+            for _ in 0..frames {
+                self.frame();
+            }
+        }
+
+        /// Flush the pusher's `on_result`, which the navigator delivers on the
+        /// next event pass.
+        fn flush(&mut self) {
+            self.root
+                .event(&mut self.state, &ev(PointerPhase::Move, 5.0, 5.0));
+        }
+    }
+
+    /// One handle shared by two panel actions (an "Apply" alongside a
+    /// "Cancel") is the shape `crate::date_picker`'s own dialog takes. A
+    /// request raised *during* an exit already in flight is the documented
+    /// no-op — it must not retarget that exit's payload.
+    #[test]
+    fn a_request_refused_mid_exit_never_retargets_the_exit_it_found() {
+        let (mut rig, dismiss) = SheetRig::presented();
+
+        dismiss.dismiss();
+        rig.frame();
+        dismiss.dismiss_with(PopResult::of(7));
+        rig.drive(60);
+        rig.flush();
+
+        assert_eq!(
+            rig.state.results,
+            vec![None],
+            "the exit in flight keeps its own empty result"
+        );
+        assert_eq!(rig.controller.depth(), 1);
+    }
+
+    /// A payload is scoped to the exit its own request staged: a staged pop
+    /// **refused** at fire time delivered nothing and springs the sheet back
+    /// open, so the payload dies with it rather than riding whichever
+    /// unrelated dismissal lands next.
+    #[test]
+    fn a_refused_staged_pop_drops_the_payload_it_was_carrying() {
+        let (mut rig, dismiss) = SheetRig::presented();
+
+        dismiss.dismiss_with(PopResult::of(7));
+        rig.frame();
+        rig.controller
+            .push_transparent(|| core_any::<NavState, _>(bg_page(400.0, 100.0)));
+        rig.drive(60);
+        rig.flush();
+        assert_eq!(rig.controller.depth(), 3, "the pushed page survives");
+        assert!(rig.state.results.is_empty(), "nothing was delivered");
+
+        // Back out of the pushed page, then dismiss the sheet the ordinary way.
+        rig.controller.request_back();
+        rig.drive(60);
+        assert_eq!(rig.controller.depth(), 2);
+        rig.controller.request_back();
+        rig.drive(60);
+        rig.flush();
+        assert_eq!(
+            rig.state.results,
+            vec![None],
+            "a later, unrelated dismissal pops with its own empty result"
+        );
+        assert_eq!(rig.controller.depth(), 1);
+    }
+
+    /// A payload-free `dismiss()` pops empty even when an earlier
+    /// `dismiss_with(..)` was never observed: the newer request supersedes the
+    /// stash on the handle itself.
+    #[test]
+    fn a_plain_dismiss_after_an_unobserved_dismiss_with_pops_empty() {
+        let (mut rig, dismiss) = SheetRig::presented();
+
+        dismiss.dismiss_with(PopResult::of(7));
+        dismiss.dismiss();
+        rig.drive(60);
+        rig.flush();
+
+        assert_eq!(
+            rig.state.results,
+            vec![None],
+            "the plain dismissal pops with nothing, not with the stale payload"
+        );
+        assert_eq!(rig.controller.depth(), 1);
     }
 
     // --- The staging flags: what cancels a staged exit, and what a refused pop
