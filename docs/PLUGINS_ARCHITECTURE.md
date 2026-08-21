@@ -192,6 +192,29 @@ toolkit they all build against). Their shared charter:
   past the rebuild that drops it (the *kept-mounted pattern*, documented in each plugin's own
   `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
   [LIMITATIONS.md](LIMITATIONS.md), which now has both plugins as consumers).
+  theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
+- **`frust-shadcn`'s one cross-component seam is its `overlay` module** — a full-area top-layer
+  widget pattern standing in for the DOM portal shadcn/ui itself relies on: an `anchored` host
+  (trigger-relative placement in window space, light-dismiss, no scrim — popover, tooltip,
+  hover-card, the menu/select/combobox family) and a `modal` host (scrim + centered/edge-pinned
+  panel over `NavigatorController::push_transparent_for_result` — dialog, alert-dialog, sheet,
+  drawer, command). Every other component paints inside its own box; only these reach through this
+  seam.
+- **Both overlay hosts animate their exit, not just their entrance.** The `modal` host stages every
+  dismiss (scrim tap, Escape, close button, drag) as a reverse ramp and fires the app's dismissal
+  only once it settles; the drawer additionally supports drag-to-close on all four pinned edges with
+  a velocity-flick threshold and Base UI-style snap points. The `anchored` host takes the same shape
+  through a builder-level `.open(bool)`: an app that wants an exit ramp must keep the host mounted
+  and toggle `open` rather than unmount it, since the framework has no seam for keeping a
+  conditionally-mounted view alive past the rebuild that drops it (the *kept-mounted pattern*,
+  documented in `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
+  [LIMITATIONS.md](LIMITATIONS.md)).
+- **`frust-shadcn`'s `scroll_area` establishes the *deferred-erasure builder* pattern**, for any
+  wrapper needing an owned-value builder method (`.physics(...)`-style) to reach its child after
+  construction: the child sits un-erased in a `Cell<Option<...>>` until a memoized
+  `OnceCell<AnyView<_>>` erases it on first `build`/`rebuild`, since `View`'s own methods take only
+  `&self` and cannot move it. A future wrapper component in this position should reach for this
+  shape rather than re-inventing it.
 
 ## Data Flow
 

@@ -43,6 +43,7 @@ mod list_view;
 pub mod motion;
 pub mod nav;
 mod padding;
+pub mod physics;
 mod platform_view;
 mod radio;
 mod safe_area;
@@ -85,6 +86,15 @@ pub use nav::router::{
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
+pub use physics::effect::OverscrollEffect;
+pub use physics::parity::{
+    AlwaysScrollable, Bouncing, Clamping, DecelerationRate, NeverScrollable,
+};
+pub use physics::rubber_band::RubberBand;
+pub use physics::{
+    MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, ScrollMetrics, ScrollPhysics, Simulation,
+    SpringDescription, Tolerance,
+};
 pub use platform_view::{
     PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,
 };

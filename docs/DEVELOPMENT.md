@@ -224,6 +224,14 @@ the three design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cup
 with no separate feature-off build to gate (`frust` has no catalog feature left to
 unify or drop — see *Build*'s design-system note above).
 
+`ScrollView`/`ListView`'s default scroll feel is platform-adaptive
+(`frust_widgets::physics::default_physics`): Android → Clamping+Stretch, every other host →
+Bouncing+Translate. A host `cargo test --workspace` run therefore only exercises the
+non-Android (Bouncing) arm; the Android arm is `#[cfg(target_os = "android")]`-gated and
+compiles only under the Android compile gate below. `RubberBand`, the pre-seam flat-resistance
+feel, is opt-in only — a test asserting that feel must install it explicitly
+(`.physics(RubberBand::new())`) rather than relying on the default.
+
 Additionally run:
 
 ```bash
