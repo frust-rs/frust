@@ -322,6 +322,8 @@ fn dialog_snippet(state: &Knobs) -> PlaySnippet {
         "Dialog",
         format!(
             "let dismiss = ModalDismiss::new();\n\
+             let cancel = dismiss.clone();\n\
+             let confirm = dismiss.clone();\n\
              show_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || dialog()\n\
@@ -349,6 +351,7 @@ fn selection_snippet(state: &Knobs) -> PlaySnippet {
         "Selection",
         format!(
             "let dismiss = ModalDismiss::new();\n\
+             let confirm = dismiss.clone();\n\
              show_selection_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || selection_dialog({title:?}, options())\n\
@@ -373,6 +376,7 @@ fn full_screen_snippet(state: &Knobs) -> PlaySnippet {
         "Full screen",
         format!(
             "let dismiss = ModalDismiss::new();\n\
+             let save = dismiss.clone();\n\
              show_full_screen_dialog(\n\
              \u{20}   &state.nav,\n\
              \u{20}   move || full_screen_dialog(\n\
@@ -387,6 +391,19 @@ fn full_screen_snippet(state: &Knobs) -> PlaySnippet {
             body = state.content.get(),
         ),
     )
+}
+
+/// This page's paste-ready snippets — the exact text a person copies out of
+/// the running app, for the demo-wide binding-sanity sweep in
+/// [`crate::widgets::playground::code_snippet`]'s test module.
+#[cfg(test)]
+pub(crate) fn snippets_for_binding_test() -> Vec<PlaySnippet> {
+    let knobs = Knobs::default();
+    vec![
+        dialog_snippet(&knobs),
+        selection_snippet(&knobs),
+        full_screen_snippet(&knobs),
+    ]
 }
 
 #[cfg(test)]

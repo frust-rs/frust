@@ -236,6 +236,8 @@ fn dialog_snippet(
 ) -> PlaySnippet {
     let code = format!(
         "let dismiss = ModalDismiss::new();\n\
+         let confirm = dismiss.clone();\n\
+         let cancel = dismiss.clone();\n\
          show_time_picker(\n    \
              &nav,\n    \
              move || time_picker(TimeOfDay::new({hour}, {minute}))\n        \
@@ -247,6 +249,7 @@ fn dialog_snippet(
                          confirm.dismiss_with(PopResult::of(picked));\n            \
                      }}\n        \
                  }})\n        \
+                 .on_cancel(move |_state| cancel.dismiss())\n        \
                  .dismiss_handle(dismiss.clone()),\n    \
              |state, result| {{\n        \
                  if let Some(picked) = result.take::<TimeOfDay>() {{\n            \
@@ -258,6 +261,18 @@ fn dialog_snippet(
         minute = time.minute(),
     );
     play_snippet("Dialog", code)
+}
+
+/// This page's paste-ready snippets — the exact text a person copies out of
+/// the running app, for the demo-wide binding-sanity sweep in
+/// [`crate::widgets::playground::code_snippet`]'s test module.
+#[cfg(test)]
+pub(crate) fn snippets_for_binding_test() -> Vec<PlaySnippet> {
+    let time = TimeOfDay::new(9, 30);
+    vec![
+        dial_snippet(time, false),
+        dialog_snippet(time, TimePickerEntryMode::Dial, false),
+    ]
 }
 
 /// "Picker" controls: entry mode, 24-hour format.

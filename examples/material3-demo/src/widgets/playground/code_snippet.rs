@@ -140,4 +140,74 @@ mod tests {
             Some(payload)
         );
     }
+
+    /// Every `<ident>.dismiss()` / `<ident>.dismiss_with(` receiver
+    /// identifier found in a snippet's paste-ready text — the collector
+    /// below finds two calls per pattern by construction, `.dismiss()` and
+    /// `.dismiss_with(`, never confusing either with `.dismiss_handle(` or a
+    /// bare `dismiss.clone()` (no leading dot before the receiver's own
+    /// name, so the pattern match starts one character later).
+    fn dismiss_receivers(code: &str) -> Vec<String> {
+        let mut receivers = Vec::new();
+        for pattern in [".dismiss()", ".dismiss_with("] {
+            let mut cursor = 0;
+            while let Some(offset) = code[cursor..].find(pattern) {
+                let call_at = cursor + offset;
+                let ident_start = code[..call_at]
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let ident = &code[ident_start..call_at];
+                if !ident.is_empty() {
+                    receivers.push(ident.to_string());
+                }
+                cursor = call_at + pattern.len();
+            }
+        }
+        receivers
+    }
+
+    /// A snippet's own contract ("shown verbatim and copied verbatim",
+    /// [`super::PlaySnippet::code`]'s doc) means every dismiss receiver it
+    /// prints must be bound with a `let <ident> =` somewhere in that same
+    /// text — otherwise copying the snippet as shown doesn't compile.
+    fn assert_dismiss_receivers_are_bound(label: &str, code: &str) {
+        for receiver in dismiss_receivers(code) {
+            let binding = format!("let {receiver} =");
+            assert!(
+                code.contains(&binding),
+                "playground snippet {label:?} calls \
+                 `{receiver}.dismiss()`/`{receiver}.dismiss_with(...)` but never binds it \
+                 with `{binding}` anywhere in its own paste-ready text:\n{code}"
+            );
+        }
+    }
+
+    /// Sweeps every playground page whose paste-ready snippet mints a
+    /// `ModalDismiss` (`view::dialogs`, `view::side_sheet`,
+    /// `pick::time_pickers` — the full set as of this test's writing, a
+    /// string search over `src/pages/playground` for a snippet-text
+    /// `ModalDismiss::new();` literal) for the binding-sanity rule above.
+    /// String-level only, deliberately: this crate carries no `syn`
+    /// dev-dependency, and a full parse isn't needed to catch an undeclared
+    /// receiver.
+    #[test]
+    fn every_playground_snippets_dismiss_receiver_is_bound_in_its_own_text() {
+        use crate::pages::playground::pick::time_pickers::snippets_for_binding_test as time_picker_snippets;
+        use crate::pages::playground::view::dialogs::snippets_for_binding_test as dialog_snippets;
+        use crate::pages::playground::view::side_sheet::snippets_for_binding_test as side_sheet_snippets;
+
+        let mut snippets = dialog_snippets();
+        snippets.extend(side_sheet_snippets());
+        snippets.extend(time_picker_snippets());
+
+        assert!(
+            snippets.len() >= 5,
+            "expected at least the five known ModalDismiss-minting snippets, got {}",
+            snippets.len()
+        );
+        for snippet in &snippets {
+            assert_dismiss_receivers_are_bound(&snippet.label, &snippet.code);
+        }
+    }
 }

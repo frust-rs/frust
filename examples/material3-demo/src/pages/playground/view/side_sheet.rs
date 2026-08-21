@@ -194,10 +194,14 @@ fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
 fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {
     let actions = if show_actions {
         "\n\
-         \u{20}   vec![\n\
-         \u{20}       any(text_button(\"Reset\", move |_: &mut State| reset.dismiss())),\n\
-         \u{20}       any(filled_button(\"Apply\", move |_: &mut State| apply.dismiss())),\n\
-         \u{20}   ],"
+         \u{20}   {\n\
+         \u{20}       let reset = dismiss.clone();\n\
+         \u{20}       let apply = dismiss.clone();\n\
+         \u{20}       vec![\n\
+         \u{20}           any(text_button(\"Reset\", move |_: &mut State| reset.dismiss())),\n\
+         \u{20}           any(filled_button(\"Apply\", move |_: &mut State| apply.dismiss())),\n\
+         \u{20}       ]\n\
+         \u{20}   },"
     } else {
         "\n    Vec::new(),"
     };
@@ -214,6 +218,18 @@ fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {
              );"
         ),
     )
+}
+
+/// This page's paste-ready snippet across both `show_actions` states — the
+/// exact text a person copies out of the running app, for the demo-wide
+/// binding-sanity sweep in [`crate::widgets::playground::code_snippet`]'s
+/// test module.
+#[cfg(test)]
+pub(crate) fn snippets_for_binding_test() -> Vec<PlaySnippet> {
+    vec![
+        snippet(DEFAULT_TITLE, DEFAULT_BODY, true),
+        snippet(DEFAULT_TITLE, DEFAULT_BODY, false),
+    ]
 }
 
 #[cfg(test)]
