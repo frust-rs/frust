@@ -42,17 +42,28 @@
 //! builder at all — the "Selected type" preview's leading toggle has no
 //! effect while `Filter` is picked, which the snippet reflects.
 //!
-//! # Divergence: `Wrap` becomes a plain `Row`
+//! # Divergence: `Wrap` becomes a plain `Column` (G10)
 //!
-//! This workspace has no flow/wrap layout primitive; the "All types"
-//! preview lays its four chips out in a single non-wrapping `Row` (the same
-//! `spaced_row` idiom `crate::pages::theme_config_page` uses for its seed
-//! swatches) rather than the reference's `Wrap(spacing: 8, runSpacing: 8)`.
+//! This workspace has no flow/wrap layout primitive and no horizontal-scroll
+//! primitive either, so the "All types" preview cannot lay its four chips out
+//! in a single row without risking the G10 overflow class (a `Row` of
+//! all-inflexible fixed-width children reports a clamped size but paints its
+//! children at their full natural extents —
+//! `crate::pages::playground::find::progress`'s module docs). A chip's
+//! natural width is label/knob-dependent (`show_leading`, and `Input`'s
+//! always-on delete icon), so no compile-time chunk count is derivable the
+//! way `crate::pages::playground::view::shapes`'s fixed-tile catalog can
+//! derive one (its `CATALOG_COLUMNS`) — measured at a phone-ish card's
+//! ~296px inner width, the four chips' combined natural width already
+//! reaches ~329px with every chip unselected/non-elevated (the row's
+//! cheapest case). [`spaced_column`]
+//! (one chip per row, vertically) is the only reflow that is safe regardless
+//! of knob state, so the "All types" preview uses that instead of the
+//! `spaced_row` idiom `crate::pages::theme_config_page` uses for its
+//! fixed-diameter seed swatches, rather than the reference's
+//! `Wrap(spacing: 8, runSpacing: 8)`.
 
-use frust::{
-    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, Stack, any,
-    component,
-};
+use frust::{AnyView, Column, Component, Get, RwSignal, Set, SizedBox, Stack, any, component};
 use frust_material::{OverlayAnchor, assist_chip, filter_chip, input_chip, suggestion_chip};
 
 use crate::AppState;
@@ -271,10 +282,10 @@ fn build_chip(
     }
 }
 
-/// All four types side by side, `Filter` selected only when the app-level
+/// All four types, one per row, `Filter` selected only when the app-level
 /// `selected` knob is set — the reference's `for (type in M3EChipType.values)`
-/// preview, laid out via [`spaced_row`] (see this file's module docs' `Wrap`
-/// divergence).
+/// preview, laid out via [`spaced_column`] (see this file's module docs'
+/// `Wrap` divergence, G10).
 fn all_types_row(
     selected: bool,
     elevated: bool,
@@ -295,20 +306,24 @@ fn all_types_row(
             )
         })
         .collect();
-    spaced_row(chips, 8.0)
+    spaced_column(chips, 8.0)
 }
 
-/// Lay `items` out horizontally with `gap`px between each pair — mirrors
-/// `crate::pages::theme_config_page`'s identical helper.
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
+/// Lay `items` out vertically with `gap`px between each pair, one per row —
+/// the reflow-safe alternative to a `spaced_row` of variable-width children
+/// (see this file's module docs' `Wrap` divergence, G10). Left-aligned
+/// (`CrossAxisAlignment::Start`, `Column`'s default): a chip's own natural
+/// width, never a fixed one, so there is nothing to stretch or center
+/// against.
+fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
-            children.push(any(SizedBox::<State>(Some(gap), None)));
+            children.push(any(SizedBox::<State>(None, Some(gap))));
         }
         children.push(item);
     }
-    any(Row(children).cross_axis(CrossAxisAlignment::Center))
+    any(Column(children))
 }
 
 /// The paste-ready Frust equivalent of the "Selected type" preview.
@@ -387,5 +402,76 @@ mod tests {
     fn the_page_fn_builds_from_its_catalog_entry() {
         let entry = crate::catalog::find_by_id("chips").expect("catalog entry exists");
         let _view = super::page(entry);
+    }
+
+    /// G10 regression: [`super::all_types_row`] must never paint past the
+    /// "All types" card's real inner width at a phone-ish device width —
+    /// the same paint-extent idiom
+    /// `crate::pages::playground::find::progress`'s own G10 test uses.
+    ///
+    /// Reverting the fix (back to a `spaced_row` of the four chips) fails
+    /// this test: even in the row's cheapest case (every chip
+    /// unselected/non-elevated, `Input`'s delete icon always on), the four
+    /// chips' combined natural width (~329px) paints straight through a
+    /// phone-ish card's ~296px inner width.
+    #[test]
+    fn all_types_row_never_paints_past_the_cards_inner_width() {
+        use std::any::Any;
+
+        use frust::authoring::Point;
+        use frust::authoring::text::TextContext;
+        use frust::authoring::{
+            BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+        };
+        use frust::kurbo::{BezPath, Shape as _};
+        use frust::peniko::{Brush, Color};
+
+        const DEVICE_WIDTH: f64 = 360.0;
+        let card_inner_width = DEVICE_WIDTH - 4.0 * frust_material::MaterialSpacing::LG;
+
+        #[derive(Default)]
+        struct MaxXScene {
+            max_x: f64,
+        }
+        impl PaintScene for MaxXScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_rounded_rect(
+                &mut self,
+                origin: Point,
+                size: Size,
+                _radius: f64,
+                _color: Color,
+            ) {
+                self.max_x = self.max_x.max(origin.x + size.width);
+            }
+            fn stroke_path(&mut self, origin: Point, path: &BezPath, _width: f64, _brush: &Brush) {
+                self.max_x = self.max_x.max(origin.x + path.bounding_box().x1);
+            }
+        }
+
+        let view = super::all_types_row(false, false, false);
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::ZERO, Size::new(card_inner_width, 400.0));
+        let mut text_ctx = TextContext::new();
+        let mut layout_ctx = LayoutCtx::with_resources(Some(&mut text_ctx as &mut dyn Any), None);
+        let size = widget.layout(&mut layout_ctx, &bc);
+        assert!(
+            size.width <= card_inner_width + 1e-6,
+            "the chip row's own reported size {size:?} must not exceed the \
+             card's inner width {card_inner_width}"
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, size);
+        let mut scene = MaxXScene::default();
+        widget.paint(&mut ctx, &mut scene);
+        assert!(
+            scene.max_x <= card_inner_width + 1e-6,
+            "G10 regressed: painted x {} exceeds the card's inner width {} \
+             (reported size {size:?})",
+            scene.max_x,
+            card_inner_width
+        );
     }
 }

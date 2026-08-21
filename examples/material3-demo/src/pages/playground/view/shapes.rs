@@ -39,8 +39,17 @@ const CATALOG_TILE_SIZE: f64 = 72.0;
 /// `spacing`/`runSpacing`.
 const CATALOG_TILE_GAP: f64 = 12.0;
 /// Tiles per catalog row. This port has no reflowing `Wrap` layout (see the
-/// module docs), so the 35-shape grid is chunked into fixed rows instead.
-const CATALOG_COLUMNS: usize = 5;
+/// module docs), so the 35-shape grid is chunked into fixed rows instead —
+/// each `Row` of [`CATALOG_COLUMNS`] tiles is a plain `Row` of all-inflexible
+/// fixed-width children (the G10 overflow class documented at
+/// `crate::pages::playground::find::progress`'s module docs), so the column
+/// count must be small enough that a full row's natural width fits a
+/// phone-ish card's ~296px inner width (`360 - 4 * MaterialSpacing::LG`),
+/// computed from [`CATALOG_TILE_SIZE`]/[`CATALOG_TILE_GAP`] rather than
+/// guessed: 4 columns is `4 * 72 + 3 * 12 = 324 > 296` (overflows — this was
+/// G17's bug, at the previous count of 5), 3 columns is
+/// `3 * 72 + 2 * 12 = 240 <= 296` (fits).
+const CATALOG_COLUMNS: usize = 3;
 /// "Clipped child" preview side length, in logical px — the reference's own
 /// `width: 120, height: 120`.
 const CLIPPED_TILE_SIZE: f64 = 120.0;
@@ -56,8 +65,19 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 }
 
 /// The 35-shape catalog, chunked [`CATALOG_COLUMNS`] wide — the reference's
-/// `Wrap` of `M3EShapeContainer` tiles.
+/// `Wrap` of `M3EShapeContainer` tiles. Split into [`catalog_rows`] (this
+/// file's G17 regression test exercises it directly at the card's own inner
+/// width) and this wrapper, the same split
+/// `crate::pages::playground::find::progress`'s `all_styles_row`/G10 fix and
+/// `crate::pages::playground::view::cards`'s `all_variants_column`/G16 fix
+/// both use.
 fn catalog_preview(theme: &Theme) -> AnyView<AppState> {
+    any(play_preview_card("Catalog", catalog_rows(theme)))
+}
+
+/// The tile grid [`catalog_preview`] wraps in a [`play_preview_card`]. See
+/// [`CATALOG_COLUMNS`]' own doc comment for the row-width arithmetic (G17).
+fn catalog_rows(theme: &Theme) -> AnyView<AppState> {
     let mut rows: Vec<AnyView<AppState>> = Vec::new();
     for (row_index, chunk) in ShapeKind::ALL.chunks(CATALOG_COLUMNS).enumerate() {
         if row_index > 0 {
@@ -72,7 +92,7 @@ fn catalog_preview(theme: &Theme) -> AnyView<AppState> {
         }
         rows.push(any(Row(cells)));
     }
-    any(play_preview_card("Catalog", Column(rows)))
+    any(Column(rows))
 }
 
 /// One catalog tile: a filled shape over its label — the reference's own
@@ -256,5 +276,64 @@ mod tests {
     fn a_degenerate_box_returns_an_empty_path_rather_than_panicking() {
         let path = fit_polygon_path(ShapeKind::Circle, Size::new(0.0, 0.0));
         assert!(path.elements().is_empty());
+    }
+
+    /// G17 regression: [`catalog_rows`] must never paint past the "Catalog"
+    /// card's real inner width at a phone-ish device width — the same
+    /// paint-extent idiom `crate::pages::playground::find::progress`'s G10
+    /// test uses.
+    ///
+    /// Reverting the fix (back to [`CATALOG_COLUMNS`] = 5) fails this test:
+    /// a full row of 5 tiles (`5 * 72 + 4 * 12 = 408`) paints straight
+    /// through a phone-ish card's ~296px inner width.
+    #[test]
+    fn catalog_rows_never_paints_past_the_cards_inner_width() {
+        use std::any::Any;
+
+        use frust::authoring::Point;
+        use frust::authoring::text::TextContext;
+
+        const DEVICE_WIDTH: f64 = 360.0;
+        let card_inner_width = DEVICE_WIDTH - 4.0 * frust_material::MaterialSpacing::LG;
+
+        #[derive(Default)]
+        struct MaxXScene {
+            max_x: f64,
+        }
+        impl PaintScene for MaxXScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_path(&mut self, origin: Point, path: &BezPath, _brush: &Brush) {
+                self.max_x = self.max_x.max(origin.x + path.bounding_box().x1);
+            }
+        }
+
+        let theme = frust_material::baseline();
+        let view = catalog_rows(&theme);
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::ZERO, Size::new(card_inner_width, 4000.0));
+        let mut text_ctx = TextContext::new();
+        let mut layout_ctx = LayoutCtx::with_resources(
+            Some(&mut text_ctx as &mut dyn Any),
+            Some(&theme as &dyn Any),
+        );
+        let size = widget.layout(&mut layout_ctx, &bc);
+        assert!(
+            size.width <= card_inner_width + 1e-6,
+            "the catalog's own reported size {size:?} must not exceed the \
+             inner width {card_inner_width}"
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        let mut scene = MaxXScene::default();
+        widget.paint(&mut ctx, &mut scene);
+        assert!(
+            scene.max_x <= card_inner_width + 1e-6,
+            "G17 regressed: painted x {} exceeds the card's inner width {} \
+             (reported size {size:?})",
+            scene.max_x,
+            card_inner_width
+        );
     }
 }

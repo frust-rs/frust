@@ -32,6 +32,21 @@ const SEED_SWATCH_SELECTED_BORDER: f64 = 3.0;
 /// border width.
 const SEED_SWATCH_BORDER: f64 = 1.0;
 
+/// Gap between adjacent seed swatches, in logical px — matches [`body`]'s own
+/// `EdgeInsets::all(16.0)` page padding.
+const SEED_GAP: f64 = 16.0;
+/// Swatches per row in [`seeds`]'s grid. A plain `Row` of all-inflexible
+/// fixed-width children is the G10 overflow class
+/// (`crate::pages::playground::find::progress`'s module docs): this page has
+/// no reflowing `Wrap` layout, so [`SEED_OPTIONS`]' five swatches are chunked
+/// into fixed rows instead, computed from [`SEED_SWATCH_SIZE`]/[`SEED_GAP`]
+/// against this page's own inner width (`360 - 2 * 16 = 328`, one
+/// `EdgeInsets::all(16.0)` layer — [`body`] wraps `seeds` directly, unlike a
+/// playground page's `play_preview_card`): 5 columns is
+/// `5 * 56 + 4 * 16 = 344 > 328` (overflows — this was the bug), 4 columns is
+/// `4 * 56 + 3 * 16 = 272 <= 328` (fits).
+const SEED_ROW_COLUMNS: usize = 4;
+
 /// The theme settings screen, pushed over the gallery shell.
 pub fn theme_config_page() -> AnyView<AppState> {
     let settings = use_context::<ThemeSettings>();
@@ -117,7 +132,7 @@ fn seeds(theme: &Theme, settings: ThemeSettings) -> AnyView<AppState> {
         any(SizedBox::<AppState>(None, Some(4.0))),
         any(text("Generates the scheme for both brightnesses.").style(detail_style)),
         any(SizedBox::<AppState>(None, Some(16.0))),
-        spaced_row(swatches, 16.0),
+        swatch_grid(swatches),
     ]))
 }
 
@@ -216,18 +231,29 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> AnyView<AppState> {
     ]))
 }
 
-/// Lay `items` out horizontally with `gap`px between each pair — `Row` has
-/// no spacing knob of its own, the same interleaved-spacer idiom this file's
-/// `body` uses vertically.
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(SizedBox::<State>(Some(gap), None)));
+/// Chunk `items` into [`SEED_ROW_COLUMNS`]-wide rows, `SEED_GAP`px apart in
+/// both directions — see [`SEED_ROW_COLUMNS`]'s own doc comment for the
+/// row-width arithmetic (G10). The same "chunk a fixed-size tile grid" idiom
+/// `crate::pages::playground::view::shapes`'s `catalog_rows` uses (`drain`
+/// rather than `chunks`, since `AnyView` — already-built views, not the raw
+/// data `shapes` chunks — isn't `Clone`).
+fn swatch_grid<State: 'static>(mut items: Vec<AnyView<State>>) -> AnyView<State> {
+    let mut rows: Vec<AnyView<State>> = Vec::new();
+    while !items.is_empty() {
+        if !rows.is_empty() {
+            rows.push(any(SizedBox::<State>(None, Some(SEED_GAP))));
         }
-        children.push(item);
+        let take = SEED_ROW_COLUMNS.min(items.len());
+        let mut cells: Vec<AnyView<State>> = Vec::with_capacity(take * 2);
+        for item in items.drain(..take) {
+            if !cells.is_empty() {
+                cells.push(any(SizedBox::<State>(Some(SEED_GAP), None)));
+            }
+            cells.push(item);
+        }
+        rows.push(any(Row(cells)));
     }
-    any(Row(children))
+    any(Column(rows))
 }
 
 #[cfg(test)]
@@ -279,5 +305,75 @@ mod tests {
         assert_eq!(settings.seed_index(), 0);
         settings.set_seed(2, Brightness::Light);
         assert_eq!(settings.seed_index(), 2);
+    }
+
+    /// G10 regression: [`super::seeds`]'s swatch grid must never paint past
+    /// this page's real inner width at a phone-ish device width — the same
+    /// paint-extent idiom `crate::pages::playground::find::progress`'s own
+    /// G10 test uses.
+    ///
+    /// Reverting the fix (back to a `spaced_row` of all five swatches) fails
+    /// this test: `5 * 56 + 4 * 16 = 344` already exceeds this page's own
+    /// ~328px inner width.
+    #[test]
+    fn seeds_never_paints_past_the_pages_inner_width() {
+        use std::any::Any;
+
+        use frust::authoring::Point;
+        use frust::authoring::text::TextContext;
+        use frust::authoring::{
+            BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+        };
+        use frust::peniko::Color;
+
+        const DEVICE_WIDTH: f64 = 360.0;
+        let page_inner_width = DEVICE_WIDTH - 2.0 * 16.0;
+
+        #[derive(Default)]
+        struct MaxXScene {
+            max_x: f64,
+        }
+        impl PaintScene for MaxXScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_rounded_rect(
+                &mut self,
+                origin: Point,
+                size: Size,
+                _radius: f64,
+                _color: Color,
+            ) {
+                self.max_x = self.max_x.max(origin.x + size.width);
+            }
+        }
+
+        let settings = ThemeSettings::new();
+        let theme = theme_from_seed(settings.seed_color(), Brightness::Light);
+        let view = super::seeds(&theme, settings);
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::ZERO, Size::new(page_inner_width, 400.0));
+        let mut text_ctx = TextContext::new();
+        let mut layout_ctx = LayoutCtx::with_resources(
+            Some(&mut text_ctx as &mut dyn Any),
+            Some(&theme as &dyn Any),
+        );
+        let size = widget.layout(&mut layout_ctx, &bc);
+        assert!(
+            size.width <= page_inner_width + 1e-6,
+            "the swatch grid's own reported size {size:?} must not exceed \
+             the page's inner width {page_inner_width}"
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        let mut scene = MaxXScene::default();
+        widget.paint(&mut ctx, &mut scene);
+        assert!(
+            scene.max_x <= page_inner_width + 1e-6,
+            "G10 regressed: painted x {} exceeds the page's inner width {} \
+             (reported size {size:?})",
+            scene.max_x,
+            page_inner_width
+        );
     }
 }

@@ -17,10 +17,26 @@
 //! own [`OverlayAnchor`], both held in `Knobs`, with the panels mounted at
 //! this page's own outer [`Stack`]); `Shape` fits a plain
 //! [`play_enum_segmented`] since it is a 2-way choice.
+//!
+//! # `spaced_row` becomes `spaced_column` in "All styles"/"Gradient fill" (G10)
+//!
+//! Both previews used to lay their buttons out in a non-wrapping `spaced_row`
+//! (this workspace has no reflowing `Wrap` layout and no horizontal-scroll
+//! primitive either). A button's natural width is size/label-dependent
+//! (`Knobs::size` ranges `Xs..=Xl`, whose `h_padding` alone spans 16px to
+//! 64px per side — `frust_material::button::core`'s size-metrics table), so
+//! no compile-time chunk count is derivable the way a fixed-tile catalog's
+//! can be (`crate::pages::playground::view::shapes`' `CATALOG_COLUMNS`).
+//! Measured at a phone-ish card's ~296px inner width: "All styles"'s five
+//! buttons already overflow at the *default* `Sm` size (~379px natural
+//! width), and "Gradient fill"'s two buttons overflow at `Xl` (~472px) even
+//! though they fit at `Sm` — so both previews reflow into a [`spaced_column`]
+//! (one button per row) rather than risk the class at some reachable knob
+//! state.
 
 use std::rc::Rc;
 
-use frust::{AnyView, Color, Component, Row, SizedBox, Stack, any, component, icon};
+use frust::{AnyView, Color, Column, Component, SizedBox, Stack, any, component, icon};
 use frust_material::{
     ButtonDecoration, ButtonShape, ButtonSize, ButtonVariant, GradientButtonDecoration,
     LinearGradientSpec, OverlayAnchor, button, button_with_icon, constant_gradient, icons,
@@ -148,7 +164,7 @@ fn styled_button(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "All styles" preview: every [`ButtonVariant`] at the current size and
-/// shape.
+/// shape, one per row — see the module docs' `Wrap` divergence (G10).
 fn all_styles(state: &Knobs) -> AnyView<Knobs> {
     let buttons: Vec<AnyView<Knobs>> = STYLES
         .iter()
@@ -160,7 +176,7 @@ fn all_styles(state: &Knobs) -> AnyView<Knobs> {
                 .enabled(state.enabled))
         })
         .collect();
-    spaced_row(buttons, 12.0)
+    spaced_column(buttons, 12.0)
 }
 
 /// The "Gradient fill" preview: a plain and an icon-carrying button, both
@@ -205,7 +221,7 @@ fn gradient_fill(state: &Knobs) -> AnyView<Knobs> {
                 .shape(state.shape)
                 .decoration(red),
         );
-    spaced_row(vec![gradient, gradient_icon], 12.0)
+    spaced_column(vec![gradient, gradient_icon], 12.0)
 }
 
 /// The paste-ready snippet for the current knob state — the reference's
@@ -311,18 +327,20 @@ fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
     )
 }
 
-/// Lay `items` out horizontally with `gap`px between each pair — `Row` has no
-/// spacing knob of its own (the same interleaved-spacer idiom
-/// `theme_config_page`'s own `spaced_row` uses).
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
+/// Lay `items` out vertically with `gap`px between each pair, one per row —
+/// the reflow-safe alternative to a `spaced_row` of size/label-variable-width
+/// buttons (see the module docs' `Wrap` divergence, G10). `Column` has no
+/// spacing knob of its own, the same interleaved-spacer idiom
+/// `theme_config_page`'s own `spaced_row` uses horizontally.
+fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
-            children.push(any(SizedBox::<State>(Some(gap), None)));
+            children.push(any(SizedBox::<State>(None, Some(gap))));
         }
         children.push(item);
     }
-    any(Row(children))
+    any(Column(children))
 }
 
 /// The page body: the playground content plus the two dropdown panels it
@@ -422,5 +440,99 @@ mod tests {
         assert!(snippet(&knobs).code.contains("button_with_icon"));
         knobs.show_icon = false;
         assert!(snippet(&knobs).code.contains("filled_button"));
+    }
+
+    /// G10 regression: neither [`super::all_styles`] nor [`super::gradient_fill`]
+    /// may ever paint past their card's real inner width at a phone-ish
+    /// device width — the same paint-extent idiom
+    /// `crate::pages::playground::find::progress`'s own G10 test uses.
+    /// `all_styles` is checked at the *default* `Sm` size (already
+    /// overflowing before the fix); `gradient_fill` at `Xl` (its own worst
+    /// case — see the module docs).
+    ///
+    /// Reverting either fix (back to a `spaced_row`) fails this test.
+    #[test]
+    fn all_styles_and_gradient_fill_never_paint_past_the_cards_inner_width() {
+        use std::any::Any;
+
+        use frust::authoring::Point;
+        use frust::authoring::text::TextContext;
+        use frust::authoring::{
+            BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+        };
+        use frust::kurbo::{BezPath, Shape as _};
+        use frust::peniko::{Brush, Color};
+
+        const DEVICE_WIDTH: f64 = 360.0;
+        let card_inner_width = DEVICE_WIDTH - 4.0 * frust_material::MaterialSpacing::LG;
+
+        #[derive(Default)]
+        struct MaxXScene {
+            max_x: f64,
+        }
+        impl PaintScene for MaxXScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_rounded_rect(
+                &mut self,
+                origin: Point,
+                size: Size,
+                _radius: f64,
+                _color: Color,
+            ) {
+                self.max_x = self.max_x.max(origin.x + size.width);
+            }
+            fn fill_rounded_rect_brush(
+                &mut self,
+                origin: Point,
+                size: Size,
+                _radius: f64,
+                _brush: &Brush,
+            ) {
+                self.max_x = self.max_x.max(origin.x + size.width);
+            }
+            fn stroke_path(&mut self, origin: Point, path: &BezPath, _width: f64, _brush: &Brush) {
+                self.max_x = self.max_x.max(origin.x + path.bounding_box().x1);
+            }
+        }
+
+        fn assert_never_overflows(label: &str, view: super::AnyView<Knobs>, card_inner_width: f64) {
+            let mut counter = 0u64;
+            let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+            let bc = BoxConstraints::new(Size::ZERO, Size::new(card_inner_width, 2000.0));
+            let mut text_ctx = TextContext::new();
+            let mut layout_ctx =
+                LayoutCtx::with_resources(Some(&mut text_ctx as &mut dyn Any), None);
+            let size = widget.layout(&mut layout_ctx, &bc);
+            assert!(
+                size.width <= card_inner_width + 1e-6,
+                "{label}'s own reported size {size:?} must not exceed the \
+                 card's inner width {card_inner_width}"
+            );
+
+            let mut ctx = PaintCtx::new(Point::ZERO, size);
+            let mut scene = MaxXScene::default();
+            widget.paint(&mut ctx, &mut scene);
+            assert!(
+                scene.max_x <= card_inner_width + 1e-6,
+                "G10 regressed in {label}: painted x {} exceeds the card's \
+                 inner width {} (reported size {size:?})",
+                scene.max_x,
+                card_inner_width
+            );
+        }
+
+        let sm_knobs = Knobs::default();
+        assert_never_overflows("all_styles", super::all_styles(&sm_knobs), card_inner_width);
+
+        let xl_knobs = Knobs {
+            size: frust_material::ButtonSize::Xl,
+            ..Knobs::default()
+        };
+        assert_never_overflows(
+            "gradient_fill",
+            super::gradient_fill(&xl_knobs),
+            card_inner_width,
+        );
     }
 }

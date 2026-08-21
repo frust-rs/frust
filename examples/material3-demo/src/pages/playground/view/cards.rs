@@ -1,7 +1,7 @@
 //! Cards: the reference's `CardsPlayground`.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Theme, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, any, component, text,
 };
 use frust_material::{CardVariant, card};
 
@@ -24,6 +24,13 @@ const VARIANTS: [CardVariant; 3] = [
 const DEFAULT_TITLE: &str = "Card title";
 /// Default card body — the reference's own `_body` seed.
 const DEFAULT_BODY: &str = "Supporting text for the card body.";
+
+/// [`all_variants_preview`]'s tile width, in logical px — the reference's own
+/// `Wrap` tile width, unchanged by the reflow fix below (G16).
+const ALL_VARIANTS_TILE_WIDTH: f64 = 180.0;
+/// Gap between adjacent tiles in [`all_variants_preview`], in logical px —
+/// the reference's `Wrap` `spacing`.
+const ALL_VARIANTS_GAP: f64 = 12.0;
 
 /// This page's knob state.
 struct Knobs {
@@ -107,24 +114,45 @@ fn single_card_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
     ))
 }
 
-/// One card per [`VARIANTS`] entry, side by side — the reference's `Wrap`.
-/// This catalog has no reflowing `Wrap` layout, so a plain `Row` stands in
-/// (three fixed-width tiles fit comfortably; a narrower viewport than the
-/// reference targets would overflow rather than reflow).
+/// One card per [`VARIANTS`] entry, stacked one per row — the reference's
+/// `Wrap`. This catalog has no reflowing `Wrap` layout (see the crate-wide
+/// note other playground pages carry), and no horizontal-scroll primitive to
+/// pan a `Row` in either, so a plain `Row` of all-inflexible fixed-width
+/// tiles is the G10 overflow class (`docs/LIMITATIONS.md`'s baseline `Clip`
+/// note; the shared mechanism is documented at
+/// `crate::pages::playground::find::progress`'s module docs): at a phone-ish
+/// card's ~296px inner width (`360 - 4 * MaterialSpacing::LG`), a single
+/// [`ALL_VARIANTS_TILE_WIDTH`]-wide tile fits but a second one plus its
+/// [`ALL_VARIANTS_GAP`] does not (`180 + 12 + 180 = 372 > 296`, computed from
+/// those two constants rather than guessed) — so this reflows into a plain
+/// `Column` instead, one tile per row (G16). Split into [`all_variants_column`]
+/// (this file's tests exercise it directly at the card's own inner width) and
+/// this wrapper, the same split `crate::pages::playground::find::progress`'s
+/// `all_styles_row`/G10 fix uses.
 fn all_variants_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
-    let mut cells: Vec<AnyView<Knobs>> = Vec::new();
+    any(play_preview_card(
+        "All variants",
+        all_variants_column(theme, state),
+    ))
+}
+
+/// The tile column [`all_variants_preview`] wraps in a [`play_preview_card`].
+fn all_variants_column(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
+    let mut rows: Vec<AnyView<Knobs>> = Vec::new();
     for (index, variant) in VARIANTS.iter().enumerate() {
         if index > 0 {
-            cells.push(any(SizedBox::<Knobs>(Some(12.0), None)));
+            rows.push(any(SizedBox::<Knobs>(None, Some(ALL_VARIANTS_GAP))));
         }
         let content = card_body::<Knobs>(theme, variant_label(*variant), &state.body);
         let mut view = card(*variant, content);
         if state.tappable {
             view = view.on_press(|_: &mut Knobs| {});
         }
-        cells.push(any(SizedBox::<Knobs>(Some(180.0), None).child(view)));
+        rows.push(any(
+            SizedBox::<Knobs>(Some(ALL_VARIANTS_TILE_WIDTH), None).child(view)
+        ));
     }
-    any(play_preview_card("All variants", Row(cells)))
+    any(Column(rows))
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
@@ -203,5 +231,73 @@ mod tests {
         }
         let state = knobs(CardVariant::Filled, false, "", "");
         let _view = body(&state);
+    }
+
+    /// G16 regression: [`all_variants_preview`] must never paint past the
+    /// "All variants" card's real inner width at a phone-ish device width —
+    /// the same paint-extent idiom
+    /// `crate::pages::playground::find::progress`'s G10 test uses.
+    ///
+    /// Reverting the fix (back to a `Row` of three fixed-180px tiles) fails
+    /// this test: two tiles plus their gap alone (`180 + 12 + 180 = 372`)
+    /// already exceed a phone-ish card's ~296px inner width, so the second
+    /// card's right edge paints straight through the card.
+    #[test]
+    fn all_variants_preview_never_paints_past_the_cards_inner_width() {
+        use frust::authoring::{
+            BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+        };
+        use frust::kurbo::{Point, Size};
+        use frust::peniko::Color;
+
+        const DEVICE_WIDTH: f64 = 360.0;
+        let card_inner_width = DEVICE_WIDTH - 4.0 * frust_material::MaterialSpacing::LG;
+
+        #[derive(Default)]
+        struct MaxXScene {
+            max_x: f64,
+        }
+        impl PaintScene for MaxXScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_rounded_rect(
+                &mut self,
+                origin: Point,
+                size: Size,
+                _radius: f64,
+                _color: Color,
+            ) {
+                self.max_x = self.max_x.max(origin.x + size.width);
+            }
+        }
+
+        let theme = frust_material::baseline();
+        let state = knobs(CardVariant::Elevated, true, DEFAULT_TITLE, DEFAULT_BODY);
+        let view = all_variants_column(&theme, &state);
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::ZERO, Size::new(card_inner_width, 2000.0));
+        let mut text_ctx = frust::authoring::text::TextContext::new();
+        let mut layout_ctx = LayoutCtx::with_resources(
+            Some(&mut text_ctx as &mut dyn std::any::Any),
+            Some(&theme as &dyn std::any::Any),
+        );
+        let size = widget.layout(&mut layout_ctx, &bc);
+        assert!(
+            size.width <= card_inner_width + 1e-6,
+            "the card's own reported size {size:?} must not exceed the inner \
+             width {card_inner_width}"
+        );
+
+        let mut ctx = PaintCtx::new(Point::ZERO, size).with_theme(&theme);
+        let mut scene = MaxXScene::default();
+        widget.paint(&mut ctx, &mut scene);
+        assert!(
+            scene.max_x <= card_inner_width + 1e-6,
+            "G16 regressed: painted x {} exceeds the card's inner width {} \
+             (reported size {size:?})",
+            scene.max_x,
+            card_inner_width
+        );
     }
 }
