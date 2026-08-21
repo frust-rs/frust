@@ -91,6 +91,16 @@
 //! below runs exactly as it always has — with no nested scrollable present the
 //! claim never registers and not one byte of this changes.
 //!
+//! The claim itself requires real capacity
+//! (`max_scroll_extent > min_scroll_extent`), on top of whatever the physics'
+//! own drag gate says: a bouncing-family physics accepts a user offset
+//! unconditionally, so without this a nested surface whose content exactly
+//! fills its viewport would still claim (and hold) every drag forever, with
+//! nothing to show for it. This parts from Flutter, whose bouncing physics
+//! bounces a fits-viewport scrollable too, toward UIKit's own default
+//! (`alwaysBounceVertical == false`): a scrollable with nothing to scroll
+//! does not intercept the gesture.
+//!
 //! # Fling driver (v1)
 //!
 //! On release with sufficient velocity a fling begins, integrated
@@ -385,8 +395,18 @@ pub(crate) fn ambient_scroll_claim() -> Option<Rc<Cell<InnerScrollState>>> {
 /// surface can answer the drag with a rubber-band even pinned against the edge
 /// (the `Bouncing`/[`RubberBand`](crate::RubberBand) family), while a clamping
 /// physics rejects the probe and genuinely has nothing to give. `registered`
-/// is the physics' own drag gate, the same one the takeover site consults, so
-/// a `NeverScrollable` inner never takes a drag from its host.
+/// is the physics' own drag gate, the same one the takeover site consults —
+/// **and, on top of it, real capacity** (`max_scroll_extent >
+/// min_scroll_extent`): the bouncing family's `should_accept_user_offset` is
+/// hardcoded `true` regardless of content, which without this conjunct would
+/// make a content-fits inner claim (and defer to) every drag forever, even
+/// though it has nothing to show for it. This deliberately parts from
+/// Flutter, whose `BouncingScrollPhysics` would still bounce a fits-viewport
+/// surface, in favor of UIKit's own default
+/// (`UIScrollView.alwaysBounceVertical == false`): a scrollable with nothing
+/// to scroll does not intercept the gesture. A `NeverScrollable` inner, or
+/// one with real capacity but no physics willing to accept the drag, never
+/// takes a drag from its host either way.
 pub(crate) fn inner_claim_state(
     physics: &dyn ScrollPhysics,
     metrics: &ScrollMetrics,
@@ -397,8 +417,9 @@ pub(crate) fn inner_claim_state(
     let trailing_free = physics
         .apply_boundary_conditions(metrics, metrics.max_scroll_extent + CLAIM_PROBE_PX)
         == 0.0;
+    let has_capacity = metrics.max_scroll_extent > metrics.min_scroll_extent;
     InnerScrollState {
-        registered: physics.should_accept_user_offset(metrics),
+        registered: has_capacity && physics.should_accept_user_offset(metrics),
         can_consume_down_drag: metrics.pixels > metrics.min_scroll_extent || leading_free,
         can_consume_up_drag: metrics.pixels < metrics.max_scroll_extent || trailing_free,
     }
@@ -3313,6 +3334,60 @@ mod tests {
     }
 
     #[test]
+    fn content_fits_inner_does_not_steal_the_drag() {
+        // A bouncing-family inner whose content exactly fills its viewport —
+        // `max_scroll_extent == min_scroll_extent`, nothing to scroll either
+        // way — under the platform default (no `.physics(...)` override).
+        // `should_accept_user_offset` is hardcoded `true` for the whole
+        // bouncing family, so without a capacity conjunct in
+        // `inner_claim_state` this would register and defer forever; the
+        // outer must still win the drag (`inner_claim_state`'s doc comment,
+        // the module docs' *Nested scrolling*). The outer runs `RubberBand`
+        // (like `outer_takes_over_when_inner_pinned`) so its resisted number
+        // is the deterministic one pinned below rather than the default's
+        // progressive depth curve.
+        let mut outer = nest_surface_rubber_band(spacer_content(), 200.0, OUTER);
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        // 1000px viewport over the fixture's fixed 1000px content: an exact
+        // fit, so `max_offset() == 0.0`.
+        let inner = nest_surface(nest_content(&seen), 1000.0, INNER);
+        assert_eq!(
+            inner.max_offset(),
+            0.0,
+            "the fixture's content exactly fits"
+        );
+        nest(&mut outer, inner);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        assert!(
+            !outer.inner_at_down.registered,
+            "no real capacity to scroll, so the claim never registers"
+        );
+
+        // 40px down, past the slop: the outer takes over exactly as the
+        // no-nested-scrollable case always has.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(outer.scrolling, "the outer takes the drag over");
+        assert!(!outer.deferring);
+        assert_eq!(
+            seen.get().cancels,
+            1,
+            "the outer's takeover Cancel reached the content through the inner"
+        );
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 80.0), 32.0);
+        assert_eq!(
+            outer.offset(),
+            -10.0,
+            "the resisted 20px past-top overscroll, same as a pinned-inner takeover"
+        );
+        assert_eq!(nested_of(&outer).offset(), 0.0, "the inner never moved");
+        assert_eq!(nested_of(&outer).edge_pull, 0.0, "…nor accrued any pull");
+        assert!(state.scrolls[INNER].is_empty(), "the inner saw nothing");
+    }
+
+    #[test]
     fn no_inner_behavior_identical() {
         // The pre-existing takeover, unchanged with arbitration in place: a
         // plain non-scrollable child registers nothing, so nothing defers.
@@ -3487,6 +3562,40 @@ mod tests {
             outer.offset(),
             -10.0,
             "the resisted 20px past-top overscroll"
+        );
+        assert_eq!(
+            nested_list_of(&outer).offset(),
+            0.0,
+            "the nested list never moved"
+        );
+    }
+
+    #[test]
+    fn a_content_fits_nested_list_view_does_not_steal_the_drag() {
+        // The `ListView` twin of `content_fits_inner_does_not_steal_the_drag`:
+        // both widgets route the claim through the same shared
+        // `inner_claim_state`, so this pins that the capacity conjunct
+        // applies here too rather than being a `ScrollWidget`-only fix.
+        let mut outer = nest_surface_rubber_band(spacer_content(), 200.0, OUTER);
+        // 10 rows of 100px in a 1000px viewport: an exact fit.
+        let list = nested_list(1000.0);
+        assert_eq!(list.max_offset(), 0.0, "the fixture's content exactly fits");
+        outer.child = ChildPod::new(Box::new(list));
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        assert!(
+            !outer.inner_at_down.registered,
+            "no real capacity to scroll, so the claim never registers"
+        );
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(outer.scrolling, "the outer takes the drag over");
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 80.0), 32.0);
+        assert_eq!(
+            outer.offset(),
+            -10.0,
+            "the resisted 20px past-top overscroll, same as a pinned-inner takeover"
         );
         assert_eq!(
             nested_list_of(&outer).offset(),
