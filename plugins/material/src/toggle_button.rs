@@ -66,6 +66,33 @@
 //! constant is read only by the plain button's own `ButtonStyle`,
 //! `m3e_button_style.dart:11`) — transcribed faithfully, not "fixed".
 //!
+//! # Content wider than the box: covered, never re-fitted
+//!
+//! A toggle button shapes its label **once, at its natural width**, and a box
+//! too small for the resulting content row centers and *clips* it rather than
+//! ellipsizing it to fit. That is the reference's own answer, not a
+//! simplification: `_fitContentToConstraints`
+//! (`m3e_toggle_button_content.dart:95`-`:111`) hands a bounded constraint to
+//! `FittedBox(fit: BoxFit.none, clipBehavior: Clip.hardEdge)`, which lays the
+//! natural row out unbounded, applies no scale, centers it
+//! (`Alignment.center`) and hard-clips the overflow. The one ellipsis the
+//! reference's label style carries (`m3e_base_button_state.dart:177`) can
+//! therefore never fire on this path — nothing ever hands the label a bounded
+//! width — and the label merges only `maxLines: 1, softWrap: false`
+//! (`_buildLabelText`, `:194`). The plain [`mod@crate::button`] is the genuine
+//! contrast, and keeps its own ellipsize-to-fit: its label sits in a
+//! `Flexible` inside the content row (`m3e_button_state.dart:28`-`:35`), so it
+//! really is handed the width left over.
+//!
+//! This is what a [`mod@crate::button_group`] member's press squish looks like
+//! in the reference and now here: the padding compresses first (the row is
+//! centered in a shrinking box), then the box edge slides over stationary
+//! glyphs — never a label re-flowing to a new ellipsis every frame, and never
+//! a truncation left behind once the box comes back. Two consequences worth
+//! naming: [`LabelRun`] caches on style alone (no width key, so a squish
+//! re-shapes nothing), and `content_x` is allowed to go negative so the
+//! overflow is split evenly off both ends.
+//!
 //! # Checked shape morph: round ↔ square, one spring
 //!
 //! Unchecked rests at the round family radius (`height / 2`, a pill);
@@ -189,9 +216,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::text::{
-    FontWeight, LineHeight, TextContext, TextLayout, TextOverflow, TextStyle,
-};
+use frust::authoring::text::{FontWeight, LineHeight, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CornerRadii, CursorIcon,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role,
@@ -834,11 +859,20 @@ impl ShapeMotion {
 /// The toggle button's own lazily-shaped label run, re-brushed at paint
 /// time — a sibling of `button::core::LabelRun` (private to that module) for
 /// the same reason as [`elevation_dp`].
+///
+/// **Shaped at its natural width and nothing else**, which is where it parts
+/// company with that sibling: the plain button fits its label to the room
+/// left over (`Flexible` + `overflow: ellipsis`,
+/// `m3e_button_state.dart:28`-`:35`), while a toggle button's content row is
+/// laid out unbounded and *clipped* by a box too small for it
+/// (`FittedBox(fit: BoxFit.none, clipBehavior: Clip.hardEdge)`,
+/// `m3e_toggle_button_content.dart:103`-`:110`). So this run carries no
+/// width-keyed cache and no ellipsis path at all — see the [module docs](self)'
+/// clipping section.
 struct LabelRun {
     content: String,
     layout: Option<TextLayout>,
-    shaped_for: Option<(TextStyle, Option<f64>)>,
-    natural: Option<(TextStyle, f64)>,
+    shaped_for: Option<TextStyle>,
 }
 
 impl LabelRun {
@@ -847,7 +881,6 @@ impl LabelRun {
             content,
             layout: None,
             shaped_for: None,
-            natural: None,
         }
     }
 
@@ -856,7 +889,6 @@ impl LabelRun {
             self.content = content.to_string();
             self.layout = None;
             self.shaped_for = None;
-            self.natural = None;
         }
     }
 
@@ -864,39 +896,19 @@ impl LabelRun {
         &self.content
     }
 
-    fn natural_width(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> f64 {
-        if let Some((cached_style, width)) = &self.natural
-            && cached_style == style
-        {
-            return *width;
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let width = text_ctx.layout(&self.content, style, None).size().width;
-        self.natural = Some((style.clone(), width));
-        width
-    }
-
-    fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f64>) -> Size {
-        let key = (style.clone(), max_width);
+    /// Shape (or reuse) the run in `style` at its natural width, returning its
+    /// measured size. Nothing but the style can invalidate it.
+    fn shape(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
         if let Some(cached) = &self.layout
-            && self.shaped_for.as_ref() == Some(&key)
+            && self.shaped_for.as_ref() == Some(style)
         {
             return cached.size();
         }
         let text_ctx = ctx.text_context::<TextContext>();
-        let laid = match max_width {
-            Some(width) => text_ctx.layout_bounded(
-                &self.content,
-                style,
-                Some(width as f32),
-                Some(1),
-                TextOverflow::Ellipsis,
-            ),
-            None => text_ctx.layout(&self.content, style, None),
-        };
+        let laid = text_ctx.layout(&self.content, style, None);
         let size = laid.size();
         self.layout = Some(laid);
-        self.shaped_for = Some(key);
+        self.shaped_for = Some(style.clone());
         size
     }
 
@@ -1203,6 +1215,9 @@ pub struct ToggleButtonWidget {
     /// The currently-effective label run (already resolved for `checked`).
     label: LabelRun,
     label_origin: Point,
+    /// Whether the last layout's content row is wider than the box it was
+    /// constrained into, so `paint` must clip it (`Clip.hardEdge`).
+    content_clipped: bool,
     icon: Option<ChildPod>,
     is_group_connected: bool,
     is_first_in_group: bool,
@@ -1326,6 +1341,7 @@ impl<State: 'static> View<State> for ToggleButtonView<State> {
             checked: self.checked,
             label,
             label_origin: Point::ZERO,
+            content_clipped: false,
             icon,
             is_group_connected: self.is_group_connected,
             is_first_in_group: self.is_first_in_group,
@@ -1475,17 +1491,11 @@ impl Widget for ToggleButtonWidget {
             0.0
         };
 
-        let available_label_width = if bc.max().width.is_finite() {
-            (bc.max().width - padding.left - padding.right - icon_width - gap).max(0.0)
-        } else {
-            f64::INFINITY
-        };
-
-        let natural_label_width = self.label.natural_width(ctx, &label_style);
-        let fit_to = (natural_label_width > available_label_width)
-            .then_some(available_label_width)
-            .filter(|w| w.is_finite());
-        let label_size = self.label.shape(ctx, &label_style, fit_to);
+        // The label is shaped once, at its natural width, whatever the
+        // incoming constraint: a box too small for the content covers it
+        // rather than re-fitting it (see the [module docs](self)' clipping
+        // section, and `paint`, which applies that clip).
+        let label_size = self.label.shape(ctx, &label_style);
 
         let content_width = icon_width + gap + label_size.width;
         // No minimum-width floor — see the [module docs](self)' Sizes
@@ -1494,8 +1504,12 @@ impl Widget for ToggleButtonWidget {
         let size = bc.constrain(Size::new(width, metrics.height));
 
         // The content row is centered as a whole, icon always leading (a
-        // toggle button has no `IconAlignment` concept).
-        let content_x = ((size.width - content_width) / 2.0).max(0.0);
+        // toggle button has no `IconAlignment` concept). Content wider than
+        // the box centers too — `FittedBox`'s default `Alignment.center`, so
+        // the overflow is split evenly and clipped off both ends rather than
+        // pinned to the leading edge.
+        let content_x = (size.width - content_width) / 2.0;
+        self.content_clipped = content_width > size.width;
         let icon_x = content_x;
         let label_x = content_x + icon_width + gap;
         if let Some(pod) = self.icon.as_mut() {
@@ -1581,6 +1595,13 @@ impl Widget for ToggleButtonWidget {
             scene.stroke_path(origin, &path, OUTLINE_WIDTH, &Brush::Solid(outline));
         }
 
+        // A content row wider than the box is clipped to it, never re-fitted
+        // — `FittedBox`'s `Clip.hardEdge`. Pushed only when it actually
+        // overflows: a clip layer is not free, and the common case does not
+        // need one.
+        if self.content_clipped {
+            scene.push_clip(origin, size);
+        }
         if let Some(pod) = self.icon.as_mut() {
             pod.paint_child(ctx, scene);
         }
@@ -1592,6 +1613,9 @@ impl Widget for ToggleButtonWidget {
             colors.content,
             scene,
         );
+        if self.content_clipped {
+            scene.pop_clip();
+        }
 
         // Long-press threshold latch — `paint` is the only pass with a
         // clock. See the [module docs](self)' Long-press section.
@@ -1780,6 +1804,12 @@ mod tests {
         rrects: Vec<(Point, Size, CornerRadii, Color)>,
         strokes: Vec<(Point, f64, Color)>,
         runs: Vec<(Point, Color)>,
+        /// Glyphs per painted run, in paint order — the only paint-side
+        /// window onto how much of a label was shaped (`GlyphRun` carries
+        /// resolved glyph ids, never the text).
+        run_glyphs: Vec<usize>,
+        /// `(origin, size)` of every clip pushed.
+        clips: Vec<(Point, Size)>,
     }
 
     impl PaintScene for Recorder {
@@ -1791,9 +1821,13 @@ mod tests {
         fn stroke_path(&mut self, o: Point, _path: &kurbo::BezPath, width: f64, brush: &Brush) {
             self.strokes.push((o, width, solid(brush)));
         }
+        fn push_clip(&mut self, o: Point, s: Size) {
+            self.clips.push((o, s));
+        }
         fn draw_glyph_run(&mut self, run: GlyphRun) {
             let t = run.transform.translation();
             self.runs.push((Point::new(t.x, t.y), solid(&run.brush)));
+            self.run_glyphs.push(run.glyphs.len());
         }
     }
 
@@ -1813,6 +1847,18 @@ mod tests {
         widget.layout(
             &mut lctx,
             &BoxConstraints::loose(Size::new(max_width, 500.0)),
+        )
+    }
+
+    /// Lay the widget out under the tight-main/loose-cross constraint a
+    /// button group hands a member (`BoxConstraints.tightFor(width:)`,
+    /// `m3e_toggle_button_group_render.dart:319`).
+    fn layout_tight_main(widget: &mut ToggleButtonWidget, main: f64) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        widget.layout(
+            &mut lctx,
+            &BoxConstraints::new(Size::new(main, 0.0), Size::new(main, 500.0)),
         )
     }
 
@@ -2432,6 +2478,71 @@ mod tests {
         layout_with(&mut labeled, 300.0, None);
         assert!(labeled.has_label());
         assert_eq!(labeled.h_padding(&ToggleButtonSize::Sm.metrics()), 16.0);
+    }
+
+    // ---- Content wider than the box: clipped, never re-fitted -------------
+
+    #[test]
+    fn a_box_narrower_than_the_content_clips_it_instead_of_ellipsizing() {
+        let mut widget = build(&toggle_button::<(), _>(false, |_, _| {}).label("Days per week"));
+        let natural = layout_with(&mut widget, f64::INFINITY, None);
+        let full = paint_at(&mut widget, natural, None).run_glyphs;
+        assert_eq!(full.len(), 1, "one label run");
+        assert!(full[0] > 1, "the label shaped some glyphs");
+        assert!(!widget.content_clipped, "nothing to clip at natural width");
+
+        // A group hands its members a tight main mid-squish. A shallow
+        // squeeze eats into the horizontal padding first — the label is whole
+        // and still inside the box, which is what makes the reference's
+        // squish read as padding compressing rather than text truncating.
+        let padding = ToggleButtonSize::Sm.metrics().h_padding;
+        let shallow = layout_tight_main(&mut widget, natural.width - padding);
+        let rec = paint_at(&mut widget, shallow, None);
+        assert_eq!(rec.run_glyphs, full, "the label is untouched");
+        assert!(
+            rec.clips.is_empty(),
+            "and still fits, so nothing is clipped"
+        );
+
+        // Past the padding the box starts covering the label itself.
+        let squeezed = layout_tight_main(&mut widget, natural.width - padding * 2.0 - 4.0);
+        let rec = paint_at(&mut widget, squeezed, None);
+        assert_eq!(
+            rec.run_glyphs, full,
+            "the shrinking box covers the label; it is never re-shaped to fit"
+        );
+        assert_eq!(
+            rec.clips,
+            vec![(Point::ZERO, squeezed)],
+            "the overflowing content row is clipped to the box (`Clip.hardEdge`)"
+        );
+        // Centered, so the overflow is split evenly off both ends.
+        assert!(
+            widget.label_origin.x < 0.0,
+            "the centered row hangs off the leading edge too: {}",
+            widget.label_origin.x
+        );
+    }
+
+    #[test]
+    fn a_squeezed_then_restored_label_keeps_its_full_shape() {
+        let mut widget = build(&toggle_button::<(), _>(false, |_, _| {}).label("Days per week"));
+        let natural = layout_with(&mut widget, f64::INFINITY, None);
+        let full = paint_at(&mut widget, natural, None).run_glyphs;
+
+        layout_tight_main(&mut widget, natural.width - 12.0);
+        // Back to natural — including the sub-pixel residue a spring landing
+        // on its target leaves behind, which an exact fit test would answer
+        // by dropping a whole word.
+        for main in [natural.width - 0.0002, natural.width] {
+            let size = layout_tight_main(&mut widget, main);
+            assert_eq!(
+                paint_at(&mut widget, size, None).run_glyphs,
+                full,
+                "the label is whole again at main {main}"
+            );
+        }
+        assert!(!widget.content_clipped, "and needs no clip once it fits");
     }
 
     // ---- Controlled contract -------------------------------------------------

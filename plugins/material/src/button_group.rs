@@ -90,6 +90,19 @@
 //! no reduced-motion concept; freezing the squish is this port's own
 //! substitution, per `docs/WIDGETS_CODE_STANDARDS.md`).
 //!
+//! **Including the frame the spring lands on**, which asks for nothing of its
+//! own: [`AnimationController::advance`] reports `false` on the very pass that
+//! snaps the value onto its target, and the two state moves that end a press
+//! (releasing the pressed member, the reduced-motion freeze) animate nothing
+//! either. So `paint` compares the live squish state against the one `layout`
+//! actually ran with and asks for the missing pass itself — otherwise the row
+//! keeps the geometry of the last in-flight frame, a residue far too small to
+//! read as a box edge (~1e-4 px) yet perfectly able to leave a member a hair
+//! under its natural width for good. What a member *does* with a width a hair
+//! under natural is [`mod@crate::toggle_button`]'s own clipping contract; the
+//! two together are why a settled group looks exactly like one that was never
+//! pressed.
+//!
 //! [`SQUISH_SPRING`] is `M3EButtonMotion.standard` (stiffness 1200, ζ 0.8,
 //! `m3e_button_motion.dart:23`) — a named constant rather than a
 //! [`crate::MaterialSpring`] token because no preset carries that pair, and
@@ -1072,7 +1085,16 @@ pub struct ButtonGroupWidget {
     pressed_index: Option<usize>,
     /// The spring-driven squish progress (0 rest → 1 fully pressed).
     squish: AnimationController,
+    /// The [`Self::squish_state`] the last `layout` pass actually ran with —
+    /// what `paint` compares the live state against to catch the frame the
+    /// spring *lands* on (see `paint`'s settle-frame note).
+    laid_out_squish: SquishState,
 }
+
+/// The layout-relevant squish inputs: the spring progress and the pressed
+/// member `layout` resolves every member extent from
+/// ([`ButtonGroupWidget::squish_state`]).
+type SquishState = (f64, Option<usize>);
 
 impl ButtonGroupWidget {
     /// Whether the neighbor-squish animation applies at all —
@@ -1082,6 +1104,18 @@ impl ButtonGroupWidget {
         self.direction == ButtonGroupDirection::Horizontal
             && self.group_type != ButtonGroupType::Connected
             && self.neighbor_squish
+    }
+
+    /// The squish inputs a `layout` pass would resolve member extents from
+    /// right now — the pair recorded as [`Self::laid_out_squish`] and
+    /// re-read by `paint`.
+    fn squish_state(&self) -> SquishState {
+        let anim = if self.supports_squish() {
+            self.squish.value_clamped()
+        } else {
+            0.0
+        };
+        (anim, self.pressed_index)
     }
 
     /// How far the content can pan; `0.0` when it fits.
@@ -1286,6 +1320,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
             last_drag: Point::ZERO,
             pressed_index: None,
             squish: AnimationController::new(SQUISH_ANIM_PERIOD),
+            laid_out_squish: (0.0, None),
         };
         widget.apply_config(self);
         widget
@@ -1409,13 +1444,13 @@ impl Widget for ButtonGroupWidget {
         self.visible_count = visible_count;
         self.trigger_visible = trigger_visible;
 
-        // The squish, over the visible run only.
-        let anim = if self.supports_squish() {
-            self.squish.value_clamped()
-        } else {
-            0.0
-        };
-        let pressed = self.pressed_index.filter(|i| *i < visible_count);
+        // The squish, over the visible run only. The pair is recorded as it
+        // is read, so `paint` can tell whether the geometry standing on
+        // screen is the one the live spring state calls for.
+        let state = self.squish_state();
+        self.laid_out_squish = state;
+        let (anim, pressed) = state;
+        let pressed = pressed.filter(|i| *i < visible_count);
         let mut sizes = squish_sizes(
             &natural[..visible_count],
             pressed,
@@ -1506,6 +1541,18 @@ impl Widget for ButtonGroupWidget {
             {
                 self.pressed_index = None;
             }
+        }
+        // The frame the spring *lands* on needs a layout too, and asks for
+        // none of its own: `AnimationController::advance` reports `false` on
+        // the very pass that snaps the value onto its target, so without this
+        // the last geometry `layout` ever saw is the one a hair short of rest
+        // — every member a fraction of a pixel off its natural extent, and
+        // every origin off with it, for as long as nothing else happens to
+        // dirty layout. Comparing against the state `layout` actually ran
+        // with also covers the two moves above that animate nothing (the
+        // released pressed member, the reduced-motion freeze).
+        if self.squish_state() != self.laid_out_squish {
+            ctx.request_layout();
         }
 
         let clipped =
@@ -2074,6 +2121,153 @@ mod tests {
             (pressed.width - unpressed.width).abs() < 1e-6,
             "the squish is extent-preserving: {unpressed:?} -> {pressed:?}"
         );
+    }
+
+    // ---- the settle frame (a landed squish is laid out) --------------------
+
+    /// The demo's compact three-member row — the labels the device gate
+    /// probed, long enough that a sub-pixel shortfall costs a whole word.
+    fn labelled_actions() -> Vec<ButtonGroupAction<()>> {
+        vec![
+            button_group_action("Every day"),
+            button_group_action("Days per week"),
+            button_group_action("Selected days"),
+        ]
+    }
+
+    /// Counts the glyphs of every painted run, in paint order — the paint-side
+    /// window onto whether a member's label ended up ellipsized (`GlyphRun`
+    /// carries resolved glyph ids, never the shaped text).
+    #[derive(Default)]
+    struct GlyphCounter {
+        runs: Vec<usize>,
+    }
+
+    impl PaintScene for GlyphCounter {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: frust::authoring::scene::GlyphRun) {
+            self.runs.push(run.glyphs.len());
+        }
+    }
+
+    /// A shell-style frame driver honouring the mobile layout-skip contract
+    /// (`AppTree`'s rebuild → layout-iff-needed → paint seam): layout runs only
+    /// on a frame the previous paint asked for one, so an animation that lands
+    /// without a final `request_layout` leaves its last in-flight geometry
+    /// standing — which is what a device shows.
+    struct Frames {
+        widget: ButtonGroupWidget,
+        text: TextContext,
+        theme: Theme,
+        max: Size,
+        size: Size,
+        needs_layout: bool,
+    }
+
+    impl Frames {
+        fn new(view: &ButtonGroupView<()>, max: Size) -> Self {
+            Frames {
+                widget: build(view),
+                text: TextContext::new(),
+                theme: crate::baseline(),
+                max,
+                size: Size::ZERO,
+                needs_layout: true,
+            }
+        }
+
+        /// Run one frame at `t_ms`, returning each painted label run's glyph
+        /// count in member order.
+        fn run(&mut self, t_ms: u64) -> Vec<usize> {
+            if self.needs_layout {
+                let mut lctx = LayoutCtx::with_text_context(&mut self.text as &mut dyn Any)
+                    .with_theme(&self.theme as &dyn Any);
+                self.size = self
+                    .widget
+                    .layout(&mut lctx, &BoxConstraints::loose(self.max));
+            }
+            let mut scene = GlyphCounter::default();
+            let mut ctx = PaintCtx::for_test(
+                Point::ZERO,
+                self.size,
+                FrameTime::from_nanos(t_ms * 1_000_000),
+            )
+            .with_theme(&self.theme as &dyn Any);
+            self.widget.paint(&mut ctx, &mut scene);
+            self.needs_layout = ctx.needs_layout();
+            scene.runs
+        }
+
+        /// Run frames every 16ms from `from_ms` until `to_ms`.
+        fn run_until(&mut self, from_ms: u64, to_ms: u64) -> Vec<usize> {
+            let mut painted = Vec::new();
+            let mut t = from_ms;
+            while t <= to_ms {
+                painted = self.run(t);
+                t += 16;
+            }
+            painted
+        }
+
+        /// The main extent every member was last laid out at.
+        fn member_mains(&self) -> Vec<f64> {
+            self.widget.members.iter().map(|p| p.size().width).collect()
+        }
+
+        fn pointer(&mut self, phase: PointerPhase, x: f64) {
+            let mut state = ();
+            let size = self.size;
+            dispatch(&mut self.widget, &mut state, size, &ev(phase, x, 16.0));
+        }
+    }
+
+    #[test]
+    fn a_settled_squish_restores_every_member_to_its_natural_shape() {
+        let view = button_group_actions(labelled_actions())
+            .density(ButtonGroupDensity::Compact)
+            .spacing(8.0)
+            .size(ToggleButtonSize::Sm);
+        let mut frames = Frames::new(&view, Size::new(1000.0, 200.0));
+        let resting_runs = frames.run(0);
+        let resting_mains = frames.member_mains();
+        assert_eq!(resting_runs.len(), 3, "one label run per member");
+
+        // The two legs the device probe took: press the middle member (both
+        // neighbours shrink), then the first (its single neighbour takes it
+        // all). Each press ran a full cycle — hold, release, settle.
+        let mut t = 0u64;
+        for pressed in [1usize, 0] {
+            let x = frames.widget.member_bases[pressed].x + 4.0;
+            frames.pointer(PointerPhase::Down, x);
+            let mid_squish = frames.run_until(t + 16, t + 16 * 4);
+            assert_eq!(
+                mid_squish, resting_runs,
+                "a squished neighbour of {pressed} covers its label, never re-shapes it"
+            );
+            frames.run_until(t + 16 * 5, t + 16 * 60);
+            frames.pointer(PointerPhase::Up, x);
+            let settled_runs = frames.run_until(t + 16 * 61, t + 16 * 160);
+            t += 16 * 160;
+
+            assert!(
+                !frames.widget.squish.is_animating(),
+                "the squish spring settled within the driven frames (pressed {pressed})"
+            );
+            assert_eq!(
+                frames.widget.pressed_index, None,
+                "the settled spring released member {pressed}"
+            );
+            assert_eq!(
+                settled_runs, resting_runs,
+                "every label paints its full glyph run again once member {pressed}'s squish settles"
+            );
+            assert_eq!(
+                frames.member_mains(),
+                resting_mains,
+                "every member is back at its natural main extent after pressing {pressed}"
+            );
+        }
     }
 
     #[test]
