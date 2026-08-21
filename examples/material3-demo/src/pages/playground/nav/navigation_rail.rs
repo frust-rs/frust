@@ -37,12 +37,33 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// column under *Not ported*), so at 320 the expanded rail — menu button +
 /// FAB + all four destinations — overflow-paints past the frame instead of
 /// scrolling. The frame is sized to the content instead, derived from
-/// `navigation_rail.rs`'s own layout constants for that worst case: `TOP_GAP`
-/// (36) + the menu button row (~40) + `SECTION_PADDING_BOTTOM` (12) + the FAB
-/// (`EXTENDED_HEIGHT`, 56) + `SECTION_PADDING_BOTTOM` (12) + 4 destinations ×
-/// (`ITEM_VERTICAL_GAP` × 2 + `RAIL_ITEM_EXPANDED_HEIGHT`, 4+40+4 = 48) ≈
-/// 348dp, rounded up for headroom.
-const PREVIEW_HEIGHT: f64 = 400.0;
+/// `navigation_rail.rs`'s own layout constants — as the **max** of the
+/// expanded and collapsed derivations below (G8's device-gate fix: this
+/// constant used to be sized off the expanded math alone, but the
+/// **collapsed** rail is the taller of the two — its 66dp item height
+/// outgrows the expanded row's 40dp minimum by more than the collapsed
+/// state saves elsewhere — so "Drafts" spilled below the frame while
+/// collapsed, screenshot-confirmed on the Xiaomi).
+///
+/// Both derivations share a fixed prefix: `TOP_GAP` (36) + the menu button
+/// row (48 — the default `Sm`/`Standard` icon button's tap target,
+/// `icon_button.rs`'s `theme_target_size`, not the ~40dp visual box) +
+/// `SECTION_PADDING_BOTTOM` (12) + the FAB row (56 — `extended_fab`'s fixed
+/// `EXTENDED_HEIGHT` while expanded, `FabSize::Medium`'s 56dp container
+/// while collapsed; `rail_fab`'s own default size, both states agree) +
+/// `SECTION_PADDING_BOTTOM` (12) = 164dp, plus 4 destinations at their
+/// per-state height (`ITEM_VERTICAL_GAP` × 2 above/below each row):
+///
+/// * Expanded: 164 + 4 × (4 + `RAIL_ITEM_EXPANDED_HEIGHT` + 4) =
+///   164 + 4×48 = 356dp.
+/// * Collapsed: 164 + 4 × (4 + `RAIL_ITEM_COLLAPSED_HEIGHT` + 4) =
+///   164 + 4×74 = 460dp.
+///
+/// Collapsed wins (460 > 356dp); rounded up to 500dp for headroom. A test
+/// pins this constant against both derivations computed from the plugin's
+/// own exported height constants, so a future geometry-table change can't
+/// silently reopen this gap.
+const PREVIEW_HEIGHT: f64 = 500.0;
 
 const RAIL_TYPES: [NavigationRailType; 4] = [
     NavigationRailType::Collapsed,
@@ -242,6 +263,7 @@ fn snippet_code(state: &RailState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust_material::{RAIL_ITEM_COLLAPSED_HEIGHT, RAIL_ITEM_EXPANDED_HEIGHT};
 
     fn base_state() -> RailState {
         NavigationRailPlayground.init()
@@ -287,5 +309,44 @@ mod tests {
 
         apply_rail_type(&mut state, NavigationRailType::AlwaysExpand);
         assert_eq!(state.rail_type, NavigationRailType::AlwaysExpand);
+    }
+
+    /// The regression guard for G8 (device-gate round 3): `PREVIEW_HEIGHT`
+    /// must cover both the expanded *and* the collapsed rail's content
+    /// height — computed here from the plugin's own exported item-height
+    /// constants (plus the fixed prefix [`PREVIEW_HEIGHT`]'s own doc comment
+    /// derives), so a future change to either geometry table fails this test
+    /// instead of silently reopening the "Drafts spills below the frame"
+    /// defect the fix closed.
+    #[test]
+    fn preview_height_covers_both_the_expanded_and_the_collapsed_rail() {
+        // The fixed prefix shared by both states: TOP_GAP (36) + the menu
+        // button row (48) + SECTION_PADDING_BOTTOM (12) + the FAB row (56)
+        // + SECTION_PADDING_BOTTOM (12) — see `PREVIEW_HEIGHT`'s own doc
+        // comment for the full citation of each term's source.
+        const PREFIX: f64 = 36.0 + 48.0 + 12.0 + 56.0 + 12.0;
+        // ITEM_VERTICAL_GAP (4dp), above and below every destination row —
+        // `navigation_rail.rs`'s own private constant, restated here since
+        // it isn't exported.
+        const ITEM_VERTICAL_GAP: f64 = 4.0;
+        const DESTINATIONS: f64 = 4.0;
+
+        let expanded_height =
+            PREFIX + DESTINATIONS * (ITEM_VERTICAL_GAP * 2.0 + RAIL_ITEM_EXPANDED_HEIGHT);
+        let collapsed_height =
+            PREFIX + DESTINATIONS * (ITEM_VERTICAL_GAP * 2.0 + RAIL_ITEM_COLLAPSED_HEIGHT);
+
+        assert!(
+            collapsed_height > expanded_height,
+            "the collapsed rail is the taller of the two states: {collapsed_height} vs {expanded_height}"
+        );
+        assert!(
+            PREVIEW_HEIGHT >= collapsed_height,
+            "PREVIEW_HEIGHT ({PREVIEW_HEIGHT}) must cover the taller collapsed rail ({collapsed_height})"
+        );
+        assert!(
+            PREVIEW_HEIGHT >= expanded_height,
+            "PREVIEW_HEIGHT ({PREVIEW_HEIGHT}) must cover the expanded rail ({expanded_height})"
+        );
     }
 }

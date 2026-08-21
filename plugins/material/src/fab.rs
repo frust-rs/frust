@@ -694,6 +694,11 @@ impl<State: 'static> View<State> for FabView<State> {
         }
 
         if self.is_extended {
+            // Whether `visible_label` starts this block unmounted — including
+            // a Plain->Extended swap that carried no prior pod at all, since
+            // `element` is reused across the type flip (see this `rebuild`'s
+            // top-level docs and G9's device-gate note below).
+            let freshly_mounted = element.visible_label.is_none();
             match (&prev.label, &self.label) {
                 (None, None) => {}
                 (Some(p), Some(n)) if p == n && prev.is_extended == self.is_extended => {}
@@ -728,11 +733,46 @@ impl<State: 'static> View<State> for FabView<State> {
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
             }
-        } else if prev.label != self.label {
-            // Icon-only FAB: the label is accessibility-only, no child to
-            // reconcile.
-            element.label_text = self.label.clone();
-            flags |= ChangeFlags::PAINT;
+            // A pod that just mounted (None -> Some above) — the common case
+            // being a Plain->Extended swap — mirrors `build()`'s own mount
+            // behavior exactly: reset the reveal controller fresh rather
+            // than inherit whatever value it drifted to while this FAB was
+            // plain (`paint` advances `label_anim` every frame regardless of
+            // `is_extended`, since `is_extended` can itself flip via this
+            // same `rebuild`). Without this, a Plain->Extended swap could
+            // land on an already-`Completed` controller and snap straight to
+            // the fully open pill instead of reveal-animating in — see the
+            // [module docs](self)' "known v1 mount quirk".
+            if freshly_mounted && element.visible_label.is_some() {
+                element.label_anim =
+                    AnimationController::new(crate::tokens::MaterialMotion::MEDIUM_2)
+                        .with_curve(crate::tokens::MaterialMotion::EMPHASIZED);
+                if self.label_shown {
+                    element.label_anim.forward();
+                }
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+        } else {
+            // Icon-only FAB: tear down any stale visible-label pod carried
+            // over from an Extended->Plain swap (`element` is reused across
+            // the type flip since the rail diffs same-typed `FabView`s via
+            // `rebuild_child` — see the [module docs](self)' Extended FAB
+            // section). `layout`'s square branch never lays out
+            // `visible_label`, so a pod left mounted here paints at its
+            // stale prior origin/size, outside the square — the G9
+            // device-gate defect this guards against.
+            if prev.is_extended
+                && let Some(mut pod) = element.visible_label.take()
+            {
+                let prev_view = label_view::<State>(prev.label.clone().unwrap_or_default());
+                frust::authoring::teardown_child(&prev_view, &mut pod, ctx);
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            if prev.label != self.label {
+                // The label is accessibility-only, no child to reconcile.
+                element.label_text = self.label.clone();
+                flags |= ChangeFlags::PAINT;
+            }
         }
 
         flags
@@ -928,7 +968,15 @@ impl Widget for FabWidget {
         if let Some(icon) = self.icon.as_mut() {
             icon.paint_child(ctx, scene);
         }
-        if let Some(label) = self.visible_label.as_mut() {
+        // Belt-and-braces: `layout`'s square branch never lays out
+        // `visible_label`, so gate its paint on `is_extended` too — the
+        // `rebuild` fix above already keeps `visible_label` `None` whenever
+        // `is_extended` is false, but this keeps paint itself from ever
+        // drawing a pod at a stale origin if that invariant is broken later
+        // (see G9's device-gate note on [`FabView::rebuild`]).
+        if self.is_extended
+            && let Some(label) = self.visible_label.as_mut()
+        {
             label.paint_child(ctx, scene);
         }
 
@@ -1262,6 +1310,96 @@ mod tests {
         assert_eq!(
             collapsed_size.width,
             EXTENDED_PAD_COLLAPSED * 2.0 + EXTENDED_ICON
+        );
+    }
+
+    /// The regression guard for G9 (device-gate round 3): the rail swaps
+    /// `extended_fab()`/`fab()` via `rebuild_child` on the same `FabView`
+    /// type when its type toggles — pre-fix, `visible_label` was built only
+    /// in `build()`, so an Extended->Plain swap left the label pod mounted,
+    /// painting stale text outside the collapsed square (screenshot-
+    /// confirmed on the Xiaomi).
+    #[test]
+    fn rebuild_extended_to_plain_tears_down_the_stale_label_pod() {
+        let extended_view: FabView<()> =
+            extended_fab("Compose", |_s: &mut ()| {}).icon(leaf_any(24.0, 24.0));
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&extended_view, &mut BuildCtx::new(&mut counter));
+        assert!(
+            w.visible_label.is_some(),
+            "an extended FAB mounts a visible label pod"
+        );
+
+        let plain_view: FabView<()> = fab::<(), _>(leaf_any(24.0, 24.0), |_s: &mut ()| {});
+        View::<()>::rebuild(
+            &plain_view,
+            &extended_view,
+            &mut w,
+            &mut BuildCtx::new(&mut counter),
+        );
+        assert!(
+            w.visible_label.is_none(),
+            "swapping to a plain FAB tears down the stale label pod"
+        );
+
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        assert_eq!(
+            size,
+            Size::new(MEDIUM_CONTAINER, MEDIUM_CONTAINER),
+            "the collapsed FAB lays out as the plain square, not the old pill"
+        );
+    }
+
+    /// The reverse of the above: a Plain->Extended swap must mount the
+    /// label pod and reveal-animate it in across advanced frames, not snap
+    /// straight to the open pill from whatever value `label_anim` drifted
+    /// to while this FAB was plain (`paint` advances it every frame
+    /// regardless of `is_extended`).
+    #[test]
+    fn rebuild_plain_to_extended_mounts_the_label_and_reveal_animates() {
+        let plain_view: FabView<()> = fab::<(), _>(leaf_any(24.0, 24.0), |_s: &mut ()| {});
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&plain_view, &mut BuildCtx::new(&mut counter));
+        // Drift the plain widget's (layout-irrelevant) `label_anim` to fully
+        // settled, exactly as real paint calls would over several frames —
+        // this is the state a naively-reused controller would wrongly
+        // inherit on the swap below.
+        w.label_anim.advance(FrameTime::ZERO);
+        w.label_anim.advance(ft_secs(1.0));
+        assert_eq!(w.label_anim.value_clamped(), 1.0);
+        assert!(w.visible_label.is_none());
+
+        let extended_view: FabView<()> =
+            extended_fab("Compose", |_s: &mut ()| {}).icon(leaf_any(24.0, 24.0));
+        View::<()>::rebuild(
+            &extended_view,
+            &plain_view,
+            &mut w,
+            &mut BuildCtx::new(&mut counter),
+        );
+        assert!(
+            w.visible_label.is_some(),
+            "swapping to an extended FAB mounts the label pod"
+        );
+
+        let mut tcx = frust::authoring::text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let just_swapped_size =
+            w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+
+        // Settle the label reveal to fully open (the module docs' known v1
+        // mount quirk: the first `advance` after a fresh `forward()` only
+        // seeds the clock).
+        w.label_anim.advance(FrameTime::ZERO);
+        w.label_anim.advance(ft_secs(1.0));
+        let mut tcx2 = frust::authoring::text::TextContext::new();
+        let mut lctx2 = LayoutCtx::with_text_context(&mut tcx2 as &mut dyn Any);
+        let grown_size = w.layout(&mut lctx2, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+
+        assert!(
+            grown_size.width > just_swapped_size.width,
+            "the label grows in across advanced frames: {just_swapped_size:?} -> {grown_size:?}"
         );
     }
 
