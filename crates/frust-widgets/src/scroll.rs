@@ -822,11 +822,18 @@ impl ScrollWidget {
     ///
     /// **Momentum is carried only onto a release that plainly continues the
     /// interrupted motion**: same sign, and faster than
-    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of its speed (Flutter's
-    /// two `ScrollDragController.end` guards). Both are load-bearing, not
-    /// polish — the carried term is comparable in magnitude to an ordinary
-    /// release, so adding it to a flick back the other way cancels the
-    /// finger's own velocity out or reverses it outright.
+    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of the physics' own
+    /// **mapped** share of the interrupted velocity —
+    /// `physics.carried_momentum(carried)`, the exact value the release is
+    /// about to add, not the raw interrupted speed. Flutter's two
+    /// `ScrollDragController.end` guards compare against `carriedMomentum`
+    /// the same way; `Bouncing`'s fitted power curve sits below the raw speed
+    /// under ~1563 px/s and above it beyond, so gating on the mapped value
+    /// (rather than the raw one) changes where the threshold actually sits.
+    /// Both guards are load-bearing, not polish — the carried term is
+    /// comparable in magnitude to an ordinary release, so adding it to a
+    /// flick back the other way cancels the finger's own velocity out or
+    /// reverses it outright.
     ///
     /// **Accepted gap**: Flutter drops the carried velocity a third way, when
     /// the finger held still before letting go (`_maybeLoseMomentum`); that
@@ -837,11 +844,11 @@ impl ScrollWidget {
     /// ballistic driver ([`ScrollWidget::release_simulation`]) and the legacy
     /// fling — so neither can grow a rule of its own.
     fn fling_start_velocity(&self, release: f64) -> f64 {
-        let carried = self.carried_velocity;
-        let continues_it = release.signum() == carried.signum()
-            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * carried.abs();
+        let mapped = self.physics.carried_momentum(self.carried_velocity);
+        let continues_it = release.signum() == mapped.signum()
+            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped.abs();
         if continues_it {
-            release + self.physics.carried_momentum(carried)
+            release + mapped
         } else {
             release
         }
@@ -2586,6 +2593,81 @@ mod tests {
             -400.0,
             1e-9,
             "…it runs at the finger's own velocity instead",
+        );
+    }
+
+    /// The retain gate compares a release against the physics' **mapped**
+    /// share of the interrupted velocity, not the raw interrupted speed —
+    /// pinned here because the two diverge (`Bouncing`'s power curve sits
+    /// below the raw value under ~1563 px/s). Interrupted at 1000 px/s,
+    /// `Bouncing::new().carried_momentum(1000.0)` maps to ~649.7, putting the
+    /// retain threshold at ~324.8 — well under the raw-carried threshold
+    /// (500) the pre-fix gate used.
+    #[test]
+    fn momentum_retain_threshold_refuses_a_weak_refling() {
+        // Parked mid-content, so the release is judged on velocity alone.
+        let mut w = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut w, &scroll(50.0, false, 1000.0), 0.0);
+
+        // Interrupted motion at 1000 px/s (the same drag
+        // `small_reverse_flick_is_not_inverted` uses to establish it).
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 78.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the interrupted motion");
+
+        let mapped = Bouncing::new().carried_momentum(1000.0);
+        let threshold = MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped;
+        assert!(
+            (300.0..350.0).contains(&threshold),
+            "the fixture's release values must straddle the threshold: {threshold}"
+        );
+
+        // Same-direction re-flick at 300 px/s — under the mapped threshold.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 80.0), 64.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 70.0), 148.0); // 30px / 100ms → 300 px/s
+        dispatch(&mut w, &ev(PointerPhase::Up, 70.0), 148.0);
+        assert_close(
+            release_velocity(&w),
+            300.0,
+            1e-9,
+            "a release under the mapped threshold carries nothing forward",
+        );
+    }
+
+    /// The strong-side twin of `momentum_retain_threshold_refuses_a_weak_refling`:
+    /// a release over the same mapped threshold carries `mapped` forward
+    /// exactly, pre-clamp.
+    #[test]
+    fn momentum_retain_threshold_carries_a_strong_refling() {
+        let mut w = laid_out(200.0, 100.0, 5000.0);
+        dispatch(&mut w, &scroll(50.0, false, 1000.0), 0.0);
+
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 78.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the interrupted motion");
+
+        let mapped = Bouncing::new().carried_momentum(1000.0);
+        let threshold = MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped;
+        assert!(
+            (300.0..350.0).contains(&threshold),
+            "the fixture's release values must straddle the threshold: {threshold}"
+        );
+
+        // Same-direction re-flick at 350 px/s — over the mapped threshold.
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 80.0), 64.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 65.0), 148.0); // 35px / 100ms → 350 px/s
+        dispatch(&mut w, &ev(PointerPhase::Up, 65.0), 148.0);
+        assert_close(
+            release_velocity(&w),
+            350.0 + mapped,
+            1e-9,
+            "a release over the mapped threshold carries `mapped` forward exactly",
         );
     }
 

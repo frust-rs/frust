@@ -1580,18 +1580,21 @@ impl ListViewWidget {
     /// Mirrors `ScrollWidget::fling_start_velocity`, gate included: momentum
     /// is carried only onto a release that plainly continues the interrupted
     /// motion — same sign, and faster than
-    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of its speed — since the
-    /// carried term is comparable in magnitude to an ordinary release and
-    /// would otherwise cancel out or reverse a flick back the other way.
-    /// Flutter's third guard, dropping the carried velocity when the finger
-    /// held still before letting go, is an accepted gap here too (see that
-    /// method for the full contract).
+    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of the physics' own
+    /// **mapped** share of the interrupted velocity —
+    /// `physics.carried_momentum(carried)`, the exact value the release is
+    /// about to add, not the raw interrupted speed (see that method's doc
+    /// for why this matters) — since the carried term is comparable in
+    /// magnitude to an ordinary release and would otherwise cancel out or
+    /// reverse a flick back the other way. Flutter's third guard, dropping
+    /// the carried velocity when the finger held still before letting go, is
+    /// an accepted gap here too (see that method for the full contract).
     fn fling_start_velocity(&self, release: f64) -> f64 {
-        let carried = self.carried_velocity;
-        let continues_it = release.signum() == carried.signum()
-            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * carried.abs();
+        let mapped = self.physics.carried_momentum(self.carried_velocity);
+        let continues_it = release.signum() == mapped.signum()
+            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped.abs();
         if continues_it {
-            release + self.physics.carried_momentum(carried)
+            release + mapped
         } else {
             release
         }
@@ -2796,7 +2799,7 @@ impl Widget for ListViewWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::parity::{Clamping, DecelerationRate, NeverScrollable};
+    use crate::physics::parity::{Bouncing, Clamping, DecelerationRate, NeverScrollable};
     use crate::physics::rubber_band::RubberBand;
     use crate::scroll::ScrollWidget;
     use frust_core::{RenderRoot, any};
@@ -4017,6 +4020,83 @@ mod tests {
         assert!(
             w.ballistic.is_some(),
             "…as a real ballistic curve, not a stalled remnant"
+        );
+    }
+
+    /// The `ScrollView` twins of this pair live in `scroll.rs`
+    /// (`momentum_retain_threshold_refuses_a_weak_refling`): the retain gate
+    /// compares a release against the physics' **mapped** share of the
+    /// interrupted velocity, not the raw interrupted speed. Interrupted at
+    /// 1000 px/s, `Bouncing::new().carried_momentum(1000.0)` maps to ~649.7,
+    /// putting the retain threshold at ~324.8 — well under the raw-carried
+    /// threshold (500) the pre-fix gate used.
+    #[test]
+    fn momentum_retain_threshold_refuses_a_weak_refling() {
+        let mut w = ListViewWidget::new(1000, 50.0);
+        w.viewport = Size::new(200.0, 200.0);
+        dispatch_list(&mut w, &wheel(1000.0), 0.0);
+        assert_eq!(w.offset(), 1000.0, "the fixture parked mid-content");
+
+        // Interrupted motion at 1000 px/s.
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 78.0), 16.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the interrupted motion");
+
+        let mapped = Bouncing::new().carried_momentum(1000.0);
+        let threshold = MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped;
+        assert!(
+            (300.0..350.0).contains(&threshold),
+            "the fixture's release values must straddle the threshold: {threshold}"
+        );
+
+        // Same-direction re-flick at 300 px/s — under the mapped threshold.
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 80.0), 64.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 70.0), 148.0); // 30px / 100ms → 300 px/s
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 70.0), 148.0);
+        assert_close(
+            release_velocity(&w),
+            300.0,
+            1e-9,
+            "a release under the mapped threshold carries nothing forward",
+        );
+    }
+
+    /// The strong-side twin of `momentum_retain_threshold_refuses_a_weak_refling`:
+    /// a release over the same mapped threshold carries `mapped` forward
+    /// exactly, pre-clamp.
+    #[test]
+    fn momentum_retain_threshold_carries_a_strong_refling() {
+        let mut w = ListViewWidget::new(1000, 50.0);
+        w.viewport = Size::new(200.0, 200.0);
+        dispatch_list(&mut w, &wheel(1000.0), 0.0);
+        assert_eq!(w.offset(), 1000.0, "the fixture parked mid-content");
+
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 78.0), 16.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the interrupted motion");
+
+        let mapped = Bouncing::new().carried_momentum(1000.0);
+        let threshold = MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped;
+        assert!(
+            (300.0..350.0).contains(&threshold),
+            "the fixture's release values must straddle the threshold: {threshold}"
+        );
+
+        // Same-direction re-flick at 350 px/s — over the mapped threshold.
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 48.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 80.0), 64.0); // takeover
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 65.0), 148.0); // 35px / 100ms → 350 px/s
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 65.0), 148.0);
+        assert_close(
+            release_velocity(&w),
+            350.0 + mapped,
+            1e-9,
+            "a release over the mapped threshold carries `mapped` forward exactly",
         );
     }
 
