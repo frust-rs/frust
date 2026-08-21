@@ -1037,14 +1037,14 @@ mod tests {
 
     #[test]
     fn paint_requests_layout_through_the_press_settle_frame() {
-        // The regression guard for the landing-frame trap (gate-r5-05):
-        // `AnimationController::advance` reports `false` on the very pass
-        // that snaps the value onto its target, so gating solely on it
-        // would leave the last inset (and hit-tested pill) `layout` ever
-        // saw a hair short of rest. This drives a shell-honest frame loop —
-        // `layout` runs only on a frame the *previous* paint actually asked
-        // for one — so a silently-skipped landing frame leaves the pill
-        // short of the target instead of landing on it exactly.
+        // The landing-frame relayout guard: `AnimationController::advance`
+        // reports `false` on the very pass that snaps the value onto its
+        // target, so gating solely on it would leave the last inset (and
+        // hit-tested pill) `layout` ever saw a hair short of rest. This
+        // drives a shell-honest frame loop — `layout` runs only on a frame
+        // the *previous* paint actually asked for one — so a silently-skipped
+        // landing frame leaves the pill short of the target instead of landing
+        // on it exactly. See docs/REVIEW_FOCUS.md's layout-skip section.
         let view = bar("").on_tap(|s: &mut App| s.taps += 1);
         let mut w = build(&view);
         layout(&mut w, &BoxConstraints::tight(Size::new(400.0, 56.0)));

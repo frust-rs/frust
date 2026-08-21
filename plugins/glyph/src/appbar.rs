@@ -2309,16 +2309,15 @@ mod tests {
 
     #[test]
     fn banner_reveal_requests_layout_through_the_settle_frame() {
-        // The regression guard for the landing-frame trap (gate-r5-05):
-        // `step` (this widget's hand-rolled `AnimationController::advance`
-        // analogue) reports "done" on the very call that snaps
-        // `banner_progress` onto its target, so gating solely on
-        // `banner_animating` would leave the last banner height `layout`
-        // ever saw a hair short of rest. Driven through `RenderRoot` (not
-        // the `paint`/`paint_nl` helpers above, which each call `advance`
-        // twice per simulated frame — once directly, once again inside
-        // `Widget::paint` — collapsing the very landing transition this
-        // guard needs to observe).
+        // The landing-frame relayout guard: `step` (this widget's hand-rolled
+        // `AnimationController::advance` analogue) reports "done" on the very
+        // call that snaps `banner_progress` onto its target, so gating solely
+        // on `banner_animating` would leave the last banner height `layout`
+        // ever saw a hair short of rest. Driven through `RenderRoot` (not the
+        // `paint`/`paint_nl` helpers above, which each call `advance` twice
+        // per simulated frame — once directly, once again inside `Widget::paint`
+        // — collapsing the very landing transition this guard needs to observe).
+        // See docs/REVIEW_FOCUS.md's layout-skip section.
         fn closed(_: &mut ()) -> AppBarView<()> {
             app_bar("terminal — dev")
         }

@@ -1213,15 +1213,16 @@ mod tests {
 
     #[test]
     fn paint_requests_layout_through_the_settle_frame() {
-        // The regression guard for the landing-frame trap (gate-r5-05):
-        // `AnimationController::advance` reports `false` on the very pass
-        // that snaps the value onto its target, so gating solely on that
-        // return would leave the last geometry `layout` ever saw a hair
-        // short of rest. This drives a shell-honest frame loop — `layout`
-        // runs only on a frame the *previous* paint (or rebuild) actually
-        // asked for one, the same contract a real shell honours — so a
-        // silently-skipped landing frame leaves the last recorded height
-        // short of the target instead of landing on it exactly.
+        // The landing-frame relayout guard: `AnimationController::advance`
+        // reports `false` on the very pass that snaps the value onto its
+        // target, so gating solely on that return would leave the last
+        // geometry `layout` ever saw a hair short of rest. This drives a
+        // shell-honest frame loop — `layout` runs only on a frame the
+        // *previous* paint (or rebuild) actually asked for one, the same
+        // contract a real shell honours — so a silently-skipped landing
+        // frame leaves the last recorded height short of the target instead
+        // of landing on it exactly. See docs/REVIEW_FOCUS.md's layout-skip
+        // section.
         let collapsed: ExpandableListView<()> = expandable_list(items(1));
         let mut w = build(&collapsed);
         layout(&mut w);

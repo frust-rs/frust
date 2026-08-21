@@ -1555,18 +1555,18 @@ mod tests {
 
     #[test]
     fn a_freshly_added_chip_lands_its_box_exactly_on_the_settle_frame() {
-        // The regression guard for the landing-frame trap (gate-r5-05):
-        // `AnimationController::advance` reports `false` on the very pass
-        // that snaps a chip's scale onto its target, so gating the
-        // relayout request solely on that return would leave the last
-        // chip box `layout` ever saw a hair short of rest. This drives a
-        // shell-honest frame loop — `layout` runs only on a frame the
-        // *previous* paint actually asked for one — so a silently-skipped
-        // landing frame would leave the chip's box short of its natural
-        // width instead of landing on it exactly. `settle()` (used by the
-        // sibling test above) can't catch this: it never relayouts and
-        // never reads laid-out geometry, only the raw `progress` value,
-        // which `paint` always updates regardless of what it requests.
+        // The landing-frame relayout guard: `AnimationController::advance`
+        // reports `false` on the very pass that snaps a chip's scale onto
+        // its target, so gating the relayout request solely on that return
+        // would leave the last chip box `layout` ever saw a hair short of
+        // rest. This drives a shell-honest frame loop — `layout` runs only
+        // on a frame the *previous* paint actually asked for one — so a
+        // silently-skipped landing frame would leave the chip's box short
+        // of its natural width instead of landing on it exactly. `settle()`
+        // (used by the sibling test above) can't catch this: it never
+        // relayouts and never reads laid-out geometry, only the raw
+        // `progress` value, which `paint` always updates regardless of what
+        // it requests. See docs/REVIEW_FOCUS.md's layout-skip section.
         let prev = view().multi(true);
         let mut w = ready(&prev);
         let next = view().multi(true).selected(vec!["apple".to_string()]);

@@ -777,9 +777,10 @@ mod tests {
         // One paint under reduce_motion snaps reveal straight to 1.0. `layout`
         // last ran against the pre-snap (closed) value, so this pass — even
         // though it never touches the spring driver — moved a layout-relevant
-        // value and must still request exactly one relayout (gate-r5-05): the
-        // reduce-motion snap is one of the cases the before/after comparison
-        // covers alongside the driver's landing frame.
+        // value and must still request exactly one relayout: the reduce-motion
+        // snap is one of the cases the before/after comparison covers alongside
+        // the driver's landing frame (the landing-frame relayout guard; see
+        // docs/REVIEW_FOCUS.md's layout-skip section).
         let mut ctx =
             PaintCtx::new(Point::ZERO, Size::new(320.0, w.header_height)).with_theme(&theme);
         let mut rec = Recorder::default();
@@ -864,11 +865,11 @@ mod tests {
             "at least one paint during the reveal reported needs_layout"
         );
 
-        // The settle-frame guarantee (gate-r5-05's landing-frame regression
-        // guard): the *last* layout this shell-honest loop ever runs lands
-        // exactly on the fully-open target height, matching a freshly-built
-        // already-open instance (which starts revealed with no animation at
-        // all, per the module docs) — never a hair short of it.
+        // The landing-frame relayout guard: the *last* layout this
+        // shell-honest loop ever runs lands exactly on the fully-open target
+        // height, matching a freshly-built already-open instance (which starts
+        // revealed with no animation at all, per the module docs) — never a
+        // hair short of it. See docs/REVIEW_FOCUS.md's layout-skip section.
         let open_ref: AccordionView<()> = accordion("Details", body()).open(true);
         let mut w_ref = build(&open_ref);
         let target = layout(&mut w_ref, None);
