@@ -626,7 +626,25 @@ impl Widget for ScrollWidget {
             self.content.height
         };
         self.viewport = Size::new(vw, vh);
-        self.set_offset(self.offset); // re-clamp against new content/viewport
+        // Invariant: an in-flight gesture/settle owns an out-of-range offset;
+        // layout must not snap it. While `scrolling` (an active past-slop drag)
+        // or `settling` (the post-release decay back to the edge) is true,
+        // `self.offset` legitimately carries the resisted past-edge overscroll —
+        // re-clamping it here would snap the child to rest mid-gesture, and the
+        // next pointer `Move` (or settle tick) would re-apply the displacement,
+        // producing a visible alternation between rest and dragged positions at
+        // display rate on a page where something else requests layout every
+        // frame (device-gate G6, the "phantom clone" bug). Only the clamp is
+        // conditional: origin sync and the viewport/content bookkeeping above
+        // still run unconditionally either way. A resize mid-drag (content or
+        // viewport shrinking under an out-of-range offset) still resolves
+        // correctly without an immediate clamp here: `Up`'s handler always
+        // recomputes `scroll_info()`/settles/flings off the freshly-updated
+        // `max_offset`, and any non-drag layout after the gesture ends clamps
+        // normally on its own next pass.
+        if !self.scrolling && !self.settling {
+            self.set_offset(self.offset); // re-clamp against new content/viewport
+        }
         self.sync_child_origin();
         bc.constrain(self.viewport)
     }
@@ -1235,5 +1253,74 @@ mod tests {
         );
         assert_eq!(w.offset(), 0.0, "Cancel snaps the surface back into range");
         assert!(!w.settling);
+    }
+
+    // --- Device-gate G6 (the "phantom clone" bug): a layout pass mid-gesture
+    // must not snap an out-of-range offset back into range. ---
+
+    #[test]
+    fn layout_mid_drag_preserves_top_overscroll() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
+        assert!(w.scrolling);
+        // Drag 20px further down past the already-at-top edge → resisted overscroll.
+        dispatch(&mut w, &ev(PointerPhase::Move, 110.0), 32.0);
+        assert_eq!(
+            w.offset(),
+            -10.0,
+            "resisted overscroll before the layout pass"
+        );
+
+        // A layout pass fires mid-drag (e.g. a sibling requesting relayout every
+        // frame, like a wavy progress indicator). Without the fix this snaps the
+        // child back to rest (offset 0.0) — the phantom-clone bug: the next
+        // pointer Move re-applies the displacement, so the presented frame
+        // alternates between rest and dragged at display rate.
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+        assert_eq!(
+            w.offset(),
+            -10.0,
+            "a layout pass mid-drag must not snap the overscroll back into range"
+        );
+        assert!(w.scrolling, "still an active drag after the layout pass");
+    }
+
+    #[test]
+    fn layout_mid_settle_preserves_decaying_overscroll() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 290.0), 32.0); // raw -200 → -100
+        assert_eq!(w.offset(), -100.0, "past the refresh trigger (|-100| > 64)");
+        dispatch(&mut w, &ev(PointerPhase::Up, 290.0), 48.0);
+        assert!(
+            w.settling,
+            "an overscrolled release enters the settle animation"
+        );
+        assert!(!w.is_flinging());
+
+        // Advance one settle tick: the offset has eased toward the edge but has
+        // not arrived yet.
+        let still_settling = w.settle_tick(16.0);
+        assert!(still_settling);
+        let after_tick = w.offset();
+        assert!(
+            after_tick < 0.0,
+            "one settle tick eases toward the edge but is still out of range"
+        );
+
+        // A layout pass fires mid-settle. Without the fix this snaps the
+        // decaying offset straight to 0.0, visibly skipping the rest of the
+        // settle animation (the same bug class as the mid-drag case above).
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+        assert_eq!(
+            w.offset(),
+            after_tick,
+            "a layout pass mid-settle must not snap the decaying overscroll back into range"
+        );
+        assert!(w.settling, "still settling after the layout pass");
     }
 }
