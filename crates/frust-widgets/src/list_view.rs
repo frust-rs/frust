@@ -2068,11 +2068,15 @@ impl ListViewWidget {
     /// **any** physics — a clamping one can never displace even if its
     /// simulation overshoots, while a bouncing one (rejecting nothing) is free
     /// to run past the edge and back. Mirrors
-    /// [`crate::ScrollWidget::drive_ballistic`].
+    /// [`crate::ScrollWidget::drive_ballistic`], including its early stop for a
+    /// curve that is [pinned
+    /// outward](ListViewWidget::ballistic_is_pinned_outward) and the handoff of
+    /// any leftover pull to the settle
+    /// ([`ListViewWidget::settle_ballistic_residual`]).
     fn drive_ballistic(&mut self, now: FrameTime) {
-        let Some((proposed, done)) = self.ballistic.as_ref().map(|state| {
+        let Some((proposed, velocity, done)) = self.ballistic.as_ref().map(|state| {
             let t = state.elapsed_secs(now);
-            (state.sim.x(t), state.sim.is_done(t))
+            (state.sim.x(t), state.sim.dx(t), state.sim.is_done(t))
         }) else {
             return;
         };
@@ -2084,8 +2088,38 @@ impl ListViewWidget {
         self.overscroll = allowed - self.offset;
         self.edge_pull = self.overscroll + rejected;
         self.sync_child_origins();
-        if done {
+        if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
             self.ballistic = None;
+            self.settle_ballistic_residual();
+        }
+    }
+
+    /// Whether the running simulation can no longer move anything on screen —
+    /// its proposal is outside the range, the physics rejected **all** of that
+    /// excess, and the curve is still travelling further out. See
+    /// [`crate::ScrollWidget::ballistic_is_pinned_outward`] for the full
+    /// contract and why the test is deliberately conservative.
+    ///
+    /// One caveat local to this widget: `max_offset` is a *converging* estimate
+    /// in variable-extent mode, so a fling stopped here against an
+    /// under-estimated end stays stopped rather than resuming when later
+    /// measurements push the end out. Accepted — the offset is already pinned
+    /// at that estimated end for as long as the estimate holds, so the
+    /// difference is a fling that ends where the surface had already stopped
+    /// moving.
+    fn ballistic_is_pinned_outward(&self, proposed: f64, rejected: f64, velocity: f64) -> bool {
+        let excess = proposed - proposed.clamp(0.0, self.max_offset());
+        excess != 0.0 && rejected == excess && velocity * excess > 0.0
+    }
+
+    /// Hand a residual [`ListViewWidget::edge_pull`] left behind by a finished
+    /// ballistic to the release-settle, so it decays on [`SETTLE_DECAY`]
+    /// exactly as a drag release's pull does instead of standing on screen
+    /// until the next `Down`/wheel/`Cancel`. Mirrors
+    /// [`crate::ScrollWidget::settle_ballistic_residual`], guard and all.
+    fn settle_ballistic_residual(&mut self) {
+        if self.edge_pull.abs() > SETTLE_STOP_PX {
+            self.settling = true;
         }
     }
 
@@ -6604,6 +6638,127 @@ mod tests {
         assert!(
             painted_transforms(&mut root, ms).is_empty(),
             "…so paint pushes no transform at all — back to identity"
+        );
+    }
+
+    /// The one transform a bare fixture's own `paint` pushes for the stretch,
+    /// as `(anchor_y, scale_y)` off the
+    /// `translate(anchor)·scale(1, s)·translate(−anchor)` sandwich — the twin
+    /// of `scroll.rs`'s `painted_stretch`, over a widget with no materialized
+    /// rows so the stretch is the whole scene. `None` when paint pushed none.
+    ///
+    /// **At rest only**: `paint` pumps the animation clock, so calling this
+    /// mid-flight would reseed it against this context's zero frame time.
+    fn painted_stretch_at_rest(w: &mut ListViewWidget) -> Option<(f64, f64)> {
+        let mut ctx = PaintCtx::new(Point::ZERO, w.viewport);
+        let mut scene = crate::test_support::RecordingScene::default();
+        w.paint(&mut ctx, &mut scene);
+        assert_eq!(
+            scene.transforms.len(),
+            scene.transform_pops as usize,
+            "every pushed transform must be popped in the same paint"
+        );
+        let [a, b, c, d, e, f] = scene.transforms.first()?.as_coeffs();
+        assert_eq!(
+            [a, b, c, e],
+            [1.0, 0.0, 0.0, 0.0],
+            "a scroll-axis-only scale: no x scale, no skew, no x translation"
+        );
+        Some((f / (1.0 - d), d))
+    }
+
+    /// The `ScrollView` twin of this test lives in `scroll.rs`, as
+    /// `clamping_fling_into_the_edge_settles_the_stretch`.
+    #[test]
+    fn clamping_fling_into_the_edge_settles_the_stretch() {
+        use crate::physics::Tolerance;
+        use crate::physics::simulation::ClampingScrollSimulation;
+
+        // The shipped Android pairing, run on the host: parked 100px short of
+        // the bottom, released at 1000 px/s straight into it. The clamping
+        // curve is unbounded, so the driver pins the offset and routes the
+        // whole overshoot into `edge_pull` — the release must not leave that
+        // pull, and the stretch it paints, standing. A bare fixture (no rows
+        // materialized): this pins the release/settle arithmetic, not
+        // windowing.
+        let mut w = ListViewWidget::new(1000, 50.0);
+        w.viewport = Size::new(200.0, 200.0);
+        w.physics = Rc::new(Clamping::new());
+        w.effect = OverscrollEffect::Stretch;
+        let bottom = w.max_offset();
+        dispatch_list(&mut w, &wheel(bottom - 100.0), 0.0);
+        assert_eq!(w.offset(), bottom - 100.0, "parked 100px short of the end");
+
+        dispatch_list(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 68.0), 16.0); // 32px > slop
+        dispatch_list(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch_list(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        assert_close(release_velocity(&w), 1000.0, 1e-9, "the release velocity");
+        assert!(w.ballistic.is_some(), "…as a real ballistic curve");
+
+        let curve = ClampingScrollSimulation::new(
+            bottom - 100.0,
+            1000.0,
+            ClampingScrollSimulation::DEFAULT_FRICTION,
+            Tolerance::for_device_pixel_ratio(METRICS_FALLBACK_DPR),
+        );
+        assert!(
+            curve.final_x() > bottom + 100.0,
+            "the spline must overshoot the extent by >100px: {}",
+            curve.final_x()
+        );
+        let spline_frames = (curve.duration() * 1000.0 / 16.0).ceil();
+
+        let mut ms = 100.0;
+        let mut frames = 0.0;
+        let mut ballistic_frames = 0.0;
+        let mut peak = 0.0f64;
+        loop {
+            let mut ctx = PaintCtx::for_test(
+                Point::ZERO,
+                w.viewport,
+                FrameTime::from_nanos((ms * 1_000_000.0) as u64),
+            );
+            w.pump_fling(&mut ctx);
+            peak = peak.max(w.edge_pull.abs());
+            if w.ballistic.is_some() {
+                ballistic_frames += 1.0;
+            }
+            ms += 16.0;
+            frames += 1.0;
+            assert!(
+                frames < 2_000.0,
+                "the release never came to rest: edge_pull {}",
+                w.edge_pull
+            );
+            if !ctx.needs_frame() {
+                break;
+            }
+        }
+
+        assert!(
+            peak > 1.0,
+            "the fling must actually reach the edge for this to mean anything: {peak}"
+        );
+        assert_close(
+            w.offset(),
+            bottom,
+            1e-9,
+            "the offset ends pinned at the end",
+        );
+        assert_eq!(
+            w.overscroll, 0.0,
+            "the windowing offset carries no leftover"
+        );
+        assert_eq!(w.edge_pull, 0.0, "a finished fling leaves no pull standing");
+        assert_eq!(
+            painted_stretch_at_rest(&mut w),
+            None,
+            "…so paint pushes no transform at all — back to identity"
+        );
+        assert!(
+            ballistic_frames < spline_frames / 2.0,
+            "the pinned curve ran {ballistic_frames} frames of a {spline_frames}-frame spline"
         );
     }
 }

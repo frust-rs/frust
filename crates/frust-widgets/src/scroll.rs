@@ -634,8 +634,11 @@ pub struct ScrollWidget {
     /// Re-derived from [`ScrollWidget::drag_position`] on every drag move
     /// (never summed across moves, which would strand a rejected pull the
     /// finger has since eased back), re-seeded from the live displacement on
-    /// `Down`, decayed by the release-settle, and zeroed by the wheel/`Cancel`
-    /// hard clamps.
+    /// `Down`, re-derived again on every ballistic pump, decayed by the
+    /// release-settle, and zeroed by the wheel/`Cancel` hard clamps. A
+    /// ballistic that ends with a pull outstanding hands it to that same settle
+    /// ([`ScrollWidget::settle_ballistic_residual`]) rather than leaving it
+    /// standing — the settle is the only path back to `0.0` that animates.
     pub(crate) edge_pull: f64,
     /// A generic ballistic simulation handed back by
     /// [`ScrollPhysics::create_ballistic_simulation`] on release, or `None` —
@@ -986,6 +989,46 @@ impl ScrollWidget {
         }
     }
 
+    /// Whether the running simulation can no longer move anything on screen:
+    /// the position it proposed sits outside the range, the physics rejected
+    /// **all** of that excess (so the painted offset is already pinned at the
+    /// edge), and the curve is still travelling further out. Nothing it reports
+    /// after that can reach the offset, so the driver ends it here rather than
+    /// asking the shell for the rest of the spline's worth of frames — an
+    /// Android-style fling into an edge otherwise pumps a second of them with
+    /// the surface stock-still.
+    ///
+    /// **Deliberately conservative.** A *partial* rejection (a physics holding
+    /// some of the excess) and an inward velocity each keep the simulation
+    /// running, because either can still bring the position back in range: an
+    /// edge spring released outward crosses back within a few frames, and only
+    /// the fully-rejected-and-still-outward case is one-way for every curve in
+    /// [`crate::physics::simulation`]. The comparison against the raw excess is
+    /// exact rather than tolerant for the same reason — a physics whose
+    /// rejection merely rounds to the excess keeps the old pump-to-done
+    /// behavior instead of being guessed at.
+    fn ballistic_is_pinned_outward(&self, proposed: f64, rejected: f64, velocity: f64) -> bool {
+        let excess = proposed - proposed.clamp(0.0, self.max_offset());
+        excess != 0.0 && rejected == excess && velocity * excess > 0.0
+    }
+
+    /// Hand a residual [`ScrollWidget::edge_pull`] left behind by a finished
+    /// ballistic to the release-settle, so it decays on [`SETTLE_DECAY`]
+    /// exactly as a drag release's pull does instead of standing on screen
+    /// until the next `Down`/wheel/`Cancel`. Only the *rejected* half can be
+    /// left over — the offset is wherever the simulation put it — and
+    /// [`ScrollWidget::settle_tick`] already decays that half on its own curve.
+    ///
+    /// A simulation that ends in range leaves nothing to settle and this is a
+    /// no-op: the guard is [`SETTLE_STOP_PX`], the same distance `settle_tick`
+    /// itself calls settled, so a bouncing spring's sub-pixel float residue
+    /// never arms an animation that would stop on its first tick.
+    fn settle_ballistic_residual(&mut self) {
+        if self.edge_pull.abs() > SETTLE_STOP_PX {
+            self.settling = true;
+        }
+    }
+
     /// Advance a physics-supplied [`Simulation`] to frame time `now`: the
     /// position it reports, minus whatever
     /// [`ScrollPhysics::apply_boundary_conditions`] rejects of it. Subtracting
@@ -994,12 +1037,15 @@ impl ScrollWidget {
     /// simulation overshoots, while a bouncing one (rejecting nothing) is free
     /// to run past the edge and back.
     ///
-    /// Clears the simulation once it reports itself done, which is what stops
-    /// the pump asking for frames.
+    /// Clears the simulation once it reports itself done — or once it is
+    /// [pinned outward](ScrollWidget::ballistic_is_pinned_outward) and can
+    /// never move the offset again — which is what stops the pump asking for
+    /// frames, and hands any pull the rejection left behind to the settle
+    /// ([`ScrollWidget::settle_ballistic_residual`]).
     fn drive_ballistic(&mut self, now: FrameTime) {
-        let Some((proposed, done)) = self.ballistic.as_ref().map(|state| {
+        let Some((proposed, velocity, done)) = self.ballistic.as_ref().map(|state| {
             let t = state.elapsed_secs(now);
-            (state.sim.x(t), state.sim.is_done(t))
+            (state.sim.x(t), state.sim.dx(t), state.sim.is_done(t))
         }) else {
             return;
         };
@@ -1009,8 +1055,9 @@ impl ScrollWidget {
         self.offset = proposed - rejected;
         self.edge_pull = self.displacement() + rejected;
         self.sync_child_origin();
-        if done {
+        if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
             self.ballistic = None;
+            self.settle_ballistic_residual();
         }
     }
 
@@ -1021,13 +1068,16 @@ impl ScrollWidget {
     /// would otherwise idle). A fling stops once [`ScrollWidget::tick`] brings it
     /// to rest (`|velocity|` below [`FLING_STOP`], or a scroll bound reached); a
     /// settle stops once [`ScrollWidget::settle_tick`] reaches the edge; a
-    /// simulation stops when it reports itself done. Because
-    /// this path carries no [`EventCtx`], an offset change here records a pending
-    /// `on_scroll` notification delivered on the next event.
+    /// simulation stops when it reports itself done or is pinned outward.
+    /// Because this path carries no [`EventCtx`], an offset change here records
+    /// a pending `on_scroll` notification delivered on the next event.
     ///
-    /// The three are mutually exclusive by construction — a release picks one —
-    /// and under [`RubberBand`](crate::RubberBand) the simulation arm is never
-    /// taken at all.
+    /// The three are mutually exclusive at any one instant — a release picks
+    /// one — though a simulation ending against an edge hands the pull it left
+    /// behind to the settle for the frames after it
+    /// ([`ScrollWidget::settle_ballistic_residual`]). Under
+    /// [`RubberBand`](crate::RubberBand) the simulation arm is never taken at
+    /// all.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
         if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
             self.last_anim = None;
@@ -2871,6 +2921,94 @@ mod tests {
             w.child.origin().y,
             0.0,
             "and the content itself never moves"
+        );
+    }
+
+    #[test]
+    fn clamping_fling_into_the_edge_settles_the_stretch() {
+        use crate::physics::Tolerance;
+        use crate::physics::simulation::ClampingScrollSimulation;
+
+        // The shipped Android pairing, run on the host: parked 100px short of
+        // the bottom, released at 1000 px/s straight into it. The clamping
+        // curve is unbounded (`physics::parity`'s *Why Clamping needs no
+        // clamped simulation adapter*), so the driver pins the offset and
+        // routes the whole overshoot into `edge_pull` — the release must not
+        // leave that pull, and the stretch it paints, standing.
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        w.physics = Rc::new(Clamping::new());
+        w.effect = OverscrollEffect::Stretch;
+        dispatch(&mut w, &scroll(50.0, false, 800.0), 0.0);
+        assert_eq!(w.offset(), 800.0, "parked 100px short of the 900px bottom");
+
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 68.0), 16.0); // 32px > slop → takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 68.0), 32.0);
+        dispatch(&mut w, &ev(PointerPhase::Up, 68.0), 32.0);
+        let released = w.ballistic.as_ref().expect("a clamping release flings");
+        assert_close(released.sim.dx(0.0), 1000.0, 1e-9, "the release velocity");
+
+        // The same curve, spelled out: it runs far past the extent, which is
+        // what makes the pull it feeds `edge_pull` a real one.
+        let curve = ClampingScrollSimulation::new(
+            800.0,
+            1000.0,
+            ClampingScrollSimulation::DEFAULT_FRICTION,
+            Tolerance::for_device_pixel_ratio(METRICS_FALLBACK_DPR),
+        );
+        assert!(
+            curve.final_x() > 1000.0,
+            "the spline must overshoot the 900px extent by >100px: {}",
+            curve.final_x()
+        );
+        let spline_frames = (curve.duration() * 1000.0 / 16.0).ceil();
+
+        // Pump the shared frame clock until nothing asks for another frame.
+        let mut ms = 100.0;
+        let mut frames = 0.0;
+        let mut ballistic_frames = 0.0;
+        let mut peak = 0.0f64;
+        loop {
+            let mut ctx = PaintCtx::for_test(Point::ZERO, w.viewport, frame_time(ms));
+            w.pump_fling(&mut ctx);
+            peak = peak.max(w.edge_pull.abs());
+            if w.ballistic.is_some() {
+                ballistic_frames += 1.0;
+            }
+            ms += 16.0;
+            frames += 1.0;
+            assert!(
+                frames < 2_000.0,
+                "the release never came to rest: edge_pull {}",
+                w.edge_pull
+            );
+            if !ctx.needs_frame() {
+                break;
+            }
+        }
+
+        assert!(
+            peak > 1.0,
+            "the fling must actually reach the edge for this to mean anything: {peak}"
+        );
+        assert_close(
+            w.offset(),
+            900.0,
+            1e-9,
+            "the offset ends pinned at the edge",
+        );
+        assert_eq!(w.edge_pull, 0.0, "a finished fling leaves no pull standing");
+        assert_eq!(
+            painted_stretch(&mut w),
+            None,
+            "…so paint pushes no transform at all — back to identity"
+        );
+
+        // And the simulation itself stops the moment it is pinned outward,
+        // rather than pumping dead frames for the rest of the spline.
+        assert!(
+            ballistic_frames < spline_frames / 2.0,
+            "the pinned curve ran {ballistic_frames} frames of a {spline_frames}-frame spline"
         );
     }
 
