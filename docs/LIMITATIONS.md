@@ -3053,31 +3053,44 @@ scroll offset is not held during a refresh" section (incl. the `on_scroll` one-e
 
 ### `material-fab-fixed-tier-icon-centering` — a tight-constrained FAB paints its icon off-center
 
-**Observed**: `FabWidget` lays its icon out against its `FabSize` tier's own container box, not the
-widget's actual constrained box. A FAB rendered at a tight-constrained size that doesn't match its
-nominal tier paints its icon off-center inside the visually smaller box. Measured on
-`plugins/material/src/toolbar.rs`'s scroll-hide FAB morph (80dp→56dp, tight-constrained rather than
-paint-rescaled so layout/visual/hit rects stay one): ~12dp of icon offset at the 80dp end. The
+**Observed**: `FabWidget` lays its icon out against its `FabSize` tier's own container box
+(`self.size.container()`), not the box the widget was actually laid out at — `Widget for
+FabWidget::layout` never re-derives the icon-centering math from the incoming `bc`. A FAB rendered
+at a tight-constrained size that doesn't match its nominal tier paints its icon off-center inside
+the visually smaller (or larger) box. Measured on `plugins/material/src/toolbar.rs`'s scroll-hide
+FAB morph (80dp→56dp, tight-constrained rather than paint-rescaled so layout/visual/hit rects stay
+one): ~12dp of icon offset at the 80dp end — unaffected by the separate baseline icon-centering fix
+(`crates/frust-widgets/src/icon.rs`, gate round 4, merge `568ff5ab`): that fix makes `IconWidget`
+scale/center its glyph inside its own laid-out box, but here the icon's own tight box
+(`self.size.icon_size()`, e.g. 24dp for `Medium`) already matches its configured requested size in
+every current caller, so the fix is a no-op at this call site — the mismatch is entirely
+`FabWidget`'s own `container` variable, which stays the nominal tier size regardless of `bc`. The
 Phase-2 `corner_radius` shape-morph seam on `fab.rs` — built so a FAB-family morph could ride it —
 was deliberately bypassed for the same reason: `fab_menu`'s Square↔Circle trigger morph hand-rolls
 its own morph via `shapes::Morph` instead of consuming that seam, specifically to avoid reproducing
-this degrade on a second surface. That leaves `corner_radius` with zero consumers in the tree,
-pending a keep-or-remove call.
+this degrade on a second surface. That leaves `corner_radius` with zero consumers in this crate
+today — resolved as **keep** (see *Why accepted*), not a signal to remove it.
 
 **Applies to**: any FAB rendered at a size other than its nominal `FabSize` tier — today only
 `toolbar.rs`'s 80dp→56dp scroll morph. `fab_menu`'s trigger avoids the class entirely by not using the
 seam.
 
-**Why accepted / fix direction**: closing it needs a `FabView` seam that exposes the actual
-container size continuously (a `container_size` prop) so icon layout can track the constrained box
-instead of the nominal tier — deferred as a FINDING candidate rather than attempted inside the
-toolbars rework. `corner_radius`'s now-zero-consumer status is a separate, pending decision (keep it
-for a future consumer that accepts this degrade, or remove it) — recorded here so the two facts
-travel together instead of being lost between phases.
+**Why accepted / fix direction**: closing the centering bug needs a `FabView` seam that exposes the
+actual container size continuously (a `container_size` prop) so icon layout can track the
+constrained box instead of the nominal tier — deferred as a FINDING candidate rather than attempted
+inside the toolbars rework. `corner_radius`'s zero-consumer status is **resolved, not pending**:
+the seam stays. [`FabView::corner_radius`](`fab.rs:556`) is the public mirror of the reference's
+`M3EFab.cornerRadius` prop, and this arc's own success criterion is parity with the reference's
+public prop surface, not in-crate usage — "no consumer" only ever meant `fab_menu` doesn't call
+into it, not that the prop lacks a reason to exist. Recorded here so the two facts — the centering
+bug and the seam's resolved fate — travel together instead of being lost between phases.
 
-**Evidence**: `plugins/material/src/toolbar.rs` module doc (FAB morph section); `plugins/material/src/fab_menu.rs`
-module doc (trigger-morph rationale); Phase-4 ledger,
-`workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
+**Evidence**: `plugins/material/src/toolbar.rs` module doc (FAB morph section);
+`plugins/material/src/fab.rs` (`Widget for FabWidget::layout`'s `self.size.container()`;
+`FabView::corner_radius` at `fab.rs:556` and its module doc's "Corner-radius override seam"
+section); `plugins/material/src/fab_menu.rs` module doc (trigger-morph rationale);
+`crates/frust-widgets/src/icon.rs` (gate round 4 fix, merge `568ff5ab` — independence check);
+Phase-4 ledger, `workflow/plans/features/material-3-expressive/phase-4/TASKS.md` (wave 2a/2b notes).
 
 ---
 
@@ -3108,6 +3121,120 @@ key-dismiss arm (a `BackHandler`-shaped Escape/back listener) alongside the exis
 
 **Evidence**: `plugins/material/src/navigation_rail.rs` module doc's "Modal presentation: painted
 in-widget, not through the modal host" section (incl. the upstream doc-comment-vs-code note).
+
+---
+
+### `material-dynamic-color-injection-only` — Material You dynamic color is unreachable; only a seed-color injection path exists
+
+**Observed**: Material You's per-device wallpaper-derived dynamic color is an OS platform-channel
+capability, unreachable from `frust_material` under the design-system plugin charter (frust +
+kurbo/peniko only, no OS reach — `docs/PLUGINS_ARCHITECTURE.md`'s Design-System Plugins charter).
+The API floated at plan time (`MaterialTheme::with_scheme_override(ColorScheme)`) did not ship —
+there is no `MaterialTheme` type anywhere in this crate. The only injection path that exists is
+`theme_from_seed(seed: Color, brightness: Brightness) -> Theme` (`plugins/material/src/tokens/
+hct.rs:966`): an app that obtains an OS accent color some other way (no such OS-facing plugin
+exists yet) can feed it in as a seed and push the regenerated `Theme` through the framework's own
+`set_default_theme`/`set_app_theme` seams — there is no seam that accepts a caller-built
+`ColorScheme` directly, only a single seed color.
+
+**Applies to**: any `frust_material` app wanting true Material You theming.
+`examples/material3-demo`'s theme settings screen reflects the gap directly: its "Dynamic color"
+row is shown, disabled, with a "Not available — frust has no device wallpaper palette to read"
+supporting line, rather than wired live or dropped from the list.
+
+**Why accepted / fix direction**: the plugin charter bars OS reach outright, so this crate cannot
+close the gap itself; a real fix needs a separate OS-facing plugin (a wallpaper-palette or
+platform-theme capability) to source the color, which `theme_from_seed` could then consume as its
+seed — out of scope for this arc.
+
+**Evidence**: `plugins/material/src/tokens/hct.rs:966` (`theme_from_seed`; no
+`with_scheme_override`/`MaterialTheme` anywhere in the crate); `examples/material3-demo/src/pages/
+theme_config_page.rs`'s `toggles` (the disabled "Dynamic color" row and its supporting text);
+`examples/material3-demo/src/theme/settings.rs` module doc ("Dynamic (device-sourced) coloring is
+not modelled at all"); PLAN.md Scope decision 2
+(`workflow/plans/features/material-3-expressive/PLAN.md:110-114`).
+
+---
+
+### `material-no-focus-traversal` — no keyboard tab-order/traversal between controls; overlays claim focus only on first interaction
+
+**Observed**: the catalog ports per-widget focus **visuals** throughout (state-layer focus rings
+and outlines, gated on `PaintCtx::has_focus`), but the framework underneath has no keyboard
+focus-**traversal** system — no Tab ring, no `autofocus`, no `FocusNode` equivalent — because the
+baseline focus model is per-widget claim-based (a widget claims focus itself, from its own event
+pass, in response to a `Down`) with no orchestration moving focus between controls or on mount.
+`button/mod.rs` and `split_button.rs` each record it verbatim as an "Honest limitation" ("frust has
+no keyboard focus traversal … no autofocus, no `FocusNode`, no Tab-ring"); `slider/mod.rs`'s thumb
+ring is ported and painted, but "[n]othing focuses a slider today" for the same reason.
+`dropdown/mod.rs`'s Up/Down/Enter/Escape panel handling is gated on the identical claim-based
+model — the panel only sees key events once it holds focus, which it claims on a press inside
+itself, so a caller must complete one pointer interaction with the panel before the arrows do
+anything; the module doc names this "no auto-focus-on-appear hook and no focus-traversal seam in
+the framework."
+
+**Applies to**: every interactive `frust_material` component — the underlying claim-based focus
+model is framework-wide, not a per-widget choice. Module docs call the gap out explicitly for
+buttons, split button, sliders, and the dropdown panel; every other focus-visual seam in the
+catalog (menus, dialogs, text fields) rides the identical model without its own restatement. See
+`overlay-no-auto-focus-on-appear` for the sibling gap this entry does not re-cover: no widget
+(material's `dialog`/`search` included) can claim focus programmatically **on mount** either —
+that entry is the register's existing home for the on-appear half; this entry covers the
+between-controls traversal half.
+
+**Why accepted / fix direction**: framework-level work — a real fix is a `frust-widgets`
+Tab-ring/traversal primitive (focus order, Tab/Shift-Tab movement) plus a claim-on-mount hook,
+neither of which exists yet. Every current design-system component ports its focus **geometry**
+ahead of that primitive so it activates for free the day traversal lands, rather than blocking the
+port on it.
+
+**Evidence**: `plugins/material/src/button/mod.rs` module doc's "Focus ring" section ("Honest
+limitation"); `plugins/material/src/split_button.rs` module doc ("Honest limitation, the same one
+[`mod@crate::button`] records"); `plugins/material/src/slider/mod.rs` module doc's "Focus outline: geometry
+ported, reachability limited" section; `plugins/material/src/dropdown/mod.rs` module doc's
+"Keyboard, and the focus gap" section; `overlay-no-auto-focus-on-appear` (this register, above).
+
+---
+
+### `material-descoped-flutter-isms` — three Flutter-framework mechanisms the port doesn't attempt
+
+**Observed**: three Flutter-framework-level mechanisms the M3E reference leans on have no
+counterpart in this workspace; each affected component's own module doc records the descope in
+place rather than silently dropping the behavior.
+
+- **Form-field validation + state restoration** (`dropdown`/`dropdown_menus`): the reference wraps
+  its tree in a Flutter `FormField` for `validator`/`autovalidateMode`, rendering an error line and
+  recoloring the border through `formState.hasError`; this workspace has no `Form`/`FormField`
+  equivalent to register with, and Flutter's state-restoration plumbing has no counterpart at all.
+  An app that needs validation renders its own message and drives `DropdownFieldView::error` itself.
+- **Native platform menu style** (`split_button`): upstream's third menu style
+  (`M3ESplitButtonMenuStyle.native`, Flutter's own `showMenu` platform route) is descoped — this
+  framework hosts no platform menu to route to. Only the popup and bottom-sheet styles ship.
+- **Text-selection toolbar** (`text_field`): the M3E text field paints decoration around the
+  framework's own `frust::TextInputView` and defers every editing concern, selection included, to
+  it; the baseline editable has no context-menu/selection-toolbar contract to pair with a selection
+  at all — a secondary press "moves nothing rather than silently relocating a caret the user cannot
+  see a menu for," because "frust has no context-menu contract to pair that with yet."
+  `frust_material` inherits this baseline-scope gap rather than adding its own toolbar.
+
+**Applies to**: `frust_material::dropdown`/`dropdown_menus` (no validator/autovalidateMode, no
+restored field state); `split_button` (no native platform menu style — an app on a platform whose
+OS ships one sees the popup or bottom-sheet style instead); every `frust_material::text_field` (no
+copy/cut/paste/select-all toolbar on a text selection, on any platform).
+
+**Why accepted**: a deliberate v1 scope line drawn at plan time (PLAN.md Scope decision 6,
+`workflow/plans/features/material-3-expressive/PLAN.md:126-128`), not a bug — closing any of the
+three needs framework-level work (a `Form`/`FormField` primitive plus restoration plumbing, a
+platform-menu host, or a context-menu/selection-toolbar contract on the baseline text input), none
+of which has a caller beyond this port yet to justify building ahead of need.
+
+**Evidence**: `plugins/material/src/dropdown/mod.rs` module doc's "Descoped: form-field validation
+and restoration" section; `plugins/material/src/split_button.rs`'s header comment ("upstream's
+third menu style … is descoped"); `crates/frust-widgets/src/textinput.rs:1616-1622` (no
+context-menu contract, quoted verbatim above); `plugins/material/src/text_field.rs` module doc's
+"Wrapping the baseline, not forking it" section.
+
+---
+
 ### `scroll-physics-stretch-affine-approx` — `OverscrollEffect::Stretch` is an affine approximation, not Android's shader
 
 **Observed**: `OverscrollEffect::Stretch` paints a whole-viewport, scroll-axis-only affine scale
@@ -3140,7 +3267,10 @@ nearest page/item boundary) exists in this crate. The `ScrollPhysics` trait's ch
 is written.
 
 **Applies to**: any app wanting a paged/carousel-style scroll surface built on the baseline
-`ScrollView`/`ListView` rather than a hand-rolled widget.
+`ScrollView`/`ListView` rather than a hand-rolled widget — concretely, both catalog carousels
+(`frust-shadcn`'s `carousel()` and `frust_material`'s `carousel` family) hand-roll their own snap
+engines instead, precisely because this physics doesn't exist to compose over yet (see
+`scroll-physics-shadcn-carousel-unmigrated` for both).
 
 **Why accepted**: the seam was built parity-first (matching the platforms' own default feel); a snap
 physics is straightforward follow-up work on the same trait, not a design gap.
@@ -3150,24 +3280,36 @@ are the only concrete `ScrollPhysics` impls); `mod.rs`'s `ScrollPhysics` trait d
 
 ---
 
-### `scroll-physics-shadcn-carousel-unmigrated` — `frust-shadcn`'s carousel still hand-rolls its own scroll engine
+### `scroll-physics-shadcn-carousel-unmigrated` — two catalog carousels still hand-roll their own scroll engines, neither on `crate::physics`
 
 **Observed**: `plugins/shadcn/src/components/carousel.rs` (the shadcn/ui Carousel port) implements
 its own drag capture, snap-to-nearest-item settle, and flick detection directly — it does not sit on
 `crate::physics::ScrollPhysics`/`Simulation`, `ScrollView`, or `ListView`. It predates and is
-untouched by the scroll-physics seam.
+untouched by the scroll-physics seam. `plugins/material/src/carousel/` (the M3E hero/contained/
+uncontained carousel, BSD-3-Clause-derived from Flutter's `CarouselView`) is a second, independent
+occurrence of the same pattern: its own weighted-slot layout (`layout.rs`) plus its own release/snap
+math (`physics.rs`'s `snap_offset`/`SETTLE_DURATION` ramp, advanced by hand from the shell frame
+clock) drive drag capture and settle directly, with no dependency on `crate::physics`, `ScrollView`,
+or `ListView` either — it was ported after shadcn's carousel and made the identical v1 choice
+independently rather than adopting shadcn's engine or waiting on a shared one.
 
-**Applies to**: `frust-shadcn`'s `carousel()`; its feel (snap timing, flick threshold) is tuned and
-tested independently of every other scroll surface in the framework and cannot pick up a
-`ScrollPhysics` change (e.g. a future snap physics, `scroll-physics-snap-not-shipped`) automatically.
+**Applies to**: `frust-shadcn`'s `carousel()` and `frust_material`'s `carousel`/`extended_carousel`;
+each one's feel (snap timing, flick threshold, settle curve) is tuned and tested independently of
+every other scroll surface in the framework — including each other — and neither can pick up a
+`ScrollPhysics` change (e.g. a future snap physics, `scroll-physics-snap-not-shipped`)
+automatically.
 
 **Why accepted**: there is no page/fixed-extent snap physics to compose over yet (see
-`scroll-physics-snap-not-shipped`), and embla (the upstream carousel's scroll engine) has no
-frust-side package to wrap — the port's own module docs record the re-implementation as a
-deliberate v1 choice. Migrating onto the physics seam is future work once a snap physics exists.
+`scroll-physics-snap-not-shipped`), and neither upstream's scroll engine (embla for shadcn, M3E's
+own weighted-carousel math for material) has a frust-side package to wrap — both ports' own module
+docs record the re-implementation as a deliberate v1 choice. Migrating either onto the physics seam
+is future work once a snap physics exists; the two hand-rolled engines are not required to converge
+with each other first.
 
 **Evidence**: `plugins/shadcn/src/components/carousel.rs` module docs (*Drag, and what ends it*,
-*Motion*) — no `crate::physics`/`ScrollView`/`ListView` dependency in the file.
+*Motion*); `plugins/material/src/carousel/mod.rs` module docs ("Snapping, and the velocity that
+picks the target") and `plugins/material/src/carousel/physics.rs` module docs ("Ramp shape: a
+duration, not a spring") — no `crate::physics`/`ScrollView`/`ListView` dependency in either carousel.
 
 ---
 
