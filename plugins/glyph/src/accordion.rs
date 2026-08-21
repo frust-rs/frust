@@ -25,12 +25,15 @@
 //! mobile intra-frame layout skip (`docs/ARCHITECTURE.md`'s Frame gate),
 //! layout never re-runs just because paint asked for another frame, and the
 //! revealed height would freeze until something else dirtied the tree. While
-//! the reveal driver is still animating, `paint` instead calls
-//! `PaintCtx::request_layout` (which implies `request_frame`), forcing the
-//! next frame's layout to re-run and pick up the freshly-advanced value —
-//! paint requests layout, the next frame relayouts, and the height tracks the
-//! animation on every platform, gated or not. (`reduce_motion` snaps straight
-//! to the target and requests neither.)
+//! the reveal driver is still animating, `paint` calls `PaintCtx::request_layout`
+//! (which implies `request_frame`), forcing the next frame's layout to re-run
+//! and pick up the freshly-advanced value. That alone would still miss the
+//! driver's *landing* frame — `AnimationController::advance` reports `false`
+//! on the very pass that snaps the value onto its target — so `paint` also
+//! compares the fraction against what it read on the previous call and
+//! requests one more relayout whenever they differ, which covers the landing
+//! pass and the `reduce_motion` snap (which otherwise requests neither) with
+//! the same rule.
 //!
 //! # Token resolution
 //!
@@ -387,13 +390,25 @@ impl Widget for AccordionWidget {
         // revealed height is computed in `layout` from `reveal_value`, so the
         // mobile intra-frame layout skip needs an explicit relayout request
         // to keep the height tracking the animation (see the module docs'
-        // "Content-size-independent height reveal" section).
+        // "Content-size-independent height reveal" section). Gating solely
+        // on `advance`'s return would miss its *landing* frame:
+        // `AnimationController::advance` reports `false` on the very pass
+        // that snaps the value onto its target, so a before/after comparison
+        // catches that pass (and the reduce-motion snap) with one rule; the
+        // truthy-`advance` request above still matters on its own — a
+        // seeding frame (zero elapsed time) can report "still animating"
+        // with no value movement at all, and only that request keeps the
+        // frame pump alive for it.
+        let reveal_before = self.reveal_value;
         if reduce_motion {
             self.reveal.snap();
         } else if self.reveal.advance(ctx.frame_time(), dur, curve) {
             ctx.request_layout();
         }
         self.reveal_value = self.reveal.value().clamp(0.0, 1.0);
+        if self.reveal_value != reveal_before {
+            ctx.request_layout();
+        }
 
         let o = ctx.origin();
         let size = ctx.size();
@@ -759,13 +774,36 @@ mod tests {
             &mut w,
             &mut BuildCtx::new(&mut counter),
         );
-        // One paint under reduce_motion snaps reveal straight to 1.0.
+        // One paint under reduce_motion snaps reveal straight to 1.0. `layout`
+        // last ran against the pre-snap (closed) value, so this pass — even
+        // though it never touches the spring driver — moved a layout-relevant
+        // value and must still request exactly one relayout (gate-r5-05): the
+        // reduce-motion snap is one of the cases the before/after comparison
+        // covers alongside the driver's landing frame.
         let mut ctx =
             PaintCtx::new(Point::ZERO, Size::new(320.0, w.header_height)).with_theme(&theme);
         let mut rec = Recorder::default();
         w.paint(&mut ctx, &mut rec);
         assert_eq!(w.reveal_value, 1.0);
-        assert!(!ctx.needs_frame(), "snapped: no further frames requested");
+        assert!(
+            ctx.needs_layout(),
+            "the snap moved a layout-relevant value, so it must request one relayout"
+        );
+
+        // The relayout a real shell would run on seeing `needs_layout`: the
+        // reported height must reach the target on the snap frame, not some
+        // later one.
+        let snapped_size = layout(&mut w, Some(&theme));
+        assert!((snapped_size.height - (w.header_height + w.body_full_height)).abs() < 1e-9);
+
+        // Settled: no ongoing animation frames follow the one relayout.
+        let mut ctx2 = PaintCtx::new(Point::ZERO, snapped_size).with_theme(&theme);
+        let mut rec2 = Recorder::default();
+        w.paint(&mut ctx2, &mut rec2);
+        assert!(
+            !ctx2.needs_layout(),
+            "a snap requests exactly one relayout, never an ongoing frame request"
+        );
     }
 
     #[test]
@@ -800,6 +838,8 @@ mod tests {
 
         let mut t_ns = 0u64;
         let mut saw_animating_frame = false;
+        let mut last_size =
+            root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
         loop {
             let mut scene = Recorder::default();
             let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
@@ -808,7 +848,8 @@ mod tests {
                 assert!(outcome.needs_frame, "request_layout implies needs_frame");
                 // Re-run layout for the next frame, as a real shell would on
                 // seeing `needs_layout` in the pending change flags.
-                root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
+                last_size =
+                    root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
             } else {
                 break;
             }
@@ -821,6 +862,19 @@ mod tests {
         assert!(
             saw_animating_frame,
             "at least one paint during the reveal reported needs_layout"
+        );
+
+        // The settle-frame guarantee (gate-r5-05's landing-frame regression
+        // guard): the *last* layout this shell-honest loop ever runs lands
+        // exactly on the fully-open target height, matching a freshly-built
+        // already-open instance (which starts revealed with no animation at
+        // all, per the module docs) — never a hair short of it.
+        let open_ref: AccordionView<()> = accordion("Details", body()).open(true);
+        let mut w_ref = build(&open_ref);
+        let target = layout(&mut w_ref, None);
+        assert_eq!(
+            last_size.height, target.height,
+            "the last layout a shell-honest driver runs lands exactly on the target height"
         );
 
         // One more settled paint reports no further layout request.

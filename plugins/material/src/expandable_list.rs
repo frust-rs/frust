@@ -41,18 +41,20 @@
 //! layout skip (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate`), layout does not
 //! re-run merely because paint asked for another frame, so a paint-only
 //! `request_frame` would leave the revealed height frozen while the chevron kept
-//! turning. While any item's reveal is still animating, `paint` therefore calls
-//! [`PaintCtx::request_layout`] (which implies `request_frame`) — the next
-//! frame relayouts and picks up the freshly-advanced fraction, on every platform,
-//! gated or not. `Theme.motion.reduce_motion` snaps straight to the target
-//! instead of springing, but the snap is still a layout-relevant value change:
-//! if the snap actually moved `value` away from what `layout` last saw, `paint`
-//! requests exactly one relayout the same way (never an ongoing frame request,
-//! since the driver is already stopped by the time the snap runs) — otherwise
-//! the item's geometry would stay pinned to its pre-toggle height indefinitely.
-//! This is the same mechanism `frust_glyph::accordion`
-//! documents, and `paint_requests_layout_on_every_reveal_frame` is its
-//! regression guard here.
+//! turning. `paint` records what fraction each item's own last `layout` call
+//! used ([`ExpandableListWidget::laid_out_reveals`]) and, after advancing every
+//! reveal, compares the live values against it: any difference — an ordinary
+//! in-flight frame, the reduce-motion snap, or the driver's *landing* frame —
+//! requests exactly one relayout via [`PaintCtx::request_layout`] (which implies
+//! `request_frame`). Gating solely on [`AnimationController::advance`]'s own
+//! return (still the first line of defense, so a still-in-flight frame with a
+//! zero-delta seed never stalls the pump) would miss the landing frame
+//! specifically: `advance` reports `false` on the very pass that snaps the
+//! controller's value onto its target, so without the comparison the last
+//! geometry `layout` would ever see is a hair short of rest. This is the same
+//! mechanism `frust_glyph::accordion` documents, and
+//! `paint_requests_layout_through_the_settle_frame` is its regression guard
+//! here.
 //!
 //! # Accordion (single-open) vs independent
 //!
@@ -503,6 +505,11 @@ pub struct ExpandableListWidget {
     expanded: BTreeSet<usize>,
     reveals: Vec<Reveal>,
     geometry: Vec<ItemGeometry>,
+    /// The reveal fraction each item's own last `layout` call actually used
+    /// — recorded there, compared against the live value in `paint` so the
+    /// driver's landing frame (which reports "not animating" but still moves
+    /// the value) is never missed. See the module docs' reveal timeline.
+    laid_out_reveals: Vec<f64>,
     outer_radius: f64,
     inner_radius: f64,
     hover_radius: f64,
@@ -583,6 +590,7 @@ impl<State: 'static> View<State> for ExpandableListView<State> {
             expanded: self.expanded.clone(),
             reveals,
             geometry: vec![ItemGeometry::default(); self.items.len()],
+            laid_out_reveals: vec![0.0; self.items.len()],
             outer_radius: self.outer_radius,
             inner_radius: self.inner_radius,
             hover_radius: self.hover_radius,
@@ -639,6 +647,7 @@ impl<State: 'static> View<State> for ExpandableListView<State> {
                 })
                 .collect();
             element.geometry = vec![ItemGeometry::default(); self.items.len()];
+            element.laid_out_reveals = vec![0.0; self.items.len()];
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else if element.expanded != self.expanded {
             for (index, reveal) in element.reveals.iter_mut().enumerate() {
@@ -786,6 +795,7 @@ impl Widget for ExpandableListWidget {
 
         let count = self.item_count();
         self.geometry.resize(count, ItemGeometry::default());
+        self.laid_out_reveals.resize(count, 0.0);
         let mut y = 0.0;
         for index in 0..count {
             let header_bc = BoxConstraints::new(
@@ -809,6 +819,7 @@ impl Widget for ExpandableListWidget {
             self.pods[index * 2 + 1].set_origin(Point::new(BODY_PAD_X, y + header + BODY_PAD_TOP));
 
             let reveal = self.reveals.get(index).map_or(0.0, |r| r.value);
+            self.laid_out_reveals[index] = reveal;
             let height = header + (reveal * body_full).max(0.0);
             self.geometry[index] = ItemGeometry {
                 y,
@@ -836,21 +847,29 @@ impl Widget for ExpandableListWidget {
 
         // Advance every reveal. The item height is computed in `layout` from
         // these fractions, so an in-flight reveal needs an explicit relayout
-        // request, not merely another frame (see the module docs).
+        // request, not merely another frame (see the module docs). Gating
+        // solely on `advance`'s return would miss its landing frame:
+        // `AnimationController::advance` reports `false` on the very pass
+        // that snaps the value onto its target, so without the second check
+        // below the last geometry `layout` ever saw is a hair short of
+        // rest. Comparing against what `layout` actually last ran with
+        // covers that landing pass, the reduce-motion snap, and an ordinary
+        // in-flight frame with one rule — the pattern `crate::button_group`
+        // documents at length.
         let now = ctx.frame_time();
-        let mut animating = false;
-        let mut snapped = false;
         for reveal in &mut self.reveals {
             if reduce_motion {
-                if reveal.value != reveal.target {
-                    snapped = true;
-                }
                 reveal.snap();
             } else if reveal.advance(now) {
-                animating = true;
+                ctx.request_layout();
             }
         }
-        if animating || snapped {
+        if self
+            .reveals
+            .iter()
+            .map(|r| r.value)
+            .ne(self.laid_out_reveals.iter().copied())
+        {
             ctx.request_layout();
         }
 
@@ -1193,11 +1212,16 @@ mod tests {
     // ---- The reveal timeline, and the layout-skip guard -------------------
 
     #[test]
-    fn paint_requests_layout_on_every_reveal_frame_and_stops_once_settled() {
-        // The regression guard for the layout-skip trap: the revealed height is
-        // computed in `layout` from a fraction advanced in `paint`, so every
-        // in-flight frame must ask for a relayout — a paint-only frame request
-        // would freeze the height under the mobile intra-frame layout skip.
+    fn paint_requests_layout_through_the_settle_frame() {
+        // The regression guard for the landing-frame trap (gate-r5-05):
+        // `AnimationController::advance` reports `false` on the very pass
+        // that snaps the value onto its target, so gating solely on that
+        // return would leave the last geometry `layout` ever saw a hair
+        // short of rest. This drives a shell-honest frame loop — `layout`
+        // runs only on a frame the *previous* paint (or rebuild) actually
+        // asked for one, the same contract a real shell honours — so a
+        // silently-skipped landing frame leaves the last recorded height
+        // short of the target instead of landing on it exactly.
         let collapsed: ExpandableListView<()> = expandable_list(items(1));
         let mut w = build(&collapsed);
         layout(&mut w);
@@ -1206,46 +1230,46 @@ mod tests {
 
         let expanded: ExpandableListView<()> = expandable_list(items(1)).expanded([0]);
         let mut counter = 0u64;
-        <ExpandableListView<()> as View<()>>::rebuild(
+        let flags = <ExpandableListView<()> as View<()>>::rebuild(
             &expanded,
             &collapsed,
             &mut w,
             &mut BuildCtx::new(&mut counter),
         );
+        assert!(flags.needs_layout());
 
         let mut frames = 0u32;
         let mut heights = Vec::new();
         let mut t_ms = 0u64;
+        let mut needs_layout = true;
         loop {
-            let (_, needs_layout) = paint_at(&mut w, t_ms, None);
             if !needs_layout {
                 break;
             }
-            frames += 1;
-            // A real shell relayouts on seeing `needs_layout`.
             heights.push(layout(&mut w).height);
-            t_ms += 16;
+            let (_, next_needs_layout) = paint_at(&mut w, t_ms, None);
+            frames += 1;
             assert!(
                 frames < 600,
                 "the reveal should settle well inside 600 frames"
             );
+            needs_layout = next_needs_layout;
+            t_ms += 16;
         }
-        // The frame that settles the spring stops asking for layout, so record
-        // its resting height too.
-        heights.push(layout(&mut w).height);
         assert!(frames > 1, "the reveal spans more than one frame");
         let collapsed_h = header_height();
         let expanded_h = header_height() + body_height();
         // Clamp discipline: an under-damped spring (ζ 0.8) overshoots past its
-        // target, and the reveal reads clamped — so no frame ever reports a
-        // band taller than the measured body (empty space below the content).
+        // target, and the reveal reads clamped — so no laid-out frame ever
+        // reports a band taller than the measured body (empty space below
+        // the content), and the sequence never backslides.
         assert!(
             heights
                 .iter()
                 .all(|h| *h >= collapsed_h - 1e-9 && *h <= expanded_h + 1e-9),
-            "every frame stays inside [{collapsed_h}, {expanded_h}]: {heights:?}"
+            "every laid-out frame stays inside [{collapsed_h}, {expanded_h}]: {heights:?}"
         );
-        // Monotonic rise up to the first frame that reaches the target (past
+        // Non-decreasing up to the first frame that reaches the target (past
         // that, the clipped overshoot may dip back by a fraction of a px).
         let peak = heights
             .iter()
@@ -1253,13 +1277,17 @@ mod tests {
             .expect("the reveal reaches its target");
         assert!(peak > 0, "the first frame is not already fully revealed");
         assert!(
-            heights[..=peak].windows(2).all(|pair| pair[1] > pair[0]),
-            "the reveal rises monotonically to the target: {heights:?}"
+            heights[..=peak]
+                .windows(2)
+                .all(|pair| pair[1] >= pair[0] - 1e-9),
+            "the reveal rises to the target without backsliding: {heights:?}"
         );
+        // The settle-frame guarantee: the *last* layout a shell-honest driver
+        // ever runs lands exactly on the target — never a hair short of it.
         let last = heights.last().copied().expect("at least one frame");
-        assert!(
-            (last - expanded_h).abs() < 1e-9,
-            "the settled reveal lands exactly on the full body height"
+        assert_eq!(
+            last, expanded_h,
+            "the last layout a shell-honest driver runs lands exactly on the target height"
         );
         // A settled stack stops asking.
         let (_, still) = paint_at(&mut w, t_ms + 16, None);

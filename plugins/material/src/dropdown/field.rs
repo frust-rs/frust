@@ -460,7 +460,12 @@ impl DropdownFieldWidget {
     /// A live chip ramp also requests a **relayout**, not just a repaint: a
     /// chip's scale drives its own advance in the strip (see
     /// [`Chip::layout_scale`]), so its box and its delete region are only
-    /// truthful for the frame the layout that produced them ran in.
+    /// truthful for the frame the layout that produced them ran in. Gating
+    /// that request solely on `advance`'s own return would miss its
+    /// *landing* frame — `AnimationController::advance` reports `false` on
+    /// the very pass that snaps the value onto its target — so each chip's
+    /// progress is compared before/after advancing, the same check the
+    /// reduce-motion arm already runs for its snap.
     fn advance(&mut self, ctx: &mut PaintCtx, reduce: bool) -> bool {
         let mut animating = false;
         let now = ctx.frame_time();
@@ -509,9 +514,19 @@ impl DropdownFieldWidget {
             } else if chip.scale.is_animating() {
                 if chip.scale.advance(now) {
                     animating = true;
-                    chips_moved = true;
                 }
                 chip.progress = chip.scale.value();
+                // Comparing before/after (not just `advance`'s own return)
+                // is what actually catches the ramp's *landing* frame:
+                // `AnimationController::advance` reports `false` on the
+                // very pass that snaps the value onto its target, so
+                // gating solely on it would leave the last chip box/
+                // delete-hit-box `layout` ever saw a hair short of rest —
+                // the same trap the reduce-motion arm above already
+                // guards against.
+                if chip.progress != progress_before {
+                    chips_moved = true;
+                }
             }
             if chip.removing && chip.progress <= DROPDOWN_PROGRESS_EPSILON {
                 settled.push(i);
@@ -1536,6 +1551,76 @@ mod tests {
         assert!(w.chips[0].progress < 1.0, "the entrance starts from zero");
         settle(&mut w);
         assert!((w.chips[0].progress - 1.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_freshly_added_chip_lands_its_box_exactly_on_the_settle_frame() {
+        // The regression guard for the landing-frame trap (gate-r5-05):
+        // `AnimationController::advance` reports `false` on the very pass
+        // that snaps a chip's scale onto its target, so gating the
+        // relayout request solely on that return would leave the last
+        // chip box `layout` ever saw a hair short of rest. This drives a
+        // shell-honest frame loop — `layout` runs only on a frame the
+        // *previous* paint actually asked for one — so a silently-skipped
+        // landing frame would leave the chip's box short of its natural
+        // width instead of landing on it exactly. `settle()` (used by the
+        // sibling test above) can't catch this: it never relayouts and
+        // never reads laid-out geometry, only the raw `progress` value,
+        // which `paint` always updates regardless of what it requests.
+        let prev = view().multi(true);
+        let mut w = ready(&prev);
+        let next = view().multi(true).selected(vec!["apple".to_string()]);
+        rebuild(&mut w, &prev, &next);
+        assert_eq!(w.chip_count(), 1);
+
+        let theme = crate::baseline().with_brightness(Brightness::Light);
+        // Both signals matter here, unlike the single-value widgets this
+        // pattern guards elsewhere: the ramp's zero-delta seeding frame
+        // reports `needs_frame` (`animating`, from a truthy `advance`) but
+        // not yet `needs_layout` (`chip.progress` hasn't visibly moved),
+        // since `chips_moved` — not a bare truthy `advance` — is this
+        // widget's only relayout trigger. A shell-honest loop must keep
+        // pumping frames on `needs_frame` alone and only relayout on
+        // `needs_layout`, exactly as a real shell would.
+        let mut needs_layout = true;
+        let mut needs_frame = true;
+        let mut t = 0u64;
+        let mut frames = 0u32;
+        let mut last_width = w.chips[0].rect.width();
+        loop {
+            if !needs_frame {
+                break;
+            }
+            if needs_layout {
+                layout(&mut w, AREA);
+                last_width = w.chips[0].rect.width();
+            }
+            let mut rec = Recorder::default();
+            let size = Size::new(w.width, w.height);
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, size, FrameTime::from_nanos(t))
+                .with_theme(&theme as &dyn Any);
+            w.paint(&mut ctx, &mut rec);
+            needs_layout = ctx.needs_layout();
+            needs_frame = ctx.needs_frame();
+            frames += 1;
+            assert!(
+                frames < 600,
+                "the chip entrance should settle well inside 600 frames"
+            );
+            t += 16_000_000;
+        }
+        assert!(frames > 1, "the chip entrance spans more than one frame");
+
+        // Reference: brute-force settle well past the spring's resting
+        // time, then one more relayout.
+        settle(&mut w);
+        layout(&mut w, AREA);
+        let target_width = w.chips[0].rect.width();
+
+        assert_eq!(
+            last_width, target_width,
+            "the last layout a shell-honest driver runs lands exactly on the chip's settled box width"
+        );
     }
 
     #[test]

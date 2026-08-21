@@ -52,12 +52,17 @@
 //! **press** instead — the nearest live signal, and the one the reference's own
 //! spring is named for. The inset is applied in `layout` (it changes the pill's
 //! geometry, so hit-testing follows it), which is why a running spring asks for
-//! a relayout rather than a bare repaint.
+//! a relayout rather than a bare repaint. Gating that request solely on
+//! [`AnimationController::advance`]'s own return would miss its *landing*
+//! frame — `advance` reports `false` on the very pass that snaps the value
+//! onto its target — so `paint` also compares the inset before/after
+//! advancing and requests one more relayout whenever it differs.
 //!
 //! `Theme.motion.reduce_motion` snaps the inset to its target with no ramp —
 //! and, since the inset is a layout value, a snap that actually moves it
-//! requests the same one relayout a running spring does, so the pill (and its
-//! hit region) don't lag a frame behind the snap.
+//! requests the same one relayout a running spring does (the same
+//! before/after comparison catches both), so the pill (and its hit region)
+//! don't lag a frame behind the snap.
 //!
 //! # Interaction
 //!
@@ -533,16 +538,21 @@ impl Widget for SearchBarWidget {
         // relayout, not a bare repaint — and a reduce-motion snap that
         // actually moves the value does too, since `layout` already ran this
         // frame against the pre-snap inset and would otherwise keep painting
-        // (and hit-testing) the resting inset indefinitely.
+        // (and hit-testing) the resting inset indefinitely. Gating the
+        // animating arm solely on `advance`'s return would miss its
+        // *landing* frame the same way: `AnimationController::advance`
+        // reports `false` on the very pass that snaps the value onto its
+        // target, so without the before/after comparison below the last
+        // inset `layout` ever saw is a hair short of rest.
+        let before = self.expand.value();
         if reduce {
-            let before = self.expand.value();
             self.expand.snap();
-            if self.expand.value() != before {
-                ctx.request_layout();
-            }
         } else if self.expand.advance(ctx.frame_time()) {
             ctx.request_layout();
             ctx.request_frame();
+        }
+        if self.expand.value() != before {
+            ctx.request_layout();
         }
 
         // The pod's hover path is authoritative: correct the latched flag from
@@ -1022,6 +1032,52 @@ mod tests {
             (w.expand_inset() - EXPAND_REST).abs() < 0.5,
             "the release springs back to the resting inset, got {}",
             w.expand_inset()
+        );
+    }
+
+    #[test]
+    fn paint_requests_layout_through_the_press_settle_frame() {
+        // The regression guard for the landing-frame trap (gate-r5-05):
+        // `AnimationController::advance` reports `false` on the very pass
+        // that snaps the value onto its target, so gating solely on it
+        // would leave the last inset (and hit-tested pill) `layout` ever
+        // saw a hair short of rest. This drives a shell-honest frame loop —
+        // `layout` runs only on a frame the *previous* paint actually asked
+        // for one — so a silently-skipped landing frame leaves the pill
+        // short of the target instead of landing on it exactly.
+        let view = bar("").on_tap(|s: &mut App| s.taps += 1);
+        let mut w = build(&view);
+        layout(&mut w, &BoxConstraints::tight(Size::new(400.0, 56.0)));
+        assert_eq!(w.pill.x0, EXPAND_REST);
+
+        let mut state = App::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, 28.0));
+
+        let mut needs_layout = true;
+        let mut last_x0 = w.pill.x0;
+        let mut t = 0u64;
+        let mut frames = 0u32;
+        loop {
+            if !needs_layout {
+                break;
+            }
+            layout(&mut w, &BoxConstraints::tight(Size::new(400.0, 56.0)));
+            last_x0 = w.pill.x0;
+            let mut rec = Recorder::default();
+            let mut pctx = PaintCtx::for_test(Point::ZERO, WINDOW, FrameTime::from_nanos(t));
+            w.paint(&mut pctx, &mut rec);
+            needs_layout = pctx.needs_layout();
+            frames += 1;
+            assert!(
+                frames < 600,
+                "the press spring should settle well inside 600 frames"
+            );
+            t += 16_000_000;
+        }
+        assert!(frames > 1, "the press spring spans more than one frame");
+        assert!(
+            (last_x0 - EXPAND_ACTIVE).abs() < 1e-9,
+            "the last layout a shell-honest driver runs lands exactly on the active inset, got {last_x0}"
         );
     }
 
