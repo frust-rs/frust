@@ -765,13 +765,6 @@ impl StagedPop {
             .set(self.depth.as_ref().map(|depth| depth()));
     }
 
-    /// Fire the close with no payload — every gesture dismissal's path. See
-    /// [`fire_with`](Self::fire_with).
-    #[must_use]
-    pub(crate) fn fire(&self) -> bool {
-        self.fire_with(&mut None)
-    }
-
     /// Fire the close, handing it `result`'s payload, unless the stack moved
     /// since [`arm`](Self::arm) — returns whether it actually fired.
     ///
@@ -870,18 +863,26 @@ impl ModalDismiss {
     }
 
     /// The live request generation.
-    fn generation(&self) -> u64 {
+    ///
+    /// `pub(crate)` (not private) so [`crate::sheet`] can mirror this same
+    /// observe pattern against its own staged-exit path rather than minting
+    /// a second handle type (see that module's own `ModalDismiss` adoption).
+    pub(crate) fn generation(&self) -> u64 {
         self.0.generation.get()
     }
 
     /// Take the pending payload, if the request carried one.
-    fn take_result(&self) -> Option<PopResult> {
+    ///
+    /// `pub(crate)` for the same cross-module reason as [`Self::generation`].
+    pub(crate) fn take_result(&self) -> Option<PopResult> {
         self.0.result.borrow_mut().take()
     }
 
     /// Whether both handles share one cell — an *identity* check, not an
     /// equality one (see [`OverlayModalView::rebuild`]'s re-seed).
-    fn same_cell(&self, other: &Self) -> bool {
+    ///
+    /// `pub(crate)` for the same cross-module reason as [`Self::generation`].
+    pub(crate) fn same_cell(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 }

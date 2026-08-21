@@ -217,13 +217,39 @@
 //! gate skips, leaving the back press dead until an unrelated later frame. The
 //! in-flight ramp keeps its own frames coming the same way.
 //!
+//! # App-initiated dismiss: adopting [`ModalDismiss`]
+//!
+//! [`BottomSheetView::dismiss_handle`] installs [`crate::overlay::modal`]'s own
+//! [`ModalDismiss`] handle — the same public type [`crate::side_sheet`] installs,
+//! never a second one minted for this module. The sheet's content (a row tap,
+//! an "Apply" button) triggers it, and the widget observes the request through
+//! exactly the shape [`mod@crate::overlay::modal`]'s own host does: a
+//! generation cell latched at `build`, re-seeded on `rebuild` only when the
+//! handle's *identity* changed, and observed in **both** the `event` pass
+//! (right after the content routing that most likely raised it) and the
+//! `paint` pass (the backstop for a request raised outside an event). Neither
+//! observation stages a *second* exit path — both route straight into this
+//! module's own [`BottomSheetWidget::request_dismiss`]/`stage_exit`/
+//! `fire_staged_close` machinery, the same one every gesture dismissal
+//! already takes, so an app dismiss plays the identical spring settle and can
+//! carry a [`PopResult`] the same way [`ModalDismiss::dismiss_with`] does for
+//! [`crate::side_sheet`].
+//!
+//! An app dismiss ignores [`BottomSheetView::dismissable`] the same way
+//! [`mod@crate::overlay::modal`]'s own handle does (that flag exists to take
+//! the *user's* exits away, and a `ModalDismiss` trigger is not one) — free
+//! here, since [`BottomSheetWidget::request_dismiss`] already applies no such
+//! gate itself; every *gesture* caller (the scrim tap, the handle-drag
+//! release, `Escape`) gates it at its own call site instead.
+//!
 //! # Public API
 //!
 //! [`bottom_sheet`], [`show_bottom_sheet`], and every [`BottomSheetView`]
-//! builder method are unchanged from v1 — the staged exit above is wired
-//! through private view/widget fields only, so this module's public surface is
-//! still the two functions plus [`BottomSheetView::on_dismiss`]/
-//! [`BottomSheetView::dismissable`].
+//! builder method except [`dismiss_handle`](BottomSheetView::dismiss_handle)
+//! are unchanged from v1 — the staged exit above is wired through private
+//! view/widget fields only, so this module's public surface is the two
+//! functions plus [`BottomSheetView::on_dismiss`]/
+//! [`BottomSheetView::dismissable`]/[`BottomSheetView::dismiss_handle`].
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -245,7 +271,7 @@ use frust::{
 };
 
 use super::press::presses;
-use crate::overlay::modal::StagedPop;
+use crate::overlay::modal::{ModalDismiss, StagedPop};
 use crate::overlay::{OverlayContainer, container, on_surface_variant, radius, scrim};
 use crate::tokens::MaterialSpring;
 
@@ -352,6 +378,12 @@ pub struct BottomSheetView<State: 'static> {
     /// The shared back-press dismiss-signal cell (the `DismissAnimated` seam),
     /// wired internally by [`show_bottom_sheet`] alongside `on_close`.
     dismiss_signal: Option<Rc<Cell<u64>>>,
+    /// The app-triggered staged-dismiss handle, installed by
+    /// [`BottomSheetView::dismiss_handle`] — unlike `on_close`/
+    /// `dismiss_signal`, never wired automatically; an app mints and installs
+    /// it itself (see the [module docs](self)' app-initiated dismiss
+    /// section).
+    dismiss_handle: Option<ModalDismiss>,
 }
 
 /// Wrap `content` in a modal bottom sheet. Chain
@@ -364,6 +396,7 @@ pub fn bottom_sheet<State: 'static, V: View<State>>(content: V) -> BottomSheetVi
         dismissable: true,
         on_close: None,
         dismiss_signal: None,
+        dismiss_handle: None,
     }
 }
 
@@ -383,6 +416,39 @@ impl<State: 'static> BottomSheetView<State> {
     /// dismisses it.
     pub fn dismissable(mut self, dismissable: bool) -> Self {
         self.dismissable = dismissable;
+        self
+    }
+
+    /// Install the app-triggered staged-dismiss handle: the sheet's own
+    /// content can then close it through the very spring exit the scrim tap,
+    /// the handle drag, `Escape`, and an Android back press all take —
+    /// instead of popping the navigator directly, which would drop the page
+    /// out from under the sheet mid-slide. Reuses
+    /// [`crate::overlay::modal::ModalDismiss`] — the same handle type
+    /// [`crate::side_sheet::SideSheetView::dismiss_handle`] installs — so an
+    /// app mixing sheet families never juggles two handle types. See the
+    /// [module docs](self)' app-initiated dismiss section.
+    ///
+    /// Mint the handle *outside* [`show_bottom_sheet`]'s page builder and
+    /// clone it in — the builder re-runs on every navigator rebuild.
+    ///
+    /// ```ignore
+    /// let dismiss = ModalDismiss::new();
+    /// let select = dismiss.clone();
+    /// show_bottom_sheet(
+    ///     &nav,
+    ///     move || {
+    ///         bottom_sheet(menu_panel(rows(), move |state: &mut State, sel| {
+    ///             on_select(state, sel);
+    ///             select.dismiss();
+    ///         }))
+    ///         .dismiss_handle(dismiss.clone())
+    ///     },
+    ///     |state: &mut State, result: PopResult| { /* ... */ },
+    /// );
+    /// ```
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.dismiss_handle = Some(dismiss);
         self
     }
 }
@@ -475,6 +541,25 @@ pub struct BottomSheetWidget {
     /// The last generation observed from `dismiss_signal` (0 with no signal
     /// wired, or a `Veto`/non-dismissable sheet).
     last_seen_dismiss: u64,
+    /// The app's own staged-dismiss handle, installed by
+    /// [`BottomSheetView::dismiss_handle`] (see the [module docs](self)'
+    /// app-initiated dismiss section).
+    dismiss_handle: Option<ModalDismiss>,
+    /// The last request generation observed from `dismiss_handle` — seeded
+    /// from the handle's own generation at build, so a request raised before
+    /// this widget existed is not aimed at it
+    /// (`crate::overlay::modal::OverlayModalWidget`'s own `last_seen_request`
+    /// field, mirrored).
+    last_seen_request: u64,
+    /// The payload a [`ModalDismiss::dismiss_with`] request armed, handed to
+    /// the staged pop when the spring settles closed.
+    ///
+    /// Held here rather than left in the handle for the length of the exit
+    /// so that a *refused* pop (the stack moved — see
+    /// [`StagedPop::fire_with`]) keeps it: that dismissal delivered nothing,
+    /// the sheet springs back open, and the payload rides whichever exit
+    /// finally lands.
+    pending_result: Option<PopResult>,
     /// Whether the running spring leg ends in a dismissal — set the moment a
     /// trigger stages one ([`Self::stage_exit`]), cleared by the settle that
     /// fires the pop and by every leg aimed back open: a drag that catches the
@@ -558,6 +643,15 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
             // Seeded from the cell's *current* generation: a bump that predates
             // this widget is not a back press aimed at it.
             last_seen_dismiss: self.dismiss_signal.as_ref().map_or(0, |sig| sig.get()),
+            dismiss_handle: self.dismiss_handle.clone(),
+            // Seeded from the handle's *current* generation, the same rule as
+            // `last_seen_dismiss` above: a request raised before this widget
+            // existed is not aimed at it.
+            last_seen_request: self
+                .dismiss_handle
+                .as_ref()
+                .map_or(0, ModalDismiss::generation),
+            pending_result: None,
             exiting: false,
             closed: false,
             content_size: Size::ZERO,
@@ -602,6 +696,22 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
         // either of them disturb the in-flight `exiting`/`closed` state.
         element.on_close = self.on_close.clone();
         element.dismiss_signal = self.dismiss_signal.clone();
+        // The app's dismiss handle follows the view whenever the view still
+        // carries one, gated on *identity* — exactly
+        // `crate::overlay::modal::OverlayModalView::rebuild`'s own re-seed: a
+        // view handing back the same cell keeps the live request generation
+        // (a button's own pending tap must not be forgotten), while a view
+        // that stopped carrying one leaves the installed handle standing,
+        // the same pinning `on_close`/`dismiss_signal` get above.
+        if let Some(handle) = &self.dismiss_handle
+            && !element
+                .dismiss_handle
+                .as_ref()
+                .is_some_and(|installed| installed.same_cell(handle))
+        {
+            element.last_seen_request = handle.generation();
+            element.dismiss_handle = Some(handle.clone());
+        }
         flags
     }
 
@@ -636,6 +746,71 @@ impl BottomSheetWidget {
         ctx.request_frame();
     }
 
+    /// Latch the app's [`ModalDismiss`] handle's request generation, taking
+    /// any payload it carries — `true` when a request this widget has not
+    /// seen before is pending.
+    ///
+    /// Mirrors `crate::overlay::modal::OverlayModalWidget`'s own
+    /// `take_dismiss_request` exactly: the payload is taken here, at
+    /// observation, rather than at the settle that consumes it, since the
+    /// handle is the app's and may be re-armed for a later presentation,
+    /// while this exit's payload belongs to this exit.
+    fn take_dismiss_request(&mut self) -> bool {
+        let Some(handle) = &self.dismiss_handle else {
+            return false;
+        };
+        let current = handle.generation();
+        if current == self.last_seen_request {
+            return false;
+        }
+        self.last_seen_request = current;
+        if let Some(result) = handle.take_result() {
+            self.pending_result = Some(result);
+        }
+        true
+    }
+
+    /// Observe the app's [`ModalDismiss`] handle in the *event* pass, right
+    /// after the content routing that most likely raised the request (a row
+    /// tap, an action button), so an app dismiss stages in the very pass that
+    /// asked for it.
+    ///
+    /// Routed straight through [`Self::request_dismiss`] — the same staged
+    /// path every gesture dismissal already takes, never a second staging
+    /// core. `request_dismiss` itself applies no `dismissable` gate (every
+    /// *gesture* caller gates it at its own call site instead), so an app
+    /// dismiss is correctly ungated here for free — matching
+    /// [`mod@crate::overlay::modal`]'s own documented rule that an app
+    /// dismiss ignores [`BottomSheetView::dismissable`].
+    fn observe_dismiss_request(&mut self, ctx: &mut EventCtx) {
+        if !self.take_dismiss_request() {
+            return;
+        }
+        self.request_dismiss(ctx, -SPRING_KICK);
+    }
+
+    /// The paint-pass twin of [`Self::observe_dismiss_request`] — the
+    /// backstop for a request raised outside an event (an async completion, a
+    /// timer). Mirrors [`Self::observe_dismiss_signal`]'s shape exactly,
+    /// keyed off the handle's own generation instead of the back-press cell.
+    ///
+    /// No unstaged fallback exists here, by design: `PaintCtx` carries no app
+    /// state to invoke [`BottomSheetView::on_dismiss`] with — the same gap
+    /// [`mod@crate::overlay::modal`]'s own paint-pass twin documents (its
+    /// `Unstaged` arm only ever reaches the state-free `on_close`). A request
+    /// raised here with no `on_close` wired (a `Stack` mount with no
+    /// navigator behind it) is silently dropped.
+    fn observe_paint_dismiss_request(&mut self, ctx: &mut PaintCtx) {
+        if !self.take_dismiss_request() {
+            return;
+        }
+        if self.exiting || self.closed || self.on_close.is_none() {
+            return;
+        }
+        self.stage_exit(-SPRING_KICK);
+        ctx.request_frame();
+    }
+
     /// Fire the staged, state-free pop once the closing spring has settled at
     /// the fully-closed end — the one place the navigator path's dismissal
     /// actually happens (see the [module docs](self)' *Who owns the exit*).
@@ -658,6 +833,11 @@ impl BottomSheetWidget {
     /// invisible, permanently undismissable barrier. The sheet springs back
     /// open instead (`reduce_motion` snaps it), and a later dismiss stages a
     /// fresh, correctly-armed exit.
+    ///
+    /// **The carried payload.** [`Self::pending_result`], armed by a
+    /// [`ModalDismiss::dismiss_with`] request, rides this fire via
+    /// [`StagedPop::fire_with`] — taken only when the pop actually happens,
+    /// so a refused pop leaves it for whichever exit eventually lands.
     fn fire_staged_close(&mut self, ctx: &mut PaintCtx, reduce: bool) {
         if !self.exiting || self.anim.is_animating() || self.progress > SETTLED_EPSILON {
             return;
@@ -669,7 +849,7 @@ impl BottomSheetWidget {
         let Some(on_close) = self.on_close.clone() else {
             return;
         };
-        if on_close.fire() {
+        if on_close.fire_with(&mut self.pending_result) {
             self.closed = true;
             // Guarantee the enqueued pop one draining rebuild — see the
             // `Scheduling the draining frame` note above.
@@ -726,18 +906,27 @@ impl BottomSheetWidget {
         }
     }
 
-    /// Take a dismiss trigger (scrim tap, Escape, or a handle-drag release
-    /// decided closed): kick the closing spring at `velocity`, then either
-    /// **stage** the navigator pop behind it (the [`show_bottom_sheet`] path,
-    /// which wires a state-free `on_close`) or fire the state-touching
-    /// [`BottomSheetView::on_dismiss`] on the spot (a standalone mount, which
-    /// has nothing to defer into) — see the [module docs](self)' *Who owns the
-    /// exit*.
+    /// Take a dismiss trigger (scrim tap, Escape, a handle-drag release
+    /// decided closed, or — via [`Self::observe_dismiss_request`] — the app's
+    /// own [`ModalDismiss`] handle): kick the closing spring at `velocity`,
+    /// then either **stage** the navigator pop behind it (the
+    /// [`show_bottom_sheet`] path, which wires a state-free `on_close`) or
+    /// fire the state-touching [`BottomSheetView::on_dismiss`] on the spot (a
+    /// standalone mount, which has nothing to defer into) — see the [module
+    /// docs](self)' *Who owns the exit*.
     ///
     /// A trigger arriving while a staged exit is already running, or after its
     /// pop has fired ([`Self::closed`]), is a no-op: the sheet stays mounted for
     /// a frame or more past the enqueued pop, and a second pop there would take
-    /// the page underneath with it.
+    /// the page underneath with it — the same no-op that makes an app dismiss
+    /// through the handle idempotent (a second `dismiss()` mid-exit changes
+    /// nothing here, on top of [`Self::take_dismiss_request`]'s own
+    /// generation latch already refusing to observe a request twice).
+    ///
+    /// No `dismissable` gate lives here — every *gesture* caller applies it at
+    /// its own call site, and [`Self::observe_dismiss_request`] deliberately
+    /// does not, so an app dismiss reaches this unconditionally (see the
+    /// [module docs](self)' app-initiated dismiss section).
     fn request_dismiss(&mut self, ctx: &mut EventCtx, velocity: f64) {
         if self.exiting || self.closed {
             return;
@@ -798,7 +987,13 @@ impl Widget for BottomSheetWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // The back-press seam, first: a bump staged here rides the very same
+        // spring the pointer/key gestures below drive. The app's own handle
+        // is observed alongside it, as the backstop for a request raised
+        // outside an event pass (`mod@crate::overlay::modal`'s own paint
+        // ordering, mirrored).
         self.observe_dismiss_signal(ctx);
+        self.observe_paint_dismiss_request(ctx);
         self.last_frame_time = ctx.frame_time();
         // Every theme read in one scope: `Theme::from_paint_ctx` ties its
         // returned reference to *this* borrow of `ctx`, and the frame-request/
@@ -1011,7 +1206,11 @@ impl Widget for BottomSheetWidget {
                     return EventResult::Handled;
                 }
                 // Everything else focus-routed goes to the content.
-                return frust::authoring::route_event_single(&mut self.content, ctx, event);
+                let result = frust::authoring::route_event_single(&mut self.content, ctx, event);
+                // The content may have just fired the app's own `ModalDismiss`
+                // handle (a keyboard-driven action) — stage it in this pass.
+                self.observe_dismiss_request(ctx);
+                return result;
             };
             match p.phase {
                 PointerPhase::Down => {
@@ -1041,6 +1240,10 @@ impl Widget for BottomSheetWidget {
                     if frust::authoring::route_event_single(&mut self.content, ctx, event)
                         == EventResult::Handled
                     {
+                        // An action the content just ran (e.g. a row that
+                        // fires on `Down`) may have asked to dismiss through
+                        // the app's own handle: stage it in this very pass.
+                        self.observe_dismiss_request(ctx);
                         return EventResult::Handled;
                     }
                     // An invisible sheet absorbs nothing — the anchored
@@ -1067,7 +1270,16 @@ impl Widget for BottomSheetWidget {
                 }
                 // A captured content child keeps receiving Move/Up/Cancel via the
                 // route helper's active-path fast lane.
-                _ => frust::authoring::route_event_single(&mut self.content, ctx, event),
+                _ => {
+                    let result =
+                        frust::authoring::route_event_single(&mut self.content, ctx, event);
+                    // Fire-on-up-inside (`docs/CODE_STANDARDS.md`'s Interaction
+                    // Semantics) means a row's own action most often lands on
+                    // this very `Up` — observe the app's handle right after,
+                    // the same pass the content just ran in.
+                    self.observe_dismiss_request(ctx);
+                    result
+                }
             }
         }
     }
@@ -2367,6 +2579,144 @@ mod tests {
             state.results,
             vec![None],
             "the sheet is still dismissible after the refused pop"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    // --- The app-initiated dismiss (`ModalDismiss`) seam — the same handle
+    //     type `crate::overlay::modal`/`crate::side_sheet` install, routed
+    //     through this module's own staged-exit path. ---
+
+    /// The whole point of adopting the handle: a row's own action must not
+    /// pop the navigator directly (which would take the page out from under
+    /// the sheet mid-slide) — it stages the very same spring exit a scrim
+    /// tap does, and can carry a result with it, the same way
+    /// `crate::side_sheet`'s own "actions" test proves for its handle.
+    #[test]
+    fn a_dismiss_handle_stages_the_slide_out_instead_of_popping_at_once() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // Minted outside the page builder, exactly as an app does it.
+        let dismiss = ModalDismiss::new();
+        let installed = dismiss.clone();
+        show_bottom_sheet(
+            &controller,
+            move || bottom_sheet(bg_page(400.0, 200.0)).dismiss_handle(installed.clone()),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        settle_navigator_frame(&mut root, area);
+
+        // A row's own "select" action, through the handle.
+        dismiss.dismiss_with(PopResult::of(3));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft(1000));
+        assert_eq!(
+            controller.depth(),
+            2,
+            "the request stages the exit — it does not pop on the spot"
+        );
+
+        let mut frames = 0u64;
+        while controller.depth() == 2 {
+            frames += 1;
+            assert!(
+                frames < 60,
+                "the staged exit settles and pops within a bounded number of frames"
+            );
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(1000 + frames * 20));
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![Some(3)],
+            "the request's own payload rides the staged pop"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    /// Two triggers landing before either is observed collapse into one
+    /// staged exit (the generation latch), and a further trigger arriving
+    /// while that exit is already running is a no-op (`request_dismiss`'s own
+    /// `exiting`/`closed` guard) — the sheet pops exactly once either way.
+    #[test]
+    fn repeated_dismiss_requests_are_idempotent() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        let dismiss = ModalDismiss::new();
+        let installed = dismiss.clone();
+        show_bottom_sheet(
+            &controller,
+            move || bottom_sheet(bg_page(400.0, 200.0)).dismiss_handle(installed.clone()),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        settle_navigator_frame(&mut root, area);
+
+        // Two requests before either is observed — the second's generation
+        // bump wins the latch, but only one exit stages.
+        dismiss.dismiss();
+        dismiss.dismiss();
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft(1000));
+        assert_eq!(controller.depth(), 2, "still staging, not popped yet");
+
+        // A third request while the exit is already running: `stage_exit`'s
+        // own guard refuses to restart the ramp or re-arm the pop.
+        dismiss.dismiss();
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft(1020));
+
+        let mut frames = 0u64;
+        while controller.depth() == 2 {
+            frames += 1;
+            assert!(frames < 60, "the exit still settles within a bounded time");
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), ft(1050 + frames * 20));
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "exactly one pop, however many requests were raised"
         );
         assert_eq!(controller.depth(), 1);
     }

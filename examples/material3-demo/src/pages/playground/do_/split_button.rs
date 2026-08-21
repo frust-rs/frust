@@ -96,15 +96,41 @@
 //! `DatePickerDialog::confirmable`), so [`resolve_selected`] — the exact
 //! read [`bottom_sheet_menu_view`] performs — stands in for it in this
 //! file's tests.
+//!
+//! # Both routes close on select
+//!
+//! [`on_select`] used to write `state.selected` and stop there, leaving the
+//! menu open on both routes — the popup never flipped
+//! [`Knobs::open`] back to `false` (a controlled-component bug: the page owns
+//! `open`, and the widget only ever *asks* through the callback), and the
+//! bottom sheet had no seam to ask through at all. Two independent fixes,
+//! one shared handler:
+//!
+//! * **Popup route.** [`on_select`] now sets `state.open` to `false`
+//!   unconditionally. [`split_popup_menu`] is kept-mounted precisely so this
+//!   works ([`mod@frust_material::split_button`]'s Menu styles section): the
+//!   host observes the flip and plays its exit ramp rather than vanishing.
+//! * **Bottom-sheet route.** [`Knobs::sheet_dismiss`] is a
+//!   [`frust_material::ModalDismiss`] handle — the same public type
+//!   [`mod@frust_material::sheet`]/[`mod@frust_material::side_sheet`] both
+//!   install — minted once, in [`Knobs::default`], for the page's whole
+//!   lifetime, and installed on every pushed sheet by
+//!   [`bottom_sheet_menu_view`]. [`on_select`] triggers it unconditionally
+//!   too: a request raised while no sheet is mounted to observe it is a
+//!   harmless no-op (the handle's own contract), so the one shared function
+//!   drives both routes' close without branching on `menu_style`. The sheet
+//!   then animates out through its own staged spring exit exactly as a scrim
+//!   tap would (see `frust_material::sheet`'s adopted-handle module-doc
+//!   section) — never a raw pop that would drop the page mid-slide.
 
 use frust::{
     AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, Stack,
     any, component, icon, navigator,
 };
 use frust_material::{
-    BottomSheetView, MenuNode, MenuSelection, OverlayAnchor, SplitButtonItem, SplitButtonMenuStyle,
-    SplitButtonShape, SplitButtonSize, SplitButtonVariant, bottom_sheet, icons, menu_panel,
-    menu_selectable, show_bottom_sheet, split_button, split_button_item,
+    BottomSheetView, MenuNode, MenuSelection, ModalDismiss, OverlayAnchor, SplitButtonItem,
+    SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant, bottom_sheet,
+    icons, menu_panel, menu_selectable, show_bottom_sheet, split_button, split_button_item,
 };
 
 use crate::AppState;
@@ -154,6 +180,11 @@ struct Knobs {
     /// Shared with [`size_menu_panel`] — the "Size" dropdown's anchor.
     size_anchor: OverlayAnchor,
     size_open: RwSignal<bool>,
+    /// The bottom-sheet route's staged-dismiss handle — see the [module
+    /// docs](self)' "Both routes close on select" section. Minted once (not
+    /// per-open) so [`on_select`]'s shared row-tap handler can trigger it
+    /// unconditionally regardless of which route the tap came from.
+    sheet_dismiss: ModalDismiss,
 }
 
 impl Default for Knobs {
@@ -174,6 +205,7 @@ impl Default for Knobs {
             style_open: RwSignal::new(false),
             size_anchor: OverlayAnchor::new(),
             size_open: RwSignal::new(false),
+            sheet_dismiss: ModalDismiss::new(),
         }
     }
 }
@@ -240,11 +272,19 @@ fn sheet_nodes() -> Vec<MenuNode> {
 
 /// Report a menu row's requested value into `state.selected` — the one
 /// `on_select` callback both menu routes share, mirroring the reference's
-/// own single `onSelected` regardless of `menuStyle`.
+/// own single `onSelected` regardless of `menuStyle` — and close whichever
+/// route raised it (see the [module docs](self)' "Both routes close on
+/// select" section).
 fn on_select(state: &mut Knobs, selection: MenuSelection) {
     if let Some(value) = selection.value() {
         state.selected.set(Some(value.to_string()));
     }
+    // Popup route: the kept-mounted host observes the flip and plays its
+    // exit ramp.
+    state.open.set(false);
+    // Bottom-sheet route: a harmless no-op when no sheet is mounted to
+    // observe it, staged through the sheet's own spring exit when one is.
+    state.sheet_dismiss.dismiss();
 }
 
 /// The value the pushed bottom-sheet menu resolves for its checkmark on
@@ -263,8 +303,16 @@ fn resolve_selected(selected: RwSignal<Option<String>>) -> Option<String> {
 /// the bug class this page shipped until this fix: a frozen
 /// `Option<String>` snapshot captured once, outside the returned closure, at
 /// open time.
-fn bottom_sheet_menu_view(selected: RwSignal<Option<String>>) -> BottomSheetView<Knobs> {
+///
+/// `dismiss` is [`Knobs::sheet_dismiss`], installed here so [`on_select`]'s
+/// unconditional trigger has a live sheet to animate out (see the [module
+/// docs](self)' "Both routes close on select" section).
+fn bottom_sheet_menu_view(
+    selected: RwSignal<Option<String>>,
+    dismiss: ModalDismiss,
+) -> BottomSheetView<Knobs> {
     bottom_sheet(menu_panel(sheet_nodes(), on_select).selected(resolve_selected(selected)))
+        .dismiss_handle(dismiss)
 }
 
 /// The trailing segment's tap handler: toggle the anchored popup directly
@@ -281,9 +329,10 @@ fn on_open(state: &mut Knobs) {
             state.open.set(true);
             let nav = state.nav.clone();
             let selected = state.selected;
+            let dismiss = state.sheet_dismiss.clone();
             show_bottom_sheet(
                 &nav,
-                move || bottom_sheet_menu_view(selected),
+                move || bottom_sheet_menu_view(selected, dismiss.clone()),
                 |state: &mut Knobs, _result: PopResult| state.open.set(false),
             );
         }
@@ -491,10 +540,13 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 mod tests {
     use frust::{Get, RwSignal, Set};
     use frust_material::{
-        SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant,
+        MenuAction, MenuSelection, ModalDismiss, SplitButtonMenuStyle, SplitButtonShape,
+        SplitButtonSize, SplitButtonVariant,
     };
 
-    use super::{Knobs, bottom_sheet_menu_view, content, on_open, resolve_selected, snippet};
+    use super::{
+        Knobs, bottom_sheet_menu_view, content, on_open, on_select, resolve_selected, snippet,
+    };
 
     #[test]
     fn the_page_builds_across_every_style() {
@@ -594,14 +646,67 @@ mod tests {
     #[test]
     fn the_pushed_bottom_sheet_menu_rereads_the_live_selected_signal() {
         let selected: RwSignal<Option<String>> = RwSignal::new(None);
+        let dismiss = ModalDismiss::new();
 
         assert_eq!(resolve_selected(selected), None);
-        let _first = bottom_sheet_menu_view(selected);
+        let _first = bottom_sheet_menu_view(selected, dismiss.clone());
 
         selected.set(Some("draft".to_string()));
 
         assert_eq!(resolve_selected(selected), Some("draft".to_string()));
-        let _second = bottom_sheet_menu_view(selected);
+        let _second = bottom_sheet_menu_view(selected, dismiss);
+    }
+
+    /// A row select must close whichever route raised it (see the [module
+    /// docs](super)' "Both routes close on select" section) — the popup
+    /// route's own half, directly observable through [`Knobs::open`].
+    #[test]
+    fn on_select_closes_the_popup_routes_kept_mounted_host() {
+        let mut knobs = Knobs {
+            open: RwSignal::new(true),
+            ..Knobs::default()
+        };
+        on_select(
+            &mut knobs,
+            MenuSelection {
+                index: 0,
+                label: "Save draft".into(),
+                action: MenuAction::Select("draft".into()),
+            },
+        );
+        assert_eq!(knobs.selected.get(), Some("draft".to_string()));
+        assert!(
+            !knobs.open.get(),
+            "the kept-mounted popup host closes on select"
+        );
+    }
+
+    /// The same fix's bottom-sheet half: [`on_select`] triggers
+    /// [`Knobs::sheet_dismiss`] unconditionally. `ModalDismiss` exposes no
+    /// public accessor for its request generation outside `frust_material`
+    /// (`frust_material::sheet`'s own tests assert the generation bump and
+    /// the staged spring it drives against a real `RenderRoot`), so the
+    /// closest black-box proof this crate can make is that a fresh sheet
+    /// still installs cleanly with the (now-triggered) handle afterwards —
+    /// i.e. the trigger is harmless with nothing mounted to observe it, and
+    /// the same handle instance remains usable for the sheet's next
+    /// presentation.
+    #[test]
+    fn on_select_requests_the_bottom_sheets_staged_dismissal_without_panicking() {
+        let mut knobs = Knobs::default();
+        let dismiss = knobs.sheet_dismiss.clone();
+
+        on_select(
+            &mut knobs,
+            MenuSelection {
+                index: 1,
+                label: "Save a copy".into(),
+                action: MenuAction::Select("copy".into()),
+            },
+        );
+
+        assert_eq!(knobs.selected.get(), Some("copy".to_string()));
+        let _sheet = bottom_sheet_menu_view(knobs.selected, dismiss);
     }
 
     #[test]
