@@ -27,6 +27,15 @@
 //! shell route is pathless, so it also matches the empty segment list, and
 //! resolution takes the first match.
 //!
+//! # Transitions
+//!
+//! Frust has no `MaterialApp`-style auto-wiring — a navigator animates only
+//! once an app opts it in via [`frust::NavigatorView::transition`], per
+//! navigator. The outer navigator (parent→child pushes onto the gallery:
+//! playgrounds, `/theme`) uses M3's shared-axis-X pattern; the inner one
+//! (top-level section switches behind the nav bar) uses M3's fade-through
+//! pattern — see [`gallery_shell`] and [`Material3Demo::build`].
+//!
 //! # State
 //!
 //! Everything a callback needs hangs off [`AppState`], which every view
@@ -47,9 +56,9 @@ mod widgets;
 // { .. }` block instead, which the macro emits only into the desktop entry
 // point — the idiom `app!`'s own docs prescribe for desktop-only types.
 use frust::{
-    AnyView, Brightness, Component, NavigatorController, Route, RouteObserver, RouteParams, Router,
-    SizedBox, Theme, any, icon, navigator, provide_context, safe_area, scaffold, shell_route,
-    use_context,
+    AnyView, Brightness, Component, NavigatorController, PageTransition, Route, RouteObserver,
+    RouteParams, Router, SizedBox, Theme, TransitionSpec, any, icon, navigator, provide_context,
+    safe_area, scaffold, shell_route, use_context,
 };
 use frust_material::{app_bar, icon_button, icons, nav_item, navigation_bar};
 
@@ -155,15 +164,21 @@ fn gallery_shell(
         },
     );
 
+    // Section switches are top-level-destination changes (M3's fade-through
+    // pattern), not parent→child navigation, so the inner navigator gets its
+    // own preset rather than inheriting the outer one's shared-axis-X. `go`
+    // reaches this navigator as a `replace` carrying no per-op override
+    // (`shell_route`'s keep-rule table), so it honors this default.
+    let inner_view = navigator(inner, blank_page)
+        .transition(TransitionSpec::duration(PageTransition::M3FadeThrough));
+
     // The bars self-size but consume no window inset of their own (the
     // catalog leaves that to the composer), so each is wrapped for the edge it
     // sits on.
-    any(
-        scaffold(any(section_routes.observe(navigator(inner, blank_page))))
-            .app_bar(any(safe_area(bar).bottom(false)))
-            .bottom_bar(any(safe_area(nav_bar).top(false)))
-            .background(theme.scheme().surface),
-    )
+    any(scaffold(any(section_routes.observe(inner_view)))
+        .app_bar(any(safe_area(bar).bottom(false)))
+        .bottom_bar(any(safe_area(nav_bar).top(false)))
+        .background(theme.scheme().surface))
 }
 
 #[derive(Default)]
@@ -203,7 +218,12 @@ impl Component for Material3Demo {
     }
 
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
-        any(navigator(&state.outer, blank_page))
+        // Parent→child navigation (a playground or `/theme` pushed over the
+        // gallery shell): M3's shared-axis-X pattern. Pop reversal, including
+        // the edge-swipe gesture, comes free — the navigator reverses the
+        // stored spec on pop.
+        any(navigator(&state.outer, blank_page)
+            .transition(TransitionSpec::duration(PageTransition::M3SharedAxisX)))
     }
 }
 
