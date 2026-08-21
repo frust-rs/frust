@@ -53,11 +53,19 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # from OUTSIDE this workspace, against the facade alone, and a root member
 # would prove nothing of the sort; it also keeps its own `target/`. Gate it
 # from its own directory (see its README).
+# examples/material3-demo (the Material 3 Expressive catalog gallery) is
+# standalone for glyph-catalog's reason, arrived at later: it started as a
+# root-workspace member while it was desktop-only, and became a full `frust
+# create` scaffold once it had to run on Android and iOS devices — its
+# generated projects need a project-local `target/` dir (the iOS Xcode build
+# phase resolves `target/<triple>/<profile>/libmaterial3demo.a` relative to
+# the project directory), and its `[profile.*]` blocks only take effect in a
+# workspace root. Gate it from its own directory (see its README).
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
