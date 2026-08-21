@@ -182,6 +182,12 @@ toolkit they all build against). Their shared charter:
   conditionally-mounted view alive past the rebuild that drops it (the *kept-mounted pattern*,
   documented in `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
   [LIMITATIONS.md](LIMITATIONS.md)).
+- **`frust-shadcn`'s `scroll_area` establishes the *deferred-erasure builder* pattern**, for any
+  wrapper needing an owned-value builder method (`.physics(...)`-style) to reach its child after
+  construction: the child sits un-erased in a `Cell<Option<...>>` until a memoized
+  `OnceCell<AnyView<_>>` erases it on first `build`/`rebuild`, since `View`'s own methods take only
+  `&self` and cannot move it. A future wrapper component in this position should reach for this
+  shape rather than re-inventing it.
 
 ## Data Flow
 

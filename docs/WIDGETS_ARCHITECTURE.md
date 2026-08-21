@@ -258,7 +258,10 @@ installed pair platform-adaptively — Android: `Clamping` + `Stretch`; every ot
 default; it remains reachable as an explicit `.physics(RubberBand::new())` opt-in, and is the only
 physics still driving both widgets' legacy hand-rolled fling/settle path
 (`create_ballistic_simulation` returns `None` by design). Wheel input stays a physics-independent
-hard clamp on both surfaces.
+hard clamp on both surfaces. A release's fling velocity carries the interrupted motion's momentum
+forward only when it plainly continues it — same direction, and faster than half the physics' own
+mapped share of that carried velocity — mirroring Flutter's `ScrollDragController.end` guards
+rather than gating on the raw interrupted speed.
 
 Every drag `Move` hands the physics *that move's* raw finger delta against the live position
 (Flutter's own per-move convention): a depth-aware curve (`Bouncing`) reads a real overscroll depth
@@ -269,7 +272,10 @@ physics rejects the whole excess (the position itself never leaves range), but `
 grows — so pull-to-refresh (`on_refresh_release`, `REFRESH_TRIGGER_PX`) and
 `OverscrollEffect::Stretch`'s paint-side intensity both fire under a clamping physics at zero
 displacement, not only a bouncing one. Stretch is a paint-only affine scale about the held edge; no
-layout pass reads the pull or its intensity.
+layout pass reads the pull or its intensity. A ballistic simulation that ends fully pinned
+outward — boundary rejection consuming its whole excess while its velocity still points further
+out of range — stops early instead of pumping the rest of its curve, handing the residual
+`edge_pull` over to the release-settle path.
 
 **Nested-scroll arbitration** (`scroll.rs`) runs the same ambient-claim shape as the navigator's
 edge-swipe arming (**R-B3-inner**, `nav::ambient`'s `SWIPE_CLAIM`, see *Data Flow* above): a scroll
@@ -277,7 +283,11 @@ surface pushes a fresh claim cell around the `Down` it forwards (`with_scroll_cl
 scrollable reached underneath reports what it could do with the gesture into it (`InnerScrollState`,
 nearest-inner pairing — a claim always lands in its immediate enclosing surface's cell, never a
 grandparent's), and the outer reads that back at the touch-slop takeover, deferring instead of
-taking over when the inner can consume the drag's direction. The report is a `Down`-time snapshot
+taking over when the inner can consume the drag's direction. A claim registers only with real
+scroll capacity (`max_scroll_extent > min_scroll_extent`) — without it, a content-fits inner under
+an always-accepting physics (the `Bouncing` family) would defer every drag to itself despite having
+nothing to scroll, a deliberate UIKit-default deviation from Flutter's own `BouncingScrollPhysics`,
+which still claims a fits-viewport surface. The report is a `Down`-time snapshot
 and the outer's defer decision is sticky for the rest of the gesture — content that becomes (or
 stops being) scrollable mid-drag never registers, and a deferred gesture never hands back — the same
 class of accepted tradeoff the navigator's own Down-time claim already lives with.

@@ -2875,3 +2875,48 @@ rather than silently drifting; closing the gap is a product-feel call (should a 
 glide at all), not a bug fix.
 
 **Evidence**: `crates/frust-widgets/src/scroll.rs`'s `default_min_fling_gate_is_one_hundred` test.
+
+---
+
+### `scroll-physics-stationary-hold-momentum-not-ported` — a finger that pauses before releasing still carries momentum
+
+**Observed**: Flutter's `ScrollDragController.end` drops carried momentum a third way beyond the
+sign/magnitude gate — `_maybeLoseMomentum` — when the finger held still before letting go. Both
+widgets' `fling_start_velocity` port only the sign and magnitude guards; a press that stalls live
+motion, pauses, then releases slowly in the same direction still adds the interrupted motion's
+momentum here.
+
+**Applies to**: any release that interrupts an in-flight fling/ballistic, pauses, and then lets go
+in the same direction the interrupted motion was travelling.
+
+**Why accepted**: a smaller, explicitly recorded gap rather than an unnoticed one — the sign and
+magnitude guards are the load-bearing pair (they prevent a flick back the other way from inheriting
+momentum it should cancel); the stall guard is a refinement on top, not ported in this pass.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `fling_start_velocity` doc
+comments (*Accepted gap*).
+
+---
+
+### `scroll-physics-ballistic-early-stop-conservatism` — a partial boundary rejection or inward velocity still pumps to `is_done`
+
+**Observed**: `ballistic_is_pinned_outward` (both widgets) only ends a simulation early when the
+physics rejects the *whole* excess and the curve's velocity still points further out of range; a
+*partial* rejection or an inward velocity each keep the simulation running the rest of its frames,
+even though most such cases can never bring the offset back on screen either. Separately in
+`ListView`, `max_offset` is a converging estimate in variable-extent mode, so a fling stopped
+against an under-estimated end stays stopped rather than resuming once later row measurements push
+the real end further out.
+
+**Applies to**: any ballistic release ending near a boundary under a non-fully-rejecting physics
+(the `Bouncing` family); the `max_offset` caveat applies only to a keyed `ListView` with
+`.estimated_item_extent(px)` set.
+
+**Why accepted**: deliberately conservative rather than guessed at — a physics whose rejection
+merely rounds to the excess, or an edge spring released outward that crosses back within a few
+frames, both need the simulation still running; only the fully-rejected-and-still-outward case is
+one-way for every curve in `crate::physics::simulation`. The `ListView` estimate case is a strictly
+smaller version of the same tradeoff windowed virtualization already accepts elsewhere.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `ballistic_is_pinned_outward`
+doc comments; `list_view.rs`'s local *One caveat* note on the same method.
