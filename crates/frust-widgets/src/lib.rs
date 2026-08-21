@@ -43,6 +43,7 @@ mod list_view;
 pub mod motion;
 pub mod nav;
 mod padding;
+pub mod physics;
 mod platform_view;
 mod radio;
 mod safe_area;
