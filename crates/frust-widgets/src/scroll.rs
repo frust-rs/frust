@@ -57,6 +57,24 @@
 //! This is how a scroll can be *taken* from a child after the slop, matching
 //! masonry.
 //!
+//! ## Nested scrolling: innermost wins
+//!
+//! Dispatch is strictly parent-first, so an outer surface always reaches that
+//! takeover site before any nested one sees the `Move` — left alone, a
+//! scrollable inside a scrollable could never win a drag. Both surfaces
+//! therefore run an **ambient claim** ([`InnerScrollState`],
+//! [`with_scroll_claim`]), the shape the navigator's edge-swipe claim
+//! (`R-B3-inner`, `nav::ambient`) established: a scrollable pushes a fresh
+//! claim cell around the `Down` it forwards, any scrollable reached underneath
+//! reports what it could do with the gesture into it, and the outer reads that
+//! answer back ([`ScrollWidget::inner_at_down`]) before deciding at the slop.
+//! When the nested surface can consume the drag's *direction*, the outer
+//! **defers**: it takes nothing over, sends no `Cancel`, and keeps forwarding
+//! the real events for the rest of the gesture, so the inner's own slop
+//! machinery takes the drag (and cancels its own child). Otherwise the takeover
+//! below runs exactly as it always has — with no nested scrollable present the
+//! claim never registers and not one byte of this changes.
+//!
 //! # Fling driver (v1)
 //!
 //! On release with sufficient velocity a fling begins, integrated
@@ -70,6 +88,7 @@
 //! release seeds the fling clock from `frame_time` (a zero-delta frame), and each
 //! subsequent paint advances it by the inter-frame delta.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use frust_core::accesskit::Role;
@@ -209,6 +228,157 @@ pub(crate) fn stretch_about_edge(origin: Point, size: Size, edge_pull: f64) -> O
             * Affine::scale_non_uniform(1.0, 1.0 + intensity)
             * Affine::translate((0.0, -anchor)),
     )
+}
+
+// --- Nested-scroll arbitration: the ambient inner-scroll claim ---------------
+
+/// How far past an edge [`inner_claim_state`] probes
+/// [`ScrollPhysics::apply_boundary_conditions`] to ask "would a pull past this
+/// edge be rejected?" (logical px).
+///
+/// The question is categorical — *does this physics hold an out-of-range
+/// position at all* — not metric, and every physics in [`crate::physics`]
+/// answers it the same way at any depth, so one pixel is enough; it is far
+/// enough past the extent that no rounding step can land back inside it.
+const CLAIM_PROBE_PX: f64 = 1.0;
+
+/// A `Down`-time snapshot of what a nested scroll surface could do with the
+/// gesture, written by that surface into its nearest enclosing one's ambient
+/// claim cell and read back there at the takeover site (the module docs'
+/// *Nested scrolling*).
+///
+/// "Down"/"up" name the **finger's** direction, never the offset's: a
+/// finger-moving-down drag reveals content *above* it (the offset falls toward
+/// the leading edge), a finger-moving-up drag reveals content below.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct InnerScrollState {
+    /// Whether a nested scroll surface reported at all. `false` — the default
+    /// a never-written cell reads back — is the no-nested-scrollable case
+    /// every gesture took before arbitration existed.
+    pub(crate) registered: bool,
+    /// Whether the inner can consume a finger-moving-DOWN drag: it still holds
+    /// content above (`pixels > min_scroll_extent`), or its physics allows
+    /// past-leading-edge displacement, which lets a bouncing-family surface
+    /// answer a pull with a rubber-band even pinned at the top.
+    pub(crate) can_consume_down_drag: bool,
+    /// Whether the inner can consume a finger-moving-UP drag: content below
+    /// (`pixels < max_scroll_extent`), or past-trailing displacement allowed.
+    pub(crate) can_consume_up_drag: bool,
+}
+
+impl InnerScrollState {
+    /// Whether an outer surface must stand down at its takeover site for a
+    /// cumulative drag of `dy` finger px (positive = the finger moved down) —
+    /// innermost-wins: a registered inner that can consume *this* direction
+    /// owns the gesture; one pinned against it does not, and the outer takes
+    /// over as it always has.
+    ///
+    /// Only ever asked past [`TOUCH_SLOP`], so `dy` is never zero; a zero would
+    /// read as an up-drag rather than warranting a third branch.
+    pub(crate) fn defers(self, dy: f64) -> bool {
+        if !self.registered {
+            return false;
+        }
+        if dy > 0.0 {
+            self.can_consume_down_drag
+        } else {
+            self.can_consume_up_drag
+        }
+    }
+}
+
+thread_local! {
+    /// The stack of per-surface **inner-scroll claim** cells for the scroll
+    /// surfaces currently forwarding a pointer `Down` — the seam a nested
+    /// scrollable reports itself to its nearest enclosing one through
+    /// (mirrors `nav::ambient`'s `SWIPE_CLAIM`/`with_swipe_claim`).
+    ///
+    /// A `Down` does not decide anything: the outer surface captures, forwards
+    /// it, and only at the later `Move` slop does it choose between taking the
+    /// drag over and deferring — by which point dispatch order has already put
+    /// it upstream of the inner. So the outer pushes a fresh cell before
+    /// forwarding the `Down` ([`with_scroll_claim`]), the nested surface writes
+    /// its [`InnerScrollState`] into whatever cell is ambient
+    /// ([`ambient_scroll_claim`]) as that `Down` reaches it, and the outer
+    /// reads it back once forwarding returns.
+    ///
+    /// A **stack**, not a single slot, because the pairing must be
+    /// *nearest*-inner: a surface writes its own state into the ambient cell
+    /// **before** pushing its own cell for its own children, so its write lands
+    /// in its enclosing surface's cell while everything deeper lands in its
+    /// own. Three levels deep, the outermost therefore learns only about the
+    /// middle surface and the middle only about the innermost — nothing
+    /// propagates a grandchild's claim up past its own parent, which is what
+    /// makes each layer arbitrate against the layer it actually contains.
+    ///
+    /// Reactive-free by construction (`frust-widgets` carries no
+    /// `reactive_graph` dependency): a plain `Rc<Cell<_>>`, never a signal, and
+    /// UI-thread-affine for the same reason `nav::ambient`'s cells are.
+    static SCROLL_CLAIM: RefCell<Vec<Rc<Cell<InnerScrollState>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Pops [`SCROLL_CLAIM`] on drop, so an unwinding child dispatch cannot leave a
+/// stale scope behind for the rest of the thread's life (mirrors
+/// `nav::ambient`'s `SwipeClaimGuard`).
+struct ScrollClaimGuard;
+
+impl Drop for ScrollClaimGuard {
+    fn drop(&mut self) {
+        SCROLL_CLAIM.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// Run `f` (a `Down` forward into this surface's own children) with `claim`
+/// installed as the ambient inner-scroll claim cell, so the nearest scroll
+/// surface reached underneath can report itself into it via
+/// [`ambient_scroll_claim`].
+///
+/// The [`SCROLL_CLAIM`] borrow is released *before* `f` runs, so `f` may itself
+/// nest another `with_scroll_claim` call (a third level of scroll nesting).
+pub(crate) fn with_scroll_claim<R>(claim: &Rc<Cell<InnerScrollState>>, f: impl FnOnce() -> R) -> R {
+    SCROLL_CLAIM.with(|stack| stack.borrow_mut().push(Rc::clone(claim)));
+    let _guard = ScrollClaimGuard;
+    f()
+}
+
+/// The claim cell of the scroll surface currently forwarding a `Down` — the
+/// *nearest enclosing* one — or `None` if none is (a top-level surface's own
+/// `Down`, or any non-`Down` event).
+pub(crate) fn ambient_scroll_claim() -> Option<Rc<Cell<InnerScrollState>>> {
+    SCROLL_CLAIM.with(|stack| stack.borrow().last().cloned())
+}
+
+/// What a surface sitting at `metrics` under `physics` claims it could do with
+/// a drag starting now — the value a nested scrollable writes into its host's
+/// claim cell.
+///
+/// Both directions are answered the same way: *room* in that direction, or a
+/// physics willing to hold a position past that edge. The second half is a
+/// one-pixel [`CLAIM_PROBE_PX`] probe of
+/// [`ScrollPhysics::apply_boundary_conditions`] — nothing rejected means the
+/// surface can answer the drag with a rubber-band even pinned against the edge
+/// (the bouncing/[`RubberBand`] family), while a clamping physics rejects the
+/// probe and genuinely has nothing to give. `registered` is the physics' own
+/// drag gate, the same one the takeover site consults, so a
+/// `NeverScrollable` inner never takes a drag from its host.
+pub(crate) fn inner_claim_state(
+    physics: &dyn ScrollPhysics,
+    metrics: &ScrollMetrics,
+) -> InnerScrollState {
+    let leading_free = physics
+        .apply_boundary_conditions(metrics, metrics.min_scroll_extent - CLAIM_PROBE_PX)
+        == 0.0;
+    let trailing_free = physics
+        .apply_boundary_conditions(metrics, metrics.max_scroll_extent + CLAIM_PROBE_PX)
+        == 0.0;
+    InnerScrollState {
+        registered: physics.should_accept_user_offset(metrics),
+        can_consume_down_drag: metrics.pixels > metrics.min_scroll_extent || leading_free,
+        can_consume_up_drag: metrics.pixels < metrics.max_scroll_extent || trailing_free,
+    }
 }
 
 /// A scroll observation snapshot handed to [`ScrollView::on_scroll`].
@@ -389,6 +559,28 @@ pub struct ScrollWidget {
     /// is true, so a hover `Move` (dispatched on every cursor motion) is never
     /// mistaken for a drag and can never take the gesture from a child.
     down_active: bool,
+    /// What the nearest nested scroll surface claimed it could do with this
+    /// gesture, read back out of the claim cell this widget pushed around the
+    /// `Down`'s forward — the whole input to the innermost-wins decision at the
+    /// takeover site (the module docs' *Nested scrolling*). Reset on `Down`
+    /// (before that forward) and on `Up`/`Cancel`, so it can never carry a
+    /// previous gesture's answer.
+    ///
+    /// **Accepted staleness**: this is a `Down`-time snapshot. An inner
+    /// revealed (scrolled off the edge it was pinned against) or re-pinned
+    /// *during* the gesture never re-registers, and the decision taken from it
+    /// is never revisited — the same limitation the navigator's edge-swipe
+    /// claim accepts for exactly the same reason (one arbitration point per
+    /// gesture, decided once).
+    pub(crate) inner_at_down: InnerScrollState,
+    /// Whether this gesture was handed to the nested surface at the takeover
+    /// site. A **sticky** decision for the rest of the gesture: every remaining
+    /// `Move` is forwarded untouched and the takeover math never runs again, so
+    /// a mid-gesture direction reversal cannot steal the drag back (v1 — the
+    /// finger is already inside the inner's own drag by then, and taking over
+    /// would mean cancelling a scroll in flight). Cleared with
+    /// [`ScrollWidget::inner_at_down`].
+    pub(crate) deferring: bool,
     down_start: Point,
     last_drag: Point,
     tracker: VelocityTracker,
@@ -424,6 +616,8 @@ impl ScrollWidget {
             on_scroll: None,
             on_refresh_release: None,
             down_active: false,
+            inner_at_down: InnerScrollState::default(),
+            deferring: false,
             down_start: Point::ZERO,
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
@@ -811,6 +1005,8 @@ impl ScrollWidget {
                     }
                     self.scrolling = false;
                     self.down_active = true;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     // Remember what this press interrupted before killing it —
                     // the next fling asks the physics how much of it to carry
                     // forward (`0.0` under `RubberBand`, i.e. start cold).
@@ -830,7 +1026,20 @@ impl ScrollWidget {
                     self.tracker.clear();
                     self.tracker.record(t_ms, p.position.y);
                     ctx.capture_pointer();
-                    self.child.event_child(ctx, event);
+                    // Innermost-wins arbitration, both halves in dispatch
+                    // order. First report THIS surface into whatever cell is
+                    // ambient — the nearest *enclosing* scrollable's, if any —
+                    // while that is still the cell on top; only then push this
+                    // surface's own cell for the forward below, so a nested
+                    // scrollable's write lands here and never in the
+                    // grandparent's.
+                    if let Some(host) = ambient_scroll_claim() {
+                        host.set(inner_claim_state(self.physics.as_ref(), &self.metrics()));
+                    }
+                    let claim = Rc::new(Cell::new(InnerScrollState::default()));
+                    let child = &mut self.child;
+                    with_scroll_claim(&claim, || child.event_child(ctx, event));
+                    self.inner_at_down = claim.get();
                     EventResult::Handled
                 }
                 PointerPhase::Move => {
@@ -853,23 +1062,37 @@ impl ScrollWidget {
                         self.sync_child_origin();
                         self.notify_scroll(ctx);
                         ctx.request_redraw();
-                    } else if (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
+                    } else if !self.deferring
+                        && (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
                         && self.physics.should_accept_user_offset(&self.metrics())
                     {
-                        // Take the gesture over: cancel the child, stop forwarding
-                        // — unless the physics refuses drags outright, in which
-                        // case the move keeps flowing to the child. `RubberBand`
-                        // accepts unconditionally (even content that fits
-                        // rubber-bands), so this gate is inert on the default feel.
-                        self.scrolling = true;
-                        self.settling = false;
-                        self.last_drag = p.position;
-                        // Seed the raw drag position from the current (in-range)
-                        // offset so overscroll accrues from here.
-                        self.drag_raw = self.offset;
-                        self.send_child_cancel(ctx, p.position);
-                        self.child.set_active(false);
-                        ctx.request_redraw();
+                        if self.inner_at_down.defers(p.position.y - self.down_start.y) {
+                            // Innermost wins: a nested scrollable registered on
+                            // this gesture's `Down` and can consume this
+                            // direction, so take nothing over — no `Cancel`, no
+                            // capture handover — and keep forwarding. The
+                            // decision is sticky (`deferring` gates this whole
+                            // branch), and the inner's own slop machinery
+                            // cancels its own child from here.
+                            self.deferring = true;
+                            self.child.event_child(ctx, event);
+                        } else {
+                            // Take the gesture over: cancel the child, stop
+                            // forwarding — unless the physics refuses drags
+                            // outright, in which case the move keeps flowing to
+                            // the child. `RubberBand` accepts unconditionally
+                            // (even content that fits rubber-bands), so that
+                            // gate is inert on the default feel.
+                            self.scrolling = true;
+                            self.settling = false;
+                            self.last_drag = p.position;
+                            // Seed the raw drag position from the current
+                            // (in-range) offset so overscroll accrues from here.
+                            self.drag_raw = self.offset;
+                            self.send_child_cancel(ctx, p.position);
+                            self.child.set_active(false);
+                            ctx.request_redraw();
+                        }
                     } else {
                         self.child.event_child(ctx, event);
                     }
@@ -922,6 +1145,8 @@ impl ScrollWidget {
                     self.child.set_active(false);
                     self.scrolling = false;
                     self.down_active = false;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -930,6 +1155,8 @@ impl ScrollWidget {
                     self.child.set_active(false);
                     self.scrolling = false;
                     self.down_active = false;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     // Cancel never mutates state and never fires a callback: drop
                     // any pending notification and snap an overscrolled surface back
                     // into range (no settle animation, no on_scroll/on_refresh) —
@@ -1100,6 +1327,7 @@ impl Widget for ScrollWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::parity::Clamping;
     use crate::test_support::leaf;
     use std::any::Any;
 
@@ -2154,6 +2382,473 @@ mod tests {
             w.child.origin().y,
             0.0,
             "and the content itself never moves"
+        );
+    }
+
+    // --- Nested scrolling: innermost-wins arbitration. See the module docs'
+    //     *Nested scrolling*. ---
+
+    /// Which layer of a nested fixture an observation came from — an index into
+    /// [`Nest`]'s per-layer logs, so one builder serves every depth.
+    const OUTER: usize = 0;
+    /// The middle layer of the three-deep fixture.
+    const MIDDLE: usize = 1;
+    /// The innermost scroll surface of a nested fixture.
+    const INNER: usize = 2;
+
+    /// What each layer of a nested fixture observed, by layer index.
+    #[derive(Default)]
+    struct Nest {
+        /// Every `ScrollInfo` a layer reported through `on_scroll`.
+        scrolls: [Vec<ScrollInfo>; 3],
+        /// How many times a layer's pull-to-refresh fired.
+        refreshes: [u32; 3],
+    }
+
+    /// The pointer phases the deepest, non-scrollable content saw — how a
+    /// `Cancel` is attributed to whichever surface sent it.
+    #[derive(Clone, Copy, Default)]
+    struct ContentSeen {
+        downs: u32,
+        cancels: u32,
+    }
+
+    /// 1000px of ordinary, non-scrollable content tallying what reaches it.
+    ///
+    /// Counted through an `Rc<Cell<_>>` rather than `EventCtx::state_mut`
+    /// because a `Cancel` arm never touches state
+    /// (`docs/CODE_STANDARDS.md`'s Interaction Semantics) — and `Cancel`s are
+    /// exactly what this probe exists to count.
+    struct NestContent(Rc<Cell<ContentSeen>>);
+    /// Retained widget for [`NestContent`].
+    struct NestContentW(Rc<Cell<ContentSeen>>);
+
+    /// A [`NestContent`] tallying into `seen`.
+    fn nest_content(seen: &Rc<Cell<ContentSeen>>) -> NestContent {
+        NestContent(Rc::clone(seen))
+    }
+
+    /// A [`NestContent`] whose tally nobody reads — the placeholder child a
+    /// layer is built with before [`nest`] wires the real nested surface into
+    /// its place. Its 1000px height is what gives that layer its content
+    /// extent, so the placeholder is load-bearing even after the swap.
+    fn spacer_content() -> NestContent {
+        NestContent(Rc::new(Cell::new(ContentSeen::default())))
+    }
+
+    impl View<Nest> for NestContent {
+        type Element = NestContentW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> NestContentW {
+            NestContentW(Rc::clone(&self.0))
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut NestContentW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for NestContentW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, 1000.0))
+        }
+        fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = e {
+                let mut seen = self.0.get();
+                match p.phase {
+                    PointerPhase::Down => seen.downs += 1,
+                    PointerPhase::Cancel => seen.cancels += 1,
+                    _ => {}
+                }
+                self.0.set(seen);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// Build and lay out one layer of a nested fixture: a `viewport_h`-tall
+    /// viewport over `child`, reporting scrolls and refreshes under `layer`.
+    ///
+    /// Laid out **tight** rather than by an enclosing surface, because a
+    /// `ScrollView` hands its child *unbounded* height — a nested scroll
+    /// surface laid out that way sizes its viewport to its own content and has
+    /// nothing left to scroll. A real tree bounds it (a `SizedBox`, a list
+    /// row's own extent); the fixture states the resulting geometry directly
+    /// rather than threading a third widget through every assertion.
+    fn nest_surface(child: impl View<Nest>, viewport_h: f64, layer: usize) -> ScrollWidget {
+        let view: ScrollView<Nest> = scroll_view(child)
+            .on_scroll(move |s: &mut Nest, info| s.scrolls[layer].push(info))
+            .on_refresh_release(move |s: &mut Nest| s.refreshes[layer] += 1);
+        let mut counter = 0u64;
+        let mut w = View::<Nest>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(
+            &mut lctx,
+            &BoxConstraints::tight(Size::new(200.0, viewport_h)),
+        );
+        w
+    }
+
+    /// Wire `inner` in as `outer`'s single child — the nesting a real tree
+    /// builds through a bounded-height wrapper (see [`nest_surface`]).
+    fn nest(outer: &mut ScrollWidget, inner: ScrollWidget) {
+        outer.child = ChildPod::new(Box::new(inner));
+    }
+
+    /// The nested surface [`nest`] wired under `outer` (single-boxed, unlike an
+    /// `AnyView`-erased pod).
+    fn nested_of(outer: &ScrollWidget) -> &ScrollWidget {
+        (outer.child.widget() as &dyn Any)
+            .downcast_ref::<ScrollWidget>()
+            .expect("the fixture wired a ScrollWidget child")
+    }
+
+    /// The nested `ListView` wired under `outer`.
+    fn nested_list_of(outer: &ScrollWidget) -> &crate::list_view::ListViewWidget {
+        (outer.child.widget() as &dyn Any)
+            .downcast_ref::<crate::list_view::ListViewWidget>()
+            .expect("the fixture wired a ListViewWidget child")
+    }
+
+    /// Build and lay out a nested `ListView` — 10 rows of 100px in a
+    /// `viewport_h`-tall viewport, tight for the same reason
+    /// [`nest_surface`] is.
+    fn nested_list(viewport_h: f64) -> crate::list_view::ListViewWidget {
+        let view: crate::list_view::ListView<Nest> =
+            crate::list_view::list_view(10, 100.0, |_| any(spacer_content()));
+        let mut counter = 0u64;
+        let mut w = View::<Nest>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(
+            &mut lctx,
+            &BoxConstraints::tight(Size::new(200.0, viewport_h)),
+        );
+        w
+    }
+
+    fn run_nest(w: &mut ScrollWidget, state: &mut Nest, e: &InputEvent, t: f64) {
+        let sa: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, e, t);
+    }
+
+    /// Park a surface at `offset` px with a wheel scroll (hard-clamped, no
+    /// overscroll and no gesture state) — how a real surface reaches a
+    /// mid-content position.
+    fn park(w: &mut dyn Widget, viewport_h: f64, offset: f64) {
+        let mut throwaway = Nest::default();
+        let sa: &mut dyn Any = &mut throwaway;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, viewport_h));
+        w.event(&mut ctx, &scroll(50.0, false, offset));
+    }
+
+    #[test]
+    fn outer_defers_when_inner_can_consume() {
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        let mut inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        // Mid-content, at neither edge: the inner's claim comes from actual
+        // room, not from a displacement-allowing physics.
+        park(&mut inner, 120.0, 400.0);
+        assert_eq!(inner.offset(), 400.0);
+        nest(&mut outer, inner);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(
+            outer.inner_at_down.registered,
+            "the nested surface reported itself on the forwarded Down"
+        );
+        assert!(outer.inner_at_down.can_consume_up_drag);
+        assert_eq!(seen.get().downs, 1, "the Down still reached the content");
+
+        // 50px of finger-up drag, past the slop: the outer stands down.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 50.0), 16.0);
+        assert!(outer.deferring, "the outer deferred to the nested surface");
+        assert!(!outer.scrolling);
+        assert_eq!(outer.offset(), 0.0, "…and never moved");
+        assert!(state.scrolls[OUTER].is_empty(), "…nor reported a scroll");
+        // The one Cancel the content saw came from the INNER's own takeover —
+        // the outer sent none, and it is the inner that is now scrolling.
+        assert!(nested_of(&outer).scrolling, "the inner took the gesture");
+        assert_eq!(seen.get().cancels, 1);
+
+        // The rest of the drag lands in the inner, still never in the outer.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 10.0), 32.0);
+        assert_eq!(
+            nested_of(&outer).offset(),
+            440.0,
+            "the inner consumed the 40px"
+        );
+        assert_eq!(outer.offset(), 0.0);
+        assert!(state.scrolls[OUTER].is_empty());
+        assert!(!state.scrolls[INNER].is_empty(), "the inner reported it");
+        assert_eq!(seen.get().cancels, 1, "no second Cancel from anywhere");
+    }
+
+    #[test]
+    fn outer_takes_over_when_inner_pinned() {
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        let mut inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        // At its top under a physics that rejects every past-edge proposal:
+        // there is nothing a downward drag can do here.
+        inner.physics = Box::new(Clamping::new());
+        nest(&mut outer, inner);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        assert!(
+            outer.inner_at_down.registered,
+            "the inner still reports itself…"
+        );
+        assert!(
+            !outer.inner_at_down.can_consume_down_drag,
+            "…pinned against a downward drag"
+        );
+        assert!(
+            outer.inner_at_down.can_consume_up_drag,
+            "…though not against an upward one"
+        );
+
+        // 40px down, past the slop: the outer takes over exactly as ever.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(outer.scrolling);
+        assert!(!outer.deferring);
+        assert_eq!(
+            seen.get().cancels,
+            1,
+            "the outer's takeover Cancel reached the content through the inner"
+        );
+        assert_eq!(
+            outer.offset(),
+            0.0,
+            "the takeover move does not itself scroll"
+        );
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 80.0), 32.0);
+        assert_eq!(
+            outer.offset(),
+            -10.0,
+            "the resisted 20px past-top overscroll, as ever"
+        );
+        assert_eq!(nested_of(&outer).offset(), 0.0, "the inner never moved");
+        assert!(state.scrolls[INNER].is_empty());
+    }
+
+    #[test]
+    fn bouncing_inner_wins_even_at_edge() {
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        // The default `RubberBand` install, at the very top: it rejects
+        // nothing, so it can still answer a downward pull with a rubber-band.
+        let inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        nest(&mut outer, inner);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        assert!(
+            outer.inner_at_down.can_consume_down_drag,
+            "a displacement-allowing physics claims even pinned at the top"
+        );
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(
+            outer.deferring,
+            "the outer defers even though the inner sits at offset 0"
+        );
+        assert!(nested_of(&outer).scrolling);
+        assert_eq!(seen.get().cancels, 1, "the inner's own takeover Cancel");
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 80.0), 32.0);
+        assert_eq!(
+            nested_of(&outer).offset(),
+            -10.0,
+            "the inner rubber-bands past its own top"
+        );
+        assert_eq!(outer.offset(), 0.0, "and the outer stays exactly put");
+        assert!(state.scrolls[OUTER].is_empty());
+    }
+
+    #[test]
+    fn no_inner_behavior_identical() {
+        // The pre-existing takeover, unchanged with arbitration in place: a
+        // plain non-scrollable child registers nothing, so nothing defers.
+        // Viewport 100 over 1000px of content — `laid_out(200, 100, 1000)`'s
+        // geometry, so the numbers below are the shipped ones.
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        let mut w = nest_surface(nest_content(&seen), 100.0, OUTER);
+        assert_eq!(w.max_offset(), 900.0);
+        let mut state = Nest::default();
+
+        run_nest(&mut w, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(!w.inner_at_down.registered, "a plain child claims nothing");
+        assert_eq!(seen.get().downs, 1);
+
+        run_nest(&mut w, &mut state, &ev(PointerPhase::Move, 70.0), 16.0);
+        assert!(w.scrolling, "the slop still takes the gesture over");
+        assert!(!w.deferring);
+        assert_eq!(seen.get().cancels, 1, "exactly one child Cancel, as before");
+        assert_eq!(w.offset(), 0.0, "the takeover move does not itself scroll");
+
+        run_nest(&mut w, &mut state, &ev(PointerPhase::Move, 40.0), 32.0);
+        assert_eq!(
+            w.offset(),
+            30.0,
+            "the 30px `drag_past_slop_scrolls_the_offset` pins"
+        );
+        assert_eq!(seen.get().cancels, 1, "no further move reaches the child");
+    }
+
+    #[test]
+    fn three_deep_nesting_pairs_nearest() {
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        let innermost = nest_surface(nest_content(&seen), 80.0, INNER);
+        let mut middle = nest_surface(spacer_content(), 140.0, MIDDLE);
+        nest(&mut middle, innermost);
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        nest(&mut outer, middle);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 75.0), 0.0);
+        // Each level learns about the level it actually contains and no
+        // further: the innermost's own child is plain content, and nothing
+        // propagated its (absent) claim up past the middle.
+        assert!(outer.inner_at_down.registered, "outer sees the middle");
+        assert!(
+            nested_of(&outer).inner_at_down.registered,
+            "middle sees the innermost"
+        );
+        assert!(
+            !nested_of(nested_of(&outer)).inner_at_down.registered,
+            "the innermost sees no scrollable below it"
+        );
+
+        // A finger-up drag every layer could consume: the innermost gets it.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 35.0), 16.0);
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 5.0), 32.0);
+        assert!(outer.deferring && nested_of(&outer).deferring);
+        assert!(!nested_of(nested_of(&outer)).deferring);
+        assert!(nested_of(nested_of(&outer)).scrolling);
+        assert_eq!(outer.offset(), 0.0, "the outermost never moved");
+        assert_eq!(nested_of(&outer).offset(), 0.0, "nor the middle");
+        assert_eq!(
+            nested_of(nested_of(&outer)).offset(),
+            30.0,
+            "only the innermost took the drag"
+        );
+        assert!(state.scrolls[OUTER].is_empty() && state.scrolls[MIDDLE].is_empty());
+        assert!(!state.scrolls[INNER].is_empty());
+    }
+
+    #[test]
+    fn up_and_cancel_still_reach_child_when_deferring() {
+        // The device-gate case end to end: a refresh surface owning its own
+        // scroll, under a page-level scroll. The outer must forward the whole
+        // gesture — including the release that fires the refresh.
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let seen = Rc::new(Cell::new(ContentSeen::default()));
+        let inner = nest_surface(nest_content(&seen), 120.0, INNER);
+        nest(&mut outer, inner);
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(
+            outer.deferring,
+            "the inner can rubber-band, so the outer defers"
+        );
+        // Pull the inner well past its own refresh trigger (150px raw, halved
+        // by the rubber-band resistance to 75 > REFRESH_TRIGGER_PX).
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 210.0), 32.0);
+        assert_eq!(nested_of(&outer).offset(), -75.0);
+        assert!(crossed_refresh_trigger(nested_of(&outer).edge_pull));
+
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Up, 210.0), 48.0);
+        assert_eq!(
+            state.refreshes[INNER], 1,
+            "the forwarded Up fired the INNER's refresh exactly once"
+        );
+        assert_eq!(state.refreshes[OUTER], 0, "and never the outer's");
+        assert_eq!(outer.offset(), 0.0, "the outer never scrolled at all");
+        assert!(state.scrolls[OUTER].is_empty());
+        // The Up clears the arbitration state, so the next gesture arbitrates
+        // from scratch rather than inheriting this one's answer.
+        assert!(!outer.deferring);
+        assert!(!outer.inner_at_down.registered);
+        assert!(!outer.scrolling && !outer.down_active);
+
+        // A second gesture, cancelled mid-drag: the Cancel is forwarded too.
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 64.0);
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 80.0);
+        assert!(outer.deferring, "still the inner's gesture");
+        run_nest(
+            &mut outer,
+            &mut state,
+            &ev(PointerPhase::Cancel, 60.0),
+            96.0,
+        );
+        // Three Cancels all told: the inner's takeover in each of the two
+        // gestures, plus this forwarded one reaching the content through it.
+        assert_eq!(seen.get().cancels, 3);
+        assert_eq!(state.refreshes[INNER], 1, "a Cancel never fires a refresh");
+        assert!(
+            !outer.deferring,
+            "the Cancel clears the arbitration state too"
+        );
+        assert!(!outer.inner_at_down.registered);
+    }
+
+    #[test]
+    fn a_nested_list_view_wins_the_drag_from_a_scroll_view() {
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let mut list = nested_list(150.0);
+        park(&mut list, 150.0, 300.0);
+        assert_eq!(list.offset(), 300.0);
+        outer.child = ChildPod::new(Box::new(list));
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(
+            outer.inner_at_down.registered,
+            "a nested ListView reports itself on the same seam"
+        );
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 50.0), 16.0);
+        assert!(outer.deferring);
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 10.0), 32.0);
+        assert_eq!(outer.offset(), 0.0, "the outer never moved");
+        assert!(state.scrolls[OUTER].is_empty());
+        assert_eq!(
+            nested_list_of(&outer).offset(),
+            340.0,
+            "the nested list took the 40px"
+        );
+    }
+
+    #[test]
+    fn a_pinned_nested_list_view_hands_the_drag_back_to_the_scroll_view() {
+        let mut outer = nest_surface(spacer_content(), 200.0, OUTER);
+        let mut list = nested_list(150.0);
+        list.physics = Box::new(Clamping::new());
+        outer.child = ChildPod::new(Box::new(list));
+
+        let mut state = Nest::default();
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Down, 20.0), 0.0);
+        assert!(
+            !outer.inner_at_down.can_consume_down_drag,
+            "the nested list is pinned at its own top"
+        );
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 60.0), 16.0);
+        assert!(outer.scrolling, "so the outer takes over as it always has");
+        run_nest(&mut outer, &mut state, &ev(PointerPhase::Move, 80.0), 32.0);
+        assert_eq!(
+            outer.offset(),
+            -10.0,
+            "the resisted 20px past-top overscroll"
+        );
+        assert_eq!(
+            nested_list_of(&outer).offset(),
+            0.0,
+            "the nested list never moved"
         );
     }
 }

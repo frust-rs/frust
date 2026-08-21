@@ -310,7 +310,21 @@
 //! wherever the surface sits rather than snapping first — mirroring
 //! `ScrollWidget::event_at`'s `Down` arm, which leaves its own `offset` untouched
 //! for the same reason.
+//!
+//! # Nested scrolling: innermost wins
+//!
+//! This widget is both halves of `scroll.rs`'s innermost-wins arbitration (see
+//! its *Nested scrolling*), on the same shared seam rather than a second copy:
+//! it reports itself into its host's ambient claim cell
+//! ([`crate::scroll::ambient_scroll_claim`]) as a forwarded `Down` reaches it,
+//! and it pushes its own cell ([`crate::scroll::with_scroll_claim`]) around the
+//! `Down` it routes to its own rows — in that order, so a row's own nested
+//! scrollable pairs with *this* list and not with whatever encloses it. At the
+//! takeover site a registered inner that can consume the drag's direction makes
+//! this list defer instead of cancelling its rows. A list with no nested
+//! scrollable in the window behaves exactly as it always has.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -329,8 +343,9 @@ use crate::physics::effect::OverscrollEffect;
 use crate::physics::rubber_band::RubberBand;
 use crate::physics::{ScrollMetrics, ScrollPhysics, Simulation};
 use crate::scroll::{
-    BallisticState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX, crossed_refresh_trigger,
-    stretch_about_edge,
+    BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
+    ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state, stretch_about_edge,
+    with_scroll_claim,
 };
 
 /// Extra items materialized above and below the visible window, so a small
@@ -1146,6 +1161,16 @@ pub struct ListViewWidget {
     scrolling: bool,
     /// Whether a `Down` armed an active gesture (mirrors `ScrollWidget`).
     down_active: bool,
+    /// What the nearest nested scroll surface inside a materialized row claimed
+    /// it could do with this gesture, read back out of the claim cell this
+    /// widget pushed around the `Down`'s routing — the input to the
+    /// innermost-wins decision at the takeover site. Same field, same contract,
+    /// same `Down`-time staleness window as `ScrollWidget::inner_at_down`; see
+    /// it for the full rule.
+    pub(crate) inner_at_down: InnerScrollState,
+    /// Whether this gesture was handed to that nested surface — sticky for the
+    /// rest of the gesture, exactly like `ScrollWidget::deferring`.
+    pub(crate) deferring: bool,
     down_start: Point,
     last_drag: Point,
     tracker: VelocityTracker,
@@ -1212,6 +1237,8 @@ impl ListViewWidget {
             viewport: Size::ZERO,
             scrolling: false,
             down_active: false,
+            inner_at_down: InnerScrollState::default(),
+            deferring: false,
             down_start: Point::ZERO,
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
@@ -2089,6 +2116,8 @@ impl ListViewWidget {
                     }
                     self.scrolling = false;
                     self.down_active = true;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     // Remember what this press interrupted before killing it —
                     // the next fling asks the physics how much of it to carry
                     // forward (`0.0` under `RubberBand`, i.e. start cold).
@@ -2108,7 +2137,22 @@ impl ListViewWidget {
                     self.tracker.clear();
                     self.tracker.record(t_ms, p.position.y);
                     ctx.capture_pointer();
-                    crate::authoring::route_event(&mut self.children, ctx, event);
+                    // Innermost-wins arbitration, in dispatch order: report
+                    // THIS list into whatever cell is ambient (the nearest
+                    // enclosing scrollable's, if any) while that is still the
+                    // top of the stack, then push this list's own cell for the
+                    // routing below so a row's nested scrollable writes here
+                    // rather than past this level. `scroll.rs` owns the seam;
+                    // this is the second consumer of it, not a second copy.
+                    if let Some(host) = ambient_scroll_claim() {
+                        host.set(inner_claim_state(self.physics.as_ref(), &self.metrics()));
+                    }
+                    let claim = Rc::new(Cell::new(InnerScrollState::default()));
+                    let children = &mut self.children;
+                    with_scroll_claim(&claim, || {
+                        crate::authoring::route_event(children, ctx, event)
+                    });
+                    self.inner_at_down = claim.get();
                     EventResult::Handled
                 }
                 PointerPhase::Move => {
@@ -2131,35 +2175,50 @@ impl ListViewWidget {
                         self.fire_near_start(ctx);
                         self.fire_near_end(ctx);
                         ctx.request_redraw();
-                    } else if (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
+                    } else if !self.deferring
+                        && (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
                         && self.physics.should_accept_user_offset(&self.metrics())
                     {
-                        // Take the gesture over: cancel the armed child, stop
-                        // forwarding — the documented window-shift capture-loss
-                        // tradeoff's sibling. A physics that refuses drags
-                        // outright keeps the move flowing to the row instead;
-                        // `RubberBand` accepts unconditionally (even content
-                        // that fits rubber-bands), so this gate is inert on the
-                        // default feel.
-                        self.scrolling = true;
-                        self.settling = false;
-                        self.last_drag = p.position;
-                        // Seed the raw drag position from the raw offset plus
-                        // any live overscroll — never `painted_offset`, which
-                        // also folds in `pending_correction`:
-                        // `apply_drag_offset` writes `drag_raw` straight into
-                        // `offset` by absolute assignment, and
-                        // `placement_offset` unconditionally re-adds
-                        // `pending_correction` on top, so seeding from painted
-                        // space would double-count a nonzero pending
-                        // correction on the first post-takeover move.
-                        // Including `overscroll` (not just `offset`) is the
-                        // intentional regrab-mid-bounce term, so a regrab
-                        // mid-bounce still continues smoothly from what is on
-                        // screen.
-                        self.drag_raw = self.offset + self.overscroll;
-                        self.cancel_children(ctx, p.position);
-                        ctx.request_redraw();
+                        if self.inner_at_down.defers(p.position.y - self.down_start.y) {
+                            // Innermost wins: a nested scrollable inside a row
+                            // registered on this gesture's `Down` and can
+                            // consume this direction, so take nothing over —
+                            // no `Cancel` to the rows, no capture handover —
+                            // and keep routing. Sticky for the rest of the
+                            // gesture (`deferring` gates this whole branch);
+                            // the inner's own slop machinery takes it from
+                            // here. See the module docs' *Nested scrolling*.
+                            self.deferring = true;
+                            crate::authoring::route_event(&mut self.children, ctx, event);
+                        } else {
+                            // Take the gesture over: cancel the armed child,
+                            // stop forwarding — the documented window-shift
+                            // capture-loss tradeoff's sibling. A physics that
+                            // refuses drags outright keeps the move flowing to
+                            // the row instead; `RubberBand` accepts
+                            // unconditionally (even content that fits
+                            // rubber-bands), so that gate is inert on the
+                            // default feel.
+                            self.scrolling = true;
+                            self.settling = false;
+                            self.last_drag = p.position;
+                            // Seed the raw drag position from the raw offset
+                            // plus any live overscroll — never
+                            // `painted_offset`, which also folds in
+                            // `pending_correction`: `apply_drag_offset` writes
+                            // `drag_raw` straight into `offset` by absolute
+                            // assignment, and `placement_offset`
+                            // unconditionally re-adds `pending_correction` on
+                            // top, so seeding from painted space would
+                            // double-count a nonzero pending correction on the
+                            // first post-takeover move. Including `overscroll`
+                            // (not just `offset`) is the intentional
+                            // regrab-mid-bounce term, so a regrab mid-bounce
+                            // still continues smoothly from what is on screen.
+                            self.drag_raw = self.offset + self.overscroll;
+                            self.cancel_children(ctx, p.position);
+                            ctx.request_redraw();
+                        }
                     } else {
                         crate::authoring::route_event(&mut self.children, ctx, event);
                     }
@@ -2209,6 +2268,8 @@ impl ListViewWidget {
                     }
                     self.scrolling = false;
                     self.down_active = false;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -2216,6 +2277,8 @@ impl ListViewWidget {
                     crate::authoring::route_event(&mut self.children, ctx, event);
                     self.scrolling = false;
                     self.down_active = false;
+                    self.inner_at_down = InnerScrollState::default();
+                    self.deferring = false;
                     // Cancel never fires a callback and snaps any overscroll away
                     // with no settle animation: drop any pending
                     // near-start/near-end fire without invoking it, and never
@@ -2597,6 +2660,7 @@ impl Widget for ListViewWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scroll::ScrollWidget;
     use frust_core::{RenderRoot, any};
     use std::any::Any;
     use std::cell::{Cell, RefCell};
@@ -3723,6 +3787,161 @@ mod tests {
         assert!(!w.settling);
         assert_eq!(w.overscroll, 0.0);
         assert_eq!(w.offset(), 0.0);
+    }
+
+    // --- (8e) Nested scrolling: innermost-wins arbitration with this widget as
+    //     the OUTER surface, over a row that owns a scroll of its own. The
+    //     mirror case (a nested `ListView` under a `ScrollView`) lives beside
+    //     the seam itself, in `scroll.rs`. See the module docs' *Nested
+    //     scrolling*. ---
+
+    /// A bare list for the nested-scroll fixtures: `count` rows of `extent` px
+    /// in a `viewport_h`-tall viewport, no rows materialized yet ([`wire_row`]
+    /// installs the one that matters).
+    fn nested_list(count: usize, extent: f64, viewport_h: f64) -> ListViewWidget {
+        let mut w = ListViewWidget::new(count, extent);
+        w.viewport = Size::new(200.0, viewport_h);
+        w
+    }
+
+    /// Build and lay out the nested `ScrollView` a row hosts: a
+    /// `viewport_h`-tall viewport over 1000px of plain content. Laid out tight
+    /// because an enclosing scroll surface hands its child unbounded height,
+    /// which would leave this one viewport == content with nothing to scroll —
+    /// a real row's own extent is what bounds it, and [`wire_row`] re-applies
+    /// exactly that.
+    fn nested_scroll(viewport_h: f64) -> ScrollWidget {
+        let view: crate::scroll::ScrollView<()> =
+            crate::scroll::scroll_view(crate::test_support::leaf(200.0, 1000.0));
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(
+            &mut lctx,
+            &BoxConstraints::tight(Size::new(200.0, viewport_h)),
+        );
+        w
+    }
+
+    /// Park a nested surface at `offset` px with a wheel scroll (hard-clamped,
+    /// no overscroll and no gesture state) — how a real one reaches a
+    /// mid-content position.
+    fn park_scroll(w: &mut ScrollWidget, viewport_h: f64, offset: f64) {
+        let mut unit = ();
+        let sa: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, viewport_h));
+        w.event(
+            &mut ctx,
+            &InputEvent::Scroll {
+                position: Point::new(10.0, 10.0),
+                delta: ScrollDelta::Pixels(0.0, offset),
+            },
+        );
+        assert_eq!(w.offset(), offset, "the fixture parked where it meant to");
+    }
+
+    /// Wire `row` in as the list's single materialized row for item `index`,
+    /// laid out tight at the list's own item extent so the pod carries the
+    /// bounds `route_event` hit-tests against — and so the nested surface gets
+    /// the bounded viewport a real row layout hands it.
+    fn wire_row(outer: &mut ListViewWidget, index: usize, row: Box<dyn Widget>) {
+        let mut pod = ChildPod::new(row);
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(
+            &mut lctx,
+            &BoxConstraints::tight(Size::new(200.0, outer.item_extent)),
+        );
+        outer.children = vec![pod];
+        outer.keys = vec![index];
+        outer.sync_child_origins();
+    }
+
+    /// The nested surface [`wire_row`] installed as the list's one row.
+    fn row_scroll(outer: &ListViewWidget) -> &ScrollWidget {
+        (outer.children[0].widget() as &dyn Any)
+            .downcast_ref::<ScrollWidget>()
+            .expect("the fixture wired a ScrollWidget row")
+    }
+
+    fn dispatch_list(w: &mut ListViewWidget, e: &InputEvent, t_ms: f64) {
+        let mut unit = ();
+        let sa: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, e, t_ms);
+    }
+
+    #[test]
+    fn list_view_outer_defers_when_the_nested_surface_can_consume() {
+        // A 200px viewport scrolled to row 2 (content y 400..600, so the row
+        // sits exactly over the viewport), that row hosting a scroll surface
+        // parked mid-content — at neither of its own edges, so its claim comes
+        // from actual room rather than a displacement-allowing physics.
+        let mut outer = nested_list(10, 200.0, 200.0);
+        outer.offset = 400.0;
+        let mut row = nested_scroll(200.0);
+        park_scroll(&mut row, 200.0, 300.0);
+        wire_row(&mut outer, 2, Box::new(row));
+
+        dispatch_list(&mut outer, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(
+            outer.inner_at_down.registered,
+            "the row's scroll surface reported itself on the routed Down"
+        );
+        assert!(outer.inner_at_down.can_consume_up_drag);
+
+        // 50px of finger-up drag, past the slop: the list stands down.
+        dispatch_list(&mut outer, &ev(PointerPhase::Move, 50.0), 16.0);
+        assert!(outer.deferring);
+        assert!(!outer.scrolling, "the list never took the gesture over");
+        assert_eq!(outer.offset, 400.0);
+        assert!(
+            outer.children[0].is_active(),
+            "no takeover Cancel went out — the row keeps its capture"
+        );
+
+        // The rest of the drag lands in the row, not in the list.
+        dispatch_list(&mut outer, &ev(PointerPhase::Move, 10.0), 32.0);
+        assert_eq!(outer.offset, 400.0, "the list still has not moved");
+        assert_eq!(outer.overscroll, 0.0);
+        assert_eq!(
+            row_scroll(&outer).offset(),
+            340.0,
+            "the nested surface consumed the 40px"
+        );
+    }
+
+    #[test]
+    fn list_view_outer_takes_over_when_the_nested_surface_is_pinned() {
+        let mut outer = nested_list(10, 200.0, 200.0);
+        outer.offset = 400.0;
+        let mut row = nested_scroll(200.0);
+        // At its own top under a physics that rejects every past-edge
+        // proposal: a downward drag has nothing to do there.
+        row.physics = Box::new(crate::physics::parity::Clamping::new());
+        wire_row(&mut outer, 2, Box::new(row));
+
+        dispatch_list(&mut outer, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(outer.inner_at_down.registered);
+        assert!(!outer.inner_at_down.can_consume_down_drag);
+
+        // 40px down, past the slop: the list takes over exactly as it always
+        // has, cancelling the row on the way.
+        dispatch_list(&mut outer, &ev(PointerPhase::Move, 140.0), 16.0);
+        assert!(outer.scrolling);
+        assert!(!outer.deferring);
+        assert!(
+            !outer.children[0].is_active(),
+            "the takeover Cancel released the row's capture"
+        );
+
+        dispatch_list(&mut outer, &ev(PointerPhase::Move, 200.0), 32.0);
+        assert_eq!(outer.offset, 340.0, "the list consumed the 60px of drag");
+        assert_eq!(outer.overscroll, 0.0, "…in range, so no displacement");
+        assert_eq!(
+            row_scroll(&outer).offset(),
+            0.0,
+            "the nested surface never moved"
+        );
     }
 
     // --- (9) Keyed reconciliation: row state follows the stable key. ---
