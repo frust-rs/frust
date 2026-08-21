@@ -2947,34 +2947,36 @@ Layer Dependencies (no design-system plugin may depend on a sibling plugin).
 
 ---
 
-### `material-modal-staged-dismiss-private-to-host` — a modal panel's content cannot request the staged exit ramp its own close affordance should use
+### `material-modal-staged-dismiss-private-to-host` — two components' content-owned close affordances still can't request the staged exit ramp
 
 **Observed**: `frust_material::overlay::modal`'s staged-exit machine (scrim tap, Escape, close
-button, drag, Android back all reverse-ramp before the app's dismissal fires) is driven by a
-`dismiss_signal: Rc<Cell<u64>>` cell that `show_overlay_modal` creates and keeps to itself — it is
-handed to the host widget, never to the content the caller builds. A panel's *own* content-owned
-close affordance (e.g. `frust_material::search`'s full-screen view's back button) can only call
-`NavigatorController::pop()` directly through the `on_modal_dismiss`/`on_close` wiring, which pops
-**unstaged** — immediately, with no reverse ramp — while every host-chrome dismiss gesture on the
-same panel stages one. A user closing the same panel two different ways sees two different exit
-motions.
+button, drag, Android back all reverse-ramp before the app's dismissal fires) is now reachable from
+caller-built content too: `ModalDismiss`, installed via `.dismiss_handle(handle)` on the modal host
+view, stages the same reverse exit `stage_dismiss` runs for chrome gestures — one staging path
+covers both, and it carries a `PopResult` so a staged "Apply"/"Save" still reaches the pusher's
+`on_result`. It deliberately bypasses `dismissable(false)` (that flag gates *user* exits; an
+app-wired dismiss is not one). The forwarding builder method has landed on `side_sheet`, all three
+`dialog` variants, `date_picker`, `time_picker`, and `bottom_sheet` (`sheet.rs`). `search`'s
+full-screen view back button and `navigation_drawer`'s app-driven dismiss-on-select `on_select`
+handler are the two holdouts: neither `SearchViewView` nor `NavigationDrawerView` forwards a
+`dismiss_handle` method, so both still call `NavigatorController::pop()` directly and dismiss
+**unstaged** while every host-chrome gesture on the same panel stages one.
 
-**Applies to**: any `frust_material` component built on `overlay::modal` whose content wants its own
-close control (confirmed today in `search`'s full-screen view back button and
-`navigation_drawer`'s app-driven dismiss-on-select `on_select` handler; latent in any future
-component that adds an in-content close affordance rather than relying only on the host chrome's
-close button/scrim/Escape/drag/back).
+**Applies to**: `frust_material::search`'s full-screen view back button and
+`frust_material::navigation_drawer`'s dismiss-on-select handler only — both still cite this id in
+their own doc comments. Every other `overlay::modal` family (`side_sheet`, `dialog` and its
+confirmation/full-screen variants, `date_picker`, `time_picker`, `bottom_sheet`) is closed.
 
-**Why accepted**: `show_overlay_modal` is the only place `dismiss_signal` is constructed and it is a
-crate-private field on the host widget by design (no public setter). Fixing this needs a public
-`request_staged_dismiss`-shaped seam on the modal host so a caller-built content view can bump the
-same signal the chrome gestures do, which is a host-API addition, not a component-level fix — out
-of scope for the Phase 3 port that found it.
+**Why accepted**: the general seam and its five adopters landed in one round (gate-r5); extending
+the same forwarding builder method to `search`/`navigation_drawer` is a small, mechanical follow-up
+that round didn't reach, not a new design problem.
 
-**Evidence**: `plugins/material/src/overlay/modal.rs`'s `show_overlay_modal` (the `dismiss_signal`
-cell constructed and threaded to the widget, never exposed to `build`'s content) and its `on_close`/
-`on_modal_dismiss` doc comments (staged vs. unstaged); `plugins/material/src/search/view.rs`'s back
-affordance (wired to the unstaged pop, doc-noted as such).
+**Evidence**: `plugins/material/src/overlay/modal.rs`'s `ModalDismiss` type and its "App-initiated
+dismiss" module-doc section; `dismiss_handle` forwarding methods in `side_sheet.rs`, `dialog.rs`,
+`date_picker/dialog.rs`, `time_picker/mod.rs`, `sheet.rs`; `search/view.rs`'s header doc (back
+affordance still pops unstaged) and `navigation_drawer.rs`'s "Selecting does not dismiss" section
+(both cite this id); gate-r5-04 `f3093a13` (staged-dismiss-public-seam) and gate-r5-02 `73cbcde6`
+(bottom-sheet adoption).
 
 ---
 
