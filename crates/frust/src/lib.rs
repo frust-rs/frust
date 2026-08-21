@@ -98,18 +98,21 @@ pub use frust_core::view::{AnyView, View, any};
 // `BackPolicy::DismissAnimated` + dismiss-signal example — an app-authored
 // modal staging its own exit on Android back instead of vanishing.
 pub use frust_widgets::{
-    Align, AlignView, Alignment, Axis, BackPolicy, BorderStyle, Button, ButtonStyle, ButtonView,
-    Checkbox, CheckboxView, ChildKey, Column, ContainerView, ContainerWidget, CrossAxisAlignment,
-    DividerView, DividerWidget, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    GestureDetectorView, HeroView, Icon, IconButton, IconButtonView, IconData, IconSource,
-    IconView, IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView,
-    ListViewWidget, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding,
-    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
-    RadioView, RadioWidget, ResultCallback, Row, SafeAreaView, ScaffoldView, ScrollInfo,
-    ScrollView, SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView, TextInput,
-    TextInputView, TextView, Timing, TransitionSpec, TransitionState, VisibilityCallback, button,
-    checkbox, colored_box, container, divider, flexible, hero, icon, icon_button, inflexible,
-    keyed, list_view, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
+    Align, AlignView, Alignment, AlwaysScrollable, Axis, BackPolicy, BorderStyle, Bouncing, Button,
+    ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column, ContainerView,
+    ContainerWidget, CrossAxisAlignment, DecelerationRate, DividerView, DividerWidget, EdgeInsets,
+    FlexChild, FlexView, GestureDetector, GestureDetectorView, HeroView, Icon, IconButton,
+    IconButtonView, IconData, IconSource, IconView, IconWidget, Image, ImageError, ImageFit,
+    ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
+    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
+    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox,
+    SizedBoxView, Slider, SliderView, SpringDescription, Stack, StackView, TextInput,
+    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
+    VisibilityCallback, button, checkbox, colored_box, container, divider, flexible, hero, icon,
+    icon_button, inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider,
+    text, text_input,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -2027,6 +2030,35 @@ mod native_typefaces_reexport {
         };
         assert!(typefaces.button.is_some());
         assert!(typefaces.body.is_some());
+    }
+}
+
+/// Facade-level check that the pluggable scroll-physics vocabulary
+/// ([`ScrollPhysics`]/[`Bouncing`]/[`OverscrollEffect`]/[`RubberBand`],
+/// alongside the rest of `frust_widgets::physics`'s flat re-export) resolves
+/// through the `frust` facade — the seam [`ScrollView::physics`]/
+/// [`ScrollView::overscroll_effect`] need a consumer to actually construct an
+/// argument for without reaching into `frust_widgets` directly.
+#[cfg(test)]
+mod scroll_physics_reexport {
+    use crate::{
+        Bouncing, OverscrollEffect, RubberBand, ScrollPhysics, ScrollView, scroll_view, text,
+    };
+
+    // A build-time proof the types name-resolve through the facade.
+    #[allow(dead_code)]
+    fn _uses_all(_p: &dyn ScrollPhysics, _e: OverscrollEffect) {}
+
+    #[test]
+    fn physics_and_effect_types_resolve_through_facade() {
+        let view: ScrollView<()> = scroll_view(text("hi"))
+            .physics(Bouncing::new())
+            .overscroll_effect(OverscrollEffect::Stretch);
+        let _ = view;
+        // RubberBand — the pre-seam feel, now an opt-in rather than any
+        // platform's default — is directly constructible through the facade
+        // too, which is the whole point of it staying reachable.
+        let _: RubberBand = RubberBand::new();
     }
 }
 

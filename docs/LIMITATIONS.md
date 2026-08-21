@@ -2743,3 +2743,180 @@ alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
 **Evidence**: `crates/frust-render/src/convert.rs`'s shared command-walk decode of
 `Command::BlurredRoundedRect` (`radii.largest()` call site and its regression test).
+
+---
+
+### `scroll-physics-stretch-affine-approx` — `OverscrollEffect::Stretch` is an affine approximation, not Android's shader
+
+**Observed**: `OverscrollEffect::Stretch` paints a whole-viewport, scroll-axis-only affine scale
+about the held edge (`stretch_about_edge`/`stretch_intensity`, `scroll.rs`) — the same approximation
+Flutter's own non-Impeller `StretchingOverscrollIndicator` makes of Android 12's overscroll shader,
+not the shader itself. A single affine scale cannot reproduce the shader's per-pixel falloff, and
+release motion rides the widgets' existing settle decay (`SETTLE_DECAY`) rather than Android's own
+release spring (ω = 24.657, ζ = 0.98), which is not ported. Roughly 60-70% visual fidelity to the
+real effect.
+
+**Applies to**: any surface painting under `OverscrollEffect::Stretch` — Android's platform-adaptive
+default today; reachable on any platform as an explicit `.overscroll_effect(Stretch)`.
+
+**Why accepted**: the same approximation Flutter itself ships (non-Impeller); a per-pixel shader
+port is a materially larger render-path change than the physics seam this stretch effect rides on.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs` module docs' *Overscroll visuals*
+(`stretch_about_edge`/`stretch_intensity`, the accepted-fidelity note and the ω/ζ citation).
+
+---
+
+### `scroll-physics-snap-not-shipped` — no snap physics (page/fixed-extent/carousel) ships yet
+
+**Observed**: `crate::physics` ships four platform-parity/utility physics (`Bouncing`, `Clamping`,
+`AlwaysScrollable`, `NeverScrollable`) plus `RubberBand`; nothing implementing Flutter's
+`PageScrollPhysics`/`FixedExtentScrollPhysics` family (a release that ballistically snaps to the
+nearest page/item boundary) exists in this crate. The `ScrollPhysics` trait's chaining contract
+(`.chain(parent)`) is designed to accommodate one — a snap physics overriding only
+`create_ballistic_simulation` and delegating everything else to a chained parent — but no such type
+is written.
+
+**Applies to**: any app wanting a paged/carousel-style scroll surface built on the baseline
+`ScrollView`/`ListView` rather than a hand-rolled widget.
+
+**Why accepted**: the seam was built parity-first (matching the platforms' own default feel); a snap
+physics is straightforward follow-up work on the same trait, not a design gap.
+
+**Evidence**: `crates/frust-widgets/src/physics/` (module inventory — `parity.rs`/`rubber_band.rs`
+are the only concrete `ScrollPhysics` impls); `mod.rs`'s `ScrollPhysics` trait docs, *Chaining*.
+
+---
+
+### `scroll-physics-shadcn-carousel-unmigrated` — `frust-shadcn`'s carousel still hand-rolls its own scroll engine
+
+**Observed**: `plugins/shadcn/src/components/carousel.rs` (the shadcn/ui Carousel port) implements
+its own drag capture, snap-to-nearest-item settle, and flick detection directly — it does not sit on
+`crate::physics::ScrollPhysics`/`Simulation`, `ScrollView`, or `ListView`. It predates and is
+untouched by the scroll-physics seam.
+
+**Applies to**: `frust-shadcn`'s `carousel()`; its feel (snap timing, flick threshold) is tuned and
+tested independently of every other scroll surface in the framework and cannot pick up a
+`ScrollPhysics` change (e.g. a future snap physics, `scroll-physics-snap-not-shipped`) automatically.
+
+**Why accepted**: there is no page/fixed-extent snap physics to compose over yet (see
+`scroll-physics-snap-not-shipped`), and embla (the upstream carousel's scroll engine) has no
+frust-side package to wrap — the port's own module docs record the re-implementation as a
+deliberate v1 choice. Migrating onto the physics seam is future work once a snap physics exists.
+
+**Evidence**: `plugins/shadcn/src/components/carousel.rs` module docs (*Drag, and what ends it*,
+*Motion*) — no `crate::physics`/`ScrollView`/`ListView` dependency in the file.
+
+---
+
+### `scroll-physics-claim-down-snapshot` — nested-scroll arbitration is a `Down`-time snapshot with no mid-gesture handback
+
+**Observed**: the ambient inner-scroll claim (`InnerScrollState`, `scroll.rs`) is written once, as a
+nested scrollable reports itself while its host forwards the gesture's `Down`, and the outer's own
+defer decision (`deferring`) is sticky for the rest of that gesture. Content that becomes scrollable
+mid-drag (e.g. new rows load in) or an inner surface reaching an edge it wasn't at on `Down` never
+changes the arbitration outcome; a gesture the outer already took over can never hand it back to a
+newly-eligible inner, and vice versa.
+
+**Applies to**: any nested-scrollable layout using the baseline `ScrollView`/`ListView`'s built-in
+arbitration; a single stationary `Down`-time state decides the whole gesture.
+
+**Why accepted**: the same Down-time-snapshot tradeoff the navigator's own edge-swipe arming already
+lives with (**R-B3-inner**, `nav::ambient`'s `SWIPE_CLAIM`) — arbitrating once at `Down` is what
+keeps the takeover decision a single read rather than a per-`Move` re-evaluation; the fix is a
+strictly larger seam (a live-updating claim), not a bug in the one shipped.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs`'s `SCROLL_CLAIM`/`InnerScrollState`/`deferring`
+module docs (*Nested scrolling: innermost wins*).
+
+---
+
+### `scroll-physics-rubber-band-legacy-path-and-easeback` — `RubberBand` keeps the pre-seam fling/settle path, and its ease-back is now path-dependent
+
+**Observed**: `RubberBand::create_ballistic_simulation` always returns `None` by design, so a
+`RubberBand`-installed surface still runs both widgets' pre-seam hand-rolled fling/settle code
+rather than the generic `Simulation`-driven ballistic path every other physics uses — unifying the
+two is recorded, unstarted follow-up work, not a behavior-preserving detail of the extraction.
+Separately, under the surfaces' per-move drag convention (every `Move` mapped against the *live*
+position), a pull-and-return within one gesture no longer lands exactly at rest: `RubberBand` has no
+easing/tensioning split of its own, so it resists the past-edge part of a *returning* delta too,
+leaving the surface slightly scrolled after the finger comes all the way back.
+
+**Applies to**: any app opting into `.physics(RubberBand::new())`; every shipped one-shot pull
+number (refresh trigger, stretch intensity) is unchanged — only a pull-and-return within a single
+gesture lands off-rest.
+
+**Why accepted**: `RubberBand` exists to preserve the exact pre-seam feel where the mapping is
+linear, not to gain the generic ballistic driver — unifying it is future work. The ease-back delta
+is the one place the new per-move convention and the old whole-excursion one genuinely part ways,
+pinned rather than papered over.
+
+**Evidence**: `crates/frust-widgets/src/physics/rubber_band.rs` module docs (*What lives here, and
+what deliberately does not*, *Under the surfaces' per-move drag convention*) and its
+`per_move_deltas_telescope_to_the_pre_seam_pull` test.
+
+---
+
+### `scroll-physics-min-fling-ladder-disagreement` — a release below a physics' fling minimum still glides, on the legacy fallback's own threshold
+
+**Observed**: a release velocity below the installed physics' `min_fling_velocity()` (e.g. below
+`Bouncing`'s 100 px/s) makes `create_ballistic_simulation` decline, but the release does not simply
+stop — it falls through to the widgets' legacy fling path, which is gated on its own, lower, pinned
+`FLING_STOP` threshold (30 px/s) instead. A release between the two (e.g. 60 px/s under `Bouncing`)
+therefore still glides, just on the legacy curve rather than the physics' own.
+
+**Applies to**: any physics whose `min_fling_velocity()` sits above `FLING_STOP`, on a release that
+lands strictly between the two thresholds — today `Bouncing` (100 px/s minimum) is the shipped case.
+
+**Why accepted**: the two ladders serve different purposes — the physics' minimum gates its own
+ballistic simulation, `FLING_STOP` gates the separate legacy fallback that every non-simulation-
+returning physics (and any in-range release) still runs — and the disagreement is pinned by a test
+rather than silently drifting; closing the gap is a product-feel call (should a sub-minimum release
+glide at all), not a bug fix.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs`'s `default_min_fling_gate_is_one_hundred` test.
+
+---
+
+### `scroll-physics-stationary-hold-momentum-not-ported` — a finger that pauses before releasing still carries momentum
+
+**Observed**: Flutter's `ScrollDragController.end` drops carried momentum a third way beyond the
+sign/magnitude gate — `_maybeLoseMomentum` — when the finger held still before letting go. Both
+widgets' `fling_start_velocity` port only the sign and magnitude guards; a press that stalls live
+motion, pauses, then releases slowly in the same direction still adds the interrupted motion's
+momentum here.
+
+**Applies to**: any release that interrupts an in-flight fling/ballistic, pauses, and then lets go
+in the same direction the interrupted motion was travelling.
+
+**Why accepted**: a smaller, explicitly recorded gap rather than an unnoticed one — the sign and
+magnitude guards are the load-bearing pair (they prevent a flick back the other way from inheriting
+momentum it should cancel); the stall guard is a refinement on top, not ported in this pass.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `fling_start_velocity` doc
+comments (*Accepted gap*).
+
+---
+
+### `scroll-physics-ballistic-early-stop-conservatism` — a partial boundary rejection or inward velocity still pumps to `is_done`
+
+**Observed**: `ballistic_is_pinned_outward` (both widgets) only ends a simulation early when the
+physics rejects the *whole* excess and the curve's velocity still points further out of range; a
+*partial* rejection or an inward velocity each keep the simulation running the rest of its frames,
+even though most such cases can never bring the offset back on screen either. Separately in
+`ListView`, `max_offset` is a converging estimate in variable-extent mode, so a fling stopped
+against an under-estimated end stays stopped rather than resuming once later row measurements push
+the real end further out.
+
+**Applies to**: any ballistic release ending near a boundary under a non-fully-rejecting physics
+(the `Bouncing` family); the `max_offset` caveat applies only to a keyed `ListView` with
+`.estimated_item_extent(px)` set.
+
+**Why accepted**: deliberately conservative rather than guessed at — a physics whose rejection
+merely rounds to the excess, or an edge spring released outward that crosses back within a few
+frames, both need the simulation still running; only the fully-rejected-and-still-outward case is
+one-way for every curve in `crate::physics::simulation`. The `ListView` estimate case is a strictly
+smaller version of the same tradeoff windowed virtualization already accepts elsewhere.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `ballistic_is_pinned_outward`
+doc comments; `list_view.rs`'s local *One caveat* note on the same method.
