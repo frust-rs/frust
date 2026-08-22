@@ -56,6 +56,18 @@
 //! without playing the staged exit, and a dismissal mid-enter resumes from
 //! wherever the entering panel had reached rather than snapping to rest first.
 //!
+//! **The barrier is only a barrier while it is on screen.** Its input swallow
+//! is gated on the scrim's own progress, never on the phase: with the scrim
+//! transparent — the first frame of an entrance, and everything past a
+//! completed exit — a press falls through to the page below instead of being
+//! captured by an invisible full-window surface (`docs/REVIEW_FOCUS.md`'s named
+//! overlay defect). That matters because `Phase::Dismissed` is **terminal**: a
+//! navigator-hosted sheet is unmounted by its own pop a frame later, but a
+//! standalone-composed one (a bare [`glyph_side_sheet`], no
+//! [`on_close`](GlyphSideSheetView::on_close)) just stays mounted there. For
+//! the same reason frames are requested only while a ramp is running plus the
+//! single frame the exit lands on, never for as long as the sheet is dismissed.
+//!
 //! # Geometry — trailing edge, full height, square corners
 //!
 //! The panel is `min(0.83 × viewport width, `[`GLYPH_SIDE_SHEET_MAX_WIDTH`]`)`
@@ -138,6 +150,20 @@
 //! [`NavigatorController::request_back`] bumps, which `paint` compares against
 //! the last-seen value to start the identical staged exit.
 //!
+//! **The flag is read once, at push time.** [`show_glyph_side_sheet`] peeks it
+//! off one `build()` call to fix that page's `BackPolicy` and dismiss-signal
+//! wiring for the page's whole life, and the widget likewise keeps the value it
+//! was *built* with: flipping [`dismissable`](GlyphSideSheetView::dismissable)
+//! on a later rebuild is **inert** — no relayout, the close affordance neither
+//! appears nor disappears, and every dismiss guard keeps answering to the
+//! pushed value. That is what keeps widget and host page agreeing: honouring a
+//! post-push flip against a frozen policy would give a sheet that paints no
+//! close affordance yet still back-dismisses, or one whose back press stays
+//! vetoed forever. Honouring a live flip *properly* is future work — it needs
+//! the pushed `BackPolicy` to become re-writable and the dismiss signal to grow
+//! a second, policy-aware writer (the review's option b), which is additive
+//! rather than a rework.
+//!
 //! # Programmatic close — [`GlyphSideSheetHandle`], the same staged exit
 //!
 //! [`show_glyph_side_sheet`] returns a cheap cloneable handle whose
@@ -196,6 +222,14 @@ use crate::press::presses;
 /// constant [`crate::dialog`]/[`crate::sheet`] both use, applied here too so
 /// the catalog's modal surfaces carry one barrier weight.
 const SCRIM_ALPHA: f32 = 0.6;
+/// Scrim fade fraction at or below which the barrier counts as **gone**: it
+/// paints nothing a user can see, so it must neither swallow input nor keep
+/// frames coming. `docs/REVIEW_FOCUS.md`'s overlay rule — *a barrier gates its
+/// input swallow on progress, never on open/closed state alone* — an invisible
+/// surface that still absorbs pointers being the named defect. Small enough
+/// that a real fade (which starts moving within one frame) is never mistaken
+/// for a dead one.
+const BARRIER_EPSILON: f32 = 1e-3;
 
 /// The panel's width as a fraction of the viewport's, from the approved Glyph
 /// side-sheet design: wide enough to be a real secondary surface, narrow
@@ -501,6 +535,11 @@ impl<State: 'static> GlyphSideSheetView<State> {
     /// (see the [module docs](self)); the app still closes it itself, through
     /// [`GlyphSideSheetHandle::close`] (staged) or a bare `controller.pop()`
     /// (immediate).
+    ///
+    /// **Read at push time only.** [`show_glyph_side_sheet`] fixes the pushed
+    /// page's [`BackPolicy`] from this flag, so the widget holds the value it
+    /// was built with and flipping it on a later rebuild is deliberately inert
+    /// (see the [module docs](self)) — decide it when the sheet is shown.
     pub fn dismissable(mut self, dismissable: bool) -> Self {
         self.dismissable = dismissable;
         self
@@ -585,7 +624,10 @@ where
     // Peeked once, at show-time: the back-policy/dismiss-signal wiring is
     // fixed for the life of this pushed page (mirrors
     // `crate::sheet::show_glyph_sheet`'s identical peek), even though `build`
-    // is re-invoked on every later navigator rebuild to diff the page.
+    // is re-invoked on every later navigator rebuild to diff the page. The
+    // widget ignores the flag on those rebuilds too (see
+    // `GlyphSideSheetView::rebuild`), so page and panel can never disagree
+    // about whether this sheet is dismissable.
     let dismissable = build().dismissable;
     // One cell, two writers: the navigator's back press (only under
     // `DismissAnimated`) and the returned handle. The widget always gets it —
@@ -675,6 +717,9 @@ pub struct GlyphSideSheetWidget {
     body: ChildPod,
     footer: Option<ChildPod>,
     on_close: Option<OnClose>,
+    /// The user-dismiss barrier flag, **as of `build`** — the push-time
+    /// contract every guard in this widget reads (see the [module docs](self));
+    /// `rebuild` deliberately never reinstalls it.
     dismissable: bool,
     /// The shared dismiss-signal cell — the one channel carrying **both** an
     /// Android back press (the `DismissAnimated` seam) and a
@@ -795,12 +840,14 @@ impl<State: 'static> View<State> for GlyphSideSheetView<State> {
         );
         // Closures aren't comparable; reinstall the close adapter unconditionally.
         element.on_close = self.on_close.clone();
-        // The flag drives the header's own trailing reserve and the close
-        // affordance's existence, so a change to it is a relayout.
-        if prev.dismissable != self.dismissable {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        element.dismissable = self.dismissable;
+        // `dismissable` is deliberately NOT reinstalled — it is a *push-time*
+        // contract (see the module docs). `show_glyph_side_sheet` freezes the
+        // pushed page's `BackPolicy` and dismiss-signal wiring off the flag it
+        // peeks once, so a post-push flip honoured here could only desynchronize
+        // the two: a sheet painting no close affordance that still
+        // back-dismisses, or one whose back press stays vetoed forever. The
+        // widget keeps its build-time value, which is what makes the flip
+        // genuinely inert — no relayout, no repaint, and no guard to re-read it.
         // The dismiss-signal cell's identity is fixed at push time (see
         // `show_glyph_side_sheet`); reinstalling it here never disturbs
         // `last_seen_dismiss`.
@@ -846,7 +893,13 @@ impl GlyphSideSheetWidget {
     /// Deliberately **not** gated on `dismissable`: the navigator only routes a
     /// back press here for a dismissable sheet in the first place (a
     /// non-dismissable one pushes [`BackPolicy::Veto`]), so the only writer
-    /// left is the app's own handle, which closes either kind.
+    /// left is the app's own handle, which closes either kind. That invariant
+    /// holds because the flag is a *push-time* contract — the pushed
+    /// [`BackPolicy`] and this widget's own `dismissable` are fixed from the
+    /// same peeked value and a later flip is ignored (see
+    /// [`GlyphSideSheetView::rebuild`](GlyphSideSheetView) and the
+    /// [module docs](self)) — so the policy can never drift away from the
+    /// barrier this sheet actually enforces.
     fn observe_dismiss_signal(&mut self) {
         if let Some(signal) = &self.dismiss_signal {
             let current = signal.get();
@@ -901,6 +954,21 @@ impl GlyphSideSheetWidget {
         };
         self.offset_frac = offset;
         (offset, (1.0 - offset) as f32, animating)
+    }
+
+    /// Whether the modal barrier is actually on screen, and so may swallow the
+    /// input it is there to keep off the page below: the scrim's fade fraction
+    /// as of the last [`advance`](Self::advance) (`1 − offset_frac`, the value
+    /// `paint` fills it with) against [`BARRIER_EPSILON`].
+    ///
+    /// `false` past a completed dismissal — `Phase::Dismissed` is terminal, and
+    /// a standalone-composed sheet (a bare [`glyph_side_sheet`] with no
+    /// navigator page to unmount it) simply stays mounted there. Gating on the
+    /// progress rather than on the phase is `docs/REVIEW_FOCUS.md`'s overlay
+    /// rule; it also, for the one still-transparent frame at the head of an
+    /// entrance, lets a press through to the page the sheet has not yet covered.
+    fn barrier_is_live(&self) -> bool {
+        (1.0 - self.offset_frac) as f32 > BARRIER_EPSILON
     }
 
     /// Whether the focus path runs into this sheet's own content — the guard
@@ -1055,7 +1123,9 @@ impl Widget for GlyphSideSheetWidget {
         self.observe_dismiss_signal();
         let theme = Theme::from_paint_ctx(ctx);
         let (enter, exit) = resolve_timings(theme);
+        let was_dismissed = self.phase == Phase::Dismissed;
         let (offset_frac, scrim_frac, animating) = self.advance(ctx.frame_time(), enter, exit);
+        let just_dismissed = !was_dismissed && self.phase == Phase::Dismissed;
 
         // Scrim fills the whole area (the modal barrier) — its own fade,
         // painted *before* any transform, so it never moves.
@@ -1114,10 +1184,26 @@ impl Widget for GlyphSideSheetWidget {
         }
         scene.pop_transform();
 
-        // Keep frames coming while the enter/exit is moving, and for one frame
-        // past Dismissed so the rebuild that applies the pop actually runs. At
-        // rest: nothing (idle-heat discipline).
-        if animating || self.phase == Phase::Dismissed {
+        // Keep frames coming while the enter/exit is moving, and for the *one*
+        // frame the exit lands on, so the rebuild that applies the pop actually
+        // runs. At rest — shown, or dismissed and faded out — nothing at all
+        // (idle-heat discipline).
+        //
+        // That landing frame is an **edge**, never `self.phase ==
+        // Phase::Dismissed`: the phase is terminal, so testing it as a level
+        // asks for a frame every frame, forever, in any composition that
+        // outlives the dismissal (a standalone `glyph_side_sheet` with no
+        // navigator page to unmount it). The barrier's own weight is not a
+        // second condition here: a settled *shown* sheet has a fully opaque
+        // scrim and still owes no frames — progress gates what the barrier
+        // *swallows* (see `barrier_is_live`), while motion gates what it paints.
+        //
+        // DEFERRED: `crate::sheet` and `crate::dialog` still carry that exact
+        // level test, together with the same "swallows input while invisible"
+        // half in their own barrier arms; the catalog-wide fix is queued and is
+        // deliberately not made here (this task's writable surface is this
+        // module alone).
+        if animating || just_dismissed {
             ctx.request_frame();
         }
     }
@@ -1166,7 +1252,15 @@ impl Widget for GlyphSideSheetWidget {
                 PointerPhase::Down => EventResult::Handled,
             };
         }
-        // 2. An in-flight scrim/panel-background press owns the stream.
+        // 2. An in-flight scrim/panel-background press owns the stream — unless
+        //    the barrier faded out from under it (a dismissal that completed
+        //    while the finger was still down). An invisible barrier holds no
+        //    gesture: the capture is dropped and the rest of the stream falls
+        //    through instead of being swallowed (see `barrier_is_live`).
+        if self.scrim_captured && !self.barrier_is_live() {
+            self.scrim_captured = false;
+            return EventResult::Ignored;
+        }
         if self.scrim_captured {
             let InputEvent::Pointer(p) = event else {
                 return EventResult::Handled;
@@ -1204,6 +1298,14 @@ impl Widget for GlyphSideSheetWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                // A barrier with no weight on screen swallows nothing, claims
+                // no focus, and captures no pointer: past a completed
+                // dismissal the panel is off-screen and the scrim fully
+                // transparent, so the press belongs to whatever is behind this
+                // sheet (see `barrier_is_live`).
+                if !self.barrier_is_live() {
+                    return EventResult::Ignored;
+                }
                 // Claim focus on every Down anywhere in the sheet. Load-
                 // bearing: the root treats a Down that bubbles no claim as a
                 // blur (`release_focus_session` drops focus + IME state), so
@@ -1372,6 +1474,38 @@ mod tests {
         w.advance(ft_ms(ENTER_SETTLED_MS), enter, exit);
         assert_eq!(w.phase, Phase::Shown, "the sheet settled shown");
         w
+    }
+
+    /// Rebuild `w` (built from `prev`) against `next` and lay it out again —
+    /// the post-push diff a live app performs on every rebuild, and the vector
+    /// the push-time `dismissable` contract is about.
+    fn rebuild_into(
+        w: &mut GlyphSideSheetWidget,
+        prev: &GlyphSideSheetView<()>,
+        next: &GlyphSideSheetView<()>,
+    ) {
+        let mut counter = 0u64;
+        View::<()>::rebuild(next, prev, w, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(area()));
+    }
+
+    /// Paint one unthemed frame and report whether it asked for another.
+    fn paint_needs_frame(w: &mut GlyphSideSheetWidget, ms: f64) -> bool {
+        let mut rec = Recorder::default();
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area(), ft_ms(ms));
+        w.paint(&mut pctx, &mut rec);
+        pctx.needs_frame()
+    }
+
+    /// Play a dismissal out to a settled `Phase::Dismissed` through `paint`
+    /// (not bare `advance`), so the frame requests are the ones under test.
+    fn dismiss_and_settle(w: &mut GlyphSideSheetWidget) {
+        w.begin_exit();
+        paint_needs_frame(w, ENTER_SETTLED_MS);
+        paint_needs_frame(w, ENTER_SETTLED_MS + 200.0);
+        assert_eq!(w.phase, Phase::Dismissed, "the exit ran to completion");
     }
 
     fn paint_at(w: &mut GlyphSideSheetWidget, ms: f64, theme: Option<&Theme>) -> Recorder {
@@ -1869,11 +2003,138 @@ mod tests {
         assert!(rec.stroke_paths.is_empty(), "…and no close glyph either");
     }
 
+    // -- `dismissable` is a push-time contract --------------------------------
+
+    #[test]
+    fn flipping_dismissable_off_after_the_push_changes_nothing() {
+        let pushed = sheet();
+        let mut w = shown(&pushed);
+        let close_rect = w.close_rect;
+        let title_w = w.title.size().width;
+
+        rebuild_into(&mut w, &pushed, &sheet().dismissable(false));
+
+        // Geometry: the close affordance keeps its hit rect and the title keeps
+        // its (narrower) reserve — no relayout was owed, because the flip is
+        // read-at-push-only.
+        assert_eq!(
+            w.close_rect, close_rect,
+            "the affordance still has a target"
+        );
+        assert_eq!(
+            w.title.size().width,
+            title_w,
+            "…and the title its own width"
+        );
+
+        // Paint: the chip and its glyph are still there.
+        let rec = paint_at(&mut w, ENTER_SETTLED_MS, None);
+        assert_eq!(rec.rrects.len(), 1, "the close chip is still painted");
+        assert_eq!(rec.stroke_paths, vec![CLOSE_INK, CLOSE_INK]);
+
+        // Behavior: the scrim tap still dismisses, on the pushed value.
+        dispatch(&mut w, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(w.phase, Phase::Exit, "the scrim tap still dismisses");
+    }
+
+    #[test]
+    fn flipping_dismissable_on_after_a_non_dismissable_push_changes_nothing() {
+        let pushed = sheet().dismissable(false);
+        let mut w = shown(&pushed);
+
+        rebuild_into(&mut w, &pushed, &sheet());
+
+        assert_eq!(w.close_rect, Rect::ZERO, "still no affordance to hit");
+        let rec = paint_at(&mut w, ENTER_SETTLED_MS, None);
+        assert!(rec.rrects.is_empty(), "still no close chip");
+
+        dispatch(&mut w, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(w.phase, Phase::Shown, "the scrim tap is still ignored");
+        dispatch(&mut w, &escape_event());
+        assert_eq!(w.phase, Phase::Shown, "…and so is Escape");
+    }
+
+    // -- A faded-out barrier is not a barrier --------------------------------
+
+    #[test]
+    fn a_dismissed_sheet_stops_requesting_frames_once_the_barrier_is_gone() {
+        // Standalone composition (no `on_close`, so no navigator page pops this
+        // sheet out of the tree): it stays mounted at `Phase::Dismissed`.
+        let mut w = shown(&sheet());
+        w.begin_exit();
+        assert!(
+            paint_needs_frame(&mut w, ENTER_SETTLED_MS),
+            "the exit is running"
+        );
+        assert!(
+            paint_needs_frame(&mut w, ENTER_SETTLED_MS + 200.0),
+            "the frame the exit lands on still asks for one more — the rebuild \
+             that applies the pop runs there"
+        );
+        assert_eq!(w.phase, Phase::Dismissed);
+        assert!(
+            !paint_needs_frame(&mut w, ENTER_SETTLED_MS + 216.0),
+            "…and then it goes quiet: `Dismissed` is terminal, so a level test \
+             on the phase would spin frames forever"
+        );
+        assert!(!paint_needs_frame(&mut w, ENTER_SETTLED_MS + 5_000.0));
+    }
+
+    #[test]
+    fn a_dismissed_sheets_barrier_swallows_no_input() {
+        let mut w = shown(&sheet());
+        dismiss_and_settle(&mut w);
+
+        // Scrim coordinates: the fill is fully transparent now.
+        assert_eq!(
+            dispatch(&mut w, &ev(PointerPhase::Down, 10.0, 10.0)),
+            EventResult::Ignored,
+            "an invisible barrier must let the press reach the page below"
+        );
+        assert!(!w.scrim_captured, "…and capture nothing");
+
+        // Panel coordinates: the hit rect is unanimated, so the off-screen
+        // panel must not swallow there either.
+        let inside = Point::new(w.panel.x0 + 20.0, 300.0);
+        assert_eq!(
+            dispatch(&mut w, &ev(PointerPhase::Down, inside.x, inside.y)),
+            EventResult::Ignored,
+            "the panel's resting hit rect is off-screen chrome now"
+        );
+        assert!(!w.scrim_captured);
+        assert_eq!(w.phase, Phase::Dismissed, "and nothing re-armed");
+    }
+
+    #[test]
+    fn a_barrier_press_is_released_when_the_barrier_fades_out_under_it() {
+        let mut w = shown(&sheet());
+        dispatch(&mut w, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(w.scrim_captured, "the barrier took the press");
+
+        // The app closes the sheet while the finger is still down.
+        dismiss_and_settle(&mut w);
+
+        assert_eq!(
+            dispatch(&mut w, &ev(PointerPhase::Up, 10.0, 10.0)),
+            EventResult::Ignored,
+            "the captured stream falls through once the barrier is gone"
+        );
+        assert!(!w.scrim_captured, "…and the capture was dropped");
+    }
+
     #[test]
     fn a_down_reclaims_focus_after_an_external_blur() {
         let view = sheet();
         let mut counter = 0u64;
-        let w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        // Settle the enter first: a sheet that has not painted yet still sits
+        // fully off-screen behind a fully transparent scrim, and a barrier with
+        // no weight on screen claims nothing (see `barrier_is_live`).
+        let (enter, exit) = resolve_timings(None);
+        w.advance(ft_ms(0.0), enter, exit);
+        w.advance(ft_ms(ENTER_SETTLED_MS), enter, exit);
         let mut pod = ChildPod::new(Box::new(w));
         let mut tcx = TextContext::new();
         let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
@@ -2245,6 +2506,45 @@ mod tests {
         h.flush();
         assert_eq!(controller.depth(), 1);
         assert_eq!(h.state.results, 1);
+    }
+
+    #[test]
+    fn a_post_push_dismissable_flip_leaves_the_back_press_on_its_pushed_policy() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut h = Harness::new(&controller);
+        let flag = Rc::new(Cell::new(true));
+        let pushed = flag.clone();
+        show_glyph_side_sheet(
+            &controller,
+            move || glyph_side_sheet("Filters", fixed(300.0, 200.0)).dismissable(pushed.get()),
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        h.open();
+
+        // The app flips the flag off after the push and rebuilds, so every
+        // later page diff carries `dismissable(false)`. The pushed
+        // `BackPolicy::DismissAnimated` cannot follow it, so the widget must
+        // not follow it either.
+        flag.set(false);
+        h.rebuild();
+        let rec = h.paint_recorded(ENTER_SETTLED_MS);
+        assert!(
+            !rec.rrects.is_empty(),
+            "the close affordance survives the flip — it is the pushed value that binds"
+        );
+
+        controller.request_back();
+        h.rebuild();
+        h.paint(ENTER_SETTLED_MS);
+        let rec = h.paint_recorded(ENTER_SETTLED_MS + 75.0);
+        assert!(
+            scrim_is_mid_fade(&rec),
+            "the back press still stages the exit, on the policy it was pushed with"
+        );
+        h.paint(ENTER_SETTLED_MS + 200.0);
+        h.flush();
+        assert_eq!(controller.depth(), 1);
+        assert_eq!(h.state.results, 1, "exactly one pop");
     }
 
     #[test]
