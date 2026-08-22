@@ -252,6 +252,15 @@
 //! the `paint` backstop on a `Stack` mount, which can deliver neither and
 //! leaves the request for the event pass rather than swallowing it.
 //!
+//! A request left pending that way still dismisses only **once**, by the same
+//! rule the other host applies: the unstaged `on_dismiss` route is one-shot
+//! ([`BottomSheetWidget::dismissed`], `closed`'s twin for a mount with no
+//! staged pop), and every dismissal route reads it through
+//! [`BottomSheetWidget::refuses_dismiss`]. Without it a scrim tap and a
+//! standing request are two dismissals rather than one: the tap fires
+//! `on_dismiss` (neither the `Down` barrier arm nor the `scrim_captured` arm
+//! observes the handle), and the next `Move` that does observe it fires again.
+//!
 //! # Public API
 //!
 //! [`bottom_sheet`], [`show_bottom_sheet`], and every [`BottomSheetView`]
@@ -590,6 +599,26 @@ pub struct BottomSheetWidget {
     /// removed, so latching would brick a still-live sheet instead of recording
     /// a finished dismissal.
     closed: bool,
+    /// [`Self::closed`]'s twin for the *unstaged* route: the one-shot latch set
+    /// the instant [`BottomSheetView::on_dismiss`] is actually invoked (see
+    /// [`Self::request_dismiss`]).
+    ///
+    /// A `Stack` mount has no staged pop to latch `closed` on — its dismissal
+    /// *is* the app callback — and the app tears the sheet down from its own
+    /// state, so this widget stays mounted and dismissable for the rebuild or
+    /// two that takes. Without this latch a second trigger inside that window
+    /// dismisses the same sheet twice: a [`ModalDismiss`] request the `paint`
+    /// backstop deliberately left standing (see
+    /// [`Self::observe_paint_dismiss_request`]) plus the scrim tap that lands
+    /// before the next rebuild are two triggers of exactly that shape — the tap
+    /// fires `on_dismiss`, and the very next `Move` observes the request and
+    /// fires it again. Terminal like `closed`, and for the same reason: nothing
+    /// ever clears it back to `false`.
+    ///
+    /// `crate::overlay::modal::OverlayModalWidget`'s own `dismissed` field,
+    /// mirrored — one rule across both hosts (see that module's *What a request
+    /// consumes*).
+    dismissed: bool,
 
     /// The content's measured size from the last real `layout` — cached so a
     /// drag scrub or a spring-advanced paint frame can reposition the panel
@@ -668,6 +697,7 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
             pending_result: None,
             exiting: false,
             closed: false,
+            dismissed: false,
             content_size: Size::ZERO,
             panel: Rect::ZERO,
             handle_target: Rect::ZERO,
@@ -753,7 +783,7 @@ impl BottomSheetWidget {
             return;
         }
         self.last_seen_dismiss = current;
-        if self.exiting || self.closed || self.on_close.is_none() {
+        if self.refuses_dismiss() || self.on_close.is_none() {
             return;
         }
         self.stage_exit(-SPRING_KICK);
@@ -803,8 +833,12 @@ impl BottomSheetWidget {
     /// Whether a dismiss trigger would be refused outright right now — the
     /// guard [`Self::request_dismiss`] applies, peeked so an app request can be
     /// refused *without* being mistaken for one that was acted on.
+    ///
+    /// One dismissal per mounted sheet, whichever route delivered it: an exit
+    /// already in flight, a staged pop already fired ([`Self::closed`]), or an
+    /// unstaged `on_dismiss` already delivered ([`Self::dismissed`]).
     fn refuses_dismiss(&self) -> bool {
-        self.exiting || self.closed
+        self.exiting || self.closed || self.dismissed
     }
 
     /// Observe the app's [`ModalDismiss`] handle in the *event* pass, right
@@ -985,13 +1019,15 @@ impl BottomSheetWidget {
     /// standalone mount, which has nothing to defer into) — see the [module
     /// docs](self)' *Who owns the exit*.
     ///
-    /// A trigger arriving while a staged exit is already running, or after its
-    /// pop has fired ([`Self::closed`]), is a no-op: the sheet stays mounted for
-    /// a frame or more past the enqueued pop, and a second pop there would take
-    /// the page underneath with it — the same no-op that makes an app dismiss
-    /// through the handle idempotent (a second `dismiss()` mid-exit changes
-    /// nothing here, on top of [`Self::take_dismiss_request`]'s own
-    /// generation latch already refusing to observe a request twice).
+    /// A trigger arriving while a staged exit is already running, or after this
+    /// sheet has dismissed once — the staged pop fired ([`Self::closed`]) or
+    /// the unstaged `on_dismiss` did ([`Self::dismissed`]) — is a no-op
+    /// ([`Self::refuses_dismiss`]): the sheet stays mounted for a frame or more
+    /// past the enqueued pop (or past the app's own teardown), and a second
+    /// dismissal there would take the page underneath with it. It is also what
+    /// makes an app dismiss through the handle idempotent (a second `dismiss()`
+    /// mid-exit changes nothing here, on top of the generation latch already
+    /// refusing to observe one request twice).
     ///
     /// No `dismissable` gate lives here — every *gesture* caller applies it at
     /// its own call site, and [`Self::observe_dismiss_request`] deliberately
@@ -1011,6 +1047,10 @@ impl BottomSheetWidget {
         self.spring_to(velocity);
         if let Some(on_dismiss) = self.on_dismiss.as_mut() {
             on_dismiss(ctx);
+            // The unstaged route's own one-shot latch, `closed`'s twin: this
+            // sheet has dismissed, and every route above refuses from here
+            // ([`Self::refuses_dismiss`]).
+            self.dismissed = true;
         }
     }
 
@@ -2823,6 +2863,42 @@ mod tests {
         tick(&mut w, area, 20);
         dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 6.0, 6.0));
         assert_eq!(state.dismissed, 1);
+    }
+
+    /// The cross-pass half of the same one-shot rule: a gesture dismissal and
+    /// a request the `paint` backstop left pending are one dismissal between
+    /// them, not one each. (`crate::overlay::modal`'s own within-one-pass
+    /// twin: `escape_with_a_pending_unobserved_request_dismisses_exactly_once`.)
+    #[test]
+    fn a_scrim_tap_then_move_with_a_pending_request_dismisses_exactly_once() {
+        let dismiss = ModalDismiss::new();
+        let view: BottomSheetView<Flag> = bottom_sheet(leaf_any_flag(300.0, 200.0))
+            .on_dismiss(|s: &mut Flag| s.dismissed += 1)
+            .dismiss_handle(dismiss.clone());
+        let mut w = build_flag(&view);
+        let area = Size::new(400.0, 600.0);
+        settle(&mut w, area);
+
+        // Pending, and unobservable from a paint on this mount.
+        dismiss.dismiss();
+        tick(&mut w, area, 20);
+        let mut state = Flag::default();
+        assert_eq!(state.dismissed, 0, "nothing dismisses from a paint");
+
+        // A scrim tap dismisses through the unstaged route — neither the `Down`
+        // barrier arm nor the `scrim_captured` arm observes the handle, so the
+        // request is still standing when the tap fires.
+        assert!(!w.panel.contains(Point::new(5.0, 5.0)));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 1, "the tap dismissed the sheet");
+
+        // The next pass that *does* observe it must find the route spent.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 6.0, 6.0));
+        assert_eq!(
+            state.dismissed, 1,
+            "the pending request rides the dismissal that already happened"
+        );
     }
 
     /// A navigator rooted on an opaque page with one `show_bottom_sheet`

@@ -173,7 +173,7 @@
 //!
 //! An observation *peeks* the generation, puts the request through
 //! [`stage_dismiss`](OverlayModalWidget::stage_dismiss), and only then decides
-//! what it consumed — three rules, all edge paths of the same seam:
+//! what it consumed — four rules, all edge paths of the same seam:
 //!
 //! * **The generation is latched by whichever pass saw the request**, accepted
 //!   or refused, so it acts exactly once. A refusal ("already exiting, already
@@ -198,6 +198,17 @@
 //!   `event` pass's own `on_dismiss` fallback — which is what makes
 //!   `.dismiss_handle(..)` work identically on both mounts, and identically to
 //!   [`crate::sheet`]'s host, whose unstaged route already fell back this way.
+//! * **A request left pending that way still dismisses only once**, because the
+//!   unstaged `on_dismiss` route is itself one-shot: the first delivery latches
+//!   it ([`OverlayModalWidget::dismissed`], `closed`'s twin for a mount with no
+//!   staged pop) and every dismissal route — scrim tap, close affordance,
+//!   handle, `Escape`, back, the handle's own request — is refused afterwards.
+//!   Without it a pending request and a user dismissal landing before the app's
+//!   teardown are *two* dismissals: `Escape` over a standing request fires
+//!   `on_dismiss` in the observation and again in the key arm of the same event
+//!   pass, with no rebuild in between. [`crate::sheet`]'s host latches the
+//!   identical rule (`BottomSheetWidget::dismissed`, read by its
+//!   `refuses_dismiss` guard), so the two seams stay interchangeable here too.
 //!
 //! # Back-dismiss: the `DismissAnimated` tier
 //!
@@ -1327,6 +1338,21 @@ pub struct OverlayModalWidget {
     /// its pop removed no page, so latching here would brick a still-live
     /// widget rather than record a finished dismissal.
     closed: bool,
+    /// [`Self::closed`]'s twin for the *unstaged* route: the one-shot latch set
+    /// the instant [`OverlayModalView::on_dismiss`] is actually invoked (see
+    /// [`Self::fire_dismiss_now`]).
+    ///
+    /// A mount with no close hook has no `closed` to latch — its dismissal is
+    /// the app callback itself — and the app tears the panel down from its own
+    /// state, so this widget stays mounted and dismissable for the rebuild or
+    /// two that takes. Without this latch a second trigger inside that window
+    /// dismisses the same panel twice: a pending [`ModalDismiss`] request the
+    /// `paint` backstop deliberately left standing (see the [module
+    /// docs](self)' *What a request consumes*) plus the `Escape` that arrives
+    /// before the next rebuild are two triggers of exactly that shape, one
+    /// event pass apart or none. Terminal like `closed`, and for the same
+    /// reason: nothing ever clears it back to `false`.
+    dismissed: bool,
     /// A scrim/panel-background press is in flight (the modal barrier).
     scrim_captured: bool,
     /// Whether that press started outside the panel — only an outside press
@@ -1547,18 +1573,20 @@ impl OverlayModalWidget {
     /// press ([`Self::observe_dismiss_signal`]), and the app's own
     /// [`ModalDismiss`] handle ([`Self::observe_dismiss_request`]).
     ///
-    /// A trigger arriving while an exit is already running, or after `on_close`
-    /// has already fired once ([`Self::closed`]), is a no-op — the `closed`
-    /// latch guards a trigger landing between the enqueued pop and the rebuild
-    /// that drains it, when the widget is still mounted and would otherwise
-    /// stage (or immediately fire) a second, spurious close. A *user* trigger
-    /// on a non-dismissable modal is a no-op too; an app one is not (the module
-    /// docs' app-initiated dismiss section states why).
+    /// A trigger arriving while an exit is already running, or after this
+    /// widget has dismissed once — `on_close` fired ([`Self::closed`]) or
+    /// `on_dismiss` did ([`Self::dismissed`]) — is a no-op. Both latches guard
+    /// the same window: the dismissal is enqueued (a navigator pop) or
+    /// delegated (the app's own state), and the widget stays mounted across the
+    /// rebuild or two that takes, where a second trigger would otherwise
+    /// dismiss it twice. A *user* trigger on a non-dismissable modal is a no-op
+    /// too; an app one is not (the module docs' app-initiated dismiss section
+    /// states why).
     ///
     /// What it cannot do is finish an unstaged dismissal, since only the caller
     /// knows which pass it holds — hence [`DismissStage::Unstaged`].
     fn stage_dismiss(&mut self, source: DismissSource) -> DismissStage {
-        if self.exiting || self.closed {
+        if self.exiting || self.closed || self.dismissed {
             return DismissStage::Refused;
         }
         if source == DismissSource::User && !self.dismissable {
@@ -1584,6 +1612,20 @@ impl OverlayModalWidget {
         fired
     }
 
+    /// Fire the state-bearing [`OverlayModalView::on_dismiss`] now — the
+    /// unstaged close's twin for a mount that wired no `on_close` at all — and
+    /// latch the route shut behind it ([`Self::dismissed`]), so however many
+    /// triggers land before the app's own teardown lands, exactly one
+    /// dismissal reaches the app. Returns whether it fired.
+    fn fire_dismiss_now(&mut self, ctx: &mut EventCtx) -> bool {
+        let Some(on_dismiss) = self.on_dismiss.as_mut() else {
+            return false;
+        };
+        on_dismiss(ctx);
+        self.dismissed = true;
+        true
+    }
+
     /// Stage the dismissal from a user gesture (a scrim tap, the close
     /// affordance, the handle, `Escape`), falling back to firing
     /// [`OverlayModalView::on_dismiss`] on the spot when there is nothing to
@@ -1593,9 +1635,7 @@ impl OverlayModalWidget {
             DismissStage::Refused => {}
             DismissStage::Ramping => ctx.request_redraw(),
             DismissStage::Unstaged => {
-                if let Some(on_dismiss) = self.on_dismiss.as_mut() {
-                    on_dismiss(ctx);
-                } else {
+                if !self.fire_dismiss_now(ctx) {
                     self.fire_close_now();
                 }
             }
@@ -1677,9 +1717,7 @@ impl OverlayModalWidget {
                     self.fire_close_now();
                 } else {
                     self.latch_dismiss_request(request);
-                    if let Some(on_dismiss) = self.on_dismiss.as_mut() {
-                        on_dismiss(ctx);
-                    }
+                    self.fire_dismiss_now(ctx);
                 }
             }
         }
@@ -1922,6 +1960,7 @@ impl<State: 'static> View<State> for OverlayModalView<State> {
             started: settled,
             exiting: false,
             closed: false,
+            dismissed: false,
             scrim_captured: false,
             scrim_down_outside: false,
             close_hovered: false,
@@ -3927,6 +3966,37 @@ mod tests {
         frame(&mut w, 3100.0);
         dispatch(&mut w, &mut state, &pointer(PointerPhase::Move, 6.0, 6.0));
         assert_eq!(state.dismissed, 1);
+    }
+
+    #[test]
+    fn escape_with_a_pending_unobserved_request_dismisses_exactly_once() {
+        // Two dismissal routes meeting inside one event pass: an async
+        // `dismiss()` the paint backstop deliberately left pending (it can
+        // reach neither hook on this mount), and the `Escape` that arrives
+        // before any rebuild. The event pass observes the request first and
+        // dismisses unstaged; the keypress that follows must find that route
+        // already spent rather than dismiss the same panel a second time.
+        let dismiss = ModalDismiss::new();
+        let view = view(OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH))
+            .dismiss_handle(dismiss.clone());
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+
+        dismiss.dismiss();
+        frame(&mut w, 3000.0);
+        let mut state = Flags::default();
+        assert_eq!(state.dismissed, 0, "nothing dismisses from a paint");
+
+        assert_eq!(
+            dispatch(&mut w, &mut state, &escape()),
+            EventResult::Handled,
+            "the barrier still swallows the key"
+        );
+        assert_eq!(
+            state.dismissed, 1,
+            "one keypress over a pending request is one dismissal, not two"
+        );
     }
 
     #[test]
