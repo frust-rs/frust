@@ -290,18 +290,26 @@ fn out_of_range_section_falls_back() {
 /// every [`SECTION_LABELS`] destination — 390px / `SECTION_LABELS.len()` per
 /// slot (≈55.7px at seven) — and
 /// a label whose shaped text wraps to two lines overflows the bar's declared
-/// 64dp height (`label_y` = 44 inside a 64px box leaves only 20px, but two
+/// 64dp height (`label_y` = 42 inside a 64px box leaves only 22px, but two
 /// `labelMediumEmphasized` lines need 32px). Mounts the WHOLE
 /// [`PlaygroundApp`] shell (not a bare page, and not at the suite's other
 /// 900x700 desktop-ish size where a 150px slot never wrapped) and inspects
-/// the actual painted glyph runs: a wrapped label shapes to two separate
-/// `draw_glyph_run` calls sharing one block origin (see
-/// [`RecScene::text_run_origins`]'s doc comment), so more than one recorded
-/// origin per slot is the tripwire.
+/// the actual painted glyph runs: a single-line label's block lands at
+/// exactly `LABEL_TOP_OFFSET` below the bar's top edge (see that local
+/// constant's own comment, inside this test's body); a wrapped label's block
+/// does NOT — post `p4-03-navbar-rework` (merge `cacaaf21`) the item's
+/// icon+label column is vertically centred by its own content height, so a
+/// taller (two-line) label pulls its shared block origin to a different Y
+/// than a one-line label's — so a slot painting anything other than exactly
+/// one glyph run at the single-line Y (zero, because the wrap moved it
+/// elsewhere, or more, were a future layout to ever repaint in place) is the
+/// tripwire.
 ///
 /// Verified locally (not committed) to actually catch the regression: with
 /// `SECTION_LABELS[0]` temporarily restored to `"Platform Views"`, this test
-/// fails with `nav label 0 ("Platform") painted 2 glyph run(s) ...`.
+/// fails with `nav label 0 ("Platform Views") painted 0 glyph run(s) ...`
+/// (the wrapped block's shared origin shifts down to a different Y, out of
+/// the single-line band entirely — see `LABEL_TOP_OFFSET`'s comment).
 #[test]
 fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     let _owner = setup();
@@ -311,17 +319,30 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     const PHONE_H: f64 = 844.0;
     const NAV_HEIGHT: f64 = 64.0;
     const SLOT_W: f64 = PHONE_W / SECTION_LABELS.len() as f64;
-    // Mirrors `frust_widgets::material::navbar`'s private `PAD_TOP` (8.0) +
-    // `INDICATOR_H` (32.0) + `LABEL_GAP` (4.0) — the label's top-edge offset
-    // from its item's own origin. Every item's label lands at exactly this Y
-    // (the label block's TOP, not its baseline — see
-    // `NavItemWidget::layout`'s `self.label.set_origin`), single-line or
-    // wrapped alike (both lines of a wrapped label share one block origin;
-    // see [`RecScene::text_run_origins`]'s doc comment) — so this is a tight,
-    // exact identifier for "a nav-bar label's glyph run", unlike a loose
-    // "anywhere in the bar's Y band" filter, which also catches unclipped
-    // off-screen page filler content that happens to paint in that band.
-    const LABEL_TOP_OFFSET: f64 = 44.0;
+    // Mirrors `frust_material::navbar`'s current (post p4-03-navbar-rework,
+    // merge `cacaaf21`) item layout — the label's top-edge offset from its
+    // item's own origin. Before that rework `NavItemWidget::layout` placed
+    // icon/label under a fixed `PAD_TOP` (8.0), giving a label offset of
+    // `PAD_TOP + INDICATOR_H + LABEL_GAP` = 8 + 32 + 4 = 44. The rework
+    // dropped `PAD_TOP` and instead centres the icon+label column inside the
+    // item's full height — matching upstream's `Column(mainAxisAlignment:
+    // center)` — so the offset is now `((HEIGHT_SMALL - content_h) / 2.0) +
+    // INDICATOR_H + LABEL_GAP`, where `content_h = INDICATOR_H + LABEL_GAP +
+    // <single-line label height>` (32 + 4 + 16 = 52 at the default
+    // `NavBarSize::Small`, 64dp). That's `((64.0 - 52.0) / 2.0) + 32.0 + 4.0`
+    // = 6.0 + 36.0 = 42.0. A SINGLE-LINE item's label lands at exactly this Y
+    // (the label block's TOP, not its baseline — see `NavItemWidget::layout`'s
+    // `self.label.set_origin`) — but `top` (and so this offset) is itself a
+    // function of the label's own content height, so a WRAPPED (two-line)
+    // label's block lands at a DIFFERENT, smaller Y instead (both lines of a
+    // wrapped label still share that one shifted block origin; see
+    // [`RecScene::text_run_origins`]'s doc comment). That makes counting runs
+    // at exactly this Y a tight, exact identifier for "a nav-bar label
+    // painted as a single line in its slot": a wrapped or missing label
+    // shows up as zero here (not two), unlike a loose "anywhere in the bar's
+    // Y band" filter, which would also catch unclipped off-screen page
+    // filler content that happens to paint in that band.
+    const LABEL_TOP_OFFSET: f64 = 42.0;
     let nav_top = PHONE_H - NAV_HEIGHT;
     let expected_label_y = nav_top + LABEL_TOP_OFFSET;
 
@@ -350,8 +371,11 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
         assert_eq!(
             runs_per_slot[slot], 1,
             "nav label {slot} ({label:?}) painted {} glyph run(s) inside its {SLOT_W}px slot at \
-             {PHONE_W}px width — expected exactly 1 (a single line); more than 1 means the label \
-             wrapped and overflowed the nav bar's declared {NAV_HEIGHT}dp box",
+             {PHONE_W}px width — expected exactly 1 (a single line painted at the item's \
+             single-line label Y); zero means the label wrapped (its shared block origin shifted \
+             to a different Y, since the item column is centred by content height — see \
+             `LABEL_TOP_OFFSET`'s comment above) and overflowed the nav bar's declared \
+             {NAV_HEIGHT}dp box",
             runs_per_slot[slot],
         );
     }

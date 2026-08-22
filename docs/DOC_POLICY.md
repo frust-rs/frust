@@ -32,7 +32,7 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, editors/vscode-frust.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics

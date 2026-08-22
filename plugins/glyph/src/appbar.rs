@@ -1351,6 +1351,16 @@ impl AppBarWidget {
         let theme = Theme::from_paint_ctx(ctx);
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let colors = resolve_colors(theme);
+        // `banner_progress` is layout-bound (`layout_banner` reads it), so a
+        // before/after comparison is what actually catches every case that
+        // needs a relayout — `self.banner_animating` (set inside `advance`,
+        // below) reports whether the hand-rolled `step()` helper was still
+        // short of its target, which mirrors `AnimationController::advance`'s
+        // own landing-frame gap: `step` reports "done" on the very call that
+        // snaps `banner_progress` onto its target, so gating solely on it
+        // would leave the last banner height `layout` ever saw a hair short
+        // of rest.
+        let banner_before = self.banner_progress;
         let animating = self.advance(ctx.frame_time(), reduce_motion);
 
         let banner_colors = resolve_banner_colors(theme, self.banner_variant);
@@ -1498,7 +1508,10 @@ impl AppBarWidget {
         // The banner is height-animated (layout-bound): while it animates, ask
         // for a relayout (which implies another frame); otherwise a plain frame
         // request covers the paint-only elevation/selection/title timelines.
-        if self.banner_animating {
+        // The before/after comparison also catches `step`'s landing frame
+        // (see this function's opening comment) — a case `banner_animating`
+        // alone reports `false` for.
+        if self.banner_animating || self.banner_progress != banner_before {
             ctx.request_layout();
         } else if animating {
             ctx.request_frame();
@@ -2292,6 +2305,86 @@ mod tests {
         w.advance(ft_ms(1000.0), false);
         assert!((w.banner_progress - 1.0).abs() < 1e-6);
         assert!(!w.banner_animating);
+    }
+
+    #[test]
+    fn banner_reveal_requests_layout_through_the_settle_frame() {
+        // The landing-frame relayout guard: `step` (this widget's hand-rolled
+        // `AnimationController::advance` analogue) reports "done" on the very
+        // call that snaps `banner_progress` onto its target, so gating solely
+        // on `banner_animating` would leave the last banner height `layout`
+        // ever saw a hair short of rest. Driven through `RenderRoot` (not the
+        // `paint`/`paint_nl` helpers above, which each call `advance` twice
+        // per simulated frame — once directly, once again inside `Widget::paint`
+        // — collapsing the very landing transition this guard needs to observe).
+        // See docs/REVIEW_FOCUS.md's layout-skip section.
+        fn closed(_: &mut ()) -> AppBarView<()> {
+            app_bar("terminal — dev")
+        }
+        fn open(_: &mut ()) -> AppBarView<()> {
+            app_bar("terminal — dev").banner(Some(banner_spec(
+                "connection lost — retrying in 3s",
+                BannerVariant::Warning,
+            )))
+        }
+        let mut state = ();
+        let mut root: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
+        root.rebuild(&mut closed, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(360.0, 200.0), &mut tcx as &mut dyn Any);
+        let mut scene = Recorder::default();
+        let settled_closed = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !settled_closed.needs_layout,
+            "already-settled bannerless bar requests no layout"
+        );
+
+        root.rebuild(&mut open, &mut state);
+        let mut t_ns = 0u64;
+        let mut saw_animating_frame = false;
+        let mut last_size =
+            root.layout_with_text(Size::new(360.0, 200.0), &mut tcx as &mut dyn Any);
+        loop {
+            let mut scene = Recorder::default();
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
+            if outcome.needs_layout {
+                saw_animating_frame = true;
+                assert!(outcome.needs_frame, "request_layout implies needs_frame");
+                last_size =
+                    root.layout_with_text(Size::new(360.0, 200.0), &mut tcx as &mut dyn Any);
+            } else {
+                break;
+            }
+            t_ns += 16_000_000; // ~16ms per simulated frame
+            assert!(
+                t_ns < 2_000_000_000,
+                "banner reveal should settle well under 2s of simulated frames"
+            );
+        }
+        assert!(
+            saw_animating_frame,
+            "at least one paint during the reveal reported needs_layout"
+        );
+
+        // The settle-frame guarantee: the *last* layout this shell-honest
+        // loop ever runs matches a freshly-built already-open bar (which
+        // starts fully revealed with no animation at all, per `build`'s
+        // seed) — never a hair short of it.
+        let mut root_ref: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
+        root_ref.rebuild(&mut open, &mut state);
+        let target = root_ref.layout_with_text(Size::new(360.0, 200.0), &mut tcx as &mut dyn Any);
+        assert_eq!(
+            last_size.height, target.height,
+            "the last layout a shell-honest driver runs lands exactly on the target height"
+        );
+
+        // One more settled paint reports no further layout request.
+        let mut scene = Recorder::default();
+        let settled_open = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
+        assert!(
+            !settled_open.needs_layout,
+            "settled: no more layout requests"
+        );
     }
 
     #[test]

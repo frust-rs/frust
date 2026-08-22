@@ -50,7 +50,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
 | `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog — including its own switch-class control (`toggle`), since baseline `frust-widgets` deliberately ships no `Switch` — plus its bundled OFL monospace fonts |
-| `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
+| `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`): a 43-role token system (34 baseline `ColorScheme` roles + a 9-role `MaterialTokens` extension) with runtime HCT seed-color generation (`from_seed`), a feature-point `RoundedPolygon`/`Morph` shape engine backing a 35-shape catalog (`shapes::` is the crate's only morph engine — the legacy `shape_morph` module was retired), a unified interaction core with a pluggable haptics hook, 88 generated Material Icons vector constants, bundled Roboto Flex/Mono fonts, the M3E core-control catalog at reference parity — buttons (5 variants × 5 sizes, gradient decoration, overflow strategies), icon buttons, toggle button + button groups + segmented buttons, FAB, selection controls (checkbox/radio/switch), chips, sliders (incl. range), and a text field wrapping the baseline editable — plus its own `overlay` hosting seam (anchored + modal hosts, a sibling port of `frust-shadcn`'s; see *Design-System Plugins* below) and the containment/overlay/feedback tier built on it: menus (incl. submenu) and dropdowns, tooltips and a snackbar host, dialogs/bottom sheets/side sheets, a selection host, a search bar/view, cards and list families (incl. expandable/dismissible), dividers and badges, a carousel, progress/loading/refresh indicators, and date/time pickers — and the navigation/structure tier: a 4-constructor app bar family (top/search/bottom/sliver, the last collapsible), primary/secondary tabs, a two-spring liquid-indicator navigation bar/rail/drawer family, floating/docked toolbars (scroll-hide + FAB 80→56 morph — see `material-fab-fixed-tier-icon-centering` in [LIMITATIONS.md](LIMITATIONS.md)), a shape-morphing FAB menu, and a two-pod split button (popup + bottom-sheet menu routes). Scroll-linked chrome (app-bar collapse, toolbar hide) has no widget-owned scroll handle: the app feeds `ScrollView::on_scroll` into the widget's own controlled collapse/hide prop — the pattern any future scroll-linked chrome follows |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 | `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
 
@@ -154,17 +154,44 @@ toolkit they all build against). Their shared charter:
 - **`install()` is the one-line entry point, called from `app!`'s `setup = { .. }` block —
   before shell construction, the one point a shell reads the default-theme slot.** Each `install()`
   calls `frust::set_default_theme(baseline())` (`frust_shadcn::install()` names its seed `theme()`
-  instead, but the shape is the same); `frust_glyph::install()` and `frust_shadcn::install()`
-  additionally call `frust::register_app_fonts` for their bundled fonts — Glyph's OFL monospace
-  faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), shadcn's bundled Inter Variable and
-  JetBrains Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/shadcn/fonts/`) — each
-  registered unconditionally, not behind a feature, since neither crate has a feature to gate them
-  with. A call after shell construction takes effect only on a later theme reseed, which may never
-  happen.
-- **`frust_glyph::baseline()` and `frust_shadcn::theme()` both attach the `NativeTypefaces` theme
-  extension** — the bundled faces reach `frust-native-widgets`' native controls through this
-  attach, not through any
+  instead, but the shape is the same); `frust_glyph::install()`, `frust_material::install()`, and
+  `frust_shadcn::install()` additionally call `frust::register_app_fonts` for their bundled fonts —
+  Glyph's OFL monospace faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's
+  bundled Roboto Flex (OFL-1.1) and Roboto Mono (OFL-1.1, `plugins/material/fonts/`), shadcn's
+  bundled Inter Variable and JetBrains Mono Variable (OFL-1.1, no Reserved Font Name,
+  `plugins/shadcn/fonts/`) — each registered unconditionally, not behind a feature, since none of
+  the three crates has a feature to gate them with. A call after shell construction takes effect
+  only on a later theme reseed, which may never happen.
+- **`frust_glyph::baseline()`, `frust_material::baseline()`, and `frust_shadcn::theme()` all attach
+  the `NativeTypefaces` theme extension** — the bundled faces reach `frust-native-widgets`' native
+  controls through this attach, not through any
   `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
+  theme ladder). Cupertino's `baseline()` attaches no font extension.
+- **`frust-shadcn` and `frust-material` each carry a cross-component `overlay` seam** — the only
+  place either catalog reaches through a full-area top-layer widget pattern standing in for the DOM
+  portal shadcn/ui itself relies on. `frust-material`'s is a Phase-3 sibling port of `frust-shadcn`'s
+  (ported, never depended on — the charter above forbids one design-system plugin depending on
+  another), not a shared module. Both give an `anchored` host (trigger-relative placement in window
+  space, light-dismiss, no scrim — popover, tooltip, hover-card, the menu/dropdown/select/combobox
+  family) and a `modal` host (scrim + centered/edge-pinned panel — dialog, alert-dialog, sheet,
+  side/drawer sheet, full-screen search, picker). Every other component in either catalog paints
+  inside its own box; only these reach through the seam. **One divergence**: `frust-shadcn`'s modal
+  host pops via the simpler `NavigatorController::push_transparent_for_result`, with no staged
+  back-press route, while `frust-material`'s sits on a `BackPolicy::DismissAnimated` +
+  `PushOptions::dismiss_signal` tier — an Android back press stages the *same* reverse-ramp exit
+  every other dismiss gesture takes, a back-dismiss tier `frust-shadcn`'s modal host lacks.
+- **Both plugins' overlay hosts animate their exit, not just their entrance.** Each `modal` host
+  stages every dismiss (scrim tap, Escape, close button, drag, and — material only — back) as a
+  reverse ramp and fires the app's dismissal only once it settles — material's staged pop is
+  identity-guarded against the navigator stack and refuses to fire (ramping the surface back open
+  instead) if the stack moved during the ramp; `frust-shadcn`'s drawer
+  additionally supports drag-to-close on all four pinned edges with a velocity-flick threshold and
+  Base UI-style snap points. Each `anchored` host takes the same shape through a builder-level
+  `.open(bool)`: an app that wants an exit ramp must keep the host mounted and toggle `open` rather
+  than unmount it, since the framework has no seam for keeping a conditionally-mounted view alive
+  past the rebuild that drops it (the *kept-mounted pattern*, documented in each plugin's own
+  `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
+  [LIMITATIONS.md](LIMITATIONS.md), which now has both plugins as consumers).
   theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
 - **`frust-shadcn`'s one cross-component seam is its `overlay` module** — a full-area top-layer
   widget pattern standing in for the DOM portal shadcn/ui itself relies on: an `anchored` host
@@ -284,3 +311,4 @@ toolkit they all build against). Their shared charter:
 | `frust_i18n::Engine` / `LocaleSet` / `Resolve` | The immutable, `Send + Sync` Fluent bundle core and its builder; the message-resolution trait both `locales!`-generated typed-key functions and the reactive `I18n` handle implement |
 | `locales!` | `frust-i18n-macros`' compile-time proc macro loading a locale directory into `locale_set()`/`engine()`/typed `keys` |
 | `fmt` (`CivilDate` / `CivilTime` / `DateLength`) | ICU4X-backed decimal/percent/currency/date/time formatting entry points and their date/time value types (`formatting` feature) |
+| `ButtonDecoration` / `OverflowObserver` | `frust_material`'s button-family extension seams: pluggable gradient decoration and label-overflow-strategy observation |
