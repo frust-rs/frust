@@ -71,17 +71,35 @@
 //!
 //! * **Header** — a fixed-height row (`HEADER_HEIGHT`), never scrolls: `title`
 //!   (Glyph display face, single-line, ellipsized) plus the close affordance
-//!   below, closed by a bottom `--border` hairline.
+//!   below, closed by a bottom `--border` hairline. The row's *content*
+//!   (title, close chip, divider) sits below the window's top safe-area inset
+//!   — the header band grows to `top_inset + HEADER_HEIGHT` — while the
+//!   **panel itself stays full-bleed**, painting edge to edge under the
+//!   status bar (the same "content shifts, chrome doesn't" split
+//!   [`crate::appbar`]'s own top-inset consumption uses). A shell that never
+//!   pushes insets (headless tests, a desktop preview without a
+//!   window-inset source) sees `top_inset = 0.0` and the geometry below
+//!   collapses to the pre-inset numbers exactly.
 //! * **Body** — the caller's view, given the remaining height **tight** and
-//!   the full panel width, and clipped by this component. Scrolling is the
-//!   caller's own concern: a body taller than the space it is given is clipped,
-//!   not scrolled, so wrap genuinely tall content in a scroll view before
-//!   handing it over (the same overflow contract [`crate::sheet`]'s content
-//!   slot documents).
+//!   inset horizontally by [`BODY_PAD_X`] on *both* edges (the approved
+//!   mock's `.side-sheet-body` gutter) — clipped by this component, whose
+//!   clip rect still spans the panel's full width. This inset is the
+//!   component's own: a caller must not re-add its own horizontal padding
+//!   inside the body slot. **Only when no footer is present**, the body's
+//!   bottom edge additionally gains the window's bottom safe-area inset, so
+//!   scrolled content never sits under a gesture-navigation bar; when a
+//!   footer *is* present, the footer (not the body) absorbs the bottom inset
+//!   (below). Scrolling is otherwise the caller's own concern: a body taller
+//!   than the space it is given is clipped, not scrolled, so wrap genuinely
+//!   tall content in a scroll view before handing it over (the same overflow
+//!   contract [`crate::sheet`]'s content slot documents).
 //! * **Footer** — present only when [`footer`](GlyphSideSheetView::footer) is
-//!   set: a top `--border` hairline plus the caller's view, inset on every
-//!   edge and pinned to the panel's bottom edge, taking its height off the
-//!   body's.
+//!   set: a top `--border` hairline plus the caller's view, inset
+//!   horizontally by the same [`BODY_PAD_X`] gutter the body uses and
+//!   vertically by `FOOTER_PAD`, pinned to the panel's bottom edge and taking
+//!   its height off the body's. Its *bottom* padding grows by the window's
+//!   bottom safe-area inset, so the footer's content clears a gesture bar the
+//!   same way the body does when there is no footer.
 //!
 //! # The close affordance is chrome this widget paints and handles
 //!
@@ -235,9 +253,25 @@ const CLOSE_STROKE_WIDTH: f64 = 1.5;
 /// name the next component to want one cannot have.
 const HEADER_HEIGHT: f64 = HEADER_PAD_TOP + CLOSE_DIAMETER + HEADER_PAD_BOTTOM;
 
-/// The footer's inset on every edge, in logical px — the header's own leading
-/// inset, so the panel reads with one gutter.
+/// The footer's *vertical* inset (top gap before its content, and its own
+/// bottom gap before growing by the window's bottom safe-area inset — see
+/// [`GlyphSideSheetWidget::layout`]), in logical px — the header's own
+/// leading inset. The footer's *horizontal* inset is [`BODY_PAD_X`] instead,
+/// so it shares the body's gutter (see the [module docs](self)'s
+/// Header/body/footer section).
 const FOOTER_PAD: f64 = HEADER_PAD_LEADING;
+
+/// The body (and footer) slot's horizontal gutter, in logical px, on *both*
+/// edges — the approved mock's `.side-sheet-body` padding (12px sides; the
+/// same rule's 18px bottom figure is not reproduced here as a static value —
+/// the body's bottom edge instead gains exactly the window's bottom
+/// safe-area inset when there is no footer, see the [module docs](self)).
+/// Glyph ships no spacing *token* scale (unlike `frust_material`'s
+/// `MaterialSpacing`), so — like [`HEADER_PAD_LEADING`]'s family — this is a
+/// named constant carrying the design's own figure. The component's own
+/// inset: a caller must not re-add horizontal padding inside the body slot
+/// (see the [module docs](self)).
+const BODY_PAD_X: f64 = 12.0;
 
 /// Title type token (Glyph display face, 15/700 — [`crate::dialog`]'s title
 /// token, since a side sheet's header title is the same class of surface
@@ -669,6 +703,15 @@ pub struct GlyphSideSheetWidget {
     /// The footer band's top hairline y (local coords, at rest); meaningful
     /// only while `footer` is `Some`.
     footer_divider_y: f64,
+    /// The window's top safe-area inset, as last observed by `layout` — the
+    /// header band grows by this (see the [module docs](self)'s
+    /// Header/body/footer section). Kept for tests; the panel itself stays
+    /// full-bleed regardless.
+    top_inset: f64,
+    /// The header band's total height (`top_inset + HEADER_HEIGHT`), as last
+    /// laid out — where the body starts and the header's own bottom hairline
+    /// sits.
+    header_height: f64,
     phase: Phase,
     /// The current animation's progress driver — enter or exit, whichever the
     /// phase says is running. Lazily built on the first paint that sees it,
@@ -714,6 +757,8 @@ impl<State: 'static> View<State> for GlyphSideSheetView<State> {
             close_rect: Rect::ZERO,
             close_center: Point::ZERO,
             footer_divider_y: 0.0,
+            top_inset: 0.0,
+            header_height: HEADER_HEIGHT,
             phase: Phase::Enter,
             driver: None,
             exit_from: 0.0,
@@ -909,14 +954,28 @@ impl Widget for GlyphSideSheetWidget {
         let area_w = finite_or_zero(bc.max().width);
         let area_h = finite_or_zero(bc.max().height);
 
+        // Top/bottom safe-area insets — zero when no shell has pushed any
+        // (headless tests, a desktop preview without a window-inset source),
+        // exactly like `crate::appbar`'s identical read. The **panel** stays
+        // full-bleed (painted edge to edge under the status bar, below); only
+        // the header's own *content* — and the body/footer bottom padding —
+        // shift for these.
+        let insets = ctx.window_insets().padding();
+        let top_inset = insets.top;
+        let bottom_inset = insets.bottom;
+        self.top_inset = top_inset;
+
         let panel_w = panel_width(area_w);
         let panel_x = area_w - panel_w;
         self.panel = Rect::new(panel_x, 0.0, area_w, area_h);
 
         // Header: the title, leading-inset and vertically centered in the
-        // fixed HEADER_HEIGHT row, with the close affordance's own footprint
-        // kept clear on the trailing edge — reclaimed for the title when this
-        // sheet paints no affordance at all.
+        // fixed HEADER_HEIGHT row — offset below `top_inset` — with the close
+        // affordance's own footprint kept clear on the trailing edge —
+        // reclaimed for the title when this sheet paints no affordance at
+        // all.
+        let header_height = top_inset + HEADER_HEIGHT;
+        self.header_height = header_height;
         let trailing_reserve = if self.dismissable {
             HEADER_PAD_TRAILING + CLOSE_DIAMETER + TITLE_CLOSE_GAP
         } else {
@@ -929,13 +988,13 @@ impl Widget for GlyphSideSheetWidget {
         );
         self.title.set_origin(Point::new(
             panel_x + HEADER_PAD_LEADING,
-            ((HEADER_HEIGHT - title_size.height) / 2.0).max(0.0),
+            top_inset + ((HEADER_HEIGHT - title_size.height) / 2.0).max(0.0),
         ));
 
         if self.dismissable {
             self.close_center = Point::new(
                 area_w - HEADER_PAD_TRAILING - CLOSE_DIAMETER / 2.0,
-                HEADER_HEIGHT / 2.0,
+                top_inset + HEADER_HEIGHT / 2.0,
             );
             self.close_rect = Rect::from_center_size(
                 self.close_center,
@@ -946,29 +1005,48 @@ impl Widget for GlyphSideSheetWidget {
             self.close_rect = Rect::ZERO;
         }
 
-        // Footer: hairline + the caller's view, inset on every edge and hugging
-        // the panel's bottom — present only when one was supplied.
+        // Footer: hairline + the caller's view, inset horizontally by
+        // BODY_PAD_X (the body's own gutter) and vertically by FOOTER_PAD,
+        // hugging the panel's bottom — present only when one was supplied.
+        // Its own bottom padding grows by `bottom_inset`, so its content
+        // clears a gesture-navigation bar.
         let mut footer_h = 0.0;
         if let Some(pod) = self.footer.as_mut() {
-            let inner_w = (panel_w - 2.0 * FOOTER_PAD).max(0.0);
-            let max_h = (area_h - HEADER_HEIGHT - HAIRLINE - 2.0 * FOOTER_PAD).max(0.0);
+            let footer_bottom_pad = FOOTER_PAD + bottom_inset;
+            let inner_w = (panel_w - 2.0 * BODY_PAD_X).max(0.0);
+            let max_h =
+                (area_h - header_height - HAIRLINE - FOOTER_PAD - footer_bottom_pad).max(0.0);
             let size = pod.layout_child(ctx, &BoxConstraints::loose(Size::new(inner_w, max_h)));
-            footer_h = HAIRLINE + 2.0 * FOOTER_PAD + size.height;
+            footer_h = HAIRLINE + FOOTER_PAD + size.height + footer_bottom_pad;
             let divider_y = area_h - footer_h;
             self.footer_divider_y = divider_y;
             pod.set_origin(Point::new(
-                panel_x + FOOTER_PAD,
+                panel_x + BODY_PAD_X,
                 divider_y + HAIRLINE + FOOTER_PAD,
             ));
         }
 
         // Body: everything between the header and the footer, tight on both
-        // axes and full panel width.
-        let body_h = (area_h - HEADER_HEIGHT - footer_h).max(0.0);
+        // axes, inset horizontally by BODY_PAD_X on both edges. Its bottom
+        // edge additionally gains `bottom_inset` when there is no footer to
+        // absorb it instead (see the [module docs](self)). The clip/extent
+        // rect (`body_rect`) still spans the panel's full width; only the
+        // child's own geometry is inset.
+        let body_h = (area_h - header_height - footer_h).max(0.0);
+        let body_bottom_pad = if self.footer.is_some() {
+            0.0
+        } else {
+            bottom_inset
+        };
+        let inner_body_w = (panel_w - 2.0 * BODY_PAD_X).max(0.0);
+        let inner_body_h = (body_h - body_bottom_pad).max(0.0);
+        self.body.layout_child(
+            ctx,
+            &BoxConstraints::tight(Size::new(inner_body_w, inner_body_h)),
+        );
         self.body
-            .layout_child(ctx, &BoxConstraints::tight(Size::new(panel_w, body_h)));
-        self.body.set_origin(Point::new(panel_x, HEADER_HEIGHT));
-        self.body_rect = Rect::new(panel_x, HEADER_HEIGHT, area_w, HEADER_HEIGHT + body_h);
+            .set_origin(Point::new(panel_x + BODY_PAD_X, header_height));
+        self.body_rect = Rect::new(panel_x, header_height, area_w, header_height + body_h);
 
         bc.constrain(Size::new(area_w, area_h))
     }
@@ -1004,10 +1082,11 @@ impl Widget for GlyphSideSheetWidget {
         let divider = resolve_divider(theme);
         let close_fill = resolve_close_fill(theme);
         let close_ink = resolve_close_ink(theme, self.close_pressed);
-        // The header's bottom hairline sits inside its own fixed height, so
-        // the body starts exactly at HEADER_HEIGHT.
+        // The header's bottom hairline sits inside its own total height
+        // (`top_inset + HEADER_HEIGHT`), so the body starts exactly at
+        // `self.header_height`.
         scene.fill_rect(
-            Point::new(panel_origin.x, origin.y + HEADER_HEIGHT - HAIRLINE),
+            Point::new(panel_origin.x, origin.y + self.header_height - HAIRLINE),
             Size::new(panel_w, HAIRLINE),
             divider,
         );
@@ -1196,7 +1275,8 @@ mod tests {
     use frust::NavigatorView;
     use frust::authoring::text::TextContext;
     use frust::authoring::{
-        BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent, any as core_any,
+        BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent, WindowEdgeInsets, WindowInsets,
+        any as core_any,
     };
     use frust_core::RenderRoot;
     use frust_widgets::navigator;
@@ -1353,10 +1433,16 @@ mod tests {
     #[test]
     fn a_footerless_sheet_gives_the_body_everything_below_the_fixed_header() {
         let w = laid_out(&sheet(), area());
-        assert_eq!(w.body.origin(), Point::new(w.panel.x0, HEADER_HEIGHT));
+        // Zero insets: header total height collapses to the bare
+        // HEADER_HEIGHT row, and (per the acceptance contract) the only
+        // change from the pre-inset geometry is the new horizontal gutter.
+        assert_eq!(
+            w.body.origin(),
+            Point::new(w.panel.x0 + BODY_PAD_X, HEADER_HEIGHT)
+        );
         assert_eq!(
             w.body.size(),
-            Size::new(w.panel.width(), 600.0 - HEADER_HEIGHT)
+            Size::new(w.panel.width() - 2.0 * BODY_PAD_X, 600.0 - HEADER_HEIGHT)
         );
         assert_eq!(w.body_rect.y1, area().height, "…all the way to the bottom");
         assert_eq!(w.close_rect.height(), CLOSE_TOUCH_TARGET);
@@ -1372,19 +1458,26 @@ mod tests {
         let w = laid_out(&view, area());
         let footer = w.footer.as_ref().expect("the footer pod was built");
 
+        // Zero bottom inset: numerically identical to the pre-inset height
+        // (FOOTER_PAD top + content + FOOTER_PAD bottom); only the footer's
+        // *horizontal* inset moved from FOOTER_PAD to the shared BODY_PAD_X
+        // gutter.
         let footer_h = HAIRLINE + 2.0 * FOOTER_PAD + 40.0;
         assert_eq!(w.footer_divider_y, area().height - footer_h);
         assert_eq!(
             footer.origin(),
             Point::new(
-                w.panel.x0 + FOOTER_PAD,
+                w.panel.x0 + BODY_PAD_X,
                 w.footer_divider_y + HAIRLINE + FOOTER_PAD
             ),
             "the footer sits inside its own insets, below its hairline"
         );
         assert_eq!(
             w.body.size(),
-            Size::new(w.panel.width(), 600.0 - HEADER_HEIGHT - footer_h),
+            Size::new(
+                w.panel.width() - 2.0 * BODY_PAD_X,
+                600.0 - HEADER_HEIGHT - footer_h
+            ),
             "the body is tight-filled between the header and the footer"
         );
         assert_eq!(w.body_rect.y1, w.footer_divider_y);
@@ -1399,6 +1492,102 @@ mod tests {
             barrier.title.size().width >= dismissable.title.size().width,
             "the title is given at least the space the chip used to reserve"
         );
+    }
+
+    // -- Safe-area insets (device-gate G1) ------------------------------------
+    //
+    // `LayoutCtx::set_window_insets` is crate-private to `frust-core`, so —
+    // exactly like `crate::appbar`'s own top-inset test — a synthetic inset is
+    // injected the one public way: `RenderRoot::set_insets`, with the sheet as
+    // the tree's own root view (mirrors `semantics_is_a_modal_dialog_labelled_by_the_title`'s
+    // harness below).
+
+    #[test]
+    fn layout_consumes_the_top_and_bottom_insets_and_keeps_the_horizontal_gutter_footerless() {
+        fn logic(_s: &mut ()) -> GlyphSideSheetView<()> {
+            sheet()
+        }
+        let mut root: RenderRoot<(), GlyphSideSheetView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 24.0, 0.0, 34.0),
+            WindowEdgeInsets::ZERO,
+        ));
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area(), &mut tcx as &mut dyn Any);
+
+        let id = root.root_id().expect("root built");
+        let w = (root.tree().pod(id).expect("pod").widget() as &dyn Any)
+            .downcast_ref::<GlyphSideSheetWidget>()
+            .expect("root is a GlyphSideSheetWidget");
+
+        // The panel itself stays full-bleed — its rect is untouched by either
+        // inset, painting edge to edge under the status bar.
+        assert_eq!(w.panel.y0, 0.0, "the panel paints under the status bar");
+        assert_eq!(w.panel.y1, area().height);
+
+        // Header *content* sits below the 24px top inset.
+        assert_eq!(w.top_inset, 24.0);
+        assert_eq!(w.header_height, HEADER_HEIGHT + 24.0);
+        assert!(w.title.origin().y >= 24.0, "title below the inset");
+        assert!(w.close_center.y >= 24.0, "close chip below the inset");
+
+        // Body: starts where the inset-grown header band ends, keeps the
+        // horizontal gutter, and (with no footer to absorb it) gains the
+        // 34px bottom inset on top of its own extent.
+        assert_eq!(w.body.origin().y, HEADER_HEIGHT + 24.0);
+        assert_eq!(
+            w.body.origin().x,
+            w.panel.x0 + BODY_PAD_X,
+            "body children inset by the shared horizontal gutter"
+        );
+        assert_eq!(w.body.size().width, w.panel.width() - 2.0 * BODY_PAD_X);
+        assert_eq!(
+            w.body.size().height,
+            area().height - (HEADER_HEIGHT + 24.0) - 34.0,
+            "the footerless body's own bottom edge gained the bottom inset"
+        );
+    }
+
+    #[test]
+    fn a_footers_bottom_padding_grows_by_the_bottom_inset_and_keeps_the_horizontal_gutter() {
+        fn logic(_s: &mut ()) -> GlyphSideSheetView<()> {
+            sheet().footer(leaf_any(120.0, 40.0))
+        }
+        let mut root: RenderRoot<(), GlyphSideSheetView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 34.0),
+            WindowEdgeInsets::ZERO,
+        ));
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area(), &mut tcx as &mut dyn Any);
+
+        let id = root.root_id().expect("root built");
+        let w = (root.tree().pod(id).expect("pod").widget() as &dyn Any)
+            .downcast_ref::<GlyphSideSheetWidget>()
+            .expect("root is a GlyphSideSheetWidget");
+
+        // The footer's own bottom padding grew by the 34px bottom inset —
+        // FOOTER_PAD (top) + content + (FOOTER_PAD + 34px bottom).
+        let footer_h = HAIRLINE + 2.0 * FOOTER_PAD + 40.0 + 34.0;
+        assert_eq!(w.footer_divider_y, area().height - footer_h);
+        let footer = w.footer.as_ref().expect("the footer pod was built");
+        assert_eq!(
+            footer.origin().x,
+            w.panel.x0 + BODY_PAD_X,
+            "footer children inset by the shared horizontal gutter"
+        );
+
+        // The body's own height still excludes only the (now taller) footer —
+        // it gained nothing of its own, since the footer absorbed the inset.
+        assert_eq!(
+            w.body.size().height,
+            area().height - HEADER_HEIGHT - footer_h
+        );
+        assert_eq!(w.body.origin().x, w.panel.x0 + BODY_PAD_X);
     }
 
     // -- Enter/exit staging: scrim fades, panel slides, INDEPENDENTLY --------
