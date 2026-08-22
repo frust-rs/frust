@@ -316,6 +316,8 @@ pub struct GlyphRevealWidget {
     /// input may reach while [`Self::cascading`] (`item_progress` is
     /// non-increasing in `i`, so the revealed set is always a prefix).
     /// `usize::MAX` until a paint records one, which reads as "no gate".
+    /// Consulted only through [`GlyphRevealWidget::input_reach`], the one
+    /// spot `event` and `semantics` both read it from.
     cascade_frontier: usize,
 }
 
@@ -451,6 +453,31 @@ impl GlyphRevealWidget {
     /// How far in the children sit: the guide's `indent + pad`, or nothing.
     fn inset(&self) -> f64 {
         self.guide.map_or(0.0, |g| g.indent + g.pad)
+    }
+
+    /// The number of leading children pointer/scroll input can currently
+    /// reach — and, by the input-parity carve-out `docs/CODE_STANDARDS.md`'s
+    /// Semantics Conventions grants a container that gates input, exactly how
+    /// many [`semantics`](Widget::semantics) below may forward. This is the
+    /// one shared reach both methods read, so the two cannot drift (the same
+    /// shape the navigator's R23 `input_routed_pages` takes): an
+    /// accesskit-synthesized `Click` (`RenderRoot::perform_accessibility_action`)
+    /// routes through this same gated `event`, so a child beyond this reach
+    /// could not be activated by one either — exposing it as an actionable
+    /// semantics node would read as a silent no-op.
+    ///
+    /// While [`Self::cascading`], the reach is the frontier the last paint
+    /// revealed ([`Self::cascade_frontier`]); settled, collapsed, or
+    /// `stagger(false)` reach every child — `event`'s own
+    /// broadcast/focus-routed/already-active-pod escape hatches (none of
+    /// which have a semantics analogue, so they stay local to `event`) layer
+    /// on top of this, never narrow it.
+    fn input_reach(&self) -> usize {
+        if self.cascading {
+            self.cascade_frontier.min(self.pods.len())
+        } else {
+            self.pods.len()
+        }
     }
 }
 
@@ -618,9 +645,8 @@ impl Widget for GlyphRevealWidget {
         // collapsed subtree already, matching `semantics` below), and a child
         // already holding the pointer capture, which was visible when it
         // claimed and must not lose the rest of its gesture.
-        let frontier = self.cascade_frontier.min(self.pods.len());
-        if !self.cascading
-            || frontier == self.pods.len()
+        let frontier = self.input_reach();
+        if frontier == self.pods.len()
             || event.is_broadcast()
             || event.is_focus_routed()
             || self.pods.iter().any(|p| p.is_active())
@@ -646,10 +672,18 @@ impl Widget for GlyphRevealWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // Forwarded regardless of reveal state: a collapsed subtree still
-        // contributes its nodes (the silent-drop rule — hidden state is the
-        // platform's concern), and focus-routed input still reaches it.
-        for pod in &self.pods {
+        // Mirrors `event`'s own cascade gate through the shared
+        // `input_reach` — the one carve-out `docs/CODE_STANDARDS.md`'s
+        // Semantics Conventions allows a container that gates input: while
+        // cascading, a child beyond the frontier cannot be tapped, and an AT
+        // client's synthesized `Click` can't reach it either
+        // (`RenderRoot::perform_accessibility_action` routes it through this
+        // same gated `event`), so forwarding it here would expose a silent
+        // no-op as actionable. Settled, collapsed, or `stagger(false)`
+        // containers reach — and forward — every child: the silent-drop
+        // rule (hidden state is the platform's concern) still covers that
+        // case, unlike the mid-cascade one this fixes.
+        for pod in &self.pods[..self.input_reach()] {
             pod.semantics_child(ctx);
         }
     }
@@ -788,7 +822,7 @@ fn mix_ink(from: Color, to: Color, t: f64) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::{PointerButton, PointerEvent, any};
+    use frust::authoring::{PointerButton, PointerEvent, Role, any};
     use std::any::Any;
 
     const WINDOW: Size = Size::new(300.0, 400.0);
@@ -949,6 +983,12 @@ mod tests {
                 InputEvent::Pointer(_) => EventResult::Handled,
                 _ => EventResult::Ignored,
             }
+        }
+        /// One node per forwarded child, so a semantics-parity test can count
+        /// exactly how many of `GlyphRevealWidget`'s children `semantics`
+        /// actually reached.
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(Role::GenericContainer, |_| {});
         }
     }
 
@@ -1445,6 +1485,82 @@ mod tests {
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
         assert_eq!(seen, 3, "collapsed or not, every child pod is visited");
+
+        // Settled (collapsed, no cascade in flight) still forwards every
+        // child to `semantics` too — unconditionally, same as the visitor
+        // above. This is the *only* state that still does: mid-cascade,
+        // `semantics` narrows to the frontier `event` can reach (see
+        // `semantics_forwarding_matches_the_event_reachable_prefix_mid_cascade`
+        // below). `SemanticsCtx`'s constructor is crate-private to
+        // `frust-core`, so this drives a real `RenderRoot` pass rather than
+        // the context itself (the `crate::toggle` precedent).
+        fn logic(_s: &mut ()) -> GlyphRevealView<()> {
+            view(false)
+        }
+        let mut root: frust_core::RenderRoot<(), GlyphRevealView<()>> =
+            frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(WINDOW);
+        let update = root.semantics();
+        let forwarded = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::GenericContainer)
+            .count();
+        assert_eq!(
+            forwarded, 3,
+            "settled: every child forwarded to semantics, unconditionally"
+        );
+    }
+
+    #[test]
+    fn semantics_forwarding_matches_the_event_reachable_prefix_mid_cascade() {
+        // Same construction and timing as
+        // `a_child_the_cascade_has_not_revealed_yet_is_not_hit_testable`: at
+        // 165ms child 2's window has not opened, so `event` reaches only
+        // children 0 and 1. `semantics` must forward exactly that same
+        // prefix — the parity `GlyphRevealWidget::input_reach` fixes.
+        fn logic(expanded: &mut bool) -> GlyphRevealView<bool> {
+            glyph_reveal::<bool>(
+                HEIGHTS
+                    .iter()
+                    .map(|h| any(Block(Size::new(120.0, *h))))
+                    .collect(),
+            )
+            .expanded(*expanded)
+        }
+
+        let mut root: frust_core::RenderRoot<bool, GlyphRevealView<bool>> =
+            frust_core::RenderRoot::new();
+        let mut expanded = false;
+        root.rebuild(&mut logic, &mut expanded);
+        root.layout(WINDOW);
+
+        expanded = true;
+        root.rebuild(&mut logic, &mut expanded);
+        root.layout(WINDOW);
+        let mut rec = Recorder::default();
+        root.paint(&mut rec, ft_ms(0.0));
+        root.layout(WINDOW);
+        let mut rec = Recorder::default();
+        root.paint(&mut rec, ft_ms(165.0));
+        assert_eq!(
+            rec.child_progress().len(),
+            2,
+            "sanity: same frontier as the widget-level hit-test test"
+        );
+
+        let update = root.semantics();
+        let forwarded = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::GenericContainer)
+            .count();
+        assert_eq!(
+            forwarded, 2,
+            "semantics forwards only the frontier the last paint revealed, exactly like event"
+        );
     }
 
     #[test]
