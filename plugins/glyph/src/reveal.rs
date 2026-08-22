@@ -41,8 +41,22 @@
 //! height tween, so the literal per-item millisecond spacing stays meaningful
 //! whatever the height animation is doing. Each child fades on that progress and
 //! slides in from [`GLYPH_REVEAL_SLIDE_DP`] to the right of its resting spot. A
-//! child whose window has not opened yet paints nothing at all, and a settled
-//! child paints with no layer/transform wrapper.
+//! child whose window has not opened yet paints nothing at all — and is not
+//! hit-testable either: pointer/scroll input reaches only the children the last
+//! paint actually revealed, so a row's blank space cannot accept a tap before it
+//! is there to be tapped (broadcasts and focus-routed events still reach every
+//! child, as they do while collapsed). A settled child paints with no
+//! layer/transform wrapper.
+//!
+//! **A child-list change mid-cascade resumes, it does not restart.** The timeline
+//! is sized off the child count, so a new list has to re-arm it — but from the
+//! elapsed position it already held. Each item's window is absolute on that
+//! elapsed clock (item `i` opens at `i · 90ms`), so every already-revealed child
+//! keeps exactly the progress it had while the longer timeline's tail carries the
+//! new ones in. The cascade is paced by *index*, not identity: appending lands
+//! the new rows on that tail, while inserting ahead of a revealed one hands it
+//! the next index's later window and re-fades it — this container holds no child
+//! keys to pace against, so a mid-cascade insert is an append or nothing.
 //!
 //! **Collapsing does not cascade out**: children stay fully opaque and are simply
 //! swallowed by the shrinking clip, so a collapse reads as one motion rather than
@@ -80,8 +94,8 @@ use std::time::Duration;
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, build_child, rebuild_children,
-    route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, build_child,
+    rebuild_children, route_event, teardown_child, visit_children,
 };
 use frust::{AnimationController, Curve, FrameTime, Tween};
 use kurbo::{Affine, Point, Size, Vec2};
@@ -113,8 +127,17 @@ const FALLBACK_DURATION: Duration = Duration::from_millis(220);
 /// `caption/11` type role so the marker sits optically level with a row's
 /// small text.
 pub const GLYPH_CHEVRON_BOX: f64 = 11.0;
-/// The chevron's arm length, in logical px (fits inside [`GLYPH_CHEVRON_BOX`]
-/// with room for the stroke's own width).
+/// The chevron's arm length, in logical px — 3.5 against
+/// [`mod@crate::accordion`]'s 4.5, deliberately, because the two marks are boxed
+/// differently: the accordion draws its chevron free-hand at a computed center
+/// in a tall padded header row, with no declared box to stay inside, while this
+/// one is a laid-out leaf whose entire footprint is [`GLYPH_CHEVRON_BOX`]. All
+/// reaches below are from the box center against its 5.5px half-extent. At rest
+/// the mark reaches `arm + CHEVRON_WIDTH / 2` = 4.25, a 1.25px optical margin,
+/// where 4.5 would reach 5.25 and leave 0.25. Rotating, the arms' outer ends
+/// sweep `arm · √2`, peaking at 45°: 5.7 here — 0.2 past the box for the few
+/// frames it lasts — against 7.11 for a 4.5 arm, 1.6px into whatever a row laid
+/// out beside it. The two constants are a pair — move one and re-check the other.
 const CHEVRON_ARM: f64 = 3.5;
 /// The chevron stroke width, in logical px.
 const CHEVRON_WIDTH: f64 = 1.5;
@@ -277,12 +300,23 @@ pub struct GlyphRevealWidget {
     /// The children's full natural extent, including gaps (set in layout).
     content_height: f64,
     /// The cascade's shared `0..1` timeline, sized to
-    /// `GlyphStagger::total_duration(n)` and armed once per expansion.
+    /// `GlyphStagger::total_duration(n)` and armed once per expansion (re-armed,
+    /// from where it stood, by a mid-cascade child-list change).
     cascade: AnimationController,
+    /// Where on the shared timeline [`Self::cascade`] was armed: `0.0` for a
+    /// fresh expansion, or the already-elapsed fraction a re-arm resumed from.
+    /// The controller itself only spans what was left, so the timeline position
+    /// is the two composed (see [`GlyphRevealWidget::arm_cascade`]).
+    cascade_from: f64,
     /// The cascade's latest shared progress.
     cascade_value: f64,
     /// Whether the cascade controller is still running.
     cascading: bool,
+    /// How many leading children the last paint revealed — the ones pointer
+    /// input may reach while [`Self::cascading`] (`item_progress` is
+    /// non-increasing in `i`, so the revealed set is always a prefix).
+    /// `usize::MAX` until a paint records one, which reads as "no gate".
+    cascade_frontier: usize,
 }
 
 impl<State: 'static> View<State> for GlyphRevealView<State> {
@@ -307,8 +341,10 @@ impl<State: 'static> View<State> for GlyphRevealView<State> {
             reveal_value: settled,
             content_height: 0.0,
             cascade: AnimationController::new(Duration::ZERO),
+            cascade_from: settled,
             cascade_value: settled,
             cascading: false,
+            cascade_frontier: usize::MAX,
         }
     }
 
@@ -333,7 +369,7 @@ impl<State: 'static> View<State> for GlyphRevealView<State> {
                 .reveal
                 .set_target(if self.expanded { 1.0 } else { 0.0 });
             if self.expanded {
-                element.arm_cascade();
+                element.arm_cascade(0.0);
             } else {
                 // Collapsing never cascades out: the children stay opaque under
                 // the shrinking clip.
@@ -342,8 +378,14 @@ impl<State: 'static> View<State> for GlyphRevealView<State> {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else if element.cascading && element.pods.len() != before {
             // The timeline is sized off the child count, so a mid-cascade list
-            // change re-arms it rather than pacing against a stale length.
-            element.arm_cascade();
+            // change re-arms it rather than pacing against a stale length — but
+            // from where the cascade already stood, never from zero. Re-arming
+            // at zero paints no children at all on the next pass and then
+            // re-cascades rows that were already in; resuming on the elapsed
+            // clock leaves every revealed child exactly as revealed as it was
+            // (see the module docs).
+            let elapsed = element.cascade_elapsed_ms(before);
+            element.arm_cascade(elapsed);
         }
         if element.stagger != self.stagger {
             element.stagger = self.stagger;
@@ -365,21 +407,43 @@ impl<State: 'static> View<State> for GlyphRevealView<State> {
 }
 
 impl GlyphRevealWidget {
-    /// Start the cascade from nothing, sized to the current child count.
-    fn arm_cascade(&mut self) {
+    /// Arm the cascade over the current child count with `elapsed_ms` of its
+    /// timeline already behind it — `0.0` starts from nothing (a fresh
+    /// expansion), anything else resumes an in-flight cascade over a new child
+    /// count.
+    ///
+    /// The controller spans only what is *left* (`total - elapsed`) and
+    /// [`Self::cascade_from`] carries the rest, which keeps the composed value
+    /// advancing at exactly one timeline-millisecond per millisecond either way.
+    fn arm_cascade(&mut self, elapsed_ms: f64) {
         let total_ms = GlyphStagger::glyph().total_duration(self.pods.len());
+        let elapsed = elapsed_ms.clamp(0.0, total_ms);
+        let remaining = (total_ms - elapsed).max(0.0);
         let mut c =
-            AnimationController::new(Duration::from_millis(total_ms.round().max(0.0) as u64))
+            AnimationController::new(Duration::from_millis(remaining.round().max(0.0) as u64))
                 .with_curve(Curve::Linear);
         c.forward();
         self.cascade = c;
-        self.cascade_value = 0.0;
+        self.cascade_from = if total_ms > 0.0 {
+            elapsed / total_ms
+        } else {
+            1.0
+        };
+        self.cascade_value = self.cascade_from;
         self.cascading = true;
+    }
+
+    /// Where the cascade currently stands in milliseconds, read against a
+    /// timeline sized for `n` children — the position [`Self::arm_cascade`]
+    /// resumes from when the child list changes under it.
+    fn cascade_elapsed_ms(&self, n: usize) -> f64 {
+        self.cascade_value * GlyphStagger::glyph().total_duration(n)
     }
 
     /// Drop the cascade and leave every child fully revealed.
     fn settle_cascade(&mut self) {
         self.cascade = AnimationController::new(Duration::ZERO);
+        self.cascade_from = 1.0;
         self.cascade_value = 1.0;
         self.cascading = false;
     }
@@ -482,14 +546,17 @@ impl Widget for GlyphRevealWidget {
             ctx.request_layout();
         }
 
-        // Advance the cascade — a decoupled, paint-only timeline.
+        // Advance the cascade — a decoupled, paint-only timeline. The
+        // controller spans what was left when it was armed, so the shared
+        // progress is that reading composed with where it started.
         if self.cascading {
             if self.cascade.advance(ctx.frame_time()) {
                 ctx.request_frame();
             } else {
                 self.cascading = false;
             }
-            self.cascade_value = self.cascade.value_clamped();
+            self.cascade_value =
+                self.cascade_from + (1.0 - self.cascade_from) * self.cascade.value_clamped();
         }
 
         let revealed = self.reveal_value * self.content_height;
@@ -511,6 +578,9 @@ impl Widget for GlyphRevealWidget {
         let cascading_in = self.stagger && self.expanded;
         let spec = GlyphStagger::glyph();
         let n = self.pods.len();
+        // How far down the list the cascade has actually revealed — recorded for
+        // `event`, so hit-testing can't reach a child that painted nothing.
+        let mut frontier = 0usize;
         for (i, pod) in self.pods.iter_mut().enumerate() {
             let progress = if cascading_in {
                 spec.item_progress(self.cascade_value, i, n, reduce_motion)
@@ -520,6 +590,7 @@ impl Widget for GlyphRevealWidget {
             if progress <= 0.0 {
                 continue;
             }
+            frontier = i + 1;
             let dx = GLYPH_REVEAL_SLIDE_DP * (1.0 - progress);
             let settled = progress >= 1.0;
             let child_origin = o + pod.origin().to_vec2() + Vec2::new(dx, 0.0);
@@ -533,12 +604,45 @@ impl Widget for GlyphRevealWidget {
                 scene.pop_layer();
             }
         }
+        // Off the cascade every child is revealed, so the frontier gates
+        // nothing; a collapsed container returns above and keeps the last one.
+        self.cascade_frontier = frontier;
 
         scene.pop_clip();
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        route_event(&mut self.pods, ctx, event)
+        // Only the cascade window gates anything. Off it — settled, collapsed,
+        // or `stagger(false)` — every child routes exactly as `route_event`
+        // alone would; so do broadcasts, focus-routed events (both reach a
+        // collapsed subtree already, matching `semantics` below), and a child
+        // already holding the pointer capture, which was visible when it
+        // claimed and must not lose the rest of its gesture.
+        let frontier = self.cascade_frontier.min(self.pods.len());
+        if !self.cascading
+            || frontier == self.pods.len()
+            || event.is_broadcast()
+            || event.is_focus_routed()
+            || self.pods.iter().any(|p| p.is_active())
+        {
+            return route_event(&mut self.pods, ctx, event);
+        }
+        // Pointer/scroll input reaches only what the last paint revealed: a
+        // child whose cascade window has not opened paints nothing, so routing
+        // a tap into its rect would have blank space accept it.
+        let result = route_event(&mut self.pods[..frontier], ctx, event);
+        // Blur-on-outside-tap still covers the whole container, not just the
+        // routed prefix: a `Down` that re-claimed nothing must drop a hidden
+        // child's stale focus link exactly as ungated routing would (mirroring
+        // `route_event`'s own rule over the children it never saw).
+        if matches!(event, InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)) {
+            for pod in &mut self.pods[frontier..] {
+                if pod.is_focused() {
+                    pod.set_focused(false);
+                }
+            }
+        }
+        result
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -684,7 +788,7 @@ fn mix_ink(from: Color, to: Color, t: f64) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::any;
+    use frust::authoring::{PointerButton, PointerEvent, any};
     use std::any::Any;
 
     const WINDOW: Size = Size::new(300.0, 400.0);
@@ -788,6 +892,23 @@ mod tests {
                 })
                 .collect()
         }
+
+        /// Each painted child's reveal progress, in child order: the alpha of the
+        /// fade layer wrapping it, or `1.0` for a settled child that painted
+        /// bare. A child whose cascade window has not opened paints nothing and
+        /// is simply absent, so the vec's length is the revealed frontier.
+        fn child_progress(&self) -> Vec<f64> {
+            let mut out = Vec::new();
+            let mut wrapping = None;
+            for op in &self.ops {
+                match op {
+                    Op::Layer(_, _, alpha) => wrapping = Some(*alpha),
+                    Op::Rect(..) => out.push(wrapping.take().map_or(1.0, f64::from)),
+                    _ => {}
+                }
+            }
+            out
+        }
     }
 
     /// A fixed-size leaf that paints one rect — a deterministic stand-in for a
@@ -820,20 +941,49 @@ mod tests {
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
         }
+        /// Consumes any pointer event that reaches it, the way a real row's
+        /// press target would — so a container test can read "did this child get
+        /// the tap?" straight off the routed result.
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(_) => EventResult::Handled,
+                _ => EventResult::Ignored,
+            }
+        }
     }
 
     fn ft_ms(ms: f64) -> FrameTime {
         FrameTime::from_nanos((ms * 1_000_000.0) as u64)
     }
 
-    fn view(expanded: bool) -> GlyphRevealView<()> {
+    fn view_of(expanded: bool, heights: &[f64]) -> GlyphRevealView<()> {
         glyph_reveal(
-            HEIGHTS
+            heights
                 .iter()
                 .map(|h| any(Block(Size::new(120.0, *h))))
                 .collect(),
         )
         .expanded(expanded)
+    }
+
+    fn view(expanded: bool) -> GlyphRevealView<()> {
+        view_of(expanded, &HEIGHTS)
+    }
+
+    /// Dispatch a pointer `Down` at `at` (container-local) and report whether the
+    /// container routed it to a child.
+    fn tap(w: &mut GlyphRevealWidget, at: Point) -> EventResult {
+        let mut state = ();
+        let sa: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, WINDOW);
+        w.event(
+            &mut ctx,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: at,
+                button: PointerButton::Primary,
+            }),
+        )
     }
 
     fn build(v: &GlyphRevealView<()>) -> GlyphRevealWidget {
@@ -1107,6 +1257,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_mid_cascade_child_arrival_resumes_the_timeline_instead_of_restarting_it() {
+        let (closed, three) = (view(false), view(true));
+        let mut w = build(&closed);
+        layout(&mut w);
+        rebuild(&closed, &three, &mut w);
+        let mut size = layout(&mut w);
+        paint(&mut w, size, 0.0, None); // seeds both clocks
+        size = layout(&mut w);
+
+        // Half way down the three-child, 330ms timeline: child 0 is fully in,
+        // child 1 is fading, child 2's 180ms window has not opened.
+        let (rec, _) = paint(&mut w, size, 165.0, None);
+        let before = rec.child_progress();
+        assert_eq!(before.len(), 2, "child 2 is not in yet: {before:?}");
+        assert_eq!(before[0], 1.0, "child 0 has settled: {before:?}");
+        assert!(before[1] > 0.0 && before[1] < 1.0, "mid-fade: {before:?}");
+
+        // A fourth child arrives mid-cascade, lengthening the timeline to 420ms.
+        let four = view_of(true, &[20.0, 30.0, 40.0, 50.0]);
+        rebuild(&three, &four, &mut w);
+        size = layout(&mut w);
+
+        // The very next frame paints exactly what the last one did: the arrival
+        // must not blank the container for a frame, nor re-fade rows already in.
+        let (rec, _) = paint(&mut w, size, 165.0, None);
+        let resumed = rec.child_progress();
+        assert_eq!(
+            resumed.len(),
+            before.len(),
+            "no blank frame, no extra reveal: {before:?} -> {resumed:?}"
+        );
+        for (i, (now, was)) in resumed.iter().zip(&before).enumerate() {
+            assert!(
+                now >= was,
+                "child {i} went backwards: {before:?} -> {resumed:?}"
+            );
+        }
+
+        // And the clock carries on at one timeline-ms per ms on the new length:
+        // child 2's 180ms window opens, child 3's 270ms one has not.
+        let (rec, _) = paint(&mut w, size, 250.0, None);
+        let mid = rec.child_progress();
+        assert_eq!(mid.len(), 3, "child 2 opened, child 3 has not: {mid:?}");
+        for (i, (now, was)) in mid.iter().zip(&resumed).enumerate() {
+            assert!(
+                now >= was,
+                "child {i} went backwards: {resumed:?} -> {mid:?}"
+            );
+        }
+
+        // The newcomer joins the tail of the cascade rather than snapping in.
+        let (rec, _) = paint(&mut w, size, 300.0, None);
+        let tail = rec.child_progress();
+        assert_eq!(tail.len(), 4, "child 3 has opened: {tail:?}");
+        assert!(tail[3] > 0.0 && tail[3] < 1.0, "and it fades: {tail:?}");
+
+        // Past the four-child timeline every row is settled.
+        let (rec, _) = paint(&mut w, size, 500.0, None);
+        assert_eq!(rec.child_progress(), vec![1.0; 4]);
+    }
+
+    #[test]
+    fn a_child_the_cascade_has_not_revealed_yet_is_not_hit_testable() {
+        let (closed, open) = (view(false), view(true));
+        let mut w = build(&closed);
+        layout(&mut w);
+        rebuild(&closed, &open, &mut w);
+        let mut size = layout(&mut w);
+        paint(&mut w, size, 0.0, None);
+        size = layout(&mut w);
+
+        // Child 2 sits at y 62..102 and its 180ms window has not opened at 165ms.
+        let (rec, _) = paint(&mut w, size, 165.0, None);
+        assert_eq!(rec.child_progress().len(), 2, "child 2 painted nothing");
+        let in_child_2 = Point::new(60.0, 80.0);
+        assert_eq!(
+            tap(&mut w, in_child_2),
+            EventResult::Ignored,
+            "blank space must not accept a tap before the row is there"
+        );
+        // The rows the cascade *has* revealed take theirs normally.
+        assert_eq!(tap(&mut w, Point::new(60.0, 10.0)), EventResult::Handled);
+
+        // Once the cascade passes its window, the same tap lands.
+        let (rec, _) = paint(&mut w, size, 400.0, None);
+        assert_eq!(rec.child_progress(), vec![1.0; 3], "all three settled");
+        assert_eq!(tap(&mut w, in_child_2), EventResult::Handled);
+    }
+
+    #[test]
+    fn a_collapsed_container_still_routes_to_its_children() {
+        // The cascade window is the only thing gated: collapsed routing keeps
+        // the silent-drop rule `semantics` follows, and `stagger(false)` never
+        // hides a row from input at all.
+        let mut w = build(&view(false));
+        layout(&mut w);
+        assert_eq!(tap(&mut w, Point::new(60.0, 10.0)), EventResult::Handled);
+
+        let closed = view(false).stagger(false);
+        let open = view(true).stagger(false);
+        let mut w = build(&closed);
+        layout(&mut w);
+        rebuild(&closed, &open, &mut w);
+        let mut size = layout(&mut w);
+        paint(&mut w, size, 0.0, None);
+        size = layout(&mut w);
+        paint(&mut w, size, 16.0, None);
+        assert_eq!(tap(&mut w, Point::new(60.0, 80.0)), EventResult::Handled);
+    }
+
     // ---- Guide -----------------------------------------------------------
 
     #[test]
@@ -1324,6 +1585,52 @@ mod tests {
         let t = tip(&rec);
         assert!((t.x - center.x).abs() < 1e-9, "already pointing down");
         assert!(!needs_frame, "a snap asks for no further frames");
+    }
+
+    #[test]
+    fn the_chevron_arm_is_sized_to_the_box_it_rotates_inside() {
+        let half = GLYPH_CHEVRON_BOX / 2.0;
+        let center = Point::new(half, half);
+        let stroke = CHEVRON_WIDTH / 2.0;
+
+        // At rest — the two orientations a reader actually sees — the whole mark
+        // sits inside the box with an optical margin.
+        for &angle in &[0.0, std::f64::consts::FRAC_PI_2] {
+            let mut rec = Recorder::default();
+            draw_chevron(&mut rec, center, angle, CHEVRON_DIM);
+            assert!(
+                reach(&rec, center) + stroke < half - 1.0,
+                "a settled chevron clears the {GLYPH_CHEVRON_BOX}px box"
+            );
+        }
+
+        // Rotating, the arms' outer ends sweep `arm · √2` and peak at 45°. This
+        // is what keeps the arm at 3.5 rather than `accordion`'s 4.5, whose
+        // chevron is drawn free-hand in a header row with no box to overrun —
+        // see `CHEVRON_ARM`.
+        let peak = (0..=90)
+            .map(|deg| {
+                let mut rec = Recorder::default();
+                draw_chevron(&mut rec, center, (deg as f64).to_radians(), CHEVRON_DIM);
+                reach(&rec, center)
+            })
+            .fold(0.0_f64, f64::max)
+            + stroke;
+        assert!(
+            peak < half + 0.25,
+            "the 45\u{b0} peak stays on the box edge: {peak} against {half}"
+        );
+    }
+
+    /// The furthest any stroked endpoint sits from `center`, along either axis —
+    /// the mark's reach against its box's half-extent.
+    fn reach(rec: &Recorder, center: Point) -> f64 {
+        rec.lines()
+            .iter()
+            .flat_map(|(p0, p1, _)| [*p0, *p1])
+            .fold(0.0_f64, |acc, p| {
+                acc.max((p.x - center.x).abs()).max((p.y - center.y).abs())
+            })
     }
 
     #[test]
