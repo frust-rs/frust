@@ -38,3 +38,5 @@
 # tooling exhaust, never committed.
 /plugins/*/platform/ios/Package.resolved
 /platform/ios/FrustEmbedding/Package.resolved
+
+.mcp.json
