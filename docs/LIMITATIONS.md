@@ -2788,15 +2788,26 @@ drawing them through vello, carries several named costs and gaps:
    containing either always lowers inline. A `ClearRect` recorded inside a TRAILING segment
    (outside any bracket) also fails to punch the real frame: the hoist is scoped to that segment's
    own transparent scratch target, never the swapchain a hosted native view sits behind.
-7. **Enclosing `PushLayer`/rounded-clip loss.** A composited bracket is drawn as a quad outside
-   vello, so an enclosing `PushLayer`'s opacity AND clip apply to neither — only `PushClip`/
-   `PushClipRounded` are tracked into the compositor's scissor rect — and a rounded enclosing clip
-   degrades to its bounding rect, since a scissor cannot round corners.
+7. **Rounded enclosing clip cropped to its bbox.** A composited bracket is drawn as a quad outside
+   vello, scissored to the device-space intersection of every enclosing `PushClip`/
+   `PushClipRounded`/`PushLayer` rect (a `PushLayer` bounds its content exactly as a clip does, so
+   its rect joins the same intersection). A rounded enclosing clip still degrades to its bounding
+   rect within that intersection, since a scissor cannot round corners. A layer's opacity has
+   nowhere to go in a quad blend, so a bracket enclosed by a `PushLayer` with `alpha < 1.0` is not
+   composited at all — it yields no plan and no hole and lowers inline, where the layer applies to
+   it normally.
 8. **A skipped main pass still dispatches one `PremultiplyPass`.** On `DirectPremultiplied`, when
    the pre segment draws nothing the intermediate texture holds stale content, but the submit-side
    premultiply compute pass runs over it anyway; its output is discarded by the composite pass's
    own `LoadOp::Clear`, so the visible result is still correct, but the GPU dispatch itself is not
    skipped.
+9. **Straight-alpha translucent surfaces get no cache at all.** A surface whose resolved composite
+   alpha mode is translucent but not premultiplied (iOS's `PostMultiplied`) disables the snapshot
+   cache for its whole lifetime (`renderer::snapshot_cache_enabled`, fed by
+   `context::alpha_mode_is_straight_translucent`/`ConfiguredSurface::straight_alpha_translucent` —
+   a straight-alpha swapchain has no exact composite arithmetic for a blended quad) — every bracket
+   on that surface lowers inline, same as `FRUST_NO_SNAPSHOT_LAYERS`, logged once per process
+   naming the reason.
 
 **Applies to**: any app relying on snapshot layers for page-transition performance — every point
 above is a behavior difference from the pre-cache inline path, not a bug. `FRUST_NO_SNAPSHOT_LAYERS`
@@ -2804,23 +2815,36 @@ above is a behavior difference from the pre-cache inline path, not a bug. `FRUST
 
 **Why accepted**: the mechanism exists to dodge vello's ~100 ms/frame in-vello image-quad cost,
 measured on the same Adreno 620 hardware; every item above is a narrower, named, test-pinned
-tradeoff against that number, not a silent wrong-pixels bug. Items 5-8 are structural consequences
+tradeoff against that number, not a silent wrong-pixels bug. Items 5-9 are structural consequences
 of compositing a texture outside vello rather than gaps found later; item 4 is a deliberate v1
 scope line (a hero morph repaints every frame, so it is never an "ideal cache candidate"). Item 1's
 fine-stage floor itself — ~14.5 ms to run a vello pass over any target regardless of content — is
 the accepted, unresolved cost this whole mechanism is chasing; the framework has not yet attempted
 to lower the floor itself (a render-scale reduction is Phase 3 future work, research artifact
-`rsa_000001a03fc498e4k8TZypnY`). Measured Pixel 5a snapshot GPU memory delta across a push/pop plus
-two tab switches: 43.6 MB → 45.0 MB (+1.4 MB; two live 1080×2400 `Rgba8Unorm` page textures during
-a transition; EGL `mtrack` unchanged at 40.9 MB) — small enough on device hardware not to itself be
-a limitation.
+`rsa_000001a03fc498e4k8TZypnY`).
+
+Memory: a cached page and the trailing scratch are each one 1080×2400 `Rgba8Unorm` texture (≈10.4
+MB); a page lives only while its bracket is still in use and both it and the scratch are released
+after `MAX_UNUSED_FRAMES` (2) consecutive unused frames (`SnapshotCache::evict`,
+`Compositor::age_scratch`/`scratch_expired`) — the scratch exists at all only for a frame that had
+a trailing segment. A transition can therefore hold a transient peak of up to ~31 MB (two live
+pages plus the scratch) for a couple of frames; the measured steady-state delta below is a
+post-eviction sample taken once that peak has already aged out, not the peak itself. Measured
+Pixel 5a snapshot GPU memory delta across a push/pop plus two tab switches: 43.6 MB → 45.0 MB
+(+1.4 MB; EGL `mtrack` unchanged at 40.9 MB) — small enough on device hardware not to itself be a
+limitation.
 
 **Evidence**: `crates/frust-render/src/snapshot.rs`'s module doc (fine-stage floor, first-render,
-and "what is never cached" sections) and its `outermost_brackets`/`is_cacheable_body`/
-`snapshot_size`/`raster_root`; `crates/frust-render/src/compositor.rs`'s module doc (trailing-
-segment ordering, ~100 ms in-vello cost); `crates/frust-render/src/convert.rs`'s
-`encode_range_with_overrides` doc comment (the range-scoped `ClearRect` hoist); `crates/frust-render/
-src/renderer.rs`'s `RenderPath::DirectPremultiplied` submit arm comment ("its output is discarded by
+"Enclosing clips and layers", and "what is never cached" sections) and its
+`outermost_brackets`/`is_cacheable_body`/`snapshot_size`/`raster_root`/`open_group_pushes`/
+`FramePlan::trailing_prefix`/`SnapshotCache::evict`; `crates/frust-render/src/compositor.rs`'s
+module doc (trailing-segment ordering, ~100 ms in-vello cost) and its
+`age_scratch`/`scratch_expired`/`MAX_UNUSED_FRAMES`; `crates/frust-render/src/convert.rs`'s
+`encode_range_with_overrides` doc comment (the range-scoped `ClearRect` hoist and the
+`trailing_prefix` re-open); `crates/frust-render/src/context.rs`'s
+`alpha_mode_is_straight_translucent`/`ConfiguredSurface::straight_alpha_translucent`;
+`crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled` and its
+`RenderPath::DirectPremultiplied` submit arm comment ("its output is discarded by
 the composite pass's own `LoadOp::Clear`"); `crates/frust-widgets/src/nav/navigator_tests/
 transition.rs`'s `hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page`; on-device
 perfetto captures, Pixel 5a (SD765G/Adreno 620, 1080×2400@60Hz, `material3-demo --profile`, 3×

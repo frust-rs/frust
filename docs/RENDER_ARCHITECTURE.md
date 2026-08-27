@@ -73,16 +73,23 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   scissored to its enclosing clips' intersection. Commands after the first cached bracket that
   still draw run through one extra transparent vello pass into a scratch texture, composited
   last as a full quad to keep z-order — content recorded BETWEEN two cached brackets lands above
-  both (see LIMITATIONS.md).
+  both (see LIMITATIONS.md). That trailing pass re-opens whatever `PushClip`/`PushClipRounded`/
+  `PushLayer` groups were still open where the split falls (`FramePlan::trailing_prefix`, from
+  `open_group_pushes`) via `encode_range_with_overrides`'s `prefix` param, then closes every
+  group still open at the segment's end so each pass stays self-balanced; the scratch texture
+  itself ages out after `MAX_UNUSED_FRAMES` (2) frames it goes unused (`Compositor::age_scratch`),
+  the same boundary the page-texture cache evicts by.
 - Kill switch: `FRUST_NO_SNAPSHOT_LAYERS` (compile-time `option_env!` or runtime env, cached
   once per surface — same compile-time-or-runtime shape as `FRUST_TRACE`, see
   `docs/DEVELOPMENT.md`'s Instrumentation table) disables the cache; every bracket then lowers
-  through `convert.rs`'s inline emulation, byte-identical to pre-cache behavior. **Render-path
-  A/B caveat** (also covers `FRUST_NO_DIRECT_SURFACE`/`FRUST_NO_SHADER_EFFECTS`): on the
-  direct-to-surface arm the GPU render moves into `submit_us` (out of `encode_us`) and
-  `acquire_us` precedes it rather than follows — account for this remap before comparing
-  `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full v3 field
-  mapping).
+  through `convert.rs`'s inline emulation, byte-identical to pre-cache behavior. A surface whose
+  resolved alpha mode is translucent but not premultiplied (iOS's `PostMultiplied`) never enables
+  the cache at all (`snapshot_cache_enabled`/`alpha_mode_is_straight_translucent`), same inline
+  path. **Render-path A/B caveat** (also covers `FRUST_NO_DIRECT_SURFACE`/
+  `FRUST_NO_SHADER_EFFECTS`): on the direct-to-surface arm the GPU render moves into `submit_us`
+  (out of `encode_us`) and `acquire_us` precedes it rather than follows — account for this remap
+  before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full
+  v3 field mapping).
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via
   `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s. `TextContext::layout_bounded`
   additionally measures against a max line count and applies `TextOverflow` by truncating the shaped
