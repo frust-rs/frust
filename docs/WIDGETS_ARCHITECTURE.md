@@ -91,6 +91,18 @@ build from.
   sensors) — an authored `true` is never un-reduced by an OS report of `false`.
 - Navigation flow: `Navigator`/`Router` manage a page stack and declarative routes over the same
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
+  - **Alpha-zero paint redirect:** `resolve_layers`'s split-crossfade presets — `M3SharedAxisX`
+    (split 0.35), `M3FadeThrough` (0.30), `Glyph` (0.44) — are hard, non-overlapping splits: before
+    the split only the leaving page ramps 1→0, after it only the entering page ramps 0→1, so exactly
+    one page is visible at any instant — never assume a dual-visible crossfade window. `IosPush`
+    keeps both pages visible instead (parallax + dim, never reaching 0); `ReducedCrossfade` is a
+    genuine crossfade, both visible except at its `p=0`/`p=1` boundary instants. When a page's
+    resolved `Layer::alpha` is `0`, `paint_page_layer` (mirrored by `motion::switcher`'s
+    `paint_staged_child`) still runs its paint pass — hero-rect capture through
+    `PaintCtx::with_hero_registry`, other paint-time state — but redirects it into
+    `frust_core::DiscardScene` so no scene command is ever emitted: vello rasterizes a layer's
+    content in full before applying its alpha, and the invisible page was otherwise real, wasted
+    GPU work every such frame.
   - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
     (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
     subtree can observe transitions; reads during paint from a widget painted *after* the navigator
