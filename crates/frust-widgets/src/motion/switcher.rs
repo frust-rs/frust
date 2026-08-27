@@ -61,9 +61,9 @@
 use std::time::Duration;
 
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EditingState, EventCtx,
-    EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
-    any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, DiscardScene, EditingState,
+    EventCtx, EventResult, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx,
+    View, Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Size};
@@ -112,6 +112,13 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// `push_transform` scale (about the child's centre) and a `push_layer` opacity
 /// when either differs from the identity — strict LIFO (transform outer, layer
 /// inner). Mirrors `nav::navigator`'s `paint_page_layer` plus the scale bracket.
+///
+/// When `alpha == 0` the child is fully invisible this frame: rather than
+/// rasterize it under a zero-opacity layer, it paints into a [`DiscardScene`]
+/// sink instead — the pass still has to run for its side effects (animating
+/// descendants advancing), but nothing it records is ever composited, so no
+/// `push_layer`/`push_transform` bracket is needed. Mirrors `nav::navigator`'s
+/// `paint_page_layer`.
 fn paint_staged_child(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
@@ -120,6 +127,13 @@ fn paint_staged_child(
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
+
+    if alpha <= 0.0 {
+        let mut sink = DiscardScene;
+        pod.paint_child(ctx, &mut sink);
+        return;
+    }
+
     let has_scale = (layer.scale - 1.0).abs() > f64::EPSILON;
     let has_alpha = alpha < 1.0;
 
@@ -913,6 +927,39 @@ mod tests {
         assert!(
             scene.transforms.is_empty(),
             "no scale transform at steady state"
+        );
+    }
+
+    // --- Discard: a staged child at alpha 0 paints into a DiscardScene sink,
+    //     recording no ops and no zero-alpha layer (mirrors nav::navigator's
+    //     paint_page_layer discard branch). ---
+
+    #[test]
+    fn alpha_zero_staged_child_records_no_ops_and_no_zero_alpha_layer() {
+        let leaf = leaf_any(10.0, 10.0);
+        let mut counter = 0u64;
+        let mut pod = crate::authoring::build_child(&leaf, &mut BuildCtx::new(&mut counter));
+        let size = pod.layout_child(&mut LayoutCtx::new(), &loose());
+        pod.set_origin(Point::ZERO);
+
+        let mut scene = RecordingScene::default();
+        let layer = PatternLayer {
+            dx: 0.0,
+            dy: 0.0,
+            alpha: 0.0,
+            scale: 1.0,
+        };
+        paint_staged_child(
+            &mut pod,
+            &mut PaintCtx::new(Point::ZERO, size),
+            &mut scene,
+            layer,
+        );
+
+        assert!(scene.rects.is_empty(), "an alpha-0 child records no fill");
+        assert!(
+            scene.layers.is_empty(),
+            "no zero-alpha push_layer is recorded either"
         );
     }
 }
