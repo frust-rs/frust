@@ -2759,6 +2759,78 @@ alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
 ---
 
+### `render-snapshot-layer-tradeoffs` — the page-transition snapshot cache trades named fidelity gaps for its GPU-time win
+
+**Observed**: `frust-render`'s snapshot pre-pass (`snapshot.rs`/`compositor.rs`), which caches a
+page transition's `PushSnapshot`/`PopSnapshot` brackets as composited quad textures instead of
+drawing them through vello, carries several named costs and gaps:
+
+1. **Trailing-segment pass cost.** A drawing command after the first cached bracket that is not
+   itself composited forces one extra vello pass over the whole target — measured ~14.5 ms on an
+   Adreno 620, whatever it draws — since a vello pass pays the same fine-stage sweep of its target
+   whether or not it paints a pixel.
+2. **Cross-bracket z-order.** Content recorded BETWEEN two composited brackets draws above both:
+   the frame splits into one pre segment, the composited quads, and one trailing segment, so a
+   scene interleaving ordinary draws between two brackets loses that interleaving.
+3. **First-appearance cost.** A page's bracket rasterizes once the first time its fingerprint is
+   seen — one heavier frame, measured ~65-75 ms on a Pixel 5a — before settling into the
+   steady-state zero-rasterization case.
+4. **Hero-morph pages stay inline.** `NavigatorWidget::snapshot_eligible` requires this frame's
+   hero directives for the page to be empty; a page mid shared-element morph carries a directive
+   every frame and is never bracketed, always lowering through the ordinary vello path.
+5. **Body cropped to its declared rect.** The cached texture is sized from `PushSnapshot`'s `rect`
+   alone (`snapshot_size`) and the body is rasterized under a root that maps `rect` onto the
+   texture's own pixel grid (`raster_root`); anything the body paints outside that extent falls
+   outside the texture and is lost, not just clipped at the rect's visual bounds.
+6. **`ShaderQuad`/`ClearRect` bodies are never cached.** `is_cacheable_body` excludes both — the
+   command-slice rasterization path carries no shader-override map, and a rasterized `ClearRect`
+   (the platform-view hole punch) would erase texture pixels instead of the surface — so a body
+   containing either always lowers inline. A `ClearRect` recorded inside a TRAILING segment
+   (outside any bracket) also fails to punch the real frame: the hoist is scoped to that segment's
+   own transparent scratch target, never the swapchain a hosted native view sits behind.
+7. **Enclosing `PushLayer`/rounded-clip loss.** A composited bracket is drawn as a quad outside
+   vello, so an enclosing `PushLayer`'s opacity AND clip apply to neither — only `PushClip`/
+   `PushClipRounded` are tracked into the compositor's scissor rect — and a rounded enclosing clip
+   degrades to its bounding rect, since a scissor cannot round corners.
+8. **A skipped main pass still dispatches one `PremultiplyPass`.** On `DirectPremultiplied`, when
+   the pre segment draws nothing the intermediate texture holds stale content, but the submit-side
+   premultiply compute pass runs over it anyway; its output is discarded by the composite pass's
+   own `LoadOp::Clear`, so the visible result is still correct, but the GPU dispatch itself is not
+   skipped.
+
+**Applies to**: any app relying on snapshot layers for page-transition performance — every point
+above is a behavior difference from the pre-cache inline path, not a bug. `FRUST_NO_SNAPSHOT_LAYERS`
+(`docs/DEVELOPMENT.md`'s Instrumentation table) reverts every bracket to that inline path exactly.
+
+**Why accepted**: the mechanism exists to dodge vello's ~100 ms/frame in-vello image-quad cost,
+measured on the same Adreno 620 hardware; every item above is a narrower, named, test-pinned
+tradeoff against that number, not a silent wrong-pixels bug. Items 5-8 are structural consequences
+of compositing a texture outside vello rather than gaps found later; item 4 is a deliberate v1
+scope line (a hero morph repaints every frame, so it is never an "ideal cache candidate"). Item 1's
+fine-stage floor itself — ~14.5 ms to run a vello pass over any target regardless of content — is
+the accepted, unresolved cost this whole mechanism is chasing; the framework has not yet attempted
+to lower the floor itself (a render-scale reduction is Phase 3 future work, research artifact
+`rsa_000001a03fc498e4k8TZypnY`). Measured Pixel 5a snapshot GPU memory delta across a push/pop plus
+two tab switches: 43.6 MB → 45.0 MB (+1.4 MB; two live 1080×2400 `Rgba8Unorm` page textures during
+a transition; EGL `mtrack` unchanged at 40.9 MB) — small enough on device hardware not to itself be
+a limitation.
+
+**Evidence**: `crates/frust-render/src/snapshot.rs`'s module doc (fine-stage floor, first-render,
+and "what is never cached" sections) and its `outermost_brackets`/`is_cacheable_body`/
+`snapshot_size`/`raster_root`; `crates/frust-render/src/compositor.rs`'s module doc (trailing-
+segment ordering, ~100 ms in-vello cost); `crates/frust-render/src/convert.rs`'s
+`encode_range_with_overrides` doc comment (the range-scoped `ClearRect` hoist); `crates/frust-render/
+src/renderer.rs`'s `RenderPath::DirectPremultiplied` submit arm comment ("its output is discarded by
+the composite pass's own `LoadOp::Clear`"); `crates/frust-widgets/src/nav/navigator_tests/
+transition.rs`'s `hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page`; on-device
+perfetto captures, Pixel 5a (SD765G/Adreno 620, 1080×2400@60Hz, `material3-demo --profile`, 3×
+push/pop, GPU-completion wait per frame): pre-cache baseline p50 60.7 ms/p90 74.0; in-vello
+image-quad attempt p50 96.9; compositor steady state p50 1.8 ms/p90 38.1 (one ~65-75 ms
+first-appearance raster per page, one ~35 ms settle frame); kill-switch control p50 63.9 on the
+same tree; `dumpsys meminfo Graphics` 43.6 MB → 45.0 MB across a push/pop and two tab switches.
+
+---
+
 ### `material-from-seed-diverges-from-baked-baseline` — `theme_from_seed`/`from_seed(#6750A4)` is not pixel-identical to `baseline()`
 
 **Observed**: `frust_material::from_seed`/`theme_from_seed` ports current
