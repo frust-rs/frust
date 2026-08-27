@@ -41,22 +41,40 @@ fn push_animates_moving_origins_and_disposes_after_settle() {
     );
     controller.push_with(|| sized_page(100.0, 80.0), spec);
 
-    // Seed frame: driver at 0. A (leaving) at rest, B (entering) slid in 30dp.
+    // Seed frame: driver at 0. A (leaving) at rest, still fully opaque. B
+    // (entering) is exactly alpha 0 at the seed frame (`resolve_layers`'s
+    // 0.35 split hasn't opened yet), so it now paints into a `DiscardScene`
+    // sink instead of sliding in under a zero-opacity layer — it records no
+    // fill here at all, not just an invisible one.
     let (f0, nf0) = full_frame(&mut root, &mut app, &mut state, ft(0));
     assert!(nf0, "a running transition requests frames");
+    assert_eq!(f0.len(), 1, "B is discarded at alpha 0 at the seed frame");
     assert_eq!(fill_h(&f0, 100.0).0.x, 0.0, "A at rest at start");
-    assert_eq!(
-        fill_h(&f0, 80.0).0.x,
-        30.0,
-        "B slid in by the 30dp shared axis"
+
+    // Early frame (20ms → progress 0.2, before the 0.35 split): B is still
+    // exactly alpha 0 and discarded; A is visible under an alpha<1 bracket
+    // and has begun sliding left, leaving.dx = -pc * 30dp = -6.0. Property:
+    // layer-to-pod-origin wiring for split presets stays asserted at paint
+    // level.
+    let (f_early, _) = full_frame(&mut root, &mut app, &mut state, ft(20));
+    assert_eq!(f_early.len(), 1, "B is still discarded before the split");
+    let a_early_x = fill_h(&f_early, 100.0).0.x;
+    assert!(
+        (a_early_x - (-6.0)).abs() < 1e-6,
+        "A slides left under the alpha<1 bracket (was {a_early_x})"
     );
 
-    // Mid frame (50ms → progress 0.5): both origins have moved inward.
+    // Mid frame (50ms → progress 0.5, past the 0.35 split): the split is a
+    // hard cut, not an overlapping crossfade, so A has now fully faded to
+    // alpha 0 in turn and is discarded here exactly like B was above; B, the
+    // only visible page, has slid to entering.dx = (1 - pc) * 30dp = 15.0.
     let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(50));
-    let a1x = fill_h(&f1, 100.0).0.x;
+    assert_eq!(f1.len(), 1, "A is discarded at alpha 0 past the split");
     let b1x = fill_h(&f1, 80.0).0.x;
-    assert!(a1x < 0.0, "A slides out to the left (was {a1x})");
-    assert!(b1x > 0.0 && b1x < 30.0, "B slides toward rest (was {b1x})");
+    assert!(
+        (b1x - 15.0).abs() < 1e-6,
+        "B slides toward rest (was {b1x})"
+    );
 
     // End frame (150ms → past the 100ms duration): settles at final geometry.
     let (f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(150));
@@ -69,6 +87,154 @@ fn push_animates_moving_origins_and_disposes_after_settle() {
     assert!(!nf3, "no frame requested once the transition is disposed");
     assert_eq!(f3.len(), 1, "culling resumed: only the top page paints");
     assert_eq!(f3[0].1, Size::new(100.0, 80.0), "the surviving page is B");
+}
+
+// --- Never rasterize a page whose resolved `Layer.alpha` is 0: it paints
+//     into a `DiscardScene` sink instead of under a zero-opacity
+//     `push_layer` bracket. `resolve_layers`'s split presets (M3SharedAxisX,
+//     M3FadeThrough, Glyph) hold exactly one page at alpha 0 at any given
+//     instant — never both, and never neither, except at the split instant
+//     itself. ---
+
+#[test]
+fn shared_axis_x_push_seed_frame_discards_the_alpha_zero_entering_page() {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+
+    let spec = TransitionSpec::new(
+        PageTransition::M3SharedAxisX,
+        Timing::Duration(Duration::from_millis(100), Curve::Linear),
+    );
+    controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+    // Seed frame (p=0): the entering page (B) is exactly alpha 0 (the 0.35
+    // split hasn't opened yet). It now paints into a `DiscardScene` sink
+    // rather than under a zero-opacity `push_layer` bracket, so its fill AND
+    // that bracket are both absent from the real scene; the leaving page (A),
+    // at rest and fully opaque, needs no bracket either way and paints
+    // plainly.
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, ft(0));
+
+    assert_eq!(
+        scene.rects.len(),
+        1,
+        "the alpha-0 entering page records no fill at all"
+    );
+    assert_eq!(
+        scene.rects[0].1,
+        Size::new(100.0, 100.0),
+        "the surviving fill is the leaving page A"
+    );
+    assert!(
+        scene.layers.is_empty(),
+        "no push_layer at all: A is alpha 1.0 (no bracket needed), B is alpha \
+         0.0 (discarded instead of bracketed)"
+    );
+}
+
+#[test]
+fn shared_axis_x_past_the_split_the_visible_page_keeps_its_normal_alpha_bracket() {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+
+    let spec = TransitionSpec::new(
+        PageTransition::M3SharedAxisX,
+        Timing::Duration(Duration::from_millis(100), Curve::Linear),
+    );
+    controller.push_with(|| sized_page(100.0, 80.0), spec);
+    full_frame(&mut root, &mut app, &mut state, ft(0)); // seed
+
+    // Mid frame (50ms → progress 0.5, past the 0.35 split): `resolve_layers`
+    // is a hard split, not an overlapping crossfade, so the leaving page (A)
+    // has by now fully faded to alpha 0 and is discarded here exactly like B
+    // was at the seed frame above. B, the only page with `0 < alpha < 1`,
+    // still paints under its ordinary `push_layer` bracket — byte-identical
+    // to the alpha>0 bracket.
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, ft(50));
+
+    assert_eq!(
+        scene.rects.len(),
+        1,
+        "the leaving page A is fully faded out (alpha 0) and discarded"
+    );
+    assert_eq!(
+        scene.rects[0].1,
+        Size::new(100.0, 80.0),
+        "the surviving fill is the entering page B"
+    );
+    assert_eq!(
+        scene.layers.len(),
+        1,
+        "B paints under exactly one alpha<1 bracket"
+    );
+    let (_, _, alpha) = scene.layers[0];
+    assert!(
+        alpha > 0.0 && alpha < 1.0,
+        "the bracket's alpha is a genuine partial value (was {alpha})"
+    );
+}
+
+#[test]
+fn glyph_push_seed_frame_discards_the_alpha_zero_entering_page() {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let mut app = {
+        let ctrl = controller.clone();
+        move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+
+    let spec = TransitionSpec::new(
+        PageTransition::Glyph,
+        Timing::Duration(Duration::from_millis(100), Curve::Linear),
+    );
+    controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+    // Seed frame (p=0): the Glyph preset's 0.44 split is the same shape as
+    // M3SharedAxisX's 0.35 one — the entering page is exactly alpha 0, so it
+    // paints into a `DiscardScene` sink instead of under a zero-opacity
+    // layer; the leaving page, at rest and fully opaque, paints plainly.
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, ft(0));
+
+    assert_eq!(
+        scene.rects.len(),
+        1,
+        "the alpha-0 entering page records no fill at all"
+    );
+    assert_eq!(
+        scene.rects[0].1,
+        Size::new(100.0, 100.0),
+        "the surviving fill is the leaving page"
+    );
+    assert!(
+        scene.layers.is_empty(),
+        "no push_layer at all: leaving is alpha 1.0, entering is alpha 0.0 (discarded)"
+    );
 }
 
 // --- Input is blocked mid-transition; no page receives the Down
@@ -376,8 +542,15 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
 
     // A Glyph push normally slides the incoming page in by 16px at p=0; under
     // reduce_motion it must collapse to the crossfade family and NOT slide.
+    // `ReducedCrossfade`'s entering alpha is exactly the raw progress value,
+    // so the literal seed frame (p=0) is exactly alpha 0 and the entering
+    // page is now discarded rather than painted under a zero-opacity layer —
+    // seed first (establishing the driver's baseline), then sample one tick
+    // later, where alpha is a hair positive, to keep this assertion about
+    // the (lack of) slide, not about that discard.
     controller.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
-    let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(0));
+    full_frame(&mut root, &mut app, &mut state, ft(0)); // seed
+    let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(1));
     assert_eq!(
         fill_h(&f0, 80.0).0.x,
         0.0,
@@ -421,15 +594,32 @@ fn fade_through_paint_scales_incoming_page_below_one() {
     controller.push_with(|| sized_page(100.0, 80.0), spec);
 
     // Seed frame (p=0): the incoming page holds at the 0.92 fade-through start
-    // scale, so exactly one sub-unit `push_transform` brackets its paint.
+    // scale AND alpha exactly 0 (the 0.30 split hasn't opened yet), so it now
+    // paints into a `DiscardScene` sink instead — NEITHER the scale
+    // transform nor an alpha layer reaches the real scene. The outgoing
+    // page is still at rest, fully opaque, and paints plainly.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = RecordingScene::default();
     root.paint(&mut scene, ft(0));
+    assert!(
+        scene.transforms.is_empty(),
+        "the alpha-0 incoming page is discarded before its scale bracket ever runs"
+    );
+    assert_eq!(scene.rects.len(), 1, "only the outgoing page paints at p=0");
+
+    // Mid frame (50ms → progress 0.5, past the 0.30 split): the incoming page
+    // has started fading in and is genuinely scaled below 1.0 (alpha > 0, not
+    // discarded), bracketed by exactly one sub-unit `push_transform` —
+    // byte-identical to the alpha>0 bracket.
+    root.rebuild(&mut app, &mut state);
+    root.layout(Size::new(100.0, 100.0));
+    let mut scene = RecordingScene::default();
+    root.paint(&mut scene, ft(50));
     assert_eq!(
         scene.transforms.len(),
         1,
-        "only the incoming (scale 0.92) page is bracketed, not the leaving one"
+        "only the incoming (scale < 1.0) page is bracketed, not the leaving one"
     );
     let sx = scene.transforms[0].as_coeffs()[0];
     assert!(
@@ -773,6 +963,25 @@ fn hero_push_morphs_between_pages_and_suppresses_endpoints() {
         "A's hero paints normally on the seed frame: {:?}",
         f0.plain
     );
+    // B (entering) is exactly alpha 0 at this same seed frame (the
+    // M3SharedAxisX 0.35 split hasn't opened) — its own hero paints into a
+    // `DiscardScene` sink and never reaches the real scene here. But
+    // `ctx.report_hero` lives on `PaintCtx`, not the scene, so its rect is
+    // still captured; the mid-frame morph below, which needs exactly that
+    // captured rect to interpolate toward, is the proof invisibility never
+    // loses a hero endpoint.
+    assert!(
+        !has_rect(
+            &f0.plain
+                .iter()
+                .map(|(o, s)| Rect::from_origin_size(*o, *s))
+                .collect::<Vec<_>>(),
+            Point::new(50.0, 30.0),
+            Size::new(80.0, 80.0),
+        ),
+        "B's hero is discarded (alpha 0) at the seed frame: {:?}",
+        f0.plain
+    );
 
     // Mid frame (p=0.5): the matched endpoints morph. The overlay rect is the
     // interpolation of A's (0,0,40,40) and B's (20,30,80,80):
@@ -887,8 +1096,14 @@ fn hero_pop_morphs_backward_and_finalizes_normal() {
     controller.pop();
     // Seed frame (discovery).
     hero_frame(&mut root, &mut app, &mut state, ft(t));
-    // Mid frame (~half the 100ms reversed transition): the morph is present.
-    let (fmid, _) = hero_frame(&mut root, &mut app, &mut state, ft(t + 50));
+    // Mid frame, BEFORE the 0.35 split (20ms of the 100ms transition): B (the
+    // popped page) paints the morph overlay here (it is "on top" during a
+    // pop), and its own `Layer.alpha` — same fade-out curve as the plain-page
+    // tests above — is still positive before the split; past it, B is
+    // discarded (alpha 0) and so is its morph, exactly as any other alpha-0
+    // paint. Sampling before the split keeps this assertion
+    // about the morph itself, not about that discard.
+    let (fmid, _) = hero_frame(&mut root, &mut app, &mut state, ft(t + 20));
     assert!(
         !fmid.morphs.is_empty(),
         "the pop paints a hero morph overlay: {:?}",
@@ -1133,8 +1348,16 @@ fn transition_state_is_frame_exact_for_chrome_painted_after_the_navigator() {
     let builds_before = log.borrow().build_active.len();
     controller.push_with(|| sized_page(100.0, 80.0), spec);
 
+    // Seed frame: establishes the driver's baseline (progress 0). B is
+    // exactly alpha 0 there (the 0.35 split hasn't opened) and is discarded
+    // rather than painted, so it has no fill to invert progress from —
+    // sampled separately, not folded into `painted` below.
+    probe_frame(&mut root, &mut app, &mut state, ft(0));
+
+    // Sample only past the 0.35 split, where B is genuinely visible (alpha >
+    // 0) and paints under its ordinary bracket.
     let mut painted = Vec::new();
-    for ms in [0u64, 25, 50, 75] {
+    for ms in [40u64, 55, 70, 85] {
         let (fills, needs) = probe_frame(&mut root, &mut app, &mut state, ft(ms));
         assert!(needs, "a running transition keeps requesting frames");
         painted.push(fill_h(&fills, 80.0).0.x);

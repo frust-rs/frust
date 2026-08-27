@@ -311,6 +311,32 @@ pub trait PaintScene {
     fn pop_transform(&mut self) {}
 }
 
+/// A [`PaintScene`] sink that accepts every paint command and records
+/// nothing — the zero-GPU-cost target for a subtree that still needs its
+/// `paint` pass driven for the pass's *side effects* (hero-rect reporting
+/// through [`PaintCtx::with_hero_registry`], other paint-time widget state)
+/// even though its pixels will never be composited. The navigator's
+/// transition machinery is the motivating case: a page whose resolved alpha
+/// is 0 still has to paint to report hero rects and advance animating
+/// children, but every command it emits is otherwise wasted GPU work.
+///
+/// # Guarantee
+///
+/// No paint command reaches any scene: every [`PaintScene`] method on
+/// [`DiscardScene`] is a no-op, whether overridden here directly or
+/// inherited from the trait's own no-op (or no-op-delegating) default.
+/// Anything driven through [`PaintCtx`] rather than through
+/// `&mut dyn PaintScene` — the hero registry, the frame clock, paced-class
+/// bubbling — is unaffected, since none of that machinery routes through the
+/// scene it's handed.
+pub struct DiscardScene;
+
+impl PaintScene for DiscardScene {
+    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+
+    fn draw_text(&mut self, _origin: Point, _text: &str) {}
+}
+
 /// Bridges the provisional [`PaintScene`] boundary onto the real
 /// `frust_scene::SceneBuilder`.
 ///
@@ -4168,5 +4194,76 @@ mod tests {
             ),
             other => panic!("expected Path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn every_paint_scene_method_terminates_on_discard_scene() {
+        // Every `PaintScene` method — including the delegating defaults
+        // (per-corner/dashed variants, the additive image/shader/shadow
+        // surface) — is reachable and terminates on `DiscardScene` without
+        // panicking; a future `todo!()` or an infinitely-recursive default
+        // would fail here. The records-nothing guarantee itself is asserted
+        // where a scene actually exists, at the navigator/switcher call
+        // sites, not here.
+        use frust_scene::{FontHandle, Glyph};
+
+        let mut scene = DiscardScene;
+        let origin = Point::new(2.0, 3.0);
+        let size = Size::new(20.0, 10.0);
+        let color = Color::BLACK;
+        let brush = Brush::Solid(color);
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+        let path = corner_probe_path();
+
+        scene.fill_rect(origin, size, color);
+        scene.fill_rounded_rect(origin, size, 4.0, color);
+        scene.fill_rounded_rect_radii(origin, size, radii, color);
+        scene.stroke_line(origin, Point::new(10.0, 10.0), 1.0, color);
+        scene.push_clip(origin, size);
+        scene.push_clip_rounded(origin, size, 4.0);
+        scene.push_clip_rounded_radii(origin, size, radii);
+        scene.pop_clip();
+        scene.draw_text(origin, "discarded");
+
+        let font = FontHandle::new(peniko::FontData::new(
+            peniko::Blob::from(Vec::<u8>::new()),
+            0,
+        ));
+        let run = GlyphRun {
+            font,
+            font_size: 16.0,
+            brush: brush.clone(),
+            transform: Affine::IDENTITY,
+            glyphs: vec![Glyph {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+            }],
+        };
+        scene.draw_glyph_run(run);
+
+        let image = peniko::ImageData {
+            data: peniko::Blob::from(vec![0u8; 2 * 2 * 4]),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 2,
+            height: 2,
+        };
+        scene.draw_image(&image, Rect::new(0.0, 0.0, 20.0, 20.0));
+
+        let program = ShaderProgram::new("fn main() {}");
+        scene.draw_shader(&program, Rect::new(0.0, 0.0, 10.0, 10.0), 1.5);
+
+        scene.draw_shadow(origin, size, 4.0, 2.0, color);
+        scene.fill_rect_brush(origin, size, &brush);
+        scene.fill_rounded_rect_brush(origin, size, 4.0, &brush);
+        scene.push_layer(origin, size, 0.5);
+        scene.pop_layer();
+        scene.clear_rect(origin, size);
+        scene.fill_path(origin, &path, &brush);
+        scene.stroke_path(origin, &path, 1.0, &brush);
+        scene.stroke_path_dashed(origin, &path, 1.0, DashPattern::new(4.0, 2.0), &brush);
+        scene.push_transform(Affine::translate((1.0, 2.0)));
+        scene.pop_transform();
     }
 }
