@@ -406,10 +406,11 @@ pub mod authoring {
     /// [`frust::CursorIcon`](crate::CursorIcon).
     pub use frust_core::CursorIcon;
     pub use frust_core::{
-        AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventOutcome,
-        EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx, Modifiers,
-        NamedKey, PaintCtx, PaintOutcome, PaintScene, PointerButton, PointerEvent, PointerPhase,
-        ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget, WidgetId, any,
+        AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EventCtx,
+        EventOutcome, EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx,
+        Modifiers, NamedKey, PaintCtx, PaintOutcome, PaintScene, PointerButton, PointerEvent,
+        PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget,
+        WidgetId, any,
     };
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name

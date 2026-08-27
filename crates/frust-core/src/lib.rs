@@ -70,6 +70,6 @@ pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{InspectNode, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
 pub use widget::{
-    ChildPod, CornerRadii, DashPattern, HeroDirective, HeroFrames, LayoutCtx, PaintCtx,
-    PaintOutcome, PaintScene, TickClass, Widget,
+    ChildPod, CornerRadii, DashPattern, DiscardScene, HeroDirective, HeroFrames, LayoutCtx,
+    PaintCtx, PaintOutcome, PaintScene, TickClass, Widget,
 };
