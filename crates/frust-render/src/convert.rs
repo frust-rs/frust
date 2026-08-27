@@ -147,30 +147,71 @@ pub(crate) fn encode_into_with_shaders(
     }
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
 
+    // `Command::PushSnapshot`'s MISS path (this crate implements no
+    // rasterized-body caching): honours only the OUTERMOST open bracket (a
+    // syntactically nested one contributes no correction of its own — see
+    // `Command::PushSnapshot`'s doc comment, point 6), tracked as —
+    //   - `snapshot_depth`: how many brackets are currently open, so a
+    //     matching `PopSnapshot` (and only it) can close the outer one and an
+    //     unbalanced pop is ignored, same policy as `PopLayer`;
+    //   - `snapshot_correction`: the affine every subsequent command's own
+    //     `transform` is left-multiplied by while the outer bracket is open.
+    //     `Affine::IDENTITY` outside a bracket, so applying it unconditionally
+    //     below is a no-op then. Set to `M * S * M.inverse()` where `M` is the
+    //     outer `PushSnapshot`'s own transform and `S` is
+    //     `scale_about(rect.center(), scale)`: conjugating `S` by `M` is what
+    //     makes "insert `push_transform(S)` right after `PushSnapshot`" (the
+    //     contract's point 5) land correctly on a body command whose transform
+    //     was already recorded as `M * (whatever the body itself pushed)`,
+    //     for a body that pushes its own nested transforms and not just the
+    //     flat case;
+    //   - `snapshot_layer_pushed`: whether the outer bracket's `alpha < 1.0`
+    //     emulated an alpha layer (via the existing `groups` mechanism, same
+    //     as `PushLayer`), so `PopSnapshot` pops it — reversed, matching the
+    //     contract's "push_transform then push_layer" / "pop reversed" order.
+    let mut snapshot_depth: usize = 0;
+    let mut snapshot_correction = Affine::IDENTITY;
+    let mut snapshot_layer_pushed = false;
+
     for command in scene.commands() {
         match command {
             Command::FillRect {
                 rect,
                 brush,
                 transform,
-            } => sink.fill_rect(Fill::NonZero, *transform, brush, rect),
+            } => sink.fill_rect(Fill::NonZero, snapshot_correction * *transform, brush, rect),
             Command::RoundedRect {
                 rect,
                 radii,
                 brush,
                 transform,
-            } => sink.fill_rounded_rect(Fill::NonZero, *transform, brush, rect, radii_of(*radii)),
+            } => sink.fill_rounded_rect(
+                Fill::NonZero,
+                snapshot_correction * *transform,
+                brush,
+                rect,
+                radii_of(*radii),
+            ),
             Command::Line {
                 p0,
                 p1,
                 width,
                 brush,
                 transform,
-            } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
-            Command::GlyphRun(run) => sink.draw_glyph_run(run),
+            } => sink.stroke_line(snapshot_correction * *transform, brush, *p0, *p1, *width),
+            Command::GlyphRun(run) => {
+                if snapshot_correction == Affine::IDENTITY {
+                    sink.draw_glyph_run(run);
+                } else {
+                    let mut corrected = run.clone();
+                    corrected.transform = snapshot_correction * corrected.transform;
+                    sink.draw_glyph_run(&corrected);
+                }
+            }
             Command::PushClip { rect, transform } => {
-                groups.push((Group::Clip(None), *transform, *rect));
-                sink.push_clip(*transform, rect);
+                let transform = snapshot_correction * *transform;
+                groups.push((Group::Clip(None), transform, *rect));
+                sink.push_clip(transform, rect);
             }
             Command::PushClipRounded {
                 rect,
@@ -181,8 +222,9 @@ pub(crate) fn encode_into_with_shaders(
                 // the radii ride along so the `ClearRect` hoist can re-push
                 // the rounded shape rather than squaring its corners.
                 let radii = radii_of(*radii);
-                groups.push((Group::Clip(Some(radii)), *transform, *rect));
-                sink.push_clip_rounded(*transform, rect, radii);
+                let transform = snapshot_correction * *transform;
+                groups.push((Group::Clip(Some(radii)), transform, *rect));
+                sink.push_clip_rounded(transform, rect, radii);
             }
             Command::PopClip => {
                 groups.pop();
@@ -193,7 +235,7 @@ pub(crate) fn encode_into_with_shaders(
                 dest,
                 transform,
             } => {
-                sink.draw_image(*transform, data, dest);
+                sink.draw_image(snapshot_correction * *transform, data, dest);
             }
             Command::BlurredRoundedRect {
                 rect,
@@ -207,22 +249,29 @@ pub(crate) fn encode_into_with_shaders(
                 // per-corner shadow lowers to its largest corner here — the
                 // single place the downgrade lives, shared by both tiers (see
                 // `frust_scene::CornerRadii::largest` for why the largest).
-                sink.draw_blurred_rounded_rect(*transform, rect, *color, radii.largest(), *std_dev)
+                sink.draw_blurred_rounded_rect(
+                    snapshot_correction * *transform,
+                    rect,
+                    *color,
+                    radii.largest(),
+                    *std_dev,
+                )
             }
             Command::PushLayer {
                 rect,
                 alpha,
                 transform,
             } => {
-                groups.push((Group::Layer(*alpha), *transform, *rect));
-                sink.push_layer(*transform, rect, *alpha);
+                let transform = snapshot_correction * *transform;
+                groups.push((Group::Layer(*alpha), transform, *rect));
+                sink.push_layer(transform, rect, *alpha);
             }
             Command::PopLayer => {
                 groups.pop();
                 sink.pop_layer();
             }
             Command::ClearRect { rect, transform } if groups.is_empty() => {
-                sink.clear_rect(*transform, rect);
+                sink.clear_rect(snapshot_correction * *transform, rect);
             }
             Command::ClearRect { rect, transform } => {
                 // Hoist to root (see the `groups` doc above): bound the punch
@@ -230,7 +279,7 @@ pub(crate) fn encode_into_with_shaders(
                 // re-push. Bboxes are exact for the axis-aligned transforms
                 // frust emits (translate/scale); a rotated clip would bound
                 // conservatively.
-                let mut punch = transform.transform_rect_bbox(*rect);
+                let mut punch = (snapshot_correction * *transform).transform_rect_bbox(*rect);
                 for (_, t, r) in &groups {
                     punch = punch.intersect(t.transform_rect_bbox(*r));
                 }
@@ -256,18 +305,21 @@ pub(crate) fn encode_into_with_shaders(
                 style,
                 brush,
                 transform,
-            } => match style {
-                PathStyle::Fill => sink.fill_path(*transform, brush, path),
-                PathStyle::Stroke { width, dash } => match dash {
-                    Some(dash) if dash.is_effective() => {
-                        let dashed = dash_path(path, *dash);
-                        sink.stroke_path(*transform, brush, &dashed, *width);
-                    }
-                    // No pattern, or a degenerate one (see
-                    // `DashPattern::is_effective`): a plain solid stroke.
-                    _ => sink.stroke_path(*transform, brush, path, *width),
-                },
-            },
+            } => {
+                let transform = snapshot_correction * *transform;
+                match style {
+                    PathStyle::Fill => sink.fill_path(transform, brush, path),
+                    PathStyle::Stroke { width, dash } => match dash {
+                        Some(dash) if dash.is_effective() => {
+                            let dashed = dash_path(path, *dash);
+                            sink.stroke_path(transform, brush, &dashed, *width);
+                        }
+                        // No pattern, or a degenerate one (see
+                        // `DashPattern::is_effective`): a plain solid stroke.
+                        _ => sink.stroke_path(transform, brush, path, *width),
+                    },
+                }
+            }
             Command::ShaderQuad {
                 program,
                 dest,
@@ -285,13 +337,18 @@ pub(crate) fn encode_into_with_shaders(
                 // program drawn at two sizes in one frame resolves each quad to
                 // its own texture — recompute the identical key the pre-pass
                 // stored the entry under (`physical_size` then `clamp_size` with
-                // the same `adapter_max`).
+                // the same `adapter_max`). Deliberately keyed off the RAW
+                // (uncorrected) transform: the pre-pass walk that populated
+                // `shader_images` reads `scene.commands()` directly with no
+                // snapshot-correction knowledge, so recomputing the key from
+                // the corrected transform would never hit.
                 let (w, h) = crate::shader_effects::clamp_size(
                     crate::renderer::physical_size(*transform, *dest),
                     adapter_max,
                 );
+                let transform = snapshot_correction * *transform;
                 match shader_images.get(&(program.id(), w, h)) {
-                    Some(image) => sink.draw_image(*transform, image, dest),
+                    Some(image) => sink.draw_image(transform, image, dest),
                     None => {
                         // Miss: the CPU tier (no shader pre-pass runs), a
                         // failed shader compile, or no override registered this
@@ -307,10 +364,45 @@ pub(crate) fn encode_into_with_shaders(
                         });
                         sink.fill_rect(
                             Fill::NonZero,
-                            *transform,
+                            transform,
                             &Brush::Solid(Color::from_rgba8(16, 16, 16, 255)),
                             dest,
                         );
+                    }
+                }
+            }
+            Command::PushSnapshot {
+                key: _,
+                rect,
+                alpha,
+                scale,
+                transform,
+            } => {
+                if snapshot_depth == 0 {
+                    if *scale != 1.0 {
+                        let m = *transform;
+                        let s = Affine::scale_about(*scale, rect.center());
+                        snapshot_correction = m * s * m.inverse();
+                    }
+                    if *alpha < 1.0 {
+                        let corrected = snapshot_correction * *transform;
+                        groups.push((Group::Layer(*alpha), corrected, *rect));
+                        sink.push_layer(corrected, rect, *alpha);
+                        snapshot_layer_pushed = true;
+                    }
+                }
+                snapshot_depth += 1;
+            }
+            Command::PopSnapshot => {
+                if snapshot_depth > 0 {
+                    snapshot_depth -= 1;
+                    if snapshot_depth == 0 {
+                        if snapshot_layer_pushed {
+                            groups.pop();
+                            sink.pop_layer();
+                            snapshot_layer_pushed = false;
+                        }
+                        snapshot_correction = Affine::IDENTITY;
                     }
                 }
             }
@@ -1829,5 +1921,165 @@ mod tests {
         };
         let dest = Rect::new(0.0, 0.0, 10.0, 10.0);
         assert!(natural_to_dest_transform(Affine::IDENTITY, &data, &dest).is_none());
+    }
+
+    /// The `Command::PushSnapshot` MISS path (acceptance criterion): a
+    /// snapshot body with `alpha` 0.5 and `scale` 0.9 must lower to the exact
+    /// same op sequence as the equivalent `push_transform` +
+    /// `push_layer` recording the contract (`Command::PushSnapshot`'s doc
+    /// comment, point 5) describes.
+    #[test]
+    fn snapshot_body_lowers_like_the_equivalent_push_transform_and_push_layer() {
+        let outer = Affine::translate((5.0, 7.0));
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+
+        let mut snapshot_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut snapshot_scene);
+        builder.push_transform(outer);
+        builder.push_snapshot(1, rect, 0.5, 0.9);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut equivalent_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut equivalent_scene);
+        builder.push_transform(outer);
+        builder.push_transform(Affine::scale_about(0.9, rect.center()));
+        builder.push_layer(rect, 0.5);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_layer();
+        builder.pop_transform();
+
+        let mut snapshot_sink = RecordingSink::default();
+        encode_into(&snapshot_scene, &mut snapshot_sink);
+        let mut equivalent_sink = RecordingSink::default();
+        encode_into(&equivalent_scene, &mut equivalent_sink);
+
+        assert_eq!(snapshot_sink.events.len(), 3);
+        assert_events_close(&snapshot_sink.events, &equivalent_sink.events);
+    }
+
+    /// The plain-pass-through half of the same contract: `alpha: 1.0` and
+    /// `scale: 1.0` (both no-ops) must lower the body with NO emulated
+    /// layer/transform correction at all — identical to the body recorded
+    /// with no bracket around it.
+    #[test]
+    fn snapshot_body_with_no_op_alpha_and_scale_lowers_like_the_bare_body() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+
+        let mut snapshot_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut snapshot_scene);
+        builder.push_snapshot(1, rect, 1.0, 1.0);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut bare_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut bare_scene);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+
+        let mut snapshot_sink = RecordingSink::default();
+        encode_into(&snapshot_scene, &mut snapshot_sink);
+        let mut bare_sink = RecordingSink::default();
+        encode_into(&bare_scene, &mut bare_sink);
+
+        assert_eq!(snapshot_sink.events, bare_sink.events);
+    }
+
+    /// An unbalanced `PopSnapshot` (more pops than pushes) must not disturb
+    /// the walk beyond the matched pair — the same policy `Command::PopLayer`
+    /// follows. `SceneBuilder::pop_snapshot` itself already refuses to record
+    /// an unmatched pop (see `frust-scene`'s own test), so this exercises the
+    /// walk's own depth guard the only way a public recording can: an extra
+    /// `pop_snapshot()` call after the bracket already closed.
+    #[test]
+    fn extra_pop_snapshot_after_the_bracket_closed_is_ignored() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        // Already balanced — recorded as a no-op, so this changes nothing.
+        builder.pop_snapshot();
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushLayer {
+                    rect,
+                    alpha: 0.5,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::FillRect {
+                    rect: Rect::new(1.0, 1.0, 2.0, 2.0),
+                    transform: Affine::IDENTITY,
+                },
+            ]
+        );
+    }
+
+    /// Compares two recorded event sequences allowing a tiny tolerance on
+    /// every `Affine`/`Rect` coefficient — the snapshot MISS path derives its
+    /// emulated transform via a `transform * scale * transform.inverse()`
+    /// conjugation (see `encode_into_with_shaders`'s `snapshot_correction`),
+    /// which is mathematically but not always bit-for-bit identical to the
+    /// same value composed the other way `push_transform`/`push_layer`
+    /// recording took.
+    fn assert_events_close(got: &[Event], want: &[Event]) {
+        assert_eq!(got.len(), want.len(), "got {got:?}, want {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            match (g, w) {
+                (
+                    Event::PushLayer {
+                        rect: gr,
+                        alpha: ga,
+                        transform: gt,
+                    },
+                    Event::PushLayer {
+                        rect: wr,
+                        alpha: wa,
+                        transform: wt,
+                    },
+                ) => {
+                    assert_eq!(gr, wr);
+                    assert_eq!(ga, wa);
+                    assert_affine_close(*gt, *wt);
+                }
+                (
+                    Event::FillRect {
+                        rect: gr,
+                        transform: gt,
+                    },
+                    Event::FillRect {
+                        rect: wr,
+                        transform: wt,
+                    },
+                ) => {
+                    assert_eq!(gr, wr);
+                    assert_affine_close(*gt, *wt);
+                }
+                (Event::PopLayer, Event::PopLayer) => {}
+                other => panic!("event shape mismatch: {other:?}"),
+            }
+        }
+    }
+
+    fn assert_affine_close(got: Affine, want: Affine) {
+        for (g, w) in got.as_coeffs().iter().zip(want.as_coeffs()) {
+            assert!(
+                (g - w).abs() < 1e-9,
+                "affine coefficients differ: got {got:?}, want {want:?}"
+            );
+        }
     }
 }

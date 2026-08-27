@@ -269,6 +269,34 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
+    /// Pushes a snapshot bracket, recording the current transform (see
+    /// [`Command::PushSnapshot`]) and incrementing the scene's snapshot
+    /// depth so the matching [`SceneBuilder::pop_snapshot`] knows a bracket
+    /// is open. `key` identifies the body's cache entry across frames;
+    /// `rect`/`alpha`/`scale` are the presentation parameters a renderer may
+    /// apply on top of the body as a whole.
+    pub fn push_snapshot(&mut self, key: u64, rect: Rect, alpha: f32, scale: f64) {
+        let transform = self.current_transform();
+        self.scene.snapshot_depth += 1;
+        self.scene.push(Command::PushSnapshot {
+            key,
+            rect,
+            alpha,
+            scale,
+            transform,
+        });
+    }
+
+    /// Pops the most recently pushed snapshot bracket. A no-op — matching
+    /// [`Command::PopClip`]/[`Command::PopLayer`]'s unbalanced-pop policy —
+    /// when no bracket is open.
+    pub fn pop_snapshot(&mut self) {
+        if self.scene.snapshot_depth > 0 {
+            self.scene.snapshot_depth -= 1;
+            self.scene.push(Command::PopSnapshot);
+        }
+    }
+
     /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
     /// under the current transform (see [`Command::ShaderQuad`]).
     ///
@@ -782,6 +810,86 @@ mod tests {
             other => panic!("expected PushLayer, got {other:?}"),
         }
         assert!(matches!(commands[1], Command::PopLayer));
+    }
+
+    #[test]
+    fn push_pop_snapshot_emit_commands_with_key_rect_alpha_scale_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((2.0, 3.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.push_snapshot(7, rect, 0.5, 0.9);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), red_brush());
+        builder.pop_snapshot();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 3);
+        match &commands[0] {
+            Command::PushSnapshot {
+                key,
+                rect: got_rect,
+                alpha,
+                scale,
+                transform,
+            } => {
+                assert_eq!(*key, 7);
+                assert_eq!(*got_rect, rect);
+                assert_eq!(*alpha, 0.5);
+                assert_eq!(*scale, 0.9);
+                assert_eq!(*transform, translate);
+            }
+            other => panic!("expected PushSnapshot, got {other:?}"),
+        }
+        assert!(matches!(commands[1], Command::FillRect { .. }));
+        assert!(matches!(commands[2], Command::PopSnapshot));
+    }
+
+    #[test]
+    fn pop_snapshot_without_a_push_is_a_no_op() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.pop_snapshot();
+        assert!(scene.commands().is_empty());
+        assert_eq!(scene.snapshot_depth, 0);
+    }
+
+    #[test]
+    fn nested_snapshot_brackets_balance() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let outer = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inner = Rect::new(10.0, 10.0, 50.0, 50.0);
+
+        builder.push_snapshot(1, outer, 1.0, 1.0);
+        builder.push_snapshot(2, inner, 0.8, 1.2);
+        builder.pop_snapshot();
+        builder.pop_snapshot();
+        // A further, unmatched pop is a no-op — depth never underflows.
+        builder.pop_snapshot();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 4);
+        assert!(matches!(commands[0], Command::PushSnapshot { key: 1, .. }));
+        assert!(matches!(commands[1], Command::PushSnapshot { key: 2, .. }));
+        assert!(matches!(commands[2], Command::PopSnapshot));
+        assert!(matches!(commands[3], Command::PopSnapshot));
+        assert_eq!(scene.snapshot_depth, 0);
+    }
+
+    #[test]
+    fn push_snapshot_increments_depth_and_pop_decrements_it() {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_snapshot(1, Rect::new(0.0, 0.0, 1.0, 1.0), 1.0, 1.0);
+        }
+        assert_eq!(scene.snapshot_depth, 1);
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.pop_snapshot();
+        }
+        assert_eq!(scene.snapshot_depth, 0);
     }
 
     #[test]
