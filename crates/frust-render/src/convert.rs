@@ -75,6 +75,33 @@ pub(crate) trait SceneSink {
     fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64);
 }
 
+/// One cached rasterization of a [`Command::PushSnapshot`] body, keyed by the
+/// bracket's own `key` in a [`SnapshotImages`] map — the snapshot cache (a
+/// later card) populates this; [`encode_into_with_overrides`]'s HIT path
+/// (see [`encode_commands`]) reads it back.
+///
+/// `width`/`height` are the rasterized texture's natural pixel size (what
+/// `register_texture` returns) — `image.width`/`image.height` already carry
+/// this, but the cache keeps its own copy for bookkeeping without touching
+/// `image`. `raster` is the transform the pre-pass used to rasterize the
+/// body: the linear part of the bracket's own transform, translation
+/// removed (see the snapshot cache card for how this drives invalidation).
+// Consumed by the snapshot cache (`snapshot.rs`, a later card); never
+// constructed inside this crate yet.
+#[allow(dead_code)]
+pub(crate) struct SnapshotImage {
+    pub image: ImageData,
+    pub width: u32,
+    pub height: u32,
+    pub raster: Affine,
+}
+
+/// Cached [`SnapshotImage`]s, keyed by the owning [`Command::PushSnapshot`]'s
+/// `key`. Empty for every caller that only exercises the MISS path
+/// ([`encode_into`], [`encode_into_with_shaders`]); the snapshot cache (a
+/// later card) is the only intended populator.
+pub(crate) type SnapshotImages = HashMap<u64, SnapshotImage>;
+
 /// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
 ///
 /// Call `target.reset()` before this to clear the previous frame — the render
@@ -115,15 +142,87 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
     encode_into_with_shaders(scene, sink, &HashMap::new(), u32::MAX);
 }
 
-/// The command walk, parameterized by the per-frame shader-override map (empty
-/// for the no-shader callers above) and the `adapter_max` used to recompute each
-/// [`Command::ShaderQuad`]'s `(id, w, h)` map key (identical to the pre-pass's
-/// keying). Kept generic over [`SceneSink`] so it is GPU-free unit-testable.
+/// [`encode_into_with_overrides`] with an empty snapshot-image map, so every
+/// [`Command::PushSnapshot`] takes its MISS path — the in-crate render path
+/// ([`crate::renderer::SurfaceRenderer::encode`]) calls this, since it does
+/// not (yet) run a snapshot pre-pass.
 pub(crate) fn encode_into_with_shaders(
     scene: &Scene,
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
+) {
+    encode_into_with_overrides(
+        scene,
+        sink,
+        shader_images,
+        adapter_max,
+        &SnapshotImages::new(),
+    );
+}
+
+/// [`encode_into_with_shaders`] plus a cache of rasterized
+/// [`Command::PushSnapshot`] bodies: a bracket whose `key` has an entry in
+/// `snapshot_images` takes the HIT path (one [`SceneSink::draw_image`] of the
+/// cached raster, skipping the body entirely — see [`encode_commands`]'s doc
+/// comment); every other bracket keeps the inline-emulation MISS path.
+/// [`encode_into_with_shaders`] is a thin wrapper over this with an empty map;
+/// the snapshot cache (a later card) is the intended caller of a populated one.
+pub(crate) fn encode_into_with_overrides(
+    scene: &Scene,
+    sink: &mut impl SceneSink,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
+    snapshot_images: &SnapshotImages,
+) {
+    encode_commands(
+        scene.commands(),
+        Affine::IDENTITY,
+        sink,
+        shader_images,
+        adapter_max,
+        snapshot_images,
+    );
+}
+
+/// Encodes an arbitrary command slice into `sink` under `root`, pre-multiplied
+/// onto every command's own recorded transform (including the `ClearRect`
+/// hoist, so a punch computed from a sub-scene still lands in `root`'s
+/// coordinate space). The entry point a caller that doesn't own a whole
+/// [`Scene`] — the snapshot cache's rasterization pre-pass (a later card) is
+/// the intended one — can drive directly with just a body's own command range
+/// and the transform it should be rasterized under. No shader-override or
+/// snapshot-image map: every [`Command::ShaderQuad`] misses to its
+/// placeholder and every [`Command::PushSnapshot`] takes the MISS path, same
+/// as [`encode_into`].
+// Consumed by the snapshot cache (`snapshot.rs`, a later card); no caller
+// inside this crate yet besides its own tests.
+#[allow(dead_code)]
+pub(crate) fn encode_commands_into(commands: &[Command], root: Affine, sink: &mut impl SceneSink) {
+    encode_commands(
+        commands,
+        root,
+        sink,
+        &HashMap::new(),
+        u32::MAX,
+        &SnapshotImages::new(),
+    );
+}
+
+/// The command walk shared by every entry point above, parameterized by the
+/// root transform every command's own transform is pre-multiplied by, the
+/// per-frame shader-override map (empty for the no-shader callers), the
+/// `adapter_max` used to recompute each [`Command::ShaderQuad`]'s `(id, w, h)`
+/// map key (identical to the pre-pass's keying), and a cache of rasterized
+/// [`Command::PushSnapshot`] bodies (empty for every MISS-only caller). Kept
+/// generic over [`SceneSink`] so it is GPU-free unit-testable.
+fn encode_commands(
+    commands: &[Command],
+    root: Affine,
+    sink: &mut impl SceneSink,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
+    snapshot_images: &SnapshotImages,
 ) {
     // Active clip/opacity group stack, tracked so a `ClearRect` can be HOISTED
     // to the root: a `Compose::Clear` inside a vello layer group only clears
@@ -147,39 +246,69 @@ pub(crate) fn encode_into_with_shaders(
     }
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
 
-    // `Command::PushSnapshot`'s MISS path (this crate implements no
-    // rasterized-body caching): honours only the OUTERMOST open bracket (a
-    // syntactically nested one contributes no correction of its own — see
-    // `Command::PushSnapshot`'s doc comment, point 6), tracked as —
-    //   - `snapshot_depth`: how many brackets are currently open, so a
-    //     matching `PopSnapshot` (and only it) can close the outer one and an
-    //     unbalanced pop is ignored, same policy as `PopLayer`;
+    // `Command::PushSnapshot`'s HIT/MISS paths (only the OUTERMOST open
+    // bracket is ever honoured — a syntactically nested one contributes
+    // nothing of its own, see `Command::PushSnapshot`'s doc comment, point 6),
+    // tracked as —
+    //   - `snapshot_depth`: how many MISS'd (inline-emulated) brackets are
+    //     currently open, so a matching `PopSnapshot` (and only it) can close
+    //     the outer one and an unbalanced pop is ignored, same policy as
+    //     `PopLayer`;
     //   - `snapshot_correction`: the affine every subsequent command's own
-    //     `transform` is left-multiplied by while the outer bracket is open.
-    //     `Affine::IDENTITY` outside a bracket, so applying it unconditionally
-    //     below is a no-op then. Set to `M * S * M.inverse()` where `M` is the
-    //     outer `PushSnapshot`'s own transform and `S` is
-    //     `scale_about(rect.center(), scale)`: conjugating `S` by `M` is what
-    //     makes "insert `push_transform(S)` right after `PushSnapshot`" (the
-    //     contract's point 5) land correctly on a body command whose transform
-    //     was already recorded as `M * (whatever the body itself pushed)`,
-    //     for a body that pushes its own nested transforms and not just the
-    //     flat case;
+    //     `transform` is left-multiplied by (after `root`) while the outer
+    //     MISS'd bracket is open. `Affine::IDENTITY` outside one, so applying
+    //     it unconditionally below is a no-op then. Set to `M * S *
+    //     M.inverse()` where `M` is the outer `PushSnapshot`'s own transform
+    //     and `S` is `scale_about(scale, rect.center())`: conjugating `S` by
+    //     `M` is what makes "insert `push_transform(S)` right after
+    //     `PushSnapshot`" (the contract's point 5) land correctly on a body
+    //     command whose transform was already recorded as `M * (whatever the
+    //     body itself pushed)`, for a body that pushes its own nested
+    //     transforms and not just the flat case;
     //   - `snapshot_layer_pushed`: whether the outer bracket's `alpha < 1.0`
     //     emulated an alpha layer (via the existing `groups` mechanism, same
-    //     as `PushLayer`), so `PopSnapshot` pops it — reversed, matching the
-    //     contract's "push_transform then push_layer" / "pop reversed" order.
+    //     as `PushLayer`) — shared by the MISS path (pushed under
+    //     `snapshot_correction`) and the HIT path (pushed under the cached
+    //     image's own placement) — so the matching close pops it, reversed;
+    //   - `snapshot_skip_depth`: how many brackets deep the walk is inside a
+    //     HIT'd bracket's SKIPPED body. Set to 1 the instant a HIT is found
+    //     (`snapshot_depth` itself is never incremented for a HIT — the body
+    //     contributes no correction, since it is never walked at all), then
+    //     tracks nested `PushSnapshot`/`PopSnapshot` depth with no other
+    //     command processed, until the matching `PopSnapshot` brings it back
+    //     to 0.
     let mut snapshot_depth: usize = 0;
     let mut snapshot_correction = Affine::IDENTITY;
     let mut snapshot_layer_pushed = false;
+    let mut snapshot_skip_depth: usize = 0;
 
-    for command in scene.commands() {
+    for command in commands {
+        if snapshot_skip_depth > 0 {
+            // Inside a HIT'd bracket's body: every command is skipped except
+            // depth-tracking so the matching `PopSnapshot` (and only it) ends
+            // the skip and pops the HIT's own layer, if one was pushed.
+            match command {
+                Command::PushSnapshot { .. } => snapshot_skip_depth += 1,
+                Command::PopSnapshot => {
+                    snapshot_skip_depth -= 1;
+                    if snapshot_skip_depth == 0 && snapshot_layer_pushed {
+                        groups.pop();
+                        sink.pop_layer();
+                        snapshot_layer_pushed = false;
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        let combined = root * snapshot_correction;
         match command {
             Command::FillRect {
                 rect,
                 brush,
                 transform,
-            } => sink.fill_rect(Fill::NonZero, snapshot_correction * *transform, brush, rect),
+            } => sink.fill_rect(Fill::NonZero, combined * *transform, brush, rect),
             Command::RoundedRect {
                 rect,
                 radii,
@@ -187,7 +316,7 @@ pub(crate) fn encode_into_with_shaders(
                 transform,
             } => sink.fill_rounded_rect(
                 Fill::NonZero,
-                snapshot_correction * *transform,
+                combined * *transform,
                 brush,
                 rect,
                 radii_of(*radii),
@@ -198,18 +327,18 @@ pub(crate) fn encode_into_with_shaders(
                 width,
                 brush,
                 transform,
-            } => sink.stroke_line(snapshot_correction * *transform, brush, *p0, *p1, *width),
+            } => sink.stroke_line(combined * *transform, brush, *p0, *p1, *width),
             Command::GlyphRun(run) => {
-                if snapshot_correction == Affine::IDENTITY {
+                if combined == Affine::IDENTITY {
                     sink.draw_glyph_run(run);
                 } else {
                     let mut corrected = run.clone();
-                    corrected.transform = snapshot_correction * corrected.transform;
+                    corrected.transform = combined * corrected.transform;
                     sink.draw_glyph_run(&corrected);
                 }
             }
             Command::PushClip { rect, transform } => {
-                let transform = snapshot_correction * *transform;
+                let transform = combined * *transform;
                 groups.push((Group::Clip(None), transform, *rect));
                 sink.push_clip(transform, rect);
             }
@@ -222,7 +351,7 @@ pub(crate) fn encode_into_with_shaders(
                 // the radii ride along so the `ClearRect` hoist can re-push
                 // the rounded shape rather than squaring its corners.
                 let radii = radii_of(*radii);
-                let transform = snapshot_correction * *transform;
+                let transform = combined * *transform;
                 groups.push((Group::Clip(Some(radii)), transform, *rect));
                 sink.push_clip_rounded(transform, rect, radii);
             }
@@ -235,7 +364,7 @@ pub(crate) fn encode_into_with_shaders(
                 dest,
                 transform,
             } => {
-                sink.draw_image(snapshot_correction * *transform, data, dest);
+                sink.draw_image(combined * *transform, data, dest);
             }
             Command::BlurredRoundedRect {
                 rect,
@@ -250,7 +379,7 @@ pub(crate) fn encode_into_with_shaders(
                 // single place the downgrade lives, shared by both tiers (see
                 // `frust_scene::CornerRadii::largest` for why the largest).
                 sink.draw_blurred_rounded_rect(
-                    snapshot_correction * *transform,
+                    combined * *transform,
                     rect,
                     *color,
                     radii.largest(),
@@ -262,7 +391,7 @@ pub(crate) fn encode_into_with_shaders(
                 alpha,
                 transform,
             } => {
-                let transform = snapshot_correction * *transform;
+                let transform = combined * *transform;
                 groups.push((Group::Layer(*alpha), transform, *rect));
                 sink.push_layer(transform, rect, *alpha);
             }
@@ -271,7 +400,7 @@ pub(crate) fn encode_into_with_shaders(
                 sink.pop_layer();
             }
             Command::ClearRect { rect, transform } if groups.is_empty() => {
-                sink.clear_rect(snapshot_correction * *transform, rect);
+                sink.clear_rect(combined * *transform, rect);
             }
             Command::ClearRect { rect, transform } => {
                 // Hoist to root (see the `groups` doc above): bound the punch
@@ -279,7 +408,7 @@ pub(crate) fn encode_into_with_shaders(
                 // re-push. Bboxes are exact for the axis-aligned transforms
                 // frust emits (translate/scale); a rotated clip would bound
                 // conservatively.
-                let mut punch = (snapshot_correction * *transform).transform_rect_bbox(*rect);
+                let mut punch = (combined * *transform).transform_rect_bbox(*rect);
                 for (_, t, r) in &groups {
                     punch = punch.intersect(t.transform_rect_bbox(*r));
                 }
@@ -306,7 +435,7 @@ pub(crate) fn encode_into_with_shaders(
                 brush,
                 transform,
             } => {
-                let transform = snapshot_correction * *transform;
+                let transform = combined * *transform;
                 match style {
                     PathStyle::Fill => sink.fill_path(transform, brush, path),
                     PathStyle::Stroke { width, dash } => match dash {
@@ -338,15 +467,15 @@ pub(crate) fn encode_into_with_shaders(
                 // its own texture — recompute the identical key the pre-pass
                 // stored the entry under (`physical_size` then `clamp_size` with
                 // the same `adapter_max`). Deliberately keyed off the RAW
-                // (uncorrected) transform: the pre-pass walk that populated
-                // `shader_images` reads `scene.commands()` directly with no
-                // snapshot-correction knowledge, so recomputing the key from
-                // the corrected transform would never hit.
+                // (uncorrected, un-rooted) transform: the pre-pass walk that
+                // populated `shader_images` reads `scene.commands()` directly
+                // with no root/snapshot-correction knowledge, so recomputing
+                // the key from the corrected transform would never hit.
                 let (w, h) = crate::shader_effects::clamp_size(
                     crate::renderer::physical_size(*transform, *dest),
                     adapter_max,
                 );
-                let transform = snapshot_correction * *transform;
+                let transform = combined * *transform;
                 match shader_images.get(&(program.id(), w, h)) {
                     Some(image) => sink.draw_image(transform, image, dest),
                     None => {
@@ -372,20 +501,40 @@ pub(crate) fn encode_into_with_shaders(
                 }
             }
             Command::PushSnapshot {
-                key: _,
+                key,
                 rect,
                 alpha,
                 scale,
                 transform,
             } => {
                 if snapshot_depth == 0 {
+                    if let Some(cached) = snapshot_images.get(key) {
+                        // HIT: draw the cached raster as one image, under the
+                        // same placement the MISS path's inline emulation
+                        // would apply — `base` is `M` (plus `root`); scaling
+                        // about `rect`'s center on top of it is exactly the
+                        // MISS path's "insert `push_transform(S)` right after
+                        // `PushSnapshot`" collapsed onto a single primitive.
+                        let base = combined * *transform;
+                        if *alpha < 1.0 {
+                            groups.push((Group::Layer(*alpha), base, *rect));
+                            sink.push_layer(base, rect, *alpha);
+                            snapshot_layer_pushed = true;
+                        }
+                        let image_transform = base * Affine::scale_about(*scale, rect.center());
+                        sink.draw_image(image_transform, &cached.image, rect);
+                        snapshot_skip_depth = 1;
+                        continue;
+                    }
+                    // MISS: emulate the bracket inline (unchanged from before
+                    // the cache existed).
                     if *scale != 1.0 {
                         let m = *transform;
                         let s = Affine::scale_about(*scale, rect.center());
                         snapshot_correction = m * s * m.inverse();
                     }
                     if *alpha < 1.0 {
-                        let corrected = snapshot_correction * *transform;
+                        let corrected = root * snapshot_correction * *transform;
                         groups.push((Group::Layer(*alpha), corrected, *rect));
                         sink.push_layer(corrected, rect, *alpha);
                         snapshot_layer_pushed = true;
@@ -2028,11 +2177,295 @@ mod tests {
         );
     }
 
+    /// A [`SnapshotImage`] of a given natural pixel size, rasterized at the
+    /// identity transform — the `raster` field isn't read by the HIT path
+    /// itself (only by the snapshot cache's own invalidation logic, a later
+    /// card), so a fixed placeholder value is fine here.
+    fn snapshot_image_of_size(w: u32, h: u32) -> SnapshotImage {
+        SnapshotImage {
+            image: image_of_size(w, h),
+            width: w,
+            height: h,
+            raster: Affine::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn snapshot_hit_draws_one_image_and_skips_the_body_when_alpha_is_full() {
+        // The HIT acceptance criterion: a bracket whose key is cached lowers
+        // to exactly one `draw_image` of the cached raster — none of the
+        // body's own ops reach the sink — and no layer, since `alpha: 1.0`
+        // needs no translucency emulation.
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(7, rect, 1.0, 1.0);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut snapshot_images = SnapshotImages::new();
+        snapshot_images.insert(7, snapshot_image_of_size(4, 4));
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_overrides(
+            &scene,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &snapshot_images,
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![Event::Image {
+                width: 4,
+                height: 4,
+                dest: rect,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn snapshot_hit_wraps_the_image_in_a_layer_when_alpha_is_translucent() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(3, rect, 0.4, 1.0);
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut snapshot_images = SnapshotImages::new();
+        snapshot_images.insert(3, snapshot_image_of_size(2, 2));
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_overrides(
+            &scene,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &snapshot_images,
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushLayer {
+                    rect,
+                    alpha: 0.4,
+                    transform: Affine::IDENTITY,
+                },
+                Event::Image {
+                    width: 2,
+                    height: 2,
+                    dest: rect,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_hit_image_transform_applies_the_bracket_scale_about_its_rect_center() {
+        // The HIT path's placement contract: `transform * scale_about(scale,
+        // rect.center())` — the same arguments `Command::Image` is lowered
+        // with, with the bracket's own outer transform composed on first.
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let outer = Affine::translate((5.0, 7.0));
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_transform(outer);
+        builder.push_snapshot(9, rect, 1.0, 0.5);
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut snapshot_images = SnapshotImages::new();
+        snapshot_images.insert(9, snapshot_image_of_size(2, 2));
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_overrides(
+            &scene,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &snapshot_images,
+        );
+
+        let expected_transform = outer * Affine::scale_about(0.5, rect.center());
+        assert_eq!(
+            sink.events,
+            vec![Event::Image {
+                width: 2,
+                height: 2,
+                dest: rect,
+                transform: expected_transform,
+            }]
+        );
+    }
+
+    #[test]
+    fn snapshot_hit_skips_a_nested_push_snapshot_even_when_it_has_its_own_cache_entry() {
+        // Nesting acceptance criterion: only the OUTERMOST bracket is ever
+        // replaced. A HIT'd outer bracket must skip everything up to its own
+        // matching `PopSnapshot`, including a nested `PushSnapshot` whose key
+        // is *also* cached — the inner bracket's own image never draws.
+        let outer_rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let inner_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, outer_rect, 1.0, 1.0);
+        builder.push_snapshot(2, inner_rect, 1.0, 1.0);
+        builder.fill_rect(Rect::new(3.0, 3.0, 4.0, 4.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        builder.fill_rect(Rect::new(5.0, 5.0, 6.0, 6.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut snapshot_images = SnapshotImages::new();
+        snapshot_images.insert(1, snapshot_image_of_size(4, 4));
+        snapshot_images.insert(2, snapshot_image_of_size(8, 8));
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_overrides(
+            &scene,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &snapshot_images,
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![Event::Image {
+                width: 4,
+                height: 4,
+                dest: outer_rect,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn snapshot_hit_image_transform_maps_natural_pixels_onto_the_bracket_rect() {
+        // The image-mapping acceptance criterion: at `scale: 1.0` the HIT
+        // path's image transform is exactly the bracket's own `transform` (no
+        // `scale_about` correction), so composed with
+        // `natural_to_dest_transform` (the same composition every sink
+        // applies) it must map the cached raster's natural pixel grid exactly
+        // onto `rect` — corner for corner — like a plain `Command::Image`
+        // would map onto the same `dest`.
+        let rect = Rect::new(10.0, 20.0, 110.0, 220.0);
+        let data = image_of_size(5, 5);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, rect, 1.0, 1.0);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut snapshot_images = SnapshotImages::new();
+        snapshot_images.insert(
+            1,
+            SnapshotImage {
+                image: data.clone(),
+                width: data.width,
+                height: data.height,
+                raster: Affine::IDENTITY,
+            },
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_overrides(
+            &scene,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &snapshot_images,
+        );
+
+        let image_transform = match sink.events.as_slice() {
+            [Event::Image { transform, .. }] => *transform,
+            other => panic!("expected exactly one Image event, got {other:?}"),
+        };
+        let dest_transform =
+            natural_to_dest_transform(image_transform, &data, &rect).expect("non-degenerate");
+        assert_eq!(
+            dest_transform * Point::new(0.0, 0.0),
+            Point::new(10.0, 20.0)
+        );
+        assert_eq!(
+            dest_transform * Point::new(5.0, 5.0),
+            Point::new(110.0, 220.0)
+        );
+    }
+
+    #[test]
+    fn encode_commands_into_premultiplies_root_onto_every_command_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let cmd_transform = Affine::translate((3.0, 4.0));
+        builder.push_transform(cmd_transform);
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        builder.fill_rect(rect, Brush::Solid(RED));
+
+        let root = Affine::scale(2.0);
+        let mut sink = RecordingSink::default();
+        encode_commands_into(scene.commands(), root, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillRect {
+                rect,
+                transform: root * cmd_transform,
+            }]
+        );
+    }
+
+    #[test]
+    fn encode_commands_into_clear_rect_hoist_respects_a_non_identity_root() {
+        // The hole-punch hoist must still clear the RIGHT rect — in root's
+        // own coordinate space — when the slice is encoded under a
+        // non-identity root, e.g. the snapshot cache's rasterization
+        // pre-pass encoding a body whose own commands carry no knowledge of
+        // the root the pre-pass rasterizes at.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let hole = Rect::new(20.0, 20.0, 60.0, 60.0);
+        builder.push_clip(clip);
+        builder.clear_rect(hole);
+        builder.pop_clip();
+
+        let root = Affine::translate((5.0, 5.0));
+        let mut sink = RecordingSink::default();
+        encode_commands_into(scene.commands(), root, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: root,
+                },
+                Event::PopClip,
+                Event::ClearRect {
+                    rect: root.transform_rect_bbox(hole),
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClip {
+                    rect: clip,
+                    transform: root,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
     /// Compares two recorded event sequences allowing a tiny tolerance on
     /// every `Affine`/`Rect` coefficient — the snapshot MISS path derives its
     /// emulated transform via a `transform * scale * transform.inverse()`
-    /// conjugation (see `encode_into_with_shaders`'s `snapshot_correction`),
-    /// which is mathematically but not always bit-for-bit identical to the
+    /// conjugation (see `encode_commands`'s `snapshot_correction`), which is
+    /// mathematically but not always bit-for-bit identical to the
     /// same value composed the other way `push_transform`/`push_layer`
     /// recording took.
     fn assert_events_close(got: &[Event], want: &[Event]) {
