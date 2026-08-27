@@ -72,6 +72,20 @@ impl TextLayout {
     /// run construction (the parley walk) is memoized on first call and reused
     /// across frames (see [`base_runs`](Self::base_runs)); each call re-applies
     /// only the cheap `origin` translation onto the cached runs' transforms.
+    ///
+    /// A caller supplying its own `run.brush` after this call (a gradient
+    /// foreground, say) must resolve that brush's geometry relative to
+    /// `origin` too — never as an already-window-space point. The render
+    /// backends apply a `GlyphRun`'s `transform` to its active paint, not
+    /// just its glyph outlines (vello's `Scene::draw_glyphs(..).transform(t)`
+    /// composes `t` with the brush the same way it composes `t` with the
+    /// glyphs; `vello_cpu`'s `set_transform` likewise precedes `set_paint`),
+    /// so a brush baked with `origin` already added gets it added a second
+    /// time at paint time. Every other [`frust_scene::Command`] variant's
+    /// `origin`/position argument does *not* auto-translate its brush this
+    /// way (see the `frust-material` gradient-button decoration's own
+    /// `PaintScene` doc note) — this contract is specific to
+    /// [`frust_scene::Command::GlyphRun`].
     pub fn to_scene_runs(&self, origin: Point) -> Vec<GlyphRun> {
         let mut memo = self.base_runs.borrow_mut();
         let base = memo.get_or_insert_with(|| {

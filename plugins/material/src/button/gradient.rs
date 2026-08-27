@@ -70,7 +70,10 @@ use std::rc::Rc;
 
 use frust::authoring::PaintScene;
 use kurbo::{Point, Shape, Size};
-use peniko::{Brush, Color, ColorStop, Gradient};
+use peniko::{
+    Brush, Color, ColorStop, Gradient, GradientKind, LinearGradientPosition,
+    RadialGradientPosition, SweepGradientPosition,
+};
 
 use crate::interaction::DISABLED_CONTAINER_OPACITY;
 
@@ -526,6 +529,53 @@ impl ButtonDecoration for GradientButtonDecoration {
     }
 }
 
+/// Re-expresses `brush`'s gradient geometry (if any) as an offset from
+/// `run_origin` rather than the window origin it was resolved against —
+/// [`ButtonDecoration::foreground_brush`]'s return value is window-space,
+/// matching every other [`ButtonSurface`]-anchored brush (see
+/// [`GradientAlignment::within_rect`]'s doc), but a
+/// [`frust::authoring::scene::GlyphRun`]'s `brush` is painted under the
+/// run's OWN `transform` — unlike [`PaintScene::fill_rounded_rect_brush`]/
+/// `stroke_path`, whose separate `origin` argument never auto-translates
+/// their brush (see this module's `PaintScene` gradient-support finding),
+/// the glyph-run render path applies `transform` to the active paint too
+/// (vello's `Scene::draw_glyphs(..).transform(run.transform).brush(..)` and
+/// `vello_cpu`'s `set_transform` before `set_paint`, both in
+/// `crates/frust-render`). Calling this with the exact origin the run's
+/// `transform` will translate from — [`super::ButtonWidget`]'s paint pass's
+/// `label_origin` — cancels that re-application, so the label's gradient
+/// lands at the same window position [`ButtonDecoration::foreground_brush`]
+/// resolved, regardless of where the label sits within the button. A
+/// non-gradient brush (nothing to shift) is returned unchanged.
+pub(super) fn brush_relative_to_run_origin(brush: &Brush, run_origin: Point) -> Brush {
+    let Brush::Gradient(gradient) = brush else {
+        return brush.clone();
+    };
+    let shift = |p: Point| Point::new(p.x - run_origin.x, p.y - run_origin.y);
+    let mut gradient = gradient.clone();
+    gradient.kind = match gradient.kind {
+        GradientKind::Linear(pos) => LinearGradientPosition {
+            start: shift(pos.start),
+            end: shift(pos.end),
+        }
+        .into(),
+        GradientKind::Radial(pos) => RadialGradientPosition {
+            start_center: shift(pos.start_center),
+            start_radius: pos.start_radius,
+            end_center: shift(pos.end_center),
+            end_radius: pos.end_radius,
+        }
+        .into(),
+        GradientKind::Sweep(pos) => SweepGradientPosition {
+            center: shift(pos.center),
+            start_angle: pos.start_angle,
+            end_angle: pos.end_angle,
+        }
+        .into(),
+    };
+    Brush::Gradient(gradient)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +908,95 @@ mod tests {
         let surf = surface(enabled_idle());
         let brush = deco.foreground_brush(&surf);
         assert!(matches!(brush, Some(Brush::Gradient(_))));
+    }
+
+    // ---- coordinate-space regression: gradient tracks the glyph run -----
+
+    /// A [`PaintScene`] that captures the *whole* [`GlyphRun`] (transform,
+    /// glyphs, brush) rather than just its brush — needed to reconstruct
+    /// what the render backend would actually draw (see
+    /// [`brush_relative_to_run_origin`]'s doc).
+    #[derive(Default)]
+    struct GlyphRunRecorder {
+        runs: Vec<GlyphRun>,
+    }
+    impl PaintScene for GlyphRunRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _radius: f64, _color: Color) {}
+        fn fill_rounded_rect_brush(&mut self, _o: Point, _s: Size, _radius: f64, _brush: &Brush) {}
+        fn stroke_path(&mut self, _o: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.runs.push(run);
+        }
+    }
+
+    /// What the render backend actually paints a linear gradient's `start`
+    /// at: `run.transform * gradient.start` — vello's
+    /// `Scene::draw_glyphs(..).transform(run.transform).brush(&run.brush)`
+    /// and `vello_cpu`'s `set_transform(run.transform)` before `set_paint`
+    /// both apply the run's transform to its active paint, not just its
+    /// glyph outlines (`crates/frust-render/src/convert.rs`/`cpu_tier.rs`).
+    fn rendered_linear_start(run: &GlyphRun) -> Point {
+        let Brush::Gradient(gradient) = &run.brush else {
+            panic!("expected a gradient brush");
+        };
+        let GradientKind::Linear(pos) = gradient.kind else {
+            panic!("expected a linear gradient kind");
+        };
+        run.transform * pos.start
+    }
+
+    /// The label's glyph run and its foreground gradient must stay locked
+    /// together across consecutive paints at different origins (simulating
+    /// a sliding page transition): both move by exactly the origin delta,
+    /// and the gradient sits at the same offset from the glyph run in every
+    /// frame — never a growing/shrinking drift.
+    #[test]
+    fn gradient_label_tracks_the_glyph_run_across_consecutive_paints_at_different_origins() {
+        let deco: Rc<dyn ButtonDecoration> =
+            Rc::new(GradientButtonDecoration::new().foreground(linear_two_stop()));
+        let view = button::<(), _>("Save", |_| {}).decoration(deco);
+        let mut widget = build(&view);
+
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+
+        let origin_delta = 10.0;
+        let mut rec1 = GlyphRunRecorder::default();
+        widget.paint(&mut PaintCtx::new(Point::new(10.0, 0.0), size), &mut rec1);
+        let mut rec2 = GlyphRunRecorder::default();
+        widget.paint(
+            &mut PaintCtx::new(Point::new(10.0 + origin_delta, 0.0), size),
+            &mut rec2,
+        );
+
+        let run1 = &rec1.runs[0];
+        let run2 = &rec2.runs[0];
+        let glyph1 = run1.transform * Point::new(run1.glyphs[0].x as f64, run1.glyphs[0].y as f64);
+        let glyph2 = run2.transform * Point::new(run2.glyphs[0].x as f64, run2.glyphs[0].y as f64);
+        let grad1 = rendered_linear_start(run1);
+        let grad2 = rendered_linear_start(run2);
+
+        assert_eq!(
+            glyph2.x - glyph1.x,
+            origin_delta,
+            "glyph run must move by exactly the origin delta"
+        );
+        assert_eq!(
+            grad2.x - grad1.x,
+            origin_delta,
+            "gradient must move by exactly the origin delta too, not a doubled (or otherwise \
+             mismatched) amount a coordinate-space bug between the brush and the run's own \
+             transform would produce"
+        );
+        assert_eq!(
+            grad1.x - glyph1.x,
+            grad2.x - glyph2.x,
+            "the gradient's offset from its own glyph run must be the same constant in both \
+             frames, never one that drifts with the button's position"
+        );
     }
 
     // ---- end-to-end: the seam actually wired through ButtonWidget -------
