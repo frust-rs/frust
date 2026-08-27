@@ -34,6 +34,7 @@ use core::ffi::c_void;
 use anyhow::{Result, anyhow};
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use frust_scene::Command;
 use kurbo::Affine;
@@ -313,6 +314,19 @@ impl SurfaceRenderer {
             pending_base_color: None,
             pending_composite: None,
         }
+    }
+
+    /// Drops the in-flight frame's cross-call stashes: the direct arm's
+    /// `base_color` and this frame's composite work.
+    ///
+    /// Both describe one frame of one surface — the composite one holds
+    /// refcounted handles on that surface's snapshot textures — so any event
+    /// that ends a surface's life (`on_surface_destroyed`) or replaces it
+    /// (`install_surface`) must drop them rather than let the next `submit`
+    /// consume a stale pair. Idempotent.
+    fn clear_pending_frame(&mut self) {
+        self.pending_base_color = None;
+        self.pending_composite = None;
     }
 
     /// Restores the persisted pipeline-cache blob a prior run produced via
@@ -599,18 +613,33 @@ impl SurfaceRenderer {
                     }
                 };
                 let compositor = Compositor::new(device, composite_format, pipeline_cache.as_ref());
+                // A translucent surface whose swapchain stores STRAIGHT alpha
+                // (iOS's `PostMultiplied`) gets no snapshot cache at all — see
+                // `snapshot_cache_enabled`. Logged once per process, naming
+                // the reason, because "snapshot layers silently off on this
+                // device" is otherwise indistinguishable from the kill switch.
+                let straight_alpha_translucent = surface.straight_alpha_translucent();
+                if straight_alpha_translucent {
+                    static LOGGED: OnceLock<()> = OnceLock::new();
+                    LOGGED.get_or_init(|| {
+                        log::info!(
+                            "frust-render: snapshot layers disabled on this surface — a \
+                             translucent swapchain storing straight alpha has no exact \
+                             composite arithmetic; brackets lower inline"
+                        );
+                    });
+                }
                 TierBackend::Gpu {
                     renderer,
                     // `FRUST_NO_SNAPSHOT_LAYERS` is resolved once here, per
                     // surface, and held by the cache itself — so the pre-pass
                     // never re-reads a process-global on the hot path and a
-                    // test can build either state directly. A surface with no
-                    // compositor disables the cache outright: a composited
-                    // page nothing draws is a missing page, so the bracket
-                    // must lower inline instead.
-                    snapshots: SnapshotCache::new(
-                        !crate::context::snapshot_layers_disabled() && compositor.is_some(),
-                    ),
+                    // test can build either state directly.
+                    snapshots: SnapshotCache::new(snapshot_cache_enabled(
+                        crate::context::snapshot_layers_disabled(),
+                        compositor.is_some(),
+                        straight_alpha_translucent,
+                    )),
                     compositor,
                 }
             }
@@ -653,6 +682,12 @@ impl SurfaceRenderer {
         // A freshly (re)installed surface starts a new `Invalid`-reconfigure
         // episode — any prior streak belonged to the surface just replaced.
         self.consecutive_invalid = 0;
+        // Same argument for the in-flight frame's stashes: they describe a
+        // frame of the surface just replaced (and the composite one holds
+        // handles on textures from the cache that died with it), so carrying
+        // either into the new surface's first `submit` would paint the old
+        // frame's pages and colour onto it.
+        self.clear_pending_frame();
         Ok(())
     }
 
@@ -821,7 +856,7 @@ impl SurfaceRenderer {
                 // targets, and the mark_seen/reap age tracking too) before
                 // touching `device`/`queue`/`renderer`/`shader_effects` at all —
                 // every `Command::ShaderQuad` this frame then falls through to
-                // `convert::encode_scene_with_shaders`'s existing miss
+                // `convert::encode_range_with_overrides`'s existing miss
                 // placeholder, exactly like a CPU-tier or no-prepass caller.
                 let adapter_max = device_handle.device.limits().max_texture_dimension_2d;
                 let shader_images = run_shader_prepass(
@@ -893,6 +928,9 @@ impl SurfaceRenderer {
                 convert::encode_range_with_overrides(
                     scene,
                     plan.pre.clone(),
+                    // The pre segment starts at the scene root: it opens every
+                    // group it needs itself.
+                    &[],
                     vello_scene,
                     &shader_images,
                     adapter_max,
@@ -915,6 +953,12 @@ impl SurfaceRenderer {
                         convert::encode_range_with_overrides(
                             scene,
                             range.clone(),
+                            // The clips/layers still open where this segment
+                            // starts — the app root's clip around both pages,
+                            // a scroll viewport's around a switcher. Without
+                            // them this pass would draw unclipped and pop
+                            // groups it never pushed.
+                            &plan.trailing_prefix,
                             trailing_scene,
                             &shader_images,
                             adapter_max,
@@ -938,6 +982,16 @@ impl SurfaceRenderer {
                     }
                     _ => None,
                 };
+                // Age the compositor's trailing scratch on EVERY frame, not
+                // only the ones that used it: a full-surface `Rgba8Unorm`
+                // texture is ~10 MB on a 1080x2400 phone, and a scene that
+                // has stopped drawing anything after its first composited
+                // bracket (the common page-transition shape) would otherwise
+                // hold it until the surface died. Costs a counter increment
+                // on a frame with no scratch at all.
+                if let Some(compositor) = compositor.as_mut() {
+                    compositor.age_scratch();
+                }
 
                 match &ready.surface.path {
                     // Direct-to-surface: the vello render targets the
@@ -1434,6 +1488,38 @@ impl SurfaceRenderer {
     }
 }
 
+/// Whether a surface gets a live [`SnapshotCache`] at all, from the three
+/// facts that can refuse it — resolved once per surface at install and held by
+/// the cache itself, so the hot path re-reads none of them.
+///
+/// - `disabled`: the `FRUST_NO_SNAPSHOT_LAYERS` kill switch
+///   ([`crate::context::snapshot_layers_disabled`]);
+/// - `has_compositor`: the compositor refused this surface's attachment format
+///   ([`Compositor::new`]) — a composited page nothing draws is a missing
+///   page, so the bracket must lower inline instead;
+/// - `straight_alpha_translucent`: the surface came up TRANSLUCENT with a
+///   swapchain that stores straight alpha
+///   ([`ConfiguredSurface::straight_alpha_translucent`], iOS's
+///   `PostMultiplied`). The compositor's straight arm blends
+///   `dst * (1 - a) + rgb * a`, which is the straight-alpha `over` only when
+///   the destination alpha is 1; over a partly transparent destination it
+///   stores premultiplied colour into a straight-alpha swapchain and the
+///   platform composites it over-bright. The premultiplied arm's algebra
+///   closes for every destination alpha, but it is not what such a swapchain
+///   holds. Rather than composite wrong pixels on a surface frust cannot test
+///   on every device, that surface keeps the inline path outright — the same
+///   refusal shape `context::blit_translucency_refused` already takes.
+///
+/// Any one of the three is enough to refuse; a plain opaque surface with a
+/// compositor is the only combination that composites.
+fn snapshot_cache_enabled(
+    disabled: bool,
+    has_compositor: bool,
+    straight_alpha_translucent: bool,
+) -> bool {
+    !disabled && has_compositor && !straight_alpha_translucent
+}
+
 /// Whether this frame can skip its MAIN vello pass altogether: its pre segment
 /// paints nothing (`crate::snapshot::FramePlan::pre_draws`) AND the compositor
 /// has at least one page to draw, so the composite pass can clear the target to
@@ -1452,7 +1538,8 @@ fn skips_main_pass(pre_draws: bool, layers: usize) -> bool {
 /// `Command::ShaderQuad` in `scene`, compile its program, render it into an
 /// offscreen texture at the quad's physical size, register that texture with
 /// vello as an image override, and collect a `(program id, clamped physical
-/// size) → ImageData` map for `convert::encode_into` to lower each quad against.
+/// size) → ImageData` map for [`convert::encode_range_with_overrides`] to lower
+/// each quad against.
 ///
 /// The map is keyed by `(id, w, h)` — not `id` alone — so the same program drawn
 /// at two different physical sizes in one frame resolves each quad to its own
@@ -1489,7 +1576,7 @@ fn skips_main_pass(pre_draws: bool, layers: usize) -> bool {
 /// pre-pass is off entirely, not merely "don't compile new programs", so a
 /// disabled run must not silently age out `last_seen` state a later re-enable
 /// would otherwise need. Returns an empty map either way, which is exactly
-/// the miss-everywhere input `convert::encode_scene_with_shaders` already
+/// the miss-everywhere input [`convert::encode_range_with_overrides`] already
 /// handles by falling through to the placeholder fill.
 fn run_shader_prepass(
     device: &wgpu::Device,
@@ -1619,6 +1706,54 @@ mod tests {
             "a pre segment that paints must still be rendered"
         );
         assert!(!skips_main_pass(true, 0), "an ordinary frame is untouched");
+    }
+
+    /// The snapshot cache is live only for a surface all three refusals pass:
+    /// the kill switch off, a compositor for the attachment format, and a
+    /// destination the straight blend is exact for.
+    #[test]
+    fn the_snapshot_cache_is_enabled_only_for_a_surface_that_can_composite() {
+        assert!(snapshot_cache_enabled(false, true, false));
+        assert!(
+            !snapshot_cache_enabled(true, true, false),
+            "FRUST_NO_SNAPSHOT_LAYERS refuses on its own"
+        );
+        assert!(
+            !snapshot_cache_enabled(false, false, false),
+            "a composited page nothing draws is a missing page"
+        );
+        assert!(
+            !snapshot_cache_enabled(false, true, true),
+            "a translucent straight-alpha swapchain has no exact composite \
+             arithmetic — brackets lower inline"
+        );
+        assert!(!snapshot_cache_enabled(true, false, true));
+    }
+
+    /// Installing a surface drops the previous one's in-flight frame: its
+    /// stashed base colour and its composite work (which holds handles on
+    /// snapshot textures that died with that surface).
+    #[test]
+    fn installing_a_surface_drops_the_previous_frames_stashes() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: Some(peniko::Color::BLACK),
+        });
+        renderer.consecutive_invalid = 3;
+
+        // The reset `install_surface` performs, minus the GPU resources it
+        // cannot build on a test host.
+        renderer.consecutive_invalid = 0;
+        renderer.clear_pending_frame();
+
+        assert!(renderer.pending_base_color.is_none());
+        assert!(renderer.pending_composite.is_none());
+        // Idempotent, as the repeated-`Destroyed` contract needs.
+        renderer.clear_pending_frame();
+        assert!(renderer.pending_composite.is_none());
     }
 
     #[test]

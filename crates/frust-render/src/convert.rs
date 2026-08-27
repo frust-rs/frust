@@ -116,6 +116,8 @@ pub(crate) fn encode_into_with_shaders(
     encode_range_with_overrides(
         scene,
         0..scene.commands().len(),
+        // The whole scene opens every group it needs itself.
+        &[],
         sink,
         shader_images,
         adapter_max,
@@ -124,23 +126,42 @@ pub(crate) fn encode_into_with_shaders(
 }
 
 /// One segment of a frame: the commands in `range`, encoded under the scene
-/// root, with every bracket whose `key` is in `holes` skipped entirely.
+/// root beneath the still-open groups `prefix` names, with every bracket whose
+/// `key` is in `holes` skipped entirely.
 ///
 /// This is the single entry the render path drives BOTH of a frame's vello
 /// passes through (see [`crate::snapshot::FramePlan`] for the split): the
 /// pre-segment and, when there is one, the trailing segment. A sub-range is
-/// encoded exactly as if it were the whole scene — the root stays
-/// `Affine::IDENTITY` (each command already carries its own composed
-/// transform) and the `ClearRect` hoist is scoped to the range, so a punch
-/// recorded inside it lands at the range's own root rather than reaching for
-/// groups the segment never opened.
+/// encoded as if it were the whole scene — the root stays `Affine::IDENTITY`
+/// (each command already carries its own composed transform) and the
+/// `ClearRect` hoist is scoped to the range, so a punch recorded inside it
+/// lands at the range's own root rather than reaching for groups the segment
+/// never opened.
 ///
-/// `range` is clamped to the scene rather than trusted: a plan is always built
-/// from the same frame's scene, so a stale range is a bug, but the render loop
-/// is not a place to panic.
+/// `prefix` is what makes a MID-SCENE range faithful: the ordered command
+/// indices of the `PushClip`/`PushClipRounded`/`PushLayer` commands that are
+/// still open where the range starts
+/// ([`crate::snapshot::FramePlan::trailing_prefix`]). They are encoded FIRST,
+/// re-establishing exactly the clip/layer state the one-pass walk would have
+/// been in at `range.start` — a `PushLayer` carrying its own alpha and rect,
+/// a rounded clip its radii — after which the range itself encodes. Without
+/// it a trailing segment recorded inside the app root's clip (or a scroll
+/// viewport's) would draw unclipped, and its in-range `PopClip` would pop a
+/// group this pass never pushed. Empty for a segment that starts at the scene
+/// root, which is every pre-segment and every whole-scene caller.
+///
+/// Whatever is still open when the walk reaches the end of the range —
+/// `prefix` groups the range never popped, plus any the range itself left open
+/// — is closed there, innermost first, so the vello scene this pass built is
+/// balanced on its own (see [`encode_commands`]).
+///
+/// `range` and `prefix` are clamped to the scene rather than trusted: a plan
+/// is always built from the same frame's scene, so a stale index is a bug, but
+/// the render loop is not a place to panic.
 pub(crate) fn encode_range_with_overrides(
     scene: &Scene,
     range: Range<usize>,
+    prefix: &[usize],
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
@@ -149,8 +170,9 @@ pub(crate) fn encode_range_with_overrides(
     let commands = scene.commands();
     let end = range.end.min(commands.len());
     let start = range.start.min(end);
+    let reopened = prefix.iter().filter_map(|&index| commands.get(index));
     encode_commands(
-        &commands[start..end],
+        reopened.chain(&commands[start..end]),
         Affine::IDENTITY,
         sink,
         shader_images,
@@ -187,8 +209,19 @@ pub(crate) fn encode_commands_into(commands: &[Command], root: Affine, sink: &mu
 /// [`Command::PushSnapshot`] keys this pass must leave as holes (empty for
 /// every caller that draws the whole scene itself). Kept generic over
 /// [`SceneSink`] so it is GPU-free unit-testable.
-fn encode_commands(
-    commands: &[Command],
+///
+/// `commands` is an ITERATOR rather than a slice so a segment can be walked
+/// as its re-opened prefix chained to its own range with no clone of either
+/// (see [`encode_range_with_overrides`]); every other caller passes a plain
+/// slice.
+///
+/// The walk CLOSES whatever it left open when it ends: a segment of a frame
+/// legitimately ends inside groups opened before its own commands (its
+/// prefix) or inside it and popped by a later segment, and the pops belong to
+/// the walk that made the pushes. A balanced whole scene — the ordinary frame
+/// — closes nothing, since nothing is open.
+fn encode_commands<'a>(
+    commands: impl IntoIterator<Item = &'a Command>,
     root: Affine,
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
@@ -513,6 +546,25 @@ fn encode_commands(
                     }
                 }
             }
+        }
+    }
+
+    // Close what this pass left open, innermost first — the re-opened prefix
+    // groups the range never popped, a group the range itself opened and a
+    // later segment pops, and a MISS'd bracket's emulated alpha layer (it
+    // lives on the same stack).
+    //
+    // Explicit rather than left to the backend. `vello_encoding`'s resolver
+    // does compensate today (`resolve.rs` appends one `PathTag::PATH` +
+    // `DrawTag::END_CLIP` per `n_open_clips` as it lays the scene out), so an
+    // unbalanced segment survived a vello sink — but that is one backend's
+    // courtesy, not part of the [`SceneSink`] contract every sink here
+    // implements, and a segment ending inside a group is the normal shape of
+    // a split frame rather than a scene-layer bug to be papered over.
+    for (kind, ..) in groups.iter().rev() {
+        match kind {
+            Group::Clip(_) => sink.pop_clip(),
+            Group::Layer(_) => sink.pop_layer(),
         }
     }
 }
@@ -2146,6 +2198,7 @@ mod tests {
         encode_range_with_overrides(
             scene,
             0..scene.commands().len(),
+            &[],
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2281,6 +2334,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             1..3,
+            &[],
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2322,6 +2376,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             1..scene.commands().len(),
+            &[],
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2360,6 +2415,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             0..999,
+            &[],
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2434,6 +2490,193 @@ mod tests {
                 },
                 Event::PopClip,
             ]
+        );
+    }
+
+    /// Encode `range` of `scene` under `prefix`, the way the render path's
+    /// trailing segment does.
+    fn encode_segment(scene: &Scene, range: Range<usize>, prefix: &[usize]) -> Vec<Event> {
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            scene,
+            range,
+            prefix,
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &HashSet::new(),
+        );
+        sink.events
+    }
+
+    /// The trailing segment's whole reason for a prefix: a range recorded
+    /// INSIDE a clip an earlier segment opened must re-open that clip before
+    /// it draws (or the overlay paints outside the viewport it was recorded
+    /// in), and the pass must come back balanced whether or not the range
+    /// carries the matching pop itself.
+    #[test]
+    fn a_trailing_range_re_establishes_the_clip_it_was_recorded_under() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let page = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let overlay = Rect::new(10.0, 10.0, 20.0, 20.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.fill_rect(page, Brush::Solid(RED));
+        builder.fill_rect(overlay, Brush::Solid(RED));
+        builder.pop_clip();
+
+        let want = || {
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: overlay,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        };
+        // The range stops short of the scene's own `PopClip`, so the walk
+        // closes the group it re-opened.
+        assert_eq!(encode_segment(&scene, 2..3, &[0]), want());
+        // The range carries the pop: the group is closed exactly once, not
+        // once by the command and again by the end-of-range close.
+        assert_eq!(encode_segment(&scene, 2..4, &[0]), want());
+    }
+
+    /// A `PushLayer` in the prefix carries its alpha AND its rect into the
+    /// segment exactly as the inline walk recorded them, and the closes run in
+    /// reverse order — innermost group first.
+    #[test]
+    fn a_trailing_prefix_re_establishes_a_layer_and_closes_in_reverse() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let layer = Rect::new(4.0, 4.0, 40.0, 40.0);
+        let overlay = Rect::new(10.0, 10.0, 20.0, 20.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.push_layer(layer, 0.5);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.fill_rect(overlay, Brush::Solid(RED));
+        builder.pop_layer();
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 3..4, &[0, 1]),
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushLayer {
+                    rect: layer,
+                    alpha: 0.5,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: overlay,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// A range that pops ONE of two re-opened groups leaves only the other to
+    /// close: the end-of-range close is what is still open, not a fixed
+    /// unwind of the prefix.
+    #[test]
+    fn a_range_that_pops_one_open_group_closes_only_the_other() {
+        let outer = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inner = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let after = Rect::new(3.0, 3.0, 4.0, 4.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(outer);
+        builder.push_clip(inner);
+        builder.fill_rect(body, Brush::Solid(RED));
+        builder.pop_clip();
+        builder.fill_rect(after, Brush::Solid(RED));
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 2..5, &[0, 1]),
+            vec![
+                Event::PushClip {
+                    rect: outer,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClip {
+                    rect: inner,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: body,
+                    transform: Affine::IDENTITY,
+                },
+                // The range's own pop closes the inner clip...
+                Event::PopClip,
+                Event::FillRect {
+                    rect: after,
+                    transform: Affine::IDENTITY,
+                },
+                // ...and the walk closes the outer one, once.
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// The other half of the split: a PRE segment that ends inside the clip it
+    /// opened closes it too, so the main pass's scene is balanced without the
+    /// commands the trailing segment took.
+    #[test]
+    fn a_pre_segment_closes_the_group_it_leaves_open() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.fill_rect(body, Brush::Solid(RED));
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 0..2, &[]),
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: body,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        );
+        // A balanced whole scene closes nothing extra — the ordinary frame.
+        assert_eq!(encode_segment(&scene, 0..3, &[]).len(), 3);
+    }
+
+    /// A prefix index past the end of the scene is clamped away rather than
+    /// panicking, like the range itself.
+    #[test]
+    fn a_stale_prefix_index_is_ignored() {
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(body, Brush::Solid(RED));
+
+        assert_eq!(
+            encode_segment(&scene, 0..1, &[99]),
+            vec![Event::FillRect {
+                rect: body,
+                transform: Affine::IDENTITY,
+            }]
         );
     }
 

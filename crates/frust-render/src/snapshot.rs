@@ -52,7 +52,7 @@
 //!   segment is only the app root's `PushClip` then costs one quad pass for
 //!   the whole frame.
 //!
-//! ## Enclosing clips
+//! ## Enclosing clips and layers
 //!
 //! A composited bracket is drawn as a quad OUTSIDE vello, so any clip the
 //! scene had pushed around it is no longer applied to its pixels — inline, the
@@ -62,6 +62,13 @@
 //! compositor applies as a scissor rect. A rounded clip contributes its
 //! rect, so the corners it would have cut are an accepted approximation —
 //! a scissor is rectangular.
+//!
+//! An enclosing `PushLayer` bounds its content exactly as a clip does, so its
+//! rect joins that intersection. Its OPACITY has nowhere to go — the quad's
+//! blend already carries the bracket's own `alpha` — so a bracket enclosed by
+//! a layer with `alpha < 1.0` is not composited at all: it yields no plan and
+//! no hole and lowers inline, where the layer applies to it normally
+//! ([`outermost_brackets`]).
 //!
 //! ## Coordinate mapping
 //!
@@ -112,9 +119,11 @@
 //! the quad's blend rather than on any vello layer. The texture is handed on
 //! exactly as vello rendered it: the crate's premultiply compute pass belongs
 //! to premultiplied-expecting swapchains only, and running it here would
-//! premultiply twice and darken every translucent edge. The GPU smoke
-//! (`tests/gpu_smoke.rs`) pins this end to end by comparing a cached bracket
-//! against the same bracket lowered inline.
+//! premultiply twice and darken every translucent edge. `compositor.rs`'s
+//! `snapshot_layer_composites_pixel_identically` GPU smoke pins this end to
+//! end by comparing a cached bracket against the same bracket lowered inline
+//! (it lives beside the pass it exercises, not in `tests/gpu_smoke.rs`: the
+//! compositor is crate-private).
 //!
 //! ## Atlas-generation churn
 //!
@@ -272,6 +281,20 @@ pub(crate) struct FramePlan {
     /// whose brackets are the last thing in the scene, bar the app root's
     /// `PopClip`) and saves that whole pass.
     pub trailing: Option<Range<usize>>,
+    /// The clip/layer pushes still OPEN where [`Self::trailing`] starts, in
+    /// recording order — the groups that pass must re-establish before it
+    /// encodes anything ([`crate::convert::encode_range_with_overrides`]'s
+    /// `prefix`).
+    ///
+    /// A trailing segment is a slice out of the middle of the frame, so it
+    /// begins inside whatever the scene had pushed around it: the app root's
+    /// clip around both pages (`nav/navigator.rs`), a scroll viewport's clip
+    /// around a switcher (`scroll.rs`). Encoding the slice alone would draw
+    /// that content unclipped and pop groups this pass never pushed. Always
+    /// empty when `trailing` is `None`, and never contains an index inside a
+    /// composited bracket's span — that body is a hole the trailing pass skips
+    /// outright.
+    pub trailing_prefix: Vec<usize>,
 }
 
 impl FramePlan {
@@ -284,6 +307,7 @@ impl FramePlan {
             layers: Vec::new(),
             holes: HashSet::new(),
             trailing: None,
+            trailing_prefix: Vec::new(),
         }
     }
 }
@@ -530,44 +554,123 @@ fn reuses_entry(existing: Option<(u32, u32, u64)>, wanted: (u32, u32, u64)) -> b
     existing == Some(wanted)
 }
 
-/// The clips enclosing a bracket, intersected into one device-space rect —
-/// `None` for an unclipped bracket. An empty intersection is returned as it
-/// falls out (a backwards rect), leaving "this quad covers nothing" for the
-/// compositor to decide rather than conflating it with "no clip at all".
-fn enclosing_clip(clips: &[Rect]) -> Option<Rect> {
-    clips
+/// One clip or layer open around a bracket, as [`outermost_brackets`] tracks
+/// it: the bbox it confines its content to, in DEVICE pixels, and the opacity
+/// it composites that content at.
+///
+/// A clip has no opacity of its own and carries `1.0`; a `PushLayer` carries
+/// its own `alpha`, which is what disqualifies a bracket from compositing
+/// (see [`enclosed_by_translucent_layer`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Enclosing {
+    bbox: Rect,
+    alpha: f32,
+}
+
+/// The clips and layers enclosing a bracket, their bboxes intersected into one
+/// device-space rect — `None` for a bracket under none of either. An empty
+/// intersection is returned as it falls out (a backwards rect), leaving "this
+/// quad covers nothing" for the compositor to decide rather than conflating it
+/// with "no clip at all".
+///
+/// A `PushLayer` bounds its content to its own rect exactly as a clip does, so
+/// it contributes its bbox here too; only its OPACITY is beyond what a scissor
+/// can express.
+fn enclosing_clip(groups: &[Enclosing]) -> Option<Rect> {
+    groups
         .iter()
-        .copied()
+        .map(|group| group.bbox)
         .reduce(|outer, inner| outer.intersect(inner))
 }
 
-/// Every OUTERMOST balanced bracket in `commands`, in recording order, each
-/// carrying the clips enclosing it.
+/// Whether any enclosing group composites its content at less than full
+/// opacity — an enclosing `PushLayer` with `alpha < 1.0`.
+///
+/// Such a bracket must NOT be composited: the quad pass has one alpha per
+/// quad, already spent on the bracket's own presentation `alpha`, and folding
+/// the layer's in would still be wrong (a layer composites its whole content
+/// once, after it is drawn, which is not the same as fading each of its parts
+/// separately). The bracket yields no plan and lowers inline instead, where
+/// `convert.rs` pushes the layer around it exactly as recorded.
+fn enclosed_by_translucent_layer(groups: &[Enclosing]) -> bool {
+    groups.iter().any(|group| group.alpha < 1.0)
+}
+
+/// The command indices of the clip/layer pushes still OPEN at `split`, in
+/// recording order — [`FramePlan::trailing_prefix`].
+///
+/// Mirrors `convert.rs`'s own group stack: `PushClip`/`PushClipRounded`/
+/// `PushLayer` open a group and either pop closes the innermost one, so an
+/// unbalanced `PopClip` pops nothing, the same tolerance the encode walk
+/// shows it.
+///
+/// Commands inside a composited bracket's `spans` are skipped: that body never
+/// reaches the trailing pass (it is a hole), so a group opened and closed
+/// inside it is not part of the state the trailing segment starts in.
+fn open_group_pushes(commands: &[Command], split: usize, spans: &[Range<usize>]) -> Vec<usize> {
+    let mut open: Vec<usize> = Vec::new();
+    for (index, command) in commands.iter().enumerate().take(split) {
+        if spans.iter().any(|span| span.contains(&index)) {
+            continue;
+        }
+        match command {
+            Command::PushClip { .. }
+            | Command::PushClipRounded { .. }
+            | Command::PushLayer { .. } => open.push(index),
+            Command::PopClip | Command::PopLayer => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Every OUTERMOST balanced bracket in `commands` that may be composited, in
+/// recording order, each carrying the clips and layers enclosing it.
 ///
 /// Nested brackets are skipped entirely (the command contract makes only the
 /// outermost one binding), an unbalanced `PopSnapshot` is ignored the way the
 /// encode walk ignores it, and a bracket left open at the end of the list has
 /// no bounded body so it yields nothing — that bracket keeps the inline path.
 ///
-/// The clip stack is tracked across the whole list, in device space
+/// The clip/layer stack is tracked across the whole list, in device space
 /// (`transform.transform_rect_bbox(rect)`), because a composited bracket's
-/// pixels leave vello and nothing else would re-apply the clip they were
-/// recorded under. A rounded clip contributes its rect: the compositor's
-/// scissor cannot round corners. An unbalanced `PopClip` pops nothing, the
-/// same tolerance the encode walk shows it.
+/// pixels leave vello and nothing else would re-apply what they were recorded
+/// under. A rounded clip contributes its rect: the compositor's scissor cannot
+/// round corners. A `PushLayer` contributes its rect the same way, and either
+/// pop closes the innermost group — one stack, exactly as `convert.rs`'s
+/// encode walk keeps one. An unbalanced `PopClip` pops nothing, the same
+/// tolerance that walk shows it.
+///
+/// A bracket enclosed by a layer with `alpha < 1.0` is DROPPED here rather
+/// than returned: the quad pass cannot apply that opacity
+/// ([`enclosed_by_translucent_layer`]), so the bracket must lower inline, and
+/// dropping it is exactly that — no plan, no layer, no hole.
 fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
     let mut brackets = Vec::new();
     let mut depth: usize = 0;
-    let mut clips: Vec<Rect> = Vec::new();
+    let mut groups: Vec<Enclosing> = Vec::new();
     let mut open: Option<(usize, Bracket)> = None;
     for (index, command) in commands.iter().enumerate() {
         match command {
             Command::PushClip { rect, transform }
             | Command::PushClipRounded {
                 rect, transform, ..
-            } => clips.push(transform.transform_rect_bbox(*rect)),
-            Command::PopClip => {
-                clips.pop();
+            } => groups.push(Enclosing {
+                bbox: transform.transform_rect_bbox(*rect),
+                alpha: 1.0,
+            }),
+            Command::PushLayer {
+                rect,
+                alpha,
+                transform,
+            } => groups.push(Enclosing {
+                bbox: transform.transform_rect_bbox(*rect),
+                alpha: *alpha,
+            }),
+            Command::PopClip | Command::PopLayer => {
+                groups.pop();
             }
             Command::PushSnapshot {
                 key,
@@ -576,7 +679,7 @@ fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
                 scale,
                 transform,
             } => {
-                if depth == 0 {
+                if depth == 0 && !enclosed_by_translucent_layer(&groups) {
                     open = Some((
                         index,
                         Bracket {
@@ -587,7 +690,7 @@ fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
                             transform: *transform,
                             // Closed below, once the matching pop is found.
                             body: 0..0,
-                            clip: enclosing_clip(&clips),
+                            clip: enclosing_clip(&groups),
                         },
                     ));
                 }
@@ -722,12 +825,17 @@ impl SnapshotCache {
         self.evict();
         let holes = layers.iter().map(|layer| layer.key).collect();
         let (pre, pre_draws, trailing) = frame_split(scene.commands(), &spans);
+        let trailing_prefix = trailing
+            .as_ref()
+            .map(|range| open_group_pushes(scene.commands(), range.start, &spans))
+            .unwrap_or_default();
         FramePlan {
             pre,
             pre_draws,
             layers,
             holes,
             trailing,
+            trailing_prefix,
         }
     }
 
@@ -950,16 +1058,33 @@ mod tests {
         }
     }
 
-    /// The split a frame would take if every eligible bracket in `scene` hit
-    /// the cache — [`SnapshotCache::prepare`]'s own arithmetic, minus the GPU
-    /// work that decides which plans actually became layers.
-    fn split_of(scene: &Scene) -> (Range<usize>, bool, Option<Range<usize>>) {
-        let spans: Vec<Range<usize>> = SnapshotCache::new(true)
+    /// The spans every eligible bracket in `scene` would contribute if it hit
+    /// the cache — the input both halves of [`SnapshotCache::prepare`]'s
+    /// split arithmetic take, minus the GPU work that decides which plans
+    /// actually became layers.
+    fn spans_of(scene: &Scene) -> Vec<Range<usize>> {
+        SnapshotCache::new(true)
             .plan(scene, 8192)
             .iter()
             .map(|plan| bracket_span(&plan.body))
-            .collect();
-        frame_split(scene.commands(), &spans)
+            .collect()
+    }
+
+    /// The split a frame would take if every eligible bracket in `scene` hit
+    /// the cache.
+    fn split_of(scene: &Scene) -> (Range<usize>, bool, Option<Range<usize>>) {
+        frame_split(scene.commands(), &spans_of(scene))
+    }
+
+    /// The trailing segment's prefix for that same frame — `prepare`'s own
+    /// derivation, so a test asserts what the render path would actually hand
+    /// `convert::encode_range_with_overrides`.
+    fn prefix_of(scene: &Scene) -> Vec<usize> {
+        let spans = spans_of(scene);
+        let (_, _, trailing) = frame_split(scene.commands(), &spans);
+        trailing
+            .map(|range| open_group_pushes(scene.commands(), range.start, &spans))
+            .unwrap_or_default()
     }
 
     fn clip(rect: Rect, transform: Affine) -> Command {
@@ -1113,11 +1238,204 @@ mod tests {
         );
     }
 
+    /// One enclosing clip (no opacity of its own) at `rect`.
+    fn clip_group(rect: Rect) -> Enclosing {
+        Enclosing {
+            bbox: rect,
+            alpha: 1.0,
+        }
+    }
+
+    /// A `PushLayer` bounds its content exactly as a clip does, so its rect
+    /// joins the enclosing intersection the compositor scissors by — a page
+    /// inside a full-opacity layer must not paint outside that layer's rect.
+    #[test]
+    fn outermost_brackets_intersects_an_enclosing_layer_into_the_clip() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let clip = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let layer = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let commands = vec![
+            Command::PushClip {
+                rect: clip,
+                transform: Affine::IDENTITY,
+            },
+            Command::PushLayer {
+                rect: layer,
+                alpha: 1.0,
+                transform: Affine::IDENTITY,
+            },
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopLayer,
+            Command::PopClip,
+        ];
+        let brackets = outermost_brackets(&commands);
+        assert_eq!(brackets.len(), 1);
+        assert_eq!(
+            brackets[0].clip,
+            Some(Rect::new(0.0, 0.0, 50.0, 20.0)),
+            "the layer's rect intersects with the clip's"
+        );
+    }
+
+    /// A bracket inside a TRANSLUCENT layer is not composited at all: the quad
+    /// pass has one alpha per quad and it is already the bracket's own, so the
+    /// bracket lowers inline (no bracket, no plan, no hole, no split) where
+    /// `convert.rs` pushes the layer around it as recorded.
+    #[test]
+    fn outermost_brackets_drops_a_bracket_inside_a_translucent_layer() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let layer = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let commands = vec![
+            Command::PushLayer {
+                rect: layer,
+                alpha: 0.5,
+                transform: Affine::IDENTITY,
+            },
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopLayer,
+        ];
+        assert!(
+            outermost_brackets(&commands).is_empty(),
+            "a bracket under a translucent layer must lower inline"
+        );
+        // The same bracket under a FULL-opacity layer still composites — the
+        // disqualification is the opacity, not the layer.
+        let opaque = vec![
+            Command::PushLayer {
+                rect: layer,
+                alpha: 1.0,
+                transform: Affine::IDENTITY,
+            },
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopLayer,
+        ];
+        assert_eq!(outermost_brackets(&opaque).len(), 1);
+    }
+
+    /// The whole-frame consequence of the drop: no plan, and the frame is one
+    /// ordinary vello pass over everything.
+    #[test]
+    fn a_bracket_inside_a_translucent_layer_yields_no_plan() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_layer(Rect::new(0.0, 0.0, 50.0, 50.0), 0.5);
+            builder.push_snapshot(KEY, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.pop_layer();
+        }
+        assert!(SnapshotCache::new(true).plan(&scene, 8192).is_empty());
+        assert_eq!(split_of(&scene), (0..scene.commands().len(), true, None));
+    }
+
+    /// The MEASURED trailing shape: the app root's clip is open where the
+    /// trailing segment starts, so the plan names its push as the prefix that
+    /// pass must re-establish.
+    #[test]
+    fn the_trailing_prefix_names_the_clip_the_segment_starts_inside() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            builder.push_snapshot(KEY, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_clip();
+        }
+        assert_eq!(split_of(&scene), (0..1, false, Some(4..6)));
+        assert_eq!(prefix_of(&scene), vec![0]);
+    }
+
+    /// No trailing segment, no prefix — the common page-transition frame
+    /// carries an empty one rather than a stale list.
+    #[test]
+    fn a_frame_with_no_trailing_segment_has_no_prefix() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            builder.push_snapshot(KEY, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.pop_clip();
+        }
+        assert!(split_of(&scene).2.is_none());
+        assert!(prefix_of(&scene).is_empty());
+        assert!(
+            FramePlan::inline(scene.commands())
+                .trailing_prefix
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn open_group_pushes_reports_only_what_is_still_open() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let commands = vec![
+            clip(rect, Affine::IDENTITY), // 0: still open at the split
+            clip(rect, Affine::IDENTITY), // 1: closed at 2
+            Command::PopClip,             // 2
+            Command::PushLayer {
+                // 3: still open at the split
+                rect,
+                alpha: 1.0,
+                transform: Affine::IDENTITY,
+            },
+            fill(rect), // 4
+        ];
+        assert_eq!(open_group_pushes(&commands, 5, &[]), vec![0, 3]);
+        // Either pop closes the innermost group, exactly as the encode walk's
+        // single stack does; an unbalanced pop closes nothing.
+        let unbalanced = vec![Command::PopClip, clip(rect, Affine::IDENTITY)];
+        assert_eq!(open_group_pushes(&unbalanced, 2, &[]), vec![1]);
+        let layer_popped_as_clip = vec![
+            Command::PushLayer {
+                rect,
+                alpha: 1.0,
+                transform: Affine::IDENTITY,
+            },
+            Command::PopClip,
+        ];
+        assert!(open_group_pushes(&layer_popped_as_clip, 2, &[]).is_empty());
+    }
+
+    /// A group opened inside a COMPOSITED bracket's body is not part of the
+    /// trailing segment's starting state: that body is a hole the pass skips
+    /// outright, so its pushes must never be re-established.
+    #[test]
+    fn open_group_pushes_skips_a_composited_brackets_own_body() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let commands = vec![
+            clip(rect, Affine::IDENTITY),    // 0: the app root's clip
+            push(1, rect, Affine::IDENTITY), // 1
+            clip(rect, Affine::IDENTITY),    // 2: inside the holed body
+            fill(rect),                      // 3
+            Command::PopSnapshot,            // 4: the body was left unbalanced
+            fill(rect),                      // 5
+        ];
+        let spans = [bracket_span(&(2..4))];
+        assert_eq!(open_group_pushes(&commands, 5, &spans), vec![0]);
+    }
+
     #[test]
     fn enclosing_clip_reports_an_empty_intersection_as_it_falls_out() {
         let disjoint = enclosing_clip(&[
-            Rect::new(0.0, 0.0, 10.0, 10.0),
-            Rect::new(20.0, 20.0, 30.0, 30.0),
+            clip_group(Rect::new(0.0, 0.0, 10.0, 10.0)),
+            clip_group(Rect::new(20.0, 20.0, 30.0, 30.0)),
         ])
         .expect("two clips are still clips");
         assert!(

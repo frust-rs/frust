@@ -333,12 +333,33 @@ pub(crate) struct CompositeTarget<'a> {
     pub clear: Option<peniko::Color>,
 }
 
+/// How many frames the trailing scratch may go unused before it is released:
+/// a scratch last used before `frame - MAX_UNUSED_FRAMES` is dropped.
+///
+/// The same two frames of slack [`crate::snapshot::SnapshotCache`]'s entries
+/// get, for the same reason — a scene that skips a trailing segment for one
+/// frame (a diff hiccup, an every-other-frame repaint) should not pay a
+/// re-allocation — while a scene that has simply stopped drawing after its
+/// first composited bracket releases a full-surface texture promptly instead
+/// of at surface teardown.
+const MAX_UNUSED_FRAMES: u64 = 2;
+
 /// The transparent intermediate the trailing segment's vello pass renders
 /// into, sized to the surface and recreated when that size changes.
 struct Scratch {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// [`Compositor::frame`] when a frame last rendered a trailing segment
+    /// into this texture — the clock [`Compositor::age_scratch`] ages against.
+    last_used: u64,
+}
+
+/// Whether a scratch last used at `last_used` is stale at `frame`. The
+/// boundary is inclusive of `frame - max_unused` (that scratch survives),
+/// exactly like `snapshot::evictable_keys`.
+fn scratch_expired(last_used: u64, frame: u64, max_unused: u64) -> bool {
+    last_used + max_unused < frame
 }
 
 /// The per-surface quad pass: two pipelines over one shader, the sampler and
@@ -362,6 +383,10 @@ pub(crate) struct Compositor {
     capacity: u32,
     stride: u64,
     scratch: Option<Scratch>,
+    /// Monotonic frame counter — the clock [`Scratch::last_used`] ages
+    /// against. Advanced once per [`Self::age_scratch`], which the render path
+    /// calls on every frame it encodes, trailing segment or not.
+    frame: u64,
 }
 
 impl Compositor {
@@ -481,11 +506,13 @@ impl Compositor {
             capacity: 0,
             stride: uniform_stride(device.limits().min_uniform_buffer_offset_alignment),
             scratch: None,
+            frame: 0,
         })
     }
 
     /// The transparent `Rgba8Unorm` target the trailing segment's vello pass
-    /// renders into, (re)created when the surface size changes.
+    /// renders into, (re)created when the surface size changes and marked as
+    /// used this frame (see [`Self::age_scratch`]).
     ///
     /// `STORAGE_BINDING` is vello's write path (it renders by compute),
     /// `TEXTURE_BINDING` is this pass's read path — the same pair a cached
@@ -520,14 +547,47 @@ impl Compositor {
                 view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
                 width,
                 height,
+                last_used: self.frame,
             });
         }
         // Set immediately above when it was missing or stale.
-        &self
+        let scratch = self
+            .scratch
+            .as_mut()
+            .expect("scratch is created when stale");
+        scratch.last_used = self.frame;
+        &scratch.view
+    }
+
+    /// Advance the frame clock and release the trailing scratch once no frame
+    /// has needed one for [`MAX_UNUSED_FRAMES`] frames — the mirror of
+    /// [`crate::snapshot::SnapshotCache`]'s own eviction, for the one texture
+    /// this module owns.
+    ///
+    /// Called once per encoded frame by the render path, INCLUDING frames with
+    /// no trailing segment (which is the whole point: those are the frames the
+    /// scratch ages on). A frame that never allocated one does a counter
+    /// increment and nothing else. Dropping the [`Scratch`] releases this
+    /// module's handle; a `PendingComposite` still holding a clone of the view
+    /// keeps the texture alive until that frame is submitted, since a wgpu
+    /// view refcounts its texture.
+    pub(crate) fn age_scratch(&mut self) {
+        self.frame += 1;
+        let frame = self.frame;
+        if self
             .scratch
             .as_ref()
-            .expect("scratch is created when stale")
-            .view
+            .is_some_and(|scratch| scratch_expired(scratch.last_used, frame, MAX_UNUSED_FRAMES))
+        {
+            self.scratch = None;
+        }
+    }
+
+    /// Whether a trailing scratch is currently allocated, for aging
+    /// assertions.
+    #[cfg(test)]
+    fn has_scratch(&self) -> bool {
+        self.scratch.is_some()
     }
 
     /// Draw this frame's cached pages onto `target`, in scene order, then the
@@ -945,6 +1005,45 @@ mod tests {
         );
     }
 
+    /// Coupling: every swapchain format `context::create_render_surface` can
+    /// hand out must be one this pass has arithmetic for. The composite pass
+    /// draws onto the swapchain itself on both direct arms, so a format added
+    /// there without a matching blend/clear story here would silently disable
+    /// snapshot layers on that surface (`Compositor::new` returns `None`, and
+    /// the renderer then builds the cache disabled).
+    #[test]
+    fn every_configurable_surface_format_is_a_supported_composite_target() {
+        for format in crate::context::SURFACE_FORMATS {
+            assert!(
+                is_supported_target_format(format),
+                "{format:?} can be configured on a surface but has no composite pipeline"
+            );
+        }
+        // The blit arm's attachment is the intermediate, always `Rgba8Unorm`.
+        assert!(is_supported_target_format(wgpu::TextureFormat::Rgba8Unorm));
+        // Not every format is waved through: the pass writes non-sRGB unorm
+        // clear values verbatim and has no conversion for anything else.
+        assert!(!is_supported_target_format(
+            wgpu::TextureFormat::Bgra8UnormSrgb
+        ));
+    }
+
+    /// The scratch's aging arithmetic, without a GPU: a scratch used this
+    /// frame survives, and one unused for more than [`MAX_UNUSED_FRAMES`]
+    /// frames does not. Same boundary as `snapshot::evictable_keys`.
+    #[test]
+    fn scratch_ages_out_only_after_the_unused_window() {
+        // Used this frame.
+        assert!(!scratch_expired(7, 7, MAX_UNUSED_FRAMES));
+        // Inside the slack window: a frame that skips a trailing segment (or
+        // two) must not cost a re-allocation.
+        assert!(!scratch_expired(7, 8, MAX_UNUSED_FRAMES));
+        assert!(!scratch_expired(7, 9, MAX_UNUSED_FRAMES));
+        // Past it.
+        assert!(scratch_expired(7, 10, MAX_UNUSED_FRAMES));
+        assert!(scratch_expired(0, u64::from(u32::MAX), MAX_UNUSED_FRAMES));
+    }
+
     // --- GPU smokes --------------------------------------------------------
     // The compositor is crate-private (no `wgpu` type leaves this crate), so
     // these live here rather than in `tests/gpu_smoke.rs`: an integration test
@@ -1210,6 +1309,23 @@ mod tests {
         scene
     }
 
+    /// The navigator's TRAILING shape: an app-root clip, one composited
+    /// bracket, an overlay recorded after it (the trailing segment), and the
+    /// matching pop — so the trailing pass starts inside a clip it did not
+    /// open. `clip` is in device pixels; a clip shorter than `overlay` is what
+    /// proves the segment re-establishes it.
+    fn clipped_trailing_scene(clip: Rect, overlay: Rect, color: Color) -> Scene {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_clip(clip);
+            bracket_body(&mut builder, 1.0);
+            builder.fill_rect(overlay, Brush::Solid(color));
+            builder.pop_clip();
+        }
+        scene
+    }
+
     /// Render `scene` through `cache`'s plan, compositing with `compositor`
     /// when the plan has layers — the blit arm's frame, minus the blit.
     async fn render_frame(
@@ -1240,6 +1356,7 @@ mod tests {
         encode_range_with_overrides(
             scene,
             plan.pre.clone(),
+            &[],
             &mut vello_scene,
             &shader_images,
             adapter_max,
@@ -1257,6 +1374,7 @@ mod tests {
             encode_range_with_overrides(
                 scene,
                 range,
+                &plan.trailing_prefix,
                 &mut trailing_scene,
                 &shader_images,
                 adapter_max,
@@ -1286,6 +1404,10 @@ mod tests {
             &plan.layers,
             trailing.as_ref(),
         );
+        // The render path ages the scratch once per encoded frame, trailing
+        // segment or not; a helper that skipped it would never exercise the
+        // aging these smokes run through.
+        compositor.age_scratch();
         read_back(device, queue, &texture).await
     }
 
@@ -1589,6 +1711,139 @@ mod tests {
         }
     }
 
+    /// The trailing segment's own clip, end to end. The scene is the
+    /// navigator's shape: an app-root clip, a composited page, an overlay
+    /// recorded AFTER the page (so it lands in the trailing segment), and the
+    /// matching pop.
+    ///
+    /// The clip is deliberately SHORTER than the overlay. Without the plan's
+    /// `trailing_prefix` the trailing pass encodes the overlay alone, under no
+    /// clip at all, and paints it over the whole overlay rect — including the
+    /// part the scene had clipped away — while its in-range `PopClip` pops a
+    /// group that pass never pushed. Both arms must agree, and outside the
+    /// clip both must be the untouched base colour.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn a_trailing_segment_keeps_the_clip_it_was_recorded_under() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let (device, queue) = gpu().await;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+                .expect("failed to create vello renderer");
+            let mut compositor = Compositor::new(&device, wgpu::TextureFormat::Rgba8Unorm, None)
+                .expect("compositor");
+
+            // The viewport stops at y = 28; the overlay would reach y = 40.
+            let base = Color::from_rgba8(32, 96, 160, 255);
+            let overlay_color = Color::from_rgba8(255, 255, 0, 255);
+            let clip = Rect::new(0.0, 0.0, f64::from(SIZE), 28.0);
+            let overlay = Rect::new(20.0, 20.0, 40.0, 40.0);
+            let scene = clipped_trailing_scene(clip, overlay, overlay_color);
+
+            let mut cached = SnapshotCache::new(true);
+            let plan = cached.prepare(
+                &device,
+                &queue,
+                &mut renderer,
+                &scene,
+                device.limits().max_texture_dimension_2d,
+            );
+            assert_eq!(plan.layers.len(), 1, "the page composites");
+            assert_eq!(
+                plan.trailing,
+                Some(6..8),
+                "the overlay after the page needs a trailing pass"
+            );
+            assert_eq!(
+                plan.trailing_prefix,
+                vec![0],
+                "the app-root clip is open where that pass starts"
+            );
+
+            let composited = render_frame(
+                &device,
+                &queue,
+                &mut renderer,
+                &mut cached,
+                &mut compositor,
+                &scene,
+                base,
+            )
+            .await;
+            let mut disabled = SnapshotCache::new(false);
+            let inline = render_frame(
+                &device,
+                &queue,
+                &mut renderer,
+                &mut disabled,
+                &mut compositor,
+                &scene,
+                base,
+            )
+            .await;
+
+            let (mut worst, mut worst_at) = (0u8, (0, 0));
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let delta = (0..4)
+                        .map(|c| pixel(&inline, x, y)[c].abs_diff(pixel(&composited, x, y)[c]))
+                        .max()
+                        .unwrap_or(0);
+                    if delta > worst {
+                        worst = delta;
+                        worst_at = (x, y);
+                    }
+                }
+            }
+            println!("trailing-clip parity: max per-pixel delta {worst} at {worst_at:?}");
+            assert!(
+                worst <= TOLERANCE,
+                "the trailing segment's arms disagree by {worst} at {worst_at:?} (tolerance \
+                 {TOLERANCE}): inline={:?} composited={:?}",
+                pixel(&inline, worst_at.0, worst_at.1),
+                pixel(&composited, worst_at.0, worst_at.1),
+            );
+
+            let want_base = [32, 96, 160, 255];
+            for (arm, data) in [("inline", &inline), ("composited", &composited)] {
+                // The overlay's own pixels, below the clip: nothing may paint
+                // there — this is the assertion an unclipped trailing pass
+                // fails.
+                for (x, y) in [(30, 30), (30, 39), (24, 34)] {
+                    let got = pixel(data, x, y);
+                    for channel in 0..4 {
+                        assert!(
+                            got[channel].abs_diff(want_base[channel]) <= TOLERANCE,
+                            "{arm} arm painted ({x}, {y}) = {got:?} outside the clip the \
+                             overlay was recorded under; want the base {want_base:?}"
+                        );
+                    }
+                }
+                // Inside the clip the overlay is drawn, above the page.
+                let over = pixel(data, 30, 24);
+                assert_eq!(
+                    over,
+                    [255, 255, 0, 255],
+                    "{arm} arm must draw the overlay inside the clip"
+                );
+                // ...and the page under it survives where the overlay is not.
+                let page = pixel(data, 12, 12);
+                assert!(
+                    page[0] > 200 && page[1] < 80,
+                    "{arm} arm must keep the composited page inside the clip, got {page:?}"
+                );
+            }
+
+            let error = scope.pop().await;
+            assert!(
+                error.is_none(),
+                "the compositor produced an uncaptured validation error: {error:?}"
+            );
+        }
+    }
+
     /// R4's structural check for a scaled page: at scale 0.9 the quad must
     /// contract about its rect's center and paint NOTHING outside the
     /// contracted rect. Bilinear resampling makes a per-pixel comparison
@@ -1801,12 +2056,24 @@ mod tests {
             }
             assert_eq!(composites, 2, "one composited quad per frame");
             // The scratch is allocated once and re-used at a stable size, so a
-            // steady frame allocates no texture at all.
+            // steady frame allocates no texture at all — even though every
+            // frame ages it.
             let first = compositor.ensure_scratch(&device, SIZE, SIZE).clone();
+            compositor.age_scratch();
             let second = compositor.ensure_scratch(&device, SIZE, SIZE).clone();
+            compositor.age_scratch();
             assert_eq!(
                 first, second,
                 "a same-size frame must not re-allocate the scratch"
+            );
+            // Frames that need no trailing segment age it out instead of
+            // holding a full-surface texture until the surface dies.
+            for _ in 0..=MAX_UNUSED_FRAMES {
+                compositor.age_scratch();
+            }
+            assert!(
+                !compositor.has_scratch(),
+                "an unused scratch must not outlive the frames that need it"
             );
             let resized = compositor.ensure_scratch(&device, SIZE / 2, SIZE).clone();
             assert_ne!(resized, second, "a resize must re-create the scratch");
