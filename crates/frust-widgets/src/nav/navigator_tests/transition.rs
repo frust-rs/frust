@@ -44,21 +44,37 @@ fn push_animates_moving_origins_and_disposes_after_settle() {
     // Seed frame: driver at 0. A (leaving) at rest, still fully opaque. B
     // (entering) is exactly alpha 0 at the seed frame (`resolve_layers`'s
     // 0.35 split hasn't opened yet), so it now paints into a `DiscardScene`
-    // sink (this task) instead of sliding in under a zero-opacity layer — it
-    // records no fill here at all, not just an invisible one.
+    // sink instead of sliding in under a zero-opacity layer — it records no
+    // fill here at all, not just an invisible one.
     let (f0, nf0) = full_frame(&mut root, &mut app, &mut state, ft(0));
     assert!(nf0, "a running transition requests frames");
     assert_eq!(f0.len(), 1, "B is discarded at alpha 0 at the seed frame");
     assert_eq!(fill_h(&f0, 100.0).0.x, 0.0, "A at rest at start");
 
+    // Early frame (20ms → progress 0.2, before the 0.35 split): B is still
+    // exactly alpha 0 and discarded; A is visible under an alpha<1 bracket
+    // and has begun sliding left, leaving.dx = -pc * 30dp = -6.0. Property:
+    // layer-to-pod-origin wiring for split presets stays asserted at paint
+    // level.
+    let (f_early, _) = full_frame(&mut root, &mut app, &mut state, ft(20));
+    assert_eq!(f_early.len(), 1, "B is still discarded before the split");
+    let a_early_x = fill_h(&f_early, 100.0).0.x;
+    assert!(
+        (a_early_x - (-6.0)).abs() < 1e-6,
+        "A slides left under the alpha<1 bracket (was {a_early_x})"
+    );
+
     // Mid frame (50ms → progress 0.5, past the 0.35 split): the split is a
     // hard cut, not an overlapping crossfade, so A has now fully faded to
     // alpha 0 in turn and is discarded here exactly like B was above; B, the
-    // only visible page, has slid in past halfway.
+    // only visible page, has slid to entering.dx = (1 - pc) * 30dp = 15.0.
     let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(50));
     assert_eq!(f1.len(), 1, "A is discarded at alpha 0 past the split");
     let b1x = fill_h(&f1, 80.0).0.x;
-    assert!(b1x > 0.0 && b1x < 30.0, "B slides toward rest (was {b1x})");
+    assert!(
+        (b1x - 15.0).abs() < 1e-6,
+        "B slides toward rest (was {b1x})"
+    );
 
     // End frame (150ms → past the 100ms duration): settles at final geometry.
     let (f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(150));
@@ -150,7 +166,7 @@ fn shared_axis_x_past_the_split_the_visible_page_keeps_its_normal_alpha_bracket(
     // has by now fully faded to alpha 0 and is discarded here exactly like B
     // was at the seed frame above. B, the only page with `0 < alpha < 1`,
     // still paints under its ordinary `push_layer` bracket — byte-identical
-    // to before this task.
+    // to the alpha>0 bracket.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = RecordingScene::default();
@@ -528,10 +544,10 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
     // reduce_motion it must collapse to the crossfade family and NOT slide.
     // `ReducedCrossfade`'s entering alpha is exactly the raw progress value,
     // so the literal seed frame (p=0) is exactly alpha 0 and the entering
-    // page is now discarded (this task) rather than painted under a
-    // zero-opacity layer — seed first (establishing the driver's baseline),
-    // then sample one tick later, where alpha is a hair positive, to keep
-    // this assertion about the (lack of) slide, not about that discard.
+    // page is now discarded rather than painted under a zero-opacity layer —
+    // seed first (establishing the driver's baseline), then sample one tick
+    // later, where alpha is a hair positive, to keep this assertion about
+    // the (lack of) slide, not about that discard.
     controller.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
     full_frame(&mut root, &mut app, &mut state, ft(0)); // seed
     let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(1));
@@ -579,8 +595,8 @@ fn fade_through_paint_scales_incoming_page_below_one() {
 
     // Seed frame (p=0): the incoming page holds at the 0.92 fade-through start
     // scale AND alpha exactly 0 (the 0.30 split hasn't opened yet), so it now
-    // paints into a `DiscardScene` sink (this task) instead — NEITHER the
-    // scale transform nor an alpha layer reaches the real scene. The outgoing
+    // paints into a `DiscardScene` sink instead — NEITHER the scale
+    // transform nor an alpha layer reaches the real scene. The outgoing
     // page is still at rest, fully opaque, and paints plainly.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -595,7 +611,7 @@ fn fade_through_paint_scales_incoming_page_below_one() {
     // Mid frame (50ms → progress 0.5, past the 0.30 split): the incoming page
     // has started fading in and is genuinely scaled below 1.0 (alpha > 0, not
     // discarded), bracketed by exactly one sub-unit `push_transform` —
-    // byte-identical to before this task.
+    // byte-identical to the alpha>0 bracket.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     let mut scene = RecordingScene::default();
@@ -1084,8 +1100,8 @@ fn hero_pop_morphs_backward_and_finalizes_normal() {
     // popped page) paints the morph overlay here (it is "on top" during a
     // pop), and its own `Layer.alpha` — same fade-out curve as the plain-page
     // tests above — is still positive before the split; past it, B is
-    // discarded (alpha 0, this task) and so is its morph, exactly as any
-    // other alpha-0 paint. Sampling before the split keeps this assertion
+    // discarded (alpha 0) and so is its morph, exactly as any other alpha-0
+    // paint. Sampling before the split keeps this assertion
     // about the morph itself, not about that discard.
     let (fmid, _) = hero_frame(&mut root, &mut app, &mut state, ft(t + 20));
     assert!(
@@ -1334,8 +1350,8 @@ fn transition_state_is_frame_exact_for_chrome_painted_after_the_navigator() {
 
     // Seed frame: establishes the driver's baseline (progress 0). B is
     // exactly alpha 0 there (the 0.35 split hasn't opened) and is discarded
-    // (this task) rather than painted, so it has no fill to invert progress
-    // from — sampled separately, not folded into `painted` below.
+    // rather than painted, so it has no fill to invert progress from —
+    // sampled separately, not folded into `painted` below.
     probe_frame(&mut root, &mut app, &mut state, ft(0));
 
     // Sample only past the 0.35 split, where B is genuinely visible (alpha >

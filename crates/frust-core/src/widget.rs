@@ -4197,12 +4197,14 @@ mod tests {
     }
 
     #[test]
-    fn discard_scene_accepts_every_paint_scene_method_without_panicking() {
-        // Every `PaintScene` method, including the per-corner/dashed
-        // defaults and the additive image/shader/shadow surface, must be
-        // reachable on `DiscardScene` without panicking — it is meant to
-        // stand in for a real scene anywhere `&mut dyn PaintScene` is asked
-        // for.
+    fn every_paint_scene_method_terminates_on_discard_scene() {
+        // Every `PaintScene` method — including the delegating defaults
+        // (per-corner/dashed variants, the additive image/shader/shadow
+        // surface) — is reachable and terminates on `DiscardScene` without
+        // panicking; a future `todo!()` or an infinitely-recursive default
+        // would fail here. The records-nothing guarantee itself is asserted
+        // where a scene actually exists, at the navigator/switcher call
+        // sites, not here.
         use frust_scene::{FontHandle, Glyph};
 
         let mut scene = DiscardScene;

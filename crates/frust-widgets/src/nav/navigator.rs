@@ -1576,11 +1576,12 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// every other preset leaves `scale == 1.0`, so the transform is skipped. Mirrors
 /// `motion::switcher`'s `paint_staged_child`.
 ///
-/// `resolve_layers` makes exactly one page fully invisible (`alpha == 0`) at
-/// every instant for the split-crossfade presets (M3SharedAxisX, M3FadeThrough,
-/// Glyph): rather than rasterize that page under a zero-opacity layer — real
-/// GPU work multiplied away to nothing — it paints into a [`DiscardScene`]
-/// sink instead. The paint pass still has to run for its side effects (hero
+/// For the split-crossfade presets (M3SharedAxisX, M3FadeThrough, Glyph),
+/// `resolve_layers` leaves at most one page visible at any instant — the
+/// other is `alpha == 0`, and at the exact split instant both are. Rather
+/// than rasterize an alpha-0 page under a zero-opacity layer — real GPU work
+/// multiplied away to nothing — it paints into a [`DiscardScene`] sink
+/// instead. The paint pass still has to run for its side effects (hero
 /// rects reported through `PaintCtx::with_hero_registry`, animating
 /// descendants advancing), so this is a redirect of the *scene*, not a skip of
 /// the pass; no `push_layer`/`push_transform` bracket is needed since nothing
