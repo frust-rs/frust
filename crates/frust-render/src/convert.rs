@@ -168,6 +168,12 @@ pub(crate) fn encode_range_with_overrides(
 /// Once the render path renders per segment it calls
 /// [`encode_range_with_overrides`] directly with [`crate::snapshot::FramePlan`]'s
 /// own ranges, and this whole-scene shorthand goes away.
+// That day has arrived: the render path now encodes each `FramePlan` segment
+// through `encode_range_with_overrides`, so this compatibility shorthand has
+// no caller left. Kept (not deleted) so its removal lands with the rest of the
+// seam cleanup rather than inside the compositor change; the allow is the one
+// line that keeps `-D warnings` green until then.
+#[allow(dead_code)]
 pub(crate) fn encode_into_with_overrides(
     scene: &Scene,
     sink: &mut impl SceneSink,

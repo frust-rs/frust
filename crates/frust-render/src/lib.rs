@@ -23,15 +23,24 @@
 //! `Pixmap` is uploaded into the same intermediate target the GPU path blits
 //! from (see the `cpu_tier` module).
 //!
-//! Two Gpu-tier pre-passes run inside `encode` before the main scene is built,
-//! each rendering into its own offscreen texture registered with vello as an
-//! image override: the fragment-shader pre-pass (`shader_effects`) and the
-//! snapshot-layer cache (`snapshot`), which rasterizes a stable subtree once
-//! and re-draws it as a single image while its `alpha`/`scale` animate.
+//! Two Gpu-tier pre-passes run inside `encode` before the main scene is built.
+//! The fragment-shader pre-pass (`shader_effects`) renders each
+//! `Command::ShaderQuad` into an offscreen texture registered with vello as an
+//! image override. The snapshot-layer cache (`snapshot`) rasterizes a stable
+//! subtree once into its own texture and hands back a frame plan; those
+//! textures never enter vello at all — `compositor` draws each of them as one
+//! alpha-blended quad in a wgpu render pass AFTER vello, on every render arm,
+//! while the bracket's `alpha`/`scale` animate for free.
 //!
 //! Surface lifecycle is a first-class state machine: see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
+// The wgpu quad pass that draws `snapshot`'s cached page textures onto a
+// frame. Crate-private; runs after vello on every render arm (see
+// `SurfaceRenderer::encode`/`submit`), because a full-page image quad inside
+// vello costs ~100 ms/frame on a low-end mobile GPU and one blended quad
+// costs ~1-2 ms.
+mod compositor;
 mod context;
 mod convert;
 #[cfg(feature = "cpu-tier")]
@@ -46,9 +55,9 @@ mod renderer;
 mod shader_effects;
 // Cached rasterizations of `Command::PushSnapshot` bodies. Crate-private;
 // wired into `SurfaceRenderer::encode`'s Gpu-tier snapshot pre-pass, which
-// rasterizes each outermost bracket's body into its own texture and registers
-// it as a vello image override so the encode walk lowers the whole body to one
-// image quad.
+// rasterizes each outermost bracket's body into its own texture and returns
+// the frame plan the encode walk skips those bodies by and `compositor` draws
+// them from.
 mod snapshot;
 mod tier;
 

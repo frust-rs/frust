@@ -129,7 +129,7 @@ pub(crate) fn choose_render_path(
 /// (pipeline compiles, offscreen targets, a vello image-override
 /// registration) that is unproven on device, so this flag is the fallback-proof escape hatch that
 /// reverts every `Command::ShaderQuad` to the existing placeholder-fill
-/// lowering (`convert::encode_scene_with_shaders`'s miss path) with zero
+/// lowering (`convert::encode_range_with_overrides`'s miss path) with zero
 /// pre-pass GPU work. Same compile-time-or-runtime parsing as
 /// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
 /// Instrumentation table). Cached: read once per process.
@@ -147,12 +147,15 @@ pub(crate) fn shader_effects_disabled() -> bool {
 /// force-disabled via the process-wide `FRUST_NO_SNAPSHOT_LAYERS` flag — the
 /// same unproven-render-path safety valve shape as
 /// [`shader_effects_disabled`]: the snapshot pre-pass drives real GPU work (an
-/// offscreen texture per cached subtree, a vello image-override registration,
-/// and an extra `render_to_texture` whenever a body changes), so this flag is
-/// the fallback-proof escape hatch that reverts every `Command::PushSnapshot`
-/// to the inline emulation the encode walk performed before the cache existed
-/// (`convert::encode_into_with_overrides`'s miss path), with zero pre-pass GPU
-/// work. Same compile-time-or-runtime parsing as
+/// offscreen texture per cached subtree, an extra `render_to_texture` whenever
+/// a body changes, and — through [`crate::compositor`] — a quad pass and a
+/// possible second vello pass per composited frame), so this flag is the
+/// fallback-proof escape hatch that reverts every `Command::PushSnapshot` to
+/// the inline emulation the encode walk performed before the cache existed
+/// (`convert::encode_range_with_overrides`'s miss path), with zero pre-pass
+/// GPU work: a disabled cache yields an empty frame plan, so the compositor
+/// pass never runs and each arm is byte-identical to its pre-cache self. Same
+/// compile-time-or-runtime parsing as
 /// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
 /// Instrumentation table). Cached: read once per process.
 pub(crate) fn snapshot_layers_disabled() -> bool {
@@ -917,12 +920,19 @@ fn create_targets(
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     // The GPU tier renders into this via a storage binding, then blits it to
-    // the swapchain. The CPU tier (`cpu-tier` feature) instead uploads its
+    // the swapchain. `RENDER_ATTACHMENT` is the snapshot compositor's
+    // (`crate::compositor`) write path: on the blit and direct-premultiplied
+    // arms this intermediate is the colour attachment its quad pass loads and
+    // draws onto, between vello and the blit/premultiply tail. `Rgba8Unorm` is
+    // renderable on every wgpu backend, so the combined usage is universally
+    // available. The CPU tier (`cpu-tier` feature) instead uploads its
     // rasterized pixmap into it with `write_texture`, which needs `COPY_DST` —
     // added only under the feature so default GPU-only builds keep the exact
     // usage set they had before.
     #[allow(unused_mut)]
-    let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+    let mut usage = wgpu::TextureUsages::STORAGE_BINDING
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::RENDER_ATTACHMENT;
     #[cfg(feature = "cpu-tier")]
     {
         usage |= wgpu::TextureUsages::COPY_DST;
