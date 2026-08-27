@@ -113,7 +113,7 @@ pub(crate) type SnapshotImages = HashMap<u64, SnapshotImage>;
 /// drive their own `vello::Renderer`: with no per-frame shader-override map,
 /// every `Command::ShaderQuad` lowers to its miss placeholder (a CPU-tier /
 /// no-prepass caller has no compiled shader targets anyway). The in-crate
-/// render path calls [`encode_scene_with_shaders`] instead.
+/// render path calls [`encode_into_with_overrides`] instead.
 pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
     encode_into(scene, target);
 }
@@ -125,6 +125,11 @@ pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
 /// ([`crate::renderer::SurfaceRenderer::encode`]) builds the map in its shader
 /// pre-pass and calls this, passing the same `adapter_max` the pre-pass used so
 /// the per-quad key recomputed here matches the one the entry was stored under.
+// The in-crate render path now goes through `encode_into_with_overrides` (it
+// carries a snapshot-image map as well), leaving this shader-only `vello::Scene`
+// wrapper without an in-crate caller — kept, and marked, as the shader-map
+// counterpart of `encode_scene`.
+#[allow(dead_code)]
 pub(crate) fn encode_scene_with_shaders(
     scene: &Scene,
     target: &mut vello::Scene,

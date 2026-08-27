@@ -37,6 +37,7 @@ use crate::lifecycle::{
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
 use crate::shader_effects::{ShaderEffects, clamp_size};
+use crate::snapshot::SnapshotCache;
 
 /// Caller-requested alpha-compositing behavior for a surface configuration —
 /// the `frust-render` public seam a shell picks
@@ -116,7 +117,17 @@ enum TierBackend {
     /// vello 0.9 GPU compute path: `render_to_texture` into the target view.
     /// Reused across frames; its compiled shader pipelines survive resizes
     /// (which recreate only the swapchain/target).
-    Gpu(vello::Renderer),
+    Gpu {
+        renderer: vello::Renderer,
+        /// Cached rasterizations of `Command::PushSnapshot` bodies, driven by
+        /// the snapshot pre-pass in [`SurfaceRenderer::encode`]. It lives in
+        /// this variant rather than beside it in [`ReadySurface`] so the
+        /// "GPU tier only" rule is structural: the `cpu-tier` path cannot
+        /// name a cache, let alone build one. Its textures are registered
+        /// with — and surrendered back to — the `renderer` next to it, which
+        /// is why the two share a variant.
+        snapshots: SnapshotCache,
+    },
     /// Experimental vello_cpu path (`cpu-tier` feature): rasterize headless
     /// into a pixmap, then upload it into the target texture. Boxed because it
     /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
@@ -522,7 +533,14 @@ impl SurfaceRenderer {
                 };
                 let renderer = vello::Renderer::new(device, renderer_options)
                     .map_err(|e| anyhow!("frust-render: failed to create vello renderer: {e}"))?;
-                TierBackend::Gpu(renderer)
+                TierBackend::Gpu {
+                    renderer,
+                    // `FRUST_NO_SNAPSHOT_LAYERS` is resolved once here, per
+                    // surface, and held by the cache itself — so the pre-pass
+                    // never re-reads a process-global on the hot path and a
+                    // test can build either state directly.
+                    snapshots: SnapshotCache::new(!crate::context::snapshot_layers_disabled()),
+                }
             }
             #[cfg(feature = "cpu-tier")]
             crate::RenderTier::Cpu => TierBackend::Cpu(Box::new(
@@ -599,6 +617,21 @@ impl SurfaceRenderer {
             SurfacePhase::NoSurface,
             "Destroyed must reach NoSurface"
         );
+        // Hand the snapshot cache's textures back to the vello renderer that
+        // minted their override handles, while that renderer is still alive:
+        // both die on the next line, so this buys a deterministic order rather
+        // than fixing a leak. Idempotent — a cleared cache clears again to
+        // nothing, which is what the repeated-`Destroyed` contract needs.
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            match &mut ready.backend {
+                TierBackend::Gpu {
+                    renderer,
+                    snapshots,
+                } => snapshots.clear(renderer),
+                #[cfg(feature = "cpu-tier")]
+                TierBackend::Cpu(_) => {}
+            }
+        }
         self.state = SurfaceState::NoSurface;
     }
 
@@ -685,7 +718,10 @@ impl SurfaceRenderer {
 
         // Encode this frame's pixels, per tier and per render path.
         match &mut ready.backend {
-            TierBackend::Gpu(renderer) => {
+            TierBackend::Gpu {
+                renderer,
+                snapshots,
+            } => {
                 // Shader pre-pass (shader-showcase): compile/render each
                 // `Command::ShaderQuad` program into an offscreen texture and
                 // register it as a vello image override, producing the
@@ -719,6 +755,36 @@ impl SurfaceRenderer {
                     adapter_max,
                     crate::context::shader_effects_disabled(),
                 );
+                // Snapshot pre-pass (snapshot layers): rasterize each
+                // outermost `Command::PushSnapshot` body whose content or size
+                // changed into its own cached texture, registered as a vello
+                // image override, and collect the `key` -> image map the
+                // encode walk lowers each bracket against — one image quad in
+                // place of the body's whole command list, with the bracket's
+                // `alpha`/`scale` still applied per frame.
+                //
+                // Runs on EVERY render path (Direct, DirectPremultiplied,
+                // Blit) and before the main encode, for the same reason the
+                // shader pre-pass does: its `render_to_texture` calls submit
+                // their own work, and wgpu serializes queue submissions, so
+                // this frame's main render sees complete textures. An
+                // unchanged bracket performs no GPU work at all here, which is
+                // what keeps vello's image-atlas generation churn (every
+                // resolve ages the atlas; two generations evict) to the single
+                // main-scene resolve the frame already paid for.
+                //
+                // `FRUST_NO_SNAPSHOT_LAYERS` (resolved into the cache at
+                // surface install, `docs/DEVELOPMENT.md`'s Instrumentation
+                // table) makes this a zero-GPU-work no-op returning an empty
+                // map — every bracket then falls through to the inline
+                // emulation `convert` performed before the cache existed.
+                let snapshot_images = snapshots.prepare(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    renderer,
+                    scene,
+                    adapter_max,
+                );
                 match &ready.surface.path {
                     // Direct-to-surface: the vello render targets the
                     // acquired swapchain texture, which does not exist until
@@ -727,11 +793,12 @@ impl SurfaceRenderer {
                     // span-mapping comment for how this remaps the v3 spans.
                     RenderPath::Direct => {
                         vello_scene.reset();
-                        convert::encode_scene_with_shaders(
+                        convert::encode_into_with_overrides(
                             scene,
                             vello_scene,
                             &shader_images,
                             adapter_max,
+                            &snapshot_images,
                         );
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
@@ -745,11 +812,12 @@ impl SurfaceRenderer {
                         intermediate_view, ..
                     } => {
                         vello_scene.reset();
-                        convert::encode_scene_with_shaders(
+                        convert::encode_into_with_overrides(
                             scene,
                             vello_scene,
                             &shader_images,
                             adapter_max,
+                            &snapshot_images,
                         );
                         let params = vello::RenderParams {
                             base_color,
@@ -774,11 +842,12 @@ impl SurfaceRenderer {
                     // the swapchain.
                     RenderPath::Blit { target_view, .. } => {
                         vello_scene.reset();
-                        convert::encode_scene_with_shaders(
+                        convert::encode_into_with_overrides(
                             scene,
                             vello_scene,
                             &shader_images,
                             adapter_max,
+                            &snapshot_images,
                         );
                         let params = vello::RenderParams {
                             base_color,
@@ -1067,7 +1136,7 @@ impl SurfaceRenderer {
             // Direct-to-surface: render vello straight into the acquired swapchain
             // texture, then present. No intermediate, no blit pass.
             RenderPath::Direct => match backend {
-                TierBackend::Gpu(renderer) => {
+                TierBackend::Gpu { renderer, .. } => {
                     let params = vello::RenderParams {
                         // Set in `encode`; a well-formed frame always encoded first.
                         base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),

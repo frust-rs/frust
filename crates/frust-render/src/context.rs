@@ -143,6 +143,28 @@ pub(crate) fn shader_effects_disabled() -> bool {
     })
 }
 
+/// Whether the snapshot-layer cache (`crate::snapshot::SnapshotCache`) is
+/// force-disabled via the process-wide `FRUST_NO_SNAPSHOT_LAYERS` flag — the
+/// same unproven-render-path safety valve shape as
+/// [`shader_effects_disabled`]: the snapshot pre-pass drives real GPU work (an
+/// offscreen texture per cached subtree, a vello image-override registration,
+/// and an extra `render_to_texture` whenever a body changes), so this flag is
+/// the fallback-proof escape hatch that reverts every `Command::PushSnapshot`
+/// to the inline emulation the encode walk performed before the cache existed
+/// (`convert::encode_into_with_overrides`'s miss path), with zero pre-pass GPU
+/// work. Same compile-time-or-runtime parsing as
+/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
+/// Instrumentation table). Cached: read once per process.
+pub(crate) fn snapshot_layers_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_NO_SNAPSHOT_LAYERS"),
+            std::env::var("FRUST_NO_SNAPSHOT_LAYERS").ok(),
+        )
+    })
+}
+
 /// The two direct-to-surface capability bits, read once from a surface's
 /// [`wgpu::SurfaceCapabilities`]. Shared by the capability probe log and the
 /// [`choose_render_path`] decision so the query is not duplicated.

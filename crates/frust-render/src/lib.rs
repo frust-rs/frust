@@ -23,6 +23,12 @@
 //! `Pixmap` is uploaded into the same intermediate target the GPU path blits
 //! from (see the `cpu_tier` module).
 //!
+//! Two Gpu-tier pre-passes run inside `encode` before the main scene is built,
+//! each rendering into its own offscreen texture registered with vello as an
+//! image override: the fragment-shader pre-pass (`shader_effects`) and the
+//! snapshot-layer cache (`snapshot`), which rasterizes a stable subtree once
+//! and re-draws it as a single image while its `alpha`/`scale` animate.
+//!
 //! Surface lifecycle is a first-class state machine: see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
@@ -38,6 +44,12 @@ mod renderer;
 // which compiles/renders each `Command::ShaderQuad` program into an offscreen
 // texture and registers it as a vello image override before vello encoding.
 mod shader_effects;
+// Cached rasterizations of `Command::PushSnapshot` bodies. Crate-private;
+// wired into `SurfaceRenderer::encode`'s Gpu-tier snapshot pre-pass, which
+// rasterizes each outermost bracket's body into its own texture and registers
+// it as a vello image override so the encode walk lowers the whole body to one
+// image quad.
+mod snapshot;
 mod tier;
 
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};

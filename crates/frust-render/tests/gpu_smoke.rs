@@ -14,7 +14,7 @@
 use frust_render::encode_scene;
 use frust_scene::{Scene, SceneBuilder};
 use peniko::Brush;
-use peniko::color::palette::css::{BLACK, RED};
+use peniko::color::palette::css::{BLACK, GREEN, RED, TRANSPARENT};
 
 const SIZE: u32 = 64; // 64 * 4 bytes = 256, the wgpu row-copy alignment — no padding math needed.
 
@@ -537,4 +537,331 @@ async fn run_clear_probe() {
             px(x)
         );
     }
+}
+
+/// The snapshot-layer round trip, pixel for pixel: a bracket rasterized into
+/// its own texture, registered as a vello image override and composited back
+/// as one image quad must land the same pixels as the same bracket painted
+/// inline — which is what the encode walk does when there is no cached image.
+///
+/// This is the test that pins the alpha decision. vello renders STRAIGHT
+/// (un-premultiplied) alpha into a target texture, and `register_texture`
+/// declares the override `ImageAlphaType::Alpha`, so vello premultiplies each
+/// sampled texel itself at composite time: the snapshot texture is registered
+/// exactly as rendered, with no premultiply pass in between. Running one would
+/// premultiply twice — the body's half-alpha green band would composite at
+/// roughly half its correct intensity, tens of levels off, on interior pixels
+/// this test compares strictly. It equally pins the image mapping: the cached
+/// texture's pixel grid must cover the bracket's local `rect` exactly, or the
+/// two arms disagree everywhere rather than at edges.
+///
+/// The comparison is strict on every pixel. The inline arm rasterizes vector
+/// edges at the composited scale while the cached arm resamples a texture
+/// rasterized at the bracket's own device scale, which in general leaves a
+/// one-pixel seam at content edges; the geometry below removes that variable
+/// deliberately, keeping every content edge on a whole device pixel in both
+/// arms (measured: the two agree exactly, delta 0, on Metal). A tolerance is
+/// kept only for 8-bit rounding — widening it to accommodate a seam would let
+/// a mis-scaled or misplaced image pass, since a placement error shows up at
+/// edges first.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn snapshot_layer_round_trips_through_atlas() {
+    pollster::block_on(run_snapshot());
+}
+
+/// Per-pixel tolerance for everything but the antialiasing seam: the two arms
+/// must agree to within a rounding step.
+const SNAPSHOT_TOLERANCE: u8 = 3;
+
+async fn run_snapshot() {
+    // The bracket: a 20x20 body in local space, recorded under a 2x device
+    // scale offset by (4, 6), composited at 75% opacity and 90% scale. Every
+    // body coordinate is a multiple of 5, which — with this transform — puts
+    // every inline edge on a whole device pixel (device = 6 + 1.8 * local in x,
+    // 8 + 1.8 * local in y), so the comparison is not measuring rasterizer
+    // subpixel coverage.
+    const KEY: u64 = 1;
+    const ALPHA: f32 = 0.75;
+    const SCALE: f64 = 0.9;
+    let bracket = kurbo::Affine::translate((4.0, 6.0)) * kurbo::Affine::scale(2.0);
+    let rect = kurbo::Rect::new(0.0, 0.0, 20.0, 20.0);
+
+    // The body: an opaque red block, a half-alpha green band over NOTHING (so
+    // the rasterized texture really carries partial alpha — the double
+    // premultiply this test rules out is invisible where alpha is 1), and a
+    // black bar with transparent margins standing in for a line of text.
+    let body = |builder: &mut SceneBuilder| {
+        builder.fill_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 10.0, 20.0, 15.0),
+            Brush::Solid(GREEN.with_alpha(0.5)),
+        );
+        builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
+    };
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("no compatible GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("frust gpu_smoke snapshot"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })
+        .await
+        .expect("failed to create device");
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+        .expect("failed to create vello renderer");
+
+    // --- the cached arm's pre-pass -----------------------------------------
+    // Texture size and rasterization root, derived exactly as the cache does:
+    // `raster` is the bracket transform's linear part (translation zeroed), the
+    // size is `rect` under `raster` rounded outward, and the root maps `rect`'s
+    // local origin to texture (0, 0) with `rect` spread over the whole grid.
+    let raster = {
+        let c = bracket.as_coeffs();
+        kurbo::Affine::new([c[0], c[1], c[2], c[3], 0.0, 0.0])
+    };
+    let bbox = raster.transform_rect_bbox(rect);
+    let (tex_w, tex_h) = (bbox.width().ceil() as u32, bbox.height().ceil() as u32);
+    assert_eq!(
+        (tex_w, tex_h),
+        (40, 40),
+        "2x device scale over a 20x20 body"
+    );
+    let root = kurbo::Affine::scale_non_uniform(
+        f64::from(tex_w) / rect.width(),
+        f64::from(tex_h) / rect.height(),
+    ) * kurbo::Affine::translate((-rect.x0, -rect.y0))
+        * bracket.inverse();
+
+    // Rasterize the body under `root`, over transparency. The body's commands
+    // carry the bracket's own transform, so the scene is recorded under
+    // `root * bracket` — what the cache's command-slice encode produces.
+    let mut body_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut body_scene);
+        builder.push_transform(root * bracket);
+        body(&mut builder);
+        builder.pop_transform();
+    }
+    let mut vello_scene = vello::Scene::new();
+    encode_scene(&body_scene, &mut vello_scene);
+    let snapshot_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust gpu_smoke snapshot layer"),
+        size: wgpu::Extent3d {
+            width: tex_w,
+            height: tex_h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let snapshot_view = snapshot_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            &device,
+            &queue,
+            &vello_scene,
+            &snapshot_view,
+            &vello::RenderParams {
+                base_color: TRANSPARENT,
+                width: tex_w,
+                height: tex_h,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("snapshot rasterization failed");
+    // Registered as-is: no premultiply pass between vello's straight-alpha
+    // output and the override vello premultiplies per texel at composite.
+    let image = renderer.register_texture(snapshot_tex);
+    renderer.mark_override_image_dirty(&image);
+
+    // --- the two arms ------------------------------------------------------
+    // Cached: one image quad under the bracket's alpha layer and presentation
+    // scale — the shape the encode walk's hit path emits.
+    let mut cached_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut cached_scene);
+        builder.push_transform(bracket);
+        builder.push_layer(rect, ALPHA);
+        builder.push_transform(kurbo::Affine::scale_about(SCALE, rect.center()));
+        builder.draw_image(&image, rect);
+        builder.pop_transform();
+        builder.pop_layer();
+        builder.pop_transform();
+    }
+    // Inline: the bracket itself, which without a snapshot-image map lowers to
+    // the encode walk's inline emulation.
+    let mut inline_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut inline_scene);
+        builder.push_transform(bracket);
+        builder.push_snapshot(KEY, rect, ALPHA, SCALE);
+        body(&mut builder);
+        builder.pop_snapshot();
+        builder.pop_transform();
+    }
+
+    let cached = render_and_read(&device, &queue, &mut renderer, &cached_scene).await;
+    let inline = render_and_read(&device, &queue, &mut renderer, &inline_scene).await;
+
+    // --- comparison --------------------------------------------------------
+    // Every pixel, no exclusions: the geometry above puts every content edge
+    // on a whole device pixel in BOTH arms, so there is no antialiasing seam
+    // to forgive. A disagreement anywhere means the cached texture is
+    // misplaced, mis-scaled, or composited with the wrong alpha type.
+    let channel = |data: &[u8], x: u32, y: u32, c: usize| data[((y * SIZE + x) * 4) as usize + c];
+    let pixel =
+        |data: &[u8], x: u32, y: u32| (0..4).map(|c| channel(data, x, y, c)).collect::<Vec<_>>();
+
+    let (mut worst, mut worst_at) = (0u8, (0, 0));
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let delta = (0..4)
+                .map(|c| channel(&inline, x, y, c).abs_diff(channel(&cached, x, y, c)))
+                .max()
+                .unwrap_or(0);
+            if delta > worst {
+                worst = delta;
+                worst_at = (x, y);
+            }
+        }
+    }
+    println!("snapshot round trip: max per-pixel delta {worst} at {worst_at:?}");
+    assert!(
+        worst <= SNAPSHOT_TOLERANCE,
+        "cached and inline arms disagree by {worst} at {worst_at:?} (tolerance \
+         {SNAPSHOT_TOLERANCE}): the alpha handling or the image mapping is wrong. \
+         inline={:?} cached={:?}",
+        pixel(&inline, worst_at.0, worst_at.1),
+        pixel(&cached, worst_at.0, worst_at.1),
+    );
+
+    // Absolute checks, so a change that broke BOTH arms identically still
+    // fails. Device coordinates follow the mapping noted above; the expected
+    // values are the composite arithmetic, not observations:
+    //  - the opaque red block composites at the bracket's 0.75 -> 191,
+    //  - the half-alpha green band (CSS green is 0x008000) composites at
+    //    128 * 0.5 * 0.75 -> 48, which is the number a texture premultiplied
+    //    a second time before compositing would halve again.
+    for (label, data) in [("inline", &inline), ("cached", &cached)] {
+        let red = pixel(data, 24, 12);
+        let green = pixel(data, 24, 30);
+        assert!(
+            red[0].abs_diff(191) <= SNAPSHOT_TOLERANCE,
+            "{label} arm must composite the opaque body block at the bracket's alpha, got {red:?}"
+        );
+        assert!(
+            green[1].abs_diff(48) <= SNAPSHOT_TOLERANCE,
+            "{label} arm must composite the body's half-alpha band at 128 * 0.5 * 0.75, \
+             got {green:?} (a doubly premultiplied snapshot texture halves this)"
+        );
+    }
+
+    let scope_err = error_scope.pop().await;
+    assert!(
+        scope_err.is_none(),
+        "snapshot pre-pass produced an uncaptured validation error: {scope_err:?}"
+    );
+}
+
+/// Render `scene` into a fresh `SIZE`-square vello target over an opaque black
+/// base and read the pixels back.
+async fn render_and_read(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    scene: &Scene,
+) -> Vec<u8> {
+    let mut vello_scene = vello::Scene::new();
+    encode_scene(scene, &mut vello_scene);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust gpu_smoke snapshot target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            device,
+            queue,
+            &vello_scene,
+            &view,
+            &vello::RenderParams {
+                base_color: BLACK,
+                width: SIZE,
+                height: SIZE,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("render_to_texture failed");
+
+    let bytes_per_row = SIZE * 4;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frust gpu_smoke snapshot readback"),
+        size: u64::from(bytes_per_row * SIZE),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    rx.recv()
+        .expect("map channel closed")
+        .expect("buffer map failed");
+    slice.get_mapped_range().to_vec()
 }
