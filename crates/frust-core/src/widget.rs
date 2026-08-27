@@ -309,6 +309,35 @@ pub trait PaintScene {
     /// Pop the most recently pushed transform, restoring the previous one.
     /// Defaulted to a no-op; see [`PaintScene::push_transform`].
     fn pop_transform(&mut self) {}
+
+    /// Push a snapshot bracket: the body is rasterizable once and cached by
+    /// `key` across frames. The `alpha` and `scale` are presentation parameters
+    /// applied to the whole cached body (alpha blending, uniform scale).
+    ///
+    /// The default implementation emulates the presentation for recorders
+    /// that don't have a snapshot concept: it pushes a transform (scale about
+    /// the rect's center), then a layer (at the rect with the given alpha).
+    /// A renderer may cache and apply both as a whole; a recorder sees the
+    /// component pieces. The matching [`PaintScene::pop_snapshot`] pops both
+    /// in the reverse order.
+    ///
+    /// [`SceneBuilder`] overrides this to call the snapshot-aware builder
+    /// methods directly, which record `Command::PushSnapshot`/`PopSnapshot`
+    /// and no extra transform/layer commands.
+    fn push_snapshot(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+        self.push_transform(Affine::scale_about(scale, center));
+        self.push_layer(origin, size, alpha);
+    }
+
+    /// Pop the most recently pushed snapshot bracket. Defaulted to the reverse
+    /// of [`PaintScene::push_snapshot`]'s default: pop layer, then transform.
+    /// Recorders that don't override both may see unbalanced stacks if only one
+    /// is overridden; the default pair is provided for source compatibility.
+    fn pop_snapshot(&mut self) {
+        self.pop_layer();
+        self.pop_transform();
+    }
 }
 
 /// A [`PaintScene`] sink that accepts every paint command and records
@@ -460,6 +489,14 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn pop_transform(&mut self) {
         SceneBuilder::pop_transform(self);
+    }
+
+    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::push_snapshot(self, key, rect_at(origin, size), alpha, scale);
+    }
+
+    fn pop_snapshot(&mut self) {
+        SceneBuilder::pop_snapshot(self);
     }
 }
 
@@ -4265,5 +4302,112 @@ mod tests {
         scene.stroke_path_dashed(origin, &path, 1.0, DashPattern::new(4.0, 2.0), &brush);
         scene.push_transform(Affine::translate((1.0, 2.0)));
         scene.pop_transform();
+    }
+
+    /// A minimal recorder that tracks only transform and layer stack operations
+    /// to verify the default [`PaintScene::push_snapshot`]/[`PaintScene::pop_snapshot`]
+    /// implementation emulates the presentation correctly.
+    #[derive(Default)]
+    struct MinimalSnapshotRecorder {
+        operations: Vec<String>,
+    }
+
+    impl PaintScene for MinimalSnapshotRecorder {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_transform(&mut self, _transform: Affine) {
+            self.operations.push("push_transform".to_string());
+        }
+        fn pop_transform(&mut self) {
+            self.operations.push("pop_transform".to_string());
+        }
+        fn push_layer(&mut self, _origin: Point, _size: Size, _alpha: f32) {
+            self.operations.push("push_layer".to_string());
+        }
+        fn pop_layer(&mut self) {
+            self.operations.push("pop_layer".to_string());
+        }
+    }
+
+    #[test]
+    fn default_push_snapshot_pop_snapshot_emulates_presentation_for_recorders() {
+        // The default `push_snapshot` and `pop_snapshot` implementation
+        // ensures recorders that override only the transform/layer methods
+        // see a consistent sequence: push_transform, push_layer, paint body,
+        // pop_layer, pop_transform — the reverse order matching the push ops.
+        let mut recorder = MinimalSnapshotRecorder::default();
+        let origin = Point::new(10.0, 20.0);
+        let size = Size::new(100.0, 50.0);
+        let alpha = 0.8;
+        let scale = 0.9;
+
+        // Emulate a body that doesn't call any paint methods (just has side effects).
+        recorder.push_snapshot(1, origin, size, alpha, scale);
+        // Body paint code would go here
+        recorder.pop_snapshot();
+
+        // Verify the sequence: transform, layer, pop_layer, pop_transform.
+        assert_eq!(
+            recorder.operations,
+            vec![
+                "push_transform".to_string(),
+                "push_layer".to_string(),
+                "pop_layer".to_string(),
+                "pop_transform".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn scene_builder_records_push_pop_snapshot_commands_directly_without_extra_transforms() {
+        // The `SceneBuilder` impl overrides `push_snapshot`/`pop_snapshot` to
+        // record the snapshot commands directly, without the emulating
+        // transform/layer pairs. It records Command::PushSnapshot with the
+        // key, rect (converted from origin/size), alpha, scale, and the current
+        // transform, and Command::PopSnapshot with no extra layer/transform commands.
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+
+            paint.push_snapshot(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
+            // Paint some content inside the snapshot.
+            paint.fill_rect(Point::new(10.0, 15.0), Size::new(20.0, 25.0), Color::BLACK);
+            paint.pop_snapshot();
+        }
+
+        // Verify the command sequence: PushSnapshot, FillRect, PopSnapshot.
+        // No PushLayer, PopLayer, PushTransform, or PopTransform commands.
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 3);
+
+        match &commands[0] {
+            frust_scene::Command::PushSnapshot {
+                key,
+                rect,
+                alpha,
+                scale,
+                ..
+            } => {
+                assert_eq!(*key, 7);
+                assert_eq!(*rect, Rect::new(5.0, 10.0, 85.0, 50.0));
+                assert_eq!(*alpha, 0.5);
+                assert_eq!(*scale, 1.2);
+            }
+            other => panic!("expected PushSnapshot, got {other:?}"),
+        }
+
+        match &commands[1] {
+            frust_scene::Command::FillRect { rect, .. } => {
+                assert_eq!(*rect, Rect::new(10.0, 15.0, 30.0, 40.0));
+            }
+            other => panic!("expected FillRect, got {other:?}"),
+        }
+
+        assert!(
+            matches!(commands[2], frust_scene::Command::PopSnapshot),
+            "expected PopSnapshot, got {:?}",
+            commands[2]
+        );
     }
 }
