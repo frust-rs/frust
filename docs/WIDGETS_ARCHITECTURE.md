@@ -93,8 +93,9 @@ build from.
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
   - **Alpha-zero paint redirect:** `resolve_layers`'s split-crossfade presets — `M3SharedAxisX`
     (split 0.35), `M3FadeThrough` (0.30), `Glyph` (0.44) — are hard, non-overlapping splits: before
-    the split only the leaving page ramps 1→0, after it only the entering page ramps 0→1, so exactly
-    one page is visible at any instant — never assume a dual-visible crossfade window. `IosPush`
+    the split only the leaving page ramps 1→0, after it only the entering page ramps 0→1, so
+    at most one page is visible at any instant (at the exact split instant both resolve to
+    alpha 0) — never assume a dual-visible crossfade window. `IosPush`
     keeps both pages visible instead (parallax + dim, never reaching 0); `ReducedCrossfade` is a
     genuine crossfade, both visible except at its `p=0`/`p=1` boundary instants. When a page's
     resolved `Layer::alpha` is `0`, `paint_page_layer` (mirrored by `motion::switcher`'s
