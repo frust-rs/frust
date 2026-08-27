@@ -41,6 +41,17 @@
 //! full `M`) is what the size derives from and what the fingerprint mixes in:
 //! a bracket that merely slides keeps both, and keeps its texture.
 //!
+//! The fingerprint's own frame follows the same origin as `root`:
+//! [`body_fingerprint`] hashes the body relative to `base = M *
+//! Affine::translate(rect.origin)`, i.e. `rect`'s own top-left corner in `M`'s
+//! space — the same point `root` maps onto texture pixel `(0, 0)`. A body
+//! whose absolute geometry slides frame-to-frame (a widget's origin baked
+//! directly into its paint commands rather than into `M`; see
+//! `frust_scene::fingerprint`'s module docs) therefore fingerprints equal to
+//! its unslid self once the bracket's own `rect` slides by the same amount —
+//! exactly what happens when the widget that owns the bracket is itself the
+//! thing sliding.
+//!
 //! ## Alpha
 //!
 //! vello renders STRAIGHT (un-premultiplied) alpha into a target texture — its
@@ -237,12 +248,20 @@ fn raster_root(transform: Affine, rect: Rect, width: u32, height: u32) -> Option
 
 /// An entry is only valid for pixels rasterized at the same size, under the
 /// same device scale, from the same content — all three folded into this one
-/// hash. The content half is hashed RELATIVE to the bracket's own transform
-/// (`Scene::fingerprint_range`), which is what keeps a body that merely
-/// slides/fades/scales as a whole on the same fingerprint.
+/// hash. The content half is hashed relative to `base = transform *
+/// Affine::translate(rect.origin)` (`Scene::fingerprint_range`) — `rect`'s own
+/// top-left corner in the bracket's space, the same origin [`raster_root`]
+/// maps onto texture pixel `(0, 0)` — rather than relative to `transform`
+/// alone. That is what keeps a body that merely slides/fades/scales as a
+/// whole on the same fingerprint (the bracket's own transform sliding, `rect`
+/// unchanged), AND what keeps a body whose absolute geometry slides instead
+/// (a widget's origin baked directly into its paint commands, `transform`
+/// unchanged) on the same fingerprint once the bracket's own `rect` slides
+/// with it — see the module docs and `frust_scene::fingerprint`'s.
 fn body_fingerprint(
     scene: &Scene,
     body: Range<usize>,
+    rect: Rect,
     transform: Affine,
     width: u32,
     height: u32,
@@ -254,7 +273,8 @@ fn body_fingerprint(
     for coefficient in raster.as_coeffs() {
         ((coefficient * RASTER_QUANT).round() as i64).hash(&mut hasher);
     }
-    scene.fingerprint_range(body, transform) ^ hasher.finish()
+    let base = transform * Affine::translate((rect.x0, rect.y0));
+    scene.fingerprint_range(body, base) ^ hasher.finish()
 }
 
 /// The reuse decision: a cached entry is re-used only when its size AND
@@ -440,6 +460,7 @@ impl SnapshotCache {
             let fingerprint = body_fingerprint(
                 scene,
                 bracket.body.clone(),
+                bracket.rect,
                 bracket.transform,
                 width,
                 height,
@@ -796,8 +817,66 @@ mod tests {
         let a = bracket_scene(still, rect, body, Brush::Solid(RED));
         let b = bracket_scene(slid, rect, body, Brush::Solid(RED));
         assert_eq!(
-            body_fingerprint(&a, 1..2, still, 40, 20, raster_transform(still)),
-            body_fingerprint(&b, 1..2, slid, 40, 20, raster_transform(slid))
+            body_fingerprint(&a, 1..2, rect, still, 40, 20, raster_transform(still)),
+            body_fingerprint(&b, 1..2, rect, slid, 40, 20, raster_transform(slid))
+        );
+    }
+
+    /// The new mechanism this card adds: a body whose ABSOLUTE geometry
+    /// slides by `(dx, dy)` — identity bracket transform throughout, the
+    /// slide baked directly into the body's own paint commands the way a
+    /// widget's origin gets baked in — fingerprints EQUAL to its unslid self
+    /// once the bracket's own `rect` slides by the same `(dx, dy)` (the
+    /// widget that owns the bracket is the thing sliding, so its own
+    /// `PushSnapshot` rect moves with it). `raster_root` also maps both
+    /// bodies onto the identical texture-pixel frame, confirming the two
+    /// scenes really do describe the same rasterized pixels.
+    #[test]
+    fn body_fingerprint_survives_an_absolute_coordinate_slide() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let transform = Affine::IDENTITY;
+        let (dx, dy) = (37.0, -12.0);
+        let shift = |r: Rect| Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy);
+        let shifted_rect = shift(rect);
+        let shifted_body = shift(body);
+
+        let a = bracket_scene(transform, rect, body, Brush::Solid(RED));
+        let b = bracket_scene(transform, shifted_rect, shifted_body, Brush::Solid(RED));
+
+        let raster = raster_transform(transform);
+        assert_eq!(
+            body_fingerprint(&a, 1..2, rect, transform, 40, 20, raster),
+            body_fingerprint(&b, 1..2, shifted_rect, transform, 40, 20, raster),
+        );
+
+        let root_a = raster_root(transform, rect, 40, 20).expect("invertible");
+        let root_b = raster_root(transform, shifted_rect, 40, 20).expect("invertible");
+        let corner_a = root_a * Point::new(body.x0, body.y0);
+        let corner_b = root_b * Point::new(shifted_body.x0, shifted_body.y0);
+        assert!(
+            (corner_a.x - corner_b.x).abs() < 1e-9 && (corner_a.y - corner_b.y).abs() < 1e-9,
+            "{corner_a:?} vs {corner_b:?}"
+        );
+    }
+
+    #[test]
+    fn body_fingerprint_changes_when_only_the_bracket_rect_shifts() {
+        // The body's own geometry stays put while the bracket's `rect`
+        // moves — an ordinary content change (or a bracket resize), not a
+        // whole-bracket slide, so the fingerprint must differ.
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let transform = Affine::IDENTITY;
+        let shifted_rect = Rect::new(10.0, 0.0, 30.0, 10.0);
+
+        let a = bracket_scene(transform, rect, body, Brush::Solid(RED));
+        let b = bracket_scene(transform, shifted_rect, body, Brush::Solid(RED));
+
+        let raster = raster_transform(transform);
+        assert_ne!(
+            body_fingerprint(&a, 1..2, rect, transform, 40, 20, raster),
+            body_fingerprint(&b, 1..2, shifted_rect, transform, 40, 20, raster),
         );
     }
 
@@ -824,14 +903,14 @@ mod tests {
             Rect::new(3.0, 2.0, 9.0, 8.0),
             Brush::Solid(RED),
         );
-        let base = body_fingerprint(&a, 1..2, transform, 40, 20, raster);
+        let base = body_fingerprint(&a, 1..2, rect, transform, 40, 20, raster);
         assert_ne!(
             base,
-            body_fingerprint(&recolored, 1..2, transform, 40, 20, raster)
+            body_fingerprint(&recolored, 1..2, rect, transform, 40, 20, raster)
         );
         assert_ne!(
             base,
-            body_fingerprint(&moved, 1..2, transform, 40, 20, raster)
+            body_fingerprint(&moved, 1..2, rect, transform, 40, 20, raster)
         );
     }
 
@@ -841,16 +920,33 @@ mod tests {
         let body = Rect::new(2.0, 2.0, 8.0, 8.0);
         let transform = Affine::scale(2.0);
         let scene = bracket_scene(transform, rect, body, Brush::Solid(RED));
-        let base = body_fingerprint(&scene, 1..2, transform, 40, 20, raster_transform(transform));
-        assert_ne!(
-            base,
-            body_fingerprint(&scene, 1..2, transform, 41, 20, raster_transform(transform))
+        let base = body_fingerprint(
+            &scene,
+            1..2,
+            rect,
+            transform,
+            40,
+            20,
+            raster_transform(transform),
         );
         assert_ne!(
             base,
             body_fingerprint(
                 &scene,
                 1..2,
+                rect,
+                transform,
+                41,
+                20,
+                raster_transform(transform)
+            )
+        );
+        assert_ne!(
+            base,
+            body_fingerprint(
+                &scene,
+                1..2,
+                rect,
                 transform,
                 40,
                 20,

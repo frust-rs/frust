@@ -3,17 +3,44 @@
 //! recorded body against to decide whether a cached rasterization is still
 //! valid.
 //!
-//! Every field that reaches pixels is folded in: geometry, brushes/gradients,
-//! radii, dash patterns, stroke widths, glyph runs, image/shader identity.
-//! Each [`kurbo::Affine`] is hashed **relative to `base`**
-//! (`base.inverse() * transform`) rather than absolutely, so a body that
-//! merely slides, scales, or fades as a whole (its own transform moving, but
-//! nothing inside it changing) keeps the same fingerprint — the load-bearing
-//! property a snapshot cache needs to survive an ordinary animation. Every
-//! coefficient/coordinate is quantized before hashing (see
-//! [`FINGERPRINT_QUANT`]) so float noise from the `base.inverse()` multiply
-//! can never flip the hash for two recordings that are mathematically
-//! identical.
+//! The contract is **pixels relative to the `base` frame**. For each command
+//! this module computes `rel = base.inverse() * command.transform` (for
+//! [`Command::GlyphRun`]: `base.inverse() * run.transform`) and then:
+//!
+//! - hashes only `rel`'s LINEAR part (`rel.as_coeffs()[0..4]`, quantized) —
+//!   never its translation, which the point-mapping below already absorbs;
+//! - hashes every geometric point/corner MAPPED through `rel`
+//!   (`quantize((rel * p).x)`/`.y`) rather than hashed raw.
+//!
+//! That is the load-bearing property a snapshot cache needs to survive an
+//! ordinary animation frame-to-frame, and it holds no matter WHERE a body's
+//! slide actually lives. A bracket that merely translates/scales/fades as a
+//! whole — the slide riding the commands' own `transform`, nothing inside
+//! changing — keeps the same fingerprint, exactly as before. But so does a
+//! body whose ABSOLUTE geometry moves every frame while its commands'
+//! `transform` stays fixed at identity: `frust-core`'s
+//! `ChildPod::paint_child` (`crates/frust-core/src/widget.rs`) builds a
+//! child's `PaintCtx` at `ctx.origin() + pod.origin`, so an ordinary widget
+//! that slides via `pod.set_origin` moves every command's rect/point/glyph
+//! it records — the geometry itself carries the motion, not a transform —
+//! and `path_at` is the same story for [`Command::Path`] (a path is
+//! translated to the widget's origin before it is ever recorded). Both cases
+//! describe the identical set of pixels relative to `base` once `base`
+//! itself moves by the same amount, so `base.inverse() * command.transform`
+//! mapping the RAW geometry — not just hashing the transform relative to
+//! `base` — is what makes the two indistinguishable to the cache.
+//!
+//! Local-space SCALARS — corner radii, stroke width, dash pattern, font
+//! size, blur standard deviation, alpha, presentation scale, shader time,
+//! colors, cache keys/ids — stay raw: they describe a *length* or an
+//! *identity*, not a *position*, so `rel` has nothing to map them through.
+//! The hashed linear part of `rel` is what disambiguates an overall scale
+//! for a command whose geometry happens to sit at the bracket's own origin
+//! (where mapping alone cannot tell a scaled `base` from an unscaled one).
+//!
+//! Every coefficient/coordinate is quantized before hashing (see
+//! [`FINGERPRINT_QUANT`]) so float noise from the `rel` multiply can never
+//! flip the hash for two recordings that are mathematically identical.
 //!
 //! Hashing uses `std`'s [`DefaultHasher`], constructed with
 //! [`DefaultHasher::new`] rather than through a [`std::collections::HashMap`]
@@ -52,8 +79,8 @@ impl Scene {
     }
 }
 
-/// Deterministic 64-bit hash of `commands`, with every [`Affine`] hashed
-/// relative to `base` (see the module docs).
+/// Deterministic 64-bit hash of `commands`, with every command's geometry and
+/// transform hashed relative to `base` (see the module docs).
 pub fn fingerprint_commands(commands: &[Command], base: Affine) -> u64 {
     let base_inv = base.inverse();
     let mut hasher = DefaultHasher::new();
@@ -64,24 +91,34 @@ pub fn fingerprint_commands(commands: &[Command], base: Affine) -> u64 {
     hasher.finish()
 }
 
-fn hash_point(hasher: &mut DefaultHasher, p: &Point) {
-    quantize(p.x).hash(hasher);
-    quantize(p.y).hash(hasher);
+/// Hashes `p` MAPPED through `rel` (`rel * p`) — the pixel `p` lands on
+/// relative to `base`, not `p` itself. This is what keeps an absolute
+/// coordinate that slides frame-to-frame (see the module docs) fingerprinting
+/// equal once `base` slides by the same amount.
+fn hash_point_rel(hasher: &mut DefaultHasher, rel: Affine, p: Point) {
+    let mapped = rel * p;
+    quantize(mapped.x).hash(hasher);
+    quantize(mapped.y).hash(hasher);
 }
 
-fn hash_rect(hasher: &mut DefaultHasher, rect: &Rect) {
-    quantize(rect.x0).hash(hasher);
-    quantize(rect.y0).hash(hasher);
-    quantize(rect.x1).hash(hasher);
-    quantize(rect.y1).hash(hasher);
+/// Hashes `rect`'s two defining corners `(x0, y0)`/`(x1, y1)`, each MAPPED
+/// through `rel`. Combined with the [`hash_linear`] call every caller makes
+/// alongside this one, the two mapped corners plus the shared linear part
+/// fully determine the parallelogram `rel` carries `rect` to (the linear part
+/// applied to `rect`'s edge vectors gives the other two corners), so they
+/// need no separate hash.
+fn hash_rect_rel(hasher: &mut DefaultHasher, rel: Affine, rect: &Rect) {
+    hash_point_rel(hasher, rel, Point::new(rect.x0, rect.y0));
+    hash_point_rel(hasher, rel, Point::new(rect.x1, rect.y1));
 }
 
-/// Hashes `transform` relative to `base_inv` (`base_inv * transform`), the
-/// property that keeps a body's fingerprint stable while its enclosing
-/// bracket merely slides/scales/fades as a whole (see the module docs).
-fn hash_affine(hasher: &mut DefaultHasher, base_inv: Affine, transform: Affine) {
-    for c in (base_inv * transform).as_coeffs() {
-        quantize(c).hash(hasher);
+/// Hashes only the LINEAR part of `rel` (`rel.as_coeffs()[0..4]`) — never its
+/// translation, which [`hash_point_rel`]/[`hash_rect_rel`] already absorb by
+/// mapping the geometry itself. See the module docs for why this is still
+/// needed on top of mapped geometry.
+fn hash_linear(hasher: &mut DefaultHasher, rel: Affine) {
+    for c in &rel.as_coeffs()[0..4] {
+        quantize(*c).hash(hasher);
     }
 }
 
@@ -112,19 +149,23 @@ fn hash_path_style(hasher: &mut DefaultHasher, style: &PathStyle) {
     }
 }
 
-fn hash_bez_path(hasher: &mut DefaultHasher, path: &BezPath) {
+/// Hashes every element of `path`, each point MAPPED through `rel` — `path`'s
+/// points are absolute (a caller translates the path to the widget's origin
+/// before recording it, see `path_at` in `frust-core`'s `widget.rs`), exactly
+/// like every other geometry this module hashes.
+fn hash_bez_path(hasher: &mut DefaultHasher, path: &BezPath, rel: Affine) {
     for el in path.elements() {
         mem::discriminant(el).hash(hasher);
         match el {
-            PathEl::MoveTo(p) | PathEl::LineTo(p) => hash_point(hasher, p),
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => hash_point_rel(hasher, rel, *p),
             PathEl::QuadTo(p0, p1) => {
-                hash_point(hasher, p0);
-                hash_point(hasher, p1);
+                hash_point_rel(hasher, rel, *p0);
+                hash_point_rel(hasher, rel, *p1);
             }
             PathEl::CurveTo(p0, p1, p2) => {
-                hash_point(hasher, p0);
-                hash_point(hasher, p1);
-                hash_point(hasher, p2);
+                hash_point_rel(hasher, rel, *p0);
+                hash_point_rel(hasher, rel, *p1);
+                hash_point_rel(hasher, rel, *p2);
             }
             PathEl::ClosePath => {}
         }
@@ -145,23 +186,27 @@ fn hash_dynamic_color(hasher: &mut DefaultHasher, color: &peniko::color::Dynamic
     }
 }
 
-fn hash_gradient(hasher: &mut DefaultHasher, gradient: &Gradient) {
+/// Hashes `gradient`'s geometry MAPPED through `rel` (start/end/center
+/// points) and its radii/angles/stops raw — a gradient's positions describe
+/// pixels the same way any other command geometry does, while its radii and
+/// angles are local-space scalars (see the module docs).
+fn hash_gradient(hasher: &mut DefaultHasher, gradient: &Gradient, rel: Affine) {
     match &gradient.kind {
         GradientKind::Linear(pos) => {
             0u8.hash(hasher);
-            hash_point(hasher, &pos.start);
-            hash_point(hasher, &pos.end);
+            hash_point_rel(hasher, rel, pos.start);
+            hash_point_rel(hasher, rel, pos.end);
         }
         GradientKind::Radial(pos) => {
             1u8.hash(hasher);
-            hash_point(hasher, &pos.start_center);
+            hash_point_rel(hasher, rel, pos.start_center);
             quantize_f32(pos.start_radius).hash(hasher);
-            hash_point(hasher, &pos.end_center);
+            hash_point_rel(hasher, rel, pos.end_center);
             quantize_f32(pos.end_radius).hash(hasher);
         }
         GradientKind::Sweep(pos) => {
             2u8.hash(hasher);
-            hash_point(hasher, &pos.center);
+            hash_point_rel(hasher, rel, pos.center);
             quantize_f32(pos.start_angle).hash(hasher);
             quantize_f32(pos.end_angle).hash(hasher);
         }
@@ -190,11 +235,11 @@ fn hash_image_sampler(hasher: &mut DefaultHasher, sampler: &peniko::ImageSampler
     quantize_f32(sampler.alpha).hash(hasher);
 }
 
-fn hash_brush(hasher: &mut DefaultHasher, brush: &Brush) {
+fn hash_brush(hasher: &mut DefaultHasher, brush: &Brush, rel: Affine) {
     mem::discriminant(brush).hash(hasher);
     match brush {
         Brush::Solid(color) => hash_color(hasher, color),
-        Brush::Gradient(gradient) => hash_gradient(hasher, gradient),
+        Brush::Gradient(gradient) => hash_gradient(hasher, gradient, rel),
         Brush::Image(image_brush) => {
             hash_image_data(hasher, &image_brush.image);
             hash_image_sampler(hasher, &image_brush.sampler);
@@ -202,19 +247,27 @@ fn hash_brush(hasher: &mut DefaultHasher, brush: &Brush) {
     }
 }
 
-/// Hashes a glyph run's font/blob id, size, brush ("style bits"), transform
-/// (relative to `base_inv`), and every glyph's id + position.
+/// Hashes a glyph run's font/blob id, size, brush and transform (relative to
+/// `base_inv`, via `rel = base_inv * run.transform`), and every glyph's id +
+/// position MAPPED through that same `rel` — a glyph's `x`/`y` are absolute
+/// in exactly the sense every other command's geometry is (see the module
+/// docs), so a page whose slide lives in the glyph positions rather than in
+/// `run.transform` fingerprints identically once `base` slides with it.
 fn hash_glyph_run(hasher: &mut DefaultHasher, run: &GlyphRun, base_inv: Affine) {
     run.font.font().data.id().hash(hasher);
     run.font.font().index.hash(hasher);
     quantize_f32(run.font_size).hash(hasher);
-    hash_brush(hasher, &run.brush);
-    hash_affine(hasher, base_inv, run.transform);
+    let rel = base_inv * run.transform;
+    hash_brush(hasher, &run.brush, rel);
+    hash_linear(hasher, rel);
     run.glyphs.len().hash(hasher);
     for glyph in &run.glyphs {
         glyph.id.hash(hasher);
-        quantize_f32(glyph.x).hash(hasher);
-        quantize_f32(glyph.y).hash(hasher);
+        hash_point_rel(
+            hasher,
+            rel,
+            Point::new(f64::from(glyph.x), f64::from(glyph.y)),
+        );
     }
 }
 
@@ -226,9 +279,10 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             brush,
             transform,
         } => {
-            hash_rect(hasher, rect);
-            hash_brush(hasher, brush);
-            hash_affine(hasher, base_inv, *transform);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
+            hash_brush(hasher, brush, rel);
+            hash_linear(hasher, rel);
         }
         Command::RoundedRect {
             rect,
@@ -236,10 +290,11 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             brush,
             transform,
         } => {
-            hash_rect(hasher, rect);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
             hash_corner_radii(hasher, radii);
-            hash_brush(hasher, brush);
-            hash_affine(hasher, base_inv, *transform);
+            hash_brush(hasher, brush, rel);
+            hash_linear(hasher, rel);
         }
         Command::Line {
             p0,
@@ -248,25 +303,28 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             brush,
             transform,
         } => {
-            hash_point(hasher, p0);
-            hash_point(hasher, p1);
+            let rel = base_inv * *transform;
+            hash_point_rel(hasher, rel, *p0);
+            hash_point_rel(hasher, rel, *p1);
             quantize(*width).hash(hasher);
-            hash_brush(hasher, brush);
-            hash_affine(hasher, base_inv, *transform);
+            hash_brush(hasher, brush, rel);
+            hash_linear(hasher, rel);
         }
         Command::GlyphRun(run) => hash_glyph_run(hasher, run, base_inv),
         Command::PushClip { rect, transform } => {
-            hash_rect(hasher, rect);
-            hash_affine(hasher, base_inv, *transform);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
+            hash_linear(hasher, rel);
         }
         Command::PushClipRounded {
             rect,
             radii,
             transform,
         } => {
-            hash_rect(hasher, rect);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
             hash_corner_radii(hasher, radii);
-            hash_affine(hasher, base_inv, *transform);
+            hash_linear(hasher, rel);
         }
         Command::PopClip => {}
         Command::Image {
@@ -274,9 +332,10 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             dest,
             transform,
         } => {
+            let rel = base_inv * *transform;
             hash_image_data(hasher, data);
-            hash_rect(hasher, dest);
-            hash_affine(hasher, base_inv, *transform);
+            hash_rect_rel(hasher, rel, dest);
+            hash_linear(hasher, rel);
         }
         Command::BlurredRoundedRect {
             rect,
@@ -285,25 +344,28 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             color,
             transform,
         } => {
-            hash_rect(hasher, rect);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
             hash_corner_radii(hasher, radii);
             quantize(*std_dev).hash(hasher);
             hash_color(hasher, color);
-            hash_affine(hasher, base_inv, *transform);
+            hash_linear(hasher, rel);
         }
         Command::PushLayer {
             rect,
             alpha,
             transform,
         } => {
-            hash_rect(hasher, rect);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
             quantize_f32(*alpha).hash(hasher);
-            hash_affine(hasher, base_inv, *transform);
+            hash_linear(hasher, rel);
         }
         Command::PopLayer => {}
         Command::ClearRect { rect, transform } => {
-            hash_rect(hasher, rect);
-            hash_affine(hasher, base_inv, *transform);
+            let rel = base_inv * *transform;
+            hash_rect_rel(hasher, rel, rect);
+            hash_linear(hasher, rel);
         }
         Command::Path {
             path,
@@ -311,10 +373,11 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             brush,
             transform,
         } => {
-            hash_bez_path(hasher, path);
+            let rel = base_inv * *transform;
+            hash_bez_path(hasher, path, rel);
             hash_path_style(hasher, style);
-            hash_brush(hasher, brush);
-            hash_affine(hasher, base_inv, *transform);
+            hash_brush(hasher, brush, rel);
+            hash_linear(hasher, rel);
         }
         Command::ShaderQuad {
             program,
@@ -322,9 +385,10 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             transform,
             time,
         } => {
+            let rel = base_inv * *transform;
             program.id().hash(hasher);
-            hash_rect(hasher, dest);
-            hash_affine(hasher, base_inv, *transform);
+            hash_rect_rel(hasher, rel, dest);
+            hash_linear(hasher, rel);
             quantize_f32(*time).hash(hasher);
         }
         Command::PushSnapshot {
@@ -334,11 +398,12 @@ fn hash_command(hasher: &mut DefaultHasher, command: &Command, base_inv: Affine)
             scale,
             transform,
         } => {
+            let rel = base_inv * *transform;
             key.hash(hasher);
-            hash_rect(hasher, rect);
+            hash_rect_rel(hasher, rel, rect);
             quantize_f32(*alpha).hash(hasher);
             quantize(*scale).hash(hasher);
-            hash_affine(hasher, base_inv, *transform);
+            hash_linear(hasher, rel);
         }
         Command::PopSnapshot => {}
     }
@@ -554,5 +619,173 @@ mod tests {
         let via_range = scene.fingerprint_range(1..3, Affine::IDENTITY);
         let via_commands = fingerprint_commands(&scene.commands()[1..3], Affine::IDENTITY);
         assert_eq!(via_range, via_commands);
+    }
+
+    fn shifted_rect(rect: Rect, dx: f64, dy: f64) -> Rect {
+        Rect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy)
+    }
+
+    fn shifted_point(p: Point, dx: f64, dy: f64) -> Point {
+        Point::new(p.x + dx, p.y + dy)
+    }
+
+    /// A body recorded entirely at ABSOLUTE positions (identity command
+    /// transforms throughout, mirroring `ChildPod::paint_child` baking a
+    /// widget's origin directly into its geometry) shifted by `(dx, dy)` —
+    /// one instance of every geometry-bearing command the module hashes:
+    /// a rect, a rounded rect, a line, a path (translated like `path_at`
+    /// does), a glyph run with absolute glyph positions, and a linear
+    /// gradient fill.
+    fn record_absolute_body(font: &FontHandle, dx: f64, dy: f64) -> Scene {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+
+        builder.fill_rect(
+            shifted_rect(Rect::new(0.0, 0.0, 10.0, 10.0), dx, dy),
+            red_brush(),
+        );
+        builder.fill_rounded_rect(
+            shifted_rect(Rect::new(20.0, 0.0, 30.0, 10.0), dx, dy),
+            2.0,
+            red_brush(),
+        );
+        builder.stroke_line(
+            shifted_point(Point::new(0.0, 20.0), dx, dy),
+            shifted_point(Point::new(10.0, 20.0), dx, dy),
+            1.5,
+            red_brush(),
+        );
+
+        let mut path = BezPath::new();
+        path.move_to((0.0, 30.0));
+        path.line_to((10.0, 30.0));
+        path.line_to((5.0, 40.0));
+        path.close_path();
+        // `Affine::translate * path`, the same shape `path_at` builds.
+        builder.fill_path(Affine::translate((dx, dy)) * path, red_brush());
+
+        builder.draw_glyph_run(GlyphRun {
+            font: font.clone(),
+            font_size: 16.0,
+            brush: red_brush(),
+            transform: Affine::IDENTITY,
+            glyphs: vec![
+                Glyph {
+                    id: 1,
+                    x: (0.0 + dx) as f32,
+                    y: (50.0 + dy) as f32,
+                },
+                Glyph {
+                    id: 2,
+                    x: (8.0 + dx) as f32,
+                    y: (50.0 + dy) as f32,
+                },
+            ],
+        });
+
+        let gradient = Gradient::new_linear(
+            shifted_point(Point::new(0.0, 60.0), dx, dy),
+            shifted_point(Point::new(10.0, 60.0), dx, dy),
+        );
+        builder.fill_rect(
+            shifted_rect(Rect::new(0.0, 60.0, 10.0, 70.0), dx, dy),
+            Brush::Gradient(gradient),
+        );
+
+        scene
+    }
+
+    /// The exact mechanism the fix targets: a body's geometry sliding by
+    /// `(dx, dy)` — absolute coordinates changing every frame, identity
+    /// command transforms throughout — fingerprints EQUAL to the unslid body
+    /// once `base` slides by the same `(dx, dy)`, and fingerprints DIFFERENT
+    /// from it when `base` stays put.
+    #[test]
+    fn absolute_coordinate_slide_with_an_equally_translated_base_keeps_the_fingerprint() {
+        let font = empty_font();
+        let base_a = Affine::translate((5.0, 7.0));
+        let (dx, dy) = (3.0, -2.0);
+        let base_a_plus_delta = Affine::translate((5.0 + dx, 7.0 + dy));
+
+        let a = record_absolute_body(&font, 0.0, 0.0);
+        let b = record_absolute_body(&font, dx, dy);
+
+        let fp_a = fingerprint_commands(a.commands(), base_a);
+        let fp_b_shifted_base = fingerprint_commands(b.commands(), base_a_plus_delta);
+        let fp_b_same_base = fingerprint_commands(b.commands(), base_a);
+
+        assert_eq!(fp_a, fp_b_shifted_base);
+        assert_ne!(fp_a, fp_b_same_base);
+    }
+
+    /// A body under a scaled `base` must differ from the same body under an
+    /// unscaled `base` — even here, where the body's only geometry sits
+    /// exactly at the bracket's own origin `(0, 0)` (so mapping alone cannot
+    /// tell the two `base`s apart: `rel * (0, 0)` is `(0, 0)` regardless of
+    /// `rel`'s linear part). Only the separately-hashed linear part of `rel`
+    /// disambiguates the scale here.
+    #[test]
+    fn scaled_base_changes_the_fingerprint_even_when_the_bodys_geometry_sits_at_the_origin() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.stroke_line(Point::ORIGIN, Point::ORIGIN, 4.0, red_brush());
+
+        assert_ne!(
+            fingerprint_commands(scene.commands(), Affine::IDENTITY),
+            fingerprint_commands(scene.commands(), Affine::scale(2.0)),
+        );
+    }
+
+    /// Two glyph runs whose slide lives in different places — one in the
+    /// run's own `transform` (composed the way `push_transform` composes
+    /// it), the other in the glyphs' own `x`/`y` — fingerprint EQUAL relative
+    /// to the same, correspondingly translated `base`.
+    #[test]
+    fn glyph_slide_via_transform_and_via_glyph_position_hash_equal_relative_to_the_same_base() {
+        let font = empty_font();
+        let shift = Affine::translate((6.0, -9.0));
+        let glyphs_at = |x: f32, y: f32| {
+            vec![
+                Glyph { id: 1, x, y },
+                Glyph {
+                    id: 2,
+                    x: x + 8.0,
+                    y,
+                },
+            ]
+        };
+
+        // Slide lives in the run's own transform; glyph positions stay local.
+        let mut via_transform = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut via_transform);
+            builder.push_transform(shift);
+            builder.draw_glyph_run(GlyphRun {
+                font: font.clone(),
+                font_size: 16.0,
+                brush: red_brush(),
+                transform: Affine::IDENTITY,
+                glyphs: glyphs_at(0.0, 0.0),
+            });
+        }
+
+        // Slide lives in the glyph positions themselves (the bug this card
+        // fixes); the run's own transform stays identity.
+        let mut via_geometry = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut via_geometry);
+            builder.draw_glyph_run(GlyphRun {
+                font: font.clone(),
+                font_size: 16.0,
+                brush: red_brush(),
+                transform: Affine::IDENTITY,
+                glyphs: glyphs_at(6.0, -9.0),
+            });
+        }
+
+        assert_eq!(
+            fingerprint_commands(via_transform.commands(), shift),
+            fingerprint_commands(via_geometry.commands(), shift),
+        );
     }
 }
