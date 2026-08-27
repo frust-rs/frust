@@ -291,10 +291,20 @@ fn shared_axis_x_push_seed_frame_discards_the_alpha_zero_entering_page() {
         "A paints through exactly one snapshot bracket: {:?}",
         scene.snapshots
     );
-    let (_, _, _, alpha, scale) = scene.snapshots[0];
+    let (_, snapshot_origin, _, alpha, scale) = scene.snapshots[0];
     assert_eq!(alpha, 1.0, "A is at rest, fully opaque");
     assert_eq!(scale, 1.0, "M3SharedAxisX never scales either page");
     assert_eq!(scene.snapshot_pops, 1, "the bracket is balanced");
+
+    // The leaving page A has dx=0 at progress 0 (not yet sliding out). The
+    // bracket origin must still follow the pod's absolute paint origin, which
+    // equals ctx.origin() when dx=0. At the root navigator level, ctx.origin()
+    // is (0, 0), so the bracket origin should be (0, 0).
+    assert_eq!(
+        snapshot_origin,
+        Point::new(0.0, 0.0),
+        "bracket origin follows ctx.origin() when dx=0 (was {snapshot_origin:?})"
+    );
 }
 
 #[test]
@@ -348,12 +358,24 @@ fn shared_axis_x_past_the_split_the_visible_page_paints_through_its_snapshot_bra
         "B paints under exactly one snapshot bracket: {:?}",
         scene.snapshots
     );
-    let (_, _, _, alpha, scale) = scene.snapshots[0];
+    let (_, snapshot_origin, _, alpha, scale) = scene.snapshots[0];
     assert!(
         alpha > 0.0 && alpha < 1.0,
         "the bracket's alpha is a genuine partial value (was {alpha})"
     );
     assert_eq!(scale, 1.0, "M3SharedAxisX never scales either page");
+
+    // The entering page B slides in from the right at progress 0.5, so its dx
+    // is 0.5 * 30dp = 15.0 (M3_SHARED_AXIS_SLIDE_DP = 30). The bracket origin
+    // must follow the pod's absolute paint origin to keep the cached texture
+    // slide-invariant and prevent cropping of the shifted body. At the root
+    // navigator level, ctx.origin() is (0, 0), so the bracket origin should be
+    // (15.0, 0).
+    assert_eq!(
+        snapshot_origin,
+        Point::new(15.0, 0.0),
+        "bracket origin follows the entering page's dx slide (was {snapshot_origin:?})"
+    );
 }
 
 #[test]

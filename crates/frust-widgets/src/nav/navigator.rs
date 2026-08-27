@@ -1652,7 +1652,12 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// [`PaintScene::push_snapshot`]/[`pop_snapshot`] instead, unconditionally —
 /// no `has_scale`/`has_alpha` identity-skip, since the bracket itself is what
 /// tells a caching renderer this body is worth caching, whatever this
-/// particular frame's alpha/scale happen to be.
+/// particular frame's alpha/scale happen to be. **The bracket rect origin must
+/// follow the pod's absolute paint origin** — `ctx.origin() + (layer.dx,
+/// layer.dy)` — so the painted body lands inside the texture (preventing crops
+/// of the shifted body) and the renderer's frame-relative fingerprint stays
+/// slide-invariant. The scale pivot still centers on the rect, which now
+/// follows the slid page.
 fn paint_page_layer(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
@@ -1671,7 +1676,8 @@ fn paint_page_layer(
     }
 
     if let Some(key) = snapshot {
-        scene.push_snapshot(key, ctx.origin(), area, alpha, layer.scale);
+        let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
+        scene.push_snapshot(key, bracket_origin, area, alpha, layer.scale);
         pod.paint_child(ctx, scene);
         scene.pop_snapshot();
         return;

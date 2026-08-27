@@ -67,7 +67,7 @@ use frust_core::{
     View, Widget, any,
 };
 use frust_theme::Theme;
-use kurbo::{Point, Size};
+use kurbo::{Point, Size, Vec2};
 
 use crate::ChildKey;
 use crate::Timing;
@@ -132,7 +132,8 @@ fn paint_staged_child(
         return;
     }
 
-    scene.push_snapshot(snapshot, ctx.origin(), ctx.size(), alpha, layer.scale);
+    let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
+    scene.push_snapshot(snapshot, bracket_origin, ctx.size(), alpha, layer.scale);
     pod.paint_child(ctx, scene);
     scene.pop_snapshot();
 }
@@ -1066,6 +1067,86 @@ mod tests {
         for (_, _, _, alpha, _) in &scene.snapshots {
             assert!(*alpha > 0.0, "an alpha-0 child never reaches the bracket");
         }
+    }
+
+    #[test]
+    fn bracket_origin_follows_the_pod_dx_in_slide_patterns() {
+        // SharedAxis::X slides children by 30dp (incoming from +30, exiting to -30).
+        // The bracket origin must follow the pod's absolute paint origin —
+        // ctx.origin() + (dx, dy) — so the cached texture is slide-invariant and
+        // the body lands inside the texture without cropping. This test verifies
+        // the bracket origin includes the dx offset during a slide transition.
+        let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
+        let mut counter = 0u64;
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        // Seed frame: the first `advance` only seeds the clock (progress 0).
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut SnapshotRecordingScene::default(),
+        );
+
+        // At p=0 (seed frame), SharedAxis::X has:
+        // - Exiting child: dx=0.0, alpha=1.0 (visible)
+        // - Incoming child: dx=30.0, alpha=0.0 (discarded, not visible)
+        // So only the exiting child paints through a snapshot bracket.
+        let mut scene = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut scene,
+        );
+
+        assert_eq!(
+            scene.snapshots.len(),
+            1,
+            "only the exiting child is visible at p=0"
+        );
+
+        // The exiting child has dx=0.0 at p=0, so its bracket origin should be
+        // at ctx.origin() = (0.0, 0.0).
+        let (_, origin, _, _, _) = scene.snapshots[0];
+        assert_eq!(
+            origin,
+            Point::new(0.0, 0.0),
+            "exiting child bracket origin at x=0.0 when dx=0 (was {:?})",
+            origin
+        );
+
+        // At a mid-transition frame like p=0.5 (50ms into 100ms duration),
+        // SharedAxis::X has:
+        // - Exiting child: dx=-15.0 (sliding out), alpha < 1.0
+        // - Incoming child: dx=15.0 (sliding in), alpha > 0.0
+        // Both are potentially visible and should have bracket origins that
+        // include their respective dx values. However, SharedAxis uses a hard
+        // split, so only one is above alpha 0 at any instant. At p=0.5 (past
+        // the ~0.35 split), the incoming child is visible.
+        let mut scene_mid = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(50.0)),
+            &mut scene_mid,
+        );
+
+        // At p=0.5, the incoming child has dx = (1.0 - 0.5) * 30 = 15.0 and
+        // is visible (past the split). Its bracket origin should reflect this.
+        assert_eq!(
+            scene_mid.snapshots.len(),
+            1,
+            "at mid-frame (p=0.5), only one child is visible through a snapshot"
+        );
+        let (_, origin_mid, _, _, _) = scene_mid.snapshots[0];
+        assert_eq!(
+            origin_mid,
+            Point::new(15.0, 0.0),
+            "incoming child bracket origin at x=15.0 when dx=15.0 (was {:?})",
+            origin_mid
+        );
     }
 
     // --- snapshot_base is reserved once, at construction, and outlives every
