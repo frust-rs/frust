@@ -33,6 +33,36 @@
 //! two composited brackets therefore lands above both: an accepted z-order
 //! approximation of a two-pass split, not a bug.
 //!
+//! ## Only segments that DRAW get a vello pass
+//!
+//! A segment is worth a vello pass only when it holds a command that paints a
+//! pixel ([`draws_pixels`]): a `PushClip`/`PopClip` pair, a layer push/pop or
+//! a composited bracket's own brackets emit no coverage, and a vello pass over
+//! them still pays the full fine-stage cost of the target (~14.5 ms on an
+//! Adreno 620, measured, whatever it draws). Both ends of the split are
+//! therefore decided on drawing commands alone:
+//!
+//! - [`FramePlan::trailing`] is `None` when nothing outside the later
+//!   composited brackets draws in that range — a scene ending in the app
+//!   root's `PopClip` no longer buys a whole pass for it;
+//! - [`FramePlan::pre_draws`] is `false` when the pre segment draws nothing,
+//!   which lets the render path skip the MAIN vello pass entirely and hand the
+//!   frame's `base_color` to the compositor as its render pass's clear (see
+//!   `compositor::CompositeTarget::clear`). A page transition whose pre
+//!   segment is only the app root's `PushClip` then costs one quad pass for
+//!   the whole frame.
+//!
+//! ## Enclosing clips
+//!
+//! A composited bracket is drawn as a quad OUTSIDE vello, so any clip the
+//! scene had pushed around it is no longer applied to its pixels — inline, the
+//! body would have been clipped. Each layer therefore carries
+//! [`CompositeLayer::clip`]: the device-space intersection of the bboxes of
+//! the clips enclosing its bracket (`None` when there are none), which the
+//! compositor applies as a scissor rect. A rounded clip contributes its
+//! rect, so the corners it would have cut are an accepted approximation —
+//! a scissor is rectangular.
+//!
 //! ## Coordinate mapping
 //!
 //! `PushSnapshot`'s `rect` is the body's bounds in the LOCAL space of the
@@ -141,6 +171,18 @@ const MAX_UNUSED_FRAMES: u64 = 2;
 /// fingerprint for two mathematically identical placements.
 const RASTER_QUANT: f64 = 4096.0;
 
+/// How far a `raster` coefficient may stray from zero and still count as
+/// axis-aligned in [`snapshot_size`]. Composing and inverting transforms
+/// leaves shear coefficients at float noise rather than at a clean `0.0`; a
+/// real rotation is orders of magnitude above this.
+const AXIS_ALIGNED_EPSILON: f64 = 1e-9;
+
+/// Shaved off an axis-aligned device extent before it is rounded up in
+/// [`snapshot_size`], so `392.72727... * 2.75` landing a few ULPs above 1080
+/// does not buy a 1081st pixel column — and, one frame later when it lands a
+/// few ULPs below, throw the texture away again.
+const SIZE_EPSILON: f64 = 1e-6;
+
 /// One cached rasterization: the texture vello renders the body into, plus the
 /// bookkeeping the reuse and eviction decisions read.
 ///
@@ -172,11 +214,6 @@ struct Entry {
 /// applies is the module's coordinate-mapping section read forwards: texture
 /// pixels `(0, 0)`..`(width, height)` cover `rect` under `transform *
 /// scale_about(scale, rect.center())`, with `alpha` on the blend.
-// Placement carried for a consumer that is not written yet: `compositor.rs`
-// reads every field below to build one quad. Until it exists, only `key`
-// (which becomes a hole) has an in-crate reader — the allow covers the rest
-// rather than fabricating uses for them, and comes off with the first quad.
-#[allow(dead_code)]
 pub(crate) struct CompositeLayer {
     /// The owning [`Command::PushSnapshot`]'s `key`, which is also its entry
     /// in [`FramePlan::holes`].
@@ -193,6 +230,12 @@ pub(crate) struct CompositeLayer {
     /// The texture's natural pixel size, which is what `rect` maps onto.
     pub width: u32,
     pub height: u32,
+    /// The clips enclosing the bracket, intersected, in DEVICE pixels —
+    /// `None` when the bracket sits under no clip at all. The quad is drawn
+    /// outside vello, so this is the only thing that still confines it to what
+    /// an inline body would have been clipped to; the compositor applies it as
+    /// a scissor rect (see the module header's "Enclosing clips").
+    pub clip: Option<Rect>,
     /// A refcounted handle on the cached texture.
     pub view: wgpu::TextureView,
 }
@@ -207,31 +250,37 @@ pub(crate) struct FramePlan {
     /// The WHOLE command range when nothing is composited, which is what makes
     /// a disabled cache (and a frame with no cache hits) an ordinary
     /// single-pass frame.
-    // Read by the render path once it draws per segment; today it still
-    // encodes the whole scene and reads `holes` alone. Same for `layers` and
-    // `trailing` below.
-    #[allow(dead_code)]
     pub pre: Range<usize>,
+    /// Whether [`Self::pre`] holds a command that paints a pixel
+    /// ([`draws_pixels`]).
+    ///
+    /// `false` with a non-empty [`Self::layers`] is the render path's licence
+    /// to skip the main vello pass altogether and let the compositor's own
+    /// pass clear the frame instead: the pre segment is then pure structure
+    /// (the app root's `PushClip` and nothing else, the measured shape of a
+    /// page transition) and a vello pass over it would draw no pixel at the
+    /// full cost of one.
+    pub pre_draws: bool,
     /// Every composited bracket, in scene order.
-    #[allow(dead_code)]
     pub layers: Vec<CompositeLayer>,
     /// `layers`' keys: the brackets [`crate::convert`] turns into holes.
     pub holes: HashSet<u64>,
     /// Commands after the first composited bracket, `Some` only when that
-    /// range holds at least one command that is not itself inside a composited
-    /// bracket — i.e. only when a second vello pass would actually draw
-    /// something. `None` is the common case (a page transition whose brackets
-    /// are the last thing in the scene) and saves that whole pass.
-    #[allow(dead_code)]
+    /// range holds at least one command that PAINTS and is not itself inside a
+    /// composited bracket — i.e. only when a second vello pass would actually
+    /// put pixels on the frame. `None` is the common case (a page transition
+    /// whose brackets are the last thing in the scene, bar the app root's
+    /// `PopClip`) and saves that whole pass.
     pub trailing: Option<Range<usize>>,
 }
 
 impl FramePlan {
-    /// The plan for a frame with nothing composited: vello draws all `len`
-    /// commands, exactly as it did before this cache existed.
-    fn inline(len: usize) -> Self {
+    /// The plan for a frame with nothing composited: vello draws every
+    /// command, exactly as it did before this cache existed.
+    fn inline(commands: &[Command]) -> Self {
         Self {
-            pre: 0..len,
+            pre: 0..commands.len(),
+            pre_draws: commands.iter().any(draws_pixels),
             layers: Vec::new(),
             holes: HashSet::new(),
             trailing: None,
@@ -251,6 +300,9 @@ struct Bracket {
     scale: f64,
     transform: Affine,
     body: Range<usize>,
+    /// The clips enclosing the bracket, intersected, in device pixels — see
+    /// [`CompositeLayer::clip`].
+    clip: Option<Rect>,
 }
 
 /// The bracket's own INCLUSIVE index span as a half-open range: its
@@ -261,26 +313,63 @@ fn bracket_span(body: &Range<usize>) -> Range<usize> {
     body.start.saturating_sub(1)..body.end + 1
 }
 
-/// The two-segment split of a frame's command list, given `len` commands and
-/// the [`bracket_span`]s of the composited brackets in scene order.
+/// Whether a command paints a pixel, as opposed to only shaping the state the
+/// painting commands are interpreted in.
+///
+/// This is what makes a vello pass worth its cost: a clip/layer bracket or a
+/// snapshot bracket emits no coverage of its own, so a segment holding nothing
+/// else has nothing for the fine stage to do — and pays for it anyway. A
+/// `ClearRect` counts: erasing pixels IS writing them, and its hoist to the
+/// scene root is exactly a destination composite.
+fn draws_pixels(command: &Command) -> bool {
+    match command {
+        Command::FillRect { .. }
+        | Command::RoundedRect { .. }
+        | Command::Line { .. }
+        | Command::GlyphRun(_)
+        | Command::Image { .. }
+        | Command::BlurredRoundedRect { .. }
+        | Command::ClearRect { .. }
+        | Command::Path { .. }
+        | Command::ShaderQuad { .. } => true,
+        Command::PushClip { .. }
+        | Command::PushClipRounded { .. }
+        | Command::PopClip
+        | Command::PushLayer { .. }
+        | Command::PopLayer
+        | Command::PushSnapshot { .. }
+        | Command::PopSnapshot => false,
+    }
+}
+
+/// The two-segment split of a frame's command list, given the frame's
+/// `commands` and the [`bracket_span`]s of the composited brackets in scene
+/// order: the pre range, whether the pre range DRAWS, and the trailing range
+/// when there is one.
 ///
 /// `pre` runs up to the first composited bracket's `PushSnapshot`; the
 /// trailing segment starts one past that same bracket's `PopSnapshot` and runs
-/// to the end. The trailing pass exists only if it would draw something: every
-/// later composited bracket inside it is skipped as a hole, so the segment is
-/// worth a vello pass exactly when it is longer than those brackets put
-/// together.
-fn frame_split(len: usize, spans: &[Range<usize>]) -> (Range<usize>, Option<Range<usize>>) {
+/// to the end. Both halves are judged on drawing commands alone
+/// ([`draws_pixels`]): every later composited bracket inside the trailing
+/// range is skipped as a hole, so the range is worth a vello pass exactly when
+/// something OUTSIDE those brackets paints in it — and the pre range's own
+/// pass is worth running exactly when something paints there (see
+/// [`FramePlan::pre_draws`]).
+fn frame_split(
+    commands: &[Command],
+    spans: &[Range<usize>],
+) -> (Range<usize>, bool, Option<Range<usize>>) {
+    let len = commands.len();
     let Some(first) = spans.first() else {
-        return (0..len, None);
+        return (0..len, commands.iter().any(draws_pixels), None);
     };
+    let pre = 0..first.start.min(len);
+    let pre_draws = commands[pre.clone()].iter().any(draws_pixels);
     let start = first.end.min(len);
-    let composited: usize = spans[1..]
-        .iter()
-        .map(|span| span.end.min(len).saturating_sub(span.start.min(len)))
-        .sum();
-    let trailing = ((len - start) > composited).then_some(start..len);
-    (0..first.start.min(len), trailing)
+    let draws = (start..len).any(|index| {
+        draws_pixels(&commands[index]) && !spans[1..].iter().any(|span| span.contains(&index))
+    });
+    (pre, pre_draws, draws.then_some(start..len))
 }
 
 /// The whole per-frame decision for one cacheable bracket, computed without
@@ -307,6 +396,10 @@ struct Plan {
     alpha: f32,
     scale: f64,
     transform: Affine,
+    /// The enclosing clips' intersected device-space bbox, carried through to
+    /// the layer — see [`CompositeLayer::clip`]. Like the three above, no part
+    /// of the reuse decision: clipping happens at composite time.
+    clip: Option<Rect>,
 }
 
 /// The per-surface snapshot cache. Crate-private: no `wgpu`/`vello` type
@@ -335,13 +428,38 @@ fn raster_transform(transform: Affine) -> Affine {
     Affine::new([c[0], c[1], c[2], c[3], 0.0, 0.0])
 }
 
-/// Device pixel size for a body: the bounding box of `rect` under `raster`,
-/// rounded OUTWARD so no part of the body falls off the texture's last pixel,
-/// then clamped to vello's atlas ceiling and the adapter's own limit by the
-/// same [`clamp_size`] policy the shader pre-pass uses (which also floors a
-/// degenerate `0` to `1`).
+/// Device pixel size for a body, rounded OUTWARD so no part of the body falls
+/// off the texture's last pixel, then clamped to vello's atlas ceiling and the
+/// adapter's own limit by the same [`clamp_size`] policy the shader pre-pass
+/// uses (which also floors a degenerate `0` to `1`).
+///
+/// For an axis-aligned `raster` — every surface frust ships on, where `raster`
+/// is a pure device scale — the extent is the rect's OWN extent times that
+/// scale, computed before any translation and therefore independent of where
+/// the rect sits. Transforming the corners instead makes the size a function
+/// of position: a 1080-wide page measured 1080 px at `x0 = 0.0` but 1081 px at
+/// `x0 = -6.25` (device-measured), and since the size is half the reuse
+/// decision, the page re-rasterized every time its fractional slide crossed a
+/// pixel column — the whole cache defeated by a slide. [`SIZE_EPSILON`]
+/// absorbs the float noise of the one remaining multiply so a product a hair
+/// over a whole pixel does not round a column up either.
+///
+/// A rotated or skewed `raster` has no such axis-wise extent and keeps the
+/// outward bounding-box rule; it is not a placement frust's shells produce
+/// today.
 fn snapshot_size(raster: Affine, rect: Rect, adapter_max: u32) -> (u32, u32) {
-    let bbox = raster.transform_rect_bbox(rect);
+    let coefficients = raster.as_coeffs();
+    let axis_aligned = coefficients[1].abs() <= AXIS_ALIGNED_EPSILON
+        && coefficients[2].abs() <= AXIS_ALIGNED_EPSILON;
+    let (width, height) = if axis_aligned {
+        (
+            rect.width() * coefficients[0].abs() - SIZE_EPSILON,
+            rect.height() * coefficients[3].abs() - SIZE_EPSILON,
+        )
+    } else {
+        let bbox = raster.transform_rect_bbox(rect);
+        (bbox.width(), bbox.height())
+    };
     let to_u32 = |v: f64| {
         let v = v.ceil();
         if v.is_finite() && v > 0.0 {
@@ -350,7 +468,7 @@ fn snapshot_size(raster: Affine, rect: Rect, adapter_max: u32) -> (u32, u32) {
             0
         }
     };
-    clamp_size((to_u32(bbox.width()), to_u32(bbox.height())), adapter_max)
+    clamp_size((to_u32(width), to_u32(height)), adapter_max)
 }
 
 /// The rasterization root for a body (see the module's coordinate-mapping
@@ -412,18 +530,45 @@ fn reuses_entry(existing: Option<(u32, u32, u64)>, wanted: (u32, u32, u64)) -> b
     existing == Some(wanted)
 }
 
-/// Every OUTERMOST balanced bracket in `commands`, in recording order.
+/// The clips enclosing a bracket, intersected into one device-space rect —
+/// `None` for an unclipped bracket. An empty intersection is returned as it
+/// falls out (a backwards rect), leaving "this quad covers nothing" for the
+/// compositor to decide rather than conflating it with "no clip at all".
+fn enclosing_clip(clips: &[Rect]) -> Option<Rect> {
+    clips
+        .iter()
+        .copied()
+        .reduce(|outer, inner| outer.intersect(inner))
+}
+
+/// Every OUTERMOST balanced bracket in `commands`, in recording order, each
+/// carrying the clips enclosing it.
 ///
 /// Nested brackets are skipped entirely (the command contract makes only the
 /// outermost one binding), an unbalanced `PopSnapshot` is ignored the way the
 /// encode walk ignores it, and a bracket left open at the end of the list has
 /// no bounded body so it yields nothing — that bracket keeps the inline path.
+///
+/// The clip stack is tracked across the whole list, in device space
+/// (`transform.transform_rect_bbox(rect)`), because a composited bracket's
+/// pixels leave vello and nothing else would re-apply the clip they were
+/// recorded under. A rounded clip contributes its rect: the compositor's
+/// scissor cannot round corners. An unbalanced `PopClip` pops nothing, the
+/// same tolerance the encode walk shows it.
 fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
     let mut brackets = Vec::new();
     let mut depth: usize = 0;
+    let mut clips: Vec<Rect> = Vec::new();
     let mut open: Option<(usize, Bracket)> = None;
     for (index, command) in commands.iter().enumerate() {
         match command {
+            Command::PushClip { rect, transform }
+            | Command::PushClipRounded {
+                rect, transform, ..
+            } => clips.push(transform.transform_rect_bbox(*rect)),
+            Command::PopClip => {
+                clips.pop();
+            }
             Command::PushSnapshot {
                 key,
                 rect,
@@ -442,6 +587,7 @@ fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
                             transform: *transform,
                             // Closed below, once the matching pop is found.
                             body: 0..0,
+                            clip: enclosing_clip(&clips),
                         },
                     ));
                 }
@@ -545,9 +691,8 @@ impl SnapshotCache {
         scene: &Scene,
         adapter_max: u32,
     ) -> FramePlan {
-        let len = scene.commands().len();
         if !self.enabled {
-            return FramePlan::inline(len);
+            return FramePlan::inline(scene.commands());
         }
         self.frame += 1;
         let mut layers = Vec::new();
@@ -569,15 +714,17 @@ impl SnapshotCache {
                 transform: plan.transform,
                 width: entry.width,
                 height: entry.height,
+                clip: plan.clip,
                 view: entry.view.clone(),
             });
             spans.push(bracket_span(&plan.body));
         }
         self.evict();
         let holes = layers.iter().map(|layer| layer.key).collect();
-        let (pre, trailing) = frame_split(len, &spans);
+        let (pre, pre_draws, trailing) = frame_split(scene.commands(), &spans);
         FramePlan {
             pre,
+            pre_draws,
             layers,
             holes,
             trailing,
@@ -634,6 +781,7 @@ impl SnapshotCache {
                 alpha: bracket.alpha,
                 scale: bracket.scale,
                 transform: bracket.transform,
+                clip: bracket.clip,
             });
         }
         plans
@@ -746,11 +894,10 @@ impl SnapshotCache {
 
     /// Drop every entry, releasing every cached texture.
     ///
-    /// Called when the surface goes away. `_renderer` is vestigial — these
-    /// textures are never handed to vello, so there is nothing to surrender
-    /// before it dies — and stays only so the teardown call site keeps its
-    /// shape until the compositor owns that sequence.
-    pub(crate) fn clear(&mut self, _renderer: &mut vello::Renderer) {
+    /// Called when the surface goes away. Takes no renderer: these textures
+    /// are never handed to vello, so there is nothing to surrender before it
+    /// dies — dropping the last view handle IS the release.
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }
 
@@ -806,13 +953,17 @@ mod tests {
     /// The split a frame would take if every eligible bracket in `scene` hit
     /// the cache — [`SnapshotCache::prepare`]'s own arithmetic, minus the GPU
     /// work that decides which plans actually became layers.
-    fn split_of(scene: &Scene) -> (Range<usize>, Option<Range<usize>>) {
+    fn split_of(scene: &Scene) -> (Range<usize>, bool, Option<Range<usize>>) {
         let spans: Vec<Range<usize>> = SnapshotCache::new(true)
             .plan(scene, 8192)
             .iter()
             .map(|plan| bracket_span(&plan.body))
             .collect();
-        frame_split(scene.commands().len(), &spans)
+        frame_split(scene.commands(), &spans)
+    }
+
+    fn clip(rect: Rect, transform: Affine) -> Command {
+        Command::PushClip { rect, transform }
     }
 
     fn fill(rect: Rect) -> Command {
@@ -883,6 +1034,100 @@ mod tests {
     }
 
     #[test]
+    fn outermost_brackets_intersects_the_enclosing_clips_in_device_space() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let commands = vec![
+            clip(Rect::new(0.0, 0.0, 100.0, 100.0), Affine::IDENTITY),
+            clip(
+                Rect::new(20.0, 0.0, 60.0, 40.0),
+                Affine::translate((5.0, 5.0)),
+            ),
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopClip,
+            Command::PopClip,
+        ];
+        assert_eq!(
+            outermost_brackets(&commands)[0].clip,
+            Some(Rect::new(25.0, 5.0, 65.0, 45.0)),
+            "each clip lands in device space and the two intersect"
+        );
+    }
+
+    #[test]
+    fn outermost_brackets_records_no_clip_for_an_unclipped_bracket() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        // A clip that opened AND closed before the bracket encloses nothing.
+        let commands = vec![
+            clip(Rect::new(0.0, 0.0, 4.0, 4.0), Affine::IDENTITY),
+            Command::PopClip,
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+        ];
+        assert_eq!(outermost_brackets(&commands)[0].clip, None);
+    }
+
+    #[test]
+    fn outermost_brackets_takes_a_rotated_or_rounded_clips_bounding_rect() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let turned = Affine::rotate(std::f64::consts::FRAC_PI_4);
+        let clipped = Rect::new(-10.0, -10.0, 10.0, 10.0);
+        let commands = vec![
+            Command::PushClipRounded {
+                rect: clipped,
+                radii: frust_scene::CornerRadii::uniform(4.0),
+                transform: turned,
+            },
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopClip,
+        ];
+        assert_eq!(
+            outermost_brackets(&commands)[0].clip,
+            Some(turned.transform_rect_bbox(clipped)),
+            "a rounded clip contributes its rect; a rotated one its bbox"
+        );
+    }
+
+    #[test]
+    fn outermost_brackets_ignores_a_clip_opened_inside_the_body() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let commands = vec![
+            push(1, rect, Affine::IDENTITY),
+            clip(Rect::new(1.0, 1.0, 2.0, 2.0), Affine::IDENTITY),
+            fill(rect),
+            Command::PopClip,
+            Command::PopSnapshot,
+            push(2, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+        ];
+        let brackets = outermost_brackets(&commands);
+        assert_eq!(
+            (brackets[0].clip, brackets[1].clip),
+            (None, None),
+            "a body's own clip is rasterized into the texture, not around it"
+        );
+    }
+
+    #[test]
+    fn enclosing_clip_reports_an_empty_intersection_as_it_falls_out() {
+        let disjoint = enclosing_clip(&[
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(20.0, 20.0, 30.0, 30.0),
+        ])
+        .expect("two clips are still clips");
+        assert!(
+            disjoint.width() <= 0.0 || disjoint.height() <= 0.0,
+            "{disjoint:?} must not read as a coverable region"
+        );
+        assert_eq!(enclosing_clip(&[]), None);
+    }
+
+    #[test]
     fn raster_transform_keeps_the_linear_part_and_drops_the_translation() {
         let transform = Affine::translate((30.0, 40.0)) * Affine::scale(2.0);
         assert_eq!(raster_transform(transform), Affine::scale(2.0));
@@ -899,6 +1144,67 @@ mod tests {
         // A fractional extent rounds outward rather than truncating.
         let odd = Rect::new(0.0, 0.0, 20.1, 10.0);
         assert_eq!(snapshot_size(raster, odd, 8192), (41, 20));
+    }
+
+    /// The bug this card fixes: a page's texture size must depend on its
+    /// EXTENT, never on where it currently sits. Sliding the same 1080-px-wide
+    /// page across fractional offsets used to flip the size between 1080 and
+    /// 1081 as the transformed corners rounded differently, and since the size
+    /// is half the reuse decision, every crossing re-rasterized the whole page
+    /// mid-transition. Size and fingerprint must both hold still.
+    #[test]
+    fn snapshot_size_and_fingerprint_are_independent_of_the_rects_position() {
+        // A Pixel 5a page: 1080 device px at the 2.75 device scale.
+        let scale = 2.75;
+        let raster = raster_transform(Affine::scale(scale));
+        let (logical_width, logical_height) = (1080.0 / scale, 2400.0 / scale);
+        let body = Rect::new(4.0, 4.0, 100.0, 200.0);
+
+        let mut sizes = Vec::new();
+        let mut fingerprints = Vec::new();
+        for x0 in [0.0, 0.3, -6.25, 15.35, 0.0026] {
+            let rect = Rect::new(x0, 0.0, x0 + logical_width, logical_height);
+            // The body slides with the bracket it belongs to, which is what a
+            // page transition does (see the module's fingerprint section).
+            let slid = Rect::new(body.x0 + x0, body.y0, body.x1 + x0, body.y1);
+            let scene = bracket_scene(Affine::scale(scale), rect, slid, Brush::Solid(RED));
+            let size = snapshot_size(raster, rect, 8192);
+            sizes.push(size);
+            fingerprints.push(body_fingerprint(
+                &scene,
+                1..2,
+                rect,
+                Affine::scale(scale),
+                size.0,
+                size.1,
+                raster,
+            ));
+        }
+        assert_eq!(
+            sizes,
+            vec![(1080, 2400); 5],
+            "a page's texture size must not follow its fractional offset"
+        );
+        assert_eq!(
+            fingerprints,
+            vec![fingerprints[0]; 5],
+            "a page that only slides must keep its fingerprint, and so its texture"
+        );
+    }
+
+    /// Rotation has no axis-wise extent, so it keeps the outward bounding-box
+    /// rule (a quarter turn swaps the two axes). Written as the exact matrix
+    /// rather than `Affine::rotate`, whose trig leaves the transformed extent
+    /// a few ULPs over 20 — which the outward rule then rounds to 21, exactly
+    /// the rounding the axis-aligned branch exists to stop paying.
+    #[test]
+    fn snapshot_size_falls_back_to_the_bounding_box_for_a_rotated_raster() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let quarter_turn = Affine::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            snapshot_size(raster_transform(quarter_turn), rect, 8192),
+            (20, 40)
+        );
     }
 
     #[test]
@@ -1252,7 +1558,7 @@ mod tests {
             .map(|plan| plan.key)
             .collect();
         assert_eq!(keys, vec![1, 2], "both brackets composite, in scene order");
-        assert_eq!(split_of(&scene), (0..1, Some(4..9)));
+        assert_eq!(split_of(&scene), (0..1, true, Some(4..9)));
     }
 
     #[test]
@@ -1267,7 +1573,7 @@ mod tests {
             builder.fill_rect(body, Brush::Solid(RED));
             builder.pop_snapshot();
         }
-        assert_eq!(split_of(&scene), (0..1, None));
+        assert_eq!(split_of(&scene), (0..1, true, None));
     }
 
     #[test]
@@ -1286,7 +1592,7 @@ mod tests {
                 builder.pop_snapshot();
             }
         }
-        assert_eq!(split_of(&scene), (0..0, None));
+        assert_eq!(split_of(&scene), (0..0, false, None));
     }
 
     #[test]
@@ -1312,19 +1618,162 @@ mod tests {
             .map(|plan| plan.key)
             .collect();
         assert_eq!(keys, vec![1], "the hole-punch bracket must not composite");
-        assert_eq!(split_of(&scene), (0..0, Some(3..6)));
+        assert_eq!(split_of(&scene), (0..0, false, Some(3..6)));
     }
 
     #[test]
     fn a_frame_with_nothing_composited_is_one_whole_vello_pass() {
         // The kill switch's plan, and equally the plan for a frame whose
         // brackets all missed: one vello pass over everything.
-        let plan = FramePlan::inline(9);
-        assert_eq!(plan.pre, 0..9);
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![clip(rect, Affine::IDENTITY), fill(rect), Command::PopClip];
+        let plan = FramePlan::inline(&commands);
+        assert_eq!(plan.pre, 0..3);
+        assert!(plan.pre_draws, "the one fill is what the pass exists for");
         assert!(plan.layers.is_empty());
         assert!(plan.holes.is_empty());
         assert!(plan.trailing.is_none());
-        assert_eq!(frame_split(9, &[]), (0..9, None));
+        assert_eq!(frame_split(&commands, &[]), (0..3, true, None));
+        // With nothing composited there is no quad pass to clear the frame,
+        // so the plan still runs its own vello pass whatever it holds.
+        let structure = vec![clip(rect, Affine::IDENTITY), Command::PopClip];
+        assert!(!FramePlan::inline(&structure).pre_draws);
+    }
+
+    #[test]
+    fn draws_pixels_separates_painting_commands_from_structure() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let radii = frust_scene::CornerRadii::uniform(2.0);
+        let painting = vec![
+            fill(rect),
+            Command::RoundedRect {
+                rect,
+                radii,
+                brush: Brush::Solid(RED),
+                transform: Affine::IDENTITY,
+            },
+            Command::Line {
+                p0: Point::ZERO,
+                p1: Point::new(1.0, 1.0),
+                width: 1.0,
+                brush: Brush::Solid(RED),
+                transform: Affine::IDENTITY,
+            },
+            Command::BlurredRoundedRect {
+                rect,
+                radii,
+                std_dev: 1.0,
+                color: RED,
+                transform: Affine::IDENTITY,
+            },
+            Command::ClearRect {
+                rect,
+                transform: Affine::IDENTITY,
+            },
+            Command::Path {
+                path: kurbo::BezPath::new(),
+                style: frust_scene::PathStyle::Fill,
+                brush: Brush::Solid(RED),
+                transform: Affine::IDENTITY,
+            },
+            Command::ShaderQuad {
+                program: frust_scene::ShaderProgram::new("@fragment fn fs_main() {}"),
+                dest: rect,
+                transform: Affine::IDENTITY,
+                time: 0.0,
+            },
+        ];
+        for command in &painting {
+            assert!(draws_pixels(command), "{command:?} paints");
+        }
+        let structure = vec![
+            clip(rect, Affine::IDENTITY),
+            Command::PushClipRounded {
+                rect,
+                radii,
+                transform: Affine::IDENTITY,
+            },
+            Command::PopClip,
+            Command::PushLayer {
+                rect,
+                alpha: 0.5,
+                transform: Affine::IDENTITY,
+            },
+            Command::PopLayer,
+            push(1, rect, Affine::IDENTITY),
+            Command::PopSnapshot,
+        ];
+        for command in &structure {
+            assert!(!draws_pixels(command), "{command:?} paints nothing");
+        }
+    }
+
+    /// The measured page-transition shape: the app root's `PushClip`, the
+    /// composited bracket, the matching `PopClip`. Neither segment paints, so
+    /// the frame is one compositor pass — no main vello pass (`pre_draws`
+    /// false) and no trailing one.
+    #[test]
+    fn frame_split_reports_a_structure_only_pre_and_tail_as_drawing_nothing() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![
+            clip(rect, Affine::IDENTITY),
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopClip,
+        ];
+        let spans = [bracket_span(&(2..3))];
+        assert_eq!(
+            frame_split(&commands, &spans),
+            (0..1, false, None),
+            "a PushClip/PopClip pair is not worth two vello passes"
+        );
+    }
+
+    #[test]
+    fn frame_split_reports_a_pre_segment_that_paints() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![
+            clip(rect, Affine::IDENTITY),
+            fill(rect),
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopClip,
+        ];
+        let spans = [bracket_span(&(3..4))];
+        assert_eq!(frame_split(&commands, &spans), (0..2, true, None));
+    }
+
+    #[test]
+    fn frame_split_keeps_a_trailing_segment_that_paints() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            Command::PopClip,
+            fill(rect),
+        ];
+        let spans = [bracket_span(&(1..2))];
+        assert_eq!(frame_split(&commands, &spans), (0..0, false, Some(3..5)));
+    }
+
+    /// A later composited bracket inside the trailing range is a hole, so its
+    /// own body's paint commands do not keep the pass alive.
+    #[test]
+    fn frame_split_ignores_paint_inside_a_later_composited_bracket() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+            push(2, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+        ];
+        let spans = [bracket_span(&(1..2)), bracket_span(&(4..5))];
+        assert_eq!(frame_split(&commands, &spans), (0..0, false, None));
     }
 
     /// The de-registration invariant, asserted the only way a unit test can:
@@ -1400,8 +1849,13 @@ mod tests {
             assert_eq!(layer.rect, rect);
             assert_eq!(layer.transform, transform);
             assert_eq!((layer.alpha, layer.scale), (1.0, 1.0));
+            assert_eq!(layer.clip, None, "an unclipped bracket needs no scissor");
             assert_eq!(plan.holes, HashSet::from([KEY]));
             assert_eq!(plan.pre, 0..0);
+            assert!(
+                !plan.pre_draws,
+                "an empty pre segment must not buy a vello pass"
+            );
             assert_eq!(plan.trailing, None);
             assert_eq!(cache.renders(KEY), Some(1));
 
@@ -1444,6 +1898,7 @@ mod tests {
             let plan = disabled.prepare(&device, &queue, &mut renderer, &scene, 8192);
             assert!(plan.layers.is_empty() && plan.holes.is_empty());
             assert_eq!(plan.pre, 0..scene.commands().len());
+            assert!(plan.pre_draws, "the body's fill is in the pre segment now");
             assert_eq!(plan.trailing, None);
             assert_eq!(disabled.len(), 0);
         }

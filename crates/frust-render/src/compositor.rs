@@ -19,7 +19,14 @@
 //!
 //! and both halves are recorded by ONE [`Compositor::composite`] call, whose
 //! render pass loads (`LoadOp::Load`) what vello already wrote and draws the
-//! layers in scene order, then the trailing scratch last. The caller supplies
+//! layers in scene order, then the trailing scratch last.
+//!
+//! When the pre segment paints nothing at all
+//! (`crate::snapshot::FramePlan::pre_draws`) the render path skips `vello(pre)`
+//! outright — a pass that would draw no pixel still costs a full fine-stage
+//! sweep of the target — and hands the frame's base colour over as
+//! [`CompositeTarget::clear`]; the load op becomes `LoadOp::Clear` and this
+//! pass alone composes the frame. The caller supplies
 //! the attachment, which differs per render path
 //! ([`crate::context::RenderPath`]): the acquired swapchain texture after
 //! vello on the direct arm, the intermediate before the blit on the blit arm,
@@ -197,12 +204,59 @@ fn uniform_stride(min_alignment: u32) -> u64 {
     UNIFORM_SIZE.div_ceil(alignment) * alignment
 }
 
-/// Whether a `composite` call has anything to draw. The empty case is the
+/// Whether a `composite` call has anything to do. The empty case is the
 /// steady state of every frame that composites nothing (no cache hits, or the
 /// kill switch): no encoder, no pass, no submit — the arm behaves exactly as
 /// it did before this module existed.
-fn has_work(layers: usize, trailing: bool) -> bool {
-    layers > 0 || trailing
+///
+/// A pending `clear` is work in its own right even with no quad to draw: on
+/// that frame this pass is the ONLY thing writing the target (the render path
+/// skipped vello's), so skipping it would present an undefined frame.
+fn has_work(layers: usize, trailing: bool, clear: bool) -> bool {
+    layers > 0 || trailing || clear
+}
+
+/// The clear value for a target holding `output`-convention pixels.
+///
+/// `wgpu` writes a clear value into a non-sRGB unorm attachment verbatim (and
+/// this pass refuses every other format, [`is_supported_target_format`]), so
+/// the straight variant hands over `peniko`'s own encoded components — the
+/// same bytes vello's fine stage stores for a pixel the scene never covers,
+/// which is what makes a skipped main pass indistinguishable from one that
+/// only cleared. The premultiplied variant multiplies the colour through by
+/// its own alpha, exactly as [`crate::context::PremultiplyPass`]'s
+/// `(rgb * a, a)` would have.
+fn clear_color(color: peniko::Color, output: OutputAlpha) -> wgpu::Color {
+    let [red, green, blue, alpha] = color.components.map(f64::from);
+    let scale = match output {
+        OutputAlpha::Straight => 1.0,
+        OutputAlpha::Premultiplied => alpha,
+    };
+    wgpu::Color {
+        r: red * scale,
+        g: green * scale,
+        b: blue * scale,
+        a: alpha,
+    }
+}
+
+/// A layer's enclosing clip as a scissor rect on a `target`-sized attachment:
+/// `(x, y, width, height)` in pixels, rounded OUTWARD so a clip edge on a
+/// fractional pixel keeps that pixel rather than shaving a column off the
+/// page, and clamped into the attachment (`wgpu` rejects a scissor that leaves
+/// it).
+///
+/// `None` when the clip covers no pixel at all — an empty intersection of
+/// nested clips, or a clip entirely off-surface. The caller then draws no
+/// quad, which is what the clip means.
+fn scissor_rect(clip: Rect, target: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+    let (width, height) = (f64::from(target.0), f64::from(target.1));
+    let x0 = clip.x0.floor().clamp(0.0, width);
+    let y0 = clip.y0.floor().clamp(0.0, height);
+    let x1 = clip.x1.ceil().clamp(0.0, width);
+    let y1 = clip.y1.ceil().clamp(0.0, height);
+    // Also the NaN guard: every comparison against a NaN edge is false.
+    (x1 > x0 && y1 > y0).then_some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
 /// Map a page's own pixel grid onto the surface: texture pixels
@@ -269,6 +323,14 @@ pub(crate) struct CompositeTarget<'a> {
     pub view: &'a wgpu::TextureView,
     pub size: (u32, u32),
     pub output: OutputAlpha,
+    /// The frame's base colour, when this pass must CLEAR the target to it
+    /// instead of loading what vello wrote — the render path skipped the main
+    /// vello pass because its segment drew nothing
+    /// (`crate::snapshot::FramePlan::pre_draws`), so nothing wrote the target
+    /// before this pass and the backdrop is this pass's job.
+    ///
+    /// `None` on every ordinary frame: load what is already there.
+    pub clear: Option<peniko::Color>,
 }
 
 /// The transparent intermediate the trailing segment's vello pass renders
@@ -472,13 +534,22 @@ impl Compositor {
     /// trailing segment's scratch (when there is one) as a full-target quad at
     /// alpha 1.
     ///
-    /// Records ONE render pass that loads and stores `target` — everything
-    /// vello (and, on the premultiplied arm, [`crate::context::PremultiplyPass`])
-    /// already wrote survives underneath — and submits its own encoder.
-    /// A no-op with nothing to draw: no encoder, no submit.
+    /// Records ONE render pass over `target` and submits its own encoder. The
+    /// pass LOADS by default — everything vello (and, on the premultiplied
+    /// arm, [`crate::context::PremultiplyPass`]) already wrote survives
+    /// underneath — or CLEARS to [`CompositeTarget::clear`] when the render
+    /// path skipped the main vello pass and this is the frame's only write.
+    /// A no-op with nothing to draw and nothing to clear: no encoder, no
+    /// submit.
+    ///
+    /// Each layer is drawn under its own [`CompositeLayer::clip`] as a scissor
+    /// rect (the quad left vello, so nothing else still applies the clips the
+    /// bracket was recorded under); a layer whose clip covers no pixel is
+    /// skipped, and the trailing scratch always draws over the whole target.
     ///
     /// `target` carries the attachment, its pixel size (the surface size on
-    /// every arm) and the alpha convention its pixels are stored in.
+    /// every arm), the alpha convention its pixels are stored in, and that
+    /// clear.
     pub(crate) fn composite(
         &mut self,
         device: &wgpu::Device,
@@ -487,7 +558,7 @@ impl Compositor {
         layers: &[CompositeLayer],
         trailing: Option<&wgpu::TextureView>,
     ) {
-        if !has_work(layers.len(), trailing.is_some()) {
+        if !has_work(layers.len(), trailing.is_some(), target.clear.is_some()) {
             return;
         }
         let quads = layers.len() + usize::from(trailing.is_some());
@@ -495,71 +566,81 @@ impl Compositor {
             // Unreachable: a frame's brackets are counted in single digits.
             return;
         };
-        self.ensure_capacity(device, quads);
-        let Some(uniforms) = self.uniforms.as_ref() else {
-            return;
-        };
+        // One bind group per quad, and the scissor each is drawn under —
+        // `None` for a quad nothing clips, which draws over the whole target.
+        // Both stay empty on a clear-only pass (no layers, no trailing), whose
+        // whole job is the load op below.
+        let mut binds: Vec<wgpu::BindGroup> = Vec::new();
+        let mut scissors: Vec<Option<Rect>> = Vec::new();
+        if quads > 0 {
+            self.ensure_capacity(device, quads);
+            let Some(uniforms) = self.uniforms.as_ref() else {
+                return;
+            };
 
-        // One write for every quad's record, then one bind group per quad
-        // (each names its own page texture; the record is addressed by the
-        // dynamic offset). The trailing scratch is the last quad: the whole
-        // target, at alpha 1, sampled 1:1.
-        let ndc = ndc_transform(target.size);
-        let mut records = vec![0u8; self.stride as usize * quads as usize];
-        let mut views: Vec<&wgpu::TextureView> = Vec::with_capacity(quads as usize);
-        for (index, layer) in layers.iter().enumerate() {
-            let clip = ndc
-                * quad_transform(
-                    layer.rect,
-                    layer.scale,
-                    layer.transform,
-                    layer.width,
-                    layer.height,
-                );
-            let bytes = uniform_bytes(clip, layer.width, layer.height, layer.alpha);
-            let at = self.stride as usize * index;
-            records[at..at + bytes.len()].copy_from_slice(&bytes);
-            views.push(&layer.view);
-        }
-        if let Some(scratch) = trailing {
-            let (width, height) = target.size;
-            let full = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-            let clip = ndc * quad_transform(full, 1.0, Affine::IDENTITY, width, height);
-            let bytes = uniform_bytes(clip, width, height, 1.0);
-            let at = self.stride as usize * layers.len();
-            records[at..at + bytes.len()].copy_from_slice(&bytes);
-            views.push(scratch);
-        }
-        queue.write_buffer(uniforms, 0, &records);
+            // One write for every quad's record, then one bind group per quad
+            // (each names its own page texture; the record is addressed by the
+            // dynamic offset). The trailing scratch is the last quad: the
+            // whole target, at alpha 1, sampled 1:1 and unclipped.
+            let ndc = ndc_transform(target.size);
+            let mut records = vec![0u8; self.stride as usize * quads as usize];
+            let mut views: Vec<&wgpu::TextureView> = Vec::with_capacity(quads as usize);
+            for (index, layer) in layers.iter().enumerate() {
+                let clip = ndc
+                    * quad_transform(
+                        layer.rect,
+                        layer.scale,
+                        layer.transform,
+                        layer.width,
+                        layer.height,
+                    );
+                let bytes = uniform_bytes(clip, layer.width, layer.height, layer.alpha);
+                let at = self.stride as usize * index;
+                records[at..at + bytes.len()].copy_from_slice(&bytes);
+                views.push(&layer.view);
+                scissors.push(layer.clip);
+            }
+            if let Some(scratch) = trailing {
+                let (width, height) = target.size;
+                let full = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+                let clip = ndc * quad_transform(full, 1.0, Affine::IDENTITY, width, height);
+                let bytes = uniform_bytes(clip, width, height, 1.0);
+                let at = self.stride as usize * layers.len();
+                records[at..at + bytes.len()].copy_from_slice(&bytes);
+                views.push(scratch);
+                scissors.push(None);
+            }
+            queue.write_buffer(uniforms, 0, &records);
 
-        // Every bind group must outlive the pass that binds it.
-        let binds: Vec<wgpu::BindGroup> = views
-            .iter()
-            .map(|view| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("frust-render compositor bind group"),
-                    layout: &self.bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: uniforms,
-                                offset: 0,
-                                size: wgpu::BufferSize::new(UNIFORM_SIZE),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
+            // Every bind group must outlive the pass that binds it.
+            binds = views
+                .iter()
+                .map(|view| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("frust-render compositor bind group"),
+                        layout: &self.bind_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: uniforms,
+                                    offset: 0,
+                                    size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                                }),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            },
+                        ],
+                    })
                 })
-            })
-            .collect();
+                .collect();
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frust-render compositor"),
@@ -573,8 +654,14 @@ impl Compositor {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // The frame vello (or the premultiply pass) just wrote
-                        // is the backdrop these quads blend onto.
-                        load: wgpu::LoadOp::Load,
+                        // is the backdrop these quads blend onto — unless the
+                        // render path skipped that pass because its segment
+                        // painted nothing, in which case this pass lays the
+                        // base colour down itself.
+                        load: match target.clear {
+                            Some(color) => wgpu::LoadOp::Clear(clear_color(color, target.output)),
+                            None => wgpu::LoadOp::Load,
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -588,6 +675,20 @@ impl Compositor {
                 OutputAlpha::Premultiplied => &self.premultiplied,
             });
             for (index, bind) in binds.iter().enumerate() {
+                // The clips the bracket was recorded under, which the quad has
+                // left vello and so left behind: re-applied here, or the page
+                // paints over chrome the scene had clipped it away from. A
+                // clip covering nothing draws nothing; an unclipped quad
+                // resets the scissor to the whole target, since the previous
+                // quad may have narrowed it.
+                let scissor = match scissors.get(index).copied().flatten() {
+                    Some(clip) => match scissor_rect(clip, target.size) {
+                        Some(scissor) => scissor,
+                        None => continue,
+                    },
+                    None => (0, 0, target.size.0, target.size.1),
+                };
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
                 let offset = self.stride * index as u64;
                 // A dynamic offset is a u32 by API; the buffer is quads *
                 // stride bytes, far inside that.
@@ -768,13 +869,80 @@ mod tests {
 
     /// The empty-plan fast path: a frame that composites nothing records no
     /// pass and submits no encoder, which is what makes a disabled cache (and
-    /// every ordinary frame) byte-identical to the pre-compositor arms.
+    /// every ordinary frame) byte-identical to the pre-compositor arms. A
+    /// pending clear is the exception — nothing else would write the target.
     #[test]
     fn a_plan_with_no_layers_and_no_trailing_segment_is_a_no_op() {
-        assert!(!has_work(0, false));
-        assert!(has_work(1, false));
-        assert!(has_work(0, true));
-        assert!(has_work(2, true));
+        assert!(!has_work(0, false, false));
+        assert!(has_work(1, false, false));
+        assert!(has_work(0, true, false));
+        assert!(has_work(2, true, false));
+        assert!(has_work(0, false, true));
+    }
+
+    /// The straight variant hands `peniko`'s components to the attachment
+    /// as-is (the bytes vello's own base-colour clear would have stored); the
+    /// premultiplied one multiplies the colour through by its alpha, matching
+    /// `PremultiplyPass`'s `(rgb * a, a)` exactly.
+    #[test]
+    fn clear_color_follows_the_targets_alpha_convention() {
+        let opaque = Color::from_rgba8(255, 128, 0, 255);
+        let straight = clear_color(opaque, OutputAlpha::Straight);
+        assert!((straight.r - 1.0).abs() < 1e-6);
+        assert!((straight.g - 128.0 / 255.0).abs() < 1e-6);
+        assert!((straight.b).abs() < 1e-6);
+        assert!((straight.a - 1.0).abs() < 1e-6);
+
+        // An opaque colour is its own premultiplication, so the two variants
+        // agree on every colour a surface actually clears to.
+        let premultiplied = clear_color(opaque, OutputAlpha::Premultiplied);
+        assert!((premultiplied.r - straight.r).abs() < 1e-6);
+        assert!((premultiplied.g - straight.g).abs() < 1e-6);
+
+        let translucent = Color::from_rgba8(255, 255, 255, 128);
+        let alpha = 128.0 / 255.0;
+        let folded = clear_color(translucent, OutputAlpha::Premultiplied);
+        assert!((folded.r - alpha).abs() < 1e-6, "{folded:?}");
+        assert!((folded.a - alpha).abs() < 1e-6, "{folded:?}");
+        // The straight variant leaves the same colour un-premultiplied.
+        let kept = clear_color(translucent, OutputAlpha::Straight);
+        assert!((kept.r - 1.0).abs() < 1e-6, "{kept:?}");
+        assert!((kept.a - alpha).abs() < 1e-6, "{kept:?}");
+    }
+
+    /// A clip becomes a scissor rounded OUTWARD (a fractional edge keeps its
+    /// pixel) and clamped into the attachment, or `None` when it covers
+    /// nothing at all.
+    #[test]
+    fn scissor_rect_rounds_outward_and_clamps_into_the_target() {
+        assert_eq!(
+            scissor_rect(Rect::new(10.0, 20.0, 30.0, 40.0), (64, 64)),
+            Some((10, 20, 20, 20))
+        );
+        // Fractional edges grow the rect rather than shaving the page.
+        assert_eq!(
+            scissor_rect(Rect::new(10.4, 20.6, 29.1, 39.2), (64, 64)),
+            Some((10, 20, 20, 20))
+        );
+        // A clip reaching past the surface is clamped, not refused.
+        assert_eq!(
+            scissor_rect(Rect::new(-40.0, -10.0, 100.0, 100.0), (64, 32)),
+            Some((0, 0, 64, 32))
+        );
+        // Empty (the intersection of disjoint clips), inverted, entirely
+        // off-surface, and non-finite all mean "draw no quad".
+        assert_eq!(
+            scissor_rect(Rect::new(20.0, 20.0, 10.0, 40.0), (64, 64)),
+            None
+        );
+        assert_eq!(
+            scissor_rect(Rect::new(80.0, 0.0, 90.0, 10.0), (64, 64)),
+            None
+        );
+        assert_eq!(
+            scissor_rect(Rect::new(f64::NAN, 0.0, 10.0, 10.0), (64, 64)),
+            None
+        );
     }
 
     // --- GPU smokes --------------------------------------------------------
@@ -1001,18 +1169,43 @@ mod tests {
             builder.fill_rect(Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
             // The bracket: a 20x20 body under a 2x device scale offset by
             // (8, 8), so its rect covers device (8, 8)..(48, 48).
-            builder.push_transform(Affine::translate((8.0, 8.0)) * Affine::scale(2.0));
-            builder.push_snapshot(1, Rect::new(0.0, 0.0, 20.0, 20.0), alpha, 1.0);
-            builder.fill_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
-            builder.fill_rect(
-                Rect::new(0.0, 10.0, 20.0, 15.0),
-                Brush::Solid(GREEN.with_alpha(0.5)),
-            );
-            builder.fill_rect(Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
-            builder.pop_snapshot();
-            builder.pop_transform();
+            bracket_body(&mut builder, alpha);
             // Trailing segment: an opaque overlay ON TOP of the page.
             builder.fill_rect(Rect::new(20.0, 20.0, 30.0, 30.0), Brush::Solid(overlay));
+        }
+        scene
+    }
+
+    /// The bracket body [`parity_scene`] draws, recorded under a 2x device
+    /// scale offset by (8, 8) so it covers device (8, 8)..(48, 48).
+    fn bracket_body(builder: &mut SceneBuilder<'_>, alpha: f32) {
+        builder.push_transform(Affine::translate((8.0, 8.0)) * Affine::scale(2.0));
+        builder.push_snapshot(1, Rect::new(0.0, 0.0, 20.0, 20.0), alpha, 1.0);
+        builder.fill_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
+        builder.fill_rect(
+            Rect::new(0.0, 10.0, 20.0, 15.0),
+            Brush::Solid(GREEN.with_alpha(0.5)),
+        );
+        builder.fill_rect(Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
+        builder.pop_snapshot();
+        builder.pop_transform();
+    }
+
+    /// The MEASURED page-transition shape: a clip, one composited bracket, the
+    /// matching pop — and nothing anywhere that paints outside the bracket.
+    /// Both segments are then pure structure, so the composited arm skips the
+    /// main vello pass and the compositor's own pass clears the frame to the
+    /// base colour and draws the page onto it.
+    ///
+    /// `clip` is the app-root clip's rect in device pixels; a clip NARROWER
+    /// than the page is what proves the scissor.
+    fn clipped_bracket_scene(clip: Rect, alpha: f32) -> Scene {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_clip(clip);
+            bracket_body(&mut builder, alpha);
+            builder.pop_clip();
         }
         scene
     }
@@ -1026,6 +1219,7 @@ mod tests {
         cache: &mut SnapshotCache,
         compositor: &mut Compositor,
         scene: &Scene,
+        base_color: Color,
     ) -> Vec<u8> {
         let adapter_max = device.limits().max_texture_dimension_2d;
         let (texture, view) = surface_target(device);
@@ -1038,6 +1232,10 @@ mod tests {
             antialiasing_method: vello::AaConfig::Area,
         };
 
+        // The renderer's own rule (`renderer::skips_main_pass`), mirrored: a
+        // pre segment that paints nothing gets no vello pass, and the
+        // composite pass clears the target to the base colour instead.
+        let clear = (!plan.pre_draws && !plan.layers.is_empty()).then_some(base_color);
         let mut vello_scene = vello::Scene::new();
         encode_range_with_overrides(
             scene,
@@ -1047,9 +1245,11 @@ mod tests {
             adapter_max,
             &plan.holes,
         );
-        renderer
-            .render_to_texture(device, queue, &vello_scene, &view, &params(BLACK))
-            .expect("pre-segment render failed");
+        if clear.is_none() {
+            renderer
+                .render_to_texture(device, queue, &vello_scene, &view, &params(base_color))
+                .expect("pre-segment render failed");
+        }
 
         let trailing = plan.trailing.clone().map(|range| {
             let scratch = compositor.ensure_scratch(device, SIZE, SIZE).clone();
@@ -1081,6 +1281,7 @@ mod tests {
                 view: &view,
                 size: (SIZE, SIZE),
                 output: OutputAlpha::Straight,
+                clear,
             },
             &plan.layers,
             trailing.as_ref(),
@@ -1125,6 +1326,7 @@ mod tests {
                 &mut cached,
                 &mut compositor,
                 &scene,
+                BLACK,
             )
             .await;
             // The kill switch: one whole-scene vello pass, no layers, no
@@ -1137,6 +1339,7 @@ mod tests {
                 &mut disabled,
                 &mut compositor,
                 &scene,
+                BLACK,
             )
             .await;
 
@@ -1205,6 +1408,187 @@ mod tests {
         }
     }
 
+    /// The same parity, for the frame shape the device gate actually measured:
+    /// a clip, the composited bracket, the matching pop, and nothing that
+    /// paints outside the bracket anywhere. The composited arm therefore runs
+    /// NO vello pass at all — the compositor clears the target to the base
+    /// colour and draws the page — and must still land the inline arm's
+    /// pixels, base colour included.
+    ///
+    /// The base colour is deliberately not black: the clear is the only thing
+    /// writing every pixel outside the page here, so a wrong colour conversion
+    /// (or a wrong premultiplication) shows up as a whole-frame delta rather
+    /// than hiding in zeroes.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn snapshot_layer_composites_pixel_identically_without_a_main_pass() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let (device, queue) = gpu().await;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+                .expect("failed to create vello renderer");
+            let mut compositor = Compositor::new(&device, wgpu::TextureFormat::Rgba8Unorm, None)
+                .expect("compositor");
+
+            let base = Color::from_rgba8(32, 96, 160, 255);
+            let full = Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE));
+            let scene = clipped_bracket_scene(full, 0.75);
+
+            let mut cached = SnapshotCache::new(true);
+            let plan = cached.prepare(
+                &device,
+                &queue,
+                &mut renderer,
+                &scene,
+                device.limits().max_texture_dimension_2d,
+            );
+            assert_eq!(plan.pre, 0..1, "the pre segment is the PushClip alone");
+            assert!(
+                !plan.pre_draws && plan.trailing.is_none(),
+                "neither segment paints, so neither is worth a vello pass"
+            );
+            assert_eq!(plan.layers.len(), 1);
+            assert_eq!(
+                plan.layers[0].clip,
+                Some(full),
+                "the page carries the clip enclosing it"
+            );
+
+            let composited = render_frame(
+                &device,
+                &queue,
+                &mut renderer,
+                &mut cached,
+                &mut compositor,
+                &scene,
+                base,
+            )
+            .await;
+            let mut disabled = SnapshotCache::new(false);
+            let inline = render_frame(
+                &device,
+                &queue,
+                &mut renderer,
+                &mut disabled,
+                &mut compositor,
+                &scene,
+                base,
+            )
+            .await;
+
+            let (mut worst, mut worst_at) = (0u8, (0, 0));
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let delta = (0..4)
+                        .map(|c| pixel(&inline, x, y)[c].abs_diff(pixel(&composited, x, y)[c]))
+                        .max()
+                        .unwrap_or(0);
+                    if delta > worst {
+                        worst = delta;
+                        worst_at = (x, y);
+                    }
+                }
+            }
+            println!("skipped-main-pass parity: max per-pixel delta {worst} at {worst_at:?}");
+            assert!(
+                worst <= TOLERANCE,
+                "the skipped-main-pass arm disagrees by {worst} at {worst_at:?} (tolerance \
+                 {TOLERANCE}): inline={:?} composited={:?}",
+                pixel(&inline, worst_at.0, worst_at.1),
+                pixel(&composited, worst_at.0, worst_at.1),
+            );
+            // The base colour outside the page comes from the compositor's own
+            // clear on one arm and vello's on the other.
+            let want = [32, 96, 160, 255];
+            for (arm, data) in [("inline", &inline), ("composited", &composited)] {
+                let outside = pixel(data, 56, 56);
+                for channel in 0..4 {
+                    assert!(
+                        outside[channel].abs_diff(want[channel]) <= TOLERANCE,
+                        "{arm} arm must leave the base colour outside the page: got {outside:?}, \
+                         want {want:?}"
+                    );
+                }
+                let red = pixel(data, 40, 12);
+                assert!(
+                    red[0].abs_diff(191) <= TOLERANCE + 40,
+                    "{arm} arm must draw the body block at the bracket's alpha over the base, \
+                     got {red:?}"
+                );
+            }
+
+            let error = scope.pop().await;
+            assert!(
+                error.is_none(),
+                "the compositor produced an uncaptured validation error: {error:?}"
+            );
+        }
+    }
+
+    /// The scissor, end to end: a page whose quad is wider than the clip it
+    /// was recorded under must leave every pixel outside that clip at the base
+    /// colour — the quad has left vello, so this pass's scissor is the only
+    /// thing still applying the clip.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn a_clipped_page_paints_nothing_outside_its_clip() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let (device, queue) = gpu().await;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+                .expect("failed to create vello renderer");
+            let mut compositor = Compositor::new(&device, wgpu::TextureFormat::Rgba8Unorm, None)
+                .expect("compositor");
+
+            // The page covers device (8, 8)..(48, 48); the clip cuts it at
+            // x = 28, so the right half of the page must never be drawn.
+            let base = Color::from_rgba8(32, 96, 160, 255);
+            let narrow = Rect::new(0.0, 0.0, 28.0, f64::from(SIZE));
+            let scene = clipped_bracket_scene(narrow, 1.0);
+
+            let mut cached = SnapshotCache::new(true);
+            let composited = render_frame(
+                &device,
+                &queue,
+                &mut renderer,
+                &mut cached,
+                &mut compositor,
+                &scene,
+                base,
+            )
+            .await;
+
+            let want = [32, 96, 160, 255];
+            // Just outside the clip but well inside the page: base colour.
+            for (x, y) in [(29, 20), (40, 12), (47, 40), (30, 30)] {
+                let got = pixel(&composited, x, y);
+                for channel in 0..4 {
+                    assert!(
+                        got[channel].abs_diff(want[channel]) <= TOLERANCE,
+                        "({x}, {y}) is outside the clip and must stay at the base colour: got \
+                         {got:?}, want {want:?}"
+                    );
+                }
+            }
+            // Inside the clip the page is drawn: its opaque red band.
+            let inside = pixel(&composited, 20, 12);
+            assert!(
+                inside[0] > 200 && inside[1] < 80,
+                "the clipped page must still draw inside its clip, got {inside:?}"
+            );
+
+            let error = scope.pop().await;
+            assert!(
+                error.is_none(),
+                "the compositor produced an uncaptured validation error: {error:?}"
+            );
+        }
+    }
+
     /// R4's structural check for a scaled page: at scale 0.9 the quad must
     /// contract about its rect's center and paint NOTHING outside the
     /// contracted rect. Bilinear resampling makes a per-pixel comparison
@@ -1234,6 +1618,7 @@ mod tests {
                 transform: Affine::translate((8.0, 8.0)) * Affine::scale(2.0),
                 width: 40,
                 height: 40,
+                clip: None,
                 view: page_of(&device, &queue, 40, [255, 0, 0, 255]),
             };
             compositor.composite(
@@ -1243,6 +1628,7 @@ mod tests {
                     view: &view,
                     size: (SIZE, SIZE),
                     output: OutputAlpha::Straight,
+                    clear: None,
                 },
                 std::slice::from_ref(&layer),
                 None,
@@ -1325,6 +1711,7 @@ mod tests {
                 transform: Affine::IDENTITY,
                 width: 40,
                 height: 40,
+                clip: None,
                 view: page_of(&device, &queue, 40, [0, 128, 0, 128]),
             };
             compositor.composite(
@@ -1334,6 +1721,7 @@ mod tests {
                     view: &view,
                     size: (SIZE, SIZE),
                     output: OutputAlpha::Premultiplied,
+                    clear: None,
                 },
                 std::slice::from_ref(&layer),
                 None,

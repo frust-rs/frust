@@ -24,7 +24,10 @@
 //! vello, drawing the snapshot cache's cached pages onto the frame; a frame
 //! that composites nothing (the common case, and every frame under the
 //! `FRUST_NO_SNAPSHOT_LAYERS` kill switch) records no such pass and is
-//! byte-identical to the arm above.
+//! byte-identical to the arm above. When the composited frame's own vello
+//! segment paints nothing at all ([`skips_main_pass`]) that pass is skipped
+//! too and the quad pass clears the target instead — a page transition is then
+//! one pass, not two.
 
 use core::ffi::c_void;
 
@@ -280,6 +283,11 @@ pub struct SurfaceRenderer {
 struct PendingComposite {
     layers: Vec<CompositeLayer>,
     trailing: Option<wgpu::TextureView>,
+    /// The frame's base colour when `encode` SKIPPED the main vello pass (its
+    /// segment painted nothing, see [`skips_main_pass`]), making the composite
+    /// pass the only thing that writes the target: it clears to this instead
+    /// of loading. `None` on an ordinary frame, where vello wrote the backdrop.
+    clear: Option<peniko::Color>,
 }
 
 impl Default for SurfaceRenderer {
@@ -691,11 +699,7 @@ impl SurfaceRenderer {
         self.pending_composite = None;
         if let SurfaceState::Ready(ready) = &mut self.state {
             match &mut ready.backend {
-                TierBackend::Gpu {
-                    renderer,
-                    snapshots,
-                    ..
-                } => snapshots.clear(renderer),
+                TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
                 #[cfg(feature = "cpu-tier")]
                 TierBackend::Cpu(_) => {}
             }
@@ -868,12 +872,23 @@ impl SurfaceRenderer {
                     height,
                     antialiasing_method: vello::AaConfig::Area,
                 };
+                // A pre segment that paints nothing buys no vello pass: the
+                // compositor's own pass clears the frame to `base_color`
+                // instead (see `skips_main_pass`). The measured page
+                // transition lands here — its pre segment is the app root's
+                // `PushClip` and nothing else, and a vello pass over it still
+                // costs a full fine-stage sweep of the surface (~14.5 ms on an
+                // Adreno 620) to draw not one pixel.
+                let clear =
+                    skips_main_pass(plan.pre_draws, plan.layers.len()).then_some(base_color);
 
                 // The frame's MAIN vello pass: the commands before the first
                 // composited bracket, with every composited bracket skipped.
                 // That is the whole scene whenever nothing composited, so a
                 // frame with no cache hits builds exactly the scene it always
-                // did.
+                // did. Still encoded when the pass is skipped — a structural
+                // segment is a handful of commands, and keeping the CPU side
+                // unconditional keeps one scene-building path.
                 vello_scene.reset();
                 convert::encode_range_with_overrides(
                     scene,
@@ -934,11 +949,13 @@ impl SurfaceRenderer {
                     // the v3 spans.
                     RenderPath::Direct => {
                         // Carry `base_color` and this frame's pages to
-                        // `submit`, where both are consumed.
+                        // `submit`, where both are consumed — including the
+                        // decision to skip the render there entirely.
                         *pending_base_color = Some(base_color);
                         *pending_composite = Some(PendingComposite {
                             layers: plan.layers,
                             trailing,
+                            clear,
                         });
                     }
                     // Direct-premultiplied (translucent, premultiplied-expecting):
@@ -951,20 +968,28 @@ impl SurfaceRenderer {
                     RenderPath::DirectPremultiplied {
                         intermediate_view, ..
                     } => {
-                        renderer
-                            .render_to_texture(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                vello_scene,
-                                intermediate_view,
-                                &params(base_color),
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
+                        // Skipped exactly as on the other two arms. The
+                        // premultiply pass in `submit` then reads a stale
+                        // intermediate, but its output is discarded by the
+                        // composite pass's own `LoadOp::Clear` — the frame is
+                        // whatever this pass's clear plus its quads make it.
+                        if clear.is_none() {
+                            renderer
+                                .render_to_texture(
+                                    &device_handle.device,
+                                    &device_handle.queue,
+                                    vello_scene,
+                                    intermediate_view,
+                                    &params(base_color),
+                                )
+                                .map_err(|e| {
+                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
+                                })?;
+                        }
                         *pending_composite = Some(PendingComposite {
                             layers: plan.layers,
                             trailing,
+                            clear,
                         });
                     }
                     // Blit fallback: render into the intermediate `Rgba8Unorm` target
@@ -972,17 +997,19 @@ impl SurfaceRenderer {
                     // the acquire/blit/present tail (see `submit`) copies it to the
                     // swapchain. Nothing crosses the encode/submit gap on this arm.
                     RenderPath::Blit { target_view, .. } => {
-                        renderer
-                            .render_to_texture(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                vello_scene,
-                                target_view,
-                                &params(base_color),
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
+                        if clear.is_none() {
+                            renderer
+                                .render_to_texture(
+                                    &device_handle.device,
+                                    &device_handle.queue,
+                                    vello_scene,
+                                    target_view,
+                                    &params(base_color),
+                                )
+                                .map_err(|e| {
+                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
+                                })?;
+                        }
                         if let Some(compositor) = compositor.as_mut() {
                             compositor.composite(
                                 &device_handle.device,
@@ -991,6 +1018,7 @@ impl SurfaceRenderer {
                                     view: target_view,
                                     size: (width, height),
                                     output: OutputAlpha::Straight,
+                                    clear,
                                 },
                                 &plan.layers,
                                 trailing.as_ref(),
@@ -1284,17 +1312,24 @@ impl SurfaceRenderer {
                         height: surface.config.height,
                         antialiasing_method: vello::AaConfig::Area,
                     };
-                    renderer
-                        .render_to_texture(
-                            &device_handle.device,
-                            &device_handle.queue,
-                            vello_scene,
-                            &swapchain_view,
-                            &params,
-                        )
-                        .map_err(|e| {
-                            anyhow!("frust-render: vello render_to_texture failed: {e}")
-                        })?;
+                    // `encode` decided this frame's pre segment paints
+                    // nothing, so the composite pass below clears the acquired
+                    // texture to the base colour and draws the pages onto it —
+                    // the whole frame, without a vello pass.
+                    let clear = pending_composite.as_ref().and_then(|pending| pending.clear);
+                    if clear.is_none() {
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                vello_scene,
+                                &swapchain_view,
+                                &params,
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
+                    }
                     // Straight alpha: the swapchain this arm presents is
                     // opaque (a premultiplied-expecting translucent surface
                     // takes `DirectPremultiplied` below instead).
@@ -1308,6 +1343,7 @@ impl SurfaceRenderer {
                                 view: &swapchain_view,
                                 size: (surface.config.width, surface.config.height),
                                 output: OutputAlpha::Straight,
+                                clear,
                             },
                             &pending.layers,
                             pending.trailing.as_ref(),
@@ -1364,6 +1400,7 @@ impl SurfaceRenderer {
                             view: &swapchain_view,
                             size: (surface.config.width, surface.config.height),
                             output: OutputAlpha::Premultiplied,
+                            clear: pending.clear,
                         },
                         &pending.layers,
                         pending.trailing.as_ref(),
@@ -1395,6 +1432,20 @@ impl SurfaceRenderer {
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
+}
+
+/// Whether this frame can skip its MAIN vello pass altogether: its pre segment
+/// paints nothing (`crate::snapshot::FramePlan::pre_draws`) AND the compositor
+/// has at least one page to draw, so the composite pass can clear the target to
+/// the frame's base colour and compose the whole frame by itself.
+///
+/// Both halves matter. Without a page there is no compositor pass at all, so
+/// dropping the vello pass would present an undefined frame; and a pre segment
+/// that paints must be rendered whatever else the frame does. An ordinary
+/// frame (nothing composited, the kill switch, the cpu tier) therefore always
+/// answers `false` and behaves exactly as it did before this seam existed.
+fn skips_main_pass(pre_draws: bool, layers: usize) -> bool {
+    !pre_draws && layers > 0
 }
 
 /// The shader-showcase pre-pass (Gpu tier only): for every distinct
@@ -1548,6 +1599,26 @@ mod tests {
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+    }
+
+    /// The main vello pass is skipped only when a composite pass will both
+    /// clear the target and cover it: a structure-only pre segment with pages
+    /// to draw. Every other frame renders exactly as it always did.
+    #[test]
+    fn only_a_structure_only_pre_segment_with_pages_skips_the_main_pass() {
+        assert!(
+            skips_main_pass(false, 1),
+            "a PushClip-only pre segment with a page to draw needs no vello pass"
+        );
+        assert!(
+            !skips_main_pass(false, 0),
+            "with no page there is no composite pass to clear the frame"
+        );
+        assert!(
+            !skips_main_pass(true, 2),
+            "a pre segment that paints must still be rendered"
+        );
+        assert!(!skips_main_pass(true, 0), "an ordinary frame is untouched");
     }
 
     #[test]

@@ -16,8 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::OnceLock;
 
-use crate::snapshot::FramePlan;
-
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
 /// Implemented for `vello::Scene` (real rendering) and for a recording sink in
@@ -89,7 +87,8 @@ pub(crate) trait SceneSink {
 /// drive their own `vello::Renderer`: with no per-frame shader-override map,
 /// every `Command::ShaderQuad` lowers to its miss placeholder (a CPU-tier /
 /// no-prepass caller has no compiled shader targets anyway). The in-crate
-/// render path calls [`encode_into_with_overrides`] instead.
+/// render path calls [`encode_range_with_overrides`] instead, once per
+/// segment of the frame's [`crate::snapshot::FramePlan`].
 pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
     encode_into(scene, target);
 }
@@ -157,37 +156,6 @@ pub(crate) fn encode_range_with_overrides(
         shader_images,
         adapter_max,
         holes,
-    );
-}
-
-/// The whole `scene` under `plan`'s holes: every composited bracket skipped,
-/// every other bracket lowered inline.
-///
-/// The frame this produces is missing exactly the composited pages — the
-/// compositor draws them, and until it is wired in they are simply absent.
-/// Once the render path renders per segment it calls
-/// [`encode_range_with_overrides`] directly with [`crate::snapshot::FramePlan`]'s
-/// own ranges, and this whole-scene shorthand goes away.
-// That day has arrived: the render path now encodes each `FramePlan` segment
-// through `encode_range_with_overrides`, so this compatibility shorthand has
-// no caller left. Kept (not deleted) so its removal lands with the rest of the
-// seam cleanup rather than inside the compositor change; the allow is the one
-// line that keeps `-D warnings` green until then.
-#[allow(dead_code)]
-pub(crate) fn encode_into_with_overrides(
-    scene: &Scene,
-    sink: &mut impl SceneSink,
-    shader_images: &HashMap<(u64, u32, u32), ImageData>,
-    adapter_max: u32,
-    plan: &FramePlan,
-) {
-    encode_range_with_overrides(
-        scene,
-        0..scene.commands().len(),
-        sink,
-        shader_images,
-        adapter_max,
-        &plan.holes,
     );
 }
 
