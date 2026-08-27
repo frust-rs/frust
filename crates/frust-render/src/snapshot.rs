@@ -4,21 +4,42 @@
 //! A snapshot bracket is the scene layer's statement that a subtree's pixels
 //! are stable while only its presentation `alpha`/`scale` animate (see
 //! [`Command::PushSnapshot`]'s contract). This module rasterizes each
-//! OUTERMOST bracket's body once into its own `Rgba8Unorm` texture, registers
-//! that texture with vello as an image override, and returns the
-//! `key -> SnapshotImage` map [`crate::convert`]'s HIT path lowers the bracket
-//! against — one image quad in place of the body's whole command list. A body
-//! is re-rasterized only when its content fingerprint or its device size
-//! changes; an ordinary slide/fade/scale of the bracket as a whole re-uses the
-//! texture untouched, which is the entire point of the mechanism.
+//! OUTERMOST bracket's body once into its own `Rgba8Unorm` texture and returns
+//! a [`FramePlan`]: the ordered [`CompositeLayer`]s to draw, the set of bracket
+//! keys [`crate::convert`]'s encode walk turns into HOLES (skipped entirely,
+//! emitting nothing), and the two-segment split of the frame's command list
+//! those two facts imply. A body is re-rasterized only when its content
+//! fingerprint or its device size changes; an ordinary slide/fade/scale of the
+//! bracket as a whole re-uses the texture untouched, which is the entire point
+//! of the mechanism.
+//!
+//! ## Who consumes the plan
+//!
+//! The compositor (`compositor.rs`) draws each layer as one alpha-blended quad
+//! in a wgpu render pass, OUTSIDE vello: a vello image quad over a whole page
+//! costs ~100 ms/frame on a low-end mobile GPU, and dodging it is why these
+//! textures never enter vello's image-override atlas at all. One frame is
+//! therefore composed as
+//!
+//! ```text
+//! vello(pre) -> composite(layers)
+//!            -> [vello(trailing, holes skipped, transparent scratch)
+//!                -> composite(full quad)]
+//! ```
+//!
+//! with the bracketed second half present only when [`FramePlan::trailing`] is
+//! `Some` — i.e. only when the scene draws something after the first
+//! composited bracket that is not itself composited. Content recorded BETWEEN
+//! two composited brackets therefore lands above both: an accepted z-order
+//! approximation of a two-pass split, not a bug.
 //!
 //! ## Coordinate mapping
 //!
 //! `PushSnapshot`'s `rect` is the body's bounds in the LOCAL space of the
 //! bracket's own transform `M`, while the body's commands carry their own
-//! already-composed transforms (which include `M`). The HIT path draws the
-//! cached texture with `draw_image(base, image, rect)`, and the sink maps an
-//! image's natural pixel rect onto `dest` — so texture pixel `(0, 0)` must be
+//! already-composed transforms (which include `M`). The compositor maps the
+//! texture's own pixel rect `(0, 0)`..`(width, height)` onto `rect` under `M *
+//! scale_about(scale, rect.center())` — so texture pixel `(0, 0)` must be
 //! `rect`'s local origin and texture pixel `(width, height)` its far corner.
 //! Rasterizing therefore runs the body under
 //!
@@ -56,14 +77,14 @@
 //!
 //! vello renders STRAIGHT (un-premultiplied) alpha into a target texture — its
 //! fine stage divides the premultiplied accumulator by alpha on the final
-//! store — and `Renderer::register_texture` mints an `ImageData` declaring
-//! `ImageAlphaType::Alpha`, which the same fine stage premultiplies per
-//! sampled texel at composite time. The snapshot texture is therefore
-//! registered exactly as vello rendered it: the crate's premultiply compute
-//! pass belongs to premultiplied-expecting swapchains only, and running it
-//! here would premultiply twice and darken every translucent edge. The GPU
-//! smoke (`tests/gpu_smoke.rs`) pins this end to end by comparing a cached
-//! bracket against the same bracket lowered inline.
+//! store — so the texture holds exactly what the compositor's own fragment
+//! stage must premultiply as it samples, with the bracket's `alpha` riding on
+//! the quad's blend rather than on any vello layer. The texture is handed on
+//! exactly as vello rendered it: the crate's premultiply compute pass belongs
+//! to premultiplied-expecting swapchains only, and running it here would
+//! premultiply twice and darken every translucent edge. The GPU smoke
+//! (`tests/gpu_smoke.rs`) pins this end to end by comparing a cached bracket
+//! against the same bracket lowered inline.
 //!
 //! ## Atlas-generation churn
 //!
@@ -86,27 +107,27 @@
 //!   carries no shader-override map, so a rasterized body would bake the
 //!   miss placeholder in place of the live shader.
 //! - A degenerate `rect` or a non-invertible bracket transform (no mapping to
-//!   derive), and a `key` recorded twice in one frame (the map is keyed by
+//!   derive), and a `key` recorded twice in one frame (the cache is keyed by
 //!   `key` alone, so two brackets sharing one would draw each other's pixels).
 //!
-//! Each of those simply yields no map entry, which is the inline MISS path the
-//! renderer used before this cache existed — never a panic and never a
-//! wrong-pixels shortcut.
+//! Each of those simply yields no layer and no hole, so the bracket lowers
+//! inline via [`crate::convert`]'s MISS path in whichever segment it falls —
+//! the path the renderer used before this cache existed, never a panic and
+//! never a wrong-pixels shortcut.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use frust_scene::{Command, Scene};
 use kurbo::{Affine, Rect};
-use peniko::ImageData;
 
-use crate::convert::{SnapshotImage, SnapshotImages, encode_commands_into};
+use crate::convert::encode_commands_into;
 use crate::shader_effects::clamp_size;
 
-/// How many frames an entry may go untouched before it is unregistered and
-/// dropped: an entry last used before `frame - MAX_UNUSED_FRAMES` is gone.
+/// How many frames an entry may go untouched before it is dropped: an entry
+/// last used before `frame - MAX_UNUSED_FRAMES` is gone.
 /// Two frames of slack keeps a bracket that skips a frame (a scene diff
 /// hiccup, an every-other-frame repaint) from paying a full re-rasterization,
 /// while a page navigated away from releases its texture almost immediately
@@ -120,29 +141,22 @@ const MAX_UNUSED_FRAMES: u64 = 2;
 /// fingerprint for two mathematically identical placements.
 const RASTER_QUANT: f64 = 4096.0;
 
-/// One cached rasterization: the texture vello renders the body into, the
-/// override handle it was registered under, and the bookkeeping the reuse and
-/// eviction decisions read.
+/// One cached rasterization: the texture vello renders the body into, plus the
+/// bookkeeping the reuse and eviction decisions read.
 ///
-/// The `wgpu::Texture` itself is not held separately — `view` and the handle
-/// inside vello's override map both keep it alive, and every use here is
-/// through one of those two.
+/// The `wgpu::Texture` itself is not held separately — `view` is refcounted
+/// onto it and keeps it alive, and every use here (re-rendering into it,
+/// sampling it from the compositor) goes through a view.
 struct Entry {
-    /// Render target for `render_to_texture`, and the only handle needed to
-    /// re-render into the same texture vello already holds an override for.
+    /// Render target for `render_to_texture`, and the handle the compositor
+    /// samples. Cloned into each frame's [`CompositeLayer`]; `wgpu` views are
+    /// refcounted, so the clone is a handle, not a copy of the pixels.
     view: wgpu::TextureView,
-    /// The vello override handle minted by `register_texture`, cloned into the
-    /// returned map and handed back to `unregister_texture` on eviction.
-    image: ImageData,
     width: u32,
     height: u32,
     /// Content fingerprint of the body this texture holds, mixed with the size
-    /// and `raster` it was rasterized under (see [`body_fingerprint`]).
+    /// and the device scale it was rasterized under (see [`body_fingerprint`]).
     fingerprint: u64,
-    /// The device-scale transform the pixels were rasterized under — reported
-    /// out with the image so a consumer reads what is actually in the texture
-    /// rather than what this frame requested.
-    raster: Affine,
     /// Frame counter value when this entry was last part of a scene.
     last_used: u64,
     /// How many times this entry's texture has been rasterized. The
@@ -150,15 +164,123 @@ struct Entry {
     renders: u32,
 }
 
+/// One cached page to composite this frame: the texture to sample and the
+/// placement/opacity to sample it with.
+///
+/// Crate-private, like everything else here — a `wgpu` type never leaves
+/// `frust-render` (`docs/CODE_STANDARDS.md`). The mapping the compositor
+/// applies is the module's coordinate-mapping section read forwards: texture
+/// pixels `(0, 0)`..`(width, height)` cover `rect` under `transform *
+/// scale_about(scale, rect.center())`, with `alpha` on the blend.
+// Placement carried for a consumer that is not written yet: `compositor.rs`
+// reads every field below to build one quad. Until it exists, only `key`
+// (which becomes a hole) has an in-crate reader — the allow covers the rest
+// rather than fabricating uses for them, and comes off with the first quad.
+#[allow(dead_code)]
+pub(crate) struct CompositeLayer {
+    /// The owning [`Command::PushSnapshot`]'s `key`, which is also its entry
+    /// in [`FramePlan::holes`].
+    pub key: u64,
+    /// The bracket's bounds in the LOCAL space of `transform`.
+    pub rect: Rect,
+    /// The bracket's presentation opacity this frame.
+    pub alpha: f32,
+    /// The bracket's presentation scale this frame, about `rect`'s center.
+    pub scale: f64,
+    /// The bracket's own transform `M` — the body's device placement, before
+    /// the presentation scale.
+    pub transform: Affine,
+    /// The texture's natural pixel size, which is what `rect` maps onto.
+    pub width: u32,
+    pub height: u32,
+    /// A refcounted handle on the cached texture.
+    pub view: wgpu::TextureView,
+}
+
+/// How one frame is rendered: which command ranges vello draws, which cached
+/// pages the compositor draws between them, and which brackets the encode walk
+/// must skip so the two never draw the same pixels twice.
+///
+/// See the module header for the pass order these four fields describe.
+pub(crate) struct FramePlan {
+    /// Commands before the first composited bracket — the main vello pass.
+    /// The WHOLE command range when nothing is composited, which is what makes
+    /// a disabled cache (and a frame with no cache hits) an ordinary
+    /// single-pass frame.
+    // Read by the render path once it draws per segment; today it still
+    // encodes the whole scene and reads `holes` alone. Same for `layers` and
+    // `trailing` below.
+    #[allow(dead_code)]
+    pub pre: Range<usize>,
+    /// Every composited bracket, in scene order.
+    #[allow(dead_code)]
+    pub layers: Vec<CompositeLayer>,
+    /// `layers`' keys: the brackets [`crate::convert`] turns into holes.
+    pub holes: HashSet<u64>,
+    /// Commands after the first composited bracket, `Some` only when that
+    /// range holds at least one command that is not itself inside a composited
+    /// bracket — i.e. only when a second vello pass would actually draw
+    /// something. `None` is the common case (a page transition whose brackets
+    /// are the last thing in the scene) and saves that whole pass.
+    #[allow(dead_code)]
+    pub trailing: Option<Range<usize>>,
+}
+
+impl FramePlan {
+    /// The plan for a frame with nothing composited: vello draws all `len`
+    /// commands, exactly as it did before this cache existed.
+    fn inline(len: usize) -> Self {
+        Self {
+            pre: 0..len,
+            layers: Vec::new(),
+            holes: HashSet::new(),
+            trailing: None,
+        }
+    }
+}
+
 /// One outermost `PushSnapshot`..`PopSnapshot` bracket located in a frame's
 /// command list, with `body` the half-open index range of the commands
-/// between them.
+/// between them — so the `PushSnapshot` itself sits at `body.start - 1` and
+/// the matching `PopSnapshot` at `body.end` (see [`bracket_span`]).
 #[derive(Clone, Debug, PartialEq)]
 struct Bracket {
     key: u64,
     rect: Rect,
+    alpha: f32,
+    scale: f64,
     transform: Affine,
     body: Range<usize>,
+}
+
+/// The bracket's own INCLUSIVE index span as a half-open range: its
+/// `PushSnapshot` through its `PopSnapshot`. This is the span a composited
+/// bracket contributes nothing outside of, so it is what the trailing-segment
+/// decision subtracts.
+fn bracket_span(body: &Range<usize>) -> Range<usize> {
+    body.start.saturating_sub(1)..body.end + 1
+}
+
+/// The two-segment split of a frame's command list, given `len` commands and
+/// the [`bracket_span`]s of the composited brackets in scene order.
+///
+/// `pre` runs up to the first composited bracket's `PushSnapshot`; the
+/// trailing segment starts one past that same bracket's `PopSnapshot` and runs
+/// to the end. The trailing pass exists only if it would draw something: every
+/// later composited bracket inside it is skipped as a hole, so the segment is
+/// worth a vello pass exactly when it is longer than those brackets put
+/// together.
+fn frame_split(len: usize, spans: &[Range<usize>]) -> (Range<usize>, Option<Range<usize>>) {
+    let Some(first) = spans.first() else {
+        return (0..len, None);
+    };
+    let start = first.end.min(len);
+    let composited: usize = spans[1..]
+        .iter()
+        .map(|span| span.end.min(len).saturating_sub(span.start.min(len)))
+        .sum();
+    let trailing = ((len - start) > composited).then_some(start..len);
+    (0..first.start.min(len), trailing)
 }
 
 /// The whole per-frame decision for one cacheable bracket, computed without
@@ -171,14 +293,20 @@ struct Plan {
     /// Transform the body's commands are rasterized under (see the module's
     /// coordinate-mapping section).
     root: Affine,
-    /// `M`'s linear part, translation zeroed.
-    raster: Affine,
     width: u32,
     height: u32,
     fingerprint: u64,
     /// `true` when the cached entry's size and fingerprint already match, so
     /// this frame performs no GPU work for the bracket.
     reuse: bool,
+    /// The bracket's placement this frame, carried through so a successful
+    /// plan becomes a [`CompositeLayer`] without re-scanning the scene. None
+    /// of the three participates in the reuse decision — they are exactly the
+    /// per-frame presentation the cache exists to animate for free.
+    rect: Rect,
+    alpha: f32,
+    scale: f64,
+    transform: Affine,
 }
 
 /// The per-surface snapshot cache. Crate-private: no `wgpu`/`vello` type
@@ -293,17 +421,29 @@ fn reuses_entry(existing: Option<(u32, u32, u64)>, wanted: (u32, u32, u64)) -> b
 fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
     let mut brackets = Vec::new();
     let mut depth: usize = 0;
-    let mut open: Option<(usize, u64, Rect, Affine)> = None;
+    let mut open: Option<(usize, Bracket)> = None;
     for (index, command) in commands.iter().enumerate() {
         match command {
             Command::PushSnapshot {
                 key,
                 rect,
+                alpha,
+                scale,
                 transform,
-                ..
             } => {
                 if depth == 0 {
-                    open = Some((index + 1, *key, *rect, *transform));
+                    open = Some((
+                        index,
+                        Bracket {
+                            key: *key,
+                            rect: *rect,
+                            alpha: *alpha,
+                            scale: *scale,
+                            transform: *transform,
+                            // Closed below, once the matching pop is found.
+                            body: 0..0,
+                        },
+                    ));
                 }
                 depth += 1;
             }
@@ -313,13 +453,11 @@ fn outermost_brackets(commands: &[Command]) -> Vec<Bracket> {
                 }
                 depth -= 1;
                 if depth == 0
-                    && let Some((start, key, rect, transform)) = open.take()
+                    && let Some((push, bracket)) = open.take()
                 {
                     brackets.push(Bracket {
-                        key,
-                        rect,
-                        transform,
-                        body: start..index,
+                        body: push + 1..index,
+                        ..bracket
                     });
                 }
             }
@@ -341,9 +479,9 @@ fn is_cacheable_body(body: &[Command]) -> bool {
     })
 }
 
-/// Keys appearing more than once in one frame's brackets. The returned map is
-/// keyed by `key` alone, so an ambiguous key would draw one bracket's pixels
-/// in the other's place; both take the inline path instead.
+/// Keys appearing more than once in one frame's brackets. The cache is keyed
+/// by `key` alone, so an ambiguous key would draw one bracket's pixels in the
+/// other's place; both take the inline path instead.
 fn ambiguous_keys(keys: impl Iterator<Item = u64>) -> Vec<u64> {
     let mut seen: HashMap<u64, u32> = HashMap::new();
     for key in keys {
@@ -382,22 +520,23 @@ impl SnapshotCache {
         }
     }
 
-    /// This frame's snapshot images: rasterize every outermost bracket whose
+    /// This frame's [`FramePlan`]: rasterize every outermost bracket whose
     /// body changed, re-use the rest untouched, age out what the scene stopped
-    /// drawing, and return the `key -> SnapshotImage` map
-    /// [`crate::convert::encode_into_with_overrides`] lowers each bracket
-    /// against.
+    /// drawing, and report the composite layers, the holes and the segment
+    /// split the frame is then rendered by (see the module header).
     ///
-    /// Renders happen through `renderer`, which submits each of them itself;
-    /// wgpu serializes queue submissions, so the caller's own
-    /// `render_to_texture` for the frame sees complete textures as long as it
-    /// runs after this — the same ordering argument the shader pre-pass makes.
+    /// Renders happen through `renderer` — the only reason it is still a
+    /// parameter, now that nothing here registers a texture with vello — and
+    /// it submits each of them itself; wgpu serializes queue submissions, so
+    /// both the caller's own `render_to_texture` and the compositor's sampling
+    /// see complete textures as long as they run after this. Same ordering
+    /// argument the shader pre-pass makes.
     ///
     /// A `false` `enabled` flag short-circuits before any GPU work, any
     /// eviction, and the frame clock itself: the switch means "the pre-pass is
     /// off", not "age everything out". Never panics — a failed rasterization
-    /// drops the entry and omits it from the map, which is exactly the inline
-    /// MISS path.
+    /// drops the entry and omits it from the plan, so the bracket lowers
+    /// inline exactly as it would have with no cache at all.
     pub(crate) fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -405,12 +544,14 @@ impl SnapshotCache {
         renderer: &mut vello::Renderer,
         scene: &Scene,
         adapter_max: u32,
-    ) -> SnapshotImages {
+    ) -> FramePlan {
+        let len = scene.commands().len();
         if !self.enabled {
-            return SnapshotImages::new();
+            return FramePlan::inline(len);
         }
         self.frame += 1;
-        let mut images = SnapshotImages::new();
+        let mut layers = Vec::new();
+        let mut spans = Vec::new();
         for plan in self.plan(scene, adapter_max) {
             if !plan.reuse && !self.render(device, queue, renderer, scene, &plan) {
                 continue;
@@ -420,18 +561,27 @@ impl SnapshotCache {
                 continue;
             };
             entry.last_used = frame;
-            images.insert(
-                plan.key,
-                SnapshotImage {
-                    image: entry.image.clone(),
-                    width: entry.width,
-                    height: entry.height,
-                    raster: entry.raster,
-                },
-            );
+            layers.push(CompositeLayer {
+                key: plan.key,
+                rect: plan.rect,
+                alpha: plan.alpha,
+                scale: plan.scale,
+                transform: plan.transform,
+                width: entry.width,
+                height: entry.height,
+                view: entry.view.clone(),
+            });
+            spans.push(bracket_span(&plan.body));
         }
-        self.evict(renderer);
-        images
+        self.evict();
+        let holes = layers.iter().map(|layer| layer.key).collect();
+        let (pre, trailing) = frame_split(len, &spans);
+        FramePlan {
+            pre,
+            layers,
+            holes,
+            trailing,
+        }
     }
 
     /// The GPU-free half of [`Self::prepare`]: what this frame would rasterize
@@ -476,20 +626,23 @@ impl SnapshotCache {
                 key: bracket.key,
                 body: bracket.body,
                 root,
-                raster,
                 width,
                 height,
                 fingerprint,
                 reuse,
+                rect: bracket.rect,
+                alpha: bracket.alpha,
+                scale: bracket.scale,
+                transform: bracket.transform,
             });
         }
         plans
     }
 
-    /// Rasterize one planned body into its (possibly freshly created) texture
-    /// and mark the override dirty. Returns whether the entry is now present
-    /// and holding this plan's pixels; `false` means the bracket must fall
-    /// back to the inline path this frame.
+    /// Rasterize one planned body into its (possibly freshly created) texture.
+    /// Returns whether the entry is now present and holding this plan's
+    /// pixels; `false` means the bracket must fall back to the inline path
+    /// this frame.
     fn render(
         &mut self,
         device: &wgpu::Device,
@@ -503,13 +656,13 @@ impl SnapshotCache {
             entries, scratch, ..
         } = self;
 
-        // A size change cannot re-use the texture: drop and unregister the old
-        // one first so vello never holds an override for a dead texture.
+        // A size change cannot re-use the texture: drop the old one first, so
+        // the fresh entry below allocates at this frame's size.
         let resized = entries
             .get(&plan.key)
             .is_some_and(|entry| entry.width != plan.width || entry.height != plan.height);
-        if resized && let Some(stale) = entries.remove(&plan.key) {
-            renderer.unregister_texture(stale.image);
+        if resized {
+            entries.remove(&plan.key);
         }
         entries.entry(plan.key).or_insert_with(|| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -523,28 +676,23 @@ impl SnapshotCache {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                // vello renders by compute (STORAGE_BINDING) and its blit-free
-                // target path also binds the texture (TEXTURE_BINDING); COPY_SRC
-                // is what the override's atlas copy reads.
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                // vello renders into it by compute (STORAGE_BINDING) and the
+                // compositor samples it (TEXTURE_BINDING). Nothing copies it,
+                // so there is no COPY_SRC: the pixels are read where they are
+                // written, never staged through an atlas.
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            // `register_texture` takes the texture; `view` keeps it alive here
-            // and is the handle every later re-render writes through.
-            let image = renderer.register_texture(texture);
+            // The view is the only handle kept: it refcounts the texture, and
+            // both the re-render and the composite go through one.
             Entry {
-                view,
-                image,
+                view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
                 width: plan.width,
                 height: plan.height,
                 // Overwritten by the render below; a fresh entry is only
                 // ever reached with a render immediately following, and a
                 // failed one is dropped rather than left holding this.
                 fingerprint: 0,
-                raster: plan.raster,
                 last_used: frame,
                 renders: 0,
             }
@@ -568,31 +716,22 @@ impl SnapshotCache {
         };
         if let Err(error) = rendered {
             log::warn!("frust-render: snapshot rasterization failed, painting inline: {error}");
-            if let Some(dropped) = entries.remove(&plan.key) {
-                renderer.unregister_texture(dropped.image);
-            }
+            entries.remove(&plan.key);
             return false;
         }
 
         let Some(entry) = entries.get_mut(&plan.key) else {
             return false;
         };
-        // Only a frame that actually re-rendered marks the override dirty: a
-        // re-used entry's atlas copy is already correct, and marking it would
-        // pay the texture->atlas copy for nothing. Safe against vello's own
-        // atlas eviction, which is not the caller's to track: an image that
-        // ages out of the atlas is re-allocated dirty on its next use and
-        // re-copied from this texture, which the entry keeps alive.
-        renderer.mark_override_image_dirty(&entry.image);
         entry.fingerprint = plan.fingerprint;
-        entry.raster = plan.raster;
         entry.renders = entry.renders.saturating_add(1);
         true
     }
 
-    /// Drop and unregister every entry the scene has stopped drawing for more
-    /// than [`MAX_UNUSED_FRAMES`] frames.
-    fn evict(&mut self, renderer: &mut vello::Renderer) {
+    /// Drop every entry the scene has stopped drawing for more than
+    /// [`MAX_UNUSED_FRAMES`] frames. Dropping the [`Entry`] releases the last
+    /// handle on its texture, so eviction is the whole release.
+    fn evict(&mut self) {
         let frame = self.frame;
         for key in evictable_keys(
             self.entries
@@ -601,22 +740,18 @@ impl SnapshotCache {
             frame,
             MAX_UNUSED_FRAMES,
         ) {
-            if let Some(entry) = self.entries.remove(&key) {
-                renderer.unregister_texture(entry.image);
-            }
+            self.entries.remove(&key);
         }
     }
 
-    /// Drop every entry, handing each texture back to `renderer` first.
+    /// Drop every entry, releasing every cached texture.
     ///
-    /// Called when the surface goes away. The cache and the renderer are
-    /// dropped together there, so this is about ORDER rather than leaks: the
-    /// overrides are surrendered while the renderer is still alive, instead of
-    /// relying on two drops landing in the right sequence.
-    pub(crate) fn clear(&mut self, renderer: &mut vello::Renderer) {
-        for (_, entry) in self.entries.drain() {
-            renderer.unregister_texture(entry.image);
-        }
+    /// Called when the surface goes away. `_renderer` is vestigial — these
+    /// textures are never handed to vello, so there is nothing to surrender
+    /// before it dies — and stays only so the teardown call site keeps its
+    /// shape until the compositor owns that sequence.
+    pub(crate) fn clear(&mut self, _renderer: &mut vello::Renderer) {
+        self.entries.clear();
     }
 
     /// How many times the entry for `key` has been rasterized — the
@@ -666,6 +801,18 @@ mod tests {
             scale: 1.0,
             transform,
         }
+    }
+
+    /// The split a frame would take if every eligible bracket in `scene` hit
+    /// the cache — [`SnapshotCache::prepare`]'s own arithmetic, minus the GPU
+    /// work that decides which plans actually became layers.
+    fn split_of(scene: &Scene) -> (Range<usize>, Option<Range<usize>>) {
+        let spans: Vec<Range<usize>> = SnapshotCache::new(true)
+            .plan(scene, 8192)
+            .iter()
+            .map(|plan| bracket_span(&plan.body))
+            .collect();
+        frame_split(scene.commands().len(), &spans)
     }
 
     fn fill(rect: Rect) -> Command {
@@ -1067,13 +1214,148 @@ mod tests {
         assert!(SnapshotCache::new(true).plan(&scene, 8192).is_empty());
     }
 
+    #[test]
+    fn bracket_span_covers_the_push_and_the_pop_themselves() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let commands = vec![
+            fill(rect),
+            push(1, rect, Affine::IDENTITY),
+            fill(rect),
+            Command::PopSnapshot,
+        ];
+        let bracket = &outermost_brackets(&commands)[0];
+        assert_eq!(bracket.body, 2..3, "body is just the one fill");
+        assert_eq!(bracket_span(&bracket.body), 1..4);
+    }
+
+    #[test]
+    fn frame_split_runs_pre_up_to_the_first_bracket_and_trails_after_it() {
+        // [fill, bracket A, fill, bracket B, fill]: the pre-segment stops at
+        // A's push, and everything after A's pop is a trailing segment
+        // because the fills between and after the brackets survive holing.
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.fill_rect(body, Brush::Solid(RED));
+            for key in [1, 2] {
+                builder.push_snapshot(key, rect, 1.0, 1.0);
+                builder.fill_rect(body, Brush::Solid(RED));
+                builder.pop_snapshot();
+                builder.fill_rect(body, Brush::Solid(RED));
+            }
+        }
+        let keys: Vec<u64> = SnapshotCache::new(true)
+            .plan(&scene, 8192)
+            .iter()
+            .map(|plan| plan.key)
+            .collect();
+        assert_eq!(keys, vec![1, 2], "both brackets composite, in scene order");
+        assert_eq!(split_of(&scene), (0..1, Some(4..9)));
+    }
+
+    #[test]
+    fn frame_split_has_no_trailing_segment_when_the_bracket_ends_the_scene() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.push_snapshot(KEY, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+        }
+        assert_eq!(split_of(&scene), (0..1, None));
+    }
+
+    #[test]
+    fn frame_split_has_no_trailing_segment_for_back_to_back_brackets() {
+        // The page-transition shape: two composited brackets and nothing
+        // else. The second one is a hole, so the range after the first would
+        // draw nothing — no second vello pass.
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            for key in [1, 2] {
+                builder.push_snapshot(key, rect, 1.0, 1.0);
+                builder.fill_rect(body, Brush::Solid(RED));
+                builder.pop_snapshot();
+            }
+        }
+        assert_eq!(split_of(&scene), (0..0, None));
+    }
+
+    #[test]
+    fn frame_split_leaves_an_uncacheable_bracket_in_the_trailing_segment() {
+        // A bracket the cache refuses (a hole punch in its body) is neither a
+        // layer nor a hole, so it keeps the trailing segment alive and lowers
+        // inline there.
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_snapshot(1, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.push_snapshot(2, rect, 1.0, 1.0);
+            builder.clear_rect(body);
+            builder.pop_snapshot();
+        }
+        let keys: Vec<u64> = SnapshotCache::new(true)
+            .plan(&scene, 8192)
+            .iter()
+            .map(|plan| plan.key)
+            .collect();
+        assert_eq!(keys, vec![1], "the hole-punch bracket must not composite");
+        assert_eq!(split_of(&scene), (0..0, Some(3..6)));
+    }
+
+    #[test]
+    fn a_frame_with_nothing_composited_is_one_whole_vello_pass() {
+        // The kill switch's plan, and equally the plan for a frame whose
+        // brackets all missed: one vello pass over everything.
+        let plan = FramePlan::inline(9);
+        assert_eq!(plan.pre, 0..9);
+        assert!(plan.layers.is_empty());
+        assert!(plan.holes.is_empty());
+        assert!(plan.trailing.is_none());
+        assert_eq!(frame_split(9, &[]), (0..9, None));
+    }
+
+    /// The de-registration invariant, asserted the only way a unit test can:
+    /// the module's own source must not name vello's texture-override API at
+    /// all. A cached page is sampled by the compositor, never uploaded into
+    /// vello's image atlas — re-introducing a registration here would put the
+    /// ~100 ms/frame image quad back on the mobile GPU this seam exists to
+    /// get off. The needles are split so this assertion is not its own
+    /// counterexample.
+    #[test]
+    fn no_snapshot_texture_is_handed_to_vello() {
+        let source = include_str!("snapshot.rs");
+        for needle in [
+            concat!("register", "_texture"),
+            concat!("mark_override", "_image_dirty"),
+        ] {
+            assert!(
+                !source.contains(needle),
+                "snapshot.rs must not call `{needle}`"
+            );
+        }
+    }
+
     /// End-to-end (real device) confirmation of the bookkeeping the pure tests
     /// above can only cover one decision at a time: that an unchanged — and a
     /// merely slid — bracket performs ZERO further rasterizations, that a
     /// content change performs exactly one, that a bracket the scene stops
-    /// drawing is unregistered and dropped, and that the kill switch does no
-    /// GPU work at all. `Entry` needs a real `wgpu::Texture` to exist, so this
-    /// is the only place the counters can be observed against real resources.
+    /// drawing is dropped, and that the kill switch does no GPU work at all.
+    /// `Entry` needs a real `wgpu::Texture` to exist, so this is the only
+    /// place the counters — and the [`FramePlan`] a real rasterization
+    /// produces — can be observed against real resources.
     #[test]
     #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
     fn steady_state_animation_rasterizes_a_body_exactly_once() {
@@ -1105,10 +1387,22 @@ mod tests {
             let scene = bracket_scene(transform, rect, body, Brush::Solid(RED));
 
             let mut cache = SnapshotCache::new(true);
-            let images = cache.prepare(&device, &queue, &mut renderer, &scene, 8192);
-            let entry = images.get(&KEY).expect("the bracket must be cached");
-            assert_eq!((entry.width, entry.height), (40, 20));
-            assert_eq!(entry.raster, raster_transform(transform));
+            let plan = cache.prepare(&device, &queue, &mut renderer, &scene, 8192);
+            // One bracket, filling the whole scene: it becomes the only
+            // layer and the only hole, there is nothing before it to draw,
+            // and nothing after it to need a second pass.
+            let layer = match plan.layers.as_slice() {
+                [layer] => layer,
+                other => panic!("expected exactly one composite layer, got {}", other.len()),
+            };
+            assert_eq!(layer.key, KEY);
+            assert_eq!((layer.width, layer.height), (40, 20));
+            assert_eq!(layer.rect, rect);
+            assert_eq!(layer.transform, transform);
+            assert_eq!((layer.alpha, layer.scale), (1.0, 1.0));
+            assert_eq!(plan.holes, HashSet::from([KEY]));
+            assert_eq!(plan.pre, 0..0);
+            assert_eq!(plan.trailing, None);
             assert_eq!(cache.renders(KEY), Some(1));
 
             // Same scene again, then the same body slid across the surface:
@@ -1119,14 +1413,14 @@ mod tests {
                 Some(1),
                 "an unchanged body must not re-render"
             );
-            let slid = bracket_scene(
-                Affine::translate((17.0, 3.0)) * transform,
-                rect,
-                body,
-                Brush::Solid(RED),
+            let slid_transform = Affine::translate((17.0, 3.0)) * transform;
+            let slid = bracket_scene(slid_transform, rect, body, Brush::Solid(RED));
+            let plan = cache.prepare(&device, &queue, &mut renderer, &slid, 8192);
+            assert!(plan.holes.contains(&KEY));
+            assert_eq!(
+                plan.layers[0].transform, slid_transform,
+                "the layer follows the bracket even when the texture does not"
             );
-            let images = cache.prepare(&device, &queue, &mut renderer, &slid, 8192);
-            assert!(images.contains_key(&KEY));
             assert_eq!(
                 cache.renders(KEY),
                 Some(1),
@@ -1138,20 +1432,19 @@ mod tests {
             cache.prepare(&device, &queue, &mut renderer, &recolored, 8192);
             assert_eq!(cache.renders(KEY), Some(2));
 
-            // The scene stops drawing the bracket: aged out and unregistered.
+            // The scene stops drawing the bracket: aged out and dropped.
             let empty = Scene::new();
             for _ in 0..=MAX_UNUSED_FRAMES {
                 cache.prepare(&device, &queue, &mut renderer, &empty, 8192);
             }
             assert_eq!(cache.len(), 0, "an undrawn bracket must be evicted");
 
-            // Kill switch: no map, no entries, no GPU work.
+            // Kill switch: one whole-scene vello pass, no entries, no GPU work.
             let mut disabled = SnapshotCache::new(false);
-            assert!(
-                disabled
-                    .prepare(&device, &queue, &mut renderer, &scene, 8192)
-                    .is_empty()
-            );
+            let plan = disabled.prepare(&device, &queue, &mut renderer, &scene, 8192);
+            assert!(plan.layers.is_empty() && plan.holes.is_empty());
+            assert_eq!(plan.pre, 0..scene.commands().len());
+            assert_eq!(plan.trailing, None);
             assert_eq!(disabled.len(), 0);
         }
     }
