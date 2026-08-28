@@ -69,14 +69,6 @@
 //! fills the whole scene with the frame's base color as its first draw — the
 //! same thing the CPU tier does for the same reason.
 
-// This tier is not reachable from the render path yet: nothing selects it, so
-// every entry point below is dead code in a plain build of the feature. It is
-// kept crate-private (rather than exported, which would silence this) because
-// its entry points take a bare `wgpu::Device`/`CommandEncoder`, and
-// `docs/RENDER_ARCHITECTURE.md`'s confinement rule keeps bare wgpu types out of
-// this crate's public API. Drop this allow once the tier seam selects it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 

@@ -116,10 +116,15 @@ pub enum Command {
         #[command(flatten)]
         build: BuildArgs,
 
-        /// Force the render tier (`gpu`/`cpu`) `frust-render` probes for
-        /// at startup, by setting `FRUST_RENDER_TIER` for the launched
-        /// process (see docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). **Desktop-preview only in v1**: the
+        /// Force the render tier (`gpu`/`cpu`/`hybrid`) `frust-render`
+        /// probes for at startup, by setting `FRUST_RENDER_TIER` for the
+        /// launched process (see docs/DEVELOPMENT.md;
+        /// `frust_render::select_render_tier`
+        /// / `RENDER_TIER_ENV_VAR`). `cpu` and `hybrid` are experimental
+        /// tiers the app must have been BUILT with (`frust-render`'s
+        /// non-default `cpu-tier`/`hybrid-tier` features); otherwise the
+        /// launched process refuses the override at startup and says so.
+        /// **Desktop-preview only in v1**: the
         /// `cargo run` fallback gets the env var directly; plumbing an
         /// override to a launched Android/iOS device (`adb`/`devicectl`
         /// env/intent extras) is not implemented yet — the on-device tier
@@ -251,14 +256,21 @@ pub enum BuildTarget {
 /// `frust run --render-tier` value (see `Command::Run`'s doc comment).
 /// Deliberately independent of `frust_render::RenderTier` — `frust-cli`
 /// has no compile-time dependency on the rendering stack (see
-/// `docs/ARCHITECTURE.md`) — but its two variants and their lowercase env
+/// `docs/ARCHITECTURE.md`) — but its three variants and their lowercase env
 /// string ([`RenderTierArg::env_value`]) must stay in sync with
 /// `frust_render::parse_render_tier_override`'s accepted values by hand.
+///
+/// The two experimental tiers are listed here unconditionally, exactly
+/// because this enum is hand-synced rather than derived: which of them a
+/// given app actually contains is a property of the app's own cargo features,
+/// which this CLI neither knows nor builds — it only sets an env var for the
+/// launched process, and that process refuses an override it cannot honour.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum RenderTierArg {
     Gpu,
     Cpu,
+    Hybrid,
 }
 
 impl RenderTierArg {
@@ -267,6 +279,7 @@ impl RenderTierArg {
         match self {
             RenderTierArg::Gpu => "gpu",
             RenderTierArg::Cpu => "cpu",
+            RenderTierArg::Hybrid => "hybrid",
         }
     }
 }
@@ -511,6 +524,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_with_render_tier_hybrid() {
+        let cli = Cli::parse_from(["frust", "run", "--render-tier", "hybrid"]);
+        match cli.command.unwrap() {
+            Command::Run { render_tier, .. } => {
+                assert_eq!(render_tier, Some(RenderTierArg::Hybrid));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_run_without_render_tier_is_none() {
         let cli = Cli::parse_from(["frust", "run"]);
         match cli.command.unwrap() {
@@ -521,7 +545,12 @@ mod tests {
 
     #[test]
     fn rejects_invalid_render_tier_value() {
-        let result = Cli::try_parse_from(["frust", "run", "--render-tier", "hybrid"]);
+        // `hybrid` used to be this fixture's unknown value and is now an
+        // accepted tier — clap validates against the enum, so the fixture has
+        // to name something outside it. `vello` is the engine, never a tier
+        // name, and matches the unknown-value fixture in
+        // `frust_render::tier`'s own parse test.
+        let result = Cli::try_parse_from(["frust", "run", "--render-tier", "vello"]);
         assert!(result.is_err());
     }
 
@@ -529,6 +558,10 @@ mod tests {
     fn render_tier_arg_env_values() {
         assert_eq!(RenderTierArg::Gpu.env_value(), "gpu");
         assert_eq!(RenderTierArg::Cpu.env_value(), "cpu");
+        // Hand-synced with `frust_render::parse_render_tier_override`'s
+        // accepted strings — this crate depends on no render crate to check
+        // it against.
+        assert_eq!(RenderTierArg::Hybrid.env_value(), "hybrid");
     }
 
     #[test]

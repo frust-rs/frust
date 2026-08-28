@@ -382,6 +382,14 @@ pub(crate) enum RenderPathKind {
     /// the swapchain each frame — the fallback for probe-refused/`Bgra8`-only
     /// surfaces and the `cpu-tier` path.
     Blit,
+    /// `vello_hybrid` renders into the acquired swapchain texture, which needs
+    /// only `RENDER_ATTACHMENT` in whatever format the surface reports — no
+    /// `Rgba8Unorm` requirement, no `STORAGE_BINDING`, no intermediate and no
+    /// blit. Chosen by [`choose_hybrid_render_path`] for the
+    /// [`Hybrid`](crate::RenderTier::Hybrid) tier alone, which is why neither
+    /// the direct-to-surface probe nor `force_blit` participates.
+    #[cfg(feature = "hybrid-tier")]
+    HybridDirect,
 }
 
 /// Pure direct-to-surface path policy: choose [`Direct`] only
@@ -405,6 +413,63 @@ pub(crate) fn choose_render_path(
         RenderPathKind::Direct
     } else {
         RenderPathKind::Blit
+    }
+}
+
+/// The hybrid tier's render path: always [`RenderPathKind::HybridDirect`],
+/// never [`RenderPathKind::Blit`].
+///
+/// A sibling of [`choose_render_path`] rather than a branch inside it because
+/// it shares none of its inputs: `vello_hybrid` targets an ordinary render
+/// attachment in the surface's own format, so the `Rgba8Unorm`/
+/// `STORAGE_BINDING` probe that decides vello's arm has nothing to say here,
+/// and the `force_blit` valve has no blit arm to force it onto — this tier
+/// owns no intermediate to blit from. `FRUST_NO_DIRECT_SURFACE` and
+/// `FRUST_RENDER_SCALE` are consequently inert on it (both are instruments of
+/// vello's own two arms), which is the reason this function takes no
+/// arguments at all: there is nothing that could change its answer.
+#[cfg(feature = "hybrid-tier")]
+pub(crate) fn choose_hybrid_render_path() -> RenderPathKind {
+    RenderPathKind::HybridDirect
+}
+
+/// Whether `tier` can only ever present through the blit arm — one exhaustive
+/// answer per tier, feeding [`choose_render_path`]'s `force_blit`.
+///
+/// Exhaustive on purpose. The expression this replaced read
+/// `selected_tier() != RenderTier::Gpu`, which silently forced the blit arm
+/// (and a `TextureBlitter`, and an intermediate) onto every tier added after
+/// it — a trap a new tier springs by existing, with no compile error. Written
+/// as a match, a new variant cannot compile until it has stated its own
+/// answer here.
+pub(crate) fn tier_forces_blit(tier: crate::tier::RenderTier) -> bool {
+    match tier {
+        // Probed per surface: direct where the swapchain supports vello's
+        // target, blit otherwise.
+        crate::tier::RenderTier::Gpu => false,
+        // Uploads its rasterized pixmap into the intermediate target the blit
+        // reads from, so it is blit-only by construction.
+        crate::tier::RenderTier::Cpu => true,
+        // Renders into the acquired swapchain view itself
+        // ([`choose_hybrid_render_path`]); an intermediate plus a blit would
+        // be a pass it never asked for.
+        crate::tier::RenderTier::Hybrid => false,
+    }
+}
+
+/// Whether THIS build actually contains `tier`'s renderer, i.e. whether the
+/// non-default cargo feature that compiles it in is on.
+///
+/// The guard [`RenderContext::create_device`] fails fast with, so a
+/// [`crate::SurfaceRenderer`] never receives a tier it has no encode path for.
+/// Exhaustive for [`tier_forces_blit`]'s reason: the `!= RenderTier::Gpu`
+/// expression this replaced refused every future tier by default, which would
+/// have made a correctly compiled-in tier unreachable for no stated reason.
+pub(crate) fn tier_compiled_in(tier: crate::tier::RenderTier) -> bool {
+    match tier {
+        crate::tier::RenderTier::Gpu => true,
+        crate::tier::RenderTier::Cpu => cfg!(feature = "cpu-tier"),
+        crate::tier::RenderTier::Hybrid => cfg!(feature = "hybrid-tier"),
     }
 }
 
@@ -589,6 +654,13 @@ fn log_render_path(
                 };
                 ("blit", reason)
             }
+            #[cfg(feature = "hybrid-tier")]
+            RenderPathKind::HybridDirect => (
+                "hybrid-direct",
+                "vello_hybrid into the acquired swapchain view (RENDER_ATTACHMENT, \
+                 surface-reported format)"
+                    .to_string(),
+            ),
         };
         log::info!("frust-perf render-path {name} ({reason})");
     });
@@ -1080,6 +1152,15 @@ pub(crate) enum RenderPath {
     /// `STORAGE_BINDING` and vello's `render_to_texture` targets its acquired
     /// texture directly. Eliminates the intermediate texture and
     /// the per-frame blit pass.
+    ///
+    /// Shared by the [`Hybrid`](crate::RenderTier::Hybrid) tier
+    /// ([`RenderPathKind::HybridDirect`]), which needs the same thing from a
+    /// surface — nothing but the acquired view — while configuring it
+    /// `RENDER_ATTACHMENT` in the surface's own format instead. The two are
+    /// one variant because the per-frame *shape* is identical: `encode` does
+    /// CPU work only, `submit` renders into the texture `acquire` produced.
+    /// Which renderer runs there is the backend's business
+    /// (`renderer::TierBackend`), not the path's.
     Direct,
     /// Direct-to-surface for a **premultiplied-expecting translucent** swapchain
     /// (`Inherit`/`PreMultiplied` alpha mode — see
@@ -1608,11 +1689,12 @@ impl RenderContext {
                 return Err(anyhow!(selection.diagnosis));
             }
         };
-        // A `Cpu` selection is only reachable in a `cpu-tier` build; guard
-        // against a stray one in a default build so the SurfaceRenderer never
-        // sees a tier it has no encode path for.
-        #[cfg(not(feature = "cpu-tier"))]
-        if tier != crate::tier::RenderTier::Gpu {
+        // An experimental tier is only reachable in a build that compiled its
+        // renderer in; guard against a stray selection so the SurfaceRenderer
+        // never sees a tier it has no encode path for. Asked per tier
+        // ([`tier_compiled_in`]) rather than as `!= RenderTier::Gpu`, which
+        // refused every tier but the default one whatever its feature said.
+        if !tier_compiled_in(tier) {
             return Err(anyhow!(selection.diagnosis));
         }
         self.selected_tier = tier;
@@ -1724,14 +1806,29 @@ impl RenderContext {
         // `FRUST_NO_DIRECT_SURFACE` does — including
         // [`blit_translucency_refused`] for a premultiplied-expecting alpha
         // mode — instead of growing a second scaled path on the direct arms.
-        let force_blit = direct_surface_force_blit()
-            || render_scaled()
-            || self.selected_tier() != crate::tier::RenderTier::Gpu;
+        //
+        // Asked of the tier through [`tier_forces_blit`], not as
+        // `selected_tier() != RenderTier::Gpu`: that expression forced the
+        // blit arm onto any tier added later, intermediate and blitter
+        // included, however little it wanted one.
+        let tier = self.selected_tier();
+        let force_blit = direct_surface_force_blit() || render_scaled() || tier_forces_blit(tier);
         let handle = self.device_handle();
 
         let capabilities = surface.get_capabilities(&handle.adapter);
         probe_direct_to_surface_capability(&capabilities);
         let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
+        // The hybrid tier decides its path on its own terms
+        // ([`choose_hybrid_render_path`]) — it shares neither the probe nor
+        // the valve `choose_render_path` weighs. Every other tier takes the
+        // untouched vello decision.
+        #[cfg(feature = "hybrid-tier")]
+        let path_kind = if tier == crate::tier::RenderTier::Hybrid {
+            choose_hybrid_render_path()
+        } else {
+            choose_render_path(has_rgba8unorm, has_storage_binding, force_blit)
+        };
+        #[cfg(not(feature = "hybrid-tier"))]
         let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
         log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
         log_render_scale(width, height, self.effective_render_scale());
@@ -1751,6 +1848,27 @@ impl RenderContext {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
             ),
             RenderPathKind::Blit => {
+                let format = capabilities
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|it| SURFACE_FORMATS.contains(it))
+                    .ok_or_else(|| {
+                        anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
+                    })?;
+                (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            }
+            // Hybrid arm: `vello_hybrid` bakes the target format into its own
+            // pipelines and draws through an ordinary render pass, so the
+            // swapchain needs `RENDER_ATTACHMENT` and nothing else — whichever
+            // supported format the surface reports first, exactly as the blit
+            // arm picks one, but for the swapchain the frame lands in directly
+            // rather than for an intermediate behind it. Duplicated rather
+            // than shared with the arm above because the two lists are free to
+            // diverge: this tier's pipelines are not bound by vello's
+            // `render_to_texture` target format.
+            #[cfg(feature = "hybrid-tier")]
+            RenderPathKind::HybridDirect => {
                 let format = capabilities
                     .formats
                     .iter()
@@ -1811,6 +1929,30 @@ impl RenderContext {
                     // the encode side never re-derives a scale of its own.
                     root: blit_root((width, height), (target_width, target_height)),
                 }
+            }
+            // The hybrid tier carries no per-surface render resources at all:
+            // `vello_hybrid`'s own renderer owns everything the frame needs
+            // (its depth texture included) and draws into the acquired
+            // swapchain view, so this arm holds exactly what
+            // [`RenderPath::Direct`] holds — nothing — and takes the same
+            // encode/submit split.
+            //
+            // Deliberately NOT reachable from the premultiply arm above: that
+            // one exists to premultiply an intermediate this tier never
+            // creates. A translucent, premultiplied-expecting surface is
+            // therefore outside the hybrid spike's scope, and says so once
+            // rather than quietly compositing over-bright.
+            #[cfg(feature = "hybrid-tier")]
+            RenderPathKind::HybridDirect => {
+                if alpha_mode_needs_premultiply(alpha_mode) {
+                    log::warn!(
+                        "frust-render: hybrid tier on a premultiplied-expecting translucent \
+                         surface (alpha_mode={alpha_mode:?}) — this arm builds no premultiply \
+                         pass, so such a frame composites over-bright; measure the hybrid tier \
+                         on an opaque surface"
+                    );
+                }
+                RenderPath::Direct
             }
         };
         let resolved_translucent =
@@ -2228,6 +2370,45 @@ mod tests {
         );
         // Neither, and forced → still blit (force never resurrects direct).
         assert_eq!(choose_render_path(false, false, true), RenderPathKind::Blit);
+    }
+
+    #[test]
+    fn only_the_cpu_tier_forces_the_blit_arm() {
+        // The R10 trap, pinned: the hybrid tier renders into the acquired
+        // swapchain view, so forcing it onto the blit arm (and its
+        // intermediate + `TextureBlitter`) would hand it a pass it never
+        // asked for. Only the CPU tier, which uploads a pixmap into that
+        // intermediate, is blit-only.
+        assert!(!tier_forces_blit(crate::tier::RenderTier::Gpu));
+        assert!(tier_forces_blit(crate::tier::RenderTier::Cpu));
+        assert!(!tier_forces_blit(crate::tier::RenderTier::Hybrid));
+    }
+
+    #[test]
+    fn a_tier_is_only_selectable_in_a_build_that_compiled_it() {
+        // The default tier is always in; each experimental one tracks its own
+        // feature — nothing inherits a blanket refusal.
+        assert!(tier_compiled_in(crate::tier::RenderTier::Gpu));
+        assert_eq!(
+            tier_compiled_in(crate::tier::RenderTier::Cpu),
+            cfg!(feature = "cpu-tier")
+        );
+        assert_eq!(
+            tier_compiled_in(crate::tier::RenderTier::Hybrid),
+            cfg!(feature = "hybrid-tier")
+        );
+    }
+
+    #[cfg(feature = "hybrid-tier")]
+    #[test]
+    fn hybrid_render_path_is_never_blit() {
+        // The hybrid tier owns no intermediate, so no input — not the
+        // direct-surface probe, not `FRUST_NO_DIRECT_SURFACE`, not
+        // `FRUST_RENDER_SCALE` — may route it through the blit arm. The
+        // function takes no arguments precisely so this cannot be conditional;
+        // the assertion is that the arm it names is not `Blit`.
+        assert_eq!(choose_hybrid_render_path(), RenderPathKind::HybridDirect);
+        assert_ne!(choose_hybrid_render_path(), RenderPathKind::Blit);
     }
 
     #[test]
