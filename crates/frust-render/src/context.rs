@@ -68,10 +68,11 @@ pub(crate) fn env_str(
 }
 
 /// vello's per-frame anti-aliasing method, selectable via the `FRUST_AA_MODE`
-/// knob (`docs/DEVELOPMENT.md`'s Instrumentation table) so the Area-vs-MSAA
-/// cost of the fine stage can be A/B'd on device. Crate-private: the `vello`
-/// type it wraps ([`vello::AaConfig`]/[`vello::AaSupport`]) never crosses this
-/// crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
+/// knob (`docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path)) so the
+/// Area-vs-MSAA cost of the fine stage can be A/B'd on device. Crate-private:
+/// the `vello` type it wraps ([`vello::AaConfig`]/[`vello::AaSupport`]) never
+/// crosses this crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak
+/// anti-pattern).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AaMode {
     /// vello's default: area anti-aliasing. Byte-identical to pre-knob
@@ -356,8 +357,8 @@ fn perf_tracing_enabled() -> bool {
 /// process-wide `FRUST_NO_DIRECT_SURFACE` flag — the fallback-proof safety valve
 /// that pins a capable device onto the blit arm so the two arms
 /// can be A/B'd on the same hardware. Same compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD` (see `docs/DEVELOPMENT.md`'s
-/// Instrumentation table). Cached: read once per process.
+/// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD` (see `docs/RENDER_DEVELOPMENT.md`
+/// § Instrumentation (render path)). Cached: read once per process.
 fn direct_surface_force_blit() -> bool {
     static FORCED: OnceLock<bool> = OnceLock::new();
     *FORCED.get_or_init(|| {
@@ -417,8 +418,8 @@ pub(crate) fn choose_render_path(
 /// reverts every `Command::ShaderQuad` to the existing placeholder-fill
 /// lowering (`convert::encode_range_with_overrides`'s miss path) with zero
 /// pre-pass GPU work. Same compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
-/// Instrumentation table). Cached: read once per process.
+/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/RENDER_DEVELOPMENT.md`
+/// § Instrumentation (render path)). Cached: read once per process.
 pub(crate) fn shader_effects_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| {
@@ -442,8 +443,8 @@ pub(crate) fn shader_effects_disabled() -> bool {
 /// GPU work: a disabled cache yields an empty frame plan, so the compositor
 /// pass never runs and each arm is byte-identical to its pre-cache self. Same
 /// compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
-/// Instrumentation table). Cached: read once per process.
+/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/RENDER_DEVELOPMENT.md`
+/// § Instrumentation (render path)). Cached: read once per process.
 pub(crate) fn snapshot_layers_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| {

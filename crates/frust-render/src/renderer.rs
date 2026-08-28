@@ -618,8 +618,8 @@ impl SurfaceRenderer {
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
                 let mode = aa_mode();
                 // One line per process naming the effective mode, so a device
-                // capture proves which build ran (`docs/DEVELOPMENT.md`'s
-                // Instrumentation table). Logged once regardless of surface
+                // capture proves which build ran (`docs/RENDER_DEVELOPMENT.md`
+                // § Instrumentation (render path)). Logged once regardless of surface
                 // recreation, mirroring `log_render_path`'s once-per-process
                 // shape.
                 // A non-default mode additionally warns: it is a measurement
@@ -693,15 +693,17 @@ impl SurfaceRenderer {
                 }
                 TierBackend::Gpu {
                     renderer,
-                    // `FRUST_NO_SNAPSHOT_LAYERS` is resolved once here, per
-                    // surface, and held by the cache itself — so the pre-pass
-                    // never re-reads a process-global on the hot path and a
-                    // test can build either state directly.
-                    snapshots: SnapshotCache::new(snapshot_cache_enabled(
-                        crate::context::snapshot_layers_disabled(),
+                    // The four refusals are resolved here, per surface, and
+                    // held by the cache itself — so the pre-pass never
+                    // re-reads a process-global on the hot path and a test
+                    // can build either state directly. `on_surface_changed`
+                    // re-resolves them through the same
+                    // `snapshot_cache_enabled_for`: the scaled-frame refusal
+                    // is a function of the surface's live geometry, not a
+                    // constant of the process.
+                    snapshots: SnapshotCache::new(snapshot_cache_enabled_for(
+                        &surface,
                         compositor.is_some(),
-                        straight_alpha_translucent,
-                        render_scaled,
                     )),
                     compositor,
                 }
@@ -758,20 +760,41 @@ impl SurfaceRenderer {
     ///
     /// Only acts in [`SurfacePhase::SurfaceReady`]; a resize with no surface is
     /// dropped. The `vello::Renderer` (and its compiled pipelines) is preserved
-    /// — only the surface config and target texture are recreated. Zero
-    /// dimensions are ignored (a minimized window keeps its last valid size).
+    /// — only the surface config and target texture are recreated, and the
+    /// snapshot cache's switch is re-resolved against the new geometry
+    /// ([`snapshot_cache_enabled_for`]). Zero dimensions are ignored (a
+    /// minimized window keeps its last valid size).
     pub fn on_surface_changed(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
             ctx.resize_surface(&mut ready.surface, width, height);
-            #[cfg(feature = "cpu-tier")]
-            if let TierBackend::Cpu(cpu) = &mut ready.backend {
-                // Keep the CPU pixmap's size in step with the swapchain; the
-                // GPU renderer needs no resize (only the target texture, done
-                // above), but the CPU tier's `RenderContext`/`Pixmap` are sized.
-                cpu.resize(width, height);
+            match &mut ready.backend {
+                // The snapshot cache's switch is re-resolved against the
+                // resized surface: the scaled-frame refusal compares the
+                // surface's size with its intermediate's, and the resize
+                // above recomputed both (`RenderContext::resize_surface`).
+                // Frozen at install it could disagree with the `root` the
+                // next frame is encoded under; `set_enabled` drops the
+                // entries on the way off, so a page rasterized for one
+                // device space is never composited in another.
+                TierBackend::Gpu {
+                    snapshots,
+                    compositor,
+                    ..
+                } => snapshots.set_enabled(snapshot_cache_enabled_for(
+                    &ready.surface,
+                    compositor.is_some(),
+                )),
+                #[cfg(feature = "cpu-tier")]
+                TierBackend::Cpu(cpu) => {
+                    // Keep the CPU pixmap's size in step with the swapchain;
+                    // the GPU renderer needs no resize (only the target
+                    // texture, done above), but the CPU tier's
+                    // `RenderContext`/`Pixmap` are sized.
+                    cpu.resize(width, height);
+                }
             }
         }
     }
@@ -919,9 +942,9 @@ impl SurfaceRenderer {
                 // so the two derive the same `(id, w, h)` for every quad.
                 //
                 // `FRUST_NO_SHADER_EFFECTS` (`context::shader_effects_disabled`,
-                // `docs/DEVELOPMENT.md`'s Instrumentation table) is the kill
-                // switch for this still-unproven-on-device pre-pass: resolved
-                // once here and threaded into `run_shader_prepass`, which
+                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
+                // is the kill switch for this still-unproven-on-device pre-pass:
+                // resolved once here and threaded into `run_shader_prepass`, which
                 // short-circuits to a zero-GPU-work no-op (skipping compile,
                 // targets, and the mark_seen/reap age tracking too) before
                 // touching `device`/`queue`/`renderer`/`shader_effects` at all —
@@ -956,8 +979,9 @@ impl SurfaceRenderer {
                 // one blended quad.
                 //
                 // `FRUST_NO_SNAPSHOT_LAYERS` (resolved into the cache at
-                // surface install, `docs/DEVELOPMENT.md`'s Instrumentation
-                // table) makes this a zero-GPU-work no-op returning the
+                // surface install and on every resize,
+                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
+                // makes this a zero-GPU-work no-op returning the
                 // whole-scene plan — no layers, no holes, no trailing segment
                 // — so every bracket falls through to the inline emulation
                 // `convert` performed before the cache existed and the
@@ -1656,7 +1680,9 @@ impl SurfaceRenderer {
 ///   point is to time vello's fine stage over a known pixel count anyway,
 ///   which a frame that composites cached pages instead of rendering them no
 ///   longer measures. So brackets lower inline through the root-scaled encode,
-///   exactly as under `FRUST_NO_SNAPSHOT_LAYERS`.
+///   exactly as under `FRUST_NO_SNAPSHOT_LAYERS`. Unlike the other three this
+///   one can change while the surface lives — a resize recomputes the
+///   intermediate — so it is re-asked on every `on_surface_changed`.
 ///
 /// Any one of the four is enough to refuse; a plain opaque, unscaled surface
 /// with a compositor is the only combination that composites.
@@ -1667,6 +1693,21 @@ fn snapshot_cache_enabled(
     render_scaled: bool,
 ) -> bool {
     !disabled && has_compositor && !straight_alpha_translucent && !render_scaled
+}
+
+/// [`snapshot_cache_enabled`] asked of `surface` as it is configured RIGHT
+/// NOW — the one derivation both the install site and
+/// [`SurfaceRenderer::on_surface_changed`] call, so the cache's switch can
+/// never disagree with the geometry the surface was last configured with:
+/// `render_scaled` is the surface's live size against its intermediate's
+/// ([`ConfiguredSurface::render_scaled`]), which a resize recomputes.
+fn snapshot_cache_enabled_for(surface: &ConfiguredSurface, has_compositor: bool) -> bool {
+    snapshot_cache_enabled(
+        crate::context::snapshot_layers_disabled(),
+        has_compositor,
+        surface.straight_alpha_translucent(),
+        surface.render_scaled(),
+    )
 }
 
 /// Whether this frame can skip its MAIN vello pass altogether: its pre segment
