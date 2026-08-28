@@ -333,13 +333,15 @@ impl SurfaceRenderer {
     /// `Invalid`-reconfigure streak and the in-flight frame's stashes.
     ///
     /// The one place a surface episode begins or ends. `install_surface`
-    /// enters through it with the freshly built [`SurfaceState::Ready`],
+    /// enters through it with the freshly built [`SurfaceState::Ready`];
     /// `on_surface_destroyed` leaves through it with
-    /// [`SurfaceState::NoSurface`], so a reset can never be written into one
-    /// of those two paths and forgotten in the other. Everything reset here
-    /// describes the surface being replaced or torn down: the streak belonged
-    /// to it, and the stashes describe one of its frames (the composite one
-    /// holding refcounted handles on snapshot textures that die with it).
+    /// [`SurfaceState::NoSurface`]; and [`Self::acquire`]'s give-up arm leaves
+    /// through it with [`SurfaceState::Lost`] — so a reset can never be
+    /// written into one of those paths and forgotten in another. Everything
+    /// reset here describes the surface being replaced or torn down: the
+    /// streak belonged to it, and the stashes describe one of its frames (the
+    /// composite one holding refcounted handles on snapshot textures that die
+    /// with it). Nothing else may assign `self.state`.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
         self.state = state;
         self.consecutive_invalid = 0;
@@ -1236,7 +1238,7 @@ impl SurfaceRenderer {
         }
         *consecutive_invalid = next_invalid_streak(status, action, *consecutive_invalid);
 
-        match action {
+        let outcome = match action {
             AcquireAction::Present => {
                 let surface_texture = match acquired {
                     Cst::Success(t) | Cst::Suboptimal(t) => t,
@@ -1250,11 +1252,11 @@ impl SurfaceRenderer {
                 // Stash the acquired texture for `submit`; the blocking vsync wait
                 // ended above, so timing stops here for the acquire sub-span.
                 *pending_present = Some(surface_texture);
-                Ok(AcquireOutcome::Acquired)
+                AcquireOutcome::Acquired
             }
             AcquireAction::Reconfigure => {
                 ctx.configure_surface(&ready.surface);
-                Ok(AcquireOutcome::Reconfigured)
+                AcquireOutcome::Reconfigured
             }
             AcquireAction::Lose => {
                 debug_assert_eq!(
@@ -1262,16 +1264,26 @@ impl SurfaceRenderer {
                     SurfacePhase::SurfaceLost,
                     "Lost must reach SurfaceLost from SurfaceReady"
                 );
-                // Drop the surface and its outstanding resources before returning
-                // so the shell can recreate cleanly. `consecutive_invalid`
-                // was already reset above (`next_invalid_streak`); the shell's own
-                // recovery path (recreate on resize/redraw/surfaceChanged) starts a
-                // fresh episode.
-                *state = SurfaceState::Lost;
-                Ok(AcquireOutcome::Lost)
+                AcquireOutcome::Lost
             }
-            AcquireAction::Skip => Ok(AcquireOutcome::Skipped),
+            AcquireAction::Skip => AcquireOutcome::Skipped,
+        };
+        if matches!(outcome, AcquireOutcome::Lost) {
+            // Drop the surface and its outstanding resources before returning
+            // so the shell can recreate cleanly — through the same door
+            // `install_surface` and `on_surface_destroyed` use, once the field
+            // borrows above have ended. That also drops the in-flight frame's
+            // stashes: a `pending_composite` holds refcounted handles on the
+            // dying cache's page textures (and the trailing scratch), and no
+            // `submit` will ever consume it now, so leaving it would keep those
+            // textures alive until the shell's next install. The streak was
+            // already reset above (`next_invalid_streak`, reset-on-give-up);
+            // the door zeroing it again is a no-op. The shell's own recovery
+            // path (recreate on resize/redraw/surfaceChanged) then starts a
+            // fresh episode.
+            self.adopt_surface_state(SurfaceState::Lost);
         }
+        Ok(outcome)
     }
 
     /// Phase 2b of the frame — the **submit** sub-span: turn the swapchain
@@ -1790,6 +1802,30 @@ mod tests {
         renderer.adopt_surface_state(SurfaceState::NoSurface);
         assert!(renderer.pending_composite.is_none());
         assert_eq!(renderer.consecutive_invalid, 0);
+    }
+
+    /// The give-up arm of `acquire` leaves through the same door: adopting
+    /// [`SurfaceState::Lost`] drops both in-flight stashes, so a surface that
+    /// went away mid-frame does not keep its cached page textures alive (via
+    /// the composite stash's refcounted views) until the shell's next install.
+    #[test]
+    fn adopting_the_lost_state_drops_the_dying_surfaces_stashes() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: None,
+        });
+
+        renderer.adopt_surface_state(SurfaceState::Lost);
+
+        assert_eq!(renderer.phase(), SurfacePhase::SurfaceLost);
+        assert!(renderer.pending_base_color.is_none());
+        assert!(
+            renderer.pending_composite.is_none(),
+            "a lost surface's composite stash must not outlive it"
+        );
     }
 
     #[test]

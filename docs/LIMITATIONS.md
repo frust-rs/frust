@@ -2828,7 +2828,9 @@ above is a behavior difference from the pre-cache inline path, not a bug. `FRUST
 measured on the same Adreno 620 hardware; every item above is a narrower, named, test-pinned
 tradeoff against that number, not a silent wrong-pixels bug. Items 5-9 are structural consequences
 of compositing a texture outside vello rather than gaps found later; item 4 is a deliberate v1
-scope line (a hero morph repaints every frame, so it is never an "ideal cache candidate"). Item 1's
+scope line (a hero morph repaints every frame, so it is never an "ideal cache candidate"); item 10
+is a defensive ceiling added in the review cleanup round once the mechanism had shipped with none,
+and no shipped shell's page bracket reaches it. Item 1's
 fine-stage floor itself — ~14.5 ms to run a vello pass over any target regardless of content — is
 the accepted, unresolved cost this whole mechanism is chasing; the framework has not yet attempted
 to lower the floor itself (a render-scale reduction is Phase 3 future work, research artifact
@@ -2839,9 +2841,12 @@ MB); a page lives only while its bracket is still in use and both it and the scr
 after `MAX_UNUSED_FRAMES` (2) consecutive unused frames (`SnapshotCache::evict`,
 `Compositor::age_scratch`/`scratch_expired`) — the scratch exists at all only for a frame that had
 a trailing segment. A transition can therefore hold a transient peak of up to ~31 MB (two live
-pages plus the scratch) for a couple of frames, and the area budget (item 10) bounds any single
-page texture at ≤2× the surface, so that arithmetic is also its per-page ceiling; the measured
-steady-state delta below is a post-eviction sample taken once that peak has already aged out, not
+pages plus the scratch) for a couple of frames — the typical figure, each page at the surface's
+own size, which is what every shipped shell's page brackets measure. The enforced ceiling is
+looser: the area budget (item 10) admits a page texture of up to 2× the surface's pixel area
+(≈20.7 MB), and the scratch is not budgeted but is always exactly the surface's size, so the worst
+case the budget permits is ≈52 MB (two ≈20.7 MB pages plus the ~10.4 MB scratch). The measured
+steady-state delta below is a post-eviction sample taken once the peak has already aged out, not
 the peak itself. Measured Pixel 5a snapshot GPU memory delta across a push/pop plus two tab
 switches: 43.6 MB → 45.0 MB (+1.4 MB; EGL `mtrack` unchanged at 40.9 MB) — small enough on
 device hardware not to itself be a limitation.

@@ -67,7 +67,7 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   and an entry unused for 2 frames is evicted. A frame that punches a `ClearRect` after the first
   cached bracket lowers whole-frame inline, and a bracket whose texture would exceed 2x the
   surface's pixel area lowers on its own (see LIMITATIONS.md).
-- Frame split (`FramePlan`, `compositor.rs`): vello renders the commands before the first cached
+- Frame split (`FramePlan`, `snapshot.rs`): vello renders the commands before the first cached
   bracket (the pre segment) — skipped entirely when it draws nothing, letting the compositor's
   own render pass clear to the frame's `base_color` instead. The `Compositor` then draws each
   cached page as one alpha-blended quad after vello: straight blend on `Direct`/`Blit`,
