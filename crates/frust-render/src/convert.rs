@@ -117,6 +117,11 @@ pub(crate) fn encode_into_with_shaders(
         scene,
         // The whole scene, which opens every group it needs itself.
         &Segment::whole(scene.commands().len()),
+        // No root scaling: a caller driving its own renderer targets a
+        // surface-sized texture (`FRUST_RENDER_SCALE` is the in-crate render
+        // path's own instrument, applied where that path knows its target's
+        // size).
+        Affine::IDENTITY,
         sink,
         shader_images,
         adapter_max,
@@ -158,18 +163,26 @@ impl Segment {
     }
 }
 
-/// One segment of a frame: the commands in `segment.range`, encoded under the
-/// scene root beneath the still-open groups `segment.prefix` names, with every
+/// One segment of a frame: the commands in `segment.range`, encoded under
+/// `root` beneath the still-open groups `segment.prefix` names, with every
 /// bracket whose `key` is in `holes` skipped entirely.
 ///
 /// This is the single entry the render path drives BOTH of a frame's vello
 /// passes through (see [`crate::snapshot::FramePlan`] for the split): the
 /// pre-segment and, when there is one, the trailing segment. A sub-range is
-/// encoded as if it were the whole scene — the root stays `Affine::IDENTITY`
-/// (each command already carries its own composed transform) and the
-/// `ClearRect` hoist is scoped to the range, so a punch recorded inside it
-/// lands at the range's own root rather than reaching for groups the segment
-/// never opened.
+/// encoded as if it were the whole scene — the `ClearRect` hoist is scoped to
+/// the range, so a punch recorded inside it lands at the range's own root
+/// rather than reaching for groups the segment never opened.
+///
+/// `root` is pre-multiplied onto every command's own recorded transform (see
+/// [`encode_commands`]). It is `Affine::IDENTITY` for every ordinary frame —
+/// each command already carries its own composed transform, so the scene is
+/// encoded in the surface's device space. The render path passes
+/// `Affine::scale(s)` instead when `FRUST_RENDER_SCALE` shrank the target it
+/// is rendering into, which maps that same device space onto the smaller
+/// intermediate; the blit pass then stretches the result back over the
+/// swapchain. Both of a frame's passes must use the SAME root, or the trailing
+/// segment would land at a different size than the pre segment it draws over.
 ///
 /// [`Segment::prefix`] is what makes a MID-SCENE range faithful. Those
 /// commands are encoded FIRST, re-establishing exactly the clip/layer state
@@ -192,6 +205,7 @@ impl Segment {
 pub(crate) fn encode_range_with_overrides(
     scene: &Scene,
     segment: &Segment,
+    root: Affine,
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
@@ -206,7 +220,7 @@ pub(crate) fn encode_range_with_overrides(
         .filter_map(|&index| commands.get(index));
     encode_commands(
         reopened.chain(&commands[start..end]),
-        Affine::IDENTITY,
+        root,
         sink,
         shader_images,
         adapter_max,
@@ -439,6 +453,13 @@ fn encode_commands<'a>(
                 // re-push. Bboxes are exact for the axis-aligned transforms
                 // frust emits (translate/scale); a rotated clip would bound
                 // conservatively.
+                //
+                // The punch is computed in `combined`'s space (`root *
+                // snapshot_correction`), and each group's bbox was recorded
+                // under the same `combined`, so a hole scales with a scaled
+                // root exactly like the content around it — the identity
+                // transform below applies to an already-rooted RECT, not to an
+                // unrooted one.
                 let mut punch = (combined * *transform).transform_rect_bbox(*rect);
                 for (_, t, r) in &groups {
                     punch = punch.intersect(t.transform_rect_bbox(*r));
@@ -502,6 +523,15 @@ fn encode_commands<'a>(
                 // populated `shader_images` reads `scene.commands()` directly
                 // with no root/snapshot-correction knowledge, so recomputing
                 // the key from the corrected transform would never hit.
+                //
+                // That RAW keying is also what makes a scaled root correct
+                // here with no code of its own: the pre-pass rendered this
+                // program at the UNSCALED physical size (it walks the scene
+                // knowing nothing of the render target), so the lookup must
+                // ask for that size — and the draw below, under `combined *
+                // transform`, simply places that full-size texture scaled
+                // into the smaller target, one resample instead of a second
+                // pre-pass at another size.
                 let (w, h) = crate::shader_effects::clamp_size(
                     crate::renderer::physical_size(*transform, *dest),
                     adapter_max,
@@ -2231,6 +2261,7 @@ mod tests {
         encode_range_with_overrides(
             scene,
             &Segment::whole(scene.commands().len()),
+            Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2366,6 +2397,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             &segment(1..3, &[]),
+            Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2407,6 +2439,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             &segment(1..scene.commands().len(), &[]),
+            Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2445,6 +2478,7 @@ mod tests {
         encode_range_with_overrides(
             &scene,
             &segment(0..999, &[]),
+            Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2522,6 +2556,55 @@ mod tests {
         );
     }
 
+    /// The render-scale acceptance criterion, taken through the same entry
+    /// the render path drives: a scaled `root` multiplies every command's own
+    /// transform (so the whole frame lands in a target that fraction of the
+    /// surface), while `Affine::IDENTITY` leaves the encode byte-identical to
+    /// what it was before the parameter existed.
+    #[test]
+    fn a_scaled_root_scales_every_commands_transform_and_identity_changes_nothing() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let offset = Affine::translate((10.0, 30.0));
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_transform(offset);
+        builder.fill_rect(rect, Brush::Solid(RED));
+        builder.pop_transform();
+
+        let encode = |root: Affine| {
+            let mut sink = RecordingSink::default();
+            encode_range_with_overrides(
+                &scene,
+                &Segment::whole(scene.commands().len()),
+                root,
+                &mut sink,
+                &HashMap::new(),
+                u32::MAX,
+                &HashSet::new(),
+            );
+            sink.events
+        };
+
+        // The rect keeps its own coordinates; the TRANSFORM carries the
+        // scale, composed onto the transform the scene recorded — which is
+        // what puts a half-size frame in a half-size target.
+        assert_eq!(
+            encode(Affine::scale(0.5)),
+            vec![Event::FillRect {
+                rect,
+                transform: Affine::scale(0.5) * offset,
+            }]
+        );
+        // The default path: untouched.
+        assert_eq!(
+            encode(Affine::IDENTITY),
+            vec![Event::FillRect {
+                rect,
+                transform: offset,
+            }]
+        );
+    }
+
     /// A [`Segment`] spelled from a range and a prefix, for the assertions
     /// that name both by hand.
     fn segment(range: Range<usize>, prefix: &[usize]) -> Segment {
@@ -2538,6 +2621,7 @@ mod tests {
         encode_range_with_overrides(
             scene,
             &segment(range, prefix),
+            Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
             u32::MAX,

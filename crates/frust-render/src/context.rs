@@ -162,6 +162,124 @@ pub(crate) fn aa_mode() -> AaMode {
     })
 }
 
+/// The narrowest fraction of the surface `FRUST_RENDER_SCALE` will render at.
+/// Below a quarter of each axis the frame is too coarse for the upscaled
+/// result to be judged against the real one at all — a measurement instrument
+/// still has to show what it measures.
+const MIN_RENDER_SCALE: f64 = 0.25;
+
+/// The widest value `FRUST_RENDER_SCALE` accepts: the surface's own
+/// resolution, which is the default and the byte-identical-to-untouched case.
+/// Rendering ABOVE the surface size is a different feature (supersampling) with
+/// its own cost profile, deliberately out of this knob's range.
+const MAX_RENDER_SCALE: f64 = 1.0;
+
+/// Parses a raw `FRUST_RENDER_SCALE` value (already resolved by [`env_str`])
+/// into the fraction of the surface's pixel size each frame renders at.
+///
+/// An unset or empty value is [`MAX_RENDER_SCALE`] (1.0) silently — that is
+/// simply "the knob wasn't touched". An unparsable or non-finite value
+/// (`abc`, `NaN`, `inf`) also falls back to 1.0 but logs one `log::warn!`
+/// naming it, since that is a typo rather than a deliberate default. A value
+/// outside `MIN_RENDER_SCALE..=MAX_RENDER_SCALE` is clamped into it, likewise
+/// with one warn: `2` means "the knob was misunderstood", and silently
+/// honouring it would present a supersampled frame nobody asked to pay for.
+pub(crate) fn parse_render_scale(raw: Option<String>) -> f64 {
+    let Some(trimmed) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return MAX_RENDER_SCALE;
+    };
+    let Ok(parsed) = trimmed.parse::<f64>() else {
+        log::warn!(
+            "frust-render: unparsable FRUST_RENDER_SCALE value {trimmed:?}, rendering at full \
+             surface resolution"
+        );
+        return MAX_RENDER_SCALE;
+    };
+    // NaN fails every comparison, so it must be rejected before the clamp
+    // rather than by it (`f64::clamp` panics on a NaN bound and returns NaN
+    // for a NaN value); infinities are equally meaningless as a fraction.
+    if !parsed.is_finite() {
+        log::warn!(
+            "frust-render: non-finite FRUST_RENDER_SCALE value {trimmed:?}, rendering at full \
+             surface resolution"
+        );
+        return MAX_RENDER_SCALE;
+    }
+    let clamped = parsed.clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE);
+    if clamped != parsed {
+        log::warn!(
+            "frust-render: FRUST_RENDER_SCALE {parsed} out of range \
+             {MIN_RENDER_SCALE}..={MAX_RENDER_SCALE}, clamped to {clamped}"
+        );
+    }
+    clamped
+}
+
+/// The process-wide render scale, resolved once from `FRUST_RENDER_SCALE`
+/// (compile-time-or-runtime, see [`env_str`]) and cached — a change requires a
+/// fresh process, matching every other `FRUST_*` knob.
+///
+/// The knob renders the whole frame into an intermediate a fraction of the
+/// surface's size and upscales it in the blit pass, so the cost per pixel of
+/// vello's fine stage (which is proportional to the pixels it sweeps) can be
+/// measured on device. It is a measurement instrument, not a shipping mode:
+/// while it is active the surface is pinned onto the blit arm and the
+/// snapshot-layer cache is refused outright (see
+/// [`crate::renderer::snapshot_cache_enabled`]).
+pub(crate) fn render_scale() -> f64 {
+    static SCALE: OnceLock<f64> = OnceLock::new();
+    *SCALE.get_or_init(|| {
+        parse_render_scale(env_str(
+            option_env!("FRUST_RENDER_SCALE"),
+            std::env::var("FRUST_RENDER_SCALE").ok(),
+        ))
+    })
+}
+
+/// Whether this process renders below the surface's own resolution — the one
+/// predicate every scale-dependent decision (forced blit, linear blit filter,
+/// root-scaled encode, snapshot-cache refusal) keys off, so none of them can
+/// disagree about what "scaled" means.
+pub(crate) fn render_scaled() -> bool {
+    render_scale() < MAX_RENDER_SCALE
+}
+
+/// The intermediate-target size for a `width` x `height` surface rendered at
+/// `scale`: each axis rounded UP (a truncated axis would leave the frame's
+/// last row/column unsampled by the upscaling blit) and floored at one texel
+/// (wgpu rejects a zero-sized texture).
+///
+/// Identity at `scale == 1.0` — every `u32` is exactly representable as `f64`,
+/// so `ceil(w * 1.0) == w` with no rounding step — which is what keeps the
+/// default path byte-identical to a build without the knob.
+pub(crate) fn scaled_size(width: u32, height: u32, scale: f64) -> (u32, u32) {
+    // `f64 as u32` saturates at both ends in Rust, so neither a huge product
+    // nor a negative one can wrap; `scale` reaches here already clamped to
+    // `MIN_RENDER_SCALE..=MAX_RENDER_SCALE` anyway.
+    let axis = |value: u32| ((f64::from(value) * scale).ceil() as u32).max(1);
+    (axis(width), axis(height))
+}
+
+/// The sampler filter the blit pass upscales with: linear while the
+/// intermediate is smaller than the surface, nearest otherwise.
+///
+/// `TextureBlitter::copy` is a sampled full-screen triangle draw over the
+/// whole destination (verified in wgpu 29.0.4's `util/texture_blitter.rs` +
+/// `blit.wgsl`: normalized tex coords, `textureSample`), so source and
+/// destination sizes may differ and the sampler's `mag_filter` is what
+/// resolves the difference — nearest would show the reduced frame as visible
+/// blocks rather than as the softened image an upscale is meant to be.
+/// `TextureBlitter::new` builds with `FilterMode::Nearest`, so the unscaled
+/// answer here is byte-identical to the blitter the default path had before
+/// this knob existed.
+pub(crate) fn blit_filter(scaled: bool) -> wgpu::FilterMode {
+    if scaled {
+        wgpu::FilterMode::Linear
+    } else {
+        wgpu::FilterMode::Nearest
+    }
+}
+
 /// Whether perf tracing (frust-perf logging) is enabled via the process-wide
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
@@ -402,7 +520,11 @@ fn log_render_path(
                 let reason = if force_blit {
                     // The safety valve wins even on a capable surface — say so, so
                     // an A/B run's log confirms the arm it is actually exercising.
-                    "forced (FRUST_NO_DIRECT_SURFACE or cpu-tier)".to_string()
+                    // `FRUST_RENDER_SCALE < 1` is the third cause: the scaled
+                    // intermediate IS the blit arm's target, so the knob pins
+                    // the surface here exactly like the kill switch does.
+                    "forced (FRUST_NO_DIRECT_SURFACE, FRUST_RENDER_SCALE < 1, or cpu-tier)"
+                        .to_string()
                 } else {
                     let mut missing = Vec::new();
                     if !has_rgba8unorm {
@@ -430,6 +552,26 @@ fn log_render_path(
     _has_storage_binding: bool,
     _force_blit: bool,
 ) {
+}
+
+/// Emits the one-per-process line naming the effective render scale and the
+/// intermediate size it implies for a `width` x `height` surface, so a device
+/// capture proves which resolution the frame it is timing was rendered at.
+///
+/// Unlike the two probe lines above this is NOT behind the `perf-trace`
+/// feature, matching the `frust-render aa-mode=` line the AA knob logs: one
+/// formatted line per process, available in any build that can be handed the
+/// knob. `scale` is the context's effective render scale (pinned to
+/// [`MAX_RENDER_SCALE`] on the CPU tier — see [`RenderContext::effective_render_scale`]),
+/// so the size reported is the one the blit arm's intermediate actually
+/// takes; on an unscaled surface that is the surface's own size, whichever
+/// arm it ends up on (scale < 1 always forces the blit arm).
+fn log_render_scale(width: u32, height: u32, scale: f64) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let (target_width, target_height) = scaled_size(width, height, scale);
+        log::info!("frust-render render-scale={scale} blit-target={target_width}x{target_height}");
+    });
 }
 
 /// Resolves a caller's [`SurfaceAlphaRequest`] against the live surface's
@@ -553,11 +695,15 @@ fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
 /// chosen render path cannot deliver the premultiplied output the resolved
 /// alpha mode expects (following on the resolved-translucency seam above).
 ///
-/// [`RenderPathKind::Blit`]'s `TextureBlitter::copy` is a plain texture copy
-/// — there is no shader stage to premultiply in, unlike the
+/// [`RenderPathKind::Blit`]'s `TextureBlitter::copy` is a sampled full-screen
+/// draw — a fixed pass-through fragment shader that samples the source and
+/// writes it out unchanged (wgpu's `util/blit.wgsl`), so it can rescale a
+/// source of a different size ([`scaled_size`]/[`blit_filter`]) but offers
+/// **no stage frust can premultiply in**, unlike the
 /// [`RenderPathKind::Direct`] arm's [`RenderPath::DirectPremultiplied`]
 /// compute pass. So a **GPU-tier** surface forced onto the blit arm (no
-/// `Rgba8Unorm`+`STORAGE_BINDING`, or `FRUST_NO_DIRECT_SURFACE`) that
+/// `Rgba8Unorm`+`STORAGE_BINDING`, `FRUST_NO_DIRECT_SURFACE`, or
+/// `FRUST_RENDER_SCALE < 1`) that
 /// resolves a premultiplied-expecting alpha mode (`Inherit`/`PreMultiplied`,
 /// [`alpha_mode_needs_premultiply`]) would feed vello's straight-alpha blit
 /// output straight to a premultiplied-expecting compositor — the same
@@ -894,13 +1040,23 @@ pub(crate) enum RenderPath {
         intermediate_view: wgpu::TextureView,
         premultiply: PremultiplyPass,
     },
-    /// Blit fallback: vello renders into `target_view`, then `blitter` copies
-    /// `target_texture` into the acquired swapchain texture each frame. Also the
-    /// `cpu-tier` upload target (`COPY_DST`, see [`create_targets`]).
+    /// Blit fallback: vello renders into `target_view`, then `blitter` draws
+    /// `target_texture` over the acquired swapchain texture each frame —
+    /// upscaling it when `FRUST_RENDER_SCALE` made the intermediate smaller
+    /// than the swapchain. Also the `cpu-tier` upload target (`COPY_DST`, see
+    /// [`create_targets`]).
     Blit {
         target_texture: wgpu::Texture,
         target_view: wgpu::TextureView,
         blitter: TextureBlitter,
+        /// The intermediate's own pixel size, which is the surface's size
+        /// unless `FRUST_RENDER_SCALE` shrank it ([`scaled_size`]) — the size
+        /// every pass that targets this texture must use (vello's
+        /// `RenderParams`, the compositor's target and its trailing scratch),
+        /// as opposed to `ConfiguredSurface::config`'s swapchain size, which
+        /// stays the surface's. Stored rather than re-derived per frame so
+        /// one resolved answer feeds every consumer.
+        target_size: (u32, u32),
     },
 }
 
@@ -1433,6 +1589,24 @@ impl RenderContext {
         Ok(())
     }
 
+    /// The render scale that actually applies to this context's surfaces:
+    /// [`render_scale`] on the GPU tier, [`MAX_RENDER_SCALE`] on the CPU tier.
+    ///
+    /// `cpu-tier` rasterizes into its own pixmap through
+    /// [`crate::convert::encode_into`] — an entry with no root transform at
+    /// all — and uploads it into the same intermediate at the swapchain's
+    /// dimensions, so a shrunken intermediate would be a `write_texture`
+    /// larger than its destination rather than a scaled frame. The knob
+    /// measures vello's GPU fine stage, so the experimental CPU tier simply
+    /// keeps rendering at full size instead.
+    fn effective_render_scale(&self) -> f64 {
+        if self.selected_tier() == crate::tier::RenderTier::Gpu {
+            render_scale()
+        } else {
+            MAX_RENDER_SCALE
+        }
+    }
+
     /// Builds a configured [`RenderSurface`] from a raw wgpu `Surface`,
     /// creating the logical device if needed. Replaces
     /// `vello::util::RenderContext::create_render_surface` so we control the
@@ -1450,8 +1624,17 @@ impl RenderContext {
         // `selected_tier()` is authoritative here: the `cpu-tier` path uploads
         // its pixmap into the intermediate target, so it is blit-only and forces
         // the blit arm alongside the `FRUST_NO_DIRECT_SURFACE` safety valve.
-        let force_blit =
-            direct_surface_force_blit() || self.selected_tier() != crate::tier::RenderTier::Gpu;
+        //
+        // `FRUST_RENDER_SCALE < 1` forces it too, and for the same structural
+        // reason: the scaled frame lives in an intermediate that has to be
+        // upscaled into the swapchain, which is precisely the blit arm's
+        // per-frame pass. A scaled surface therefore behaves exactly as
+        // `FRUST_NO_DIRECT_SURFACE` does — including
+        // [`blit_translucency_refused`] for a premultiplied-expecting alpha
+        // mode — instead of growing a second scaled path on the direct arms.
+        let force_blit = direct_surface_force_blit()
+            || render_scaled()
+            || self.selected_tier() != crate::tier::RenderTier::Gpu;
         let handle = self.device_handle();
 
         let capabilities = surface.get_capabilities(&handle.adapter);
@@ -1459,6 +1642,7 @@ impl RenderContext {
         let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
         let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
         log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
+        log_render_scale(width, height, self.effective_render_scale());
 
         let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
         log_surface_alpha_caps(&capabilities, alpha_mode);
@@ -1514,11 +1698,23 @@ impl RenderContext {
             }
             RenderPathKind::Direct => RenderPath::Direct,
             RenderPathKind::Blit => {
-                let (target_texture, target_view) = create_targets(width, height, &handle.device);
+                // The swapchain keeps the surface's own size (the frame is
+                // presented at full resolution however it was rendered); only
+                // the intermediate shrinks, and the blit's sampled draw
+                // stretches it back over the whole swapchain texture.
+                let scale = self.effective_render_scale();
+                let (target_width, target_height) = scaled_size(width, height, scale);
+                let (target_texture, target_view) =
+                    create_targets(target_width, target_height, &handle.device);
                 RenderPath::Blit {
                     target_texture,
                     target_view,
-                    blitter: TextureBlitter::new(&handle.device, format),
+                    // Linear only while scaled — the unscaled builder is the
+                    // exact configuration `TextureBlitter::new` produces.
+                    blitter: wgpu::util::TextureBlitterBuilder::new(&handle.device, format)
+                        .sample_type(blit_filter(scale < MAX_RENDER_SCALE))
+                        .build(),
+                    target_size: (target_width, target_height),
                 }
             }
         };
@@ -1577,6 +1773,13 @@ impl RenderContext {
     /// and the direct-premultiplied arm each recreate their intermediate target
     /// texture at the new size; the plain direct arm has no intermediate, so
     /// only the swapchain config changes. Zero dimensions are rejected upstream.
+    ///
+    /// The blit arm's intermediate is recreated at the SCALED size and its
+    /// recorded `target_size` updated with it, so a resize under
+    /// `FRUST_RENDER_SCALE` keeps rendering at the same fraction of the new
+    /// surface rather than silently returning to full resolution. The
+    /// direct-premultiplied arm is never scaled — scale < 1 forces the blit
+    /// arm, so that arm only ever exists at scale 1.0.
     pub(crate) fn resize_surface(&self, surface: &mut ConfiguredSurface, width: u32, height: u32) {
         surface.config.width = width;
         surface.config.height = height;
@@ -1584,12 +1787,16 @@ impl RenderContext {
             RenderPath::Blit {
                 target_texture,
                 target_view,
+                target_size,
                 ..
             } => {
+                let (target_width, target_height) =
+                    scaled_size(width, height, self.effective_render_scale());
                 let (new_texture, new_view) =
-                    create_targets(width, height, &self.device_handle().device);
+                    create_targets(target_width, target_height, &self.device_handle().device);
                 *target_texture = new_texture;
                 *target_view = new_view;
+                *target_size = (target_width, target_height);
             }
             RenderPath::DirectPremultiplied {
                 intermediate_view, ..
@@ -1747,6 +1954,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_render_scale_unset_or_empty_is_full_resolution() {
+        // The knob wasn't touched: full resolution, silently.
+        assert_eq!(parse_render_scale(None), 1.0);
+        assert_eq!(parse_render_scale(Some(String::new())), 1.0);
+        assert_eq!(parse_render_scale(Some("   ".to_string())), 1.0);
+    }
+
+    #[test]
+    fn parse_render_scale_reads_a_fraction_in_range() {
+        assert_eq!(parse_render_scale(Some("0.75".to_string())), 0.75);
+        assert_eq!(parse_render_scale(Some("0.5".to_string())), 0.5);
+        // Trimmed like every other string knob, and the top of the range is a
+        // legal (identity) value rather than a clamp.
+        assert_eq!(parse_render_scale(Some("  0.6\n".to_string())), 0.6);
+        assert_eq!(parse_render_scale(Some("1".to_string())), 1.0);
+    }
+
+    #[test]
+    fn parse_render_scale_clamps_out_of_range_values() {
+        // Above the surface's own resolution is supersampling, not this knob.
+        assert_eq!(parse_render_scale(Some("2".to_string())), 1.0);
+        // Below a quarter the frame is too coarse to judge the upscale by.
+        assert_eq!(parse_render_scale(Some("0.1".to_string())), 0.25);
+        assert_eq!(parse_render_scale(Some("-1".to_string())), 0.25);
+    }
+
+    #[test]
+    fn parse_render_scale_rejects_unparsable_and_non_finite_values() {
+        // A typo must not render at a mystery resolution, and NaN/inf must be
+        // caught BEFORE the clamp (`f64::clamp` would hand NaN straight back).
+        assert_eq!(parse_render_scale(Some("abc".to_string())), 1.0);
+        assert_eq!(parse_render_scale(Some("NaN".to_string())), 1.0);
+        assert_eq!(parse_render_scale(Some("inf".to_string())), 1.0);
+        assert_eq!(parse_render_scale(Some("-inf".to_string())), 1.0);
+    }
+
+    #[test]
+    fn scaled_size_rounds_up_and_is_identity_at_full_scale() {
+        // A 1080x2400 phone at the two scales the measurement uses.
+        assert_eq!(scaled_size(1080, 2400, 0.75), (810, 1800));
+        assert_eq!(scaled_size(1080, 2400, 0.5), (540, 1200));
+        // Identity at 1.0 is what keeps the default path byte-identical.
+        assert_eq!(scaled_size(1080, 2400, 1.0), (1080, 2400));
+        // Rounds UP, so no row/column of the surface goes unsampled.
+        assert_eq!(scaled_size(1081, 2401, 0.5), (541, 1201));
+        // …and never asks wgpu for a zero-sized texture.
+        assert_eq!(scaled_size(1, 1, 0.25), (1, 1));
+    }
+
+    #[test]
+    fn blit_filter_is_linear_only_while_scaled() {
+        // Nearest unscaled is exactly what `TextureBlitter::new` builds, so an
+        // unscaled surface keeps the blitter it always had.
+        assert_eq!(blit_filter(false), wgpu::FilterMode::Nearest);
+        assert_eq!(blit_filter(true), wgpu::FilterMode::Linear);
+    }
+
+    #[test]
     fn direct_path_chosen_only_when_both_caps_present_and_not_forced() {
         // The GO population (OP9/Xiaomi 12): Rgba8Unorm + STORAGE_BINDING, no
         // force → direct-to-surface.
@@ -1758,8 +2023,10 @@ mod tests {
 
     #[test]
     fn force_blit_overrides_a_capable_surface() {
-        // FRUST_NO_DIRECT_SURFACE (or cpu-tier) pins a fully-capable surface onto
-        // the blit arm — the fallback-proof safety valve / A-B mechanism.
+        // FRUST_NO_DIRECT_SURFACE, FRUST_RENDER_SCALE < 1, or cpu-tier pins a
+        // fully-capable surface onto the blit arm — the fallback-proof safety
+        // valve / A-B mechanism. The scaled case rides this same decision:
+        // there is no scaled variant of either direct arm.
         assert_eq!(choose_render_path(true, true, true), RenderPathKind::Blit);
     }
 
@@ -2109,9 +2376,10 @@ mod tests {
         // A GPU-tier surface forced onto the blit
         // arm (no Rgba8Unorm+STORAGE_BINDING) that resolves a
         // premultiplied-expecting alpha mode (Android's `Inherit`) must
-        // refuse translucency — the blit arm's plain `TextureBlitter::copy`
-        // has no premultiply stage, so presenting it straight would
-        // reproduce the over-bright-fringing defect.
+        // refuse translucency — the blit arm's `TextureBlitter::copy` is a
+        // fixed pass-through sampled draw with no premultiply stage frust can
+        // reach, so presenting it straight would reproduce the
+        // over-bright-fringing defect.
         assert!(blit_translucency_refused(
             RenderPathKind::Blit,
             wgpu::CompositeAlphaMode::Inherit,
