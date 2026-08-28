@@ -6,6 +6,11 @@
 #                     never persists.
 #   *.pss_*.txt     — `dumpsys meminfo <our bench pkg>` snapshots (S7 memory
 #                     axis); scoped to our own app's process only.
+#   stats.txt       — the run.sh stdout tail from its `-- stats.py` banner
+#                     onward (the stats.py p50=/p95=/frames:/missed_* table
+#                     for that scenario's kept runs); whitelist-checked
+#                     line-by-line the same way as runN.log, by
+#                     ab_matrix.sh's self_check_raw_dir.
 # Pre-commit verification (conductor runs both):
 #   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' raw/ --include='*.log'   (expect no output)
 #   scan *.pss_*.txt for any package identifier other than it.f0x.*bench     (expect none)
