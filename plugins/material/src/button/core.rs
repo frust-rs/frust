@@ -26,6 +26,7 @@ use frust::authoring::{
 use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use super::gradient;
 use super::motion::ContentPadding;
 use super::overflow::max_scroll;
 use super::{
@@ -520,6 +521,13 @@ pub trait ButtonDecoration {
     /// does the drawing, right where it would otherwise paint the label in
     /// its own resolved solid ink. `None` (the default) leaves that solid ink
     /// untouched.
+    ///
+    /// Resolve any gradient geometry against `surface.origin`/`surface.size`
+    /// in window space, exactly like [`Self::paint_fill`]/[`Self::paint_outline`]
+    /// do — the core re-expresses it relative to the label's own glyph-run
+    /// transform before painting (see
+    /// [`super::gradient::brush_relative_to_run_origin`]'s doc for why a
+    /// glyph run's brush needs that step and the other three hooks don't).
     fn foreground_brush(&self, _surface: &ButtonSurface) -> Option<Brush> {
         None
     }
@@ -1031,7 +1039,19 @@ impl Widget for ButtonWidget {
             .as_ref()
             .and_then(|d| d.foreground_brush(&surface))
         {
-            Some(brush) => self.label.paint_brush(label_origin, &brush, scene),
+            Some(brush) => {
+                // `foreground_brush` resolves gradient geometry in window
+                // space, matching every other `ButtonSurface`-anchored
+                // brush — but the label's `GlyphRun` paints under its OWN
+                // `transform` (`label_origin`, via `LabelRun::paint_brush`
+                // -> `TextLayout::to_scene_runs`), which the render backend
+                // applies to the active paint too, not just the glyph
+                // outlines. Re-express the brush relative to `label_origin`
+                // so it isn't translated a second time at paint time — see
+                // `gradient::brush_relative_to_run_origin`'s doc.
+                let local_brush = gradient::brush_relative_to_run_origin(&brush, label_origin);
+                self.label.paint_brush(label_origin, &local_brush, scene);
+            }
             None => self.label.paint(label_origin, colors.content, scene),
         }
         if panning {

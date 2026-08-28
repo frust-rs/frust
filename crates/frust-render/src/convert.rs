@@ -12,7 +12,8 @@
 use frust_scene::{Command, DashPattern, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::OnceLock;
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
@@ -86,25 +87,10 @@ pub(crate) trait SceneSink {
 /// drive their own `vello::Renderer`: with no per-frame shader-override map,
 /// every `Command::ShaderQuad` lowers to its miss placeholder (a CPU-tier /
 /// no-prepass caller has no compiled shader targets anyway). The in-crate
-/// render path calls [`encode_scene_with_shaders`] instead.
+/// render path calls [`encode_range_with_overrides`] instead, once per
+/// segment of the frame's [`crate::snapshot::FramePlan`].
 pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
     encode_into(scene, target);
-}
-
-/// Encodes `scene` into `target`, resolving each [`Command::ShaderQuad`] against
-/// `shader_images` (`(program id, clamped physical size)` → the shader pre-pass's
-/// registered override [`ImageData`]). A hit lowers to a `draw_image`; a miss
-/// keeps the placeholder fill. The in-crate render path
-/// ([`crate::renderer::SurfaceRenderer::encode`]) builds the map in its shader
-/// pre-pass and calls this, passing the same `adapter_max` the pre-pass used so
-/// the per-quad key recomputed here matches the one the entry was stored under.
-pub(crate) fn encode_scene_with_shaders(
-    scene: &Scene,
-    target: &mut vello::Scene,
-    shader_images: &HashMap<(u64, u32, u32), ImageData>,
-    adapter_max: u32,
-) {
-    encode_into_with_shaders(scene, target, shader_images, adapter_max);
 }
 
 /// Generic worker behind [`encode_scene`]; kept separate so tests (and the
@@ -115,15 +101,165 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
     encode_into_with_shaders(scene, sink, &HashMap::new(), u32::MAX);
 }
 
-/// The command walk, parameterized by the per-frame shader-override map (empty
-/// for the no-shader callers above) and the `adapter_max` used to recompute each
-/// [`Command::ShaderQuad`]'s `(id, w, h)` map key (identical to the pre-pass's
-/// keying). Kept generic over [`SceneSink`] so it is GPU-free unit-testable.
+/// The whole `scene` with no holes, resolving each [`Command::ShaderQuad`]
+/// against `shader_images` (`(program id, clamped physical size)` → the shader
+/// pre-pass's registered override [`ImageData`]). A hit lowers to a
+/// `draw_image`; a miss keeps the placeholder fill. Every
+/// [`Command::PushSnapshot`] takes its inline MISS path, since no bracket is
+/// composited away.
 pub(crate) fn encode_into_with_shaders(
     scene: &Scene,
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
+) {
+    encode_range_with_overrides(
+        scene,
+        // The whole scene, which opens every group it needs itself.
+        &Segment::whole(scene.commands().len()),
+        sink,
+        shader_images,
+        adapter_max,
+        &HashSet::new(),
+    );
+}
+
+/// One segment of a frame's command list, as
+/// [`encode_range_with_overrides`] takes it: the half-open command `range` to
+/// encode, plus the still-open group pushes that pass must re-establish
+/// first.
+///
+/// The two travel together because they are ONE decision — where the frame
+/// splits determines both the commands a pass encodes and the clip/layer
+/// state it starts in — and splitting them into two arguments is how a caller
+/// forgets the second (`crate::snapshot::frame_split` derives both, and the
+/// render path forwards this whole value).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Segment {
+    /// The commands to encode, half-open and clamped to the scene by
+    /// [`encode_range_with_overrides`] rather than trusted.
+    pub range: Range<usize>,
+    /// The ordered command indices of the `PushClip`/`PushClipRounded`/
+    /// `PushLayer` commands still OPEN where [`Self::range`] starts — the
+    /// groups this pass must re-open before it encodes anything. Empty for a
+    /// segment that starts at the scene root.
+    pub prefix: Vec<usize>,
+}
+
+impl Segment {
+    /// The whole command list encoded from the scene root: `0..len` under no
+    /// re-opened groups, which is what every whole-scene caller (and every
+    /// pre segment) wants.
+    pub(crate) fn whole(len: usize) -> Self {
+        Self {
+            range: 0..len,
+            prefix: Vec::new(),
+        }
+    }
+}
+
+/// One segment of a frame: the commands in `segment.range`, encoded under the
+/// scene root beneath the still-open groups `segment.prefix` names, with every
+/// bracket whose `key` is in `holes` skipped entirely.
+///
+/// This is the single entry the render path drives BOTH of a frame's vello
+/// passes through (see [`crate::snapshot::FramePlan`] for the split): the
+/// pre-segment and, when there is one, the trailing segment. A sub-range is
+/// encoded as if it were the whole scene — the root stays `Affine::IDENTITY`
+/// (each command already carries its own composed transform) and the
+/// `ClearRect` hoist is scoped to the range, so a punch recorded inside it
+/// lands at the range's own root rather than reaching for groups the segment
+/// never opened.
+///
+/// [`Segment::prefix`] is what makes a MID-SCENE range faithful. Those
+/// commands are encoded FIRST, re-establishing exactly the clip/layer state
+/// the one-pass walk would have been in at `range.start` — a `PushLayer`
+/// carrying its own alpha and rect, a rounded clip its radii — after which the
+/// range itself encodes. Without it a trailing segment recorded inside the app
+/// root's clip (or a scroll viewport's) would draw unclipped, and its in-range
+/// `PopClip` would pop a group this pass never pushed. Empty for a segment
+/// that starts at the scene root, which is every pre-segment and every
+/// whole-scene caller.
+///
+/// Whatever is still open when the walk reaches the end of the range — prefix
+/// groups the range never popped, plus any the range itself left open — is
+/// closed there, innermost first, so the vello scene this pass built is
+/// balanced on its own (see [`encode_commands`]).
+///
+/// The range and the prefix indices are clamped to the scene rather than
+/// trusted: a plan is always built from the same frame's scene, so a stale
+/// index is a bug, but the render loop is not a place to panic.
+pub(crate) fn encode_range_with_overrides(
+    scene: &Scene,
+    segment: &Segment,
+    sink: &mut impl SceneSink,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
+    holes: &HashSet<u64>,
+) {
+    let commands = scene.commands();
+    let end = segment.range.end.min(commands.len());
+    let start = segment.range.start.min(end);
+    let reopened = segment
+        .prefix
+        .iter()
+        .filter_map(|&index| commands.get(index));
+    encode_commands(
+        reopened.chain(&commands[start..end]),
+        Affine::IDENTITY,
+        sink,
+        shader_images,
+        adapter_max,
+        holes,
+    );
+}
+
+/// Encodes an arbitrary command slice into `sink` under `root`, pre-multiplied
+/// onto every command's own recorded transform (including the `ClearRect`
+/// hoist, so a punch computed from a sub-scene still lands in `root`'s
+/// coordinate space). The entry point a caller that doesn't own a whole
+/// [`Scene`] can drive directly with just a body's own command range and the
+/// transform it should be rasterized under — [`crate::snapshot`]'s
+/// rasterization pre-pass is the caller. No shader-override map and no holes:
+/// every [`Command::ShaderQuad`] misses to its placeholder and every
+/// [`Command::PushSnapshot`] takes the MISS path, same as [`encode_into`].
+pub(crate) fn encode_commands_into(commands: &[Command], root: Affine, sink: &mut impl SceneSink) {
+    encode_commands(
+        commands,
+        root,
+        sink,
+        &HashMap::new(),
+        u32::MAX,
+        &HashSet::new(),
+    );
+}
+
+/// The command walk shared by every entry point above, parameterized by the
+/// root transform every command's own transform is pre-multiplied by, the
+/// per-frame shader-override map (empty for the no-shader callers), the
+/// `adapter_max` used to recompute each [`Command::ShaderQuad`]'s `(id, w, h)`
+/// map key (identical to the pre-pass's keying), and the set of
+/// [`Command::PushSnapshot`] keys this pass must leave as holes (empty for
+/// every caller that draws the whole scene itself). Kept generic over
+/// [`SceneSink`] so it is GPU-free unit-testable.
+///
+/// `commands` is an ITERATOR rather than a slice so a segment can be walked
+/// as its re-opened prefix chained to its own range with no clone of either
+/// (see [`Segment`] and [`encode_range_with_overrides`]); every other caller
+/// passes a plain slice.
+///
+/// The walk CLOSES whatever it left open when it ends: a segment of a frame
+/// legitimately ends inside groups opened before its own commands (its
+/// prefix) or inside it and popped by a later segment, and the pops belong to
+/// the walk that made the pushes. A balanced whole scene — the ordinary frame
+/// — closes nothing, since nothing is open.
+fn encode_commands<'a>(
+    commands: impl IntoIterator<Item = &'a Command>,
+    root: Affine,
+    sink: &mut impl SceneSink,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
+    holes: &HashSet<u64>,
 ) {
     // Active clip/opacity group stack, tracked so a `ClearRect` can be HOISTED
     // to the root: a `Compose::Clear` inside a vello layer group only clears
@@ -147,30 +283,95 @@ pub(crate) fn encode_into_with_shaders(
     }
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
 
-    for command in scene.commands() {
+    // `Command::PushSnapshot`'s HOLE/MISS paths (only the OUTERMOST open
+    // bracket is ever honoured — a syntactically nested one contributes
+    // nothing of its own, see `Command::PushSnapshot`'s doc comment, point 6),
+    // tracked as —
+    //   - `snapshot_depth`: how many MISS'd (inline-emulated) brackets are
+    //     currently open, so a matching `PopSnapshot` (and only it) can close
+    //     the outer one and an unbalanced pop is ignored, same policy as
+    //     `PopLayer`;
+    //   - `snapshot_correction`: the affine every subsequent command's own
+    //     `transform` is left-multiplied by (after `root`) while the outer
+    //     MISS'd bracket is open. `Affine::IDENTITY` outside one, so applying
+    //     it unconditionally below is a no-op then. Set to `M * S *
+    //     M.inverse()` where `M` is the outer `PushSnapshot`'s own transform
+    //     and `S` is `scale_about(scale, rect.center())`: conjugating `S` by
+    //     `M` is what makes "insert `push_transform(S)` right after
+    //     `PushSnapshot`" (the contract's point 5) land correctly on a body
+    //     command whose transform was already recorded as `M * (whatever the
+    //     body itself pushed)`, for a body that pushes its own nested
+    //     transforms and not just the flat case;
+    //   - `snapshot_layer_pushed`: whether the outer MISS'd bracket's
+    //     `alpha < 1.0` emulated an alpha layer (via the existing `groups`
+    //     mechanism, same as `PushLayer`), so the matching close pops it. A
+    //     holed bracket never pushes one — its alpha rides on the
+    //     compositor's blend, not on a vello layer;
+    //   - `snapshot_skip_depth`: how many brackets deep the walk is inside a
+    //     HOLED bracket's skipped body. Set to 1 the instant a hole is found
+    //     (`snapshot_depth` itself is never incremented for a hole — the body
+    //     contributes no correction, since it is never walked at all), then
+    //     tracks nested `PushSnapshot`/`PopSnapshot` depth with no other
+    //     command processed, until the matching `PopSnapshot` brings it back
+    //     to 0.
+    let mut snapshot_depth: usize = 0;
+    let mut snapshot_correction = Affine::IDENTITY;
+    let mut snapshot_layer_pushed = false;
+    let mut snapshot_skip_depth: usize = 0;
+
+    for command in commands {
+        if snapshot_skip_depth > 0 {
+            // Inside a holed bracket's body: every command is skipped except
+            // depth-tracking, so the matching `PopSnapshot` (and only it) ends
+            // the skip. Nothing was pushed on the way in, so nothing is popped
+            // on the way out — the whole bracket contributes zero ops.
+            match command {
+                Command::PushSnapshot { .. } => snapshot_skip_depth += 1,
+                Command::PopSnapshot => snapshot_skip_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+
+        let combined = root * snapshot_correction;
         match command {
             Command::FillRect {
                 rect,
                 brush,
                 transform,
-            } => sink.fill_rect(Fill::NonZero, *transform, brush, rect),
+            } => sink.fill_rect(Fill::NonZero, combined * *transform, brush, rect),
             Command::RoundedRect {
                 rect,
                 radii,
                 brush,
                 transform,
-            } => sink.fill_rounded_rect(Fill::NonZero, *transform, brush, rect, radii_of(*radii)),
+            } => sink.fill_rounded_rect(
+                Fill::NonZero,
+                combined * *transform,
+                brush,
+                rect,
+                radii_of(*radii),
+            ),
             Command::Line {
                 p0,
                 p1,
                 width,
                 brush,
                 transform,
-            } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
-            Command::GlyphRun(run) => sink.draw_glyph_run(run),
+            } => sink.stroke_line(combined * *transform, brush, *p0, *p1, *width),
+            Command::GlyphRun(run) => {
+                if combined == Affine::IDENTITY {
+                    sink.draw_glyph_run(run);
+                } else {
+                    let mut corrected = run.clone();
+                    corrected.transform = combined * corrected.transform;
+                    sink.draw_glyph_run(&corrected);
+                }
+            }
             Command::PushClip { rect, transform } => {
-                groups.push((Group::Clip(None), *transform, *rect));
-                sink.push_clip(*transform, rect);
+                let transform = combined * *transform;
+                groups.push((Group::Clip(None), transform, *rect));
+                sink.push_clip(transform, rect);
             }
             Command::PushClipRounded {
                 rect,
@@ -181,8 +382,9 @@ pub(crate) fn encode_into_with_shaders(
                 // the radii ride along so the `ClearRect` hoist can re-push
                 // the rounded shape rather than squaring its corners.
                 let radii = radii_of(*radii);
-                groups.push((Group::Clip(Some(radii)), *transform, *rect));
-                sink.push_clip_rounded(*transform, rect, radii);
+                let transform = combined * *transform;
+                groups.push((Group::Clip(Some(radii)), transform, *rect));
+                sink.push_clip_rounded(transform, rect, radii);
             }
             Command::PopClip => {
                 groups.pop();
@@ -193,7 +395,7 @@ pub(crate) fn encode_into_with_shaders(
                 dest,
                 transform,
             } => {
-                sink.draw_image(*transform, data, dest);
+                sink.draw_image(combined * *transform, data, dest);
             }
             Command::BlurredRoundedRect {
                 rect,
@@ -207,22 +409,29 @@ pub(crate) fn encode_into_with_shaders(
                 // per-corner shadow lowers to its largest corner here — the
                 // single place the downgrade lives, shared by both tiers (see
                 // `frust_scene::CornerRadii::largest` for why the largest).
-                sink.draw_blurred_rounded_rect(*transform, rect, *color, radii.largest(), *std_dev)
+                sink.draw_blurred_rounded_rect(
+                    combined * *transform,
+                    rect,
+                    *color,
+                    radii.largest(),
+                    *std_dev,
+                )
             }
             Command::PushLayer {
                 rect,
                 alpha,
                 transform,
             } => {
-                groups.push((Group::Layer(*alpha), *transform, *rect));
-                sink.push_layer(*transform, rect, *alpha);
+                let transform = combined * *transform;
+                groups.push((Group::Layer(*alpha), transform, *rect));
+                sink.push_layer(transform, rect, *alpha);
             }
             Command::PopLayer => {
                 groups.pop();
                 sink.pop_layer();
             }
             Command::ClearRect { rect, transform } if groups.is_empty() => {
-                sink.clear_rect(*transform, rect);
+                sink.clear_rect(combined * *transform, rect);
             }
             Command::ClearRect { rect, transform } => {
                 // Hoist to root (see the `groups` doc above): bound the punch
@@ -230,7 +439,7 @@ pub(crate) fn encode_into_with_shaders(
                 // re-push. Bboxes are exact for the axis-aligned transforms
                 // frust emits (translate/scale); a rotated clip would bound
                 // conservatively.
-                let mut punch = transform.transform_rect_bbox(*rect);
+                let mut punch = (combined * *transform).transform_rect_bbox(*rect);
                 for (_, t, r) in &groups {
                     punch = punch.intersect(t.transform_rect_bbox(*r));
                 }
@@ -256,18 +465,21 @@ pub(crate) fn encode_into_with_shaders(
                 style,
                 brush,
                 transform,
-            } => match style {
-                PathStyle::Fill => sink.fill_path(*transform, brush, path),
-                PathStyle::Stroke { width, dash } => match dash {
-                    Some(dash) if dash.is_effective() => {
-                        let dashed = dash_path(path, *dash);
-                        sink.stroke_path(*transform, brush, &dashed, *width);
-                    }
-                    // No pattern, or a degenerate one (see
-                    // `DashPattern::is_effective`): a plain solid stroke.
-                    _ => sink.stroke_path(*transform, brush, path, *width),
-                },
-            },
+            } => {
+                let transform = combined * *transform;
+                match style {
+                    PathStyle::Fill => sink.fill_path(transform, brush, path),
+                    PathStyle::Stroke { width, dash } => match dash {
+                        Some(dash) if dash.is_effective() => {
+                            let dashed = dash_path(path, *dash);
+                            sink.stroke_path(transform, brush, &dashed, *width);
+                        }
+                        // No pattern, or a degenerate one (see
+                        // `DashPattern::is_effective`): a plain solid stroke.
+                        _ => sink.stroke_path(transform, brush, path, *width),
+                    },
+                }
+            }
             Command::ShaderQuad {
                 program,
                 dest,
@@ -285,13 +497,18 @@ pub(crate) fn encode_into_with_shaders(
                 // program drawn at two sizes in one frame resolves each quad to
                 // its own texture — recompute the identical key the pre-pass
                 // stored the entry under (`physical_size` then `clamp_size` with
-                // the same `adapter_max`).
+                // the same `adapter_max`). Deliberately keyed off the RAW
+                // (uncorrected, un-rooted) transform: the pre-pass walk that
+                // populated `shader_images` reads `scene.commands()` directly
+                // with no root/snapshot-correction knowledge, so recomputing
+                // the key from the corrected transform would never hit.
                 let (w, h) = crate::shader_effects::clamp_size(
                     crate::renderer::physical_size(*transform, *dest),
                     adapter_max,
                 );
+                let transform = combined * *transform;
                 match shader_images.get(&(program.id(), w, h)) {
-                    Some(image) => sink.draw_image(*transform, image, dest),
+                    Some(image) => sink.draw_image(transform, image, dest),
                     None => {
                         // Miss: the CPU tier (no shader pre-pass runs), a
                         // failed shader compile, or no override registered this
@@ -307,13 +524,80 @@ pub(crate) fn encode_into_with_shaders(
                         });
                         sink.fill_rect(
                             Fill::NonZero,
-                            *transform,
+                            transform,
                             &Brush::Solid(Color::from_rgba8(16, 16, 16, 255)),
                             dest,
                         );
                     }
                 }
             }
+            Command::PushSnapshot {
+                key,
+                rect,
+                alpha,
+                scale,
+                transform,
+            } => {
+                if snapshot_depth == 0 {
+                    if holes.contains(key) {
+                        // HOLE: this bracket's pixels come from the
+                        // compositor, so this pass emits NOTHING for it — no
+                        // layer, no transform, no image — and skips the body
+                        // outright. `rect`/`alpha`/`scale` are the
+                        // compositor's to apply (`crate::snapshot`'s
+                        // `CompositeLayer`); applying any of them here would
+                        // double them.
+                        snapshot_skip_depth = 1;
+                        continue;
+                    }
+                    // MISS: emulate the bracket inline (unchanged from before
+                    // the cache existed).
+                    if *scale != 1.0 {
+                        let m = *transform;
+                        let s = Affine::scale_about(*scale, rect.center());
+                        snapshot_correction = m * s * m.inverse();
+                    }
+                    if *alpha < 1.0 {
+                        let corrected = root * snapshot_correction * *transform;
+                        groups.push((Group::Layer(*alpha), corrected, *rect));
+                        sink.push_layer(corrected, rect, *alpha);
+                        snapshot_layer_pushed = true;
+                    }
+                }
+                snapshot_depth += 1;
+            }
+            Command::PopSnapshot => {
+                if snapshot_depth > 0 {
+                    snapshot_depth -= 1;
+                    if snapshot_depth == 0 {
+                        if snapshot_layer_pushed {
+                            groups.pop();
+                            sink.pop_layer();
+                            snapshot_layer_pushed = false;
+                        }
+                        snapshot_correction = Affine::IDENTITY;
+                    }
+                }
+            }
+        }
+    }
+
+    // Close what this pass left open, innermost first — the re-opened prefix
+    // groups the range never popped, a group the range itself opened and a
+    // later segment pops, and a MISS'd bracket's emulated alpha layer (it
+    // lives on the same stack).
+    //
+    // Explicit rather than left to the backend. `vello_encoding`'s resolver
+    // does compensate today (`resolve.rs` appends one `PathTag::PATH` +
+    // `DrawTag::END_CLIP` per `n_open_clips` as it lays the scene out), so an
+    // unbalanced segment survived a vello sink — but that is one backend's
+    // courtesy, not part of the [`SceneSink`] contract every sink here
+    // implements, and a segment ending inside a group is the normal shape of
+    // a split frame rather than a scene-layer bug to be papered over.
+    for (kind, ..) in groups.iter().rev() {
+        match kind {
+            Group::Clip(_) => sink.pop_clip(),
+            Group::Layer(_) => sink.pop_layer(),
         }
     }
 }
@@ -1161,8 +1445,8 @@ mod tests {
         // (`renderer::run_shader_prepass`'s `disabled` short-circuit returns an
         // empty map with zero GPU work — see its own doc comment and
         // `renderer::tests::shader_prepass_is_a_full_no_op_when_disabled`):
-        // feeding that empty map through `encode_scene_with_shaders` (the exact
-        // call `SurfaceRenderer::encode`'s Gpu arm makes) must lower every
+        // feeding that empty map through the encode walk (the exact call
+        // `SurfaceRenderer::encode`'s Gpu arm makes) must lower every
         // `Command::ShaderQuad` to the placeholder fill, identical to a
         // never-had-a-pre-pass caller.
         let mut scene = Scene::new();
@@ -1173,9 +1457,8 @@ mod tests {
         let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
         builder.draw_shader(&program, dest, 1.0);
 
-        // `encode_scene_with_shaders` targets a real `vello::Scene`; drive the
-        // same underlying walk (`encode_into_with_shaders`) with a
-        // `RecordingSink` instead so the assertion needs no GPU device.
+        // Drive `encode_into_with_shaders` with a `RecordingSink` rather than
+        // a real `vello::Scene`, so the assertion needs no GPU device.
         let mut sink = RecordingSink::default();
         encode_into_with_shaders(&scene, &mut sink, &HashMap::new(), u32::MAX);
 
@@ -1829,5 +2112,663 @@ mod tests {
         };
         let dest = Rect::new(0.0, 0.0, 10.0, 10.0);
         assert!(natural_to_dest_transform(Affine::IDENTITY, &data, &dest).is_none());
+    }
+
+    /// The `Command::PushSnapshot` MISS path (acceptance criterion): a
+    /// snapshot body with `alpha` 0.5 and `scale` 0.9 must lower to the exact
+    /// same op sequence as the equivalent `push_transform` +
+    /// `push_layer` recording the contract (`Command::PushSnapshot`'s doc
+    /// comment, point 5) describes.
+    #[test]
+    fn snapshot_body_lowers_like_the_equivalent_push_transform_and_push_layer() {
+        let outer = Affine::translate((5.0, 7.0));
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+
+        let mut snapshot_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut snapshot_scene);
+        builder.push_transform(outer);
+        builder.push_snapshot(1, rect, 0.5, 0.9);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut equivalent_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut equivalent_scene);
+        builder.push_transform(outer);
+        builder.push_transform(Affine::scale_about(0.9, rect.center()));
+        builder.push_layer(rect, 0.5);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_layer();
+        builder.pop_transform();
+
+        let mut snapshot_sink = RecordingSink::default();
+        encode_into(&snapshot_scene, &mut snapshot_sink);
+        let mut equivalent_sink = RecordingSink::default();
+        encode_into(&equivalent_scene, &mut equivalent_sink);
+
+        assert_eq!(snapshot_sink.events.len(), 3);
+        assert_events_close(&snapshot_sink.events, &equivalent_sink.events);
+    }
+
+    /// The plain-pass-through half of the same contract: `alpha: 1.0` and
+    /// `scale: 1.0` (both no-ops) must lower the body with NO emulated
+    /// layer/transform correction at all — identical to the body recorded
+    /// with no bracket around it.
+    #[test]
+    fn snapshot_body_with_no_op_alpha_and_scale_lowers_like_the_bare_body() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+
+        let mut snapshot_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut snapshot_scene);
+        builder.push_snapshot(1, rect, 1.0, 1.0);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        let mut bare_scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut bare_scene);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+
+        let mut snapshot_sink = RecordingSink::default();
+        encode_into(&snapshot_scene, &mut snapshot_sink);
+        let mut bare_sink = RecordingSink::default();
+        encode_into(&bare_scene, &mut bare_sink);
+
+        assert_eq!(snapshot_sink.events, bare_sink.events);
+    }
+
+    /// An unbalanced `PopSnapshot` (more pops than pushes) must not disturb
+    /// the walk beyond the matched pair — the same policy `Command::PopLayer`
+    /// follows. `SceneBuilder::pop_snapshot` itself already refuses to record
+    /// an unmatched pop (see `frust-scene`'s own test), so this exercises the
+    /// walk's own depth guard the only way a public recording can: an extra
+    /// `pop_snapshot()` call after the bracket already closed.
+    #[test]
+    fn extra_pop_snapshot_after_the_bracket_closed_is_ignored() {
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        // Already balanced — recorded as a no-op, so this changes nothing.
+        builder.pop_snapshot();
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushLayer {
+                    rect,
+                    alpha: 0.5,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::FillRect {
+                    rect: Rect::new(1.0, 1.0, 2.0, 2.0),
+                    transform: Affine::IDENTITY,
+                },
+            ]
+        );
+    }
+
+    /// The set of holes a test names, spelled once.
+    fn holes_of<const N: usize>(keys: [u64; N]) -> HashSet<u64> {
+        HashSet::from(keys)
+    }
+
+    /// Encode the whole `scene` with `holes`, the way the render path's
+    /// pre-segment does.
+    fn encode_holed(scene: &Scene, holes: &HashSet<u64>) -> Vec<Event> {
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            scene,
+            &Segment::whole(scene.commands().len()),
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            holes,
+        );
+        sink.events
+    }
+
+    #[test]
+    fn a_holed_bracket_contributes_no_ops_while_its_siblings_encode() {
+        // The hole acceptance criterion: a bracket whose key is composited
+        // emits NOTHING — no layer, no transform, no image, none of the
+        // body's own ops — while everything recorded around it encodes
+        // untouched.
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let before = Rect::new(0.0, 0.0, 1.0, 1.0);
+        let after = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(before, Brush::Solid(RED));
+        builder.push_snapshot(7, rect, 1.0, 1.0);
+        builder.fill_rect(Rect::new(2.0, 2.0, 10.0, 10.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        builder.fill_rect(after, Brush::Solid(RED));
+
+        assert_eq!(
+            encode_holed(&scene, &holes_of([7])),
+            vec![
+                Event::FillRect {
+                    rect: before,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: after,
+                    transform: Affine::IDENTITY,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_holed_brackets_alpha_and_scale_never_reach_the_sink() {
+        // The compositor applies both on its own quad, so emitting either
+        // here would double them. An `alpha`/`scale` that the MISS path would
+        // have emulated with a layer and a transform correction must leave
+        // the recording completely empty.
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_transform(Affine::translate((5.0, 7.0)));
+        builder.push_snapshot(3, rect, 0.4, 0.5);
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        assert_eq!(encode_holed(&scene, &holes_of([3])), vec![]);
+    }
+
+    #[test]
+    fn a_holed_bracket_skips_a_nested_bracket_that_is_also_holed() {
+        // Nesting acceptance criterion: only the OUTERMOST bracket is ever
+        // honoured. A holed outer bracket skips everything up to its own
+        // matching `PopSnapshot`, including a nested `PushSnapshot` whose key
+        // is *also* a hole, and including body content recorded after the
+        // inner bracket closed.
+        let outer_rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let inner_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+        let tail = Rect::new(7.0, 7.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, outer_rect, 1.0, 1.0);
+        builder.push_snapshot(2, inner_rect, 1.0, 1.0);
+        builder.fill_rect(Rect::new(3.0, 3.0, 4.0, 4.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        builder.fill_rect(Rect::new(5.0, 5.0, 6.0, 6.0), Brush::Solid(RED));
+        builder.pop_snapshot();
+        builder.fill_rect(tail, Brush::Solid(RED));
+
+        assert_eq!(
+            encode_holed(&scene, &holes_of([1, 2])),
+            vec![Event::FillRect {
+                rect: tail,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bracket_that_is_not_holed_still_lowers_inline() {
+        // The other half of the same walk: a bracket the cache could not take
+        // (uncacheable body, kill switch, failed rasterization) is absent
+        // from `holes` and keeps the untouched MISS emulation, in whichever
+        // segment it falls.
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let body_rect = Rect::new(2.0, 2.0, 10.0, 10.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.fill_rect(body_rect, Brush::Solid(RED));
+        builder.pop_snapshot();
+
+        // A hole for some OTHER bracket must not touch this one.
+        assert_eq!(
+            encode_holed(&scene, &holes_of([99])),
+            vec![
+                Event::PushLayer {
+                    rect,
+                    alpha: 0.5,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: body_rect,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_range_with_overrides_encodes_exactly_the_given_range() {
+        let rects = [
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Rect::new(1.0, 1.0, 2.0, 2.0),
+            Rect::new(2.0, 2.0, 3.0, 3.0),
+        ];
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        for rect in rects {
+            builder.fill_rect(rect, Brush::Solid(RED));
+        }
+
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            &scene,
+            &segment(1..3, &[]),
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::FillRect {
+                    rect: rects[1],
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: rects[2],
+                    transform: Affine::IDENTITY,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_range_with_overrides_hoists_a_clear_rect_within_the_range_only() {
+        // The hoist pops the groups the SEGMENT opened, not the ones an
+        // earlier segment did — a clip pushed before the range simply is not
+        // this pass's to pop, and the punch is bounded by the in-range clip
+        // alone.
+        let outside = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let hole = Rect::new(20.0, 20.0, 60.0, 60.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(outside, Brush::Solid(RED));
+        builder.push_clip(clip);
+        builder.clear_rect(hole);
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            &scene,
+            &segment(1..scene.commands().len(), &[]),
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+                Event::ClearRect {
+                    rect: hole,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_range_with_overrides_clamps_a_range_past_the_end() {
+        let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(rect, Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            &scene,
+            &segment(0..999, &[]),
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillRect {
+                rect,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn encode_commands_into_premultiplies_root_onto_every_command_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let cmd_transform = Affine::translate((3.0, 4.0));
+        builder.push_transform(cmd_transform);
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        builder.fill_rect(rect, Brush::Solid(RED));
+
+        let root = Affine::scale(2.0);
+        let mut sink = RecordingSink::default();
+        encode_commands_into(scene.commands(), root, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillRect {
+                rect,
+                transform: root * cmd_transform,
+            }]
+        );
+    }
+
+    #[test]
+    fn encode_commands_into_clear_rect_hoist_respects_a_non_identity_root() {
+        // The hole-punch hoist must still clear the RIGHT rect — in root's
+        // own coordinate space — when the slice is encoded under a
+        // non-identity root, e.g. the snapshot cache's rasterization
+        // pre-pass encoding a body whose own commands carry no knowledge of
+        // the root the pre-pass rasterizes at.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let hole = Rect::new(20.0, 20.0, 60.0, 60.0);
+        builder.push_clip(clip);
+        builder.clear_rect(hole);
+        builder.pop_clip();
+
+        let root = Affine::translate((5.0, 5.0));
+        let mut sink = RecordingSink::default();
+        encode_commands_into(scene.commands(), root, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: root,
+                },
+                Event::PopClip,
+                Event::ClearRect {
+                    rect: root.transform_rect_bbox(hole),
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClip {
+                    rect: clip,
+                    transform: root,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// A [`Segment`] spelled from a range and a prefix, for the assertions
+    /// that name both by hand.
+    fn segment(range: Range<usize>, prefix: &[usize]) -> Segment {
+        Segment {
+            range,
+            prefix: prefix.to_vec(),
+        }
+    }
+
+    /// Encode `range` of `scene` under `prefix`, the way the render path's
+    /// trailing segment does.
+    fn encode_segment(scene: &Scene, range: Range<usize>, prefix: &[usize]) -> Vec<Event> {
+        let mut sink = RecordingSink::default();
+        encode_range_with_overrides(
+            scene,
+            &segment(range, prefix),
+            &mut sink,
+            &HashMap::new(),
+            u32::MAX,
+            &HashSet::new(),
+        );
+        sink.events
+    }
+
+    /// The trailing segment's whole reason for a prefix: a range recorded
+    /// INSIDE a clip an earlier segment opened must re-open that clip before
+    /// it draws (or the overlay paints outside the viewport it was recorded
+    /// in), and the pass must come back balanced whether or not the range
+    /// carries the matching pop itself.
+    #[test]
+    fn a_trailing_range_re_establishes_the_clip_it_was_recorded_under() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let page = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let overlay = Rect::new(10.0, 10.0, 20.0, 20.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.fill_rect(page, Brush::Solid(RED));
+        builder.fill_rect(overlay, Brush::Solid(RED));
+        builder.pop_clip();
+
+        let want = || {
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: overlay,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        };
+        // The range stops short of the scene's own `PopClip`, so the walk
+        // closes the group it re-opened.
+        assert_eq!(encode_segment(&scene, 2..3, &[0]), want());
+        // The range carries the pop: the group is closed exactly once, not
+        // once by the command and again by the end-of-range close.
+        assert_eq!(encode_segment(&scene, 2..4, &[0]), want());
+    }
+
+    /// A `PushLayer` in the prefix carries its alpha AND its rect into the
+    /// segment exactly as the inline walk recorded them, and the closes run in
+    /// reverse order — innermost group first.
+    #[test]
+    fn a_trailing_prefix_re_establishes_a_layer_and_closes_in_reverse() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let layer = Rect::new(4.0, 4.0, 40.0, 40.0);
+        let overlay = Rect::new(10.0, 10.0, 20.0, 20.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.push_layer(layer, 0.5);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.fill_rect(overlay, Brush::Solid(RED));
+        builder.pop_layer();
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 3..4, &[0, 1]),
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushLayer {
+                    rect: layer,
+                    alpha: 0.5,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: overlay,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// A range that pops ONE of two re-opened groups leaves only the other to
+    /// close: the end-of-range close is what is still open, not a fixed
+    /// unwind of the prefix.
+    #[test]
+    fn a_range_that_pops_one_open_group_closes_only_the_other() {
+        let outer = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inner = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let after = Rect::new(3.0, 3.0, 4.0, 4.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(outer);
+        builder.push_clip(inner);
+        builder.fill_rect(body, Brush::Solid(RED));
+        builder.pop_clip();
+        builder.fill_rect(after, Brush::Solid(RED));
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 2..5, &[0, 1]),
+            vec![
+                Event::PushClip {
+                    rect: outer,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClip {
+                    rect: inner,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: body,
+                    transform: Affine::IDENTITY,
+                },
+                // The range's own pop closes the inner clip...
+                Event::PopClip,
+                Event::FillRect {
+                    rect: after,
+                    transform: Affine::IDENTITY,
+                },
+                // ...and the walk closes the outer one, once.
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// The other half of the split: a PRE segment that ends inside the clip it
+    /// opened closes it too, so the main pass's scene is balanced without the
+    /// commands the trailing segment took.
+    #[test]
+    fn a_pre_segment_closes_the_group_it_leaves_open() {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_clip(clip);
+        builder.fill_rect(body, Brush::Solid(RED));
+        builder.pop_clip();
+
+        assert_eq!(
+            encode_segment(&scene, 0..2, &[]),
+            vec![
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
+                Event::FillRect {
+                    rect: body,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        );
+        // A balanced whole scene closes nothing extra — the ordinary frame.
+        assert_eq!(encode_segment(&scene, 0..3, &[]).len(), 3);
+    }
+
+    /// A prefix index past the end of the scene is clamped away rather than
+    /// panicking, like the range itself.
+    #[test]
+    fn a_stale_prefix_index_is_ignored() {
+        let body = Rect::new(1.0, 1.0, 2.0, 2.0);
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(body, Brush::Solid(RED));
+
+        assert_eq!(
+            encode_segment(&scene, 0..1, &[99]),
+            vec![Event::FillRect {
+                rect: body,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    /// Compares two recorded event sequences allowing a tiny tolerance on
+    /// every `Affine`/`Rect` coefficient — the snapshot MISS path derives its
+    /// emulated transform via a `transform * scale * transform.inverse()`
+    /// conjugation (see `encode_commands`'s `snapshot_correction`), which is
+    /// mathematically but not always bit-for-bit identical to the
+    /// same value composed the other way `push_transform`/`push_layer`
+    /// recording took.
+    fn assert_events_close(got: &[Event], want: &[Event]) {
+        assert_eq!(got.len(), want.len(), "got {got:?}, want {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            match (g, w) {
+                (
+                    Event::PushLayer {
+                        rect: gr,
+                        alpha: ga,
+                        transform: gt,
+                    },
+                    Event::PushLayer {
+                        rect: wr,
+                        alpha: wa,
+                        transform: wt,
+                    },
+                ) => {
+                    assert_eq!(gr, wr);
+                    assert_eq!(ga, wa);
+                    assert_affine_close(*gt, *wt);
+                }
+                (
+                    Event::FillRect {
+                        rect: gr,
+                        transform: gt,
+                    },
+                    Event::FillRect {
+                        rect: wr,
+                        transform: wt,
+                    },
+                ) => {
+                    assert_eq!(gr, wr);
+                    assert_affine_close(*gt, *wt);
+                }
+                (Event::PopLayer, Event::PopLayer) => {}
+                other => panic!("event shape mismatch: {other:?}"),
+            }
+        }
+    }
+
+    fn assert_affine_close(got: Affine, want: Affine) {
+        for (g, w) in got.as_coeffs().iter().zip(want.as_coeffs()) {
+            assert!(
+                (g - w).abs() < 1e-9,
+                "affine coefficients differ: got {got:?}, want {want:?}"
+            );
+        }
     }
 }

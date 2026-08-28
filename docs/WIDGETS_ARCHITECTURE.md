@@ -104,6 +104,17 @@ build from.
     `frust_core::DiscardScene` so no scene command is ever emitted: vello rasterizes a layer's
     content in full before applying its alpha, and the invisible page was otherwise real, wasted
     GPU work every such frame.
+  - **Snapshot bracket eligibility:** the alpha-0 `DiscardScene` redirect above runs first; a
+    surviving page then brackets its paint with `PaintScene::push_snapshot`/`pop_snapshot` when
+    `snapshot_eligible` holds — the transition is programmatic (not an interactive edge-swipe) and
+    this frame's hero directives for the page are empty. Bracketing is then unconditional, even at
+    alpha/scale identity, since the bracket itself tells a caching renderer the body is worth caching;
+    `push_snapshot`'s default still emulates the transform+layer pair for a plain recorder. Each
+    `PageEntry` draws its `snapshot_key` once, for the pod's lifetime, from the process-wide
+    `NEXT_SNAPSHOT_KEY` `AtomicU64`; `motion::switcher` reserves a `snapshot_base`/`snapshot_base + 1`
+    pair the same way for its live/exiting children. The bracket rect's origin follows the pod's
+    absolute paint origin, keeping RENDER_ARCHITECTURE.md's frame-relative fingerprint slide-invariant
+    as alpha/scale ride the bracket instead of a separate transform/layer pair.
   - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
     (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
     subtree can observe transitions; reads during paint from a widget painted *after* the navigator

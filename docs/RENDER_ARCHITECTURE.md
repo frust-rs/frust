@@ -21,6 +21,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-render::renderer` | `SurfaceRenderer` drives per-frame encode/present on a dedicated render thread by default; `DeferredPresent` lets iOS present inside a platform-view transaction |
 | `frust-render::lifecycle` | `SurfacePhase`/`FrameOutcome` state machine models a surface that can be destroyed at any time, shared by every shell |
 | `frust-render::convert` | `encode_scene` converts a `frust_scene::Scene` into a `vello::Scene` |
+| `frust-render::snapshot` | `SnapshotCache` rasterizes each outermost `PushSnapshot`/`PopSnapshot` bracket once per content/size change into a cached texture and returns the frame's `FramePlan` |
+| `frust-render::compositor` | `Compositor` draws each `FramePlan` layer as one alpha-blended `CompositeTarget` quad, outside vello |
 | `frust-render::tier` | `select_render_tier` probes adapter capabilities to choose GPU (default) vs experimental CPU rendering, with an env/CLI override |
 | `frust-text::context` | `TextContext` owns Parley's font context and a shape cache; `register_fonts` hot-swaps app fonts and invalidates it |
 | `frust-text::layout` | `TextLayout` is a finished, measurable shaped block converting to `frust_scene` `GlyphRun`s |
@@ -56,6 +58,41 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   offscreen texture composited into the scene ahead of the main encode.
 - `SurfaceAlphaRequest` resolves the platform's compositing/alpha mode to pick the presentation
   path, feeding translucency state upstream to paint.
+- Snapshot pre-pass (`snapshot.rs`): each frame's outermost `PushSnapshot`..`PopSnapshot`
+  bracket fingerprints its body relative to `base = transform * Affine::translate(rect.origin)`
+  (the bracket's own frame-relative origin, so a slide keeps the same fingerprint) and, on a
+  fingerprint or size change, rasterizes it once into a cached `Rgba8Unorm` `TEXTURE_BINDING |
+  STORAGE_BINDING` texture sized from the rect's own extent under the bracket's raster (device)
+  scale, independent of where the rect sits; an unchanged bracket reuses its texture untouched,
+  and an entry unused for 2 frames is evicted. A frame that punches a `ClearRect` after the first
+  cached bracket lowers whole-frame inline, and a bracket whose texture would exceed 2x the
+  surface's pixel area lowers on its own (see LIMITATIONS.md).
+- Frame split (`FramePlan`, `snapshot.rs`): vello renders the commands before the first cached
+  bracket (the pre segment) — skipped entirely when it draws nothing, letting the compositor's
+  own render pass clear to the frame's `base_color` instead. The `Compositor` then draws each
+  cached page as one alpha-blended quad after vello: straight blend on `Direct`/`Blit`,
+  premultiplied on `DirectPremultiplied`'s swapchain after `PremultiplyPass`; each quad is
+  scissored to its enclosing clips' intersection. Commands after the first cached bracket that
+  still draw run through one extra transparent vello pass into a scratch texture, composited
+  last as a full quad to keep z-order — content recorded BETWEEN two cached brackets lands above
+  both (see LIMITATIONS.md). That trailing pass re-opens whatever `PushClip`/`PushClipRounded`/
+  `PushLayer` groups were still open where the split falls: `FramePlan::trailing` is a
+  `convert::Segment` (its command range plus those still-open group pushes, derived in one walk by
+  `frame_split`/`open_group_pushes`) that `encode_range_with_overrides` re-opens first, then
+  closes every group still open at the segment's end so each pass stays self-balanced; the
+  scratch texture itself ages out after `MAX_UNUSED_FRAMES` (2) frames it goes unused
+  (`Compositor::age_scratch`), the same boundary the page-texture cache evicts by.
+- Kill switch: `FRUST_NO_SNAPSHOT_LAYERS` (compile-time `option_env!` or runtime env, cached
+  once per surface — same compile-time-or-runtime shape as `FRUST_TRACE`, see
+  `docs/DEVELOPMENT.md`'s Instrumentation table) disables the cache; every bracket then lowers
+  through `convert.rs`'s inline emulation, byte-identical to pre-cache behavior. A surface whose
+  resolved alpha mode is translucent but not premultiplied (iOS's `PostMultiplied`) never enables
+  the cache at all (`snapshot_cache_enabled`/`alpha_mode_is_straight_translucent`), same inline
+  path. **Render-path A/B caveat** (also covers `FRUST_NO_DIRECT_SURFACE`/
+  `FRUST_NO_SHADER_EFFECTS`): on the direct-to-surface arm the GPU render moves into `submit_us`
+  (out of `encode_us`) and `acquire_us` precedes it rather than follows — account for this remap
+  before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full
+  v3 field mapping).
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via
   `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s. `TextContext::layout_bounded`
   additionally measures against a max line count and applies `TextOverflow` by truncating the shaped
@@ -85,6 +122,7 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `RenderTier` / `TierCaps` | GPU-vs-CPU render-backend selection, probed from adapter capabilities plus an override |
 | `SurfacePhase` / `FrameOutcome` / `EncodeOutcome` / `AcquireOutcome` | The surface-can-be-destroyed-anytime lifecycle state machine shared by every shell |
 | `encode_scene` | The sole function converting a `frust_scene::Scene` into a `vello::Scene` |
+| `CompositeLayer` / `FramePlan` | One cached page's placement/texture for the compositor to draw, and the frame's vello-pass/compositor-layer/hole split those cached pages imply (see Data Flow) |
 | `CornerRadii` / `DashPattern` (`frust-scene`) | Per-corner rounding and dash geometry carried by `RoundedRect`/`PushClipRounded`/`BlurredRoundedRect`/dashed-stroke commands; lowered to backend shapes in the shared command walk (see Data Flow) |
 | `TextContext` / `TextStyle` / `TextLayout` / `TextOverflow` | Renderer-agnostic shaping surface: font/cache state, styling knobs, a finished measurable shaped block, and `layout_bounded`'s measure-and-truncate overflow mode |
 | `TextEditor` / `EditingState` / `EditOp` | The Parley-based editing engine and its state-sync payload at the platform IME seam |

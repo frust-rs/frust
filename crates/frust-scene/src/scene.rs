@@ -300,6 +300,43 @@ pub enum Command {
         transform: Affine,
         time: f32,
     },
+    /// Marks the start of a cacheable "snapshot" bracket, under a transform.
+    ///
+    /// The commands between this and the matching [`Command::PopSnapshot`] are
+    /// the BODY, recorded in the ordinary composed transform space (i.e. not
+    /// pre-multiplied by `scale`). `rect` is the body's bounds in the local
+    /// space of `transform` — the same convention [`Command::PushLayer`]'s
+    /// `rect`/`alpha`/`transform` use.
+    ///
+    /// `alpha` (`0.0..=1.0`) and `scale` (uniform, about `rect`'s center) are
+    /// PRESENTATION parameters applied to the body as a whole — deliberately
+    /// NOT baked into the body's own commands, so a renderer can reuse a
+    /// rasterized body while they animate.
+    ///
+    /// A renderer that implements snapshots MAY rasterize the body once and
+    /// draw it as an image with `transform * scale_about(rect.center(),
+    /// scale)` inside an alpha layer. A renderer that does not MUST paint the
+    /// body inline wrapped exactly as if the recorder had emitted
+    /// `push_transform(scale_about(rect.center(), scale))` (when `scale !=
+    /// 1.0`) then `push_layer(rect, alpha)` (when `alpha < 1.0`) — pops
+    /// reversed (see `frust-render::convert`'s miss path).
+    ///
+    /// Syntactic nesting is allowed, but only the OUTERMOST bracket needs
+    /// honouring — an inner bracket's own `alpha`/`scale` may be ignored by a
+    /// non-implementing renderer. An unbalanced [`Command::PopSnapshot`] is
+    /// ignored, the same policy [`Command::PopLayer`] follows.
+    PushSnapshot {
+        /// Cache key identifying this bracket's body across frames.
+        key: u64,
+        rect: Rect,
+        alpha: f32,
+        /// Uniform scale, applied about `rect`'s center.
+        scale: f64,
+        transform: Affine,
+    },
+    /// Pop the most recently pushed snapshot bracket (see
+    /// [`Command::PushSnapshot`]).
+    PopSnapshot,
 }
 
 /// Renderer-agnostic, immediate-mode display list.
@@ -317,6 +354,15 @@ pub struct Scene {
     /// to `[Affine::IDENTITY]` on construction, so behavior is unchanged.
     /// Not part of the stable widget-facing API.
     pub(crate) transform_stack: Vec<Affine>,
+    /// Depth counter for open [`Command::PushSnapshot`] brackets, incremented
+    /// by [`crate::SceneBuilder::push_snapshot`] and decremented — only when
+    /// greater than zero — by [`crate::SceneBuilder::pop_snapshot`], the same
+    /// unbalanced-pop policy [`Command::PopClip`]/[`Command::PopLayer`]
+    /// follow. Reset alongside `commands` in [`Scene::reset`]; NOT reset by
+    /// [`crate::SceneBuilder::new`] (unlike `transform_stack`), since it
+    /// tracks bracket balance across the whole scene, not a builder session.
+    /// Not part of the stable widget-facing API.
+    pub(crate) snapshot_depth: usize,
 }
 
 impl Scene {
@@ -328,6 +374,7 @@ impl Scene {
     /// Clears all recorded commands so the scene can be reused for the next frame.
     pub fn reset(&mut self) {
         self.commands.clear();
+        self.snapshot_depth = 0;
     }
 
     /// The recorded commands for this frame, in paint order.
@@ -363,6 +410,14 @@ mod tests {
 
         scene.reset();
         assert!(scene.commands().is_empty());
+    }
+
+    #[test]
+    fn reset_clears_snapshot_depth() {
+        let mut scene = Scene::new();
+        scene.snapshot_depth = 2;
+        scene.reset();
+        assert_eq!(scene.snapshot_depth, 0);
     }
 
     #[test]

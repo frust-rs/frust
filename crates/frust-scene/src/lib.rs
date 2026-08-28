@@ -8,12 +8,14 @@
 
 mod arc;
 mod builder;
+mod fingerprint;
 mod glyph;
 mod scene;
 mod shader;
 
 pub use arc::arc_path;
 pub use builder::SceneBuilder;
+pub use fingerprint::fingerprint_commands;
 pub use glyph::{FontHandle, Glyph, GlyphRun};
 pub use scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
 pub use shader::ShaderProgram;

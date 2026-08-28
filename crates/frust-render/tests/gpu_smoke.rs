@@ -14,7 +14,7 @@
 use frust_render::encode_scene;
 use frust_scene::{Scene, SceneBuilder};
 use peniko::Brush;
-use peniko::color::palette::css::{BLACK, RED};
+use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED};
 
 const SIZE: u32 = 64; // 64 * 4 bytes = 256, the wgpu row-copy alignment — no padding math needed.
 
@@ -537,4 +537,214 @@ async fn run_clear_probe() {
             px(x)
         );
     }
+}
+
+/// The inline (MISS) lowering of a `Command::PushSnapshot` bracket, pixel for
+/// pixel — the arm the compositor is measured against.
+///
+/// A cached bracket's pixels are drawn OUTSIDE vello now (`compositor.rs`'s
+/// quad pass, whose own parity smoke lives in-crate because the compositor is
+/// crate-private). What is reachable from here, through the public
+/// `encode_scene` seam alone, is the other half of that comparison: the
+/// bracket lowered inline, which is what a MISS, an uncacheable body, a
+/// `cpu-tier` surface and the `FRUST_NO_SNAPSHOT_LAYERS` kill switch all
+/// produce. This pins the absolute arithmetic that arm must hit — the numbers
+/// the composited arm is then required to reproduce — and the z-order of a
+/// command recorded after the bracket.
+///
+/// The geometry keeps every content edge on a whole device pixel, so nothing
+/// here is measuring rasterizer subpixel coverage.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn snapshot_bracket_inline_emulation_matches_the_composite_arithmetic() {
+    pollster::block_on(run_snapshot());
+}
+
+/// Per-pixel tolerance: an 8-bit rounding step, no more.
+const SNAPSHOT_TOLERANCE: u8 = 3;
+
+async fn run_snapshot() {
+    // The bracket: a 20x20 body in local space under a 2x device scale offset
+    // by (8, 8) — device (8, 8)..(48, 48) — composited at 75% opacity.
+    const ALPHA: f32 = 0.75;
+    let bracket = kurbo::Affine::translate((8.0, 8.0)) * kurbo::Affine::scale(2.0);
+    let rect = kurbo::Rect::new(0.0, 0.0, 20.0, 20.0);
+    let overlay = peniko::Color::from_rgba8(255, 255, 0, 255);
+
+    let mut fk_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut fk_scene);
+        // An opaque black backdrop, which is what makes the composite
+        // arithmetic below exact, plus a marker outside the bracket.
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Solid(BLACK),
+        );
+        builder.fill_rect(kurbo::Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
+        builder.push_transform(bracket);
+        builder.push_snapshot(1, rect, ALPHA, 1.0);
+        // An opaque red block, a half-alpha green band over NOTHING (so the
+        // bracket really carries partial alpha — a double premultiply is
+        // invisible where alpha is 1), and a black bar standing in for a line
+        // of text.
+        builder.fill_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 10.0, 20.0, 15.0),
+            Brush::Solid(GREEN.with_alpha(0.5)),
+        );
+        builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
+        builder.pop_snapshot();
+        builder.pop_transform();
+        // Recorded AFTER the bracket, so it must land on top of it.
+        builder.fill_rect(
+            kurbo::Rect::new(20.0, 20.0, 30.0, 30.0),
+            Brush::Solid(overlay),
+        );
+    }
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("no compatible GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("frust gpu_smoke snapshot"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })
+        .await
+        .expect("failed to create device");
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+        .expect("failed to create vello renderer");
+
+    let data = render_and_read(&device, &queue, &mut renderer, &fk_scene).await;
+    let pixel = |x: u32, y: u32| {
+        let at = ((y * SIZE + x) * 4) as usize;
+        [data[at], data[at + 1], data[at + 2], data[at + 3]]
+    };
+
+    // The expected values are the composite arithmetic over the black
+    // backdrop, not observations:
+    //  - the opaque red block composites at the bracket's 0.75 -> 191,
+    //  - the half-alpha green band (CSS green is 0x008000) composites at
+    //    128 * 0.5 * 0.75 -> 48, which is the number a doubly premultiplied
+    //    page would halve again.
+    let red = pixel(40, 12);
+    assert!(
+        red[0].abs_diff(191) <= SNAPSHOT_TOLERANCE,
+        "the bracket's opaque block must composite at its alpha, got {red:?}"
+    );
+    let green = pixel(40, 32);
+    assert!(
+        green[1].abs_diff(48) <= SNAPSHOT_TOLERANCE,
+        "the bracket's half-alpha band must composite at 128 * 0.5 * 0.75, got {green:?}"
+    );
+    assert_eq!(
+        pixel(24, 24),
+        [255, 255, 0, 255],
+        "a command recorded after the bracket must land on top of it"
+    );
+    let marker = pixel(56, 56);
+    assert!(
+        marker[2] > 200,
+        "content recorded before the bracket must survive, got {marker:?}"
+    );
+
+    let scope_err = error_scope.pop().await;
+    assert!(
+        scope_err.is_none(),
+        "the inline bracket lowering produced an uncaptured validation error: {scope_err:?}"
+    );
+}
+
+/// Render `scene` into a fresh `SIZE`-square vello target over an opaque black
+/// base and read the pixels back.
+async fn render_and_read(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    scene: &Scene,
+) -> Vec<u8> {
+    let mut vello_scene = vello::Scene::new();
+    encode_scene(scene, &mut vello_scene);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust gpu_smoke snapshot target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            device,
+            queue,
+            &vello_scene,
+            &view,
+            &vello::RenderParams {
+                base_color: BLACK,
+                width: SIZE,
+                height: SIZE,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("render_to_texture failed");
+
+    let bytes_per_row = SIZE * 4;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frust gpu_smoke snapshot readback"),
+        size: u64::from(bytes_per_row * SIZE),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    rx.recv()
+        .expect("map channel closed")
+        .expect("buffer map failed");
+    slice.get_mapped_range().to_vec()
 }

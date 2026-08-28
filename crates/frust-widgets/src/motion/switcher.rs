@@ -58,6 +58,7 @@
 //! re-exports `motion` wholesale, so these types ride along under
 //! `frust::motion::*`).
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use frust_core::{
@@ -66,11 +67,12 @@ use frust_core::{
     View, Widget, any,
 };
 use frust_theme::Theme;
-use kurbo::{Affine, Point, Size};
+use kurbo::{Point, Size, Vec2};
 
 use crate::ChildKey;
 use crate::Timing;
 use crate::motion::patterns::{FadeThrough, PatternLayer, TransitionPattern};
+use crate::nav::navigator::NEXT_SNAPSHOT_KEY;
 use crate::nav::transition::{TransitionDriver, make_driver};
 
 /// The unthemed fallback transition duration (the Glyph `base` token, 220ms) —
@@ -98,32 +100,28 @@ fn resolve_switch_timing(theme: Option<&Theme>, explicit: Option<Timing>) -> Tim
     })
 }
 
-/// Build the affine that scales uniformly by `scale` about the absolute point
-/// `pivot` — the standard translate/scale/translate-back "scale about a point"
-/// construction (mirrors `motion::animated`'s own `scale_about`).
-fn scale_about(pivot: Point, scale: f64) -> Affine {
-    Affine::translate((pivot.x, pivot.y))
-        * Affine::scale(scale)
-        * Affine::translate((-pivot.x, -pivot.y))
-}
-
 /// Paint one staged child: offset its pod origin by the layer's `dx`/`dy` (so
 /// paint and hit-testing move together), then bracket its paint with a
-/// `push_transform` scale (about the child's centre) and a `push_layer` opacity
-/// when either differs from the identity — strict LIFO (transform outer, layer
-/// inner). Mirrors `nav::navigator`'s `paint_page_layer` plus the scale bracket.
+/// snapshot bracket, keyed by `snapshot`, using `layer`'s alpha/scale — no
+/// `push_transform`/`push_layer` of its own. Both the live and frozen exiting
+/// child are static during a switch (only their position/alpha/scale move,
+/// never their content), the same "ideal cache candidate" reasoning
+/// `nav::navigator`'s `paint_page_layer` applies to a static transition page —
+/// see [`PatternSwitcherWidget::snapshot_base`] for the two keys this bracket
+/// draws from.
 ///
 /// When `alpha == 0` the child is fully invisible this frame: rather than
 /// rasterize it under a zero-opacity layer, it paints into a [`DiscardScene`]
 /// sink instead — the pass still has to run for its side effects (animating
 /// descendants advancing), but nothing it records is ever composited, so no
-/// `push_layer`/`push_transform` bracket is needed. Mirrors `nav::navigator`'s
-/// `paint_page_layer`.
+/// bracket is needed at all. Mirrors `nav::navigator`'s `paint_page_layer`,
+/// whose `DiscardScene` check also runs first, ahead of its own bracket.
 fn paint_staged_child(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
     scene: &mut dyn PaintScene,
     layer: PatternLayer,
+    snapshot: u64,
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
@@ -134,25 +132,10 @@ fn paint_staged_child(
         return;
     }
 
-    let has_scale = (layer.scale - 1.0).abs() > f64::EPSILON;
-    let has_alpha = alpha < 1.0;
-
-    if has_scale {
-        let origin = ctx.origin();
-        let size = ctx.size();
-        let pivot = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
-        scene.push_transform(scale_about(pivot, layer.scale));
-    }
-    if has_alpha {
-        scene.push_layer(ctx.origin(), ctx.size(), alpha);
-    }
+    let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
+    scene.push_snapshot(snapshot, bracket_origin, ctx.size(), alpha, layer.scale);
     pod.paint_child(ctx, scene);
-    if has_alpha {
-        scene.pop_layer();
-    }
-    if has_scale {
-        scene.pop_transform();
-    }
+    scene.pop_snapshot();
 }
 
 /// The cleared/inactive IME surface published after a switch so the platform
@@ -264,6 +247,16 @@ pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     /// A cleared IME surface must be published on the next paint (deterministic
     /// keyboard hide after the switch).
     needs_ime_clear: bool,
+    /// This switcher's pair of [`PaintScene::push_snapshot`] cache keys,
+    /// reserved once from [`NEXT_SNAPSHOT_KEY`] at construction (`fetch_add(2)`)
+    /// and stable for the widget's lifetime, across every switch it ever
+    /// stages: `snapshot_base` for the live (incoming) child,
+    /// `snapshot_base + 1` for the frozen exiting pod. A single-slot container
+    /// has no slot index to key by (unlike the navigator's per-page keys), but
+    /// still needs two distinct keys since both children can be on screen
+    /// staged together — reusing one key for both would alias their cached
+    /// rasters.
+    snapshot_base: u64,
 }
 
 impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
@@ -284,6 +277,7 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             settled: false,
             reduce_motion: false,
             needs_ime_clear: false,
+            snapshot_base: NEXT_SNAPSHOT_KEY.fetch_add(2, Ordering::Relaxed),
         }
     }
 
@@ -422,8 +416,16 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
                 self.pattern.resolve(adv.value, self.reverse, size)
             };
             // Paint the exiting child (below) then the incoming child (on top).
-            paint_staged_child(exiting, ctx, scene, exiting_layer);
-            paint_staged_child(&mut self.child, ctx, scene, incoming_layer);
+            // `snapshot_base` keys the live child; `snapshot_base + 1` the
+            // frozen exiting pod — see `Self::snapshot_base`.
+            paint_staged_child(exiting, ctx, scene, exiting_layer, self.snapshot_base + 1);
+            paint_staged_child(
+                &mut self.child,
+                ctx,
+                scene,
+                incoming_layer,
+                self.snapshot_base,
+            );
 
             if adv.animating {
                 ctx.request_frame();
@@ -464,7 +466,7 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::motion::patterns::SharedAxis;
+    use crate::motion::patterns::{FadeScale, SharedAxis};
     use crate::test_support::{RecordingScene, leaf_any};
     use crate::{Column, FlexView};
     use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot};
@@ -491,6 +493,40 @@ mod tests {
 
     fn loose() -> BoxConstraints {
         BoxConstraints::loose(Size::new(100.0, 100.0))
+    }
+
+    /// A recording scene that separates `push_snapshot`/`pop_snapshot` calls
+    /// from `push_layer`/`push_transform` ones. `crate::test_support`'s shared
+    /// `RecordingScene` doesn't override `push_snapshot`, so it would fold a
+    /// snapshot bracket into the trait's emulating default — a `push_transform`
+    /// and `push_layer` pair — indistinguishable from a plain bracket. This one
+    /// keeps them apart so a test can assert a staged child painted through
+    /// the snapshot bracket specifically, and through no other bracket.
+    #[derive(Default)]
+    struct SnapshotRecordingScene {
+        rects: Vec<(Point, Size)>,
+        layers: Vec<(Point, Size, f32)>,
+        transform_pushes: u32,
+        snapshots: Vec<(u64, Point, Size, f32, f64)>,
+        snapshot_pops: u32,
+    }
+    impl PaintScene for SnapshotRecordingScene {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
+            self.rects.push((origin, size));
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
+            self.layers.push((origin, size, alpha));
+        }
+        fn push_transform(&mut self, _transform: kurbo::Affine) {
+            self.transform_pushes += 1;
+        }
+        fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+            self.snapshots.push((key, origin, size, alpha, scale));
+        }
+        fn pop_snapshot(&mut self) {
+            self.snapshot_pops += 1;
+        }
     }
 
     /// An interactive child that captures the pointer + takes focus on `Down`,
@@ -954,12 +990,204 @@ mod tests {
             &mut PaintCtx::new(Point::ZERO, size),
             &mut scene,
             layer,
+            1,
         );
 
         assert!(scene.rects.is_empty(), "an alpha-0 child records no fill");
         assert!(
             scene.layers.is_empty(),
             "no zero-alpha push_layer is recorded either"
+        );
+    }
+
+    // --- Snapshot bracket: a staged child paints through push_snapshot/
+    //     pop_snapshot keyed by snapshot_base (incoming) / snapshot_base + 1
+    //     (exiting), never a push_layer/push_transform bracket of its own —
+    //     mirrors nav::navigator's paint_page_layer snapshot bracket. ---
+
+    #[test]
+    fn staged_children_paint_through_a_snapshot_bracket_keyed_by_snapshot_base() {
+        // FadeScale (unlike FadeThrough/SharedAxis's hard split) fades both
+        // children simultaneously over its first 30%, so a mid-window frame
+        // has both the incoming and the frozen exiting child at alpha > 0 at
+        // once — the case that proves each gets its OWN key.
+        let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeScale, leaf_any(10.0, 10.0)).timing(timing);
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeScale, leaf_any(10.0, 10.0)).timing(timing);
+        let mut counter = 0u64;
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        // Seed frame: the first `advance` only seeds the clock (progress 0).
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut SnapshotRecordingScene::default(),
+        );
+
+        // 15ms into the 100ms linear duration: progress 0.15, inside
+        // FadeScale's [0, 0.30] simultaneous-fade window.
+        let base = w.snapshot_base;
+        let mut scene = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(15.0)),
+            &mut scene,
+        );
+
+        assert_eq!(
+            scene.snapshots.len(),
+            2,
+            "both the incoming and frozen exiting child paint through a \
+             snapshot bracket: {:?}",
+            scene.snapshots
+        );
+        assert_eq!(scene.snapshot_pops, 2, "each bracket pops exactly once");
+        assert!(
+            scene.layers.is_empty(),
+            "no push_layer bracket of its own: {:?}",
+            scene.layers
+        );
+        assert_eq!(
+            scene.transform_pushes, 0,
+            "no push_transform bracket of its own"
+        );
+
+        let keys: Vec<u64> = scene.snapshots.iter().map(|(k, ..)| *k).collect();
+        assert!(
+            keys.contains(&base),
+            "the incoming child is keyed by snapshot_base: {keys:?}"
+        );
+        assert!(
+            keys.contains(&(base + 1)),
+            "the frozen exiting child is keyed by snapshot_base + 1: {keys:?}"
+        );
+        for (_, _, _, alpha, _) in &scene.snapshots {
+            assert!(*alpha > 0.0, "an alpha-0 child never reaches the bracket");
+        }
+    }
+
+    #[test]
+    fn bracket_origin_follows_the_pod_dx_in_slide_patterns() {
+        // SharedAxis::X slides children by 30dp (incoming from +30, exiting to -30).
+        // The bracket origin must follow the pod's absolute paint origin —
+        // ctx.origin() + (dx, dy) — so the cached texture is slide-invariant and
+        // the body lands inside the texture without cropping. This test verifies
+        // the bracket origin includes the dx offset during a slide transition.
+        let timing = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, SharedAxis::X, leaf_any(10.0, 10.0)).timing(timing);
+        let mut counter = 0u64;
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        // Seed frame: the first `advance` only seeds the clock (progress 0).
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut SnapshotRecordingScene::default(),
+        );
+
+        // At p=0 (seed frame), SharedAxis::X has:
+        // - Exiting child: dx=0.0, alpha=1.0 (visible)
+        // - Incoming child: dx=30.0, alpha=0.0 (discarded, not visible)
+        // So only the exiting child paints through a snapshot bracket.
+        let mut scene = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)),
+            &mut scene,
+        );
+
+        assert_eq!(
+            scene.snapshots.len(),
+            1,
+            "only the exiting child is visible at p=0"
+        );
+
+        // The exiting child has dx=0.0 at p=0, so its bracket origin should be
+        // at ctx.origin() = (0.0, 0.0).
+        let (_, origin, _, _, _) = scene.snapshots[0];
+        assert_eq!(
+            origin,
+            Point::new(0.0, 0.0),
+            "exiting child bracket origin at x=0.0 when dx=0 (was {:?})",
+            origin
+        );
+
+        // At a mid-transition frame like p=0.5 (50ms into 100ms duration),
+        // SharedAxis::X has:
+        // - Exiting child: dx=-15.0 (sliding out), alpha < 1.0
+        // - Incoming child: dx=15.0 (sliding in), alpha > 0.0
+        // Both are potentially visible and should have bracket origins that
+        // include their respective dx values. However, SharedAxis uses a hard
+        // split, so only one is above alpha 0 at any instant. At p=0.5 (past
+        // the ~0.35 split), the incoming child is visible.
+        let mut scene_mid = SnapshotRecordingScene::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, size, ft_ms(50.0)),
+            &mut scene_mid,
+        );
+
+        // At p=0.5, the incoming child has dx = (1.0 - 0.5) * 30 = 15.0 and
+        // is visible (past the split). Its bracket origin should reflect this.
+        assert_eq!(
+            scene_mid.snapshots.len(),
+            1,
+            "at mid-frame (p=0.5), only one child is visible through a snapshot"
+        );
+        let (_, origin_mid, _, _, _) = scene_mid.snapshots[0];
+        assert_eq!(
+            origin_mid,
+            Point::new(15.0, 0.0),
+            "incoming child bracket origin at x=15.0 when dx=15.0 (was {:?})",
+            origin_mid
+        );
+    }
+
+    // --- snapshot_base is reserved once, at construction, and outlives every
+    //     switch this widget instance stages. ---
+
+    #[test]
+    fn snapshot_base_is_stable_across_multiple_switches_on_the_same_widget() {
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeThrough, leaf_any(10.0, 10.0));
+        let mut w = build(&v1);
+        let base = w.snapshot_base;
+        let mut counter = 0u64;
+
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0));
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            w.snapshot_base, base,
+            "a switch does not reassign the key pair"
+        );
+
+        let v3: PatternSwitcherView<(), _> =
+            pattern_switcher(3u32, FadeThrough, leaf_any(10.0, 10.0));
+        v3.rebuild(&v2, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            w.snapshot_base, base,
+            "a second switch on the same widget still keeps the same key pair"
+        );
+    }
+
+    // --- Two switcher instances never alias each other's cache slot. ---
+
+    #[test]
+    fn two_switcher_instances_get_disjoint_snapshot_key_pairs() {
+        let v: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeThrough, leaf_any(10.0, 10.0));
+        let w1 = build(&v);
+        let w2 = build(&v);
+        assert_ne!(
+            w1.snapshot_base, w2.snapshot_base,
+            "two switcher instances never share a snapshot key pair"
         );
     }
 }

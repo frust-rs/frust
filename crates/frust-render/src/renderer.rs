@@ -19,17 +19,28 @@
 //!   swapchain view) → present.
 //!
 //! The two arms remap the v3 present spans — see [`SurfaceRenderer::submit`].
+//!
+//! On the Gpu tier every arm also runs [`crate::compositor`]'s quad pass after
+//! vello, drawing the snapshot cache's cached pages onto the frame; a frame
+//! that composites nothing (the common case, and every frame under the
+//! `FRUST_NO_SNAPSHOT_LAYERS` kill switch) records no such pass and is
+//! byte-identical to the arm above. When the composited frame's own vello
+//! segment paints nothing at all ([`skips_main_pass`]) that pass is skipped
+//! too and the quad pass clears the target instead — a page transition is then
+//! one pass, not two.
 
 use core::ffi::c_void;
 
 use anyhow::{Result, anyhow};
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use frust_scene::Command;
 use kurbo::Affine;
 use peniko::ImageData;
 
+use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
 use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
 use crate::convert;
 use crate::lifecycle::{
@@ -37,6 +48,7 @@ use crate::lifecycle::{
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
 use crate::shader_effects::{ShaderEffects, clamp_size};
+use crate::snapshot::{CompositeLayer, SnapshotCache};
 
 /// Caller-requested alpha-compositing behavior for a surface configuration —
 /// the `frust-render` public seam a shell picks
@@ -116,7 +128,25 @@ enum TierBackend {
     /// vello 0.9 GPU compute path: `render_to_texture` into the target view.
     /// Reused across frames; its compiled shader pipelines survive resizes
     /// (which recreate only the swapchain/target).
-    Gpu(vello::Renderer),
+    Gpu {
+        renderer: vello::Renderer,
+        /// Cached rasterizations of `Command::PushSnapshot` bodies, driven by
+        /// the snapshot pre-pass in [`SurfaceRenderer::encode`]. It lives in
+        /// this variant rather than beside it in [`ReadySurface`] so the
+        /// "GPU tier only" rule is structural: the `cpu-tier` path cannot
+        /// name a cache, let alone build one. Its bodies are rasterized by the
+        /// `renderer` next to it, which is why the two share a variant.
+        snapshots: SnapshotCache,
+        /// The quad pass that draws `snapshots`' cached pages onto the frame
+        /// after vello (`crate::compositor`), built once per surface for that
+        /// surface's composite attachment format.
+        ///
+        /// `None` only when the compositor refused that format, in which case
+        /// `snapshots` was constructed disabled — the two are built together
+        /// in [`SurfaceRenderer::install_surface`] precisely so a plan can
+        /// never carry layers no one would draw.
+        compositor: Option<Compositor>,
+    },
     /// Experimental vello_cpu path (`cpu-tier` feature): rasterize headless
     /// into a pixmap, then upload it into the target texture. Boxed because it
     /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
@@ -195,6 +225,14 @@ pub struct SurfaceRenderer {
     /// Reused across frames; `reset()` each frame rather than reallocated.
     /// Device-independent, so it outlives surface transitions.
     scene: vello::Scene,
+    /// The second reusable scene, holding a frame's TRAILING segment — the
+    /// commands recorded after the first composited snapshot bracket (see
+    /// [`crate::snapshot::FramePlan`]). Kept beside [`Self::scene`] rather
+    /// than reset-and-reused as one buffer because both scenes are alive at
+    /// once on the direct arm, where the pre-segment's render happens in
+    /// `submit`. Untouched on frames with no trailing segment, which is the
+    /// common case.
+    trailing_scene: vello::Scene,
     state: SurfaceState,
     /// Consecutive `AcquireStatus::Invalid` acquires retried via `Reconfigure`
     /// since the last successful acquire or surface (re)install — see
@@ -226,6 +264,31 @@ pub struct SurfaceRenderer {
     /// blit path (which renders inside `encode`, where `base_color` is a
     /// parameter). `None` outside an in-flight direct-path frame.
     pending_base_color: Option<peniko::Color>,
+    /// This frame's composite work, stashed by [`Self::encode`] for
+    /// [`Self::submit`] on the two arms whose composite attachment is the
+    /// ACQUIRED swapchain texture (`Direct`, `DirectPremultiplied`), which
+    /// does not exist until [`Self::acquire`]. The blit arm composites onto
+    /// its intermediate inside `encode` and never sets this.
+    ///
+    /// Overwritten every `encode` and taken by every `submit`, so a frame
+    /// whose present was skipped holds its page handles no longer than until
+    /// the next one; [`Self::on_surface_destroyed`] clears it outright, since
+    /// those handles belong to the cache dying with the surface.
+    pending_composite: Option<PendingComposite>,
+}
+
+/// The composite half of a frame, carried from [`SurfaceRenderer::encode`] to
+/// [`SurfaceRenderer::submit`]: the cached pages to draw, in scene order, and
+/// the trailing segment's already-rendered scratch (`None` when the frame has
+/// no trailing segment). Both are refcounted `wgpu` handles, not pixels.
+struct PendingComposite {
+    layers: Vec<CompositeLayer>,
+    trailing: Option<wgpu::TextureView>,
+    /// The frame's base colour when `encode` SKIPPED the main vello pass (its
+    /// segment painted nothing, see [`skips_main_pass`]), making the composite
+    /// pass the only thing that writes the target: it clears to this instead
+    /// of loading. `None` on an ordinary frame, where vello wrote the backdrop.
+    clear: Option<peniko::Color>,
 }
 
 impl Default for SurfaceRenderer {
@@ -243,12 +306,46 @@ impl SurfaceRenderer {
     pub fn new() -> Self {
         Self {
             scene: vello::Scene::new(),
+            trailing_scene: vello::Scene::new(),
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
             initial_cache_data: None,
             pending_present: None,
             pending_base_color: None,
+            pending_composite: None,
         }
+    }
+
+    /// Drops the in-flight frame's cross-call stashes: the direct arm's
+    /// `base_color` and this frame's composite work.
+    ///
+    /// Both describe one frame of one surface — the composite one holds
+    /// refcounted handles on that surface's snapshot textures — so any event
+    /// that ends a surface's life (`on_surface_destroyed`) or replaces it
+    /// (`install_surface`) must drop them rather than let the next `submit`
+    /// consume a stale pair. Idempotent.
+    fn clear_pending_frame(&mut self) {
+        self.pending_base_color = None;
+        self.pending_composite = None;
+    }
+
+    /// Adopt `state` and reset everything else scoped to ONE surface: the
+    /// `Invalid`-reconfigure streak and the in-flight frame's stashes.
+    ///
+    /// The one place a surface episode begins or ends. `install_surface`
+    /// enters through it with the freshly built [`SurfaceState::Ready`];
+    /// `on_surface_destroyed` leaves through it with
+    /// [`SurfaceState::NoSurface`]; and [`Self::acquire`]'s give-up arm leaves
+    /// through it with [`SurfaceState::Lost`] — so a reset can never be
+    /// written into one of those paths and forgotten in another. Everything
+    /// reset here describes the surface being replaced or torn down: the
+    /// streak belonged to it, and the stashes describe one of its frames (the
+    /// composite one holding refcounted handles on snapshot textures that die
+    /// with it). Nothing else may assign `self.state`.
+    fn adopt_surface_state(&mut self, state: SurfaceState) {
+        self.state = state;
+        self.consecutive_invalid = 0;
+        self.clear_pending_frame();
     }
 
     /// Restores the persisted pipeline-cache blob a prior run produced via
@@ -522,7 +619,48 @@ impl SurfaceRenderer {
                 };
                 let renderer = vello::Renderer::new(device, renderer_options)
                     .map_err(|e| anyhow!("frust-render: failed to create vello renderer: {e}"))?;
-                TierBackend::Gpu(renderer)
+                // The compositor is built for the attachment its quad pass
+                // actually draws onto, which is the arm's own vello target:
+                // the acquired swapchain texture on both direct arms (always
+                // `Rgba8Unorm` — the direct arm configures it so), the
+                // intermediate on the blit arm (likewise `Rgba8Unorm`, even
+                // when the swapchain behind it is `Bgra8Unorm`).
+                let composite_format = match &surface.path {
+                    RenderPath::Blit { .. } => wgpu::TextureFormat::Rgba8Unorm,
+                    RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
+                        surface.config.format
+                    }
+                };
+                let compositor = Compositor::new(device, composite_format, pipeline_cache.as_ref());
+                // A translucent surface whose swapchain stores STRAIGHT alpha
+                // (iOS's `PostMultiplied`) gets no snapshot cache at all — see
+                // `snapshot_cache_enabled`. Logged once per process, naming
+                // the reason, because "snapshot layers silently off on this
+                // device" is otherwise indistinguishable from the kill switch.
+                let straight_alpha_translucent = surface.straight_alpha_translucent();
+                if straight_alpha_translucent {
+                    static LOGGED: OnceLock<()> = OnceLock::new();
+                    LOGGED.get_or_init(|| {
+                        log::info!(
+                            "frust-render: snapshot layers disabled on this surface — a \
+                             translucent swapchain storing straight alpha has no exact \
+                             composite arithmetic; brackets lower inline"
+                        );
+                    });
+                }
+                TierBackend::Gpu {
+                    renderer,
+                    // `FRUST_NO_SNAPSHOT_LAYERS` is resolved once here, per
+                    // surface, and held by the cache itself — so the pre-pass
+                    // never re-reads a process-global on the hot path and a
+                    // test can build either state directly.
+                    snapshots: SnapshotCache::new(snapshot_cache_enabled(
+                        crate::context::snapshot_layers_disabled(),
+                        compositor.is_some(),
+                        straight_alpha_translucent,
+                    )),
+                    compositor,
+                }
             }
             #[cfg(feature = "cpu-tier")]
             crate::RenderTier::Cpu => TierBackend::Cpu(Box::new(
@@ -554,15 +692,21 @@ impl SurfaceRenderer {
         // Dropping the previous `SurfaceState` here tears down any prior surface
         // before the new one goes live: no surface outlives a
         // transition.
-        self.state = SurfaceState::Ready(Box::new(ReadySurface {
+        //
+        // Through `adopt_surface_state` for the resets that come with it: a
+        // freshly (re)installed surface starts a new `Invalid`-reconfigure
+        // episode (any prior streak belonged to the surface just replaced),
+        // and the in-flight frame's stashes describe a frame of that same
+        // replaced surface (the composite one holding handles on textures
+        // from the cache that died with it), so carrying either into the new
+        // surface's first `submit` would paint the old frame's pages and
+        // colour onto it.
+        self.adopt_surface_state(SurfaceState::Ready(Box::new(ReadySurface {
             surface,
             backend,
             pipeline_cache,
             shader_effects,
-        }));
-        // A freshly (re)installed surface starts a new `Invalid`-reconfigure
-        // episode — any prior streak belonged to the surface just replaced.
-        self.consecutive_invalid = 0;
+        })));
         Ok(())
     }
 
@@ -599,7 +743,29 @@ impl SurfaceRenderer {
             SurfacePhase::NoSurface,
             "Destroyed must reach NoSurface"
         );
-        self.state = SurfaceState::NoSurface;
+        // Release the in-flight frame's stashes, then the snapshot cache's
+        // textures, while the renderer that rasterized them is still alive:
+        // all of it dies with the state below, so this buys a deterministic
+        // order rather than fixing a leak. Both stashes go, not just the
+        // composite one: they describe a frame of the surface that is dying,
+        // and a stale `base_color` is as wrong to hand the next `submit` as a
+        // stale composite. Idempotent — a cleared cache and cleared stashes
+        // clear again to nothing, which is what the repeated-`Destroyed`
+        // contract needs.
+        self.clear_pending_frame();
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            match &mut ready.backend {
+                TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
+                #[cfg(feature = "cpu-tier")]
+                TierBackend::Cpu(_) => {}
+            }
+        }
+        // The same door `install_surface` enters by, which repeats the
+        // (idempotent) stash reset above and also clears the
+        // `Invalid`-reconfigure streak — behaviour-neutral here, since that
+        // streak belonged to the surface just torn down and `install_surface`
+        // resets it again.
+        self.adopt_surface_state(SurfaceState::NoSurface);
     }
 
     /// Encodes `scene` and presents it, clearing to `base_color`; returns the
@@ -643,10 +809,13 @@ impl SurfaceRenderer {
     ///
     /// - **Blit arm**: also renders (clearing to `base_color`) into the
     ///   intermediate `Rgba8Unorm` target — so `encode_us` includes the GPU
-    ///   render, as it always has on this path.
+    ///   render, as it always has on this path — and composites this frame's
+    ///   cached snapshot pages onto that same target, before the blit.
     /// - **Direct arm**: does ONLY the CPU-side scene build and stashes
     ///   `base_color`; the GPU render moves to [`Self::submit`] (it needs the
-    ///   acquired swapchain texture). `encode_us` is then just the CPU encode.
+    ///   acquired swapchain texture), and so does the composite pass.
+    ///   `encode_us` is then just the CPU encode, plus the trailing segment's
+    ///   render on the frames that have one.
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
     /// phase but [`SurfacePhase::SurfaceReady`]; otherwise
@@ -667,8 +836,10 @@ impl SurfaceRenderer {
         // direct-path color stash; `consecutive_invalid` belongs to `present`.
         let Self {
             scene: vello_scene,
+            trailing_scene,
             state,
             pending_base_color,
+            pending_composite,
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
@@ -685,7 +856,11 @@ impl SurfaceRenderer {
 
         // Encode this frame's pixels, per tier and per render path.
         match &mut ready.backend {
-            TierBackend::Gpu(renderer) => {
+            TierBackend::Gpu {
+                renderer,
+                snapshots,
+                compositor,
+            } => {
                 // Shader pre-pass (shader-showcase): compile/render each
                 // `Command::ShaderQuad` program into an offscreen texture and
                 // register it as a vello image override, producing the
@@ -707,7 +882,7 @@ impl SurfaceRenderer {
                 // targets, and the mark_seen/reap age tracking too) before
                 // touching `device`/`queue`/`renderer`/`shader_effects` at all —
                 // every `Command::ShaderQuad` this frame then falls through to
-                // `convert::encode_scene_with_shaders`'s existing miss
+                // `convert::encode_range_with_overrides`'s existing miss
                 // placeholder, exactly like a CPU-tier or no-prepass caller.
                 let adapter_max = device_handle.device.limits().max_texture_dimension_2d;
                 let shader_images = run_shader_prepass(
@@ -719,84 +894,221 @@ impl SurfaceRenderer {
                     adapter_max,
                     crate::context::shader_effects_disabled(),
                 );
+                // Snapshot pre-pass (snapshot layers): rasterize each
+                // outermost `Command::PushSnapshot` body whose content or size
+                // changed into its own cached texture, and take this frame's
+                // plan — the ordered pages to composite, the bracket keys the
+                // encode walk must skip as HOLES, and the two-segment split of
+                // the command list those two imply
+                // (`crate::snapshot::FramePlan`).
+                //
+                // Runs on EVERY render path (Direct, DirectPremultiplied,
+                // Blit) and before the main encode, for the same reason the
+                // shader pre-pass does: its `render_to_texture` calls submit
+                // their own work, and wgpu serializes queue submissions, so
+                // this frame's own passes see complete textures. An unchanged
+                // bracket performs no GPU work at all here — the steady state
+                // of an animating page transition is zero rasterizations and
+                // one blended quad.
+                //
+                // `FRUST_NO_SNAPSHOT_LAYERS` (resolved into the cache at
+                // surface install, `docs/DEVELOPMENT.md`'s Instrumentation
+                // table) makes this a zero-GPU-work no-op returning the
+                // whole-scene plan — no layers, no holes, no trailing segment
+                // — so every bracket falls through to the inline emulation
+                // `convert` performed before the cache existed and the
+                // compositor pass below never runs.
+                let width = ready.surface.config.width;
+                let height = ready.surface.config.height;
+                let plan = snapshots.prepare(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    renderer,
+                    scene,
+                    adapter_max,
+                    // The surface's own pixel size, the yardstick each
+                    // bracket's texture area is budgeted against: a page is a
+                    // subtree of THIS surface, so a texture much larger than
+                    // it is a bracket to lower inline, not to cache.
+                    (width, height),
+                );
+                let params = |base_color| vello::RenderParams {
+                    base_color,
+                    width,
+                    height,
+                    antialiasing_method: vello::AaConfig::Area,
+                };
+                // A pre segment that paints nothing buys no vello pass: the
+                // compositor's own pass clears the frame to `base_color`
+                // instead (see `skips_main_pass`). The measured page
+                // transition lands here — its pre segment is the app root's
+                // `PushClip` and nothing else, and a vello pass over it still
+                // costs a full fine-stage sweep of the surface (~14.5 ms on an
+                // Adreno 620) to draw not one pixel.
+                let clear =
+                    skips_main_pass(plan.pre_draws, plan.layers.len()).then_some(base_color);
+
+                // The frame's MAIN vello pass: the commands before the first
+                // composited bracket, with every composited bracket skipped.
+                // That is the whole scene whenever nothing composited, so a
+                // frame with no cache hits builds exactly the scene it always
+                // did. Still encoded when the pass is skipped — a structural
+                // segment is a handful of commands, and keeping the CPU side
+                // unconditional keeps one scene-building path.
+                vello_scene.reset();
+                convert::encode_range_with_overrides(
+                    scene,
+                    // The pre segment starts at the scene root, so its own
+                    // prefix is empty: it opens every group it needs itself.
+                    &plan.pre,
+                    vello_scene,
+                    &shader_images,
+                    adapter_max,
+                    &plan.holes,
+                );
+
+                // The TRAILING segment, present only when the scene draws
+                // something after the first composited bracket that is not
+                // itself composited: one extra vello pass into the
+                // compositor's transparent scratch, which the quad pass then
+                // draws last so that content keeps its z-order above the
+                // pages. This is the only extra vello pass the mechanism can
+                // ever add — there is no third segment.
+                let trailing = match (&plan.trailing, compositor.as_mut()) {
+                    (Some(segment), Some(compositor)) => {
+                        let scratch = compositor
+                            .ensure_scratch(&device_handle.device, width, height)
+                            .clone();
+                        trailing_scene.reset();
+                        convert::encode_range_with_overrides(
+                            scene,
+                            // The segment carries BOTH its range and the
+                            // clips/layers still open where it starts — the
+                            // app root's clip around both pages, a scroll
+                            // viewport's around a switcher. Forwarding one
+                            // value is what makes forgetting the second
+                            // impossible; without them this pass would draw
+                            // unclipped and pop groups it never pushed.
+                            segment,
+                            trailing_scene,
+                            &shader_images,
+                            adapter_max,
+                            &plan.holes,
+                        );
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                trailing_scene,
+                                &scratch,
+                                // Transparent, not the frame's base color:
+                                // everything this segment does not paint must
+                                // composite through to the pages under it.
+                                &params(peniko::color::palette::css::TRANSPARENT),
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
+                        Some(scratch)
+                    }
+                    _ => None,
+                };
+                // Age the compositor's trailing scratch on EVERY frame, not
+                // only the ones that used it: a full-surface `Rgba8Unorm`
+                // texture is ~10 MB on a 1080x2400 phone, and a scene that
+                // has stopped drawing anything after its first composited
+                // bracket (the common page-transition shape) would otherwise
+                // hold it until the surface died. Costs a counter increment
+                // on a frame with no scratch at all.
+                if let Some(compositor) = compositor.as_mut() {
+                    compositor.age_scratch();
+                }
+
                 match &ready.surface.path {
                     // Direct-to-surface: the vello render targets the
                     // acquired swapchain texture, which does not exist until
-                    // `acquire`. So `encode` does ONLY the CPU-side scene build here;
-                    // the GPU `render_to_texture` moves to `submit`. See `submit`'s
-                    // span-mapping comment for how this remaps the v3 spans.
+                    // `acquire`. So `encode` does ONLY the CPU-side scene build
+                    // here; the GPU `render_to_texture` — and, after it, the
+                    // composite pass onto that same texture — move to `submit`.
+                    // See `submit`'s span-mapping comment for how this remaps
+                    // the v3 spans.
                     RenderPath::Direct => {
-                        vello_scene.reset();
-                        convert::encode_scene_with_shaders(
-                            scene,
-                            vello_scene,
-                            &shader_images,
-                            adapter_max,
-                        );
-                        // Carry `base_color` to `submit`, where the render runs.
+                        // Carry `base_color` and this frame's pages to
+                        // `submit`, where both are consumed — including the
+                        // decision to skip the render there entirely.
                         *pending_base_color = Some(base_color);
+                        *pending_composite = Some(PendingComposite {
+                            layers: plan.layers,
+                            trailing,
+                            clear,
+                        });
                     }
                     // Direct-premultiplied (translucent, premultiplied-expecting):
                     // unlike the plain direct arm, the intermediate
                     // already exists at encode time, so vello renders into it now
                     // (like the blit arm); `submit`'s premultiply compute pass then
-                    // writes `(rgb*a, a)` into the acquired swapchain texture.
+                    // writes `(rgb*a, a)` into the acquired swapchain texture, and
+                    // the composite pass follows it there — onto premultiplied
+                    // pixels, which is why that arm draws its own pipeline variant.
                     RenderPath::DirectPremultiplied {
                         intermediate_view, ..
                     } => {
-                        vello_scene.reset();
-                        convert::encode_scene_with_shaders(
-                            scene,
-                            vello_scene,
-                            &shader_images,
-                            adapter_max,
-                        );
-                        let params = vello::RenderParams {
-                            base_color,
-                            width: ready.surface.config.width,
-                            height: ready.surface.config.height,
-                            antialiasing_method: vello::AaConfig::Area,
-                        };
-                        renderer
-                            .render_to_texture(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                vello_scene,
-                                intermediate_view,
-                                &params,
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
+                        // Skipped exactly as on the other two arms. The
+                        // premultiply pass in `submit` then reads a stale
+                        // intermediate, but its output is discarded by the
+                        // composite pass's own `LoadOp::Clear` — the frame is
+                        // whatever this pass's clear plus its quads make it.
+                        if clear.is_none() {
+                            renderer
+                                .render_to_texture(
+                                    &device_handle.device,
+                                    &device_handle.queue,
+                                    vello_scene,
+                                    intermediate_view,
+                                    &params(base_color),
+                                )
+                                .map_err(|e| {
+                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
+                                })?;
+                        }
+                        *pending_composite = Some(PendingComposite {
+                            layers: plan.layers,
+                            trailing,
+                            clear,
+                        });
                     }
                     // Blit fallback: render into the intermediate `Rgba8Unorm` target
-                    // now; the acquire/blit/present tail (see `submit`) copies it to
-                    // the swapchain.
+                    // now and composite this frame's pages straight onto it, before
+                    // the acquire/blit/present tail (see `submit`) copies it to the
+                    // swapchain. Nothing crosses the encode/submit gap on this arm.
                     RenderPath::Blit { target_view, .. } => {
-                        vello_scene.reset();
-                        convert::encode_scene_with_shaders(
-                            scene,
-                            vello_scene,
-                            &shader_images,
-                            adapter_max,
-                        );
-                        let params = vello::RenderParams {
-                            base_color,
-                            width: ready.surface.config.width,
-                            height: ready.surface.config.height,
-                            antialiasing_method: vello::AaConfig::Area,
-                        };
-                        renderer
-                            .render_to_texture(
+                        if clear.is_none() {
+                            renderer
+                                .render_to_texture(
+                                    &device_handle.device,
+                                    &device_handle.queue,
+                                    vello_scene,
+                                    target_view,
+                                    &params(base_color),
+                                )
+                                .map_err(|e| {
+                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
+                                })?;
+                        }
+                        if let Some(compositor) = compositor.as_mut() {
+                            compositor.composite(
                                 &device_handle.device,
                                 &device_handle.queue,
-                                vello_scene,
-                                target_view,
-                                &params,
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
+                                CompositeTarget {
+                                    view: target_view,
+                                    size: (width, height),
+                                    output: OutputAlpha::Straight,
+                                    clear,
+                                },
+                                &plan.layers,
+                                trailing.as_ref(),
+                            );
+                        }
                     }
                 }
             }
@@ -926,7 +1238,7 @@ impl SurfaceRenderer {
         }
         *consecutive_invalid = next_invalid_streak(status, action, *consecutive_invalid);
 
-        match action {
+        let outcome = match action {
             AcquireAction::Present => {
                 let surface_texture = match acquired {
                     Cst::Success(t) | Cst::Suboptimal(t) => t,
@@ -940,11 +1252,11 @@ impl SurfaceRenderer {
                 // Stash the acquired texture for `submit`; the blocking vsync wait
                 // ended above, so timing stops here for the acquire sub-span.
                 *pending_present = Some(surface_texture);
-                Ok(AcquireOutcome::Acquired)
+                AcquireOutcome::Acquired
             }
             AcquireAction::Reconfigure => {
                 ctx.configure_surface(&ready.surface);
-                Ok(AcquireOutcome::Reconfigured)
+                AcquireOutcome::Reconfigured
             }
             AcquireAction::Lose => {
                 debug_assert_eq!(
@@ -952,16 +1264,26 @@ impl SurfaceRenderer {
                     SurfacePhase::SurfaceLost,
                     "Lost must reach SurfaceLost from SurfaceReady"
                 );
-                // Drop the surface and its outstanding resources before returning
-                // so the shell can recreate cleanly. `consecutive_invalid`
-                // was already reset above (`next_invalid_streak`); the shell's own
-                // recovery path (recreate on resize/redraw/surfaceChanged) starts a
-                // fresh episode.
-                *state = SurfaceState::Lost;
-                Ok(AcquireOutcome::Lost)
+                AcquireOutcome::Lost
             }
-            AcquireAction::Skip => Ok(AcquireOutcome::Skipped),
+            AcquireAction::Skip => AcquireOutcome::Skipped,
+        };
+        if matches!(outcome, AcquireOutcome::Lost) {
+            // Drop the surface and its outstanding resources before returning
+            // so the shell can recreate cleanly — through the same door
+            // `install_surface` and `on_surface_destroyed` use, once the field
+            // borrows above have ended. That also drops the in-flight frame's
+            // stashes: a `pending_composite` holds refcounted handles on the
+            // dying cache's page textures (and the trailing scratch), and no
+            // `submit` will ever consume it now, so leaving it would keep those
+            // textures alive until the shell's next install. The streak was
+            // already reset above (`next_invalid_streak`, reset-on-give-up);
+            // the door zeroing it again is a no-op. The shell's own recovery
+            // path (recreate on resize/redraw/surfaceChanged) then starts a
+            // fresh episode.
+            self.adopt_surface_state(SurfaceState::Lost);
         }
+        Ok(outcome)
     }
 
     /// Phase 2b of the frame — the **submit** sub-span: turn the swapchain
@@ -1050,8 +1372,13 @@ impl SurfaceRenderer {
             scene: vello_scene,
             state,
             pending_base_color,
+            pending_composite,
             ..
         } = self;
+        // Taken unconditionally: a frame that reached `acquire` consumes its
+        // composite here or not at all, and holding cached-page handles past
+        // that would outlive the plan they came from.
+        let pending_composite = pending_composite.take();
         let SurfaceState::Ready(ready) = state else {
             return Ok((FrameOutcome::Skipped, None));
         };
@@ -1065,9 +1392,14 @@ impl SurfaceRenderer {
 
         match &surface.path {
             // Direct-to-surface: render vello straight into the acquired swapchain
-            // texture, then present. No intermediate, no blit pass.
+            // texture, composite this frame's cached pages onto it, then present.
+            // No intermediate, no blit pass.
             RenderPath::Direct => match backend {
-                TierBackend::Gpu(renderer) => {
+                TierBackend::Gpu {
+                    renderer,
+                    compositor,
+                    ..
+                } => {
                     let params = vello::RenderParams {
                         // Set in `encode`; a well-formed frame always encoded first.
                         base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),
@@ -1075,17 +1407,43 @@ impl SurfaceRenderer {
                         height: surface.config.height,
                         antialiasing_method: vello::AaConfig::Area,
                     };
-                    renderer
-                        .render_to_texture(
+                    // `encode` decided this frame's pre segment paints
+                    // nothing, so the composite pass below clears the acquired
+                    // texture to the base colour and draws the pages onto it —
+                    // the whole frame, without a vello pass.
+                    let clear = pending_composite.as_ref().and_then(|pending| pending.clear);
+                    if clear.is_none() {
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                vello_scene,
+                                &swapchain_view,
+                                &params,
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
+                    }
+                    // Straight alpha: the swapchain this arm presents is
+                    // opaque (a premultiplied-expecting translucent surface
+                    // takes `DirectPremultiplied` below instead).
+                    if let Some(compositor) = compositor.as_mut()
+                        && let Some(pending) = pending_composite.as_ref()
+                    {
+                        compositor.composite(
                             &device_handle.device,
                             &device_handle.queue,
-                            vello_scene,
-                            &swapchain_view,
-                            &params,
-                        )
-                        .map_err(|e| {
-                            anyhow!("frust-render: vello render_to_texture failed: {e}")
-                        })?;
+                            CompositeTarget {
+                                view: &swapchain_view,
+                                size: (surface.config.width, surface.config.height),
+                                output: OutputAlpha::Straight,
+                                clear,
+                            },
+                            &pending.layers,
+                            pending.trailing.as_ref(),
+                        );
+                    }
                 }
                 // Unreachable: the direct arm is only ever configured for the GPU
                 // tier (`choose_render_path` forces blit for cpu-tier).
@@ -1121,9 +1479,32 @@ impl SurfaceRenderer {
                     surface.config.height,
                 );
                 device_handle.queue.submit([encoder.finish()]);
+                // The pages go on AFTER the premultiply pass, onto the
+                // premultiplied swapchain it just wrote — with the
+                // premultiplied output variant, so a composited page carries
+                // the same `(rgb*a, a)` convention every other pixel on that
+                // surface now does.
+                if let TierBackend::Gpu { compositor, .. } = backend
+                    && let Some(compositor) = compositor.as_mut()
+                    && let Some(pending) = pending_composite.as_ref()
+                {
+                    compositor.composite(
+                        &device_handle.device,
+                        &device_handle.queue,
+                        CompositeTarget {
+                            view: &swapchain_view,
+                            size: (surface.config.width, surface.config.height),
+                            output: OutputAlpha::Premultiplied,
+                            clear: pending.clear,
+                        },
+                        &pending.layers,
+                        pending.trailing.as_ref(),
+                    );
+                }
             }
-            // Blit fallback: copy the intermediate target (filled in `encode`)
-            // into the swapchain texture and submit.
+            // Blit fallback: copy the intermediate target (filled — and
+            // composited onto — in `encode`) into the swapchain texture and
+            // submit.
             RenderPath::Blit {
                 target_view,
                 blitter,
@@ -1148,11 +1529,58 @@ impl SurfaceRenderer {
     }
 }
 
+/// Whether a surface gets a live [`SnapshotCache`] at all, from the three
+/// facts that can refuse it — resolved once per surface at install and held by
+/// the cache itself, so the hot path re-reads none of them.
+///
+/// - `disabled`: the `FRUST_NO_SNAPSHOT_LAYERS` kill switch
+///   ([`crate::context::snapshot_layers_disabled`]);
+/// - `has_compositor`: the compositor refused this surface's attachment format
+///   ([`Compositor::new`]) — a composited page nothing draws is a missing
+///   page, so the bracket must lower inline instead;
+/// - `straight_alpha_translucent`: the surface came up TRANSLUCENT with a
+///   swapchain that stores straight alpha
+///   ([`ConfiguredSurface::straight_alpha_translucent`], iOS's
+///   `PostMultiplied`). The compositor's straight arm blends
+///   `dst * (1 - a) + rgb * a`, which is the straight-alpha `over` only when
+///   the destination alpha is 1; over a partly transparent destination it
+///   stores premultiplied colour into a straight-alpha swapchain and the
+///   platform composites it over-bright. The premultiplied arm's algebra
+///   closes for every destination alpha, but it is not what such a swapchain
+///   holds. Rather than composite wrong pixels on a surface frust cannot test
+///   on every device, that surface keeps the inline path outright — the same
+///   refusal shape `context::blit_translucency_refused` already takes.
+///
+/// Any one of the three is enough to refuse; a plain opaque surface with a
+/// compositor is the only combination that composites.
+fn snapshot_cache_enabled(
+    disabled: bool,
+    has_compositor: bool,
+    straight_alpha_translucent: bool,
+) -> bool {
+    !disabled && has_compositor && !straight_alpha_translucent
+}
+
+/// Whether this frame can skip its MAIN vello pass altogether: its pre segment
+/// paints nothing (`crate::snapshot::FramePlan::pre_draws`) AND the compositor
+/// has at least one page to draw, so the composite pass can clear the target to
+/// the frame's base colour and compose the whole frame by itself.
+///
+/// Both halves matter. Without a page there is no compositor pass at all, so
+/// dropping the vello pass would present an undefined frame; and a pre segment
+/// that paints must be rendered whatever else the frame does. An ordinary
+/// frame (nothing composited, the kill switch, the cpu tier) therefore always
+/// answers `false` and behaves exactly as it did before this seam existed.
+fn skips_main_pass(pre_draws: bool, layers: usize) -> bool {
+    !pre_draws && layers > 0
+}
+
 /// The shader-showcase pre-pass (Gpu tier only): for every distinct
 /// `Command::ShaderQuad` in `scene`, compile its program, render it into an
 /// offscreen texture at the quad's physical size, register that texture with
 /// vello as an image override, and collect a `(program id, clamped physical
-/// size) → ImageData` map for `convert::encode_into` to lower each quad against.
+/// size) → ImageData` map for [`convert::encode_range_with_overrides`] to lower
+/// each quad against.
 ///
 /// The map is keyed by `(id, w, h)` — not `id` alone — so the same program drawn
 /// at two different physical sizes in one frame resolves each quad to its own
@@ -1189,7 +1617,7 @@ impl SurfaceRenderer {
 /// pre-pass is off entirely, not merely "don't compile new programs", so a
 /// disabled run must not silently age out `last_seen` state a later re-enable
 /// would otherwise need. Returns an empty map either way, which is exactly
-/// the miss-everywhere input `convert::encode_scene_with_shaders` already
+/// the miss-everywhere input [`convert::encode_range_with_overrides`] already
 /// handles by falling through to the placeholder fill.
 fn run_shader_prepass(
     device: &wgpu::Device,
@@ -1301,6 +1729,105 @@ mod tests {
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
     }
 
+    /// The main vello pass is skipped only when a composite pass will both
+    /// clear the target and cover it: a structure-only pre segment with pages
+    /// to draw. Every other frame renders exactly as it always did.
+    #[test]
+    fn only_a_structure_only_pre_segment_with_pages_skips_the_main_pass() {
+        assert!(
+            skips_main_pass(false, 1),
+            "a PushClip-only pre segment with a page to draw needs no vello pass"
+        );
+        assert!(
+            !skips_main_pass(false, 0),
+            "with no page there is no composite pass to clear the frame"
+        );
+        assert!(
+            !skips_main_pass(true, 2),
+            "a pre segment that paints must still be rendered"
+        );
+        assert!(!skips_main_pass(true, 0), "an ordinary frame is untouched");
+    }
+
+    /// The snapshot cache is live only for a surface all three refusals pass:
+    /// the kill switch off, a compositor for the attachment format, and a
+    /// destination the straight blend is exact for.
+    #[test]
+    fn the_snapshot_cache_is_enabled_only_for_a_surface_that_can_composite() {
+        assert!(snapshot_cache_enabled(false, true, false));
+        assert!(
+            !snapshot_cache_enabled(true, true, false),
+            "FRUST_NO_SNAPSHOT_LAYERS refuses on its own"
+        );
+        assert!(
+            !snapshot_cache_enabled(false, false, false),
+            "a composited page nothing draws is a missing page"
+        );
+        assert!(
+            !snapshot_cache_enabled(false, true, true),
+            "a translucent straight-alpha swapchain has no exact composite \
+             arithmetic — brackets lower inline"
+        );
+        assert!(!snapshot_cache_enabled(true, false, true));
+    }
+
+    /// One surface episode ending drops everything scoped to it: the
+    /// `Invalid`-reconfigure streak, the stashed base colour, and the
+    /// composite work (which holds handles on snapshot textures that died
+    /// with that surface).
+    ///
+    /// Asserted through `adopt_surface_state` itself — the single door
+    /// `install_surface` and `on_surface_destroyed` both go through — rather
+    /// than by re-typing their reset statements here. A previous version of
+    /// this test did the latter and would have stayed green if either caller
+    /// stopped resetting anything at all.
+    #[test]
+    fn adopting_a_surface_state_drops_the_previous_frames_stashes() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: Some(peniko::Color::BLACK),
+        });
+        renderer.consecutive_invalid = 3;
+
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
+
+        assert!(renderer.pending_base_color.is_none());
+        assert!(renderer.pending_composite.is_none());
+        assert_eq!(renderer.consecutive_invalid, 0);
+        assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        // Idempotent, as the repeated-`Destroyed` contract needs.
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
+        assert!(renderer.pending_composite.is_none());
+        assert_eq!(renderer.consecutive_invalid, 0);
+    }
+
+    /// The give-up arm of `acquire` leaves through the same door: adopting
+    /// [`SurfaceState::Lost`] drops both in-flight stashes, so a surface that
+    /// went away mid-frame does not keep its cached page textures alive (via
+    /// the composite stash's refcounted views) until the shell's next install.
+    #[test]
+    fn adopting_the_lost_state_drops_the_dying_surfaces_stashes() {
+        let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: None,
+        });
+
+        renderer.adopt_surface_state(SurfaceState::Lost);
+
+        assert_eq!(renderer.phase(), SurfacePhase::SurfaceLost);
+        assert!(renderer.pending_base_color.is_none());
+        assert!(
+            renderer.pending_composite.is_none(),
+            "a lost surface's composite stash must not outlive it"
+        );
+    }
+
     #[test]
     fn resolved_translucent_is_false_without_a_live_surface() {
         // The Mode A default: with no surface installed
@@ -1366,13 +1893,32 @@ mod tests {
         assert_eq!(outcome, FrameOutcome::Skipped);
     }
 
+    /// Destroy is idempotent, reaches `NoSurface`, and — the half that used
+    /// to be open-coded — drops BOTH in-flight stashes, not just the
+    /// composite one. A stale `base_color` describes the dead surface's frame
+    /// exactly as much as a stale composite does.
     #[test]
     fn destroy_is_idempotent_and_resets_to_no_surface() {
         let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: Some(peniko::Color::BLACK),
+        });
+
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert!(
+            renderer.pending_base_color.is_none(),
+            "the dying surface's base colour must not reach the next submit"
+        );
+        assert!(renderer.pending_composite.is_none());
+
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert!(renderer.pending_base_color.is_none());
+        assert!(renderer.pending_composite.is_none());
     }
 
     #[test]

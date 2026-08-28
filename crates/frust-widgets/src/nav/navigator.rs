@@ -130,6 +130,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EditingState, EventCtx,
@@ -157,6 +158,18 @@ pub use super::options::{
     ResultCallback, RouteChangeCallback, VisibilityCallback,
 };
 pub use super::view::{NavigatorView, navigator, overlay_host};
+
+/// Process-wide, monotonically increasing source for
+/// [`PageEntry::snapshot_key`] and `motion::switcher`'s per-instance
+/// `snapshot_base` — every [`PaintScene::push_snapshot`] key handed to a
+/// renderer, across every navigator and switcher in the process, is drawn
+/// from this one counter. A renderer caches a snapshot's rasterized body by
+/// key alone, so two unrelated pods that happened to share a key would alias
+/// each other's cached content; per-navigator or per-switcher counters could
+/// collide with each other where this single process-wide one cannot.
+/// `Relaxed` ordering is sufficient: the counter's only job is producing
+/// distinct values, never synchronizing access to anything else.
+pub(crate) static NEXT_SNAPSHOT_KEY: AtomicU64 = AtomicU64::new(0);
 
 /// One retained page in the [`NavigatorWidget`]'s stack: its builder (re-run each
 /// rebuild), the last view it produced (for reconciliation), the retained child
@@ -224,6 +237,13 @@ pub(super) struct PageEntry<State: 'static> {
     /// [`cull_covered_builds`](NavigatorView::cull_covered_builds) still reports
     /// truthfully.
     pub(super) reach: Rc<Cell<bool>>,
+    /// This page's [`PaintScene::push_snapshot`] cache key, drawn once from
+    /// [`NEXT_SNAPSHOT_KEY`] when the page is constructed and stable for its
+    /// whole lifetime — including a pop/replace stash, since the same
+    /// `PageEntry` moves into [`ActiveTransition::stashed`] rather than being
+    /// rebuilt. A key that changed frame to frame (or page to page) would
+    /// give a caching renderer nothing to hit.
+    snapshot_key: u64,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -1168,6 +1188,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         route,
                         pop_swipe,
                         reach,
+                        snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
                     // ANDed with the rebuild-pass chain down to this navigator.
@@ -1237,6 +1258,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // page pushed with no override.
                             pop_swipe: None,
                             reach: Rc::clone(&reach),
+                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1265,6 +1287,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             route,
                             pop_swipe: None,
                             reach,
+                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
                         });
                     }
                     // Full gate (`top_pod_focused`): the replaced page's own link
@@ -1462,6 +1485,14 @@ impl<State: 'static> NavigatorWidget<State> {
 
     /// Paint the entering page (always the stack top) with `layer`, a hero
     /// reporter installed, returning its captured page-local hero rects.
+    ///
+    /// Also decides this page's snapshot-bracket eligibility for
+    /// [`paint_page_layer`]: a *programmatic* transition (never an
+    /// interactive edge-swipe, whose progress is drag-held and whose stack
+    /// is provisional) whose `directives` this frame are empty — a hero
+    /// morph paints inside the page and must move every frame, so a page
+    /// carrying one is never snapshotted. `alpha > 0.0` is checked inside
+    /// [`paint_page_layer`] itself (its `DiscardScene` branch stays first).
     fn paint_entering_heroes(
         &mut self,
         ctx: &mut PaintCtx,
@@ -1471,7 +1502,9 @@ impl<State: 'static> NavigatorWidget<State> {
         nav_origin: Point,
         directives: HashMap<String, HeroDirective>,
     ) -> HashMap<String, Rect> {
+        let snapshot_eligible = self.snapshot_eligible(&directives);
         if let Some(entry) = self.pages.last_mut() {
+            let snapshot = snapshot_eligible.then_some(entry.snapshot_key);
             let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
             paint_page_heroes(
                 &mut entry.pod,
@@ -1481,6 +1514,7 @@ impl<State: 'static> NavigatorWidget<State> {
                 area,
                 reference,
                 directives,
+                snapshot,
             )
         } else {
             HashMap::new()
@@ -1490,6 +1524,10 @@ impl<State: 'static> NavigatorWidget<State> {
     /// Paint the leaving page — the retained page (pop/replace) or the page below
     /// the new top (push) — with `layer`, a hero reporter installed, returning
     /// its captured page-local hero rects.
+    ///
+    /// See [`paint_entering_heroes`](Self::paint_entering_heroes) for the
+    /// snapshot-bracket eligibility rule this applies identically, including
+    /// to the stashed pod a pop/replace retains.
     #[allow(clippy::too_many_arguments)]
     fn paint_leaving_heroes(
         &mut self,
@@ -1502,10 +1540,12 @@ impl<State: 'static> NavigatorWidget<State> {
         directives: HashMap<String, HeroDirective>,
     ) -> HashMap<String, Rect> {
         let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
+        let snapshot_eligible = self.snapshot_eligible(&directives);
         if has_stashed {
             if let Some(t) = self.transition.as_mut()
                 && let Some(stashed) = t.stashed.as_mut()
             {
+                let snapshot = snapshot_eligible.then_some(stashed.snapshot_key);
                 return paint_page_heroes(
                     &mut stashed.pod,
                     ctx,
@@ -1514,12 +1554,14 @@ impl<State: 'static> NavigatorWidget<State> {
                     area,
                     reference,
                     directives,
+                    snapshot,
                 );
             }
             HashMap::new()
         } else {
             let n = self.pages.len();
             if n >= 2 {
+                let snapshot = snapshot_eligible.then_some(self.pages[n - 2].snapshot_key);
                 paint_page_heroes(
                     &mut self.pages[n - 2].pod,
                     ctx,
@@ -1528,11 +1570,23 @@ impl<State: 'static> NavigatorWidget<State> {
                     area,
                     reference,
                     directives,
+                    snapshot,
                 )
             } else {
                 HashMap::new()
             }
         }
+    }
+
+    /// The shared snapshot-bracket eligibility test both
+    /// [`paint_entering_heroes`](Self::paint_entering_heroes) and
+    /// [`paint_leaving_heroes`](Self::paint_leaving_heroes) apply to their
+    /// own page this frame: the in-flight transition is programmatic (not an
+    /// interactive edge-swipe) and this frame's hero `directives` for the
+    /// page are empty.
+    fn snapshot_eligible(&self, directives: &HashMap<String, HeroDirective>) -> bool {
+        let programmatic = self.transition.as_ref().is_some_and(|t| !t.interactive);
+        programmatic && directives.is_empty()
     }
 }
 
@@ -1540,7 +1594,9 @@ impl<State: 'static> NavigatorWidget<State> {
 /// returning the page-local rects its tagged descendants captured. `reference`
 /// is the page's absolute top-left this frame (nav origin + the layer's
 /// animated offset), subtracted from each reported rect so captures are stable
-/// across the slide.
+/// across the slide. `snapshot` is this page's resolved snapshot-bracket key
+/// this frame, if eligible — see
+/// [`paint_entering_heroes`](NavigatorWidget::paint_entering_heroes).
 #[allow(clippy::too_many_arguments)]
 fn paint_page_heroes(
     pod: &mut ChildPod,
@@ -1550,10 +1606,11 @@ fn paint_page_heroes(
     area: Size,
     reference: Point,
     directives: HashMap<String, HeroDirective>,
+    snapshot: Option<u64>,
 ) -> HashMap<String, Rect> {
     let registry = RefCell::new(HeroFrames::new(reference, directives));
     ctx.with_hero_registry(&registry, |page_ctx| {
-        paint_page_layer(pod, page_ctx, scene, layer, area);
+        paint_page_layer(pod, page_ctx, scene, layer, area, snapshot);
     });
     registry.into_inner().into_captured()
 }
@@ -1568,12 +1625,13 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 }
 
 /// Paint one transition page: offset its pod origin by the layer's `dx`/`dy` (so
-/// paint and hit-testing move together), then bracket its paint with a
-/// `push_transform` scale (about the page's paint-area centre) and a `push_layer`
-/// opacity when either differs from the identity — strict LIFO (transform outer,
-/// opacity inner). The scale realises M3 fade-through's `0.92 → 1.0` incoming
-/// scale-up ([`Layer::scale`](super::transition::Layer::scale));
-/// every other preset leaves `scale == 1.0`, so the transform is skipped. Mirrors
+/// paint and hit-testing move together), then bracket its paint with either a
+/// snapshot bracket (see below) or, when ineligible, a `push_transform` scale
+/// (about the page's paint-area centre) and a `push_layer` opacity when either
+/// differs from the identity — strict LIFO (transform outer, opacity inner).
+/// The scale realises M3 fade-through's `0.92 → 1.0` incoming scale-up
+/// ([`Layer::scale`](super::transition::Layer::scale)); every other preset
+/// leaves `scale == 1.0`, so the transform is skipped. Mirrors
 /// `motion::switcher`'s `paint_staged_child`.
 ///
 /// For the split-crossfade presets (M3SharedAxisX, M3FadeThrough, Glyph),
@@ -1585,13 +1643,28 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// rects reported through `PaintCtx::with_hero_registry`, animating
 /// descendants advancing), so this is a redirect of the *scene*, not a skip of
 /// the pass; no `push_layer`/`push_transform` bracket is needed since nothing
-/// the sink records is ever composited.
+/// the sink records is ever composited. This DiscardScene check runs first,
+/// ahead of the snapshot bracket below, unconditionally.
+///
+/// When `snapshot` is `Some(key)` (see
+/// [`NavigatorWidget::paint_entering_heroes`] for the eligibility rule), the
+/// alpha-surviving page paints through
+/// [`PaintScene::push_snapshot`]/[`pop_snapshot`] instead, unconditionally —
+/// no `has_scale`/`has_alpha` identity-skip, since the bracket itself is what
+/// tells a caching renderer this body is worth caching, whatever this
+/// particular frame's alpha/scale happen to be. **The bracket rect origin must
+/// follow the pod's absolute paint origin** — `ctx.origin() + (layer.dx,
+/// layer.dy)` — so the painted body lands inside the texture (preventing crops
+/// of the shifted body) and the renderer's frame-relative fingerprint stays
+/// slide-invariant. The scale pivot still centers on the rect, which now
+/// follows the slid page.
 fn paint_page_layer(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
     scene: &mut dyn PaintScene,
     layer: Layer,
     area: Size,
+    snapshot: Option<u64>,
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
@@ -1599,6 +1672,14 @@ fn paint_page_layer(
     if alpha <= 0.0 {
         let mut sink = DiscardScene;
         pod.paint_child(ctx, &mut sink);
+        return;
+    }
+
+    if let Some(key) = snapshot {
+        let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
+        scene.push_snapshot(key, bracket_origin, area, alpha, layer.scale);
+        pod.paint_child(ctx, scene);
+        scene.pop_snapshot();
         return;
     }
 
@@ -1668,6 +1749,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 // navigator's own resolved default.
                 pop_swipe: None,
                 reach: root_reach,
+                snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,

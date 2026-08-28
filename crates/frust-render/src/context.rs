@@ -129,7 +129,7 @@ pub(crate) fn choose_render_path(
 /// (pipeline compiles, offscreen targets, a vello image-override
 /// registration) that is unproven on device, so this flag is the fallback-proof escape hatch that
 /// reverts every `Command::ShaderQuad` to the existing placeholder-fill
-/// lowering (`convert::encode_scene_with_shaders`'s miss path) with zero
+/// lowering (`convert::encode_range_with_overrides`'s miss path) with zero
 /// pre-pass GPU work. Same compile-time-or-runtime parsing as
 /// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
 /// Instrumentation table). Cached: read once per process.
@@ -139,6 +139,31 @@ pub(crate) fn shader_effects_disabled() -> bool {
         env_flag_enabled(
             option_env!("FRUST_NO_SHADER_EFFECTS"),
             std::env::var("FRUST_NO_SHADER_EFFECTS").ok(),
+        )
+    })
+}
+
+/// Whether the snapshot-layer cache (`crate::snapshot::SnapshotCache`) is
+/// force-disabled via the process-wide `FRUST_NO_SNAPSHOT_LAYERS` flag — the
+/// same unproven-render-path safety valve shape as
+/// [`shader_effects_disabled`]: the snapshot pre-pass drives real GPU work (an
+/// offscreen texture per cached subtree, an extra `render_to_texture` whenever
+/// a body changes, and — through [`crate::compositor`] — a quad pass and a
+/// possible second vello pass per composited frame), so this flag is the
+/// fallback-proof escape hatch that reverts every `Command::PushSnapshot` to
+/// the inline emulation the encode walk performed before the cache existed
+/// (`convert::encode_range_with_overrides`'s miss path), with zero pre-pass
+/// GPU work: a disabled cache yields an empty frame plan, so the compositor
+/// pass never runs and each arm is byte-identical to its pre-cache self. Same
+/// compile-time-or-runtime parsing as
+/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
+/// Instrumentation table). Cached: read once per process.
+pub(crate) fn snapshot_layers_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_NO_SNAPSHOT_LAYERS"),
+            std::env::var("FRUST_NO_SNAPSHOT_LAYERS").ok(),
         )
     })
 }
@@ -385,6 +410,26 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
         mode,
         wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::Inherit
     )
+}
+
+/// Whether a **resolved** alpha mode means "translucent, and the swapchain
+/// stores STRAIGHT alpha" — the one combination the snapshot compositor has no
+/// exact arithmetic for.
+///
+/// True for `PostMultiplied` alone: it is translucent
+/// ([`alpha_mode_is_translucent`]) and expects straight alpha
+/// ([`alpha_mode_needs_premultiply`] is false), which is iOS's translucent
+/// mode. `Inherit`/`PreMultiplied` are translucent but premultiplied, so they
+/// take [`RenderPath::DirectPremultiplied`] and the compositor's premultiplied
+/// arm; `Opaque`/`Auto` ignore alpha entirely, which is the destination the
+/// straight arm's blend is exact for.
+///
+/// Pure and mode-only, so the decision is host-testable without a surface; the
+/// live per-surface answer is
+/// [`ConfiguredSurface::straight_alpha_translucent`], which additionally
+/// respects [`blit_translucency_refused`].
+fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
+    alpha_mode_is_translucent(mode) && !alpha_mode_needs_premultiply(mode)
 }
 
 /// Whether a configured surface must **refuse** translucency because its
@@ -767,6 +812,40 @@ pub(crate) struct ConfiguredSurface {
     pub(crate) resolved_translucent: bool,
 }
 
+impl ConfiguredSurface {
+    /// Whether this surface really came up translucent with a swapchain that
+    /// stores STRAIGHT alpha — iOS's `PostMultiplied` translucent mode.
+    ///
+    /// Reads [`Self::resolved_translucent`] rather than the raw alpha mode, so
+    /// a surface whose translucency was REFUSED
+    /// ([`blit_translucency_refused`]) answers `false`: it presents opaque, and
+    /// an opaque destination is exactly what the straight blend is exact for.
+    ///
+    /// [`crate::renderer::SurfaceRenderer`] folds this into the snapshot
+    /// cache's enable decision (`renderer::snapshot_cache_enabled`): the
+    /// compositor's straight arm computes `dst * (1 - a) + rgb * a`, the
+    /// straight-alpha `over` only at destination alpha 1, so such a surface
+    /// keeps every bracket on the inline path instead.
+    pub(crate) fn straight_alpha_translucent(&self) -> bool {
+        self.resolved_translucent && alpha_mode_is_straight_translucent(self.config.alpha_mode)
+    }
+}
+
+/// Every swapchain format [`RenderContext::create_render_surface`] can
+/// configure a surface with: the direct arm's mandatory `Rgba8Unorm` (vello's
+/// `render_to_texture` target format) and, on the blit arm, whichever of the
+/// two the platform reports first.
+///
+/// Named once so the compositor's own attachment-format predicate can be
+/// coupled to it by a test (`compositor::is_supported_target_format`): the
+/// composite pass draws onto the swapchain itself on both direct arms, so a
+/// format this list gained without the pass gaining its arithmetic would
+/// silently disable snapshot layers on that surface.
+pub(crate) const SURFACE_FORMATS: [wgpu::TextureFormat; 2] = [
+    wgpu::TextureFormat::Rgba8Unorm,
+    wgpu::TextureFormat::Bgra8Unorm,
+];
+
 /// Given the build-config-derived instance flags and whether the process is
 /// currently running on an Android emulator, decides the flags wgpu's
 /// `Instance` should actually be created with.
@@ -895,12 +974,19 @@ fn create_targets(
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     // The GPU tier renders into this via a storage binding, then blits it to
-    // the swapchain. The CPU tier (`cpu-tier` feature) instead uploads its
+    // the swapchain. `RENDER_ATTACHMENT` is the snapshot compositor's
+    // (`crate::compositor`) write path: on the blit and direct-premultiplied
+    // arms this intermediate is the colour attachment its quad pass loads and
+    // draws onto, between vello and the blit/premultiply tail. `Rgba8Unorm` is
+    // renderable on every wgpu backend, so the combined usage is universally
+    // available. The CPU tier (`cpu-tier` feature) instead uploads its
     // rasterized pixmap into it with `write_texture`, which needs `COPY_DST` —
     // added only under the feature so default GPU-only builds keep the exact
     // usage set they had before.
     #[allow(unused_mut)]
-    let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+    let mut usage = wgpu::TextureUsages::STORAGE_BINDING
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::RENDER_ATTACHMENT;
     #[cfg(feature = "cpu-tier")]
     {
         usage |= wgpu::TextureUsages::COPY_DST;
@@ -1276,12 +1362,7 @@ impl RenderContext {
                     .formats
                     .iter()
                     .copied()
-                    .find(|it| {
-                        matches!(
-                            it,
-                            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
-                        )
-                    })
+                    .find(|it| SURFACE_FORMATS.contains(it))
                     .ok_or_else(|| {
                         anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
                     })?;
@@ -1692,6 +1773,37 @@ mod tests {
             wgpu::CompositeAlphaMode::Opaque,
         ] {
             assert!(!alpha_mode_is_translucent(mode), "{mode:?}");
+        }
+    }
+
+    /// The snapshot compositor's refusal case, over every mode
+    /// `resolve_alpha_mode` can produce: `PostMultiplied` alone is translucent
+    /// AND straight-alpha, so it is the only one that keeps brackets inline.
+    #[test]
+    fn only_post_multiplied_is_translucent_with_straight_alpha() {
+        assert!(alpha_mode_is_straight_translucent(
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+        // Translucent but premultiplied: `DirectPremultiplied` plus the
+        // compositor's premultiplied arm, whose algebra closes for every
+        // destination alpha.
+        for mode in [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+        ] {
+            assert!(
+                alpha_mode_needs_premultiply(mode),
+                "{mode:?} must take the premultiply pass"
+            );
+            assert!(!alpha_mode_is_straight_translucent(mode), "{mode:?}");
+        }
+        // Not translucent at all: the opaque destination the straight blend is
+        // exact for.
+        for mode in [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Auto,
+        ] {
+            assert!(!alpha_mode_is_straight_translucent(mode), "{mode:?}");
         }
     }
 
