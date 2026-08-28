@@ -86,24 +86,32 @@
 # `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
 # via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
 # exact committed files backing each cell (PROTOCOL §10's "raw series
-# committed alongside the computed table" rule). The destination cell
-# directory is `rm -rf`'d then `mkdir -p`'d immediately before each copy (a
-# rerun over a stale cell never leaves a prior run's files mixed in with
-# the new ones), every `cp` is checked (a failed copy is a hard, loud
-# failure — never a silently-short raw series), and a SKIPPED
-# scenario/nav result is never copied at all (its cell directory, if one
-# exists from an earlier rerun, is left alone — the progress line prints
-# `raw: not copied (SKIPPED)` instead). After every copy this script
-# re-runs the sanitization self-check `benchmarks/.gitignore` documents as
-# its pre-commit rule over the just-written cell directory, and fails
-# loudly if it doesn't pass — never a silent partial copy:
+# committed alongside the computed table" rule). Each cell's artifacts are
+# first assembled in a staging directory under --out
+# (`<out>/stage/<aa>-<scale>/<sub>`, cleared per copy), every `cp` is
+# checked (a failed copy is a hard, loud failure — never a silently-short
+# raw series), the sanitization self-check `benchmarks/.gitignore`
+# documents as its pre-commit rule runs over the STAGED copy, and only a
+# copy that passes is moved into the committed tree: the destination cell
+# directory — built from the RESOLVED raw root and asserted to be exactly
+# `<raw-root>/<device-name>/fine-floor/<aa>-<scale>/<sub>`, nothing else
+# — is `rm -rf`'d immediately before the move (a rerun over a stale cell
+# never leaves a prior run's files mixed in with the new ones). A rejected
+# copy therefore never touches `benchmarks/raw/` at all, and a SKIPPED
+# scenario/nav result is never copied (its cell directory, if one exists
+# from an earlier rerun, is left alone — the progress line prints
+# `raw: not copied (SKIPPED)` instead). The self-check fails loudly —
+# never a silent partial copy:
 #   - every `*.log` line matches the perf whitelist (`grep -rlvE
 #     'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$'
 #     --include='*.log'` must print nothing);
-#   - every `stats.txt` line matches the stats.py-table whitelist (the
-#     exact line shapes `format_table`/run.sh's own `-- stats.py` banner
-#     produce: `^-- stats.py`, `^== `, `^frames:`, `^p50=`, `^missed_`, or
-#     blank);
+#   - every `stats.txt` line matches the stats.py-table whitelist — the
+#     FULL line shapes `format_table`/run.sh's own `-- stats.py` banner
+#     produce (STATS_WHITELIST_RE below; `benchmarks/.gitignore` cites the
+#     same expression as its pre-commit rule): the banner, `== <label> ==`,
+#     `frames: N total, N active, N skipped`, the `p50=..ms  p95=..ms
+#     p99=..ms  worst=..ms` row, the `missed_60hz=N (budget ..ms)
+#     missed_120hz=N (budget ..ms)` row, or blank;
 #   - the expected artifacts are actually present — `run-01.log` through
 #     `run-<RUNS>.log` plus `stats.txt` for a scenario cell,
 #     `logcat-frust-perf.log` for a nav cell — a missing artifact fails the
@@ -113,22 +121,30 @@
 # Device wake/unlock/lock: before cell 1 (skipped in --dry-run, but
 # printed by it so a preview shows the full live-run command sequence),
 # this script wakes the device if it isn't already `Awake`
-# (`dumpsys power`'s `mWakefulness`) and always sends the home/menu key to
-# clear the keyguard — a scenario/nav capture started against a sleeping
+# (`dumpsys power`'s `mWakefulness`) and sends the menu key to clear the
+# keyguard if one is showing (`dumpsys activity activities`'
+# `mKeyguardShowing`) — a scenario/nav capture started against a sleeping
 # or locked screen captures nothing usable. It locks the device again on
-# exit (normal, error, or Ctrl-C) ONLY if this run itself woke it (a
-# device the operator had already unlocked on purpose is left alone), and
-# never under --dry-run.
+# exit (normal, error, or Ctrl-C) ONLY if this run itself woke it OR
+# dismissed its keyguard (a device the operator had already unlocked on
+# purpose — awake, no keyguard showing — is left alone), and never under
+# --dry-run.
 #
 # Emits a Markdown table — columns `aa`, `scale`, one p50/p95 column pair per
 # `--scenarios` entry, `nav total_p50`, `nav submit_p95` — to stdout and to
-# `<out>/ab_matrix.md`. Transient build/install/command output (kept for
-# debugging a SKIPPED cell) lives under `benchmarks/harness/.runs/` (already
-# gitignored); ONLY the sanitized raw-series artifacts described above are
-# ever written under `benchmarks/raw/`. An EXIT/INT/TERM trap removes any
-# other transient scratch this script itself creates outside that
-# committed tree (e.g. a nav run's `*.monkey.txt` launch-output capture)
-# and performs the device-lock step above.
+# `<out>/ab_matrix.md`; each finished cell's row is ALSO appended to
+# `<out>/ab_matrix.rows.md` the moment it is measured, so a run that ends
+# early (a hard failure in a later cell, Ctrl-C) never loses the cells
+# already measured — on such an exit the EXIT trap prints the rows so far
+# as a PARTIAL table (also written to `<out>/ab_matrix.partial.md`).
+# Ctrl-C/SIGTERM STOPS the matrix — no further cell is built, installed or
+# run — and exits 130/143. Transient build/install/command output
+# (including a nav run's `*.monkey.txt` launch capture — kept for
+# debugging a SKIPPED cell, which is what its message points at) lives
+# under `benchmarks/harness/.runs/` (already gitignored) and is never
+# removed by this script; ONLY the sanitized raw-series artifacts
+# described above are ever written under `benchmarks/raw/`. The EXIT trap
+# performs the device-lock step above.
 #
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
 #                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
@@ -179,7 +195,11 @@
 #   --frust <path>     path to the frust CLI binary (default:
 #                      <repo-root>/target/debug/frust).
 #   --raw-root <dir>   root of the committed sanitized raw-series tree
-#                      (default: <repo-root>/benchmarks/raw). Refused if it
+#                      (default: <repo-root>/benchmarks/raw). Must be
+#                      non-empty and must not resolve to `/` or the home
+#                      directory: every cell path — and so the one `rm -rf`
+#                      this script performs — is built from its RESOLVED
+#                      form (see the raw-series note above). Refused if it
 #                      would resolve inside --out, or vice versa — the
 #                      transient/unsanitized output directory and the
 #                      sanitized raw-series root must never nest inside one
@@ -241,6 +261,21 @@ DRY_RUN=0
 # itself woke the device — gates the cleanup trap's lock-on-exit step (see
 # the header's "Device wake/unlock/lock" note). Never set under --dry-run.
 WOKE_DEVICE=0
+DISMISSED_KEYGUARD=0
+# Rows of the emitted table, appended per finished cell by the run loop —
+# declared here, not in the loop, so the EXIT trap can print whatever was
+# measured before an early exit. MATRIX_DONE flips to 1 once the final
+# table has been written; CELL_TOTAL is the matrix size once the lists
+# are parsed; RAW_ROOT_ABS is --raw-root resolved (live runs only).
+declare -a TABLE_ROWS=()
+MATRIX_DONE=0
+CELL_TOTAL=0
+RAW_ROOT_ABS=""
+# Every line a scenario cell's stats.txt may contain, as full-line shapes
+# (see the header's raw-series note). benchmarks/.gitignore cites this
+# exact expression as its pre-commit rule for stats.txt — keep the two
+# identical.
+STATS_WHITELIST_RE='^-- stats\.py( --dclass)? \(discarding first [0-9]+ runs?, per protocol convention\) --$|^== [A-Za-z0-9_. ()-]+ ==$|^frames: [0-9]+ total, [0-9]+ active, [0-9]+ skipped$|^p50=[0-9.]+ms[[:space:]]+p95=[0-9.]+ms[[:space:]]+p99=[0-9.]+ms[[:space:]]+worst=[0-9.]+ms$|^missed_60hz=[0-9]+ \(budget [0-9.]+ms\)[[:space:]]+missed_120hz=[0-9]+ \(budget [0-9.]+ms\)$|^[[:space:]]*$'
 
 # DISCARD_FIRST (runs discarded as warm-up before stats.py computes
 # percentiles) is derived from stats.py itself a little further down, once
@@ -333,12 +368,13 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --raw-root)
-      [ $# -ge 2 ] || { echo "error: --raw-root requires a directory" >&2; exit 2; }
+      [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: --raw-root requires a non-empty directory" >&2; exit 2; }
       RAW_ROOT="$2"
       shift 2
       ;;
     --raw-root=*)
       RAW_ROOT="${1#--raw-root=}"
+      [ -n "${RAW_ROOT}" ] || { echo "error: --raw-root requires a non-empty directory" >&2; exit 2; }
       shift
       ;;
     --taps)
@@ -496,27 +532,49 @@ done
 TAP_X=("${TAP_NUMS[0]}" "${TAP_NUMS[2]}" "${TAP_NUMS[4]}")
 TAP_Y=("${TAP_NUMS[1]}" "${TAP_NUMS[3]}" "${TAP_NUMS[5]}")
 
-# --- Cleanup trap (registered before any device/filesystem work below, so
-# --- an interrupted tool-check, wake step, or matrix run still cleans up) -
+# --- EXIT / INT / TERM handling (registered before any device/filesystem -
+# --- work below, so an interrupted tool-check, wake step, or matrix run ---
+# --- still cleans up) -------------------------------------------------------
 #
-# Removes transient scratch this script itself creates outside the
-# committed benchmarks/raw/ tree (e.g. a nav run's *.monkey.txt launch
-# capture — see run_nav below) and, only for a live run that itself woke
-# the device (WOKE_DEVICE, set by wake_and_unlock_device below), locks it
-# again if it's still Awake (see the header's "Device wake/unlock/lock"
-# note). Best-effort throughout — a lost device or an already-gone OUT_DIR
-# must never turn cleanup itself into a hard failure.
+# cleanup — the EXIT trap. When the run ends before the final table was
+# written but cells were already measured (a hard failure in a later cell,
+# a signal), prints those rows as a PARTIAL table (also written to
+# <out>/ab_matrix.partial.md); then, only for a live run that itself woke
+# the device or dismissed its keyguard (WOKE_DEVICE / DISMISSED_KEYGUARD,
+# set by wake_and_unlock_device below), locks it again if it's still Awake
+# (see the header's "Device wake/unlock/lock" note). Best-effort
+# throughout — a lost device or an already-gone OUT_DIR must never turn
+# cleanup itself into a hard failure. Transient scratch under --out (a nav
+# run's *.monkey.txt launch capture included) is deliberately NOT removed:
+# it is what a SKIPPED cell's message points the operator at.
 cleanup() {
-  if [ -n "${OUT_DIR}" ] && [ -d "${OUT_DIR}" ]; then
-    find "${OUT_DIR}" -name '*.monkey.txt' -type f -delete 2>/dev/null || true
+  if [ "${MATRIX_DONE}" -eq 0 ] && [ "${#TABLE_ROWS[@]}" -gt 0 ]; then
+    emit_table "**PARTIAL** — this run ended before every cell completed: ${#TABLE_ROWS[@]} of ${CELL_TOTAL} cell(s) measured; the rows below are the completed cells only (each was also appended to ${OUT_DIR}/ab_matrix.rows.md as it finished)." \
+      2>/dev/null | tee "${OUT_DIR}/ab_matrix.partial.md" >&2 || true
   fi
-  if [ "${DRY_RUN}" -eq 0 ] && [ "${WOKE_DEVICE}" -eq 1 ] && [ -n "${DEVICE}" ]; then
+  if [ "${DRY_RUN}" -eq 0 ] && [ -n "${DEVICE}" ] \
+      && { [ "${WOKE_DEVICE}" -eq 1 ] || [ "${DISMISSED_KEYGUARD}" -eq 1 ]; }; then
     if adb -s "${DEVICE}" shell dumpsys power 2>/dev/null | grep -m1 mWakefulness | grep -q 'Awake'; then
       adb -s "${DEVICE}" shell input keyevent 26 >/dev/null 2>&1 || true
     fi
   fi
 }
-trap cleanup EXIT INT TERM
+# on_signal <name> <exit-code> — the INT/TERM trap. A trap whose handler
+# merely returns lets bash resume with the NEXT command — for this script
+# that would be the next cell, driven against a device cleanup() had just
+# locked, ending in exit 0 as if the matrix had completed. So a signal
+# stops the run right here: nothing further is built, installed or run,
+# the exit status is the conventional 128+signal (130 for SIGINT, 143 for
+# SIGTERM), and cleanup() still runs on the way out via the EXIT trap.
+on_signal() {
+  local name="$1" code="$2"
+  echo >&2
+  echo "ab_matrix.sh: caught SIG${name} — stopping the matrix (no further cell is built, installed or run); exit ${code}" >&2
+  exit "${code}"
+}
+trap cleanup EXIT
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
 
 # --- Tool checks (skipped under --dry-run — see the header) -------------
 #
@@ -556,8 +614,8 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   else
     mkdir -p "${OUT_DIR}"
   fi
-  mkdir -p "${OUT_DIR}/build" "${OUT_DIR}/install" "${OUT_DIR}/nav" "${OUT_DIR}/scenarios"
-  mkdir -p "${RAW_ROOT}"
+  mkdir -p "${OUT_DIR}/build" "${OUT_DIR}/install" "${OUT_DIR}/nav" "${OUT_DIR}/scenarios" "${OUT_DIR}/stage"
+  mkdir -p "${RAW_ROOT}" || { echo "error: mkdir -p ${RAW_ROOT} (--raw-root) failed" >&2; exit 2; }
 
   # Neither directory may nest inside the other: --out holds transient,
   # unsanitized build/install/command output, and --raw-root holds ONLY
@@ -567,8 +625,20 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   # not a plain `pwd` — so a symlinked --out/--raw-root can't present a
   # logical path that dodges the prefix compare below while still landing
   # in the nested location on disk.
-  OUT_DIR_ABS="$(cd -P "${OUT_DIR}" && pwd -P)"
-  RAW_ROOT_ABS="$(cd -P "${RAW_ROOT}" && pwd -P)"
+  OUT_DIR_ABS="$(cd -P "${OUT_DIR}" && pwd -P)" || { echo "error: cannot resolve --out ${OUT_DIR}" >&2; exit 2; }
+  RAW_ROOT_ABS="$(cd -P "${RAW_ROOT}" && pwd -P)" || { echo "error: cannot resolve --raw-root ${RAW_ROOT}" >&2; exit 2; }
+  # The resolved raw root is what every cell path — and so the one `rm -rf`
+  # this script performs (publish_cell) — is built from; the unresolved
+  # --raw-root string is never used for a write again. It must also be a
+  # directory of its own: `/` or the home directory would turn a cell
+  # directory's `rm -rf` into a deletion inside the operator's own tree.
+  home_abs="$(cd -P "${HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)"
+  case "${RAW_ROOT_ABS}" in
+    /|"${home_abs}")
+      echo "error: --raw-root resolves to ${RAW_ROOT_ABS}, which is refused as a raw-series root — it must be a dedicated directory such as <repo>/benchmarks/raw." >&2
+      exit 2
+      ;;
+  esac
   case "${OUT_DIR_ABS}" in
     "${RAW_ROOT_ABS}"|"${RAW_ROOT_ABS}"/*)
       echo "error: --out (${OUT_DIR_ABS}) resolves inside --raw-root (${RAW_ROOT_ABS}) — transient/unsanitized build, install and run.sh output would land under benchmarks/raw, which must hold only sanitized run-NN.log/stats.txt/logcat-frust-perf.log copies. Pass a different --out." >&2
@@ -584,6 +654,10 @@ if [ "${DRY_RUN}" -eq 0 ]; then
 
   echo "Output directory: ${OUT_DIR}"
   echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/fine-floor/"
+else
+  # A dry run resolves nothing and writes nothing: the cell paths it prints
+  # use --raw-root as given.
+  RAW_ROOT_ABS="${RAW_ROOT}"
 fi
 
 # --- Helpers -------------------------------------------------------------
@@ -606,28 +680,85 @@ print_cmd() {
 }
 
 # raw_cell_dir <aa> <scale> <sub> — echoes
-# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/<sub> (sub is a scenario
-# id, or "nav"). Uses the display placeholder for <device-name> when none
-# was given (--dry-run only — a live run requires --device-name).
+# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<sub> (sub is a
+# scenario id, or "nav"), built from the RESOLVED raw root. Uses the
+# display placeholder for <device-name> when none was given (--dry-run
+# only — a live run requires --device-name).
 raw_cell_dir() {
   local aa="$1" scale="$2" sub="$3"
-  echo "${RAW_ROOT}/${DEVICE_NAME_DISPLAY}/fine-floor/${aa}-${scale}/${sub}"
+  echo "${RAW_ROOT_ABS}/${DEVICE_NAME_DISPLAY}/fine-floor/${aa}-${scale}/${sub}"
+}
+
+# stage_cell_dir <aa> <scale> <sub> — echoes the staging directory under
+# --out a cell is assembled and self-checked in before publish_cell moves
+# it into the committed tree: <out>/stage/<aa>-<scale>/<sub> (`<out>`
+# literally under --dry-run, which has no output directory).
+stage_cell_dir() {
+  local aa="$1" scale="$2" sub="$3"
+  echo "${OUT_DIR:-<out>}/stage/${aa}-${scale}/${sub}"
+}
+
+# assert_raw_cell_dir <dir> — dies unless <dir> is exactly one cell
+# directory under the RESOLVED raw root —
+# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<sub>: four
+# non-empty segments below the root, no `..` segment anywhere, an absolute
+# root. Called by publish_cell immediately before its `rm -rf`, the only
+# recursive delete this script performs, which must never be pointed
+# anywhere else whatever --raw-root, --device-name or the matrix values
+# were.
+assert_raw_cell_dir() {
+  local dir="$1" rel slashes
+  [ -n "${RAW_ROOT_ABS}" ] || die "assert_raw_cell_dir: the raw root is not resolved"
+  case "${RAW_ROOT_ABS}" in
+    /*) ;;
+    *) die "assert_raw_cell_dir: raw root '${RAW_ROOT_ABS}' is not absolute" ;;
+  esac
+  case "${dir}" in
+    *'/../'*|*'/..'|'../'*|'..') die "refusing to touch '${dir}': the path contains a '..' segment" ;;
+  esac
+  case "${dir}" in
+    "${RAW_ROOT_ABS}"/*/fine-floor/*-*/*) ;;
+    *) die "refusing to touch '${dir}': not of the form ${RAW_ROOT_ABS}/<device-name>/fine-floor/<aa>-<scale>/<sub>" ;;
+  esac
+  rel="${dir#"${RAW_ROOT_ABS}"/}"
+  case "${rel}" in
+    *//*|/*|*/) die "refusing to touch '${dir}': empty path segment in '${rel}'" ;;
+  esac
+  slashes="${rel//[^\/]/}"
+  [ "${#slashes}" -eq 3 ] || die "refusing to touch '${dir}': expected exactly <device-name>/fine-floor/<aa>-<scale>/<sub> below ${RAW_ROOT_ABS}, got '${rel}'"
+}
+
+# publish_cell <stage-dir> <cell-dir> — moves a cell that PASSED the
+# self-check from its staging directory into the committed tree. The only
+# `rm -rf` this script performs happens here, immediately after
+# assert_raw_cell_dir has vetted the destination; it clears a stale cell
+# from an earlier rerun before the move.
+publish_cell() {
+  local stage_dir="$1" cell_dir="$2" parent
+  assert_raw_cell_dir "${cell_dir}"
+  rm -rf "${cell_dir}"
+  parent="$(dirname "${cell_dir}")"
+  mkdir -p "${parent}" || die "mkdir -p ${parent} failed"
+  mv "${stage_dir}" "${cell_dir}" || die "mv ${stage_dir} -> ${cell_dir} failed"
 }
 
 # self_check_raw_dir <dir> <kind:scenario|nav> [<runs>] — re-runs the
 # sanitization self-check benchmarks/.gitignore documents as its pre-commit
 # rule over the raw-series artifacts copy_scenario_raw/copy_nav_raw just
-# wrote into <dir> — a hard, loud failure of the whole matrix on any
-# violation (see header), never a silent partial/corrupt copy:
+# STAGED into <dir> (under --out — nothing has touched the committed tree
+# yet; publish_cell runs only after this returns) — a hard, loud failure
+# of the whole matrix on any violation (see header), never a silent
+# partial/corrupt copy, and never a rejected file left under
+# benchmarks/raw:
 #   - every *.log line matches the perf whitelist (frust-perf/
 #     flutter-perf/bench-scenario/blank);
-#   - kind=scenario: every stats.txt line matches the stats.py-table
-#     whitelist (the exact line shapes format_table/run.sh's own
-#     "-- stats.py" banner produce), AND run-01.log..run-<runs>.log plus
-#     stats.txt are all present;
+#   - kind=scenario: every stats.txt line matches STATS_WHITELIST_RE (the
+#     full line shapes format_table/run.sh's own "-- stats.py" banner
+#     produce), AND run-01.log..run-<runs>.log plus stats.txt are all
+#     present;
 #   - kind=nav: logcat-frust-perf.log is present.
 # Only ever called after a non-SKIPPED copy (see the run loop below) — a
-# SKIPPED cell's raw dir is never written, so this never runs against one.
+# SKIPPED cell is never staged, so this never runs against one.
 self_check_raw_dir() {
   local dir="$1" kind="$2" runs="${3:-0}" offenders i run_file
   [ -d "${dir}" ] || die "expected raw-series directory missing: ${dir}"
@@ -642,9 +773,9 @@ self_check_raw_dir() {
   case "${kind}" in
     scenario)
       [ -f "${dir}/stats.txt" ] || die "expected ${dir}/stats.txt missing"
-      offenders="$(grep -vE '^-- stats\.py|^== |^frames:|^p50=|^missed_|^[[:space:]]*$' "${dir}/stats.txt" 2>/dev/null || true)"
+      offenders="$(grep -vE "${STATS_WHITELIST_RE}" "${dir}/stats.txt" 2>/dev/null || true)"
       if [ -n "${offenders}" ]; then
-        echo "error: unexpected content in ${dir}/stats.txt (line(s) matching none of the stats.py-table whitelist -- stats.py/==/frames:/p50=/missed_/blank):" >&2
+        echo "error: unexpected content in ${dir}/stats.txt (line(s) matching none of the stats.py-table full-line shapes — banner / == label == / frames: / p50= row / missed_60hz= row / blank):" >&2
         printf '  %s\n' "${offenders}" >&2
         exit 1
       fi
@@ -662,63 +793,114 @@ self_check_raw_dir() {
   esac
 }
 
-# copy_scenario_raw <scenario> <aa> <scale> <scen_out> <runsh_log> — clears
-# (rm -rf then mkdir -p) then repopulates
-# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/<scenario>/ with
-# run.sh's own sanitized run-NN.log files plus a stats.txt (the run.sh
-# stdout tail carrying stats.py's p50=/p95= table), then re-runs the
-# raw-series sanitization self-check over that directory. Only ever called
-# for a non-SKIPPED scenario result (see the run loop) — every cp is
-# checked, and a missing expected artifact fails the self-check.
+# copy_scenario_raw <scenario> <aa> <scale> <scen_out> <runsh_log> —
+# assembles run.sh's own sanitized run-NN.log files plus a stats.txt (the
+# run.sh stdout tail carrying stats.py's p50=/p95= table) in the cell's
+# staging directory (cleared first), runs the raw-series sanitization
+# self-check THERE, and only then publishes the cell into
+# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<scenario>/ (see
+# publish_cell). Only ever called for a non-SKIPPED scenario result (see
+# the run loop) — every cp is checked, and a missing expected artifact
+# fails the self-check before anything is published.
 copy_scenario_raw() {
-  local scenario="$1" aa="$2" scale="$3" scen_out="$4" runsh_log="$5" cell_dir
+  local scenario="$1" aa="$2" scale="$3" scen_out="$4" runsh_log="$5" cell_dir stage_dir
   cell_dir="$(raw_cell_dir "${aa}" "${scale}" "${scenario}")"
+  stage_dir="$(stage_cell_dir "${aa}" "${scale}" "${scenario}")"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    print_cmd "" "rm -rf ${cell_dir} && mkdir -p ${cell_dir} && cp ${scen_out}/run-*.log ${cell_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${cell_dir}/stats.txt" >&2
+    print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
     return 0
   fi
-  rm -rf "${cell_dir}"
-  mkdir -p "${cell_dir}" || die "mkdir -p ${cell_dir} failed"
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}" || die "mkdir -p ${stage_dir} failed"
   local copied=0 f
   for f in "${scen_out}"/run-*.log; do
     [ -e "${f}" ] || continue
-    cp "${f}" "${cell_dir}/" || die "cp ${f} -> ${cell_dir}/ failed"
+    cp "${f}" "${stage_dir}/" || die "cp ${f} -> ${stage_dir}/ failed"
     copied=1
   done
   if [ "${copied}" -eq 0 ]; then
-    echo "note: no sanitized run-NN.log files found under ${scen_out} — nothing copied into ${cell_dir}" >&2
+    echo "note: no sanitized run-NN.log files found under ${scen_out} — nothing staged for ${cell_dir}" >&2
   fi
   if [ -f "${runsh_log}" ]; then
-    sed -n '/^-- stats.py/,$p' "${runsh_log}" >"${cell_dir}/stats.txt" || die "writing ${cell_dir}/stats.txt failed"
-    if [ ! -s "${cell_dir}/stats.txt" ]; then
-      rm -f "${cell_dir}/stats.txt"
+    sed -n '/^-- stats.py/,$p' "${runsh_log}" >"${stage_dir}/stats.txt" || die "writing ${stage_dir}/stats.txt failed"
+    if [ ! -s "${stage_dir}/stats.txt" ]; then
+      rm -f "${stage_dir}/stats.txt"
     fi
   fi
-  self_check_raw_dir "${cell_dir}" "scenario" "${RUNS}"
+  self_check_raw_dir "${stage_dir}" "scenario" "${RUNS}"
+  publish_cell "${stage_dir}" "${cell_dir}"
 }
 
-# copy_nav_raw <aa> <scale> <nav_log> — clears (rm -rf then mkdir -p) then
-# repopulates
-# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/nav/logcat-frust-perf.log
-# with the already-sanitized nav log (see run_nav), then re-runs the
-# raw-series sanitization self-check over that directory. Only ever called
-# for a non-SKIPPED nav result (see the run loop) — the cp is checked, and
-# a missing expected artifact fails the self-check.
+# copy_nav_raw <aa> <scale> <nav_log> — stages the already-sanitized nav
+# log (see run_nav) as logcat-frust-perf.log in the cell's staging
+# directory (cleared first), runs the raw-series sanitization self-check
+# THERE, and only then publishes the cell into
+# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/nav/ (see
+# publish_cell). Only ever called for a non-SKIPPED nav result (see the
+# run loop) — the cp is checked, and a missing expected artifact fails the
+# self-check before anything is published.
 copy_nav_raw() {
-  local aa="$1" scale="$2" nav_log="$3" cell_dir
+  local aa="$1" scale="$2" nav_log="$3" cell_dir stage_dir
   cell_dir="$(raw_cell_dir "${aa}" "${scale}" "nav")"
+  stage_dir="$(stage_cell_dir "${aa}" "${scale}" "nav")"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    print_cmd "" "rm -rf ${cell_dir} && mkdir -p ${cell_dir} && cp ${nav_log} ${cell_dir}/logcat-frust-perf.log" >&2
+    print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${nav_log} ${stage_dir}/logcat-frust-perf.log && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
     return 0
   fi
-  rm -rf "${cell_dir}"
-  mkdir -p "${cell_dir}" || die "mkdir -p ${cell_dir} failed"
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}" || die "mkdir -p ${stage_dir} failed"
   if [ -f "${nav_log}" ]; then
-    cp "${nav_log}" "${cell_dir}/logcat-frust-perf.log" || die "cp ${nav_log} -> ${cell_dir}/logcat-frust-perf.log failed"
+    cp "${nav_log}" "${stage_dir}/logcat-frust-perf.log" || die "cp ${nav_log} -> ${stage_dir}/logcat-frust-perf.log failed"
   else
-    echo "note: nav log ${nav_log} not found — nothing copied into ${cell_dir}" >&2
+    echo "note: nav log ${nav_log} not found — nothing staged for ${cell_dir}" >&2
   fi
-  self_check_raw_dir "${cell_dir}" "nav"
+  self_check_raw_dir "${stage_dir}" "nav"
+  publish_cell "${stage_dir}" "${cell_dir}"
+}
+
+# emit_table <status-line> — the Markdown table over whatever TABLE_ROWS
+# holds so far, to stdout: called once at the end of a completed matrix
+# (empty status line) and, with a PARTIAL status line, by the EXIT trap
+# when the run ends early with rows already measured (see cleanup).
+emit_table() {
+  local status="$1" header sep scenario upper row
+  header="| AA mode | Render scale |"
+  sep="|---|---|"
+  for scenario in "${SCENARIO_ARR[@]}"; do
+    upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
+    header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
+    sep="${sep}---|---|"
+  done
+  header="${header} nav total_p50 (ms) | nav submit_p95 (ms) |"
+  sep="${sep}---|---|"
+
+  echo
+  echo "## Fine-floor A/B matrix — device ${DEVICE}"
+  echo
+  if [ -n "${status}" ]; then
+    echo "${status}"
+    echo
+  fi
+  echo "Kept ${KEPT} of ${RUNS} runs per scenario (the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4); percentiles below are computed over the kept runs only. The nav columns (nav total_p50, nav submit_p95) are NOT part of this kept-run accounting — see the note below."
+  echo
+  echo "${header}"
+  echo "${sep}"
+  for row in "${TABLE_ROWS[@]}"; do
+    echo "${row}"
+  done
+  echo
+  echo "Note: under FRUST_RENDER_SCALE<1 the snapshot-layer cache is disabled"
+  echo "by design, so the nav column's numbers at scale<1 measure the inline"
+  echo "(uncached) path, not the cached one."
+  echo
+  echo "Nav-basis note: the nav columns come from ONE push/pop pass per cell"
+  echo "(no repeated runs, nothing discarded as warm-up) — they report"
+  echo "material3-demo's own in-process rolling percentiles off the LAST"
+  echo "frust-perf frame summary line's n=<frames> field, not a kept-N-of-M"
+  echo "sample like the scenario columns above."
+  echo
+  echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4) — scenario columns only; see the nav-basis note above for the nav columns."
+  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/."
 }
 
 # build_apk <label> <app-dir> <aa> <scale> <log> — runs (or, under
@@ -879,9 +1061,10 @@ run_scenario() {
 # only the already-sanitized result is ever written to ${log} — there is
 # no intermediate file to delete or leak on any of this function's
 # SKIPPED/parse-failure returns below (see the header's "no unfiltered
-# dump" note). The EXIT/INT/TERM trap (see cleanup(), above the tool
-# checks) still cleans up this function's other transient file, the
-# monkey-launch capture at ${log}.monkey.txt.
+# dump" note). This function's other transient file, the monkey-launch
+# capture at ${log}.monkey.txt, is deliberately KEPT under --out: it is
+# what the SKIPPED message below points the operator at, and --out is
+# transient, gitignored scratch (see the header) that no trap removes.
 run_nav() {
   local log="$1" i
   echo "-- nav (material3-demo push/pop): drive --" >&2
@@ -949,19 +1132,32 @@ wake_and_unlock_device() {
   print_cmd "" "adb -s ${DEVICE} shell dumpsys power | grep -m1 mWakefulness" >&2
   print_cmd "" "adb -s ${DEVICE} shell input keyevent 26   # wake, only if not already Awake" >&2
   print_cmd "" "sleep 1" >&2
-  print_cmd "" "adb -s ${DEVICE} shell input keyevent 82   # unlock (always)" >&2
-  print_cmd "" "adb -s ${DEVICE} shell input keyevent 26   # lock on exit, only if this run woke the device (EXIT/INT/TERM trap)" >&2
+  print_cmd "" "adb -s ${DEVICE} shell dumpsys activity activities | grep -m1 mKeyguardShowing" >&2
+  print_cmd "" "adb -s ${DEVICE} shell input keyevent 82   # dismiss the keyguard, only if one is showing" >&2
+  print_cmd "" "adb -s ${DEVICE} shell input keyevent 26   # lock on exit, only if this run woke the device or dismissed its keyguard (EXIT trap)" >&2
   if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
   fi
-  local wakefulness
+  local wakefulness keyguard
   wakefulness="$(adb -s "${DEVICE}" shell dumpsys power 2>/dev/null | grep -m1 mWakefulness || true)"
   if ! printf '%s' "${wakefulness}" | grep -q 'Awake'; then
     adb -s "${DEVICE}" shell input keyevent 26 >/dev/null 2>&1 || true
     sleep 1
     WOKE_DEVICE=1
   fi
-  adb -s "${DEVICE}" shell input keyevent 82 >/dev/null 2>&1 || true
+  # The keyguard is asked about directly — a device can be Awake AND
+  # sitting on its lock screen (the usual state of a rig phone the operator
+  # just tapped) — so the exit-time re-lock keys off what this run actually
+  # changed, not off wakefulness alone. Verified on the Pixel 5 (Android
+  # 14): `mKeyguardShowing=true` asleep and on the lock screen, `=false`
+  # once dismissed. An unreadable field counts as "showing": dismissing an
+  # absent keyguard is a harmless menu key, while leaving a real one
+  # dismissed and unlocked on exit is not.
+  keyguard="$(adb -s "${DEVICE}" shell dumpsys activity activities 2>/dev/null | grep -m1 mKeyguardShowing || true)"
+  if ! printf '%s' "${keyguard}" | grep -q 'mKeyguardShowing=false'; then
+    adb -s "${DEVICE}" shell input keyevent 82 >/dev/null 2>&1 || true
+    DISMISSED_KEYGUARD=1
+  fi
 }
 
 # --- Dry run: print every command for every cell, then exit -------------
@@ -1002,7 +1198,8 @@ fi
 
 # --- Live run: drive the matrix ------------------------------------------
 
-declare -a TABLE_ROWS=()
+CELL_TOTAL=$(( ${#AA_ARR[@]} * ${#SCALE_ARR[@]} ))
+: >"${OUT_DIR}/ab_matrix.rows.md" || die "cannot write ${OUT_DIR}/ab_matrix.rows.md"
 
 wake_and_unlock_device
 
@@ -1056,46 +1253,18 @@ for aa in "${AA_ARR[@]}"; do
     fi
 
     TABLE_ROWS+=("${row}")
+    # Durable the moment it exists: a later hard failure or a signal must
+    # not cost the cells already measured (the EXIT trap also prints them).
+    printf '%s\n' "${row}" >>"${OUT_DIR}/ab_matrix.rows.md" \
+      || echo "warning: could not append the row to ${OUT_DIR}/ab_matrix.rows.md" >&2
   done
 done
 
 # --- Emit the Markdown table ----------------------------------------------
 
-header="| AA mode | Render scale |"
-sep="|---|---|"
-for scenario in "${SCENARIO_ARR[@]}"; do
-  upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
-  header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
-  sep="${sep}---|---|"
-done
-header="${header} nav total_p50 (ms) | nav submit_p95 (ms) |"
-sep="${sep}---|---|"
+emit_table "" | tee "${OUT_DIR}/ab_matrix.md"
+MATRIX_DONE=1
 
-{
-  echo
-  echo "## Fine-floor A/B matrix — device ${DEVICE}"
-  echo
-  echo "Kept ${KEPT} of ${RUNS} runs per scenario (the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4); percentiles below are computed over the kept runs only. The nav columns (nav total_p50, nav submit_p95) are NOT part of this kept-run accounting — see the note below."
-  echo
-  echo "${header}"
-  echo "${sep}"
-  for row in "${TABLE_ROWS[@]}"; do
-    echo "${row}"
-  done
-  echo
-  echo "Note: under FRUST_RENDER_SCALE<1 the snapshot-layer cache is disabled"
-  echo "by design, so the nav column's numbers at scale<1 measure the inline"
-  echo "(uncached) path, not the cached one."
-  echo
-  echo "Nav-basis note: the nav columns come from ONE push/pop pass per cell"
-  echo "(no repeated runs, nothing discarded as warm-up) — they report"
-  echo "material3-demo's own in-process rolling percentiles off the LAST"
-  echo "frust-perf frame summary line's n=<frames> field, not a kept-N-of-M"
-  echo "sample like the scenario columns above."
-  echo
-  echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4) — scenario columns only; see the nav-basis note above for the nav columns."
-  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/."
-} | tee "${OUT_DIR}/ab_matrix.md"
 
 echo
 echo "Matrix complete — ${cell} cell(s). Table written to ${OUT_DIR}/ab_matrix.md"
