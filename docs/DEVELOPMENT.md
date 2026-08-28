@@ -395,9 +395,8 @@ workspace: `frust_bench/` (standalone Cargo package, gate from its own directory
 `examples/huddle`) and `flutter_bench/` (Flutter SDK, tested against 3.44.2 stable)
 implement the same scenarios — eight timed UI scenarios (S1–S8) plus two DB op-latency
 scenarios (D1/D2) — driven by `harness/`'s shared scripts. `benchmarks/` is scoped strictly
-to this paired-comparison protocol; the terminal-grid and IME-capability probes that used to
-ride alongside it as S9/S10 now live in `examples/playground` as exploratory, single-sided
-demos instead.
+to this paired-comparison protocol; the exploratory, single-sided terminal-grid and
+IME-capability probes live in `examples/playground` instead.
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
@@ -425,6 +424,7 @@ coreutils`) until fixed.
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
 | `FRUST_NO_DIRECT_SURFACE` / `FRUST_NO_SHADER_EFFECTS` / `FRUST_NO_SNAPSHOT_LAYERS` | Render-path A/B kill switches, one per GPU pre-pass (`docs/RENDER_ARCHITECTURE.md`'s Data Flow): `FRUST_NO_DIRECT_SURFACE` pins a direct-capable surface onto the blit fallback arm; `FRUST_NO_SHADER_EFFECTS` disables the shader-quad pre-pass, so `Command::ShaderQuad` falls back to its placeholder fill; `FRUST_NO_SNAPSHOT_LAYERS` disables the snapshot-layer cache, so every `PushSnapshot` bracket lowers through `convert.rs`'s inline emulation. Same compile-time-or-runtime parsing as `FRUST_TRACE`; see RENDER_ARCHITECTURE.md's kill-switch entry for the `submit_us`/`acquire_us` remap caveat these three A/B valves share. | off (path auto-probed) / off (pre-pass active) / off (cache active) |
+| `FRUST_AA_MODE` / `FRUST_RENDER_SCALE` | Render-cost measurement instruments — not policy: both exist to A/B vello's fine-stage cost on device (`docs/RENDER_ARCHITECTURE.md`'s Data Flow), and nothing selects either automatically. `FRUST_AA_MODE` picks vello's anti-aliasing method (`area`/`msaa8`/`msaa16`, case-insensitive; an unrecognised value warns once and falls back to `area`), requested at every render-params site including cached snapshot pages, with the vello renderer built for exactly that one mode's pipelines; msaa8/msaa16 render corrupted on Adreno 620, unusable there (see LIMITATIONS.md). `FRUST_RENDER_SCALE` renders the whole frame into an intermediate that fraction of the surface (`0.25..=1.0`; out of range clamps, unparsable/non-finite falls back to `1.0`, each with one warn) and lets the blit pass upscale it — while it is below `1.0` the surface is pinned onto the blit arm and the snapshot-layer cache is refused (see LIMITATIONS.md). Same compile-time-or-runtime parsing as `FRUST_TRACE`. Each logs its effective value once per process in any build, no `perf-trace` needed: `frust-render aa-mode=<mode>` and `frust-render render-scale=<s> blit-target=<w>x<h>`. | `area` (byte-identical to an untouched build) / `1.0` (full surface resolution) |
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...`
 line, then periodic `frust-perf frame ...` summaries; on a platform-view page it

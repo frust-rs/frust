@@ -93,6 +93,21 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   (out of `encode_us`) and `acquire_us` precedes it rather than follows — account for this remap
   before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full
   v3 field mapping).
+- Measurement knobs (`FRUST_AA_MODE`/`FRUST_RENDER_SCALE`, same compile-time-or-runtime shape as the
+  kill switch above — see `docs/DEVELOPMENT.md`'s Instrumentation table): `FRUST_AA_MODE` picks the
+  single `vello::AaSupport` mode the renderer compiles pipelines for and the `antialiasing_method`
+  every pass requests, cached snapshot pages included, so a frame and its composited pages are
+  always anti-aliased alike. `FRUST_RENDER_SCALE < 1` forces the blit arm exactly as
+  `FRUST_NO_DIRECT_SURFACE` does (`blit_translucency_refused` included), sizes the intermediate at
+  `ceil(w*s) x ceil(h*s)` (`context::scaled_size`, on creation and on resize), and encodes both of
+  the frame's vello passes under a root `Affine::scale(s)` — `convert::encode_range_with_overrides`'s
+  `root`, pre-multiplied onto every command's own transform, with the range-scoped `ClearRect` hoist
+  composing on top — after which the blit pass upscales through a `Linear`-sampled `TextureBlitter`
+  (`context::blit_filter`). The shader pre-pass keeps its raw, unrooted override keys, so its
+  full-size texture is drawn scaled into the smaller target; the snapshot-layer cache is refused
+  while scaled (a cached page composites in the target's own device space), so every bracket lowers
+  inline. The cpu-tier is pinned at 1.0, and `encode_us` still carries the GPU render, now at the
+  reduced size (the A/B caveat above is otherwise unchanged).
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via
   `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s. `TextContext::layout_bounded`
   additionally measures against a max line count and applies `TextOverflow` by truncating the shaped
