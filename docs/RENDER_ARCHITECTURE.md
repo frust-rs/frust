@@ -64,7 +64,9 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   fingerprint or size change, rasterizes it once into a cached `Rgba8Unorm` `TEXTURE_BINDING |
   STORAGE_BINDING` texture sized from the rect's own extent under the bracket's raster (device)
   scale, independent of where the rect sits; an unchanged bracket reuses its texture untouched,
-  and an entry unused for 2 frames is evicted.
+  and an entry unused for 2 frames is evicted. A frame that punches a `ClearRect` after the first
+  cached bracket lowers whole-frame inline, and a bracket whose texture would exceed 2x the
+  surface's pixel area lowers on its own (see LIMITATIONS.md).
 - Frame split (`FramePlan`, `compositor.rs`): vello renders the commands before the first cached
   bracket (the pre segment) — skipped entirely when it draws nothing, letting the compositor's
   own render pass clear to the frame's `base_color` instead. The `Compositor` then draws each
@@ -74,11 +76,12 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   still draw run through one extra transparent vello pass into a scratch texture, composited
   last as a full quad to keep z-order — content recorded BETWEEN two cached brackets lands above
   both (see LIMITATIONS.md). That trailing pass re-opens whatever `PushClip`/`PushClipRounded`/
-  `PushLayer` groups were still open where the split falls (`FramePlan::trailing_prefix`, from
-  `open_group_pushes`) via `encode_range_with_overrides`'s `prefix` param, then closes every
-  group still open at the segment's end so each pass stays self-balanced; the scratch texture
-  itself ages out after `MAX_UNUSED_FRAMES` (2) frames it goes unused (`Compositor::age_scratch`),
-  the same boundary the page-texture cache evicts by.
+  `PushLayer` groups were still open where the split falls: `FramePlan::trailing` is a
+  `convert::Segment` (its command range plus those still-open group pushes, derived in one walk by
+  `frame_split`/`open_group_pushes`) that `encode_range_with_overrides` re-opens first, then
+  closes every group still open at the segment's end so each pass stays self-balanced; the
+  scratch texture itself ages out after `MAX_UNUSED_FRAMES` (2) frames it goes unused
+  (`Compositor::age_scratch`), the same boundary the page-texture cache evicts by.
 - Kill switch: `FRUST_NO_SNAPSHOT_LAYERS` (compile-time `option_env!` or runtime env, cached
   once per surface — same compile-time-or-runtime shape as `FRUST_TRACE`, see
   `docs/DEVELOPMENT.md`'s Instrumentation table) disables the cache; every bracket then lowers

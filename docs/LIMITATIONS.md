@@ -2785,9 +2785,16 @@ drawing them through vello, carries several named costs and gaps:
 6. **`ShaderQuad`/`ClearRect` bodies are never cached.** `is_cacheable_body` excludes both — the
    command-slice rasterization path carries no shader-override map, and a rasterized `ClearRect`
    (the platform-view hole punch) would erase texture pixels instead of the surface — so a body
-   containing either always lowers inline. A `ClearRect` recorded inside a TRAILING segment
-   (outside any bracket) also fails to punch the real frame: the hoist is scoped to that segment's
-   own transparent scratch target, never the swapchain a hosted native view sits behind.
+   containing either always lowers inline. A `ClearRect` recorded AFTER the first composited
+   bracket and outside every bracket escapes wider: `SnapshotCache::plan`'s
+   `punches_after_first_bracket` lowers the WHOLE frame inline that frame — no layers, no holes,
+   no trailing pass, the ordinary single-pass frame — since the trailing pass's hoist is scoped to
+   its own transparent scratch target, never the swapchain a hosted native view sits behind. The
+   reachable shape is a bracketed-but-uncacheable page hosting a platform view (its body carries
+   the hole punch, so `is_cacheable_body` refuses it) pushed OVER a composited page on a
+   translucent Android surface; that transition pays the pre-cache cost while the punch is in
+   flight rather than showing the composited page through the hole. A punch recorded BEFORE the
+   first composited bracket (the pre segment) still lands on the real target and keeps the cache.
 7. **Rounded enclosing clip cropped to its bbox.** A composited bracket is drawn as a quad outside
    vello, scissored to the device-space intersection of every enclosing `PushClip`/
    `PushClipRounded`/`PushLayer` rect (a `PushLayer` bounds its content exactly as a clip does, so
@@ -2808,6 +2815,10 @@ drawing them through vello, carries several named costs and gaps:
    a straight-alpha swapchain has no exact composite arithmetic for a blended quad) — every bracket
    on that surface lowers inline, same as `FRUST_NO_SNAPSHOT_LAYERS`, logged once per process
    naming the reason.
+10. **Per-bracket area budget.** A body whose texture would exceed `SNAPSHOT_AREA_BUDGET_FACTOR`
+    (2) times the surface's pixel area lowers inline (`SnapshotCache::plan`, fed the surface size
+    by `prepare`). A page texture is at most the surface's own physical size, so only an oversized
+    bracket — a scroll extent, a rotated raster's bounding box — ever reaches the budget.
 
 **Applies to**: any app relying on snapshot layers for page-transition performance — every point
 above is a behavior difference from the pre-cache inline path, not a bug. `FRUST_NO_SNAPSHOT_LAYERS`
@@ -2828,22 +2839,27 @@ MB); a page lives only while its bracket is still in use and both it and the scr
 after `MAX_UNUSED_FRAMES` (2) consecutive unused frames (`SnapshotCache::evict`,
 `Compositor::age_scratch`/`scratch_expired`) — the scratch exists at all only for a frame that had
 a trailing segment. A transition can therefore hold a transient peak of up to ~31 MB (two live
-pages plus the scratch) for a couple of frames; the measured steady-state delta below is a
-post-eviction sample taken once that peak has already aged out, not the peak itself. Measured
-Pixel 5a snapshot GPU memory delta across a push/pop plus two tab switches: 43.6 MB → 45.0 MB
-(+1.4 MB; EGL `mtrack` unchanged at 40.9 MB) — small enough on device hardware not to itself be a
-limitation.
+pages plus the scratch) for a couple of frames, and the area budget (item 10) bounds any single
+page texture at ≤2× the surface, so that arithmetic is also its per-page ceiling; the measured
+steady-state delta below is a post-eviction sample taken once that peak has already aged out, not
+the peak itself. Measured Pixel 5a snapshot GPU memory delta across a push/pop plus two tab
+switches: 43.6 MB → 45.0 MB (+1.4 MB; EGL `mtrack` unchanged at 40.9 MB) — small enough on
+device hardware not to itself be a limitation.
 
 **Evidence**: `crates/frust-render/src/snapshot.rs`'s module doc (fine-stage floor, first-render,
 "Enclosing clips and layers", and "what is never cached" sections) and its
 `outermost_brackets`/`is_cacheable_body`/`snapshot_size`/`raster_root`/`open_group_pushes`/
-`FramePlan::trailing_prefix`/`SnapshotCache::evict`; `crates/frust-render/src/compositor.rs`'s
+`snapshot_depth_before`/`punches_after_first_bracket`/`SNAPSHOT_AREA_BUDGET_FACTOR`/
+`SnapshotCache::evict`, plus `frame_split`'s `FramePlan::trailing` (a `convert::Segment` — the
+command range plus the still-open group pushes); `crates/frust-render/src/compositor.rs`'s
 module doc (trailing-segment ordering, ~100 ms in-vello cost) and its
 `age_scratch`/`scratch_expired`/`MAX_UNUSED_FRAMES`; `crates/frust-render/src/convert.rs`'s
 `encode_range_with_overrides` doc comment (the range-scoped `ClearRect` hoist and the
-`trailing_prefix` re-open); `crates/frust-render/src/context.rs`'s
+`Segment::prefix` re-open); `crates/frust-render/src/context.rs`'s
 `alpha_mode_is_straight_translucent`/`ConfiguredSurface::straight_alpha_translucent`;
-`crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled` and its
+`crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled`, its
+`adopt_surface_state`/`clear_pending_frame` reset door (the one place a surface episode drops the
+in-flight frame's composite stash and its texture handles), and its
 `RenderPath::DirectPremultiplied` submit arm comment ("its output is discarded by
 the composite pass's own `LoadOp::Clear`"); `crates/frust-widgets/src/nav/navigator_tests/
 transition.rs`'s `hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page`; on-device
