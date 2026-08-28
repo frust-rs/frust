@@ -1379,6 +1379,10 @@ mod tests {
         encode_range_with_overrides(
             scene,
             &plan.pre,
+            // Unscaled: this helper renders into a SIZE x SIZE target, the
+            // full "surface" of the smoke (`FRUST_RENDER_SCALE` forces the
+            // blit arm and refuses the cache these smokes exercise).
+            Affine::IDENTITY,
             &mut vello_scene,
             &shader_images,
             adapter_max,
@@ -1399,6 +1403,7 @@ mod tests {
             encode_range_with_overrides(
                 scene,
                 segment,
+                Affine::IDENTITY,
                 &mut trailing_scene,
                 &shader_images,
                 adapter_max,

@@ -2833,8 +2833,8 @@ is a defensive ceiling added in the review cleanup round once the mechanism had 
 and no shipped shell's page bracket reaches it. Item 1's
 fine-stage floor itself — ~14.5 ms to run a vello pass over any target regardless of content — is
 the accepted, unresolved cost this whole mechanism is chasing; the framework has not yet attempted
-to lower the floor itself (a render-scale reduction is Phase 3 future work, research artifact
-`rsa_000001a03fc498e4k8TZypnY`).
+to lower the floor itself — `FRUST_RENDER_SCALE` measures that floor's cost per pixel rather than
+lowering it (see `render-measurement-knobs-not-shipping-modes` below).
 
 Memory: a cached page and the trailing scratch are each one 1080×2400 `Rgba8Unorm` texture (≈10.4
 MB); a page lives only while its bracket is still in use and both it and the scratch are released
@@ -2873,6 +2873,55 @@ push/pop, GPU-completion wait per frame): pre-cache baseline p50 60.7 ms/p90 74.
 image-quad attempt p50 96.9; compositor steady state p50 1.8 ms/p90 38.1 (one ~65-75 ms
 first-appearance raster per page, one ~35 ms settle frame); kill-switch control p50 63.9 on the
 same tree; `dumpsys meminfo Graphics` 43.6 MB → 45.0 MB across a push/pop and two tab switches.
+
+---
+
+### `render-measurement-knobs-not-shipping-modes` — a scaled frame is soft and cacheless, and MSAA is unusable on Adreno
+
+**Observed**: `frust-render`'s two render-cost instruments (`docs/DEVELOPMENT.md`'s Instrumentation
+table) each degrade the frame in a named way at any non-default value:
+
+1. **`FRUST_RENDER_SCALE < 1` softens the image, text worst.** The frame renders into an
+   intermediate a fraction of the surface and the blit pass stretches it back over the swapchain
+   with a `Linear` sampler (`context::blit_filter`), so glyphs arrive resampled instead of shaped at
+   the surface's own resolution — a bilinear upscale of a coarser raster, not a crisp smaller one.
+2. **A scaled frame gets no snapshot-layer cache.** `renderer::snapshot_cache_enabled` refuses
+   outright on `ConfiguredSurface::render_scaled` (re-asked on every resize) — a cached page is
+   composited in the target's own device space — so every `PushSnapshot` bracket lowers inline
+   exactly as under `FRUST_NO_SNAPSHOT_LAYERS` (`render-snapshot-layer-tradeoffs` above), logged
+   once per process naming the reason. A scaled
+   surface is also pinned onto the blit arm, so `blit_translucency_refused` applies to it just as it
+   does under `FRUST_NO_DIRECT_SURFACE`.
+3. **MSAA renders corrupted on Adreno 620.** `FRUST_AA_MODE=msaa8`/`msaa16` builds vello with only
+   that mode's pipelines (`AaMode::support`) and requests it at every render-params site including
+   `SnapshotCache::render`; the knob applies cleanly (`frust-render aa-mode=msaa8` logs, direct
+   arm, no wgpu validation error, no panic), but the fine-stage output is wrong on device: the
+   first frames after launch present black, and once content appears every glyph, icon,
+   rounded-rect edge, and chevron shows horizontal tearing (strips of the shape duplicated/shifted
+   a few pixels; text unreadable at a glance). `area` on the same tree renders cleanly. vello
+   0.9.0's MSAA fine-stage path produces wrong coverage on Adreno 620, so msaa8 and msaa16 are
+   unusable on that GPU tier — `area` is the only mode with a valid on-device cell.
+
+**Applies to**: only a process handed a non-default value for either knob, at build or run time.
+The defaults are byte-identical to a build without them (`AaSupport::area_only`, `scaled_size`
+identity at `1.0`, a `Nearest`-sampled blitter), and the experimental cpu-tier ignores the scale
+entirely (`RenderContext::effective_render_scale` pins it at `1.0`).
+
+**Why accepted**: both knobs are measurement instruments, not shipping modes — they exist to
+produce the on-device A/B numbers a per-device-tier render policy would be decided from, and no
+such policy exists yet: nothing selects either knob automatically, and an out-of-range,
+unparsable, or unrecognised value is clamped or refused with a warn rather than honoured. Shipping
+a reduced render scale would need resolution-aware text rather than a bilinear upscale, and
+shipping an MSAA mode on Adreno is not an option at all — item 3's on-device result shows the
+fine-stage path itself producing wrong coverage there, not merely an unmeasured cost.
+
+**Evidence**: `crates/frust-render/src/context.rs`'s `parse_aa_mode`/`aa_mode`/`AaMode::support`/
+`AaMode::to_vello` and `parse_render_scale`/`render_scale`/`render_scaled`/`scaled_size`/
+`blit_filter`/`RenderContext::effective_render_scale` (each with host tests for the fallback,
+clamp, ceil, and filter cases); `crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled`
+`render_scaled` refusal and its scaled-root blit arm; `crates/frust-render/src/convert.rs`'s
+`encode_range_with_overrides` `root` doc comment; on-device smoke, Pixel 5 (redfin, Adreno 620),
+2026-08-28, `material3-demo` built with `--define FRUST_AA_MODE=msaa8` and `msaa16`.
 
 ---
 

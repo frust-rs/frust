@@ -41,7 +41,9 @@ use kurbo::Affine;
 use peniko::ImageData;
 
 use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
+use crate::context::{
+    AaMode, ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode,
+};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
@@ -600,20 +602,40 @@ impl SurfaceRenderer {
         let backend = match ctx.selected_tier() {
             crate::RenderTier::Gpu => {
                 let device = &ctx.device_handle().device;
-                // Narrow the compiled AA pipeline set to `Area` only (the sole
-                // `AaConfig` `render()` ever requests — see the
-                // `antialiasing_method: vello::AaConfig::Area` `RenderParams`
-                // below): `RendererOptions::default()` compiles shader
-                // permutations for every `AaConfig` (`AaSupport::all()`), ~3x
-                // unnecessary pipeline compiles at init that contribute to the
-                // slow, synchronous, main-thread launch-time shader compile that
-                // can trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
+                // Narrow the compiled AA pipeline set to the one mode the
+                // `FRUST_AA_MODE` knob selected (default: `Area`, the sole
+                // `AaConfig` every production `RenderParams` site requests —
+                // see the `antialiasing_method: aa_mode().to_vello()` sites in
+                // `encode`/`submit_impl` and `snapshot.rs`'s `SnapshotCache::render`):
+                // `RendererOptions::default()` compiles shader permutations
+                // for every `AaConfig` (`AaSupport::all()`), ~3x unnecessary
+                // pipeline compiles at init that contribute to the slow,
+                // synchronous, main-thread launch-time shader compile that can
+                // trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
                 // dev-profile shader-stack override note).
                 // Verified against the vello 0.9.0 source
                 // (`RendererOptions::antialiasing_support: AaSupport`,
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
+                let mode = aa_mode();
+                // One line per process naming the effective mode, so a device
+                // capture proves which build ran (`docs/RENDER_DEVELOPMENT.md`
+                // § Instrumentation (render path)). Logged once regardless of surface
+                // recreation, mirroring `log_render_path`'s once-per-process
+                // shape.
+                // A non-default mode additionally warns: it is a measurement
+                // instrument that changes what every pass renders, and a
+                // capture read later should say so at a level that stands out
+                // from an ordinary startup line. A default build (`Area`)
+                // logs only the `info` line above, exactly as before.
+                static AA_MODE_LOGGED: OnceLock<()> = OnceLock::new();
+                AA_MODE_LOGGED.get_or_init(|| {
+                    log::info!("frust-render aa-mode={mode}");
+                    if mode != AaMode::Area {
+                        log::warn!("frust-render measurement knob in effect: aa-mode={mode}");
+                    }
+                });
                 let renderer_options = vello::RendererOptions {
-                    antialiasing_support: vello::AaSupport::area_only(),
+                    antialiasing_support: mode.support(),
                     pipeline_cache: pipeline_cache.clone(),
                     ..Default::default()
                 };
@@ -648,16 +670,40 @@ impl SurfaceRenderer {
                         );
                     });
                 }
+                // The same one-per-process note for the other silent refusal:
+                // a scaled frame gets no snapshot cache either, and "off"
+                // would otherwise look identical to the kill switch in a
+                // device capture taken to compare the two.
+                //
+                // Asked of the SURFACE, not of the knob: this must be the same
+                // truth the frame is encoded under (`RenderPath::Blit`'s
+                // `root`), and only the surface knows whether its own
+                // intermediate ended up smaller — a cpu-tier surface is pinned
+                // to full resolution however the knob is set.
+                let render_scaled = surface.render_scaled();
+                if render_scaled {
+                    static LOGGED: OnceLock<()> = OnceLock::new();
+                    LOGGED.get_or_init(|| {
+                        log::info!(
+                            "frust-render: snapshot layers disabled on this surface — render \
+                             scale < 1: cached pages are composited in the target's device \
+                             space; brackets lower inline"
+                        );
+                    });
+                }
                 TierBackend::Gpu {
                     renderer,
-                    // `FRUST_NO_SNAPSHOT_LAYERS` is resolved once here, per
-                    // surface, and held by the cache itself — so the pre-pass
-                    // never re-reads a process-global on the hot path and a
-                    // test can build either state directly.
-                    snapshots: SnapshotCache::new(snapshot_cache_enabled(
-                        crate::context::snapshot_layers_disabled(),
+                    // The four refusals are resolved here, per surface, and
+                    // held by the cache itself — so the pre-pass never
+                    // re-reads a process-global on the hot path and a test
+                    // can build either state directly. `on_surface_changed`
+                    // re-resolves them through the same
+                    // `snapshot_cache_enabled_for`: the scaled-frame refusal
+                    // is a function of the surface's live geometry, not a
+                    // constant of the process.
+                    snapshots: SnapshotCache::new(snapshot_cache_enabled_for(
+                        &surface,
                         compositor.is_some(),
-                        straight_alpha_translucent,
                     )),
                     compositor,
                 }
@@ -714,20 +760,41 @@ impl SurfaceRenderer {
     ///
     /// Only acts in [`SurfacePhase::SurfaceReady`]; a resize with no surface is
     /// dropped. The `vello::Renderer` (and its compiled pipelines) is preserved
-    /// — only the surface config and target texture are recreated. Zero
-    /// dimensions are ignored (a minimized window keeps its last valid size).
+    /// — only the surface config and target texture are recreated, and the
+    /// snapshot cache's switch is re-resolved against the new geometry
+    /// ([`snapshot_cache_enabled_for`]). Zero dimensions are ignored (a
+    /// minimized window keeps its last valid size).
     pub fn on_surface_changed(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
             ctx.resize_surface(&mut ready.surface, width, height);
-            #[cfg(feature = "cpu-tier")]
-            if let TierBackend::Cpu(cpu) = &mut ready.backend {
-                // Keep the CPU pixmap's size in step with the swapchain; the
-                // GPU renderer needs no resize (only the target texture, done
-                // above), but the CPU tier's `RenderContext`/`Pixmap` are sized.
-                cpu.resize(width, height);
+            match &mut ready.backend {
+                // The snapshot cache's switch is re-resolved against the
+                // resized surface: the scaled-frame refusal compares the
+                // surface's size with its intermediate's, and the resize
+                // above recomputed both (`RenderContext::resize_surface`).
+                // Frozen at install it could disagree with the `root` the
+                // next frame is encoded under; `set_enabled` drops the
+                // entries on the way off, so a page rasterized for one
+                // device space is never composited in another.
+                TierBackend::Gpu {
+                    snapshots,
+                    compositor,
+                    ..
+                } => snapshots.set_enabled(snapshot_cache_enabled_for(
+                    &ready.surface,
+                    compositor.is_some(),
+                )),
+                #[cfg(feature = "cpu-tier")]
+                TierBackend::Cpu(cpu) => {
+                    // Keep the CPU pixmap's size in step with the swapchain;
+                    // the GPU renderer needs no resize (only the target
+                    // texture, done above), but the CPU tier's
+                    // `RenderContext`/`Pixmap` are sized.
+                    cpu.resize(width, height);
+                }
             }
         }
     }
@@ -875,9 +942,9 @@ impl SurfaceRenderer {
                 // so the two derive the same `(id, w, h)` for every quad.
                 //
                 // `FRUST_NO_SHADER_EFFECTS` (`context::shader_effects_disabled`,
-                // `docs/DEVELOPMENT.md`'s Instrumentation table) is the kill
-                // switch for this still-unproven-on-device pre-pass: resolved
-                // once here and threaded into `run_shader_prepass`, which
+                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
+                // is the kill switch for this still-unproven-on-device pre-pass:
+                // resolved once here and threaded into `run_shader_prepass`, which
                 // short-circuits to a zero-GPU-work no-op (skipping compile,
                 // targets, and the mark_seen/reap age tracking too) before
                 // touching `device`/`queue`/`renderer`/`shader_effects` at all —
@@ -912,8 +979,9 @@ impl SurfaceRenderer {
                 // one blended quad.
                 //
                 // `FRUST_NO_SNAPSHOT_LAYERS` (resolved into the cache at
-                // surface install, `docs/DEVELOPMENT.md`'s Instrumentation
-                // table) makes this a zero-GPU-work no-op returning the
+                // surface install and on every resize,
+                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
+                // makes this a zero-GPU-work no-op returning the
                 // whole-scene plan — no layers, no holes, no trailing segment
                 // — so every bracket falls through to the inline emulation
                 // `convert` performed before the cache existed and the
@@ -932,12 +1000,35 @@ impl SurfaceRenderer {
                     // it is a bracket to lower inline, not to cache.
                     (width, height),
                 );
-                let params = |base_color| vello::RenderParams {
-                    base_color,
-                    width,
-                    height,
-                    antialiasing_method: vello::AaConfig::Area,
+                // The size of the texture THIS frame's vello passes render
+                // into, and the root every one of them encodes under. They
+                // are one decision, and the blit arm made it when it sized its
+                // intermediate (`context::scaled_size`/`context::blit_root`):
+                // the passes targeting a shrunken intermediate must both be
+                // sized for it and be scaled into it — a `RenderParams` at the
+                // surface size would render into a target that cannot hold it,
+                // and an unscaled root would fill it with the frame's top-left
+                // corner. Both values are READ from the arm rather than
+                // re-derived here, so the frame is scaled by exactly the ratio
+                // its target has. The direct arms are never scaled (scale < 1
+                // forces the blit arm, `context::create_render_surface`), so
+                // they keep the surface size and the identity root exactly as
+                // before.
+                let (pass_width, pass_height, root) = match &ready.surface.path {
+                    RenderPath::Blit {
+                        target_size, root, ..
+                    } => (target_size.0, target_size.1, *root),
+                    RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
+                        (width, height, Affine::IDENTITY)
+                    }
                 };
+                let params =
+                    |base_color, (target_width, target_height): (u32, u32)| vello::RenderParams {
+                        base_color,
+                        width: target_width,
+                        height: target_height,
+                        antialiasing_method: aa_mode().to_vello(),
+                    };
                 // A pre segment that paints nothing buys no vello pass: the
                 // compositor's own pass clears the frame to `base_color`
                 // instead (see `skips_main_pass`). The measured page
@@ -961,6 +1052,7 @@ impl SurfaceRenderer {
                     // The pre segment starts at the scene root, so its own
                     // prefix is empty: it opens every group it needs itself.
                     &plan.pre,
+                    root,
                     vello_scene,
                     &shader_images,
                     adapter_max,
@@ -977,7 +1069,7 @@ impl SurfaceRenderer {
                 let trailing = match (&plan.trailing, compositor.as_mut()) {
                     (Some(segment), Some(compositor)) => {
                         let scratch = compositor
-                            .ensure_scratch(&device_handle.device, width, height)
+                            .ensure_scratch(&device_handle.device, pass_width, pass_height)
                             .clone();
                         trailing_scene.reset();
                         convert::encode_range_with_overrides(
@@ -990,6 +1082,11 @@ impl SurfaceRenderer {
                             // impossible; without them this pass would draw
                             // unclipped and pop groups it never pushed.
                             segment,
+                            // The SAME root as the pre segment: the two passes
+                            // are composited onto one another, so a different
+                            // root here would misplace this one against the
+                            // pixels it draws over.
+                            root,
                             trailing_scene,
                             &shader_images,
                             adapter_max,
@@ -1004,7 +1101,10 @@ impl SurfaceRenderer {
                                 // Transparent, not the frame's base color:
                                 // everything this segment does not paint must
                                 // composite through to the pages under it.
-                                &params(peniko::color::palette::css::TRANSPARENT),
+                                &params(
+                                    peniko::color::palette::css::TRANSPARENT,
+                                    (pass_width, pass_height),
+                                ),
                             )
                             .map_err(|e| {
                                 anyhow!("frust-render: vello render_to_texture failed: {e}")
@@ -1065,7 +1165,9 @@ impl SurfaceRenderer {
                                     &device_handle.queue,
                                     vello_scene,
                                     intermediate_view,
-                                    &params(base_color),
+                                    // Never scaled: this arm exists only at
+                                    // scale 1.0 (see the `pass_*` binding).
+                                    &params(base_color, (width, height)),
                                 )
                                 .map_err(|e| {
                                     anyhow!("frust-render: vello render_to_texture failed: {e}")
@@ -1089,7 +1191,11 @@ impl SurfaceRenderer {
                                     &device_handle.queue,
                                     vello_scene,
                                     target_view,
-                                    &params(base_color),
+                                    // The intermediate's own size, which is
+                                    // the surface's unless the scale knob
+                                    // shrank it — the pixels this pass sweeps
+                                    // are exactly what the knob measures.
+                                    &params(base_color, (pass_width, pass_height)),
                                 )
                                 .map_err(|e| {
                                     anyhow!("frust-render: vello render_to_texture failed: {e}")
@@ -1101,7 +1207,11 @@ impl SurfaceRenderer {
                                 &device_handle.queue,
                                 CompositeTarget {
                                     view: target_view,
-                                    size: (width, height),
+                                    // The target the quads land in, not the
+                                    // swapchain behind it (unreachable while
+                                    // scaled — the cache is refused then — but
+                                    // the size must still name this target).
+                                    size: (pass_width, pass_height),
                                     output: OutputAlpha::Straight,
                                     clear,
                                 },
@@ -1129,6 +1239,12 @@ impl SurfaceRenderer {
                 // RGBA8), then upload it into the intermediate target the blit
                 // reads from. `write_texture` needs no row padding (unlike a
                 // buffer copy), so the tight `4 * width` stride is fine.
+                //
+                // The SURFACE's size, not a scaled one: this tier's
+                // intermediate is never scaled
+                // (`RenderContext::effective_render_scale`), because its
+                // rasterizer encodes at identity into a pixmap of exactly
+                // these dimensions.
                 let pixels = cpu.render(scene, base_color, width, height);
                 device_handle.queue.write_texture(
                     target_texture.as_image_copy(),
@@ -1294,10 +1410,15 @@ impl SurfaceRenderer {
     /// What the submit span contains depends on the render path (the v3 span
     /// mapping):
     ///
-    /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`): the intermediate
-    ///   target was already filled in [`Self::encode`], so `submit` = create the
-    ///   swapchain view + `TextureBlitter::copy` + queue-submit + present. This is
-    ///   the pre-direct-to-surface behavior, unchanged.
+    /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`/`FRUST_RENDER_SCALE`):
+    ///   the intermediate target was already filled in [`Self::encode`], so
+    ///   `submit` = create the swapchain view + `TextureBlitter::copy` +
+    ///   queue-submit + present. This is the pre-direct-to-surface behavior,
+    ///   unchanged. At a render scale below 1 the mapping is unchanged too —
+    ///   `encode_us` still carries the GPU render, now over the reduced
+    ///   intermediate, and the blit in this span additionally upscales it —
+    ///   which is exactly what makes `encode_us` the field the fine-stage
+    ///   cost-per-pixel measurement reads.
     /// - **Direct arm** (`Rgba8Unorm` + `STORAGE_BINDING`): the vello
     ///   `render_to_texture` runs HERE, targeting the acquired swapchain texture
     ///   directly (it does not exist until [`Self::acquire`]), then present — no
@@ -1405,7 +1526,7 @@ impl SurfaceRenderer {
                         base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),
                         width: surface.config.width,
                         height: surface.config.height,
-                        antialiasing_method: vello::AaConfig::Area,
+                        antialiasing_method: aa_mode().to_vello(),
                     };
                     // `encode` decided this frame's pre segment paints
                     // nothing, so the composite pass below clears the acquired
@@ -1529,7 +1650,7 @@ impl SurfaceRenderer {
     }
 }
 
-/// Whether a surface gets a live [`SnapshotCache`] at all, from the three
+/// Whether a surface gets a live [`SnapshotCache`] at all, from the four
 /// facts that can refuse it — resolved once per surface at install and held by
 /// the cache itself, so the hot path re-reads none of them.
 ///
@@ -1550,15 +1671,43 @@ impl SurfaceRenderer {
 ///   holds. Rather than composite wrong pixels on a surface frust cannot test
 ///   on every device, that surface keeps the inline path outright — the same
 ///   refusal shape `context::blit_translucency_refused` already takes.
+/// - `render_scaled`: the surface renders the frame into a smaller
+///   intermediate ([`ConfiguredSurface::render_scaled`]). A cached page
+///   leaves vello as a finished texture and the compositor places its quad in
+///   the TARGET's device space, so honouring a scaled root would mean
+///   rescaling every quad, every scissor rect and every page's own raster —
+///   for a measurement instrument, not a shipping mode. The knob's whole
+///   point is to time vello's fine stage over a known pixel count anyway,
+///   which a frame that composites cached pages instead of rendering them no
+///   longer measures. So brackets lower inline through the root-scaled encode,
+///   exactly as under `FRUST_NO_SNAPSHOT_LAYERS`. Unlike the other three this
+///   one can change while the surface lives — a resize recomputes the
+///   intermediate — so it is re-asked on every `on_surface_changed`.
 ///
-/// Any one of the three is enough to refuse; a plain opaque surface with a
-/// compositor is the only combination that composites.
+/// Any one of the four is enough to refuse; a plain opaque, unscaled surface
+/// with a compositor is the only combination that composites.
 fn snapshot_cache_enabled(
     disabled: bool,
     has_compositor: bool,
     straight_alpha_translucent: bool,
+    render_scaled: bool,
 ) -> bool {
-    !disabled && has_compositor && !straight_alpha_translucent
+    !disabled && has_compositor && !straight_alpha_translucent && !render_scaled
+}
+
+/// [`snapshot_cache_enabled`] asked of `surface` as it is configured RIGHT
+/// NOW — the one derivation both the install site and
+/// [`SurfaceRenderer::on_surface_changed`] call, so the cache's switch can
+/// never disagree with the geometry the surface was last configured with:
+/// `render_scaled` is the surface's live size against its intermediate's
+/// ([`ConfiguredSurface::render_scaled`]), which a resize recomputes.
+fn snapshot_cache_enabled_for(surface: &ConfiguredSurface, has_compositor: bool) -> bool {
+    snapshot_cache_enabled(
+        crate::context::snapshot_layers_disabled(),
+        has_compositor,
+        surface.straight_alpha_translucent(),
+        surface.render_scaled(),
+    )
 }
 
 /// Whether this frame can skip its MAIN vello pass altogether: its pre segment
@@ -1749,26 +1898,32 @@ mod tests {
         assert!(!skips_main_pass(true, 0), "an ordinary frame is untouched");
     }
 
-    /// The snapshot cache is live only for a surface all three refusals pass:
-    /// the kill switch off, a compositor for the attachment format, and a
-    /// destination the straight blend is exact for.
+    /// The snapshot cache is live only for a surface all four refusals pass:
+    /// the kill switch off, a compositor for the attachment format, a
+    /// destination the straight blend is exact for, and an unscaled frame.
     #[test]
     fn the_snapshot_cache_is_enabled_only_for_a_surface_that_can_composite() {
-        assert!(snapshot_cache_enabled(false, true, false));
+        assert!(snapshot_cache_enabled(false, true, false, false));
         assert!(
-            !snapshot_cache_enabled(true, true, false),
+            !snapshot_cache_enabled(true, true, false, false),
             "FRUST_NO_SNAPSHOT_LAYERS refuses on its own"
         );
         assert!(
-            !snapshot_cache_enabled(false, false, false),
+            !snapshot_cache_enabled(false, false, false, false),
             "a composited page nothing draws is a missing page"
         );
         assert!(
-            !snapshot_cache_enabled(false, true, true),
+            !snapshot_cache_enabled(false, true, true, false),
             "a translucent straight-alpha swapchain has no exact composite \
              arithmetic — brackets lower inline"
         );
-        assert!(!snapshot_cache_enabled(true, false, true));
+        assert!(
+            !snapshot_cache_enabled(false, true, false, true),
+            "FRUST_RENDER_SCALE refuses on its own: a cached page is \
+             composited in the target's device space, which a scaled root \
+             never reaches"
+        );
+        assert!(!snapshot_cache_enabled(true, false, true, true));
     }
 
     /// One surface episode ending drops everything scoped to it: the

@@ -1011,6 +1011,59 @@ figure (parity) for mode-only questions.**
 
 ---
 
+## Device: Pixel 5a (barbet, Snapdragon 765G / Adreno 620) — mid-tier Android
+
+**Status:** matrix run to completion on the Pixel 5 stand-in (area × 1.0/0.75/0.5, 3 kept of 5 runs per scenario), msaa cells excluded as corrupted, Decision recorded, raw series committed. **Row 1 is the pre-existing 2026-08-27 diagnosis baseline** (`area` / `1.0`, S1/S2 only, device-state gate skipped). **Rows 2–4 are the Pixel 5 stand-in `ab_matrix.sh` run** (2026-08-28, `--skip-device-state`, 5 runs × 20 s captured, 3 kept, 60Hz mode, USB power on).
+
+- Chipset: Snapdragon 765G / Adreno 620
+- Model: Google Pixel 5a (barbet), serial `17281JECB01994`
+- OS: Android 14, build AP2A.240805.005
+- Display: 1080×2400 @ 420dpi, **60Hz only** — no high-refresh mode, so
+  only the 16.67ms budget applies on this device (no 8.33ms column).
+- Pixel 5 stand-in: Google Pixel 5 (redfin, serial 13261FDD40030W, Snapdragon 765G / Adreno 620, 1080×2340, Android 14) stands in for the Pixel 5a in the rows below — same SoC and GPU as the Pixel 5a, 2.75× density.
+
+### Fine-floor A/B (remedy 3, plan fplan_000001a03fce41148yUkciag)
+
+Matrix driven by `benchmarks/harness/ab_matrix.sh` (`FRUST_AA_MODE` ×
+`FRUST_RENDER_SCALE`, `benchmarks/frust_bench`'s S1/S2/S4 plus
+`examples/material3-demo`'s push/pop nav column) — column order matches the
+script's own emitted table. Only a cell that has actually been run is
+listed; an unrun cell is omitted here, never filled with a placeholder
+number (this file's own top-of-document rule, restated in the
+methodology-deviations note below).
+
+| AA mode | Render scale | S1 p50 (ms) | S1 p95 (ms) | S2 p50 (ms) | S2 p95 (ms) | S4 p50 (ms) | S4 p95 (ms) | nav total_p50 (ms) | nav submit_p95 (ms) |
+|---|---|---|---|---|---|---|---|---|---|
+| area | 1.0 | 47.9 | 49.6 | 44.0 | 45.8 | not captured | not captured | not captured | not captured |
+| area | 1.0 | 48.23 | 49.13 | 42.23 | 43.98 | 16.71 | 17.45 | 11 | 36 |
+| area | 0.75 | 31.88 | 33.04 | 28.05 | 29.45 | 7.53 | 8.19 | 37 | 43 |
+| area | 0.5 | 19.23 | 20.18 | 17.87 | 19.82 | 7.83 | 8.31 | 19 | 24 |
+
+Raw series: benchmarks/raw/pixel5/fine-floor/<aa>-<scale>/<scenario>/run-NN.log (+ stats.txt; nav: .../nav/logcat-frust-perf.log), sanitized by run.sh/ab_matrix.sh at capture time. (the baseline row has no committed series — see deviation 5)
+
+msaa8 / msaa16 cells are excluded — both render corrupted on Adreno 620 (device smoke 2026-08-28, black first frames + torn glyph/edge strips; vello 0.9's MSAA fine path; research artifact rsa_000001a0486660f3RiPPR50x; LIMITATIONS.md entry above), so their fine-stage timings would measure a broken pipeline.
+
+**Decision:** Render scale is a real lever and the fine cost is ~80 % pixel-proportional on Adreno 620: S1 fits t ≈ 9.6 + 38.7·s² ms (0.75 → predicted 31.3, measured 31.9; 0.5 → predicted 19.2, measured 19.2), ~10 ms fixed + ~39 ms per full-resolution fine sweep; S4 halves at 0.75 then flattens (7.5 → 7.8); the nav column shows the snapshot cache beating any scale (1.0 with cache 11 ms vs 0.75 inline 37 ms), so a reduced-scale mode must keep the cache. No default changes in Phase 3: `FRUST_RENDER_SCALE` stays a measurement instrument — shipping a reduced scale would need resolution-aware text (bilinear upscale softens glyphs) and a compositor-aware snapshot cache (refused while scaled); the number that decides a later device-tier render-policy plan is the ~38 ms/sweep slope, which only a lower-cost fine stage (e.g. the vello_hybrid spike, if run) or fewer full-surface sweeps per frame can move.
+
+#### Methodology deviations (Fine-floor A/B, this device)
+
+1. **Quick pass, not the PROTOCOL §4 convention:** 5 runs × 20 s per scenario for S1/S2/S4 columns,
+   first 2 discarded per PROTOCOL §4 → percentiles over 3 kept runs (vs §4's
+   ≥10 runs × 30 s).
+2. **No thermal/brightness/airplane-mode/charger gate:** every scenario
+   batch runs with `run.sh --skip-device-state`, so `device_state.sh`'s
+   fairness gate (PROTOCOL §3) never runs for this matrix — environmental
+   controls are uncontrolled for every cell, baseline row included.
+3. **Baseline row predates the script:** the `area` / `1.0` row's S1/S2
+   numbers come from the 2026-08-27 diagnosis session, not an
+   `ab_matrix.sh` invocation — recorded here as the matrix's starting
+   point, not reproduced by the script itself.
+4. **Rows 2–4 come from a Pixel 5 stand-in, `--skip-device-state`, 60 Hz mode, USB power on; cell area/0.5 was re-run standalone after the first pass was interrupted during its nav step.**
+5. **The 2026-08-27 baseline row has no committed raw series** (diagnosis session, perfetto-only quick pass).
+6. **Nav column baseline — single passes, not multi-run:** Each nav cell represents one push/pop-navigation pass per cell via `ab_matrix.sh run_nav`, reporting the app's in-process rolling percentiles from the last `frust-perf frame` summary, with no warm-up discard, over n = 120 (area/1.0), 56 (area/0.75) and 102 (area/0.5) frames as recorded in `benchmarks/raw/pixel5/fine-floor/<cell>/nav/logcat-frust-perf.log`. The Decision's cache-beats-scale statement (1.0 with cache 11 ms vs 0.75 inline 37 ms) rests on these single passes, an effect far outside single-session noise and corroborated by the perfetto gate phase-2b-cleanup-device-gate-pixel5.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB

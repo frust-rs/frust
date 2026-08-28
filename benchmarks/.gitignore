@@ -6,9 +6,17 @@
 #                     never persists.
 #   *.pss_*.txt     — `dumpsys meminfo <our bench pkg>` snapshots (S7 memory
 #                     axis); scoped to our own app's process only.
-# Pre-commit verification (conductor runs both):
+#   stats.txt       — the run.sh stdout tail from its `-- stats.py` banner
+#                     onward (the stats.py p50=/p95=/frames:/missed_* table
+#                     for that scenario's kept runs); whitelist-checked
+#                     line-by-line the same way as runN.log, by
+#                     ab_matrix.sh's self_check_raw_dir.
+# Pre-commit verification (conductor runs all three — one line per committed
+# artifact class above; the stats.txt expression is ab_matrix.sh's
+# STATS_WHITELIST_RE verbatim, keep the two identical):
 #   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' raw/ --include='*.log'   (expect no output)
 #   scan *.pss_*.txt for any package identifier other than it.f0x.*bench     (expect none)
+#   grep -rlvE '^-- stats\.py( --dclass)? \(discarding first [0-9]+ runs?, per protocol convention\) --$|^== [A-Za-z0-9_. ()-]+ ==$|^frames: [0-9]+ total, [0-9]+ active, [0-9]+ skipped$|^p50=[0-9.]+ms[[:space:]]+p95=[0-9.]+ms[[:space:]]+p99=[0-9.]+ms[[:space:]]+worst=[0-9.]+ms$|^missed_60hz=[0-9]+ \(budget [0-9.]+ms\)[[:space:]]+missed_120hz=[0-9]+ \(budget [0-9.]+ms\)$|^[[:space:]]*$' raw/ --include='stats.txt'   (expect no output)
 # Transient capture scratch (pre-sanitize) — never committed:
 *.unfiltered
 *.console.txt

@@ -173,6 +173,7 @@ use std::ops::Range;
 use frust_scene::{Command, Scene};
 use kurbo::{Affine, Rect};
 
+use crate::context::aa_mode;
 use crate::convert::{Segment, encode_commands_into};
 use crate::shader_effects::clamp_size;
 
@@ -506,10 +507,11 @@ pub(crate) struct SnapshotCache {
     /// Reused encoding buffer for the body being rasterized, reset per render
     /// exactly like the per-frame main scene.
     scratch: vello::Scene,
-    /// Whether snapshot layers are on for this surface, resolved once by the
-    /// caller from `FRUST_NO_SNAPSHOT_LAYERS`
-    /// ([`crate::context::snapshot_layers_disabled`]) and held here so tests
-    /// are not hostage to a process-global.
+    /// Whether snapshot layers are on for this surface, resolved by the
+    /// caller (`FRUST_NO_SNAPSHOT_LAYERS` — [`crate::context::snapshot_layers_disabled`]
+    /// — plus the surface's own refusals) at install and again on every
+    /// resize ([`Self::set_enabled`]), and held here so tests are not hostage
+    /// to a process-global.
     enabled: bool,
 }
 
@@ -885,6 +887,21 @@ impl SnapshotCache {
         }
     }
 
+    /// Re-resolves the switch for a surface whose geometry changed
+    /// (`SurfaceRenderer::on_surface_changed`): the scaled-frame refusal in
+    /// `renderer::snapshot_cache_enabled` is the surface's live size against
+    /// its intermediate's, so it is asked again on every resize rather than
+    /// frozen at install. Switching OFF drops every entry — a body rasterized
+    /// for one device space must never be composited in another — while
+    /// switching ON starts empty, as [`Self::new`] does. A no-op when nothing
+    /// changed.
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled && !enabled {
+            self.clear();
+        }
+        self.enabled = enabled;
+    }
+
     /// This frame's [`FramePlan`]: rasterize every outermost bracket whose
     /// body changed, re-use the rest untouched, age out what the scene stopped
     /// drawing, and report the composite layers, the holes and the segment
@@ -1108,7 +1125,11 @@ impl SnapshotCache {
             base_color: peniko::color::palette::css::TRANSPARENT,
             width: plan.width,
             height: plan.height,
-            antialiasing_method: vello::AaConfig::Area,
+            // The same mode the frame's own vello pass uses (`aa_mode()`,
+            // `renderer.rs`'s `encode`/`submit_impl`): a cached page is
+            // composited beside inline content rendered with that mode, and a
+            // mismatched mode would visibly differ at the bracket's edges.
+            antialiasing_method: aa_mode().to_vello(),
         };
         let rendered = match entries.get(&plan.key) {
             Some(entry) => renderer.render_to_texture(device, queue, scratch, &entry.view, &params),
@@ -1986,6 +2007,32 @@ mod tests {
         );
     }
 
+    /// A resize that scales the frame (or unscales it) flips the switch
+    /// after construction: off plans nothing, exactly like the kill switch,
+    /// and on plans again.
+    #[test]
+    fn set_enabled_flips_the_plan_after_construction() {
+        let scene = bracket_scene(
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 20.0, 10.0),
+            Rect::new(2.0, 2.0, 8.0, 8.0),
+            Brush::Solid(RED),
+        );
+        let mut cache = SnapshotCache::new(true);
+        assert_eq!(cache.plan(&scene, 8192, SURFACE).len(), 1);
+        cache.set_enabled(false);
+        assert!(
+            cache.plan(&scene, 8192, SURFACE).is_empty(),
+            "a resize that scales the frame refuses like the kill switch"
+        );
+        cache.set_enabled(true);
+        assert_eq!(
+            cache.plan(&scene, 8192, SURFACE).len(),
+            1,
+            "a resize back to full resolution plans again"
+        );
+    }
+
     #[test]
     fn plan_skips_a_body_that_punches_a_hole_or_draws_a_shader() {
         let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
@@ -2666,6 +2713,21 @@ mod tests {
             assert!(plan.pre_draws, "the body's fill is in the pre segment now");
             assert_eq!(plan.trailing, None);
             assert_eq!(disabled.len(), 0);
+            // A resize that scales the frame switches the cache off: every
+            // entry — and the texture it holds — goes with it, so a page
+            // rasterized for this device space is never composited in the
+            // scaled one; switched back on it starts empty and re-renders.
+            cache.set_enabled(false);
+            assert_eq!(cache.len(), 0, "switching off must drop every entry");
+            let plan = cache.prepare(&device, &queue, &mut renderer, &scene, 8192, SURFACE);
+            assert!(plan.layers.is_empty(), "an off cache composites nothing");
+            cache.set_enabled(true);
+            cache.prepare(&device, &queue, &mut renderer, &scene, 8192, SURFACE);
+            assert_eq!(
+                cache.renders(KEY),
+                Some(1),
+                "switched back on it renders afresh"
+            );
         }
     }
 }

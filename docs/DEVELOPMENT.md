@@ -251,13 +251,11 @@ Additionally run:
 ```
 
 `examples/huddle`, `examples/playground`, `examples/design-system-sample`,
-`examples/material3-demo`, and
-`plugins/clean-signals-frust` each gate from their own directory rather than `-p` from the repo
-root because all five are standalone workspaces excluded from the root one (*Version-Pin
-Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog`
-gate under, from their own directories, per their own READMEs.
-`huddle` and `clean-signals-frust` git+rev-pin
-`clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
+`examples/material3-demo`, and `plugins/clean-signals-frust` each gate from their own directory
+rather than `-p` from the repo root because all five are standalone workspaces excluded from the
+root one (*Version-Pin Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog`
+gate under, per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin `clean-signals`
+to its public repo, so no local sibling checkout is required to run this gate.
 `design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
 (from its own directory) to print **no** `frust feature "..."` line — no longer a catalog-off
 proof (`frust` carries no catalog feature anywhere for any dependent to print), but the
@@ -395,9 +393,8 @@ workspace: `frust_bench/` (standalone Cargo package, gate from its own directory
 `examples/huddle`) and `flutter_bench/` (Flutter SDK, tested against 3.44.2 stable)
 implement the same scenarios — eight timed UI scenarios (S1–S8) plus two DB op-latency
 scenarios (D1/D2) — driven by `harness/`'s shared scripts. `benchmarks/` is scoped strictly
-to this paired-comparison protocol; the terminal-grid and IME-capability probes that used to
-ride alongside it as S9/S10 now live in `examples/playground` as exploratory, single-sided
-demos instead.
+to this paired-comparison protocol; the exploratory, single-sided terminal-grid and
+IME-capability probes live in `examples/playground` instead.
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
@@ -424,7 +421,7 @@ coreutils`) until fixed.
 | `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`, requiring the same `perf-trace` build: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3 (`acquire_us`/`submit_us` as separate fields, superseding v2's single `present_us`); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
-| `FRUST_NO_DIRECT_SURFACE` / `FRUST_NO_SHADER_EFFECTS` / `FRUST_NO_SNAPSHOT_LAYERS` | Render-path A/B kill switches, one per GPU pre-pass (`docs/RENDER_ARCHITECTURE.md`'s Data Flow): `FRUST_NO_DIRECT_SURFACE` pins a direct-capable surface onto the blit fallback arm; `FRUST_NO_SHADER_EFFECTS` disables the shader-quad pre-pass, so `Command::ShaderQuad` falls back to its placeholder fill; `FRUST_NO_SNAPSHOT_LAYERS` disables the snapshot-layer cache, so every `PushSnapshot` bracket lowers through `convert.rs`'s inline emulation. Same compile-time-or-runtime parsing as `FRUST_TRACE`; see RENDER_ARCHITECTURE.md's kill-switch entry for the `submit_us`/`acquire_us` remap caveat these three A/B valves share. | off (path auto-probed) / off (pre-pass active) / off (cache active) |
+| render-path knobs (`FRUST_NO_DIRECT_SURFACE`, `FRUST_NO_SHADER_EFFECTS`, `FRUST_NO_SNAPSHOT_LAYERS`, `FRUST_AA_MODE`, `FRUST_RENDER_SCALE`) | See [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) § Instrumentation (render path). | — |
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...`
 line, then periodic `frust-perf frame ...` summaries; on a platform-view page it
@@ -508,42 +505,32 @@ target?** `Package.swift`'s `platforms:` must stay **at or below** every consume
 
 ### Why Android is 26 and must not go lower
 
-Raised from 24 in `db6827b`. API 24/25 (Android 7.x) were dropped as too old to carry, and the floor
-was actively costing correctness: **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` is API 26+**, so
-the keyboard-learning half of FINDINGS #31's mitigation was a no-op below it. It is an `imeOptions`
-bit, so the constant inlines at compile time and an older IME simply ignores it — no compile error,
-no runtime crash. At 26 the flag is unconditionally honoured and `frust-core/src/event.rs`'s IME
-contract table holds at the floor.
-
-> **Lint *did* catch this, and we were not running lint.** Re-tested by setting the module back to
-> `minSdk = 24`: `lintDebug` reports it twice as **`InlinedApi`** (the rule specifically for inlined
-> constants) — *"Field requires API level 26 (current min is 24):
-> `android.view.inputmethod.EditorInfo#IME_FLAG_NO_PERSONALIZED_LEARNING`"*. Its default severity is
-> **warning**, so the build still exits 0. The defect was not invisible to tooling; it was invisible
-> because **no gate ran Android Lint at all**. Wiring `lintDebug` into the Android gate — and
-> deciding whether `InlinedApi` should be an error here — is open work, not something this bump
-> settled.
+API 24/25 (Android 7.x) sit below the floor because **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING`
+is API 26+**: it is an `imeOptions` bit, so the constant inlines at compile time and an older IME
+simply ignores it — no compile error, no runtime crash, just the keyboard-learning half of FINDINGS
+#31's mitigation silently doing nothing. At 26 the flag is unconditionally honoured and
+`frust-core/src/event.rs`'s IME contract table holds at the floor.
 
 **Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
-API-caveat entry in `docs/LIMITATIONS.md` in the same change.
+API-caveat entry in `docs/LIMITATIONS.md` in the same change. Android Lint does flag the shape
+(**`InlinedApi`**, the rule for inlined constants), but **no gate runs Android Lint at all** —
+wiring `lintDebug` into the Android gate, and deciding whether `InlinedApi` should be an error
+here, is open work (*Verifying a floor change* below covers why its exit code proves nothing).
 
-**One** API becomes available at the new floor and is deliberately **not** adopted:
-`SeekBar.setMin` (API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side
-range mapping; see that module doc for why.
-
-Two things the bump does **not** unlock, and which still need their existing workarounds:
-`Font.Builder(ByteBuffer)` is **API 29**, so `typeface.rs` still writes a cache file; and
-`BiometricPrompt` is **API 28+**, so `secure-storage`'s gate stays and
+**One** API becomes available at this floor and is deliberately **not** adopted: `SeekBar.setMin`
+(API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side range mapping; see
+that module doc for why. Two things the floor does **not** unlock still need their existing
+workarounds: `Font.Builder(ByteBuffer)` is **API 29**, so `typeface.rs` still writes a cache file;
+and `BiometricPrompt` is **API 28+**, so `secure-storage`'s gate stays and
 `NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
 
 ### Migrating an already-scaffolded app
 
-Apps generated before `db6827b` carry `minSdk = 24`. **The bump is mandatory, not optional** — a
-scaffolded app consumes the embedding as a Gradle *project* dependency
+An app scaffolded against an older floor carries `minSdk = 24`. **The bump is mandatory, not
+optional** — a scaffolded app consumes the embedding as a Gradle *project* dependency
 (`implementation(project(":frust-embedding"))`), so an app at 24 against the 26 library fails the
-manifest merger outright (verified: `:app:processDebugMainManifest` exits 1 with the
-`cannot be smaller than version 26` error quoted above). Set `minSdk = 26` in the app's
-`app/build.gradle.kts`; there is no other migration step.
+manifest merger outright. Set `minSdk = 26` in the app's `app/build.gradle.kts`; there is no other
+migration step.
 
 **Verifying a floor change:** `cargo` cannot see any of this. Run, from an app dir:
 

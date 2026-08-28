@@ -82,9 +82,9 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   closes every group still open at the segment's end so each pass stays self-balanced; the
   scratch texture itself ages out after `MAX_UNUSED_FRAMES` (2) frames it goes unused
   (`Compositor::age_scratch`), the same boundary the page-texture cache evicts by.
-- Kill switch: `FRUST_NO_SNAPSHOT_LAYERS` (compile-time `option_env!` or runtime env, cached
-  once per surface — same compile-time-or-runtime shape as `FRUST_TRACE`, see
-  `docs/DEVELOPMENT.md`'s Instrumentation table) disables the cache; every bracket then lowers
+- Kill switch: `FRUST_NO_SNAPSHOT_LAYERS` (compile-time `option_env!` or runtime env, cached once
+  per surface — same compile-time-or-runtime shape as `FRUST_TRACE`; the row lives in
+  [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) disables the cache; every bracket then lowers
   through `convert.rs`'s inline emulation, byte-identical to pre-cache behavior. A surface whose
   resolved alpha mode is translucent but not premultiplied (iOS's `PostMultiplied`) never enables
   the cache at all (`snapshot_cache_enabled`/`alpha_mode_is_straight_translucent`), same inline
@@ -93,6 +93,27 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   (out of `encode_us`) and `acquire_us` precedes it rather than follows — account for this remap
   before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full
   v3 field mapping).
+- Measurement knobs (`FRUST_AA_MODE`/`FRUST_RENDER_SCALE`, same compile-time-or-runtime shape as the
+  kill switch above — rows in [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)): `FRUST_AA_MODE` picks
+  the single `vello::AaSupport` mode the renderer compiles pipelines for and the
+  `antialiasing_method` every pass requests, cached snapshot pages included, so a frame and its
+  composited pages are always anti-aliased alike. `FRUST_RENDER_SCALE < 1` forces the blit arm
+  exactly as `FRUST_NO_DIRECT_SURFACE` does (`blit_translucency_refused` included), sizes the
+  intermediate at `ceil(w*s) x ceil(h*s)` (`context::scaled_size`, on creation and on resize), and
+  encodes both of the frame's vello passes under the root that arm carries: `RenderPath::Blit`'s
+  `root`, derived once by `context::blit_root` from the intermediate's actual `target_size` as a
+  per-axis target/surface ratio, so a non-integral `w * s` maps exactly onto the ceil'd axis and
+  leaves no unpainted edge strip. `convert::encode_range_with_overrides` pre-multiplies it onto
+  every command's own transform, the range-scoped `ClearRect` hoist composing on top, after which
+  the blit pass upscales through a `Linear`-sampled `TextureBlitter` (`context::blit_filter`). The
+  shader pre-pass keeps its raw, unrooted override keys, so its full-size texture is drawn scaled
+  into the smaller target; the snapshot-layer cache is refused while scaled (a cached page
+  composites in the target's own device space), that refusal reading the same per-surface answer
+  the root is built from (`ConfiguredSurface::render_scaled`, derived from the sizes the surface
+  holds, not the process-global knob, and re-asked on every resize through
+  `SnapshotCache::set_enabled`), so every bracket lowers inline. The cpu-tier is pinned at 1.0,
+  and `encode_us` still carries the GPU render, now at the reduced size (the A/B caveat above is
+  otherwise unchanged).
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via
   `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s. `TextContext::layout_bounded`
   additionally measures against a max line count and applies `TextOverflow` by truncating the shaped
