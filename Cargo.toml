@@ -262,6 +262,11 @@ accesskit_ios = "=0.1.2"
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
 vello_cpu = "=0.0.9"
+# measurement spike: vello_hybrid 0.2.0 + companions, optional `hybrid-tier` feature
+# on frust-render, exact-pinned (pre-1.0 experimental), NOT default build
+vello_hybrid = { version = "=0.2.0", default-features = false, features = ["wgpu", "text"] }
+vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
+glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
 # frust-secure-storage's Apple Keychain + LocalAuthentication bindings —
 # same rationale/precedent as `objc2`/
 # `objc2-foundation` above: plain version strings (no `default-features`
@@ -588,6 +593,15 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.vello_common]
+opt-level = 2
+
+[profile.dev.package.glifo]
+opt-level = 2
+
+[profile.dev.package.fearless_simd]
 opt-level = 2
 
 # Debug dep opt widening: non-workspace-member dependencies

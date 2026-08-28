@@ -17,11 +17,18 @@ log.workspace = true
 # optional, only pulled in by the `cpu-tier` feature below; NOT part of the
 # default GPU path. Exact-pinned per the workspace Version-Pin Policy.
 vello_cpu = { workspace = true, optional = true }
+# Measurement spike: vello_hybrid 0.2.0 render tier —
+# optional, only pulled in by the `hybrid-tier` feature below; NOT part of the
+# default GPU path. Exact-pinned per the workspace Version-Pin Policy.
+vello_hybrid = { workspace = true, optional = true }
 
 [features]
 # Experimental vello_cpu-backed CPU render tier.
 # NOT default — the GPU (vello) path is unaffected when this is off.
 cpu-tier = ["dep:vello_cpu"]
+# Measurement spike: vello_hybrid 0.2.0 render tier.
+# NOT default — the GPU (vello) path is unaffected when this is off.
+hybrid-tier = ["dep:vello_hybrid"]
 # Opt-in perf-tracing probes: gates the
 # `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
 # `context.rs`. NOT default — a build without this feature compiles neither
