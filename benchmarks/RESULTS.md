@@ -1011,6 +1011,64 @@ figure (parity) for mode-only questions.**
 
 ---
 
+## Device: Pixel 5a (barbet, Snapdragon 765G / Adreno 620) — mid-tier Android
+
+**Status:** fine-floor A/B matrix started, one cell recorded — the
+pre-existing 2026-08-27 diagnosis baseline (`area` / `1.0`). The full
+`FRUST_AA_MODE` × `FRUST_RENDER_SCALE` sweep is driven by
+`benchmarks/harness/ab_matrix.sh` (plan `fplan_000001a03fce41148yUkciag`,
+phase `pph_000001a04171930dcLOuu2jm`) and has not yet been run to
+completion on this device — see the Fine-floor A/B subsection below.
+
+- Chipset: Snapdragon 765G / Adreno 620
+- Model: Google Pixel 5a (barbet), serial `17281JECB01994`
+- OS: Android 14, build AP2A.240805.005
+- Display: 1080×2400 @ 420dpi, **60Hz only** — no high-refresh mode, so
+  only the 16.67ms budget applies on this device (no 8.33ms column).
+
+### Fine-floor A/B (remedy 3, plan fplan_000001a03fce41148yUkciag)
+
+Matrix driven by `benchmarks/harness/ab_matrix.sh` (`FRUST_AA_MODE` ×
+`FRUST_RENDER_SCALE`, `benchmarks/frust_bench`'s S1/S2/S4 plus
+`examples/material3-demo`'s push/pop nav column) — column order matches the
+script's own emitted table. Only a cell that has actually been run is
+listed; an unrun cell is omitted here, never filled with a placeholder
+number (this file's own top-of-document rule, restated in the
+methodology-deviations note below).
+
+| AA mode | Render scale | S1 p50 (ms) | S1 p95 (ms) | S2 p50 (ms) | S2 p95 (ms) | S4 p50 (ms) | S4 p95 (ms) | nav total_p50 (ms) | nav submit_p95 (ms) |
+|---|---|---|---|---|---|---|---|---|---|
+| area | 1.0 | 47.9 | 49.6 | 44.0 | 45.8 | not captured | not captured | not captured | not captured |
+
+**The `area` / `1.0` row is the pre-existing 2026-08-27 diagnosis baseline
+— quick pass, device-state gate skipped** (S1/S2 only; S4 and the nav
+column were not part of that diagnosis pass and are not invented here). It
+predates `ab_matrix.sh` and was not produced by the script — every other
+cell in the matrix (`area`/0.75, `area`/0.5, `msaa8`/*, `msaa16`/*) awaits
+an actual run of `ab_matrix.sh` on this device.
+
+**Decision:** _Pending. No default `FRUST_AA_MODE` / `FRUST_RENDER_SCALE`
+pairing is chosen for Phase 3 until the matrix above is populated by a real
+`ab_matrix.sh` run on this device and reviewed against the Phase 1/2b
+milestones._
+
+#### Methodology deviations (Fine-floor A/B, this device)
+
+1. **Quick pass, not the PROTOCOL §4 convention:** `ab_matrix.sh` defaults
+   to 3 runs × 20s per scenario (vs. PROTOCOL §4's declared ≥10 runs × 30s
+   per scenario) — a knob-comparison sweep for picking a default, not a
+   publishable head-to-head result.
+2. **No thermal/brightness/airplane-mode/charger gate:** every scenario
+   batch runs with `run.sh --skip-device-state`, so `device_state.sh`'s
+   fairness gate (PROTOCOL §3) never runs for this matrix — environmental
+   controls are uncontrolled for every cell, baseline row included.
+3. **Baseline row predates the script:** the `area` / `1.0` row's S1/S2
+   numbers come from the 2026-08-27 diagnosis session, not an
+   `ab_matrix.sh` invocation — recorded here as the matrix's starting
+   point, not reproduced by the script itself.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB
