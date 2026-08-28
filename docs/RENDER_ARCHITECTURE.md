@@ -110,7 +110,8 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   into the smaller target; the snapshot-layer cache is refused while scaled (a cached page
   composites in the target's own device space), that refusal reading the same per-surface answer
   the root is built from (`ConfiguredSurface::render_scaled`, derived from the sizes the surface
-  holds, not the process-global knob), so every bracket lowers inline. The cpu-tier is pinned at 1.0,
+  holds, not the process-global knob, and re-asked on every resize through
+  `SnapshotCache::set_enabled`), so every bracket lowers inline. The cpu-tier is pinned at 1.0,
   and `encode_us` still carries the GPU render, now at the reduced size (the A/B caveat above is
   otherwise unchanged).
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via

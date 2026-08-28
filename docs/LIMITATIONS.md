@@ -2886,9 +2886,10 @@ table) each degrade the frame in a named way at any non-default value:
    with a `Linear` sampler (`context::blit_filter`), so glyphs arrive resampled instead of shaped at
    the surface's own resolution — a bilinear upscale of a coarser raster, not a crisp smaller one.
 2. **A scaled frame gets no snapshot-layer cache.** `renderer::snapshot_cache_enabled` refuses
-   outright on `context::render_scaled` — a cached page is composited in the target's own device
-   space — so every `PushSnapshot` bracket lowers inline exactly as under `FRUST_NO_SNAPSHOT_LAYERS`
-   (`render-snapshot-layer-tradeoffs` above), logged once per process naming the reason. A scaled
+   outright on `ConfiguredSurface::render_scaled` (re-asked on every resize) — a cached page is
+   composited in the target's own device space — so every `PushSnapshot` bracket lowers inline
+   exactly as under `FRUST_NO_SNAPSHOT_LAYERS` (`render-snapshot-layer-tradeoffs` above), logged
+   once per process naming the reason. A scaled
    surface is also pinned onto the blit arm, so `blit_translucency_refused` applies to it just as it
    does under `FRUST_NO_DIRECT_SURFACE`.
 3. **MSAA renders corrupted on Adreno 620.** `FRUST_AA_MODE=msaa8`/`msaa16` builds vello with only
