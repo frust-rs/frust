@@ -1062,6 +1062,209 @@ msaa8 / msaa16 cells are excluded — both render corrupted on Adreno 620 (devic
 5. **The 2026-08-27 baseline row has no committed raw series** (diagnosis session, perfetto-only quick pass).
 6. **Nav column baseline — single passes, not multi-run:** Each nav cell represents one push/pop-navigation pass per cell via `ab_matrix.sh run_nav`, reporting the app's in-process rolling percentiles from the last `frust-perf frame` summary, with no warm-up discard, over n = 120 (area/1.0), 56 (area/0.75) and 102 (area/0.5) frames as recorded in `benchmarks/raw/pixel5/fine-floor/<cell>/nav/logcat-frust-perf.log`. The Decision's cache-beats-scale statement (1.0 with cache 11 ms vs 0.75 inline 37 ms) rests on these single passes, an effect far outside single-session noise and corroborated by the perfetto gate phase-2b-cleanup-device-gate-pixel5.
 
+### Pixel 5 — classic baseline for the engine plan
+
+The number every later engine-plan render/GPU threshold (frust-engine +
+frust-gpu plan, phase 0) is judged against. **Adopts** the Fine-floor A/B
+`area` / `1.0` row above as the S1/S2/S4 baseline verbatim — cited, not
+re-measured, same raw series
+(`benchmarks/raw/pixel5/fine-floor/area-1.0/s{1,2,4}/`) — and **completes**
+the set with a fresh S5 and S6 pass at the identical `area`/`1.0` settings
+and quick-pass run convention, one PROTOCOL §4-compliant S1 anchor
+(≥10 runs × 30 s, first 2 discarded) so the quick-pass rows below carry a
+calibrated error bar, and a freshly measured material3-demo nav push/pop
+pass. `encode+submit p50` and `Graphics (MB)` are derived
+columns beyond `stats.py`'s own `format_table` output — see deviation 5
+below for how they're computed; every other column reproduces exactly via
+`python3 benchmarks/harness/stats.py --scenario <sN> <raw-dir>/run-*.log`.
+
+Both binaries are profile builds with live instrumentation (the release-lean
+convention), at the same `area`/`1.0` render settings:
+
+```
+# scenario rows (S5, S6, S1 anchor) — built from benchmarks/frust_bench/
+frust build apk --profile --define FRUST_TRACE_RAW=1
+# nav row — built from examples/material3-demo/
+frust build apk --profile --define FRUST_TRACE_RAW=1 \
+    --define FRUST_AA_MODE=area --define FRUST_RENDER_SCALE=1.0
+```
+
+`FRUST_AA_MODE=area` and `FRUST_RENDER_SCALE=1.0` are the documented
+defaults (byte-identical to an untouched build), so the two command lines
+describe the same render configuration; naming them on the nav line only
+records which settings the pass was driven at. That configuration is
+verified on the installed binaries rather than assumed from the command
+lines: both APKs log `frust-render aa-mode=area` and `frust-render
+render-scale=1 blit-target=1080x2340` once at startup, with no
+non-default-knob warning. `FRUST_TRACE_RAW=1` is likewise evident in the
+captures themselves — the per-frame `frust-perf raw` lines every number
+below is computed from exist only under it.
+
+| Scenario | Basis | Kept runs × duration | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | encode+submit p50 (ms) | Graphics avg (MB) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| S1 | adopted (Fine-floor A/B `area`/`1.0` row) | 3 of 5 × 20s | 48.23 | 49.13 | 52.02 | 137.44 | 1,235 (100%) | 1,235 (100%) | 47.39 | not captured (see deviation 5) |
+| S2 | adopted (Fine-floor A/B `area`/`1.0` row) | 3 of 5 × 20s | 42.23 | 43.98 | 45.81 | 137.51 | 1,484 (100%) | 1,484 (100%) | 39.59 | not captured (see deviation 5) |
+| S4 | adopted (Fine-floor A/B `area`/`1.0` row) | 3 of 5 × 20s | 16.71 | 17.45 | 18.55 | 83.40 | 1,928 (54.0%) | 3,570 (100%) | 16.26 | not captured (see deviation 5) |
+| S5 | measured, this section (2026-08-28) | 3 of 5 × 20s | **94.71** | 98.52 | 99.64 | 101.01 | 678 (100%) | 678 (100%) | 93.94 | 54.97 |
+| S6 | measured, this section (2026-08-28) | 3 of 5 × 20s | 22.44 | 23.36 | 25.70 | 58.10 | 2,705 (99.9%) | 2,707 (100%) | 21.75 | 52.82 |
+| S1 anchor | measured, this section (2026-08-28), PROTOCOL §4-compliant | 10 of 12 × 30s | 48.51 | 49.56 | 50.88 | 93.03 | 6,206 (100%) | 6,206 (100%) | 47.71 | 52.56 |
+
+**Nav — material3-demo push/pop (measured, 2026-08-28).** One push/pop pass
+driven through `ab_matrix.sh`'s `run_nav` recipe (`am force-stop`, `logcat
+-c`, `monkey` launch, 1.6 s settle, three `input tap` / `KEYCODE_BACK` pairs
+1.6 s apart at 540,472 / 540,734 / 540,996, then one `adb logcat -d -v raw |
+grep -a 'frust-perf'` pipe), snapshot-layer cache left at its default (ON —
+the same cache state as the adopted row):
+
+| Nav basis | n (frames) | total_p50 (ms) | submit_p95 (ms) | acquire_p95 (ms) |
+|---|---|---|---|---|
+| measured — last-120 ring window (the window a summary line covers) | 120 of 141 | **7.39** | 35.95 | 10.89 |
+| measured — whole pass | 141 | 7.43 | 57.29 | 10.89 |
+| adopted (Fine-floor A/B `area`/`1.0` row), cited, cache on | 120 | 11 | 36 | 12 |
+
+Truncated to whole milliseconds the way `FrameStats::emit_log` prints them,
+the measured ring-window figures read `total_p50_ms=7 submit_p95_ms=35
+acquire_p95_ms=10` against the cited row's `11`/`36`/`12`. The measured pass
+emitted no `frust-perf frame` summary line, so its three figures are
+computed from its own committed `frust-perf raw` frame lines instead of read
+from a summary — a substitution calibrated against the cited row's raw log,
+where the identical computation reproduces that row's emitted summary line
+exactly (11.39 → `total_p50_ms=11`, 36.66 → `submit_p95_ms=36`, 12.45 →
+`acquire_p95_ms=12`, over the same last-120 window). Deviation 8 below has
+the mechanism and the calibration in full.
+
+The measured median lands ~4 ms below the cited one at nominally identical
+settings. Refresh mode does not explain it: both logs' own `frust-perf
+platform-view tail` lines report a ~11.13 ms display frame period (90 Hz)
+during capture. Each figure is a single push/pop pass with no warm-up
+discard and no repeat (this file's Fine-floor deviation 6 above states that
+convention for the nav column), so a gap of this size between two sessions
+is recorded here rather than explained; the whole-pass `submit_p95` column
+shows how much the same pass's tail moves with the window alone (35.95 ms
+over the ring window, 57.29 ms over all 141 frames).
+
+Raw series: `benchmarks/raw/pixel5/classic-baseline/{s5,s6,s1}/run-NN.log`
+(+ `stats.txt` + `run-NN.pss_before.txt`/`run-NN.pss_after.txt`), sanitized
+by `run.sh` at capture time — the S1 row there is the protocol-compliant
+anchor (12 runs), not the adopted sub-protocol S1 — plus the nav pass at
+`benchmarks/raw/pixel5/classic-baseline/nav/logcat-frust-perf.log`,
+sanitized in the single `logcat | grep` pipe above (no unfiltered dump is
+written anywhere). The adopted S1/S2/S4 and cited-nav rows' own raw series
+remains at `benchmarks/raw/pixel5/fine-floor/area-1.0/` (unchanged, not
+duplicated).
+
+**Anchor calibration:** the protocol-compliant S1 anchor (48.51/49.56 ms
+p50/p95 over 6,206 kept frames, 10×30s runs) lands within 0.3–0.4ms of the
+adopted quick-pass S1 row (48.23/49.13 ms, 3×20s) — on this device/scenario
+the quick-pass convention is not meaningfully biased relative to the full
+PROTOCOL §4 convention, so the S2/S4/S5/S6 quick-pass rows above can be
+read with roughly that same error bar.
+
+#### Methodology deviations (classic baseline, this device)
+
+**Device:** Pixel 5 (`redfin`, serial `13261FDD40030W`), Adreno 620,
+1080x2340, Android 14, attached over USB. Display mode observed during every
+capture in this section: `DisplayMode{id=1, 1080x2340, refreshRate=90.0}`
+with `mActiveRenderFrameRate=90.0` (`dumpsys display`), i.e. a ~11.13 ms
+frame period — see deviation 4.
+
+1. **S1/S2/S4 rows are cited, not re-measured** — see the Fine-floor
+   A/B section's own deviations 1–2 and 4 above (quick-pass 5×20s/3-kept
+   convention, `--skip-device-state`, Pixel 5 stand-in, USB power on); they
+   apply unchanged to the cited rows here. The cited nav figure carried
+   alongside the measured one in the nav table is from that same row.
+2. **S5/S6 use the same quick-pass convention as the adopted rows** (5
+   runs × 20 s, first 2 discarded, 3 kept) to stay comparable to them —
+   below PROTOCOL §4's ≥10×30s convention. The S1 anchor row exists
+   specifically to bound how much that shortcut costs on this device.
+3. **Device-state fairness gate ran (not skipped) for S5/S6/S1-anchor and
+   the nav pass** — unlike the adopted rows' `--skip-device-state` session:
+   fixed brightness=128; thermal OK (~30–32°C for the scenario batches,
+   27.5°C for the nav batch, ceiling 38°C); airplane mode OFF and USB
+   charging detected, both flagged as warnings by `device_state.sh` and left
+   uncontrolled (radio/charger state is check-only, never forced — see that
+   script's own header). The nav batch ran its own `device_state.sh` pass
+   before capture, on the same terms.
+4. **Display refresh mode not locked to 60Hz** — the device ran at its
+   default active mode, confirmed 90Hz
+   (`dumpsys display`'s `mActiveSfDisplayMode`/`mActiveRenderFrameRate=90.0`)
+   during every capture in this section, unlike the adopted Fine-floor A/B
+   matrix, which explicitly forced "60 Hz mode" (that section's deviation
+   4). For the scenario rows this changes nothing measurable: every measured
+   p50 there (22–95ms) already misses even the 90Hz (11.1ms) frame budget by
+   2–8×, so the missed@16.67/missed@8.33 counts are unaffected. For the nav
+   row it is load-bearing and stated rather than argued away — a nav frame
+   at a 7.4ms median sits *inside* the 11.1ms period, so it is vsync-paced,
+   and its `acquire_p95` (10.89ms, a blocking swapchain wait) is essentially
+   one frame period. Note that the cited nav row's own committed log reports
+   the same ~11.13ms period in its `frust-perf platform-view tail` lines
+   despite that section's forced-60Hz note, so measured and cited nav are
+   refresh-comparable to each other.
+5. **`encode+submit p50` and `Graphics (MB)` are derived, not `stats.py`
+   `format_table` output.** `encode+submit` sums each kept frame's
+   `encode_us`+`submit_us` (loaded via `stats.py`'s own
+   `load_run_frames`/`discard_first_runs`, then `stats.py`'s
+   `_nearest_rank_percentile` — imported and reused, not reimplemented)
+   before the percentile step. `Graphics (MB)` averages the `Graphics`
+   Pss(KB) line of each kept run's **post-run** `dumpsys meminfo`
+   snapshot (`run.sh`'s own `pss_after` capture) — the pre-run snapshot is
+   always empty (the app is force-stopped immediately before each run, so
+   there is no process to sample), so this is an absolute post-run figure,
+   not a before/after delta. The `pss_before`/`pss_after` text dumps behind
+   the S5/S6/S1-anchor Graphics figures are committed alongside their
+   `run-NN.log`/`stats.txt` (`benchmarks/.gitignore`'s documented
+   `*.pss_*.txt` raw-artifact class, scoped to `it.f0x.*bench`'s own
+   process — self-check: no foreign package identifier appears in any of
+   them). The adopted S1/S2/S4 rows report Graphics as "not captured"
+   instead: that series' own committed raw set
+   (`run-NN.log`+`stats.txt` only, per `ab_matrix.sh`'s own committed-set
+   convention) never captured a meminfo snapshot at all, and the cited rows
+   are not re-measured here.
+6. **S5's ~94ms median is a genuine, reproducible present-path stall, not
+   a capture artifact** — `submit_us` alone accounts for ~93–94ms of the
+   ~95ms median frame (`encode_us`/`acquire_us` both near-zero), consistent
+   across all 5 captured runs (per-run mean `total_us` 87.6k–90.0k µs, tight
+   spread). This mirrors the OnePlus 9 (Adreno 660)'s own S5 present-path
+   finding elsewhere in this file (`present_us` 58.9% of its median frame)
+   — the same pathology, far more severe on the older/slower Adreno 620.
+7. **Raw-path layout for this section.** Every series measured here lives
+   under `benchmarks/raw/pixel5/classic-baseline/<scenario>/` — `s1` (the
+   protocol anchor), `s5`, `s6` as `run-NN.log`+`stats.txt`+`pss_*` in the
+   established per-run layout, and `nav` as the single sanitized
+   `logcat-frust-perf.log`. That tree is a sibling of the Fine-floor A/B
+   section's `benchmarks/raw/pixel5/fine-floor/<cell>/<scenario>/`, not a
+   copy of it: the cited rows keep pointing at their original series, which
+   is neither moved nor duplicated.
+8. **The measured nav pass emitted no `frust-perf frame` summary line, so
+   its percentiles are computed from that pass's own raw frame lines.**
+   `FrameStats::emit_log` is rate-limited to one summary per 2s of
+   *accumulated frame time* (`EMIT_INTERVAL` in
+   `crates/frust-shell-common/src/perf.rs`), and one three-pair push/pop
+   pass renders less than that on this build: the two passes driven
+   accumulated 1.92s over 150 frames and 1.85s over 141 frames, so the rate
+   limit never fired in either. The second pass is the committed one. Its
+   `total_p50`/`submit_p95`/`acquire_p95` are computed from its
+   `frust-perf raw` lines with `stats.py`'s own `_nearest_rank_percentile`
+   (imported, not reimplemented) over the last 120 frames — `RING_CAPACITY`,
+   the same window `FrameStats::summary` reports over. The substitution is
+   calibrated rather than assumed: run over the cited nav row's raw log —
+   across the window that row's summary actually covered, its last 120
+   frames as of its own `total_frames=133` — it reproduces all eleven
+   fields of that emitted line exactly (`total_p50/p95/p99`,
+   `rebuild/layout/paint/encode/acquire/submit_p95`, `over_60hz`,
+   `over_120hz`) once truncated to whole milliseconds as `emit_log` prints
+   them. No figure in the nav table is read from a summary line that does
+   not exist, and none is estimated.
+9. **What is measured here versus cited.** S5, S6, the S1 anchor and the nav
+   pass were measured on this device for this section. S1, S2 and S4 are
+   cited verbatim from the Fine-floor A/B `area`/`1.0` row above and were
+   not re-run (deviation 1); the nav table carries that row's nav figure
+   next to the measured one rather than replacing it, so the two bases stay
+   visible side by side. `ab_matrix.sh` was read for the nav recipe but
+   neither modified nor executed — the nav pass above was driven step by
+   step, so no matrix cell, staging directory or published-cell path was
+   touched.
+
 ---
 
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
