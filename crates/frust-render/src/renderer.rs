@@ -41,7 +41,7 @@ use kurbo::Affine;
 use peniko::ImageData;
 
 use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
+use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
@@ -600,20 +600,32 @@ impl SurfaceRenderer {
         let backend = match ctx.selected_tier() {
             crate::RenderTier::Gpu => {
                 let device = &ctx.device_handle().device;
-                // Narrow the compiled AA pipeline set to `Area` only (the sole
-                // `AaConfig` `render()` ever requests — see the
-                // `antialiasing_method: vello::AaConfig::Area` `RenderParams`
-                // below): `RendererOptions::default()` compiles shader
-                // permutations for every `AaConfig` (`AaSupport::all()`), ~3x
-                // unnecessary pipeline compiles at init that contribute to the
-                // slow, synchronous, main-thread launch-time shader compile that
-                // can trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
+                // Narrow the compiled AA pipeline set to the one mode the
+                // `FRUST_AA_MODE` knob selected (default: `Area`, the sole
+                // `AaConfig` every production `RenderParams` site requests —
+                // see the `antialiasing_method: aa_mode().to_vello()` sites in
+                // `encode`/`submit_impl` and `snapshot.rs`'s `SnapshotCache::render`):
+                // `RendererOptions::default()` compiles shader permutations
+                // for every `AaConfig` (`AaSupport::all()`), ~3x unnecessary
+                // pipeline compiles at init that contribute to the slow,
+                // synchronous, main-thread launch-time shader compile that can
+                // trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
                 // dev-profile shader-stack override note).
                 // Verified against the vello 0.9.0 source
                 // (`RendererOptions::antialiasing_support: AaSupport`,
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
+                let mode = aa_mode();
+                // One line per process naming the effective mode, so a device
+                // capture proves which build ran (`docs/DEVELOPMENT.md`'s
+                // Instrumentation table). Logged once regardless of surface
+                // recreation, mirroring `log_render_path`'s once-per-process
+                // shape.
+                static AA_MODE_LOGGED: OnceLock<()> = OnceLock::new();
+                AA_MODE_LOGGED.get_or_init(|| {
+                    log::info!("frust-render aa-mode={mode}");
+                });
                 let renderer_options = vello::RendererOptions {
-                    antialiasing_support: vello::AaSupport::area_only(),
+                    antialiasing_support: mode.support(),
                     pipeline_cache: pipeline_cache.clone(),
                     ..Default::default()
                 };
@@ -936,7 +948,7 @@ impl SurfaceRenderer {
                     base_color,
                     width,
                     height,
-                    antialiasing_method: vello::AaConfig::Area,
+                    antialiasing_method: aa_mode().to_vello(),
                 };
                 // A pre segment that paints nothing buys no vello pass: the
                 // compositor's own pass clears the frame to `base_color`
@@ -1405,7 +1417,7 @@ impl SurfaceRenderer {
                         base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),
                         width: surface.config.width,
                         height: surface.config.height,
-                        antialiasing_method: vello::AaConfig::Area,
+                        antialiasing_method: aa_mode().to_vello(),
                     };
                     // `encode` decided this frame's pre segment paints
                     // nothing, so the composite pass below clears the acquired

@@ -173,6 +173,7 @@ use std::ops::Range;
 use frust_scene::{Command, Scene};
 use kurbo::{Affine, Rect};
 
+use crate::context::aa_mode;
 use crate::convert::{Segment, encode_commands_into};
 use crate::shader_effects::clamp_size;
 
@@ -1108,7 +1109,11 @@ impl SnapshotCache {
             base_color: peniko::color::palette::css::TRANSPARENT,
             width: plan.width,
             height: plan.height,
-            antialiasing_method: vello::AaConfig::Area,
+            // The same mode the frame's own vello pass uses (`aa_mode()`,
+            // `renderer.rs`'s `encode`/`submit_impl`): a cached page is
+            // composited beside inline content rendered with that mode, and a
+            // mismatched mode would visibly differ at the bracket's edges.
+            antialiasing_method: aa_mode().to_vello(),
         };
         let rendered = match entries.get(&plan.key) {
             Some(entry) => renderer.render_to_texture(device, queue, scratch, &entry.view, &params),

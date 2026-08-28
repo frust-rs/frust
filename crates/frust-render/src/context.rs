@@ -45,6 +45,123 @@ fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String
     is_set_non_zero(name_compile_time) || is_set_non_zero(name_runtime.as_deref())
 }
 
+/// The precedence-resolved value of a `FRUST_*` string-valued env knob (e.g.
+/// `FRUST_AA_MODE`), checking both the compile-time (`option_env!`) and
+/// runtime (`std::env::var`) halves like [`env_flag_enabled`], but returning
+/// the value itself rather than a bool.
+///
+/// **Runtime wins**: a non-empty runtime value is returned even when a
+/// compile-time value is also set; an empty (`""`) runtime value is treated
+/// as unset and falls through to the compile-time half; `None` when neither
+/// half carries a non-empty value. Same spirit as `env_flag_enabled`'s
+/// compile-time-or-runtime parsing, so an Android app process (no runtime
+/// env) still honours a baked-in value.
+pub(crate) fn env_str(
+    compile_time: Option<&'static str>,
+    runtime: Option<String>,
+) -> Option<String> {
+    fn non_empty(value: Option<String>) -> Option<String> {
+        value.filter(|v| !v.is_empty())
+    }
+    non_empty(runtime).or_else(|| non_empty(compile_time.map(str::to_string)))
+}
+
+/// vello's per-frame anti-aliasing method, selectable via the `FRUST_AA_MODE`
+/// knob (`docs/DEVELOPMENT.md`'s Instrumentation table) so the Area-vs-MSAA
+/// cost of the fine stage can be A/B'd on device. Crate-private: the `vello`
+/// type it wraps ([`vello::AaConfig`]/[`vello::AaSupport`]) never crosses this
+/// crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AaMode {
+    /// vello's default: area anti-aliasing. Byte-identical to pre-knob
+    /// behaviour, and the fallback for an unset/empty/unknown knob value.
+    Area,
+    /// 8x multisampling.
+    Msaa8,
+    /// 16x multisampling.
+    Msaa16,
+}
+
+impl std::fmt::Display for AaMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AaMode::Area => "area",
+            AaMode::Msaa8 => "msaa8",
+            AaMode::Msaa16 => "msaa16",
+        })
+    }
+}
+
+impl AaMode {
+    /// The [`vello::AaConfig`] this mode requests from `RenderParams`.
+    pub(crate) fn to_vello(self) -> vello::AaConfig {
+        match self {
+            AaMode::Area => vello::AaConfig::Area,
+            AaMode::Msaa8 => vello::AaConfig::Msaa8,
+            AaMode::Msaa16 => vello::AaConfig::Msaa16,
+        }
+    }
+
+    /// The [`vello::AaSupport`] a `vello::Renderer` should be built with to
+    /// compile pipelines for exactly this mode — never more: `AaSupport::all()`
+    /// compiles shader permutations for every `AaConfig`, ~3x unnecessary
+    /// pipeline compiles at init (the same rationale `install_surface`'s
+    /// `AaSupport::area_only()` documents), so only the selected mode's bit is
+    /// ever set.
+    pub(crate) fn support(self) -> vello::AaSupport {
+        match self {
+            AaMode::Area => vello::AaSupport::area_only(),
+            AaMode::Msaa8 => vello::AaSupport {
+                area: false,
+                msaa8: true,
+                msaa16: false,
+            },
+            AaMode::Msaa16 => vello::AaSupport {
+                area: false,
+                msaa8: false,
+                msaa16: true,
+            },
+        }
+    }
+}
+
+/// Parses a raw `FRUST_AA_MODE` value (already resolved by [`env_str`]) into
+/// an [`AaMode`]. Case-insensitive on `area`/`msaa8`/`msaa16`, with
+/// surrounding whitespace trimmed first. An unset or empty value falls back
+/// to [`AaMode::Area`] silently (that is simply "the knob wasn't touched");
+/// an unrecognised value also falls back to `Area`, but logs one
+/// `log::warn!` naming the offending value, since that case is more likely a
+/// typo than a deliberate default.
+pub(crate) fn parse_aa_mode(raw: Option<String>) -> AaMode {
+    let Some(trimmed) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return AaMode::Area;
+    };
+    match trimmed.to_ascii_lowercase().as_str() {
+        "area" => AaMode::Area,
+        "msaa8" => AaMode::Msaa8,
+        "msaa16" => AaMode::Msaa16,
+        _ => {
+            log::warn!(
+                "frust-render: unrecognised FRUST_AA_MODE value {trimmed:?}, falling back to area"
+            );
+            AaMode::Area
+        }
+    }
+}
+
+/// The process-wide anti-aliasing mode, resolved once from `FRUST_AA_MODE`
+/// (compile-time-or-runtime, see [`env_str`]) and cached — a `FRUST_AA_MODE`
+/// change requires a fresh process, matching every other `FRUST_*` knob.
+pub(crate) fn aa_mode() -> AaMode {
+    static MODE: OnceLock<AaMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        parse_aa_mode(env_str(
+            option_env!("FRUST_AA_MODE"),
+            std::env::var("FRUST_AA_MODE").ok(),
+        ))
+    })
+}
+
 /// Whether perf tracing (frust-perf logging) is enabled via the process-wide
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
@@ -1525,6 +1642,108 @@ mod tests {
         // honours a baked-in compile-time value, and vice versa.
         assert!(env_flag_enabled(Some("1"), Some("0".to_string())));
         assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
+    }
+
+    #[test]
+    fn env_str_unset_both_halves_is_none() {
+        assert_eq!(env_str(None, None), None);
+    }
+
+    #[test]
+    fn env_str_runtime_non_empty_beats_compile_time() {
+        // Runtime wins even when a compile-time value is also present.
+        assert_eq!(
+            env_str(Some("msaa8"), Some("msaa16".to_string())),
+            Some("msaa16".to_string())
+        );
+    }
+
+    #[test]
+    fn env_str_empty_runtime_falls_through_to_compile_time() {
+        // An empty runtime value ("") is treated as unset, not a real override.
+        assert_eq!(
+            env_str(Some("msaa8"), Some(String::new())),
+            Some("msaa8".to_string())
+        );
+    }
+
+    #[test]
+    fn env_str_compile_time_only() {
+        assert_eq!(env_str(Some("msaa16"), None), Some("msaa16".to_string()));
+    }
+
+    #[test]
+    fn env_str_runtime_only() {
+        assert_eq!(
+            env_str(None, Some("area".to_string())),
+            Some("area".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_aa_mode_none_is_area() {
+        assert_eq!(parse_aa_mode(None), AaMode::Area);
+    }
+
+    #[test]
+    fn parse_aa_mode_empty_is_area() {
+        assert_eq!(parse_aa_mode(Some(String::new())), AaMode::Area);
+    }
+
+    #[test]
+    fn parse_aa_mode_case_insensitive_hits() {
+        assert_eq!(parse_aa_mode(Some("area".to_string())), AaMode::Area);
+        assert_eq!(parse_aa_mode(Some("AREA".to_string())), AaMode::Area);
+        assert_eq!(parse_aa_mode(Some("Msaa8".to_string())), AaMode::Msaa8);
+        assert_eq!(parse_aa_mode(Some("MSAA8".to_string())), AaMode::Msaa8);
+        assert_eq!(parse_aa_mode(Some("msaa16".to_string())), AaMode::Msaa16);
+        assert_eq!(parse_aa_mode(Some("MsAa16".to_string())), AaMode::Msaa16);
+    }
+
+    #[test]
+    fn parse_aa_mode_trims_surrounding_whitespace() {
+        assert_eq!(parse_aa_mode(Some("  msaa8  ".to_string())), AaMode::Msaa8);
+        assert_eq!(
+            parse_aa_mode(Some("\tmsaa16\n".to_string())),
+            AaMode::Msaa16
+        );
+    }
+
+    #[test]
+    fn parse_aa_mode_unknown_falls_back_to_area() {
+        assert_eq!(parse_aa_mode(Some("nonsense".to_string())), AaMode::Area);
+    }
+
+    #[test]
+    fn aa_mode_support_enables_exactly_the_selected_mode() {
+        let area = AaMode::Area.support();
+        assert!(area.area);
+        assert!(!area.msaa8);
+        assert!(!area.msaa16);
+
+        let msaa8 = AaMode::Msaa8.support();
+        assert!(!msaa8.area);
+        assert!(msaa8.msaa8);
+        assert!(!msaa8.msaa16);
+
+        let msaa16 = AaMode::Msaa16.support();
+        assert!(!msaa16.area);
+        assert!(!msaa16.msaa8);
+        assert!(msaa16.msaa16);
+    }
+
+    #[test]
+    fn aa_mode_to_vello_matches_selected_mode() {
+        assert_eq!(AaMode::Area.to_vello(), vello::AaConfig::Area);
+        assert_eq!(AaMode::Msaa8.to_vello(), vello::AaConfig::Msaa8);
+        assert_eq!(AaMode::Msaa16.to_vello(), vello::AaConfig::Msaa16);
+    }
+
+    #[test]
+    fn aa_mode_display_matches_knob_spelling() {
+        assert_eq!(AaMode::Area.to_string(), "area");
+        assert_eq!(AaMode::Msaa8.to_string(), "msaa8");
+        assert_eq!(AaMode::Msaa16.to_string(), "msaa16");
     }
 
     #[test]
