@@ -148,11 +148,22 @@
 //! - A degenerate `rect` or a non-invertible bracket transform (no mapping to
 //!   derive), and a `key` recorded twice in one frame (the cache is keyed by
 //!   `key` alone, so two brackets sharing one would draw each other's pixels).
+//! - A bracket whose texture would cover more than
+//!   [`SNAPSHOT_AREA_BUDGET_FACTOR`] times the surface's own pixel area:
+//!   [`snapshot_size`] clamps each AXIS to the adapter limit, which on its own
+//!   still admits a 268 MB page.
 //!
 //! Each of those simply yields no layer and no hole, so the bracket lowers
 //! inline via [`crate::convert`]'s MISS path in whichever segment it falls —
 //! the path the renderer used before this cache existed, never a panic and
 //! never a wrong-pixels shortcut.
+//!
+//! One refusal is frame-wide rather than per-bracket: a `ClearRect` recorded
+//! AFTER the first composited bracket ([`punches_after_first_bracket`]). It
+//! would land in the trailing segment, whose pass renders into a transparent
+//! scratch texture the punch erases instead of the swapchain — so the frame
+//! composites nothing at all and takes the ordinary single-pass path, exactly
+//! as the kill switch does.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -162,7 +173,7 @@ use std::ops::Range;
 use frust_scene::{Command, Scene};
 use kurbo::{Affine, Rect};
 
-use crate::convert::encode_commands_into;
+use crate::convert::{Segment, encode_commands_into};
 use crate::shader_effects::clamp_size;
 
 /// How many frames an entry may go untouched before it is dropped: an entry
@@ -191,6 +202,23 @@ const AXIS_ALIGNED_EPSILON: f64 = 1e-9;
 /// does not buy a 1081st pixel column — and, one frame later when it lands a
 /// few ULPs below, throw the texture away again.
 const SIZE_EPSILON: f64 = 1e-6;
+
+/// How many times the SURFACE's own pixel area one cached page may cover
+/// before the bracket is refused and lowered inline.
+///
+/// [`snapshot_size`] clamps each AXIS to vello's atlas ceiling and the
+/// adapter's limit, which alone permits an 8192x8192 `Rgba8Unorm` texture —
+/// 268 MB for one page. An area budget is the missing half: a page is a
+/// widget subtree drawn onto this surface, so its texture is at most the
+/// surface's own physical size (its rect times the device scale), and 2x
+/// leaves generous room for the legitimate overhang — a page recorded at full
+/// extent while it slides in from off-screen, a rect rounded outward on both
+/// axes — while still refusing a bracket whose rect is pathological.
+///
+/// A bracket over the budget yields no plan and no hole and lowers inline,
+/// exactly like every other refusal in the module header's "what is never
+/// cached".
+const SNAPSHOT_AREA_BUDGET_FACTOR: u64 = 2;
 
 /// One cached rasterization: the texture vello renders the body into, plus the
 /// bookkeeping the reuse and eviction decisions read.
@@ -259,7 +287,10 @@ pub(crate) struct FramePlan {
     /// The WHOLE command range when nothing is composited, which is what makes
     /// a disabled cache (and a frame with no cache hits) an ordinary
     /// single-pass frame.
-    pub pre: Range<usize>,
+    ///
+    /// Its [`Segment::prefix`] is ALWAYS empty: the pre segment starts at the
+    /// scene root, so it opens every group it needs itself.
+    pub pre: Segment,
     /// Whether [`Self::pre`] holds a command that paints a pixel
     /// ([`draws_pixels`]).
     ///
@@ -280,21 +311,16 @@ pub(crate) struct FramePlan {
     /// put pixels on the frame. `None` is the common case (a page transition
     /// whose brackets are the last thing in the scene, bar the app root's
     /// `PopClip`) and saves that whole pass.
-    pub trailing: Option<Range<usize>>,
-    /// The clip/layer pushes still OPEN where [`Self::trailing`] starts, in
-    /// recording order — the groups that pass must re-establish before it
-    /// encodes anything ([`crate::convert::encode_range_with_overrides`]'s
-    /// `prefix`).
     ///
-    /// A trailing segment is a slice out of the middle of the frame, so it
-    /// begins inside whatever the scene had pushed around it: the app root's
+    /// Unlike [`Self::pre`], this one carries a [`Segment::prefix`]: a
+    /// trailing segment is a slice out of the MIDDLE of the frame, so it
+    /// begins inside whatever the scene had pushed around it — the app root's
     /// clip around both pages (`nav/navigator.rs`), a scroll viewport's clip
     /// around a switcher (`scroll.rs`). Encoding the slice alone would draw
-    /// that content unclipped and pop groups this pass never pushed. Always
-    /// empty when `trailing` is `None`, and never contains an index inside a
-    /// composited bracket's span — that body is a hole the trailing pass skips
-    /// outright.
-    pub trailing_prefix: Vec<usize>,
+    /// that content unclipped and pop groups this pass never pushed. The
+    /// prefix never contains an index inside a composited bracket's span:
+    /// that body is a hole the trailing pass skips outright.
+    pub trailing: Option<Segment>,
 }
 
 impl FramePlan {
@@ -302,12 +328,11 @@ impl FramePlan {
     /// command, exactly as it did before this cache existed.
     fn inline(commands: &[Command]) -> Self {
         Self {
-            pre: 0..commands.len(),
+            pre: Segment::whole(commands.len()),
             pre_draws: commands.iter().any(draws_pixels),
             layers: Vec::new(),
             holes: HashSet::new(),
             trailing: None,
-            trailing_prefix: Vec::new(),
         }
     }
 }
@@ -368,24 +393,28 @@ fn draws_pixels(command: &Command) -> bool {
 
 /// The two-segment split of a frame's command list, given the frame's
 /// `commands` and the [`bracket_span`]s of the composited brackets in scene
-/// order: the pre range, whether the pre range DRAWS, and the trailing range
-/// when there is one.
+/// order: the pre [`Segment`], whether the pre segment DRAWS, and the trailing
+/// [`Segment`] when there is one.
 ///
-/// `pre` runs up to the first composited bracket's `PushSnapshot`; the
-/// trailing segment starts one past that same bracket's `PopSnapshot` and runs
-/// to the end. Both halves are judged on drawing commands alone
-/// ([`draws_pixels`]): every later composited bracket inside the trailing
-/// range is skipped as a hole, so the range is worth a vello pass exactly when
-/// something OUTSIDE those brackets paints in it — and the pre range's own
-/// pass is worth running exactly when something paints there (see
-/// [`FramePlan::pre_draws`]).
-fn frame_split(
-    commands: &[Command],
-    spans: &[Range<usize>],
-) -> (Range<usize>, bool, Option<Range<usize>>) {
+/// `pre` runs up to the first composited bracket's `PushSnapshot` and always
+/// carries an empty prefix (it starts at the scene root); the trailing segment
+/// starts one past that same bracket's `PopSnapshot`, runs to the end, and
+/// carries the [`open_group_pushes`] its pass must re-establish. Both halves
+/// are judged on drawing commands alone ([`draws_pixels`]): every later
+/// composited bracket inside the trailing range is skipped as a hole, so the
+/// range is worth a vello pass exactly when something OUTSIDE those brackets
+/// paints in it — and the pre range's own pass is worth running exactly when
+/// something paints there (see [`FramePlan::pre_draws`]).
+///
+/// The trailing range and its prefix are derived HERE, in one walk order, so
+/// the renderer, the compositor's own frame helper and the tests all consume
+/// one value rather than three re-derivations of the same decision that can
+/// drift apart (a caller that forgot the prefix used to leave every host test
+/// green).
+fn frame_split(commands: &[Command], spans: &[Range<usize>]) -> (Segment, bool, Option<Segment>) {
     let len = commands.len();
     let Some(first) = spans.first() else {
-        return (0..len, commands.iter().any(draws_pixels), None);
+        return (Segment::whole(len), commands.iter().any(draws_pixels), None);
     };
     let pre = 0..first.start.min(len);
     let pre_draws = commands[pre.clone()].iter().any(draws_pixels);
@@ -393,7 +422,48 @@ fn frame_split(
     let draws = (start..len).any(|index| {
         draws_pixels(&commands[index]) && !spans[1..].iter().any(|span| span.contains(&index))
     });
-    (pre, pre_draws, draws.then_some(start..len))
+    let trailing = draws.then(|| {
+        // The depth-0 invariant [`open_group_pushes`] is written against:
+        // `start` is one past an OUTERMOST composited bracket's
+        // `PopSnapshot`, so no snapshot bracket — and therefore no MISS'd
+        // bracket's emulated alpha layer — can be open here.
+        debug_assert_eq!(
+            snapshot_depth_before(commands, start),
+            0,
+            "a frame split must not fall inside a snapshot bracket"
+        );
+        Segment {
+            range: start..len,
+            prefix: open_group_pushes(commands, start, spans),
+        }
+    });
+    (
+        Segment {
+            range: pre,
+            prefix: Vec::new(),
+        },
+        pre_draws,
+        trailing,
+    )
+}
+
+/// The `PushSnapshot`/`PopSnapshot` nesting depth immediately BEFORE `index`:
+/// pushes minus pops over `commands[..index]`, saturating at zero so an
+/// unbalanced pop reads as depth 0 — the same tolerance the encode walk and
+/// [`outermost_brackets`] show one.
+///
+/// Exists to assert the invariant [`open_group_pushes`] relies on, so a future
+/// split rule that could fall inside a bracket trips a debug assertion rather
+/// than silently mis-modelling the emulated layer a MISS'd bracket pushes.
+fn snapshot_depth_before(commands: &[Command], index: usize) -> usize {
+    commands
+        .iter()
+        .take(index)
+        .fold(0usize, |depth, command| match command {
+            Command::PushSnapshot { .. } => depth + 1,
+            Command::PopSnapshot => depth.saturating_sub(1),
+            _ => depth,
+        })
 }
 
 /// The whole per-frame decision for one cacheable bracket, computed without
@@ -597,7 +667,7 @@ fn enclosed_by_translucent_layer(groups: &[Enclosing]) -> bool {
 }
 
 /// The command indices of the clip/layer pushes still OPEN at `split`, in
-/// recording order — [`FramePlan::trailing_prefix`].
+/// recording order — a trailing [`Segment`]'s [`Segment::prefix`].
 ///
 /// Mirrors `convert.rs`'s own group stack: `PushClip`/`PushClipRounded`/
 /// `PushLayer` open a group and either pop closes the innermost one, so an
@@ -607,6 +677,18 @@ fn enclosed_by_translucent_layer(groups: &[Enclosing]) -> bool {
 /// Commands inside a composited bracket's `spans` are skipped: that body never
 /// reaches the trailing pass (it is a hole), so a group opened and closed
 /// inside it is not part of the state the trailing segment starts in.
+///
+/// ## The one group `convert.rs` pushes that this deliberately does not model
+///
+/// The encode walk pushes a `Group::Layer` of its own for a MISS'd
+/// `PushSnapshot` whose `alpha < 1.0` (its inline emulation), and this mirror
+/// does not. That is correct ONLY because a split never falls inside a
+/// bracket: [`frame_split`] starts the trailing segment one past an
+/// OUTERMOST composited bracket's `PopSnapshot`, where the snapshot depth is
+/// therefore 0 ([`snapshot_depth_before`], debug-asserted there), so no
+/// bracket — MISS'd or otherwise — is open at `split` and no emulated layer
+/// can be part of the state the segment starts in. A split rule that could
+/// land inside a bracket would have to model it here.
 fn open_group_pushes(commands: &[Command], split: usize, spans: &[Range<usize>]) -> Vec<usize> {
     let mut open: Vec<usize> = Vec::new();
     for (index, command) in commands.iter().enumerate().take(split) {
@@ -728,6 +810,40 @@ fn is_cacheable_body(body: &[Command]) -> bool {
     })
 }
 
+/// Whether a `ClearRect` lands in the frame's TRAILING segment: at or after
+/// the first composited bracket's own [`bracket_span`] end, and outside every
+/// composited bracket's span.
+///
+/// A punch there cannot be composited correctly, so the whole frame gives up
+/// on compositing rather than paint it wrong. The trailing segment renders
+/// into the compositor's TRANSPARENT scratch texture, and `convert.rs` hoists
+/// a `ClearRect` to that pass's own root — so the punch erases scratch pixels
+/// and never reaches the swapchain, leaving the composited page underneath
+/// fully visible exactly where a hosted native view was supposed to show
+/// through. The measured shape is a camera page (bracketed, but uncacheable
+/// via [`is_cacheable_body`], so it falls into the trailing segment) pushed
+/// over an already-composited page on a translucent Android surface.
+///
+/// A punch in the PRE segment is fine and is deliberately not reported: that
+/// pass writes the real target, `pre_draws` is true for it, and a quad drawn
+/// over it afterwards matches the inline z-order.
+///
+/// Reported from [`SnapshotCache::plan`], which is GPU-free — the frame falls
+/// back to the ordinary single-pass path before anything is rasterized.
+fn punches_after_first_bracket(commands: &[Command], spans: &[Range<usize>]) -> bool {
+    let Some(first) = spans.first() else {
+        return false;
+    };
+    commands
+        .iter()
+        .enumerate()
+        .skip(first.end)
+        .any(|(index, command)| {
+            matches!(command, Command::ClearRect { .. })
+                && !spans.iter().any(|span| span.contains(&index))
+        })
+}
+
 /// Keys appearing more than once in one frame's brackets. The cache is keyed
 /// by `key` alone, so an ambiguous key would draw one bracket's pixels in the
 /// other's place; both take the inline path instead.
@@ -781,6 +897,11 @@ impl SnapshotCache {
     /// see complete textures as long as they run after this. Same ordering
     /// argument the shader pre-pass makes.
     ///
+    /// `surface` is the swapchain's pixel size, the yardstick each bracket's
+    /// own texture area is budgeted against
+    /// ([`SNAPSHOT_AREA_BUDGET_FACTOR`]); a zero-area surface budgets nothing
+    /// and composites nothing.
+    ///
     /// A `false` `enabled` flag short-circuits before any GPU work, any
     /// eviction, and the frame clock itself: the switch means "the pre-pass is
     /// off", not "age everything out". Never panics — a failed rasterization
@@ -793,6 +914,7 @@ impl SnapshotCache {
         renderer: &mut vello::Renderer,
         scene: &Scene,
         adapter_max: u32,
+        surface: (u32, u32),
     ) -> FramePlan {
         if !self.enabled {
             return FramePlan::inline(scene.commands());
@@ -800,7 +922,7 @@ impl SnapshotCache {
         self.frame += 1;
         let mut layers = Vec::new();
         let mut spans = Vec::new();
-        for plan in self.plan(scene, adapter_max) {
+        for plan in self.plan(scene, adapter_max, surface) {
             if !plan.reuse && !self.render(device, queue, renderer, scene, &plan) {
                 continue;
             }
@@ -824,32 +946,41 @@ impl SnapshotCache {
         }
         self.evict();
         let holes = layers.iter().map(|layer| layer.key).collect();
+        // One walk decides both segments AND the trailing prefix, so the
+        // renderer cannot forward a range without the groups it starts inside.
         let (pre, pre_draws, trailing) = frame_split(scene.commands(), &spans);
-        let trailing_prefix = trailing
-            .as_ref()
-            .map(|range| open_group_pushes(scene.commands(), range.start, &spans))
-            .unwrap_or_default();
         FramePlan {
             pre,
             pre_draws,
             layers,
             holes,
             trailing,
-            trailing_prefix,
         }
     }
 
     /// The GPU-free half of [`Self::prepare`]: what this frame would rasterize
     /// and what it would re-use. Split out so the scan, the size/root
-    /// derivation, the fingerprint decision and the kill switch are all
-    /// assertable without a device.
-    fn plan(&self, scene: &Scene, adapter_max: u32) -> Vec<Plan> {
+    /// derivation, the fingerprint decision, the budgets and the kill switch
+    /// are all assertable without a device.
+    ///
+    /// `surface` is the swapchain's pixel size; a bracket whose texture would
+    /// cover more than [`SNAPSHOT_AREA_BUDGET_FACTOR`] times that area is
+    /// skipped and lowers inline. An empty result — every bracket skipped, or
+    /// the whole frame refused by [`punches_after_first_bracket`] — is exactly
+    /// the kill switch's plan, so the caller's ordinary single-pass path
+    /// carries it with no special case.
+    fn plan(&self, scene: &Scene, adapter_max: u32, surface: (u32, u32)) -> Vec<Plan> {
         if !self.enabled {
             return Vec::new();
         }
         let commands = scene.commands();
         let brackets = outermost_brackets(commands);
         let ambiguous = ambiguous_keys(brackets.iter().map(|bracket| bracket.key));
+        // Guarded rather than divided into, so a zero-area surface (a
+        // minimized window, a surface mid-resize) budgets nothing and
+        // composites nothing instead of dividing by zero: every texture is at
+        // least 1x1 after `clamp_size`, so `area > 0` refuses them all.
+        let budget = SNAPSHOT_AREA_BUDGET_FACTOR * u64::from(surface.0) * u64::from(surface.1);
         let mut plans = Vec::new();
         for bracket in brackets {
             if ambiguous.contains(&bracket.key)
@@ -859,6 +990,9 @@ impl SnapshotCache {
             }
             let raster = raster_transform(bracket.transform);
             let (width, height) = snapshot_size(raster, bracket.rect, adapter_max);
+            if u64::from(width) * u64::from(height) > budget {
+                continue;
+            }
             let Some(root) = raster_root(bracket.transform, bracket.rect, width, height) else {
                 continue;
             };
@@ -891,6 +1025,16 @@ impl SnapshotCache {
                 transform: bracket.transform,
                 clip: bracket.clip,
             });
+        }
+        // A hole punch recorded after the first composited bracket cannot
+        // survive the trailing pass's transparent scratch, so the WHOLE frame
+        // lowers inline rather than seal the hole a hosted native view shows
+        // through (see [`punches_after_first_bracket`]). Decided here, before
+        // any rasterization: the caller still ticks its frame clock and
+        // evicts, it just composites nothing.
+        let spans: Vec<Range<usize>> = plans.iter().map(|plan| bracket_span(&plan.body)).collect();
+        if punches_after_first_bracket(commands, &spans) {
+            return Vec::new();
         }
         plans
     }
@@ -1033,6 +1177,12 @@ mod tests {
 
     const KEY: u64 = 7;
 
+    /// The surface size every plan/split assertion here is budgeted against —
+    /// large enough that no bracket in this module is refused for area. The
+    /// budget itself is pinned by
+    /// [`plan_skips_a_bracket_over_the_area_budget`].
+    const SURFACE: (u32, u32) = (256, 256);
+
     /// A scene holding one bracket: `body` filled inside a `rect` bracket
     /// recorded under `transform`.
     fn bracket_scene(transform: Affine, rect: Rect, body: Rect, brush: Brush) -> Scene {
@@ -1064,7 +1214,7 @@ mod tests {
     /// actually became layers.
     fn spans_of(scene: &Scene) -> Vec<Range<usize>> {
         SnapshotCache::new(true)
-            .plan(scene, 8192)
+            .plan(scene, 8192, SURFACE)
             .iter()
             .map(|plan| bracket_span(&plan.body))
             .collect()
@@ -1072,19 +1222,38 @@ mod tests {
 
     /// The split a frame would take if every eligible bracket in `scene` hit
     /// the cache.
-    fn split_of(scene: &Scene) -> (Range<usize>, bool, Option<Range<usize>>) {
+    fn split_of(scene: &Scene) -> (Segment, bool, Option<Segment>) {
         frame_split(scene.commands(), &spans_of(scene))
     }
 
-    /// The trailing segment's prefix for that same frame — `prepare`'s own
-    /// derivation, so a test asserts what the render path would actually hand
+    /// The trailing segment's prefix for that same frame — a VIEW over
+    /// [`frame_split`]'s own return value rather than a second derivation, so
+    /// a test asserts exactly what the render path would hand
     /// `convert::encode_range_with_overrides`.
     fn prefix_of(scene: &Scene) -> Vec<usize> {
-        let spans = spans_of(scene);
-        let (_, _, trailing) = frame_split(scene.commands(), &spans);
-        trailing
-            .map(|range| open_group_pushes(scene.commands(), range.start, &spans))
+        split_of(scene)
+            .2
+            .map(|segment| segment.prefix)
             .unwrap_or_default()
+    }
+
+    /// A segment starting at the scene root: a range under no re-opened
+    /// groups, which is every pre segment and every trailing segment of an
+    /// unclipped scene.
+    fn seg(range: Range<usize>) -> Segment {
+        Segment {
+            range,
+            prefix: Vec::new(),
+        }
+    }
+
+    /// The composited keys `plan` would report for `scene`, in scene order.
+    fn planned_keys(scene: &Scene) -> Vec<u64> {
+        SnapshotCache::new(true)
+            .plan(scene, 8192, SURFACE)
+            .iter()
+            .map(|plan| plan.key)
+            .collect()
     }
 
     fn clip(rect: Rect, transform: Affine) -> Command {
@@ -1333,8 +1502,15 @@ mod tests {
             builder.pop_snapshot();
             builder.pop_layer();
         }
-        assert!(SnapshotCache::new(true).plan(&scene, 8192).is_empty());
-        assert_eq!(split_of(&scene), (0..scene.commands().len(), true, None));
+        assert!(
+            SnapshotCache::new(true)
+                .plan(&scene, 8192, SURFACE)
+                .is_empty()
+        );
+        assert_eq!(
+            split_of(&scene),
+            (seg(0..scene.commands().len()), true, None)
+        );
     }
 
     /// The MEASURED trailing shape: the app root's clip is open where the
@@ -1354,7 +1530,19 @@ mod tests {
             builder.fill_rect(body, Brush::Solid(RED));
             builder.pop_clip();
         }
-        assert_eq!(split_of(&scene), (0..1, false, Some(4..6)));
+        assert_eq!(
+            split_of(&scene),
+            (
+                seg(0..1),
+                false,
+                Some(Segment {
+                    range: 4..6,
+                    // The app root's `PushClip`, carried by the segment
+                    // itself rather than beside it.
+                    prefix: vec![0],
+                })
+            )
+        );
         assert_eq!(prefix_of(&scene), vec![0]);
     }
 
@@ -1375,10 +1563,11 @@ mod tests {
         }
         assert!(split_of(&scene).2.is_none());
         assert!(prefix_of(&scene).is_empty());
+        let inline = FramePlan::inline(scene.commands());
+        assert!(inline.trailing.is_none());
         assert!(
-            FramePlan::inline(scene.commands())
-                .trailing_prefix
-                .is_empty()
+            inline.pre.prefix.is_empty(),
+            "the pre segment starts at the scene root"
         );
     }
 
@@ -1766,7 +1955,7 @@ mod tests {
             Brush::Solid(RED),
         );
         let cache = SnapshotCache::new(true);
-        let plans = cache.plan(&scene, 8192);
+        let plans = cache.plan(&scene, 8192, SURFACE);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].key, KEY);
         assert_eq!((plans[0].width, plans[0].height), (40, 20));
@@ -1786,10 +1975,15 @@ mod tests {
             Brush::Solid(RED),
         );
         assert!(
-            SnapshotCache::new(false).plan(&scene, 8192).is_empty(),
+            SnapshotCache::new(false)
+                .plan(&scene, 8192, SURFACE)
+                .is_empty(),
             "the kill switch must short-circuit before any bracket is planned"
         );
-        assert_eq!(SnapshotCache::new(true).plan(&scene, 8192).len(), 1);
+        assert_eq!(
+            SnapshotCache::new(true).plan(&scene, 8192, SURFACE).len(),
+            1
+        );
     }
 
     #[test]
@@ -1803,7 +1997,9 @@ mod tests {
             builder.pop_snapshot();
         }
         assert!(
-            SnapshotCache::new(true).plan(&scene, 8192).is_empty(),
+            SnapshotCache::new(true)
+                .plan(&scene, 8192, SURFACE)
+                .is_empty(),
             "a hole punch must reach the surface, not a snapshot texture"
         );
 
@@ -1817,7 +2013,7 @@ mod tests {
         }
         assert!(
             SnapshotCache::new(true)
-                .plan(&shader_scene, 8192)
+                .plan(&shader_scene, 8192, SURFACE)
                 .is_empty(),
             "a shader body has no override map on the slice encode path"
         );
@@ -1835,7 +2031,132 @@ mod tests {
                 builder.pop_snapshot();
             }
         }
-        assert!(SnapshotCache::new(true).plan(&scene, 8192).is_empty());
+        assert!(
+            SnapshotCache::new(true)
+                .plan(&scene, 8192, SURFACE)
+                .is_empty()
+        );
+    }
+
+    /// A hole punch recorded AFTER the first composited bracket lowers the
+    /// WHOLE frame inline. The measured shape is a camera page pushed over an
+    /// already-composited page: bracketed, but uncacheable, so it lands in the
+    /// trailing segment — whose pass renders into a TRANSPARENT scratch the
+    /// punch erases instead of the swapchain, leaving the composited page
+    /// visible exactly where the native view had to show through.
+    ///
+    /// Two controls: the same shape with the punch swapped for another
+    /// uncacheable body still composites (so it is the punch, not the second
+    /// bracket, that disables the frame), and a punch in the PRE segment is
+    /// fine (that pass writes the real target).
+    #[test]
+    fn plan_lowers_the_frame_inline_when_a_punch_follows_the_first_bracket() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let program = frust_scene::ShaderProgram::new("@fragment fn fs_main() {}");
+
+        // A cacheable bracket, then an uncacheable one whose body punches.
+        let mut punched = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut punched);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            builder.push_snapshot(1, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.push_snapshot(2, rect, 1.0, 1.0);
+            builder.clear_rect(body);
+            builder.pop_snapshot();
+            builder.pop_clip();
+        }
+        assert!(
+            planned_keys(&punched).is_empty(),
+            "a punch in the trailing segment must lower the whole frame inline"
+        );
+        assert_eq!(
+            split_of(&punched),
+            (seg(0..punched.commands().len()), true, None),
+            "the inline frame is one ordinary vello pass, exactly as with the \
+             kill switch"
+        );
+
+        // Control: the punch swapped for a shader quad — still an uncacheable
+        // second bracket, but nothing to erase the scratch.
+        let mut shaded = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut shaded);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            builder.push_snapshot(1, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.push_snapshot(2, rect, 1.0, 1.0);
+            builder.draw_shader(&program, body, 0.0);
+            builder.pop_snapshot();
+            builder.pop_clip();
+        }
+        assert_eq!(
+            planned_keys(&shaded),
+            vec![1],
+            "only the PUNCH disables the frame, not an uncacheable neighbour"
+        );
+
+        // Control: the same punch recorded BEFORE the composited bracket. It
+        // lands in the pre segment, which writes the real target.
+        let mut punched_first = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut punched_first);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
+            builder.clear_rect(body);
+            builder.push_snapshot(1, rect, 1.0, 1.0);
+            builder.fill_rect(body, Brush::Solid(RED));
+            builder.pop_snapshot();
+            builder.push_snapshot(2, rect, 1.0, 1.0);
+            builder.draw_shader(&program, body, 0.0);
+            builder.pop_snapshot();
+            builder.pop_clip();
+        }
+        assert_eq!(
+            planned_keys(&punched_first),
+            vec![1],
+            "a punch before the first bracket is the pre segment's, and fine"
+        );
+    }
+
+    /// The per-bracket area budget: `snapshot_size` clamps each AXIS to the
+    /// adapter limit, which alone still admits a 268 MB page, so a bracket
+    /// whose texture would cover more than [`SNAPSHOT_AREA_BUDGET_FACTOR`]
+    /// times the surface is refused and lowers inline.
+    #[test]
+    fn plan_skips_a_bracket_over_the_area_budget() {
+        let surface = (100u32, 100u32);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let plan_for = |extent: f64| {
+            let scene = bracket_scene(
+                Affine::IDENTITY,
+                Rect::new(0.0, 0.0, extent, extent),
+                body,
+                Brush::Solid(RED),
+            );
+            SnapshotCache::new(true).plan(&scene, 8192, surface).len()
+        };
+        // 300x300 = 90_000 device pixels against a 2 * 100 * 100 = 20_000
+        // budget.
+        assert_eq!(plan_for(300.0), 0, "an oversized page must lower inline");
+        // 140x140 = 19_600, just inside it.
+        assert_eq!(plan_for(140.0), 1, "a page within the budget composites");
+
+        // A zero-area surface budgets nothing rather than dividing by zero.
+        let scene = bracket_scene(
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            body,
+            Brush::Solid(RED),
+        );
+        assert!(
+            SnapshotCache::new(true)
+                .plan(&scene, 8192, (0, 0))
+                .is_empty(),
+            "a zero-area surface composites nothing"
+        );
     }
 
     #[test]
@@ -1870,13 +2191,12 @@ mod tests {
                 builder.fill_rect(body, Brush::Solid(RED));
             }
         }
-        let keys: Vec<u64> = SnapshotCache::new(true)
-            .plan(&scene, 8192)
-            .iter()
-            .map(|plan| plan.key)
-            .collect();
-        assert_eq!(keys, vec![1, 2], "both brackets composite, in scene order");
-        assert_eq!(split_of(&scene), (0..1, true, Some(4..9)));
+        assert_eq!(
+            planned_keys(&scene),
+            vec![1, 2],
+            "both brackets composite, in scene order"
+        );
+        assert_eq!(split_of(&scene), (seg(0..1), true, Some(seg(4..9))));
     }
 
     #[test]
@@ -1891,7 +2211,7 @@ mod tests {
             builder.fill_rect(body, Brush::Solid(RED));
             builder.pop_snapshot();
         }
-        assert_eq!(split_of(&scene), (0..1, true, None));
+        assert_eq!(split_of(&scene), (seg(0..1), true, None));
     }
 
     #[test]
@@ -1910,16 +2230,21 @@ mod tests {
                 builder.pop_snapshot();
             }
         }
-        assert_eq!(split_of(&scene), (0..0, false, None));
+        assert_eq!(split_of(&scene), (seg(0..0), false, None));
     }
 
     #[test]
     fn frame_split_leaves_an_uncacheable_bracket_in_the_trailing_segment() {
-        // A bracket the cache refuses (a hole punch in its body) is neither a
-        // layer nor a hole, so it keeps the trailing segment alive and lowers
-        // inline there.
+        // A bracket the cache refuses (a shader quad in its body, which has no
+        // override map on the slice encode path) is neither a layer nor a
+        // hole, so it keeps the trailing segment alive and lowers inline
+        // there. The refusal is deliberately NOT a hole punch: a `ClearRect`
+        // after the first composited bracket lowers the whole frame inline
+        // instead (`plan_lowers_the_frame_inline_when_a_punch_follows_the_
+        // first_bracket`), which would prove nothing about the split.
         let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
         let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let program = frust_scene::ShaderProgram::new("@fragment fn fs_main() {}");
         let mut scene = Scene::new();
         {
             let mut builder = SceneBuilder::new(&mut scene);
@@ -1927,16 +2252,135 @@ mod tests {
             builder.fill_rect(body, Brush::Solid(RED));
             builder.pop_snapshot();
             builder.push_snapshot(2, rect, 1.0, 1.0);
-            builder.clear_rect(body);
+            builder.draw_shader(&program, body, 0.0);
             builder.pop_snapshot();
         }
-        let keys: Vec<u64> = SnapshotCache::new(true)
-            .plan(&scene, 8192)
-            .iter()
-            .map(|plan| plan.key)
-            .collect();
-        assert_eq!(keys, vec![1], "the hole-punch bracket must not composite");
-        assert_eq!(split_of(&scene), (0..0, false, Some(3..6)));
+        assert_eq!(
+            planned_keys(&scene),
+            vec![1],
+            "the uncacheable bracket must not composite"
+        );
+        assert_eq!(split_of(&scene), (seg(0..0), false, Some(seg(3..6))));
+    }
+
+    /// The depth-0 invariant [`open_group_pushes`] is written against: a
+    /// trailing segment starts one past an OUTERMOST composited bracket's
+    /// `PopSnapshot`, so no bracket is open there — and in particular no
+    /// MISS'd bracket's emulated `Group::Layer` (`convert.rs` pushes one for
+    /// an uncacheable bracket with `alpha < 1.0`), which this mirror
+    /// deliberately does not model.
+    ///
+    /// The scene puts exactly that MISS'd translucent bracket BEFORE the
+    /// composited one, so a prefix that walked into it would name its
+    /// `PushSnapshot`.
+    #[test]
+    fn a_split_never_falls_inside_a_bracket() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0)); // 0: app root
+            // 1: uncacheable (a punch in its body) AND translucent, so
+            // `convert.rs` emulates it with a layer this walk never sees.
+            builder.push_snapshot(7, rect, 0.5, 1.0); // 1
+            builder.clear_rect(body); // 2: in the PRE segment, the legal place
+            builder.pop_snapshot(); // 3
+            builder.push_snapshot(1, rect, 1.0, 1.0); // 4: composited
+            builder.fill_rect(body, Brush::Solid(RED)); // 5
+            builder.pop_snapshot(); // 6
+            builder.fill_rect(body, Brush::Solid(RED)); // 7: trailing
+            builder.pop_clip(); // 8
+        }
+        // The spans the REAL plan produces: only the cacheable bracket
+        // composites, so the split is taken from its span alone.
+        assert_eq!(planned_keys(&scene), vec![1]);
+        let spans = spans_of(&scene);
+        assert_eq!(spans, vec![4..7]);
+
+        let commands = scene.commands();
+        let (_, _, trailing) = frame_split(commands, &spans);
+        let trailing = trailing.expect("the fill after the bracket needs a pass");
+        assert_eq!(trailing.range, 7..9);
+        assert_eq!(
+            trailing.prefix,
+            vec![0],
+            "only the app root's clip is open where the split falls"
+        );
+        assert!(
+            !trailing
+                .prefix
+                .iter()
+                .any(|&index| matches!(commands[index], Command::PushSnapshot { .. })),
+            "a prefix must never name a snapshot bracket"
+        );
+        assert_eq!(
+            snapshot_depth_before(commands, trailing.range.start),
+            0,
+            "the split lands outside every bracket"
+        );
+    }
+
+    /// A nested bracket is never composited on its own: only the OUTERMOST one
+    /// is a candidate, and an outermost body the cache refuses takes its whole
+    /// subtree inline with it. Nothing composites, so there is no split at all
+    /// — the frame is one vello pass.
+    #[test]
+    fn an_uncacheable_outer_bracket_composites_nothing_and_needs_no_split() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
+        let body = Rect::new(2.0, 2.0, 8.0, 8.0);
+        let program = frust_scene::ShaderProgram::new("@fragment fn fs_main() {}");
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_snapshot(7, rect, 1.0, 1.0); // 0: the outer bracket
+            builder.draw_shader(&program, body, 0.0); // 1: uncacheable body
+            builder.push_snapshot(1, rect, 1.0, 1.0); // 2: the inner one
+            builder.fill_rect(body, Brush::Solid(RED)); // 3
+            builder.pop_snapshot(); // 4
+            builder.pop_snapshot(); // 5
+            builder.fill_rect(body, Brush::Solid(RED)); // 6
+        }
+        let commands = scene.commands();
+        assert_eq!(
+            outermost_brackets(commands)
+                .iter()
+                .map(|bracket| bracket.key)
+                .collect::<Vec<_>>(),
+            vec![7],
+            "the inner bracket is not a candidate at all"
+        );
+        assert_eq!(
+            snapshot_depth_before(commands, 3),
+            2,
+            "index 3 sits inside both brackets"
+        );
+        assert!(planned_keys(&scene).is_empty());
+        assert_eq!(
+            split_of(&scene),
+            (seg(0..7), true, None),
+            "nothing composited is one whole vello pass"
+        );
+    }
+
+    #[test]
+    fn snapshot_depth_before_counts_pushes_minus_pops() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let commands = vec![
+            push(1, rect, Affine::IDENTITY), // 0
+            push(2, rect, Affine::IDENTITY), // 1
+            Command::PopSnapshot,            // 2
+            Command::PopSnapshot,            // 3
+            Command::PopSnapshot,            // 4: unbalanced
+        ];
+        assert_eq!(snapshot_depth_before(&commands, 0), 0);
+        assert_eq!(snapshot_depth_before(&commands, 2), 2);
+        assert_eq!(snapshot_depth_before(&commands, 3), 1);
+        assert_eq!(
+            snapshot_depth_before(&commands, 5),
+            0,
+            "an unbalanced pop saturates rather than wrapping"
+        );
     }
 
     #[test]
@@ -1946,12 +2390,12 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 20.0, 10.0);
         let commands = vec![clip(rect, Affine::IDENTITY), fill(rect), Command::PopClip];
         let plan = FramePlan::inline(&commands);
-        assert_eq!(plan.pre, 0..3);
+        assert_eq!(plan.pre, seg(0..3));
         assert!(plan.pre_draws, "the one fill is what the pass exists for");
         assert!(plan.layers.is_empty());
         assert!(plan.holes.is_empty());
         assert!(plan.trailing.is_none());
-        assert_eq!(frame_split(&commands, &[]), (0..3, true, None));
+        assert_eq!(frame_split(&commands, &[]), (seg(0..3), true, None));
         // With nothing composited there is no quad pass to clear the frame,
         // so the plan still runs its own vello pass whatever it holds.
         let structure = vec![clip(rect, Affine::IDENTITY), Command::PopClip];
@@ -2043,7 +2487,7 @@ mod tests {
         let spans = [bracket_span(&(2..3))];
         assert_eq!(
             frame_split(&commands, &spans),
-            (0..1, false, None),
+            (seg(0..1), false, None),
             "a PushClip/PopClip pair is not worth two vello passes"
         );
     }
@@ -2060,7 +2504,7 @@ mod tests {
             Command::PopClip,
         ];
         let spans = [bracket_span(&(3..4))];
-        assert_eq!(frame_split(&commands, &spans), (0..2, true, None));
+        assert_eq!(frame_split(&commands, &spans), (seg(0..2), true, None));
     }
 
     #[test]
@@ -2074,7 +2518,10 @@ mod tests {
             fill(rect),
         ];
         let spans = [bracket_span(&(1..2))];
-        assert_eq!(frame_split(&commands, &spans), (0..0, false, Some(3..5)));
+        assert_eq!(
+            frame_split(&commands, &spans),
+            (seg(0..0), false, Some(seg(3..5)))
+        );
     }
 
     /// A later composited bracket inside the trailing range is a hole, so its
@@ -2091,7 +2538,7 @@ mod tests {
             Command::PopSnapshot,
         ];
         let spans = [bracket_span(&(1..2)), bracket_span(&(4..5))];
-        assert_eq!(frame_split(&commands, &spans), (0..0, false, None));
+        assert_eq!(frame_split(&commands, &spans), (seg(0..0), false, None));
     }
 
     /// The de-registration invariant, asserted the only way a unit test can:
@@ -2154,7 +2601,7 @@ mod tests {
             let scene = bracket_scene(transform, rect, body, Brush::Solid(RED));
 
             let mut cache = SnapshotCache::new(true);
-            let plan = cache.prepare(&device, &queue, &mut renderer, &scene, 8192);
+            let plan = cache.prepare(&device, &queue, &mut renderer, &scene, 8192, SURFACE);
             // One bracket, filling the whole scene: it becomes the only
             // layer and the only hole, there is nothing before it to draw,
             // and nothing after it to need a second pass.
@@ -2169,7 +2616,7 @@ mod tests {
             assert_eq!((layer.alpha, layer.scale), (1.0, 1.0));
             assert_eq!(layer.clip, None, "an unclipped bracket needs no scissor");
             assert_eq!(plan.holes, HashSet::from([KEY]));
-            assert_eq!(plan.pre, 0..0);
+            assert_eq!(plan.pre, seg(0..0));
             assert!(
                 !plan.pre_draws,
                 "an empty pre segment must not buy a vello pass"
@@ -2179,7 +2626,7 @@ mod tests {
 
             // Same scene again, then the same body slid across the surface:
             // both re-use the texture, so the counter must not move.
-            cache.prepare(&device, &queue, &mut renderer, &scene, 8192);
+            cache.prepare(&device, &queue, &mut renderer, &scene, 8192, SURFACE);
             assert_eq!(
                 cache.renders(KEY),
                 Some(1),
@@ -2187,7 +2634,7 @@ mod tests {
             );
             let slid_transform = Affine::translate((17.0, 3.0)) * transform;
             let slid = bracket_scene(slid_transform, rect, body, Brush::Solid(RED));
-            let plan = cache.prepare(&device, &queue, &mut renderer, &slid, 8192);
+            let plan = cache.prepare(&device, &queue, &mut renderer, &slid, 8192, SURFACE);
             assert!(plan.holes.contains(&KEY));
             assert_eq!(
                 plan.layers[0].transform, slid_transform,
@@ -2201,21 +2648,21 @@ mod tests {
 
             // Changed content: exactly one more rasterization.
             let recolored = bracket_scene(transform, rect, body, Brush::Solid(BLUE));
-            cache.prepare(&device, &queue, &mut renderer, &recolored, 8192);
+            cache.prepare(&device, &queue, &mut renderer, &recolored, 8192, SURFACE);
             assert_eq!(cache.renders(KEY), Some(2));
 
             // The scene stops drawing the bracket: aged out and dropped.
             let empty = Scene::new();
             for _ in 0..=MAX_UNUSED_FRAMES {
-                cache.prepare(&device, &queue, &mut renderer, &empty, 8192);
+                cache.prepare(&device, &queue, &mut renderer, &empty, 8192, SURFACE);
             }
             assert_eq!(cache.len(), 0, "an undrawn bracket must be evicted");
 
             // Kill switch: one whole-scene vello pass, no entries, no GPU work.
             let mut disabled = SnapshotCache::new(false);
-            let plan = disabled.prepare(&device, &queue, &mut renderer, &scene, 8192);
+            let plan = disabled.prepare(&device, &queue, &mut renderer, &scene, 8192, SURFACE);
             assert!(plan.layers.is_empty() && plan.holes.is_empty());
-            assert_eq!(plan.pre, 0..scene.commands().len());
+            assert_eq!(plan.pre, seg(0..scene.commands().len()));
             assert!(plan.pre_draws, "the body's fill is in the pre segment now");
             assert_eq!(plan.trailing, None);
             assert_eq!(disabled.len(), 0);

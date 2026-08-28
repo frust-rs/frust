@@ -329,6 +329,23 @@ impl SurfaceRenderer {
         self.pending_composite = None;
     }
 
+    /// Adopt `state` and reset everything else scoped to ONE surface: the
+    /// `Invalid`-reconfigure streak and the in-flight frame's stashes.
+    ///
+    /// The one place a surface episode begins or ends. `install_surface`
+    /// enters through it with the freshly built [`SurfaceState::Ready`],
+    /// `on_surface_destroyed` leaves through it with
+    /// [`SurfaceState::NoSurface`], so a reset can never be written into one
+    /// of those two paths and forgotten in the other. Everything reset here
+    /// describes the surface being replaced or torn down: the streak belonged
+    /// to it, and the stashes describe one of its frames (the composite one
+    /// holding refcounted handles on snapshot textures that die with it).
+    fn adopt_surface_state(&mut self, state: SurfaceState) {
+        self.state = state;
+        self.consecutive_invalid = 0;
+        self.clear_pending_frame();
+    }
+
     /// Restores the persisted pipeline-cache blob a prior run produced via
     /// [`pipeline_cache_data`](Self::pipeline_cache_data), to seed vello's
     /// shader-pipeline compilation at the next surface install and cut warm-start
@@ -673,21 +690,21 @@ impl SurfaceRenderer {
         // Dropping the previous `SurfaceState` here tears down any prior surface
         // before the new one goes live: no surface outlives a
         // transition.
-        self.state = SurfaceState::Ready(Box::new(ReadySurface {
+        //
+        // Through `adopt_surface_state` for the resets that come with it: a
+        // freshly (re)installed surface starts a new `Invalid`-reconfigure
+        // episode (any prior streak belonged to the surface just replaced),
+        // and the in-flight frame's stashes describe a frame of that same
+        // replaced surface (the composite one holding handles on textures
+        // from the cache that died with it), so carrying either into the new
+        // surface's first `submit` would paint the old frame's pages and
+        // colour onto it.
+        self.adopt_surface_state(SurfaceState::Ready(Box::new(ReadySurface {
             surface,
             backend,
             pipeline_cache,
             shader_effects,
-        }));
-        // A freshly (re)installed surface starts a new `Invalid`-reconfigure
-        // episode — any prior streak belonged to the surface just replaced.
-        self.consecutive_invalid = 0;
-        // Same argument for the in-flight frame's stashes: they describe a
-        // frame of the surface just replaced (and the composite one holds
-        // handles on textures from the cache that died with it), so carrying
-        // either into the new surface's first `submit` would paint the old
-        // frame's pages and colour onto it.
-        self.clear_pending_frame();
+        })));
         Ok(())
     }
 
@@ -724,14 +741,16 @@ impl SurfaceRenderer {
             SurfacePhase::NoSurface,
             "Destroyed must reach NoSurface"
         );
-        // Release the snapshot cache's textures while the renderer that
-        // rasterized them is still alive: both die on the next line, so this
-        // buys a deterministic order rather than fixing a leak. The stashed
-        // composite goes with them — it holds handles on those same textures,
-        // and its frame will never be presented now. Idempotent — a cleared
-        // cache clears again to nothing, which is what the
-        // repeated-`Destroyed` contract needs.
-        self.pending_composite = None;
+        // Release the in-flight frame's stashes, then the snapshot cache's
+        // textures, while the renderer that rasterized them is still alive:
+        // all of it dies with the state below, so this buys a deterministic
+        // order rather than fixing a leak. Both stashes go, not just the
+        // composite one: they describe a frame of the surface that is dying,
+        // and a stale `base_color` is as wrong to hand the next `submit` as a
+        // stale composite. Idempotent — a cleared cache and cleared stashes
+        // clear again to nothing, which is what the repeated-`Destroyed`
+        // contract needs.
+        self.clear_pending_frame();
         if let SurfaceState::Ready(ready) = &mut self.state {
             match &mut ready.backend {
                 TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
@@ -739,7 +758,12 @@ impl SurfaceRenderer {
                 TierBackend::Cpu(_) => {}
             }
         }
-        self.state = SurfaceState::NoSurface;
+        // The same door `install_surface` enters by, which repeats the
+        // (idempotent) stash reset above and also clears the
+        // `Invalid`-reconfigure streak — behaviour-neutral here, since that
+        // streak belonged to the surface just torn down and `install_surface`
+        // resets it again.
+        self.adopt_surface_state(SurfaceState::NoSurface);
     }
 
     /// Encodes `scene` and presents it, clearing to `base_color`; returns the
@@ -892,15 +916,20 @@ impl SurfaceRenderer {
                 // — so every bracket falls through to the inline emulation
                 // `convert` performed before the cache existed and the
                 // compositor pass below never runs.
+                let width = ready.surface.config.width;
+                let height = ready.surface.config.height;
                 let plan = snapshots.prepare(
                     &device_handle.device,
                     &device_handle.queue,
                     renderer,
                     scene,
                     adapter_max,
+                    // The surface's own pixel size, the yardstick each
+                    // bracket's texture area is budgeted against: a page is a
+                    // subtree of THIS surface, so a texture much larger than
+                    // it is a bracket to lower inline, not to cache.
+                    (width, height),
                 );
-                let width = ready.surface.config.width;
-                let height = ready.surface.config.height;
                 let params = |base_color| vello::RenderParams {
                     base_color,
                     width,
@@ -927,10 +956,9 @@ impl SurfaceRenderer {
                 vello_scene.reset();
                 convert::encode_range_with_overrides(
                     scene,
-                    plan.pre.clone(),
-                    // The pre segment starts at the scene root: it opens every
-                    // group it needs itself.
-                    &[],
+                    // The pre segment starts at the scene root, so its own
+                    // prefix is empty: it opens every group it needs itself.
+                    &plan.pre,
                     vello_scene,
                     &shader_images,
                     adapter_max,
@@ -945,20 +973,21 @@ impl SurfaceRenderer {
                 // pages. This is the only extra vello pass the mechanism can
                 // ever add — there is no third segment.
                 let trailing = match (&plan.trailing, compositor.as_mut()) {
-                    (Some(range), Some(compositor)) => {
+                    (Some(segment), Some(compositor)) => {
                         let scratch = compositor
                             .ensure_scratch(&device_handle.device, width, height)
                             .clone();
                         trailing_scene.reset();
                         convert::encode_range_with_overrides(
                             scene,
-                            range.clone(),
-                            // The clips/layers still open where this segment
-                            // starts — the app root's clip around both pages,
-                            // a scroll viewport's around a switcher. Without
-                            // them this pass would draw unclipped and pop
-                            // groups it never pushed.
-                            &plan.trailing_prefix,
+                            // The segment carries BOTH its range and the
+                            // clips/layers still open where it starts — the
+                            // app root's clip around both pages, a scroll
+                            // viewport's around a switcher. Forwarding one
+                            // value is what makes forgetting the second
+                            // impossible; without them this pass would draw
+                            // unclipped and pop groups it never pushed.
+                            segment,
                             trailing_scene,
                             &shader_images,
                             adapter_max,
@@ -1730,11 +1759,18 @@ mod tests {
         assert!(!snapshot_cache_enabled(true, false, true));
     }
 
-    /// Installing a surface drops the previous one's in-flight frame: its
-    /// stashed base colour and its composite work (which holds handles on
-    /// snapshot textures that died with that surface).
+    /// One surface episode ending drops everything scoped to it: the
+    /// `Invalid`-reconfigure streak, the stashed base colour, and the
+    /// composite work (which holds handles on snapshot textures that died
+    /// with that surface).
+    ///
+    /// Asserted through `adopt_surface_state` itself — the single door
+    /// `install_surface` and `on_surface_destroyed` both go through — rather
+    /// than by re-typing their reset statements here. A previous version of
+    /// this test did the latter and would have stayed green if either caller
+    /// stopped resetting anything at all.
     #[test]
-    fn installing_a_surface_drops_the_previous_frames_stashes() {
+    fn adopting_a_surface_state_drops_the_previous_frames_stashes() {
         let mut renderer = SurfaceRenderer::new();
         renderer.pending_base_color = Some(peniko::Color::WHITE);
         renderer.pending_composite = Some(PendingComposite {
@@ -1744,16 +1780,16 @@ mod tests {
         });
         renderer.consecutive_invalid = 3;
 
-        // The reset `install_surface` performs, minus the GPU resources it
-        // cannot build on a test host.
-        renderer.consecutive_invalid = 0;
-        renderer.clear_pending_frame();
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
 
         assert!(renderer.pending_base_color.is_none());
         assert!(renderer.pending_composite.is_none());
+        assert_eq!(renderer.consecutive_invalid, 0);
+        assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
         // Idempotent, as the repeated-`Destroyed` contract needs.
-        renderer.clear_pending_frame();
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
         assert!(renderer.pending_composite.is_none());
+        assert_eq!(renderer.consecutive_invalid, 0);
     }
 
     #[test]
@@ -1821,13 +1857,32 @@ mod tests {
         assert_eq!(outcome, FrameOutcome::Skipped);
     }
 
+    /// Destroy is idempotent, reaches `NoSurface`, and — the half that used
+    /// to be open-coded — drops BOTH in-flight stashes, not just the
+    /// composite one. A stale `base_color` describes the dead surface's frame
+    /// exactly as much as a stale composite does.
     #[test]
     fn destroy_is_idempotent_and_resets_to_no_surface() {
         let mut renderer = SurfaceRenderer::new();
+        renderer.pending_base_color = Some(peniko::Color::WHITE);
+        renderer.pending_composite = Some(PendingComposite {
+            layers: Vec::new(),
+            trailing: None,
+            clear: Some(peniko::Color::BLACK),
+        });
+
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert!(
+            renderer.pending_base_color.is_none(),
+            "the dying surface's base colour must not reach the next submit"
+        );
+        assert!(renderer.pending_composite.is_none());
+
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert!(renderer.pending_base_color.is_none());
+        assert!(renderer.pending_composite.is_none());
     }
 
     #[test]

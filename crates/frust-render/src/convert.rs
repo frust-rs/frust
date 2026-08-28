@@ -115,9 +115,8 @@ pub(crate) fn encode_into_with_shaders(
 ) {
     encode_range_with_overrides(
         scene,
-        0..scene.commands().len(),
-        // The whole scene opens every group it needs itself.
-        &[],
+        // The whole scene, which opens every group it needs itself.
+        &Segment::whole(scene.commands().len()),
         sink,
         shader_images,
         adapter_max,
@@ -125,9 +124,43 @@ pub(crate) fn encode_into_with_shaders(
     );
 }
 
-/// One segment of a frame: the commands in `range`, encoded under the scene
-/// root beneath the still-open groups `prefix` names, with every bracket whose
-/// `key` is in `holes` skipped entirely.
+/// One segment of a frame's command list, as
+/// [`encode_range_with_overrides`] takes it: the half-open command `range` to
+/// encode, plus the still-open group pushes that pass must re-establish
+/// first.
+///
+/// The two travel together because they are ONE decision — where the frame
+/// splits determines both the commands a pass encodes and the clip/layer
+/// state it starts in — and splitting them into two arguments is how a caller
+/// forgets the second (`crate::snapshot::frame_split` derives both, and the
+/// render path forwards this whole value).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Segment {
+    /// The commands to encode, half-open and clamped to the scene by
+    /// [`encode_range_with_overrides`] rather than trusted.
+    pub range: Range<usize>,
+    /// The ordered command indices of the `PushClip`/`PushClipRounded`/
+    /// `PushLayer` commands still OPEN where [`Self::range`] starts — the
+    /// groups this pass must re-open before it encodes anything. Empty for a
+    /// segment that starts at the scene root.
+    pub prefix: Vec<usize>,
+}
+
+impl Segment {
+    /// The whole command list encoded from the scene root: `0..len` under no
+    /// re-opened groups, which is what every whole-scene caller (and every
+    /// pre segment) wants.
+    pub(crate) fn whole(len: usize) -> Self {
+        Self {
+            range: 0..len,
+            prefix: Vec::new(),
+        }
+    }
+}
+
+/// One segment of a frame: the commands in `segment.range`, encoded under the
+/// scene root beneath the still-open groups `segment.prefix` names, with every
+/// bracket whose `key` is in `holes` skipped entirely.
 ///
 /// This is the single entry the render path drives BOTH of a frame's vello
 /// passes through (see [`crate::snapshot::FramePlan`] for the split): the
@@ -138,39 +171,39 @@ pub(crate) fn encode_into_with_shaders(
 /// lands at the range's own root rather than reaching for groups the segment
 /// never opened.
 ///
-/// `prefix` is what makes a MID-SCENE range faithful: the ordered command
-/// indices of the `PushClip`/`PushClipRounded`/`PushLayer` commands that are
-/// still open where the range starts
-/// ([`crate::snapshot::FramePlan::trailing_prefix`]). They are encoded FIRST,
-/// re-establishing exactly the clip/layer state the one-pass walk would have
-/// been in at `range.start` — a `PushLayer` carrying its own alpha and rect,
-/// a rounded clip its radii — after which the range itself encodes. Without
-/// it a trailing segment recorded inside the app root's clip (or a scroll
-/// viewport's) would draw unclipped, and its in-range `PopClip` would pop a
-/// group this pass never pushed. Empty for a segment that starts at the scene
-/// root, which is every pre-segment and every whole-scene caller.
+/// [`Segment::prefix`] is what makes a MID-SCENE range faithful. Those
+/// commands are encoded FIRST, re-establishing exactly the clip/layer state
+/// the one-pass walk would have been in at `range.start` — a `PushLayer`
+/// carrying its own alpha and rect, a rounded clip its radii — after which the
+/// range itself encodes. Without it a trailing segment recorded inside the app
+/// root's clip (or a scroll viewport's) would draw unclipped, and its in-range
+/// `PopClip` would pop a group this pass never pushed. Empty for a segment
+/// that starts at the scene root, which is every pre-segment and every
+/// whole-scene caller.
 ///
-/// Whatever is still open when the walk reaches the end of the range —
-/// `prefix` groups the range never popped, plus any the range itself left open
-/// — is closed there, innermost first, so the vello scene this pass built is
+/// Whatever is still open when the walk reaches the end of the range — prefix
+/// groups the range never popped, plus any the range itself left open — is
+/// closed there, innermost first, so the vello scene this pass built is
 /// balanced on its own (see [`encode_commands`]).
 ///
-/// `range` and `prefix` are clamped to the scene rather than trusted: a plan
-/// is always built from the same frame's scene, so a stale index is a bug, but
-/// the render loop is not a place to panic.
+/// The range and the prefix indices are clamped to the scene rather than
+/// trusted: a plan is always built from the same frame's scene, so a stale
+/// index is a bug, but the render loop is not a place to panic.
 pub(crate) fn encode_range_with_overrides(
     scene: &Scene,
-    range: Range<usize>,
-    prefix: &[usize],
+    segment: &Segment,
     sink: &mut impl SceneSink,
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
     holes: &HashSet<u64>,
 ) {
     let commands = scene.commands();
-    let end = range.end.min(commands.len());
-    let start = range.start.min(end);
-    let reopened = prefix.iter().filter_map(|&index| commands.get(index));
+    let end = segment.range.end.min(commands.len());
+    let start = segment.range.start.min(end);
+    let reopened = segment
+        .prefix
+        .iter()
+        .filter_map(|&index| commands.get(index));
     encode_commands(
         reopened.chain(&commands[start..end]),
         Affine::IDENTITY,
@@ -212,8 +245,8 @@ pub(crate) fn encode_commands_into(commands: &[Command], root: Affine, sink: &mu
 ///
 /// `commands` is an ITERATOR rather than a slice so a segment can be walked
 /// as its re-opened prefix chained to its own range with no clone of either
-/// (see [`encode_range_with_overrides`]); every other caller passes a plain
-/// slice.
+/// (see [`Segment`] and [`encode_range_with_overrides`]); every other caller
+/// passes a plain slice.
 ///
 /// The walk CLOSES whatever it left open when it ends: a segment of a frame
 /// legitimately ends inside groups opened before its own commands (its
@@ -2197,8 +2230,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_range_with_overrides(
             scene,
-            0..scene.commands().len(),
-            &[],
+            &Segment::whole(scene.commands().len()),
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2333,8 +2365,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_range_with_overrides(
             &scene,
-            1..3,
-            &[],
+            &segment(1..3, &[]),
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2375,8 +2406,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_range_with_overrides(
             &scene,
-            1..scene.commands().len(),
-            &[],
+            &segment(1..scene.commands().len(), &[]),
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2414,8 +2444,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_range_with_overrides(
             &scene,
-            0..999,
-            &[],
+            &segment(0..999, &[]),
             &mut sink,
             &HashMap::new(),
             u32::MAX,
@@ -2493,14 +2522,22 @@ mod tests {
         );
     }
 
+    /// A [`Segment`] spelled from a range and a prefix, for the assertions
+    /// that name both by hand.
+    fn segment(range: Range<usize>, prefix: &[usize]) -> Segment {
+        Segment {
+            range,
+            prefix: prefix.to_vec(),
+        }
+    }
+
     /// Encode `range` of `scene` under `prefix`, the way the render path's
     /// trailing segment does.
     fn encode_segment(scene: &Scene, range: Range<usize>, prefix: &[usize]) -> Vec<Event> {
         let mut sink = RecordingSink::default();
         encode_range_with_overrides(
             scene,
-            range,
-            prefix,
+            &segment(range, prefix),
             &mut sink,
             &HashMap::new(),
             u32::MAX,

@@ -622,10 +622,14 @@ impl Compositor {
             return;
         }
         let quads = layers.len() + usize::from(trailing.is_some());
-        let Ok(quads) = u32::try_from(quads) else {
-            // Unreachable: a frame's brackets are counted in single digits.
-            return;
-        };
+        // Clamped, never returned. Unreachable in practice — a frame's
+        // brackets are counted in single digits and each layer holds a live
+        // page texture, so 2^32 of them cannot coexist — but from here to
+        // `queue.submit` below this function must have no exit: on a frame
+        // whose main vello pass was skipped, this pass's `LoadOp::Clear` is
+        // the ONLY write to the swapchain, and leaving early would present an
+        // undefined frame.
+        let quads = u32::try_from(quads).unwrap_or(u32::MAX);
         // One bind group per quad, and the scissor each is drawn under —
         // `None` for a quad nothing clips, which draws over the whole target.
         // Both stay empty on a clear-only pass (no layers, no trailing), whose
@@ -633,10 +637,13 @@ impl Compositor {
         let mut binds: Vec<wgpu::BindGroup> = Vec::new();
         let mut scissors: Vec<Option<Rect>> = Vec::new();
         if quads > 0 {
-            self.ensure_capacity(device, quads);
-            let Some(uniforms) = self.uniforms.as_ref() else {
-                return;
-            };
+            // A refcounted handle, not a copy of the buffer: cloning ends
+            // `ensure_capacity`'s borrow of `self`, leaving the bind-group
+            // build below free to read `bind_layout`/`sampler`. There is
+            // deliberately no `Option` to unwrap here, and so no shape that
+            // invites an early return between the `has_work` check above and
+            // the `queue.submit` below.
+            let uniforms = self.ensure_capacity(device, quads).clone();
 
             // One write for every quad's record, then one bind group per quad
             // (each names its own page texture; the record is addressed by the
@@ -670,7 +677,7 @@ impl Compositor {
                 views.push(scratch);
                 scissors.push(None);
             }
-            queue.write_buffer(uniforms, 0, &records);
+            queue.write_buffer(&uniforms, 0, &records);
 
             // Every bind group must outlive the pass that binds it.
             binds = views
@@ -683,7 +690,7 @@ impl Compositor {
                             wgpu::BindGroupEntry {
                                 binding: 0,
                                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: uniforms,
+                                    buffer: &uniforms,
                                     offset: 0,
                                     size: wgpu::BufferSize::new(UNIFORM_SIZE),
                                 }),
@@ -759,20 +766,36 @@ impl Compositor {
         queue.submit([encoder.finish()]);
     }
 
-    /// Ensure the shared uniform buffer holds `quads` records, reallocating
-    /// (never shrinking) when it does not. A steady page transition reaches
-    /// its capacity on the first composited frame and never allocates again.
-    fn ensure_capacity(&mut self, device: &wgpu::Device, quads: u32) {
-        if self.uniforms.is_some() && self.capacity >= quads {
-            return;
+    /// Ensure the shared uniform buffer holds `quads` records and RETURN it,
+    /// reallocating (never shrinking) when it does not. A steady page
+    /// transition reaches its capacity on the first composited frame and never
+    /// allocates again.
+    ///
+    /// Returning the buffer is the point: it leaves [`Self::composite`] with
+    /// no `Option` to unwrap after its `has_work` check, and therefore no
+    /// shape that invites an early return out of a pass whose `LoadOp::Clear`
+    /// may be the frame's only write to the swapchain.
+    ///
+    /// `quads` is floored at 1 — a zero-length uniform buffer is not a valid
+    /// binding, and the caller only asks for one when it has a quad to draw.
+    fn ensure_capacity(&mut self, device: &wgpu::Device, quads: u32) -> &wgpu::Buffer {
+        let quads = quads.max(1);
+        // Grow by dropping the undersized buffer, so the insert below rebuilds
+        // it at the new capacity. Never shrinks: a smaller frame re-uses what
+        // a larger one allocated.
+        if self.capacity < quads {
+            self.capacity = quads;
+            self.uniforms = None;
         }
-        self.uniforms = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frust-render compositor quads"),
-            size: self.stride * u64::from(quads),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        self.capacity = quads;
+        let (stride, capacity) = (self.stride, self.capacity);
+        self.uniforms.get_or_insert_with(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frust-render compositor quads"),
+                size: stride * u64::from(capacity),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
     }
 }
 
@@ -1058,7 +1081,7 @@ mod tests {
     use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, TRANSPARENT};
     use std::collections::{HashMap, HashSet};
 
-    use crate::convert::encode_range_with_overrides;
+    use crate::convert::{Segment, encode_range_with_overrides};
     use crate::snapshot::SnapshotCache;
 
     /// Square target edge for every smoke: 64 * 4 bytes = 256, wgpu's
@@ -1339,7 +1362,7 @@ mod tests {
     ) -> Vec<u8> {
         let adapter_max = device.limits().max_texture_dimension_2d;
         let (texture, view) = surface_target(device);
-        let plan = cache.prepare(device, queue, renderer, scene, adapter_max);
+        let plan = cache.prepare(device, queue, renderer, scene, adapter_max, (SIZE, SIZE));
         let shader_images: HashMap<(u64, u32, u32), ImageData> = HashMap::new();
         let params = |base_color| vello::RenderParams {
             base_color,
@@ -1355,8 +1378,7 @@ mod tests {
         let mut vello_scene = vello::Scene::new();
         encode_range_with_overrides(
             scene,
-            plan.pre.clone(),
-            &[],
+            &plan.pre,
             &mut vello_scene,
             &shader_images,
             adapter_max,
@@ -1368,13 +1390,15 @@ mod tests {
                 .expect("pre-segment render failed");
         }
 
-        let trailing = plan.trailing.clone().map(|range| {
+        // The segment carries its own prefix, so this helper cannot forward a
+        // range without the groups that pass must re-open — the render path
+        // hands `convert` exactly this value too.
+        let trailing = plan.trailing.as_ref().map(|segment| {
             let scratch = compositor.ensure_scratch(device, SIZE, SIZE).clone();
             let mut trailing_scene = vello::Scene::new();
             encode_range_with_overrides(
                 scene,
-                range,
-                &plan.trailing_prefix,
+                segment,
                 &mut trailing_scene,
                 &shader_images,
                 adapter_max,
@@ -1565,8 +1589,13 @@ mod tests {
                 &mut renderer,
                 &scene,
                 device.limits().max_texture_dimension_2d,
+                (SIZE, SIZE),
             );
-            assert_eq!(plan.pre, 0..1, "the pre segment is the PushClip alone");
+            assert_eq!(
+                plan.pre.range,
+                0..1,
+                "the pre segment is the PushClip alone"
+            );
             assert!(
                 !plan.pre_draws && plan.trailing.is_none(),
                 "neither segment paints, so neither is worth a vello pass"
@@ -1716,9 +1745,9 @@ mod tests {
     /// recorded AFTER the page (so it lands in the trailing segment), and the
     /// matching pop.
     ///
-    /// The clip is deliberately SHORTER than the overlay. Without the plan's
-    /// `trailing_prefix` the trailing pass encodes the overlay alone, under no
-    /// clip at all, and paints it over the whole overlay rect — including the
+    /// The clip is deliberately SHORTER than the overlay. Without the trailing
+    /// [`Segment`]'s own prefix the trailing pass encodes the overlay alone,
+    /// under no clip at all, and paints it over the whole overlay rect — including the
     /// part the scene had clipped away — while its in-range `PopClip` pops a
     /// group that pass never pushed. Both arms must agree, and outside the
     /// clip both must be the untouched base colour.
@@ -1749,17 +1778,19 @@ mod tests {
                 &mut renderer,
                 &scene,
                 device.limits().max_texture_dimension_2d,
+                (SIZE, SIZE),
             );
             assert_eq!(plan.layers.len(), 1, "the page composites");
             assert_eq!(
                 plan.trailing,
-                Some(6..8),
-                "the overlay after the page needs a trailing pass"
-            );
-            assert_eq!(
-                plan.trailing_prefix,
-                vec![0],
-                "the app-root clip is open where that pass starts"
+                Some(Segment {
+                    range: 6..8,
+                    // The app-root clip is open where that pass starts, and
+                    // travels WITH the range rather than beside it.
+                    prefix: vec![0],
+                }),
+                "the overlay after the page needs a trailing pass, re-opening \
+                 the clip it was recorded under"
             );
 
             let composited = render_frame(
@@ -2041,6 +2072,7 @@ mod tests {
                     &mut renderer,
                     &scene,
                     device.limits().max_texture_dimension_2d,
+                    (SIZE, SIZE),
                 );
                 assert_eq!(
                     plan.layers.len(),
