@@ -41,7 +41,9 @@ use kurbo::Affine;
 use peniko::ImageData;
 
 use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode};
+use crate::context::{
+    AaMode, ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode,
+};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
@@ -620,9 +622,17 @@ impl SurfaceRenderer {
                 // Instrumentation table). Logged once regardless of surface
                 // recreation, mirroring `log_render_path`'s once-per-process
                 // shape.
+                // A non-default mode additionally warns: it is a measurement
+                // instrument that changes what every pass renders, and a
+                // capture read later should say so at a level that stands out
+                // from an ordinary startup line. A default build (`Area`)
+                // logs only the `info` line above, exactly as before.
                 static AA_MODE_LOGGED: OnceLock<()> = OnceLock::new();
                 AA_MODE_LOGGED.get_or_init(|| {
                     log::info!("frust-render aa-mode={mode}");
+                    if mode != AaMode::Area {
+                        log::warn!("frust-render measurement knob in effect: aa-mode={mode}");
+                    }
                 });
                 let renderer_options = vello::RendererOptions {
                     antialiasing_support: mode.support(),
@@ -664,7 +674,13 @@ impl SurfaceRenderer {
                 // a scaled frame gets no snapshot cache either, and "off"
                 // would otherwise look identical to the kill switch in a
                 // device capture taken to compare the two.
-                let render_scaled = crate::context::render_scaled();
+                //
+                // Asked of the SURFACE, not of the knob: this must be the same
+                // truth the frame is encoded under (`RenderPath::Blit`'s
+                // `root`), and only the surface knows whether its own
+                // intermediate ended up smaller — a cpu-tier surface is pinned
+                // to full resolution however the knob is set.
+                let render_scaled = surface.render_scaled();
                 if render_scaled {
                     static LOGGED: OnceLock<()> = OnceLock::new();
                     LOGGED.get_or_init(|| {
@@ -962,25 +978,22 @@ impl SurfaceRenderer {
                 );
                 // The size of the texture THIS frame's vello passes render
                 // into, and the root every one of them encodes under. They
-                // are one decision: the blit arm's intermediate is a fraction
-                // of the surface under `FRUST_RENDER_SCALE`
-                // (`context::scaled_size`), so the passes targeting it must
-                // both be sized for it and be scaled into it — a `RenderParams`
-                // at the surface size would render into a target that cannot
-                // hold it, and an unscaled root would fill it with the frame's
-                // top-left corner. The direct arms are never scaled (scale < 1
+                // are one decision, and the blit arm made it when it sized its
+                // intermediate (`context::scaled_size`/`context::blit_root`):
+                // the passes targeting a shrunken intermediate must both be
+                // sized for it and be scaled into it — a `RenderParams` at the
+                // surface size would render into a target that cannot hold it,
+                // and an unscaled root would fill it with the frame's top-left
+                // corner. Both values are READ from the arm rather than
+                // re-derived here, so the frame is scaled by exactly the ratio
+                // its target has. The direct arms are never scaled (scale < 1
                 // forces the blit arm, `context::create_render_surface`), so
                 // they keep the surface size and the identity root exactly as
                 // before.
                 let (pass_width, pass_height, root) = match &ready.surface.path {
-                    RenderPath::Blit { target_size, .. } => {
-                        let root = if crate::context::render_scaled() {
-                            Affine::scale(crate::context::render_scale())
-                        } else {
-                            Affine::IDENTITY
-                        };
-                        (target_size.0, target_size.1, root)
-                    }
+                    RenderPath::Blit {
+                        target_size, root, ..
+                    } => (target_size.0, target_size.1, *root),
                     RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
                         (width, height, Affine::IDENTITY)
                     }
@@ -1634,8 +1647,8 @@ impl SurfaceRenderer {
 ///   holds. Rather than composite wrong pixels on a surface frust cannot test
 ///   on every device, that surface keeps the inline path outright — the same
 ///   refusal shape `context::blit_translucency_refused` already takes.
-/// - `render_scaled`: `FRUST_RENDER_SCALE` is rendering the frame into a
-///   smaller intermediate ([`crate::context::render_scaled`]). A cached page
+/// - `render_scaled`: the surface renders the frame into a smaller
+///   intermediate ([`ConfiguredSurface::render_scaled`]). A cached page
 ///   leaves vello as a finished texture and the compositor places its quad in
 ///   the TARGET's device space, so honouring a scaled root would mean
 ///   rescaling every quad, every scissor rect and every page's own raster —
