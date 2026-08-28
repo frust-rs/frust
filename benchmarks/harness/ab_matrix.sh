@@ -23,6 +23,10 @@
 #      `benchmarks/harness/run.sh <scenario> --app frust --device <serial>
 #      --runs <n> --duration <d> --skip-device-state --out <dir>` and parse
 #      its printed `p50=`/`p95=` line (stats.py's `format_table`, one line).
+#      run.sh's own capture loop already sanitizes every persisted
+#      `run-NN.log` to ONLY `frust-perf`/`flutter-perf`/`bench-scenario`
+#      lines before it touches disk, so this script never sees or copies an
+#      unfiltered logcat dump for a scenario.
 #   4. Build examples/material3-demo (its own standalone workspace) with the
 #      identical three defines, install it the same way, then drive ONE
 #      push/pop pass — the fine-floor research recipe: `am force-stop`,
@@ -32,57 +36,117 @@
 #      the LAST `frust-perf frame` summary line off logcat and read its
 #      `total_p50_ms=`/`submit_p95_ms=`/`acquire_p95_ms=` fields (see
 #      `crates/frust-shell-common/src/perf.rs`'s `FrameStats::emit_log`).
+#      The nav capture is sanitized the same way: the full-device `adb
+#      logcat -d -v raw` dump is written to a transient `<log>.unfiltered`
+#      file, immediately reduced by `grep -a 'frust-perf'` into the
+#      persisted `<log>`, and the unfiltered file is deleted before this
+#      script does anything else with the result (including a SKIPPED/
+#      parse-failure return) — an unsanitized dump never survives.
+#
+# Kept-run accounting: `benchmarks/harness/stats.py`'s
+# `DEFAULT_DISCARD_FIRST = 2` always discards the first 2 runs of every
+# scenario as warm-up before computing percentiles (PROTOCOL §4), so
+# `--runs <n>` only ever contributes `n - 2` runs to the published numbers.
+# This script refuses `--runs` below 3 (there would be nothing left to
+# keep), defaults to 5 (3 kept runs — a quick pass, still below PROTOCOL
+# §4's >=10-run convention), and prints `kept <n-2> of <n> runs` for every
+# cell and in the emitted table's header/footer, so a reader of
+# `ab_matrix.md` never has to reverse-engineer stats.py's discard to know
+# the effective sample size.
+#
+# Raw-series output: every sanitized artifact this script produces —
+# run.sh's own `run-NN.log` files, a `stats.txt` capturing the run.sh
+# stdout tail that carries stats.py's `p50=`/`p95=` table, and the nav
+# column's sanitized `logcat-frust-perf.log` — is copied into
+# `benchmarks/raw/<device-name>/fine-floor/<aa>-<scale>/<scenario>/`
+# (nav: `.../<aa>-<scale>/nav/logcat-frust-perf.log`), `<device-name>` from
+# `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
+# via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
+# exact committed files backing each cell (PROTOCOL §10's "raw series
+# committed alongside the computed table" rule). After every copy this
+# script re-runs the same sanitization self-check `benchmarks/.gitignore`
+# documents as its pre-commit rule
+# (`grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$'
+# --include='*.log'` must print nothing) over the just-written cell
+# directory, and fails loudly if it doesn't pass — never a silent partial
+# copy.
 #
 # Emits a Markdown table — columns `aa`, `scale`, one p50/p95 column pair per
 # `--scenarios` entry, `nav total_p50`, `nav submit_p95` — to stdout and to
-# `<out>/ab_matrix.md`. Raw build/install/logcat output lives under
-# `benchmarks/harness/.runs/` (already gitignored) for inspection; nothing
-# under `benchmarks/raw/` is written by this script.
+# `<out>/ab_matrix.md`. Transient build/install/command output (kept for
+# debugging a SKIPPED cell) lives under `benchmarks/harness/.runs/` (already
+# gitignored); ONLY the sanitized raw-series artifacts described above are
+# ever written under `benchmarks/raw/`.
 #
-# Usage: ab_matrix.sh --device <serial> [--aa area,msaa8,msaa16]
-#                      [--scale 1.0,0.75,0.5] [--scenarios s1,s2,s4]
-#                      [--runs 3] [--duration 20] [--frust <path>]
+# Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
+#                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
+#                      [--scenarios s1,s2,s4] [--runs 5] [--duration 20]
+#                      [--frust <path>] [--raw-root <dir>]
 #                      [--taps 540,472,540,734,540,996] [--out <dir>]
 #                      [--dry-run]
 #
 #   --device <serial>  adb device serial (`adb devices`) — required even
 #                      under --dry-run (a dry run still prints the exact
 #                      `adb -s <serial> ...` command lines it would issue).
+#   --device-name <slug>  lowercase device slug (`[a-z0-9_]+`, e.g.
+#                      `pixel5`) used to file this run's raw series under
+#                      `benchmarks/raw/<slug>/fine-floor/...` — required
+#                      for a live run; may be omitted under --dry-run (a
+#                      placeholder is printed instead).
 #   --aa <csv>         FRUST_AA_MODE values to sweep (default:
 #                      area,msaa8,msaa16 — the three values
 #                      `frust-render/src/context.rs`'s `parse_aa_mode`
 #                      recognizes; case-insensitive, validated up front).
 #   --scale <csv>      FRUST_RENDER_SCALE values to sweep (default:
-#                      1.0,0.75,0.5). Under scale<1 the snapshot-layer cache
-#                      is disabled BY DESIGN (a scaled intermediate would
-#                      need every cached page's quads/scissors/raster
-#                      rescaled — see `renderer.rs`'s `FRUST_RENDER_SCALE
-#                      refuses on its own` note), so the nav column's
-#                      numbers at scale<1 measure the inline (uncached)
-#                      path, not the cached one — the emitted table repeats
-#                      this in its footer.
+#                      1.0,0.75,0.5). Each value must be a decimal in
+#                      0.25..=1.0 with at most 2 fractional digits,
+#                      validated up front (same posture as --aa). Under
+#                      scale<1 the snapshot-layer cache is disabled BY
+#                      DESIGN (a scaled intermediate would need every cached
+#                      page's quads/scissors/raster rescaled — see
+#                      `renderer.rs`'s `FRUST_RENDER_SCALE refuses on its
+#                      own` note), so the nav column's numbers at scale<1
+#                      measure the inline (uncached) path, not the cached
+#                      one — the emitted table repeats this in its footer.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
-#                      passed through to run.sh (default: s1,s2,s4).
-#   --runs <n>         runs per scenario, passed to run.sh (default: 3 — a
-#                      quick pass, below PROTOCOL §4's >=10-run convention;
-#                      see the RESULTS.md deviations note it produces).
+#                      passed through to run.sh (default: s1,s2,s4). Each
+#                      value must be one of s1..s8, d1, d2, validated up
+#                      front (same posture as --aa).
+#   --runs <n>         runs per scenario, passed to run.sh (default: 5).
+#                      Must be >= 3 — stats.py's `DEFAULT_DISCARD_FIRST = 2`
+#                      always discards the first 2 runs as warm-up (PROTOCOL
+#                      §4), so anything below 3 would keep zero runs; the
+#                      default of 5 (3 kept) is a quick pass, below
+#                      PROTOCOL §4's >=10-run convention — see the
+#                      RESULTS.md deviations note it produces.
 #   --duration <secs>  capture window per run, passed to run.sh (default:
 #                      20 — below PROTOCOL §4's 30s convention; quick pass).
 #   --frust <path>     path to the frust CLI binary (default:
 #                      <repo-root>/target/debug/frust).
+#   --raw-root <dir>   root of the committed sanitized raw-series tree
+#                      (default: <repo-root>/benchmarks/raw). Refused if it
+#                      would resolve inside --out, or vice versa — the
+#                      transient/unsanitized output directory and the
+#                      sanitized raw-series root must never nest inside one
+#                      another (see the raw-series note above).
 #   --taps <csv>       six comma-separated integers x1,y1,x2,y2,x3,y3 — the
 #                      three tap points for the nav push/pop recipe
 #                      (default: 540,472,540,734,540,996 — the fine-floor
 #                      research recipe's coordinates, verified to land on
 #                      the same list rows on both the Pixel 5a and the
 #                      Pixel 5 at 2.75x density).
-#   --out <dir>        output directory for the emitted table + raw logs
-#                      (default: a fresh mktemp -d under
-#                      benchmarks/harness/.runs/). Ignored under --dry-run
-#                      (nothing is written to disk).
+#   --out <dir>        output directory for the emitted table + transient
+#                      build/install/command logs (default: a fresh
+#                      mktemp -d under benchmarks/harness/.runs/). Ignored
+#                      under --dry-run (nothing is written to disk). See
+#                      --raw-root above for where the sanitized per-cell
+#                      artifacts land — that is a separate directory, not
+#                      this one.
 #   --dry-run          print every command this script would run, for every
-#                      cell of the matrix, and exit 0 — no build, no adb, no
-#                      filesystem write, no device touched.
+#                      cell of the matrix — including the raw-series copy
+#                      steps and the `kept <n> of <n> runs` line — and exit
+#                      0. No build, no adb, no filesystem write, no device
+#                      touched.
 #
 # Never skips a cell silently: a missing required tool (adb, python3, the
 # frust CLI binary), an unreachable device, or a build failure is a loud,
@@ -92,8 +156,9 @@
 # matrix continues — never a placeholder number.
 #
 # Exit status: non-zero on a usage error, a missing required tool, an
-# unreachable device, or a build/install failure; 0 otherwise (individual
-# `SKIPPED` cells do not fail the run).
+# unreachable device, a build/install failure, or a raw-series
+# sanitization self-check failure; 0 otherwise (individual `SKIPPED` cells
+# do not fail the run).
 
 set -uo pipefail
 
@@ -101,22 +166,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
 
 DEVICE=""
+DEVICE_NAME=""
 AA_LIST="area,msaa8,msaa16"
 SCALE_LIST="1.0,0.75,0.5"
 SCENARIOS_LIST="s1,s2,s4"
-RUNS=3
+RUNS=5
 DURATION=20
 FRUST_BIN="${REPO_ROOT}/target/debug/frust"
+RAW_ROOT="${REPO_ROOT}/benchmarks/raw"
 TAPS="540,472,540,734,540,996"
 OUT_DIR=""
 DRY_RUN=0
+
+# Runs discarded as warm-up before stats.py computes percentiles — mirrors
+# stats.py's DEFAULT_DISCARD_FIRST (see the header's "Kept-run accounting"
+# note). Not a CLI knob: changing it would silently disagree with what
+# stats.py itself discards.
+DISCARD_FIRST=2
 
 FRUST_BENCH_DIR="${REPO_ROOT}/benchmarks/frust_bench"
 MATERIAL3_DEMO_DIR="${REPO_ROOT}/examples/material3-demo"
 MATERIAL3_DEMO_PKG="it.f0x.material3demo"
 
 usage() {
-  sed -n '2,96p' "$0"
+  sed -n '2,161p' "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -130,6 +203,15 @@ while [ $# -gt 0 ]; do
       ;;
     --device=*)
       DEVICE="${1#--device=}"
+      shift
+      ;;
+    --device-name)
+      [ $# -ge 2 ] || { echo "error: --device-name requires a value" >&2; exit 2; }
+      DEVICE_NAME="$2"
+      shift 2
+      ;;
+    --device-name=*)
+      DEVICE_NAME="${1#--device-name=}"
       shift
       ;;
     --aa)
@@ -186,6 +268,15 @@ while [ $# -gt 0 ]; do
       FRUST_BIN="${1#--frust=}"
       shift
       ;;
+    --raw-root)
+      [ $# -ge 2 ] || { echo "error: --raw-root requires a directory" >&2; exit 2; }
+      RAW_ROOT="$2"
+      shift 2
+      ;;
+    --raw-root=*)
+      RAW_ROOT="${1#--raw-root=}"
+      shift
+      ;;
     --taps)
       [ $# -ge 2 ] || { echo "error: --taps requires a value" >&2; exit 2; }
       TAPS="$2"
@@ -226,10 +317,21 @@ if [ -z "${DEVICE}" ]; then
   exit 2
 fi
 
-if ! [[ "${RUNS}" =~ ^[0-9]+$ ]] || [ "${RUNS}" -lt 1 ]; then
-  echo "error: --runs must be a positive integer, got '${RUNS}'" >&2
+if [ -n "${DEVICE_NAME}" ] && ! [[ "${DEVICE_NAME}" =~ ^[a-z0-9_]+$ ]]; then
+  echo "error: --device-name must match [a-z0-9_]+ (lowercase letters, digits, underscore), got '${DEVICE_NAME}'" >&2
   exit 2
 fi
+if [ "${DRY_RUN}" -eq 0 ] && [ -z "${DEVICE_NAME}" ]; then
+  echo "error: --device-name <slug> is required for a live run (e.g. pixel5) — it names the benchmarks/raw/<slug>/fine-floor/... directory this run's sanitized raw series is copied into. Pass --dry-run to preview without one." >&2
+  exit 2
+fi
+DEVICE_NAME_DISPLAY="${DEVICE_NAME:-<device-name>}"
+
+if ! [[ "${RUNS}" =~ ^[0-9]+$ ]] || [ "${RUNS}" -lt 3 ]; then
+  echo "error: --runs must be an integer >= 3 — stats.py's DEFAULT_DISCARD_FIRST always discards the first 2 runs of every scenario as warm-up (benchmarks/harness/stats.py, PROTOCOL §4), so anything below 3 would keep zero runs; got '${RUNS}'" >&2
+  exit 2
+fi
+KEPT=$((RUNS - DISCARD_FIRST))
 
 if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || [ "${DURATION}" -lt 1 ]; then
   echo "error: --duration must be a positive integer (seconds), got '${DURATION}'" >&2
@@ -260,6 +362,33 @@ for aa in "${AA_ARR[@]}"; do
     area|msaa8|msaa16) ;;
     *)
       echo "error: --aa value '${aa}' is not one of area, msaa8, msaa16" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# --scale: each value must be a decimal in 0.25..=1.0 with at most 2
+# fractional digits (format check via regex, range check via awk — bash
+# has no floating-point comparison operator).
+for scale in "${SCALE_ARR[@]}"; do
+  if ! [[ "${scale}" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
+    echo "error: --scale value '${scale}' is not a decimal with at most 2 fractional digits (e.g. 0.75)" >&2
+    exit 2
+  fi
+  if ! awk -v s="${scale}" 'BEGIN { exit !(s >= 0.25 && s <= 1.0) }'; then
+    echo "error: --scale value '${scale}' is outside the supported range 0.25..=1.0" >&2
+    exit 2
+  fi
+done
+
+# --scenarios: each value must be a declared benchmarks/frust_bench
+# scenario id — PROTOCOL §8's s1..s8 frame-class ids or §9.1's d1/d2
+# DB-class ids.
+for scenario in "${SCENARIO_ARR[@]}"; do
+  case "${scenario}" in
+    s1|s2|s3|s4|s5|s6|s7|s8|d1|d2) ;;
+    *)
+      echo "error: --scenarios value '${scenario}' is not one of s1..s8, d1, d2" >&2
       exit 2
       ;;
   esac
@@ -307,7 +436,8 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   fi
 fi
 
-# --- Output directory (real runs only — a dry run writes nothing) -------
+# --- Output directory + raw-series root (real runs only — a dry run -----
+# --- writes nothing) ------------------------------------------------------
 
 if [ "${DRY_RUN}" -eq 0 ]; then
   if [ -z "${OUT_DIR}" ]; then
@@ -317,7 +447,29 @@ if [ "${DRY_RUN}" -eq 0 ]; then
     mkdir -p "${OUT_DIR}"
   fi
   mkdir -p "${OUT_DIR}/build" "${OUT_DIR}/install" "${OUT_DIR}/nav" "${OUT_DIR}/scenarios"
+  mkdir -p "${RAW_ROOT}"
+
+  # Neither directory may nest inside the other: --out holds transient,
+  # unsanitized build/install/command output, and --raw-root holds ONLY
+  # sanitized copies that get committed (benchmarks/.gitignore) — nesting
+  # either way risks unsanitized content landing under benchmarks/raw.
+  OUT_DIR_ABS="$(cd "${OUT_DIR}" && pwd)"
+  RAW_ROOT_ABS="$(cd "${RAW_ROOT}" && pwd)"
+  case "${OUT_DIR_ABS}" in
+    "${RAW_ROOT_ABS}"|"${RAW_ROOT_ABS}"/*)
+      echo "error: --out (${OUT_DIR_ABS}) resolves inside --raw-root (${RAW_ROOT_ABS}) — transient/unsanitized build, install and run.sh output would land under benchmarks/raw, which must hold only sanitized run-NN.log/stats.txt/logcat-frust-perf.log copies. Pass a different --out." >&2
+      exit 2
+      ;;
+  esac
+  case "${RAW_ROOT_ABS}" in
+    "${OUT_DIR_ABS}"|"${OUT_DIR_ABS}"/*)
+      echo "error: --raw-root (${RAW_ROOT_ABS}) resolves inside --out (${OUT_DIR_ABS}) — the sanitized raw-series root must not sit inside the transient output directory. Pass a different --raw-root." >&2
+      exit 2
+      ;;
+  esac
+
   echo "Output directory: ${OUT_DIR}"
+  echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/fine-floor/"
 fi
 
 # --- Helpers -------------------------------------------------------------
@@ -329,6 +481,86 @@ print_cmd() {
   local label="$1"
   shift
   echo "  ${label}$*"
+}
+
+# raw_cell_dir <aa> <scale> <sub> — echoes
+# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/<sub> (sub is a scenario
+# id, or "nav"). Uses the display placeholder for <device-name> when none
+# was given (--dry-run only — a live run requires --device-name).
+raw_cell_dir() {
+  local aa="$1" scale="$2" sub="$3"
+  echo "${RAW_ROOT}/${DEVICE_NAME_DISPLAY}/fine-floor/${aa}-${scale}/${sub}"
+}
+
+# self_check_raw_dir <dir> — re-runs the sanitization self-check
+# benchmarks/.gitignore documents as its pre-commit rule over the *.log
+# files under <dir>: any line matching none of
+# frust-perf/flutter-perf/bench-scenario/blank means an unsanitized dump
+# slipped through the copy step — a hard, loud failure of the whole matrix
+# (see header), never a silent partial copy.
+self_check_raw_dir() {
+  local dir="$1" offenders
+  [ -d "${dir}" ] || return 0
+  offenders="$(grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' "${dir}" --include='*.log' 2>/dev/null || true)"
+  if [ -n "${offenders}" ]; then
+    echo "error: unsanitized content found under ${dir} (file(s) with a line matching none of frust-perf/flutter-perf/bench-scenario/blank):" >&2
+    printf '  %s\n' "${offenders}" >&2
+    exit 1
+  fi
+}
+
+# copy_scenario_raw <scenario> <aa> <scale> <scen_out> <runsh_log> — copies
+# run.sh's own sanitized run-NN.log files, plus a stats.txt (the run.sh
+# stdout tail carrying stats.py's p50=/p95= table), into
+# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/<scenario>/, then
+# re-runs the raw-series sanitization self-check over that directory.
+# Never fails the matrix on a missing/empty source (a SKIPPED scenario may
+# have produced no logs) — only a sanitization self-check failure is
+# fatal (see header).
+copy_scenario_raw() {
+  local scenario="$1" aa="$2" scale="$3" scen_out="$4" runsh_log="$5" cell_dir
+  cell_dir="$(raw_cell_dir "${aa}" "${scale}" "${scenario}")"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    print_cmd "" "mkdir -p ${cell_dir} && cp ${scen_out}/run-*.log ${cell_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${cell_dir}/stats.txt" >&2
+    return 0
+  fi
+  mkdir -p "${cell_dir}"
+  local copied=0 f
+  for f in "${scen_out}"/run-*.log; do
+    [ -e "${f}" ] || continue
+    cp "${f}" "${cell_dir}/"
+    copied=1
+  done
+  if [ "${copied}" -eq 0 ]; then
+    echo "note: no sanitized run-NN.log files found under ${scen_out} — nothing copied into ${cell_dir}" >&2
+  fi
+  if [ -f "${runsh_log}" ]; then
+    sed -n '/^-- stats.py/,$p' "${runsh_log}" >"${cell_dir}/stats.txt"
+    if [ ! -s "${cell_dir}/stats.txt" ]; then
+      rm -f "${cell_dir}/stats.txt"
+    fi
+  fi
+  self_check_raw_dir "${cell_dir}"
+}
+
+# copy_nav_raw <aa> <scale> <nav_log> — copies the already-sanitized nav
+# log (see run_nav) to
+# <raw-root>/<device-name>/fine-floor/<aa>-<scale>/nav/logcat-frust-perf.log,
+# then re-runs the raw-series sanitization self-check over that directory.
+copy_nav_raw() {
+  local aa="$1" scale="$2" nav_log="$3" cell_dir
+  cell_dir="$(raw_cell_dir "${aa}" "${scale}" "nav")"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    print_cmd "" "mkdir -p ${cell_dir} && cp ${nav_log} ${cell_dir}/logcat-frust-perf.log" >&2
+    return 0
+  fi
+  mkdir -p "${cell_dir}"
+  if [ -f "${nav_log}" ]; then
+    cp "${nav_log}" "${cell_dir}/logcat-frust-perf.log"
+  else
+    echo "note: nav log ${nav_log} not found — nothing copied into ${cell_dir}" >&2
+  fi
+  self_check_raw_dir "${cell_dir}"
 }
 
 # build_apk <label> <app-dir> <aa> <scale> <log> — runs (or, under
@@ -421,8 +653,15 @@ run_scenario() {
 # echoes "<total_p50_ms> <submit_p95_ms> <acquire_p95_ms>" on success, or
 # "SKIPPED <reason>" — never fails the matrix (see header). Same
 # stdout/stderr split as run_scenario above.
+#
+# The full-device logcat dump is captured to a transient "<log>.unfiltered"
+# file, reduced by `grep -a 'frust-perf'` into the persisted "<log>", and
+# the unfiltered file is deleted immediately after — before any of this
+# function's own SKIPPED/parse-failure returns below — so an unsanitized
+# dump never survives this function, on any code path.
 run_nav() {
-  local log="$1" i
+  local log="$1" unfiltered i
+  unfiltered="${log}.unfiltered"
   echo "-- nav (material3-demo push/pop): drive --" >&2
   print_cmd "" "adb -s ${DEVICE} shell am force-stop ${MATERIAL3_DEMO_PKG}" >&2
   print_cmd "" "adb -s ${DEVICE} logcat -c" >&2
@@ -434,7 +673,8 @@ run_nav() {
     print_cmd "" "adb -s ${DEVICE} shell input keyevent KEYCODE_BACK" >&2
     print_cmd "" "sleep 1.6" >&2
   done
-  print_cmd "" "adb -s ${DEVICE} logcat -d -v raw > ${log}" >&2
+  print_cmd "" "adb -s ${DEVICE} logcat -d -v raw > ${unfiltered}" >&2
+  print_cmd "" "grep -a 'frust-perf' ${unfiltered} > ${log}  &&  rm -f ${unfiltered}" >&2
   print_cmd "" "adb -s ${DEVICE} shell am force-stop ${MATERIAL3_DEMO_PKG}" >&2
 
   if [ "${DRY_RUN}" -eq 1 ]; then
@@ -456,8 +696,15 @@ run_nav() {
     adb -s "${DEVICE}" shell input keyevent KEYCODE_BACK >/dev/null 2>&1
     sleep 1.6
   done
-  adb -s "${DEVICE}" logcat -d -v raw >"${log}" 2>/dev/null
+  adb -s "${DEVICE}" logcat -d -v raw >"${unfiltered}" 2>/dev/null
   adb -s "${DEVICE}" shell am force-stop "${MATERIAL3_DEMO_PKG}" >/dev/null 2>&1 || true
+
+  # Sanitize before anything persists (mirrors run.sh's own capture loop):
+  # a full-device logcat dump can carry other apps'/system lines, so only
+  # frust-perf lines are ever written to the persisted ${log}, and the
+  # unfiltered dump is deleted immediately — before any return below.
+  grep -a 'frust-perf' "${unfiltered}" >"${log}" 2>/dev/null || true
+  rm -f "${unfiltered}"
 
   local line total_p50 submit_p95 acquire_p95
   line="$(grep -a 'frust-perf frame' "${log}" 2>/dev/null | tail -n1 || true)"
@@ -480,23 +727,27 @@ run_nav() {
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "== ab_matrix.sh --dry-run =="
   echo "device: ${DEVICE} (never queried — --dry-run touches no device)"
+  echo "device-name: ${DEVICE_NAME_DISPLAY}  raw-root: ${RAW_ROOT}"
   echo "aa: ${AA_LIST}  scale: ${SCALE_LIST}  scenarios: ${SCENARIOS_LIST}"
   echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}"
+  echo "kept ${KEPT} of ${RUNS} runs per scenario (first ${DISCARD_FIRST} discarded as warm-up per PROTOCOL §4)"
   echo "taps: ${TAPS}"
   echo
   cell=0
   for aa in "${AA_ARR[@]}"; do
     for scale in "${SCALE_ARR[@]}"; do
       cell=$((cell + 1))
-      echo "=== cell ${cell}: aa=${aa} scale=${scale} ==="
+      echo "=== cell ${cell}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
       build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${aa}" "${scale}" "/dev/null"
       install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
       for scenario in "${SCENARIO_ARR[@]}"; do
         run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
+        copy_scenario_raw "${scenario}" "${aa}" "${scale}" "/dev/null" "/dev/null"
       done
       build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${aa}" "${scale}" "/dev/null"
       install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
       run_nav "/dev/null" >/dev/null
+      copy_nav_raw "${aa}" "${scale}" "/dev/null"
       echo
     done
   done
@@ -513,7 +764,7 @@ for aa in "${AA_ARR[@]}"; do
   for scale in "${SCALE_ARR[@]}"; do
     cell=$((cell + 1))
     echo
-    echo "=== cell ${cell}: aa=${aa} scale=${scale} ==="
+    echo "=== cell ${cell}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
 
     build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${aa}" "${scale}" \
       "${OUT_DIR}/build/frust_bench-${aa}-${scale}.log"
@@ -523,8 +774,9 @@ for aa in "${AA_ARR[@]}"; do
     row="| ${aa} | ${scale} |"
     for scenario in "${SCENARIO_ARR[@]}"; do
       scen_out="${OUT_DIR}/scenarios/${scenario}-${aa}-${scale}"
-      result="$(run_scenario "${scenario}" "${scen_out}" \
-        "${OUT_DIR}/scenarios/${scenario}-${aa}-${scale}.runsh.log")"
+      runsh_log="${OUT_DIR}/scenarios/${scenario}-${aa}-${scale}.runsh.log"
+      result="$(run_scenario "${scenario}" "${scen_out}" "${runsh_log}")"
+      copy_scenario_raw "${scenario}" "${aa}" "${scale}" "${scen_out}" "${runsh_log}"
       if [[ "${result}" == SKIPPED* ]]; then
         echo "${scenario}: ${result}"
         row="${row} SKIPPED | SKIPPED |"
@@ -540,7 +792,9 @@ for aa in "${AA_ARR[@]}"; do
     install_apk "material3-demo" "$(material3_demo_apk_path)" \
       "${OUT_DIR}/install/material3demo-${aa}-${scale}.log"
 
-    nav_result="$(run_nav "${OUT_DIR}/nav/${aa}-${scale}.log")"
+    nav_log="${OUT_DIR}/nav/${aa}-${scale}.log"
+    nav_result="$(run_nav "${nav_log}")"
+    copy_nav_raw "${aa}" "${scale}" "${nav_log}"
     if [[ "${nav_result}" == SKIPPED* ]]; then
       echo "nav: ${nav_result}"
       row="${row} SKIPPED | SKIPPED |"
@@ -570,6 +824,8 @@ sep="${sep}---|---|"
   echo
   echo "## Fine-floor A/B matrix — device ${DEVICE}"
   echo
+  echo "Kept ${KEPT} of ${RUNS} runs per scenario (the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4); percentiles below are computed over the kept runs only."
+  echo
   echo "${header}"
   echo "${sep}"
   for row in "${TABLE_ROWS[@]}"; do
@@ -579,8 +835,12 @@ sep="${sep}---|---|"
   echo "Note: under FRUST_RENDER_SCALE<1 the snapshot-layer cache is disabled"
   echo "by design, so the nav column's numbers at scale<1 measure the inline"
   echo "(uncached) path, not the cached one."
+  echo
+  echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4)."
+  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/."
 } | tee "${OUT_DIR}/ab_matrix.md"
 
 echo
 echo "Matrix complete — ${cell} cell(s). Table written to ${OUT_DIR}/ab_matrix.md"
-echo "Raw build/install/scenario/nav logs are under ${OUT_DIR}/"
+echo "Transient build/install/scenario/nav logs are under ${OUT_DIR}/"
+echo "Sanitized raw series copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/"
