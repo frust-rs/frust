@@ -1025,6 +1025,7 @@ completion on this device — see the Fine-floor A/B subsection below.
 - OS: Android 14, build AP2A.240805.005
 - Display: 1080×2400 @ 420dpi, **60Hz only** — no high-refresh mode, so
   only the 16.67ms budget applies on this device (no 8.33ms column).
+- Pixel 5 stand-in: Google Pixel 5 (redfin, serial 13261FDD40030W, Snapdragon 765G / Adreno 620, 1080×2340, Android 14) stands in for the Pixel 5a in the rows below — same SoC and GPU as the Pixel 5a, 2.75× density.
 
 ### Fine-floor A/B (remedy 3, plan fplan_000001a03fce41148yUkciag)
 
@@ -1039,18 +1040,15 @@ methodology-deviations note below).
 | AA mode | Render scale | S1 p50 (ms) | S1 p95 (ms) | S2 p50 (ms) | S2 p95 (ms) | S4 p50 (ms) | S4 p95 (ms) | nav total_p50 (ms) | nav submit_p95 (ms) |
 |---|---|---|---|---|---|---|---|---|---|
 | area | 1.0 | 47.9 | 49.6 | 44.0 | 45.8 | not captured | not captured | not captured | not captured |
+| area | 1.0 | 47.70 | 48.72 | 42.94 | 44.60 | 16.10 | 16.66 | not captured¹ | not captured¹ |
+| area | 0.75 | 31.69 | 32.69 | 28.54 | 29.80 | 7.36 | 8.06 | 36 | 43 |
+| area | 0.5 | 19.32 | 20.23 | 17.80 | 19.76 | 7.92 | 10.85 | 19 | 25 |
 
-**The `area` / `1.0` row is the pre-existing 2026-08-27 diagnosis baseline
-— quick pass, device-state gate skipped** (S1/S2 only; S4 and the nav
-column were not part of that diagnosis pass and are not invented here). It
-predates `ab_matrix.sh` and was not produced by the script — every other
-cell in the matrix (`area`/0.75, `area`/0.5, `msaa8`/*, `msaa16`/*) awaits
-an actual run of `ab_matrix.sh` on this device.
+**Row 1 is the pre-existing 2026-08-27 Pixel 5a diagnosis baseline (S1/S2 only, device-state gate skipped).** **Rows 2–4 are the Pixel 5 stand-in `ab_matrix.sh` run** (2026-08-28, `--skip-device-state`, 3 runs × 20s, 60Hz mode, USB power on). ¹ the 1.0 nav cell printed no `frust-perf frame` summary inside the ~10 s recipe (with the snapshot cache ON a transition frame costs ~1.6 ms and the idle gate skips frames, so the periodic summary never fires); the cell is covered by the perfetto gate `phase-2b-cleanup-device-gate-pixel5` on the same device and tree family: GPU-completion wait p50 1.6 ms / p90 36.0 (132 frames), kill-switch control 58.8 / 72.5. The 0.75/0.5 nav cells measure the INLINE path because the snapshot-layer cache is refused while scaled (see LIMITATIONS.md `render-measurement-knobs-not-shipping-modes`).
 
-**Decision:** _Pending. No default `FRUST_AA_MODE` / `FRUST_RENDER_SCALE`
-pairing is chosen for Phase 3 until the matrix above is populated by a real
-`ab_matrix.sh` run on this device and reviewed against the Phase 1/2b
-milestones._
+msaa8 / msaa16 cells are excluded — both render corrupted on Adreno 620 (device smoke 2026-08-28, black first frames + torn glyph/edge strips; vello 0.9's MSAA fine path; research artifact rsa_000001a0486660f3RiPPR50x; LIMITATIONS.md entry above), so their fine-stage timings would measure a broken pipeline.
+
+**Decision:** Render scale is a real lever and the fine cost is ~80 % pixel-proportional on Adreno 620: S1 fits t ≈ 9.9 + 37.8·s² ms (0.75 → predicted 31.2, measured 31.7; 0.5 → predicted 19.4, measured 19.3), i.e. ~10 ms of fixed per-frame cost plus ~38 ms per full-resolution fine sweep at 1080×2340; S2 tracks S1, S4 (heavy-work responsiveness) halves at 0.75 and then flattens (7.4 → 7.9), so its floor is elsewhere. The AA lever is closed on this tier (MSAA corrupted). No default changes in Phase 3: `FRUST_RENDER_SCALE` stays a measurement instrument — shipping a reduced scale would need resolution-aware text (bilinear upscale softens glyphs) and a compositor-aware snapshot cache (refused while scaled); the number that decides a later device-tier render-policy plan is the ~38 ms/sweep slope, which only a lower-cost fine stage (e.g. the vello_hybrid spike, if run) or fewer full-surface sweeps per frame can move.
 
 #### Methodology deviations (Fine-floor A/B, this device)
 
@@ -1066,6 +1064,7 @@ milestones._
    numbers come from the 2026-08-27 diagnosis session, not an
    `ab_matrix.sh` invocation — recorded here as the matrix's starting
    point, not reproduced by the script itself.
+4. **Rows 2–4 come from a Pixel 5 stand-in, `--skip-device-state`, 3 runs × 20s, 60Hz mode, USB power on; the 1.0 nav cell is from perfetto not the script.**
 
 ---
 
