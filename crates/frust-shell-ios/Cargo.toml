@@ -83,3 +83,9 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # this targets only exists in the iOS-gated dependency block, so this is a no-op
 # off-iOS.
 devtools = ["frust-shell-common/devtools"]
+# Opt-in experimental `vello_hybrid` render tier: re-exports
+# frust-render/hybrid-tier, the sole crate that owns the tier. Empty by
+# default, exactly like `perf-trace` above; this shell holds no hybrid code of
+# its own, it only forwards the feature so the facade can reach frust-render
+# through the same per-target shell edges the other two features use.
+hybrid-tier = ["frust-render/hybrid-tier"]

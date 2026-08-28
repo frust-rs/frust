@@ -37,6 +37,7 @@ pub fn run(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
 ) -> Result<u8> {
     // The CLI path never cancels — drive the shared preflight/build/install
     // core to completion, then block on `simctl launch` under a Ctrl-C
@@ -44,11 +45,18 @@ pub fn run(
     // the launch stream's killable handle instead).
     let never = AtomicBool::new(false);
     let mut on_line = |line: &str| println!("{line}");
-    let prepared =
-        match prepare_simulator_session(runner, root, device, info, &mut on_line, &never)? {
-            Some(prepared) => prepared,
-            None => return Ok(0),
-        };
+    let prepared = match prepare_simulator_session(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        &mut on_line,
+        &never,
+    )? {
+        Some(prepared) => prepared,
+        None => return Ok(0),
+    };
 
     println!("Launching {}…", prepared.bundle_id);
     // Best-effort cleanup on Ctrl-C: `simctl launch` is a foreground bridge
@@ -113,6 +121,7 @@ fn prepare_simulator_session(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<PreparedIosSession>> {
@@ -136,11 +145,12 @@ fn prepare_simulator_session(
     // calls `encode_features` directly (bypassing `ios_build::build`), so it
     // needs its own resolve.
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
+        crate::cargo_manifest::resolve_release_features(&project.root, info.mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
-    let features_b64 = crate::ios_build::encode_features(&features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let features_b64 = crate::ios_build::encode_features(&feature_refs);
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
@@ -218,7 +228,11 @@ pub fn spawn_session(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<IosLaunch>> {
-    let Some(prepared) = prepare_simulator_session(runner, root, device, info, on_line, cancel)?
+    // The supervisor seam exposes no `--features` flag surface of its own, so
+    // the passthrough is empty here — a TUI/MCP-driven session builds exactly
+    // what the mode selects, as it did before the passthrough existed.
+    let Some(prepared) =
+        prepare_simulator_session(runner, root, device, info, &[], on_line, cancel)?
     else {
         return Ok(None);
     };
@@ -266,11 +280,19 @@ pub fn run_physical(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
 ) -> Result<u8> {
     let never = AtomicBool::new(false);
     let mut on_line = |line: &str| println!("{line}");
-    let prepared = match prepare_physical_session(runner, root, device, info, &mut on_line, &never)?
-    {
+    let prepared = match prepare_physical_session(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        &mut on_line,
+        &never,
+    )? {
         Some(prepared) => prepared,
         None => return Ok(0),
     };
@@ -305,6 +327,7 @@ fn prepare_physical_session(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<PreparedIosSession>> {
@@ -333,6 +356,7 @@ fn prepare_physical_session(
             simulator: false,
             codesign: true,
         },
+        extra_features,
         // Route the signed build's `[xcodebuild] …` stream through this
         // session's line sink, not `println!` — a TUI physical-run session
         // holds the terminal in raw mode (the tty-garbling fix).
@@ -397,7 +421,10 @@ pub fn spawn_physical_session(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<IosLaunch>> {
-    let Some(prepared) = prepare_physical_session(runner, root, device, info, on_line, cancel)?
+    // No `--features` flag surface on the supervisor seam — see
+    // [`spawn_session`]'s own empty passthrough.
+    let Some(prepared) =
+        prepare_physical_session(runner, root, device, info, &[], on_line, cancel)?
     else {
         return Ok(None);
     };
@@ -474,6 +501,11 @@ mod tests {
     use crate::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// No `--features` passthrough — byte-identical to the pre-passthrough
+    /// invocation, which is what every case but an explicit passthrough test
+    /// asserts against.
+    const NO_EXTRA: &[String] = &[];
 
     fn unique_project_dir(tag: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -564,7 +596,7 @@ mod tests {
                 },
             );
 
-        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info(), NO_EXTRA).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("xcodebuild"), "{message}");
         assert!(message.contains("--- stdout (tail) ---"), "{message}");
@@ -589,7 +621,7 @@ mod tests {
         // pipeline early, the next unmatched invocation would itself error
         // via `FakeProcessRunner`'s "missing" path, which would also fail
         // this test — either way this proves xcodebuild was never reached.
-        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info(), NO_EXTRA).unwrap_err();
         assert!(err.to_string().contains("Xcode not found"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -633,7 +665,7 @@ mod tests {
                 },
             );
 
-        let err = run(&runner, &dir, &device(), &profile_info()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &profile_info(), NO_EXTRA).unwrap_err();
         assert!(err.to_string().contains("simctl install"), "{err}");
 
         let _ = fs::remove_dir_all(&dir);
@@ -698,6 +730,7 @@ mod tests {
             &dir,
             &device(),
             &release_info(),
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
             &never,
         )
@@ -761,6 +794,7 @@ mod tests {
             &dir,
             &device(),
             &release_info(),
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
             &never,
         )
@@ -847,7 +881,7 @@ mod tests {
         // No fixtures registered at all: proves `require_ios_dir` rejects
         // before any `ProcessRunner` call is made.
         let runner = FakeProcessRunner::new();
-        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info(), NO_EXTRA).unwrap_err();
         assert!(err.to_string().contains("ios/Runner.xcodeproj"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -946,7 +980,8 @@ mod tests {
                 ok("hello from device\n"),
             );
 
-        let code = run_physical(&runner, &dir, &physical_device(), &debug_info()).unwrap();
+        let code =
+            run_physical(&runner, &dir, &physical_device(), &debug_info(), NO_EXTRA).unwrap();
         assert_eq!(code, 0);
 
         let _ = fs::remove_dir_all(&dir);
@@ -960,7 +995,7 @@ mod tests {
         // No fixtures registered at all: proves the iOS-17+ gate stops the
         // pipeline before any `xcodebuild`/`devicectl` call is attempted.
         let runner = FakeProcessRunner::new();
-        let err = run_physical(&runner, &dir, &device, &debug_info()).unwrap_err();
+        let err = run_physical(&runner, &dir, &device, &debug_info(), NO_EXTRA).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("iOS 17+"), "{message}");
         assert!(message.contains("16.7.2"), "{message}");
@@ -973,7 +1008,7 @@ mod tests {
         let mut device = physical_device();
         device.os_version = None;
         let runner = FakeProcessRunner::new();
-        let err = run_physical(&runner, &dir, &device, &debug_info()).unwrap_err();
+        let err = run_physical(&runner, &dir, &device, &debug_info(), NO_EXTRA).unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -996,7 +1031,8 @@ mod tests {
             },
         );
 
-        let err = run_physical(&runner, &dir, &physical_device(), &debug_info()).unwrap_err();
+        let err =
+            run_physical(&runner, &dir, &physical_device(), &debug_info(), NO_EXTRA).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("devicectl device install app"),
@@ -1028,7 +1064,8 @@ mod tests {
                 },
             );
 
-        let err = run_physical(&runner, &dir, &physical_device(), &debug_info()).unwrap_err();
+        let err =
+            run_physical(&runner, &dir, &physical_device(), &debug_info(), NO_EXTRA).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("devicectl device process launch"),
@@ -1055,7 +1092,8 @@ mod tests {
         // No fixtures registered at all: proves `require_ios_dir` rejects
         // before any `ProcessRunner` call is made.
         let runner = FakeProcessRunner::new();
-        let err = run_physical(&runner, &dir, &physical_device(), &debug_info()).unwrap_err();
+        let err =
+            run_physical(&runner, &dir, &physical_device(), &debug_info(), NO_EXTRA).unwrap_err();
         assert!(err.to_string().contains("ios/Runner.xcodeproj"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1127,7 +1165,14 @@ mod tests {
                 ok("hello from device\n"),
             );
 
-        let code = run_physical(&runner, &dir, &physical_device(), &develop_flavor_info()).unwrap();
+        let code = run_physical(
+            &runner,
+            &dir,
+            &physical_device(),
+            &develop_flavor_info(),
+            NO_EXTRA,
+        )
+        .unwrap();
         assert_eq!(code, 0);
 
         let _ = fs::remove_dir_all(&dir);
@@ -1158,6 +1203,7 @@ mod tests {
             &dir,
             &physical_device(),
             &debug_info(),
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
             &never,
         )
@@ -1205,6 +1251,7 @@ mod tests {
             &dir,
             &physical_device(),
             &debug_info(),
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
             &never,
         )

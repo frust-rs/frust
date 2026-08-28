@@ -48,7 +48,11 @@ fn capitalize(s: &str) -> String {
 /// `BuildMode::cargo_features` — a legacy app that doesn't declare `lean`
 /// arrives here with `lean` already dropped, so the `cargoFeatures` prop is
 /// simply omitted (empty → no prop) rather than passing an undeclared feature
-/// to `cargo ndk`.
+/// to `cargo ndk`. That resolved list also carries the front-end's
+/// `--features` passthrough, appended after the mode's own selection, so the
+/// extras ride this one CSV rather than a second property: the Gradle side
+/// decodes the whole value into a single `--features <csv>` argument, which is
+/// exactly cargo's own comma-separated syntax.
 pub fn gradle_properties(
     target: &AndroidArtifact,
     defines: &HashMap<String, String>,

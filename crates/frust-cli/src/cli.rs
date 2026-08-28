@@ -114,7 +114,7 @@ pub enum Command {
     /// no Android device selected → `cargo run` passthrough.
     Run {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Force the render tier (`gpu`/`cpu`/`hybrid`) `frust-render`
         /// probes for at startup, by setting `FRUST_RENDER_TIER` for the
@@ -160,7 +160,7 @@ pub enum BuildTarget {
     /// Release-signed APK via Gradle.
     Apk {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Produce one APK per target ABI instead of a single fat APK.
         #[arg(long = "split-per-abi")]
@@ -175,7 +175,7 @@ pub enum BuildTarget {
     #[command(alias = "aab")]
     Appbundle {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Comma-separated target ABIs (`android-arm64`, `android-arm`,
         /// `android-x64`); defaults to all three.
@@ -185,7 +185,7 @@ pub enum BuildTarget {
     /// iOS device/simulator build via `xcodebuild` (macOS host only).
     Ios {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Build for the iOS Simulator instead of a physical device.
         #[arg(long)]
@@ -199,7 +199,7 @@ pub enum BuildTarget {
     /// distribution (macOS host only).
     Ipa {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Export method: `app-store-connect`, `release-testing`,
         /// `debugging`, or `enterprise`.
@@ -215,7 +215,7 @@ pub enum BuildTarget {
     /// `build ios`.
     Macos {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Also build the platform's installer set over the assembled
         /// bundle — a `.dmg` on macOS — via a pinned `cargo-packager`
@@ -228,7 +228,7 @@ pub enum BuildTarget {
     /// to release mode, like every other `frust build` target.
     Windows {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Also build the platform's installer set over the assembled
         /// bundle — an NSIS `.exe` and a WiX `.msi` on Windows — via a
@@ -243,7 +243,7 @@ pub enum BuildTarget {
     /// other `frust build` target.
     Linux {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Also build the platform's installer set over the assembled
         /// bundle — a `.deb` and an `.AppImage` on Linux — via a pinned
@@ -251,6 +251,52 @@ pub enum BuildTarget {
         #[arg(long)]
         installer: bool,
     },
+}
+
+/// The whole flag surface a build-producing subcommand exposes: the shared
+/// mode/flavor/defines/version funnel plus the app cargo-feature passthrough.
+///
+/// A wrapper around [`BuildArgs`] rather than two more fields on it, because
+/// that struct mirrors [`frust_drive::build_info::BuildArgs`] field-for-field
+/// and converts into it — and `--features` is deliberately outside that
+/// funnel. A `BuildInfo` describes *what* is being built (mode, flavor,
+/// defines, version); these features are appended to whatever
+/// `BuildMode::cargo_features` already selected, at each platform's own
+/// cargo-argv site, and never reach the funnel's validation.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BuildFlags {
+    #[command(flatten)]
+    pub build: BuildArgs,
+
+    /// Extra cargo features to compile the app with, on top of the ones the
+    /// build mode already selects (`frust/perf-trace`+`frust/devtools` for
+    /// debug/profile, `lean` for release). Repeatable, and a single value may
+    /// itself be a space- or comma-separated list, matching cargo's own
+    /// `--features` syntax. Strictly additive — it never replaces the mode's
+    /// selection, it is appended after it, so a `--profile` build keeps its
+    /// instrumentation. Reaches the app's own `[features]` table, so a name
+    /// the app does not declare is cargo's error to report, not this CLI's.
+    #[arg(long = "features", value_name = "FEATURES")]
+    pub features: Vec<String>,
+}
+
+impl BuildFlags {
+    /// The passthrough features as one flat list: every `--features`
+    /// occurrence split on commas and whitespace (cargo's own accepted
+    /// syntax, so `--features "a,b"`, `--features "a b"` and `--features a
+    /// --features b` are equivalent), trimmed, empty tokens dropped, order
+    /// preserved. Splitting here rather than downstream keeps every funnel
+    /// site handling one feature per element, which is what the Android
+    /// `-Pfrust.cargoFeatures` CSV and the iOS `FRUST_FEATURES` CSV both need.
+    pub fn extra_features(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .flat_map(|spec| spec.split([',', ' ', '\t', '\n']))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 /// `frust run --render-tier` value (see `Command::Run`'s doc comment).
@@ -472,12 +518,103 @@ mod tests {
                 render_tier,
                 watch,
             } => {
-                assert!(!build.debug);
-                assert!(!build.profile);
-                assert!(!build.release);
+                assert!(!build.build.debug);
+                assert!(!build.build.profile);
+                assert!(!build.build.release);
                 assert_eq!(render_tier, None);
                 assert!(!watch);
             }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_features_flag_is_repeatable_and_splits_lists() {
+        // The three spellings cargo itself accepts must be equivalent here,
+        // since every downstream funnel joins the result back into one CSV.
+        for argv in [
+            vec!["frust", "run", "--features", "hybrid-tier,perf-trace"],
+            vec!["frust", "run", "--features", "hybrid-tier perf-trace"],
+            vec![
+                "frust",
+                "run",
+                "--features",
+                "hybrid-tier",
+                "--features",
+                "perf-trace",
+            ],
+        ] {
+            let cli = Cli::parse_from(argv.clone());
+            match cli.command.unwrap() {
+                Command::Run { build, .. } => assert_eq!(
+                    build.extra_features(),
+                    vec!["hybrid-tier".to_string(), "perf-trace".to_string()],
+                    "argv {argv:?}"
+                ),
+                other => panic!("expected Run, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn features_flag_defaults_to_empty_on_every_build_target() {
+        // The passthrough is opt-in: an untouched invocation must resolve to
+        // no extras at all, which is what keeps every existing argv
+        // byte-identical.
+        for argv in [
+            vec!["frust", "run"],
+            vec!["frust", "build", "apk"],
+            vec!["frust", "build", "appbundle"],
+            vec!["frust", "build", "ios"],
+            vec!["frust", "build", "macos"],
+        ] {
+            let cli = Cli::parse_from(argv.clone());
+            let flags = match cli.command.unwrap() {
+                Command::Run { build, .. } => build,
+                Command::Build { target } => match target {
+                    BuildTarget::Apk { build, .. }
+                    | BuildTarget::Appbundle { build, .. }
+                    | BuildTarget::Ios { build, .. }
+                    | BuildTarget::Ipa { build, .. }
+                    | BuildTarget::Macos { build, .. }
+                    | BuildTarget::Windows { build, .. }
+                    | BuildTarget::Linux { build, .. } => build,
+                },
+                other => panic!("expected Run/Build, got {other:?}"),
+            };
+            assert!(flags.extra_features().is_empty(), "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn build_apk_accepts_features_beside_the_mode_and_define_flags() {
+        let cli = Cli::parse_from([
+            "frust",
+            "build",
+            "apk",
+            "--profile",
+            "--features",
+            "hybrid-tier",
+            "--define",
+            "FRUST_RENDER_TIER=hybrid",
+        ]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Apk { build, .. },
+            } => {
+                assert!(build.build.profile);
+                assert_eq!(build.build.defines, vec!["FRUST_RENDER_TIER=hybrid"]);
+                assert_eq!(build.extra_features(), vec!["hybrid-tier".to_string()]);
+            }
+            other => panic!("expected Build/Apk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_feature_values_resolve_to_no_extras() {
+        let cli = Cli::parse_from(["frust", "run", "--features", " , ,", "--features", ""]);
+        match cli.command.unwrap() {
+            Command::Run { build, .. } => assert!(build.extra_features().is_empty()),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -496,7 +633,7 @@ mod tests {
         let cli = Cli::parse_from(["frust", "-d", "emulator-5554", "run", "--release"]);
         assert_eq!(cli.device_id.as_deref(), Some("emulator-5554"));
         match cli.command.unwrap() {
-            Command::Run { build, .. } => assert!(build.release),
+            Command::Run { build, .. } => assert!(build.build.release),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -583,10 +720,10 @@ mod tests {
             Command::Build {
                 target: BuildTarget::Apk { build, .. },
             } => {
-                assert_eq!(build.flavor.as_deref(), Some("paid"));
-                assert_eq!(build.build_name.as_deref(), Some("1.2.3"));
-                assert_eq!(build.build_number, Some(42));
-                assert_eq!(build.defines, vec!["A=B".to_string()]);
+                assert_eq!(build.build.flavor.as_deref(), Some("paid"));
+                assert_eq!(build.build.build_name.as_deref(), Some("1.2.3"));
+                assert_eq!(build.build.build_number, Some(42));
+                assert_eq!(build.build.defines, vec!["A=B".to_string()]);
             }
             other => panic!("expected Build/Apk, got {other:?}"),
         }
@@ -713,7 +850,7 @@ mod tests {
                 target: BuildTarget::Windows { build, installer },
             } => {
                 assert!(installer);
-                assert_eq!(build.build_name.as_deref(), Some("1.2.3"));
+                assert_eq!(build.build.build_name.as_deref(), Some("1.2.3"));
             }
             other => panic!("expected Build/Windows, got {other:?}"),
         }
@@ -738,9 +875,9 @@ mod tests {
                 target: BuildTarget::Linux { build, installer },
             } => {
                 assert!(!installer);
-                assert!(!build.debug);
-                assert!(!build.profile);
-                assert!(!build.release);
+                assert!(!build.build.debug);
+                assert!(!build.build.profile);
+                assert!(!build.build.release);
             }
             other => panic!("expected Build/Linux, got {other:?}"),
         }

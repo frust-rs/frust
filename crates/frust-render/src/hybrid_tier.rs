@@ -62,6 +62,21 @@
 //! reuses its atlas slot on every later one; a handle unseen for
 //! [`IMAGE_EVICTION_FRAMES`] frames is destroyed, releasing its atlas region.
 //!
+//! # Instrumentation
+//!
+//! Two knobs, both resolved once per process:
+//!
+//! - `FRUST_HYBRID_ATLAS_CACHE` (`1`/`true`) turns on glifo's experimental
+//!   glyph atlas cache for every glyph run this tier draws — upstream calls it
+//!   "not recommended for external use", which is exactly why it is a knob and
+//!   not a default. The effective value is logged once in any build.
+//! - Under the `perf-trace` feature AND `FRUST_TRACE`, [`HybridTierRenderer::render`]
+//!   emits one `frust-perf hybrid strip_us=<n> record_us=<n>` line per frame,
+//!   splitting the frame into the CPU half (scene reset → sparse-strip
+//!   rasterization through the shared command walk) and the GPU half (the
+//!   renderer's own pass recording). The image-eviction pass between them
+//!   belongs to neither window.
+//!
 //! # Base color
 //!
 //! `vello_hybrid`'s root render pass loads the target view rather than clearing
@@ -99,6 +114,58 @@ const FALLBACK_PAINT: Color = Color::new([0.0, 0.0, 0.0, 0.0]);
 /// off-screen and back (a second at 60 Hz) without re-uploading it.
 const IMAGE_EVICTION_FRAMES: u64 = 60;
 
+/// Whether glifo's experimental glyph atlas cache is enabled for this
+/// process's glyph runs, resolved once from `FRUST_HYBRID_ATLAS_CACHE`
+/// (compile-time `option_env!` or runtime env var, see
+/// [`crate::context::env_str`]) and cached — a change requires a fresh
+/// process, matching every other `FRUST_*` knob.
+///
+/// `1` and `true` (case-insensitive, surrounding whitespace trimmed) enable
+/// it; every other value, including unset, leaves glifo's own default, which
+/// is off. There is deliberately no warn-on-unrecognised arm: unlike
+/// `FRUST_AA_MODE`'s named modes this is a plain flag, and the effective value
+/// is logged either way (see [`HybridTierRenderer::new`]).
+fn atlas_cache_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_atlas_cache(crate::context::env_str(
+            option_env!("FRUST_HYBRID_ATLAS_CACHE"),
+            std::env::var("FRUST_HYBRID_ATLAS_CACHE").ok(),
+        ))
+    })
+}
+
+/// Parses a raw `FRUST_HYBRID_ATLAS_CACHE` value (already resolved by
+/// [`crate::context::env_str`]). Split out from [`atlas_cache_enabled`]'s
+/// `OnceLock` so the parsing is testable without a process-wide env.
+fn parse_atlas_cache(raw: Option<String>) -> bool {
+    raw.as_deref()
+        .map(str::trim)
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
+}
+
+/// Whether the per-frame `frust-perf hybrid` span line is enabled: the
+/// process-wide `FRUST_TRACE` flag, compile-time-or-runtime, resolved once and
+/// cached.
+///
+/// Mirrors `context::perf_tracing_enabled`, which is private to that module —
+/// the two must answer identically, so a change to `FRUST_TRACE`'s parsing
+/// belongs in both. Only compiled under the `perf-trace` feature, so a build
+/// without it carries neither this env read nor the `"frust-perf …"` literal
+/// it guards; that is the same inert-counterpart shape `context.rs`'s own
+/// probes use.
+#[cfg(feature = "perf-trace")]
+fn frame_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        fn is_set_non_zero(value: Option<&str>) -> bool {
+            matches!(value, Some(v) if v != "0")
+        }
+        is_set_non_zero(option_env!("FRUST_TRACE"))
+            || is_set_non_zero(std::env::var("FRUST_TRACE").ok().as_deref())
+    })
+}
+
 /// A [`vello_hybrid`]-backed render tier: owns the reusable hybrid scene, the
 /// renderer and its persistent resources, and the image-residency map, so a
 /// frame allocates nothing of its own (mirroring the GPU path's reused
@@ -116,6 +183,11 @@ pub(crate) struct HybridTierRenderer {
     /// built per frame because `render` takes it by reference.
     bindings: TextureBindings,
     images: ImageResidency,
+    /// Whether every glyph run this renderer draws asks glifo for its
+    /// atlas-backed glyph cache — resolved once at construction from
+    /// [`atlas_cache_enabled`] and held here so the per-frame path reads a
+    /// plain `bool` rather than a `OnceLock`.
+    atlas_cache: bool,
     width: u16,
     height: u16,
 }
@@ -149,12 +221,34 @@ impl HybridTierRenderer {
                 height: u32::from(h),
             },
         );
+        // One line per process naming the knob's effective value, beside the
+        // tier/aa-mode/render-scale lines and in any build (no `perf-trace`
+        // needed) — a capture read hours later should not have to infer which
+        // glyph path produced its numbers. A non-default value also warns
+        // once, the same escalation the other measurement knobs use, because
+        // upstream calls this cache experimental and not recommended.
+        let atlas_cache = atlas_cache_enabled();
+        static ATLAS_CACHE_LOGGED: OnceLock<()> = OnceLock::new();
+        ATLAS_CACHE_LOGGED.get_or_init(|| {
+            log::info!(
+                "frust-render hybrid atlas-cache={}",
+                if atlas_cache { "on" } else { "off" }
+            );
+            if atlas_cache {
+                log::warn!(
+                    "frust-render measurement knob in effect: FRUST_HYBRID_ATLAS_CACHE=1 \
+                     (glifo's experimental glyph atlas cache, upstream-flagged as not \
+                     recommended for external use)"
+                );
+            }
+        });
         Self {
             scene: vello_hybrid::Scene::new(w, h),
             renderer,
             resources,
             bindings: TextureBindings::new(),
             images: ImageResidency::new(max_atlas_image_dimension(device)),
+            atlas_cache,
             width: w,
             height: h,
         }
@@ -192,6 +286,14 @@ impl HybridTierRenderer {
         base_color: Color,
         target_view: &wgpu::TextureView,
     ) -> Result<(), RenderError> {
+        // Window one opens here: scene reset, base-color ground and the whole
+        // shared command walk, i.e. every sparse strip `vello_hybrid`
+        // rasterizes on the CPU for this frame. One clock read, and only when
+        // tracing is on (`bool::then`, the frame-path convention in
+        // `docs/CODE_STANDARDS.md`'s Instrumentation section).
+        #[cfg(feature = "perf-trace")]
+        let strip_start = frame_trace_enabled().then(std::time::Instant::now);
+
         self.scene.reset();
         self.images.begin_frame();
 
@@ -214,6 +316,7 @@ impl HybridTierRenderer {
                 renderer,
                 resources,
                 images,
+                atlas_cache,
                 ..
             } = self;
             let mut sink = HybridSink {
@@ -226,6 +329,7 @@ impl HybridTierRenderer {
                         device,
                         queue,
                         encoder,
+                        atlas_cache: *atlas_cache,
                     },
                 },
             };
@@ -233,6 +337,11 @@ impl HybridTierRenderer {
             // command coverage stays single-sourced.
             encode_into(scene, &mut sink);
         }
+        // Window one closes with the walk: the eviction pass below is neither
+        // CPU strip work nor the composite record, so it is charged to neither
+        // window (it is also a no-op on the overwhelmingly common frame).
+        #[cfg(feature = "perf-trace")]
+        let strip_us = strip_start.map(|start| start.elapsed().as_micros());
 
         // Release atlas slots whose images have gone unused. Collected first so
         // the residency map is no longer borrowed while the renderer clears the
@@ -245,7 +354,14 @@ impl HybridTierRenderer {
                 .destroy_image(&mut self.resources, encoder, id);
         }
 
-        self.renderer.render(
+        // Window two: the renderer's own recording of the composite passes
+        // into the caller's encoder. GPU execution is NOT in it — the caller
+        // owns submission — so this is record cost, which is what the name
+        // says.
+        #[cfg(feature = "perf-trace")]
+        let record_start = strip_us.map(|_| std::time::Instant::now());
+
+        let recorded = self.renderer.render(
             &self.scene,
             &mut self.resources,
             device,
@@ -257,7 +373,23 @@ impl HybridTierRenderer {
             },
             target_view,
             &self.bindings,
-        )
+        );
+
+        // One line per frame, both windows on it, through the same
+        // `log::info!` path every other `frust-perf` line uses. A failed
+        // record is not reported: its windows time an abandoned frame, and a
+        // stats reader has no way to tell that from a real one.
+        #[cfg(feature = "perf-trace")]
+        if recorded.is_ok()
+            && let (Some(strip_us), Some(record_start)) = (strip_us, record_start)
+        {
+            log::info!(
+                "frust-perf hybrid strip_us={strip_us} record_us={}",
+                record_start.elapsed().as_micros()
+            );
+        }
+
+        recorded
     }
 
     /// The current target width (device px). Test-only.
@@ -308,6 +440,9 @@ struct GpuResources<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     encoder: &'a mut wgpu::CommandEncoder,
+    /// The renderer's resolved `FRUST_HYBRID_ATLAS_CACHE` value, lent per
+    /// frame — glifo takes it per glyph run, not per renderer.
+    atlas_cache: bool,
 }
 
 impl HybridResources for GpuResources<'_> {
@@ -316,6 +451,11 @@ impl HybridResources for GpuResources<'_> {
             .glyph_run(self.resources, run.font.font())
             .font_size(run.font_size)
             .hint(false)
+            // Per-run, not per-renderer: `vello_hybrid` builds each glyph run
+            // with the cache off and glifo exposes the choice only on the
+            // builder, so the renderer's resolved knob is re-applied here on
+            // every run rather than once at construction.
+            .atlas_cache(self.atlas_cache)
             .fill_glyphs(run.glyphs.iter().map(|g| glifo::Glyph {
                 id: g.id,
                 x: g.x,
@@ -1800,5 +1940,142 @@ mod tests {
                 "centre pixel should be red-dominant, got rgb=({r},{g},{b})"
             );
         });
+    }
+
+    /// A `log`ger that keeps every record's rendered message, so a test can
+    /// assert on what the frame path actually emitted rather than on a
+    /// re-derivation of it. Installed process-wide (the `log` crate allows
+    /// exactly one), which is why the assertion below tolerates a losing race
+    /// with an already-installed logger.
+    #[cfg(feature = "perf-trace")]
+    struct CapturingLogger(std::sync::Mutex<Vec<String>>);
+
+    #[cfg(feature = "perf-trace")]
+    static CAPTURED: CapturingLogger = CapturingLogger(std::sync::Mutex::new(Vec::new()));
+
+    #[cfg(feature = "perf-trace")]
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if let Ok(mut lines) = self.0.lock() {
+                lines.push(record.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// The per-frame span line is really emitted by a real render, in the
+    /// documented `frust-perf hybrid strip_us=<n> record_us=<n>` shape — the
+    /// contract a capture reader parses. Needs both halves of the gate: the
+    /// `perf-trace` feature (compile time) and `FRUST_TRACE` (this process's
+    /// environment), which is why the run command sets it rather than the test
+    /// mutating a process-global env var mid-suite.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    #[ignore = "requires a GPU and FRUST_TRACE; run locally with `FRUST_TRACE=1 cargo test -p frust-render --features hybrid-tier,perf-trace -- --ignored`"]
+    fn hybrid_render_emits_one_strip_us_span_line_per_frame() {
+        assert!(
+            frame_trace_enabled(),
+            "run this test with FRUST_TRACE=1 in the environment"
+        );
+        let _ = log::set_logger(&CAPTURED);
+        log::set_max_level(log::LevelFilter::Info);
+
+        pollster::block_on(async {
+            const SIZE: u32 = 64;
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust hybrid_tier span smoke"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("frust hybrid_tier span target"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let mut scene = Scene::new();
+            {
+                let mut builder = SceneBuilder::new(&mut scene);
+                builder.fill_rect(
+                    Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+                    solid_red(),
+                );
+            }
+
+            let mut renderer =
+                HybridTierRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, SIZE, SIZE);
+            // Three frames, three lines: the line is per-frame, not per-process
+            // like the tier/atlas-cache startup lines.
+            for _ in 0..3 {
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                renderer
+                    .render(&device, &queue, &mut encoder, &scene, Color::WHITE, &view)
+                    .expect("hybrid render failed");
+                queue.submit([encoder.finish()]);
+            }
+
+            let lines = CAPTURED.0.lock().expect("capture lock").clone();
+            let spans: Vec<&String> = lines
+                .iter()
+                .filter(|line| line.starts_with("frust-perf hybrid strip_us="))
+                .collect();
+            assert_eq!(spans.len(), 3, "one line per frame, got {lines:?}");
+            for span in spans {
+                let rest = span
+                    .strip_prefix("frust-perf hybrid strip_us=")
+                    .expect("filtered on this prefix");
+                let (strip, record) = rest
+                    .split_once(" record_us=")
+                    .unwrap_or_else(|| panic!("missing record_us field: {span:?}"));
+                strip
+                    .parse::<u128>()
+                    .unwrap_or_else(|_| panic!("strip_us not an integer: {span:?}"));
+                record
+                    .parse::<u128>()
+                    .unwrap_or_else(|_| panic!("record_us not an integer: {span:?}"));
+            }
+        });
+    }
+
+    /// `FRUST_HYBRID_ATLAS_CACHE` is a flag, not a mode list: only `1`/`true`
+    /// (case- and whitespace-insensitive) turn the experimental cache on, and
+    /// every other value — including an unrecognised one — leaves glifo's own
+    /// default off, since a typo must never silently enable an
+    /// upstream-experimental path.
+    #[test]
+    fn atlas_cache_knob_accepts_only_one_and_true() {
+        for raw in ["1", "true", "TRUE", " True ", "\ttrue\n"] {
+            assert!(parse_atlas_cache(Some(raw.to_string())), "raw {raw:?}");
+        }
+        for raw in ["0", "false", "on", "yes", "", "  ", "hybrid"] {
+            assert!(!parse_atlas_cache(Some(raw.to_string())), "raw {raw:?}");
+        }
+        assert!(!parse_atlas_cache(None), "unset must stay off");
     }
 }

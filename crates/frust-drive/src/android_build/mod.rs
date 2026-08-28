@@ -56,17 +56,34 @@ pub struct BuiltArtifacts {
 /// it to the tty. The CLI (`commands::build`) passes an `on_line` that just
 /// `println!`s each line, preserving its stdout verbatim.
 ///
+/// `extra_features` is the front-end's `--features` passthrough, appended to
+/// the mode's own cargo features and carried to `cargo ndk` inside the same
+/// base64 `-Pfrust.cargoFeatures` property (see
+/// [`tasks::gradle_properties`]); an empty slice reproduces the pre-passthrough
+/// invocation exactly. `frust-tui`'s build session has no flag surface for it
+/// and passes an empty slice.
+///
 /// **Frozen signature** — do not change without updating every caller
 /// (`commands::build`, `frust-tui`'s build session) and this doc comment.
-/// The `on_line` sink was added by the tty-garbling fix.
+/// The `on_line` sink was added by the tty-garbling fix; `extra_features` by
+/// the cargo-feature passthrough.
 pub fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     info: &BuildInfo,
     target: &AndroidArtifact,
+    extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
-    build_with_env(runner, project_dir, info, target, &RealEnv, on_line)
+    build_with_env(
+        runner,
+        project_dir,
+        info,
+        target,
+        extra_features,
+        &RealEnv,
+        on_line,
+    )
 }
 
 /// The testable core of [`build`], taking an injected [`EnvLookup`] so
@@ -79,6 +96,7 @@ fn build_with_env(
     project_dir: &Path,
     info: &BuildInfo,
     target: &AndroidArtifact,
+    extra_features: &[String],
     env: &dyn EnvLookup,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
@@ -126,13 +144,14 @@ fn build_with_env(
     // undeclared `--features lean` (cargo's opaque hard error). A declaring
     // app keeps byte-identical features and warns nothing.
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
+        crate::cargo_manifest::resolve_release_features(project_dir, info.mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
 
     let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
-    let props = tasks::gradle_properties(target, &info.defines, &features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let props = tasks::gradle_properties(target, &info.defines, &feature_refs);
 
     let mut args: Vec<&str> = Vec::with_capacity(1 + props.len());
     args.push(task.as_str());
@@ -234,6 +253,11 @@ mod tests {
         .unwrap();
     }
 
+    /// No `--features` passthrough — what every caller but an explicit
+    /// passthrough test passes, and byte-identical to the pre-passthrough
+    /// invocation.
+    const NO_EXTRA: &[String] = &[];
+
     fn fake_env() -> FakeEnv {
         FakeEnv::new().set("JAVA_HOME", JAVA_HOME)
     }
@@ -304,6 +328,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -314,6 +339,52 @@ mod tests {
         let local_props = fs::read_to_string(android_dir.join("local.properties")).unwrap();
         assert!(local_props.contains("frust.versionName=1.0"));
         assert!(local_props.contains("frust.versionCode=1"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The `--features` passthrough reaches `cargo ndk`: the extras land in
+    /// the SAME base64 `-Pfrust.cargoFeatures` CSV as the mode's own features,
+    /// appended after them. The gradlew fixture is registered with the exact,
+    /// fully-decoded property value, so any other CSV (a replaced selection, a
+    /// different order, a second property) finds no registration and fails the
+    /// build outright rather than passing on a prefix match.
+    #[test]
+    fn passthrough_features_ride_the_cargo_features_csv_after_the_modes_own() {
+        let dir = unique_project_dir("passthrough-apk");
+        let android_dir = dir.join("android");
+        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            // base64("frust/perf-trace,frust/devtools,hybrid-tier")
+            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a \
+-Pfrust.splitPerAbi=false \
+-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scyxoeWJyaWQtdGllcg==",
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let build_info = info(BuildMode::Debug, None);
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &["hybrid-tier".to_string()],
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -355,6 +426,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -407,6 +479,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -433,6 +506,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -504,6 +578,7 @@ mod tests {
             &dir,
             &build_info,
             &arm64_apk(),
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -533,6 +608,7 @@ mod tests {
             &dir,
             &build_info,
             &arm64_apk(),
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -565,6 +641,7 @@ mod tests {
             &dir,
             &build_info,
             &arm64_apk(),
+            NO_EXTRA,
             &fake_env(),
             &mut |l| lines.push(l.to_string()),
         )
@@ -604,6 +681,7 @@ mod tests {
             &dir,
             &build_info,
             &arm64_apk(),
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -638,6 +716,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -671,6 +750,7 @@ mod tests {
             &dir,
             &build_info,
             &target,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
@@ -714,9 +794,15 @@ mod tests {
         };
         let build_info = info(BuildMode::Release, None);
         let mut lines = Vec::new();
-        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env(), &mut |l| {
-            lines.push(l.to_string())
-        })
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            NO_EXTRA,
+            &fake_env(),
+            &mut |l| lines.push(l.to_string()),
+        )
         .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-release.apk")]);
         assert!(
@@ -762,9 +848,15 @@ mod tests {
         };
         let build_info = info(BuildMode::Release, None);
         let mut lines = Vec::new();
-        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env(), &mut |l| {
-            lines.push(l.to_string())
-        })
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            NO_EXTRA,
+            &fake_env(),
+            &mut |l| lines.push(l.to_string()),
+        )
         .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-release.apk")]);
         assert!(
@@ -799,6 +891,7 @@ mod tests {
             &dir,
             &build_info,
             &AndroidArtifact::Appbundle,
+            NO_EXTRA,
             &fake_env(),
             &mut |_| {},
         )
