@@ -572,7 +572,7 @@ fn snapshot_size(raster: Affine, rect: Rect, adapter_max: u32) -> (u32, u32) {
 /// invertible — neither has a mapping onto a texture, so the bracket keeps the
 /// inline path.
 fn raster_root(transform: Affine, rect: Rect, width: u32, height: u32) -> Option<Affine> {
-    if !(rect.width() > 0.0 && rect.height() > 0.0) || !rect.is_finite() {
+    if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
     let determinant = transform.determinant();
