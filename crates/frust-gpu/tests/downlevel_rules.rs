@@ -4,18 +4,68 @@
 //! These tests validate that the engine and its dependencies conform to the
 //! downlevel design rules before any shader code is introduced.
 
+use std::path::{Path, PathBuf};
+
+/// The workspace root, resolved from this crate's manifest dir
+/// (`crates/frust-gpu`) so the scan is working-directory-independent —
+/// mirrors `crates/frust/tests/comment_residue_conformance.rs`'s
+/// `workspace_root`.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/frust-gpu has a grandparent (the workspace root)")
+        .to_path_buf()
+}
+
 #[test]
-fn shader_directory_empty_on_this_base() {
-    // The engine shaders directory doesn't exist on this base (p2-07 adds it).
-    // This test confirms that when shaders ARE added, lint_wgsl_dir will be
-    // called to validate them.
-    let engine_shaders = std::path::Path::new("crates/frust-engine/shaders");
-    let violations = frust_gpu::lint::lint_wgsl_dir(engine_shaders);
-    // Empty directory or non-existent: no violations expected
+fn shader_directory_is_scanned_when_present_and_tolerated_when_absent() {
+    let engine_crate = workspace_root().join("crates/frust-engine");
+    let engine_shaders = engine_crate.join("shaders");
+
+    if !engine_crate.exists() {
+        // crates/frust-engine has not been added to this base yet — there is
+        // nothing to scan, and that is a tolerated state, not a violation.
+        return;
+    }
+
+    // Once crates/frust-engine exists, its shaders directory must exist and
+    // actually be scanned — an engine crate with no shaders/ directory (or
+    // one this test silently stopped pointing at) is a tripwire that decayed
+    // rather than a clean shader tree.
+    assert!(
+        engine_shaders.is_dir(),
+        "crates/frust-engine exists but {} is missing — this test's shader-dir tripwire has \
+         decayed",
+        engine_shaders.display()
+    );
+
+    let violations = frust_gpu::lint::lint_wgsl_dir(&engine_shaders)
+        .unwrap_or_else(|err| panic!("shader directory could not be scanned: {err}"));
     assert!(
         violations.is_empty(),
         "Shader violations found: {:?}",
         violations
+    );
+}
+
+#[test]
+fn shader_directory_scan_flags_a_real_violation() {
+    // Proves the tripwire above is not vacuous: pointed at a directory that
+    // actually contains a violating shader, lint_wgsl_dir must report it
+    // rather than come back empty.
+    let tmpdir = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::write(
+        tmpdir.path().join("bad.wgsl"),
+        "@compute @workgroup_size(1, 1, 1) fn main() {}",
+    )
+    .expect("write fixture shader");
+
+    let violations = frust_gpu::lint::lint_wgsl_dir(tmpdir.path())
+        .expect("scan of a readable temp dir must not fail");
+    assert!(
+        !violations.is_empty(),
+        "a directory containing a design-rule-violating shader must not scan clean"
     );
 }
 
@@ -127,20 +177,3 @@ fn lint_pipeline_layout_accepts_valid_spec() {
         "Valid layout should have no violations"
     );
 }
-
-// NOTE: The following test is gated on the existence of HeadlessTarget type,
-// which is introduced in phase p2-07. For now, this test is skipped with a
-// comment explaining the seam.
-//
-// Once HeadlessTarget is available, uncomment and implement:
-//
-// #[test]
-// fn headless_target_usage_excludes_storage_binding() {
-//     // Rule E2: HeadlessTarget usage excludes STORAGE_BINDING.
-//     // This will be enforced once the HeadlessTarget type exists.
-//     // The assertion checks that any HeadlessTarget instantiation
-//     // does not include STORAGE_BINDING in its bind group layouts.
-//     //
-//     // Until p2-07 lands, this check is trivially satisfied by the
-//     // absence of the type itself.
-// }

@@ -38,7 +38,7 @@ pub use lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase,
 };
-pub use lint::{check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
+pub use lint::{LintError, check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
 pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
 pub use pool::{PoolKey, PoolStats, PooledTexture, TextureAllocator, TexturePool};
 pub use shader::{ShaderId, ShaderLibrary};
