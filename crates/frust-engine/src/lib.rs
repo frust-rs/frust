@@ -1,31 +1,39 @@
-//! Layer 4: Frust Engine — GPU render pipeline abstraction for Phase 3.
+//! Layer 4: Frust Engine — the sparse-strip GPU render pipeline.
 //!
-//! `frust-engine` provides the skeleton of the rendering engine, with
-//! configuration kill switches, error handling, and the public seam types
-//! used by shells and integrations.
+//! `frust-engine` turns a `frust_scene::Scene` into recorded GPU work. One
+//! [`EngineRenderer`] drives one surface: it compiles the display list into
+//! sparse strips ([`compile`]), packs them into the layouts the WGSL reads
+//! ([`gpu`]), and records the frame's passes into a [`EngineTarget`] through a
+//! command encoder the *caller* owns and submits. Every rendering path returns
+//! an [`EngineError`] rather than panicking (E17).
 //!
-//! The engine accepts [`EngineTarget`] descriptors (texture views, formats, dimensions)
-//! and fills them via [`EngineRenderer`], returning engine-specific errors on failure.
-//! All rendering paths return errors rather than panicking (E17).
+//! The crate splits along one line throughout: pure decisions over plain
+//! values on one side (sizing, packing, addressing, pool keying — all
+//! host-testable with no GPU), and a small number of named entry points that
+//! touch a live `wgpu::Device` on the other. [`renderer`] is where the two
+//! meet.
 //!
-//! Configuration is global and cached per-process, selected via environment variables
-//! parsed at compile-time (via `option_env!`) or runtime (via `std::env::var`),
-//! supporting kill switches for layers, atlas, pooling, depth, and resource limits.
+//! Configuration is process-global and cached, selected from environment
+//! variables read at compile time (`option_env!`) or run time
+//! (`std::env::var`); see [`config`] for the kill switches over layers, atlas,
+//! pooling, depth and resource limits.
 
 pub mod cache;
 pub mod compile;
 pub mod config;
 pub mod error;
 pub mod gpu;
+pub mod renderer;
 
 pub use cache::{CachedRamp, GradientCache, GradientTextureLayout};
 pub use compile::paint::{BrushEncoding, LutRequest, encode_brush};
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use error::EngineError;
 pub use gpu::{
-    EnginePipeline, EngineShaderModule, EngineShaders, GpuConfig, GpuEncodedPaint, GpuStrip,
-    StripDraw,
+    DepthAttachment, DepthTexture, EnginePipeline, EngineShaderModule, EngineShaders, GpuConfig,
+    GpuEncodedPaint, GpuStrip, IntermediateTargets, IntermediateTexture, StripDraw,
 };
+pub use renderer::EngineRenderer;
 
 /// Alpha output mode for the render target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +44,18 @@ pub enum OutputAlpha {
     Straight,
 }
 
-/// Render target descriptor passed to [`EngineRenderer`].
+/// Render target descriptor passed to [`EngineRenderer::encode`].
 ///
-/// Specifies the texture view, format, dimensions, and optional depth texture
-/// for the engine to render into.
+/// Describes one frame's destination: the view to draw into, the format and
+/// extent that view was created with, and how the result's alpha is to be
+/// interpreted.
+///
+/// `depth` is the caller's own depth attachment, for a host that already ran a
+/// 3D pass into the same colour target and wants the 2D pass to test against
+/// the depth that pass established. Leaving it `None` lets the engine own a
+/// depth attachment of its own; either way, pair it with
+/// [`EngineRenderer::set_depth_pre_cleared`] so the frame loads a populated
+/// buffer instead of clearing it.
 #[derive(Debug)]
 pub struct EngineTarget<'a> {
     /// The destination texture view to render into.
@@ -54,13 +70,6 @@ pub struct EngineTarget<'a> {
     pub depth: Option<&'a wgpu::TextureView>,
     /// Alpha output mode.
     pub output: OutputAlpha,
-}
-
-/// Engine renderer — handles scene rendering and GPU resource management.
-///
-/// Filled in by Phase 3, step p3-07. Placeholder type for public API seam.
-pub struct EngineRenderer {
-    // Implementation details to be added in p3-07
 }
 
 /// Engine-wide render settings and configuration.

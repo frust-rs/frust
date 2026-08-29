@@ -22,9 +22,15 @@ pub enum EngineError {
     #[error("target exceeds u16 ceiling (65,535 pixels)")]
     TargetTooLarge,
 
+    #[error("non-finite transform or geometry refused")]
+    InvalidTransform,
+
     #[error("scheduler escalation")]
     SchedulerEscalation,
 
     #[error("alpha capacity exhausted")]
     AlphaCapacity,
+
+    #[error("encoded-paint capacity exhausted")]
+    PaintCapacity,
 }

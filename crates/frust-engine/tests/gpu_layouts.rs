@@ -450,7 +450,7 @@ fn the_encoded_paint_texture_grows_by_texels_and_refuses_to_exceed_the_ceiling()
 
     assert!(matches!(
         paint_texture::encoded_paints_texture_height(4 * 4 + 1, 4),
-        Err(EngineError::AtlasError)
+        Err(EngineError::PaintCapacity)
     ));
 
     let descriptor = paint_texture::encoded_paints_texture_descriptor(2048, 3);

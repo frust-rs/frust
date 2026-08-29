@@ -255,17 +255,17 @@ pub fn encoded_paints_texture_descriptor(
 ///
 /// # Errors
 ///
-/// Returns [`EngineError::AtlasError`] when the required height exceeds
+/// Returns [`EngineError::PaintCapacity`] when the required height exceeds
 /// `resource_texture_dim` — the point at which the reference renderer
-/// asserts. There is no dedicated capacity variant for this resource yet, so
-/// the general resource-allocation failure stands in.
+/// asserts. Paint records past that ceiling have nowhere to live, and a frame
+/// path reports it rather than panicking.
 pub fn encoded_paints_texture_height(
     texels: u32,
     resource_texture_dim: u32,
 ) -> Result<u32, EngineError> {
     let required = texels.div_ceil(resource_texture_dim);
     if required > resource_texture_dim {
-        return Err(EngineError::AtlasError);
+        return Err(EngineError::PaintCapacity);
     }
     Ok(required.max(MIN_RESOURCE_TEXTURE_HEIGHT))
 }
@@ -279,8 +279,8 @@ pub fn encoded_paints_texture_height(
 ///
 /// # Errors
 ///
-/// Returns [`EngineError::AtlasError`] on the same over-capacity condition as
-/// [`encoded_paints_texture_height`].
+/// Returns [`EngineError::PaintCapacity`] on the same over-capacity condition
+/// as [`encoded_paints_texture_height`].
 pub fn grow_encoded_paints_texture_height(
     current_height: u32,
     texels: u32,

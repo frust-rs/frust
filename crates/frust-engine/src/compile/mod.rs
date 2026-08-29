@@ -120,12 +120,11 @@ impl SceneCompiler {
     ///
     /// # Errors
     ///
-    /// [`EngineError::TargetTooLarge`] when the frame cannot be addressed on
-    /// the u16 device grid: either `size` cannot be rounded up to whole tiles
-    /// inside `u16`, or a composed transform is non-finite and so maps
-    /// geometry to coordinates no `u16` pixel can hold. Both are refused
-    /// before any strip is generated — the frame path returns errors and never
-    /// panics.
+    /// [`EngineError::TargetTooLarge`] when `size` cannot be rounded up to
+    /// whole tiles inside `u16`, and [`EngineError::InvalidTransform`] when a
+    /// composed transform is non-finite and so maps geometry to coordinates no
+    /// `u16` pixel can hold. Both are refused before any strip is generated —
+    /// the frame path returns errors and never panics.
     pub fn compile(
         &mut self,
         scene: &Scene,
@@ -403,7 +402,7 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
     if transform.as_coeffs().iter().all(|c| c.is_finite()) {
         Ok(())
     } else {
-        Err(EngineError::TargetTooLarge)
+        Err(EngineError::InvalidTransform)
     }
 }
 
