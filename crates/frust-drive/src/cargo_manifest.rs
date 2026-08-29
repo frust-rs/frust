@@ -26,6 +26,16 @@ note: this app's Cargo.toml declares no `lean` feature, so `frust --release` bui
 lean = [\"log/release_max_level_warn\"]\n\
 and a `log` dependency under [dependencies].";
 
+/// Reads and parses the app manifest at `<project_root>/Cargo.toml`, if it
+/// exists and is well-formed. `None` on a missing, unreadable, or
+/// unparseable manifest — every caller here picks its own fail-open/
+/// fail-closed stance for that case rather than sharing one.
+fn read_app_manifest(project_root: &Path) -> Option<DocumentMut> {
+    let path = project_root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.parse::<DocumentMut>().ok()
+}
+
 /// Whether the app manifest at `<project_root>/Cargo.toml` positively
 /// declares `[features].<feature>`.
 ///
@@ -36,16 +46,45 @@ and a `log` dependency under [dependencies].";
 /// manifest couldn't be read. Only a manifest that *positively parses and
 /// lacks* the feature returns `false`.
 pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
-    let path = project_root.join("Cargo.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return true; // fail open: missing/unreadable
-    };
-    let Ok(doc) = text.parse::<DocumentMut>() else {
-        return true; // fail open: unparseable
+    let Some(doc) = read_app_manifest(project_root) else {
+        return true; // fail open: missing/unreadable/unparseable
     };
     doc.get("features")
         .and_then(|features| features.as_table_like())
         .is_some_and(|table| table.contains_key(feature))
+}
+
+/// Whether the app's own `[features]` table defines `feature` as an alias
+/// that directly enables `frust/devtools` — e.g. `full =
+/// ["frust/devtools"]`. Deliberately cheap and non-transitive: only a
+/// feature whose *own* enabled-list literally names the string
+/// `"frust/devtools"` counts, with no recursive feature-graph walk through
+/// other app-defined aliases.
+///
+/// Used by `frust build`'s release lanes
+/// (`frust-cli::commands::build::refuse_devtools_features`) alongside the
+/// literal `devtools`/`frust/devtools`/`*/devtools` token checks, to catch
+/// an app-defined feature name that itself turns the devtools listener on.
+///
+/// **Fails closed** — the opposite of [`declares_feature`]'s courtesy
+/// fail-open stance — since this function exists purely to widen a security
+/// refusal: a missing or unparseable manifest must never be read as "this
+/// token is safe", it just means this extra (best-effort, one-level) check
+/// has nothing to add; the literal-spelling checks alongside it remain the
+/// actual defense.
+pub fn feature_enables_devtools(project_root: &Path, feature: &str) -> bool {
+    let Some(doc) = read_app_manifest(project_root) else {
+        return false; // fail closed: missing/unreadable/unparseable
+    };
+    doc.get("features")
+        .and_then(|features| features.as_table_like())
+        .and_then(|table| table.get(feature))
+        .and_then(|item| item.as_array())
+        .is_some_and(|enabled| {
+            enabled
+                .iter()
+                .any(|value| value.as_str() == Some("frust/devtools"))
+        })
 }
 
 /// Resolves the cargo `--features` a `mode` build selects for the app rooted
@@ -168,6 +207,56 @@ mod tests {
         let dir = unique_dir("declares-garbage");
         write_manifest(&dir, "this is { not ]= valid toml");
         assert!(declares_feature(&dir, "lean"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_true_when_alias_names_frust_devtools() {
+        let dir = unique_dir("enables-devtools-true");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
+        );
+        assert!(feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_false_when_array_lacks_it() {
+        let dir = unique_dir("enables-devtools-false");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/perf-trace\"]\n",
+        );
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_false_when_feature_absent() {
+        let dir = unique_dir("enables-devtools-absent");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nother = []\n",
+        );
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_missing_manifest() {
+        let dir = unique_dir("enables-devtools-missing");
+        // No Cargo.toml written — unlike `declares_feature`, this must NOT
+        // fail open, since it exists to widen a security refusal.
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_unparseable_manifest() {
+        let dir = unique_dir("enables-devtools-garbage");
+        write_manifest(&dir, "this is { not ]= valid toml");
+        assert!(!feature_enables_devtools(&dir, "full"));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -7,10 +7,11 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::cli::{BuildFlags, BuildTarget};
+use crate::cli::{BuildFlags, BuildTarget, validate_feature_token_charset};
 use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::android_run;
 use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::cargo_manifest;
 use frust_drive::desktop_build::{
     self, BundleReport, DesktopBundleTarget, InstallerFormat, InstallerReport,
 };
@@ -47,6 +48,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             target_platform,
         } => {
             let extra_features = build.extra_features();
+            validate_extra_features("build apk", &extra_features)?;
+            refuse_devtools_features("build apk", project_dir, &extra_features)?;
             let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             let abis = resolve_abis(target_platform.as_deref())?;
@@ -66,6 +69,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             target_platform,
         } => {
             let extra_features = build.extra_features();
+            validate_extra_features("build appbundle", &extra_features)?;
+            refuse_devtools_features("build appbundle", project_dir, &extra_features)?;
             let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             // Validated for a clear error even though `Appbundle` doesn't
@@ -87,6 +92,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
         } => {
             require_macos_host("build ios")?;
             let extra_features = build.extra_features();
+            validate_extra_features("build ios", &extra_features)?;
+            refuse_devtools_features("build ios", project_dir, &extra_features)?;
             let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
@@ -107,6 +114,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             require_macos_host("build ipa")?;
             validate_export_method(&export_method)?;
             let extra_features = build.extra_features();
+            validate_extra_features("build ipa", &extra_features)?;
+            refuse_devtools_features("build ipa", project_dir, &extra_features)?;
             let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
@@ -172,6 +181,68 @@ fn reject_unplumbed_features(command: &str, build: &BuildFlags) -> Result<()> {
         "`frust {command}` does not support --features yet (requested: {}); \
          it is plumbed for `build apk`, `build appbundle`, `build ios`, `build ipa` and `run`",
         requested.join(", ")
+    )
+}
+
+/// Rejects any `--features` passthrough token outside the strict charset
+/// [`crate::cli::feature_token_charset_ok`] requires, naming the offending
+/// token — see that function's doc comment for why a validated-charset
+/// token still matters this far downstream. Runs on all four release lanes
+/// (`build apk`/`appbundle`/`ios`/`ipa`) before any of them does anything
+/// else with the tokens; `frust run` is unaffected (see `BuildFlags`'s own
+/// doc comment on `features`).
+fn validate_extra_features(command: &str, extra_features: &[String]) -> Result<()> {
+    if let Err(bad) = validate_feature_token_charset(extra_features) {
+        bail!(
+            "`frust {command}` rejects --features token '{bad}': expected cargo's own \
+             feature-name charset ([A-Za-z0-9_.-]+), optionally prefixed by '<pkg>/'"
+        );
+    }
+    Ok(())
+}
+
+/// Whether `token` is one of the literal spellings that enable the in-app
+/// devtools listener: the bare name, its `frust`-qualified form, or any
+/// `<pkg>/devtools` spelling another crate might expose the same switch
+/// under.
+fn is_devtools_token(token: &str) -> bool {
+    token == "devtools" || token == "frust/devtools" || token.ends_with("/devtools")
+}
+
+/// Refuses a `--features` token that would compile the in-app devtools
+/// listener into a release-signed store artifact. `frust build`'s release
+/// lanes (`apk`/`appbundle`/`ios`/`ipa`) forward `--features` straight
+/// through `BuildMode::cargo_features`'s own devtools-off release
+/// selection, so an explicit `--features frust/devtools` (or an app-defined
+/// feature alias that itself enables it) would silently reopen the hole
+/// `docs/DEVTOOLS_ARCHITECTURE.md`'s Trust model relies on release builds
+/// closing ("a release build compiles the listener out entirely"). Checked
+/// both literally ([`is_devtools_token`]) and — cheaply, one level, no
+/// transitive feature-graph walk — against the app's own `[features]`
+/// table (`cargo_manifest::feature_enables_devtools`), so an app-defined
+/// alias for the switch is caught under its own name too. Mirrors
+/// [`reject_unplumbed_features`]'s stance: refuse before any work, naming
+/// every offending token.
+fn refuse_devtools_features(
+    command: &str,
+    project_dir: &Path,
+    extra_features: &[String],
+) -> Result<()> {
+    let offending: Vec<&str> = extra_features
+        .iter()
+        .map(String::as_str)
+        .filter(|&token| {
+            is_devtools_token(token) || cargo_manifest::feature_enables_devtools(project_dir, token)
+        })
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "`frust {command}` refuses --features that would enable the devtools listener on a \
+         release artifact ({}); the in-app devtools RPC service must stay compiled out of a \
+         store-distributed build (see docs/DEVTOOLS_ARCHITECTURE.md's Trust model)",
+        offending.join(", ")
     )
 }
 
@@ -701,6 +772,101 @@ mod tests {
                 .contains("rustup target add aarch64-linux-android"),
             "{err}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `build appbundle --features frust/devtools` — the exact release
+    /// artifact the finding names (a store-bound `.aab`) — is refused
+    /// outright, before Gradle/`android_build` ever runs (the fake runner
+    /// holds no registrations at all, so a real invocation would itself
+    /// error with something unrelated).
+    #[test]
+    fn build_appbundle_refuses_frust_devtools_feature() {
+        let dir = android_project_dir("appbundle-devtools-refused");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Appbundle {
+            build: BuildFlags {
+                features: vec!["frust/devtools".to_string()],
+                ..Default::default()
+            },
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("frust/devtools"), "{message}");
+        assert!(message.contains("build appbundle"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The bare `devtools` spelling and any `<pkg>/devtools` spelling are
+    /// refused the same way as the fully-qualified `frust/devtools` above.
+    #[test]
+    fn build_apk_refuses_bare_and_pkg_qualified_devtools_spellings() {
+        for token in ["devtools", "some-plugin/devtools"] {
+            let dir = android_project_dir("apk-devtools-spelling");
+            let runner = FakeProcessRunner::new();
+            let target = BuildTarget::Apk {
+                build: BuildFlags {
+                    features: vec![token.to_string()],
+                    ..Default::default()
+                },
+                split_per_abi: false,
+                target_platform: None,
+            };
+            let err = run_in(&runner, &dir, target).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("devtools"), "token {token}: {message}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An app-defined feature alias whose own `[features]` entry names
+    /// `frust/devtools` is refused under its own name too — the "cheap,
+    /// one-level" app-manifest check alongside the literal-spelling ones.
+    #[test]
+    fn build_apk_refuses_app_defined_alias_that_enables_devtools() {
+        let dir = android_project_dir("apk-devtools-alias");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["full".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("full"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A passthrough token carrying a shell metacharacter is rejected before
+    /// any work, naming the offending token — this is what stands between an
+    /// unvalidated CSV and the iOS release lane's unquoted `cargo build ...
+    /// $CARGO_FEATURES` shell expansion.
+    #[test]
+    fn build_apk_rejects_features_token_with_shell_metacharacters() {
+        let dir = android_project_dir("apk-shell-metacharacters");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["evil;touch /tmp/pwned".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("evil;touch"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -276,6 +276,12 @@ pub struct BuildFlags {
     /// selection, it is appended after it, so a `--profile` build keeps its
     /// instrumentation. Reaches the app's own `[features]` table, so a name
     /// the app does not declare is cargo's error to report, not this CLI's.
+    /// On `frust build`'s four release lanes (`apk`/`appbundle`/`ios`/`ipa`)
+    /// every token is additionally charset-validated
+    /// ([`feature_token_charset_ok`]) and refused outright if it would
+    /// enable the in-app devtools listener
+    /// (`commands::build::refuse_devtools_features`) — see
+    /// `docs/DEVTOOLS_ARCHITECTURE.md`'s Trust model; `run` is unaffected.
     #[arg(long = "features", value_name = "FEATURES")]
     pub features: Vec<String>,
 }
@@ -288,6 +294,12 @@ impl BuildFlags {
     /// preserved. Splitting here rather than downstream keeps every funnel
     /// site handling one feature per element, which is what the Android
     /// `-Pfrust.cargoFeatures` CSV and the iOS `FRUST_FEATURES` CSV both need.
+    ///
+    /// Deliberately infallible and unvalidated — every existing caller
+    /// (including `frust run`, which this task leaves unchanged) depends on
+    /// a plain `Vec<String>` here. [`validate_feature_token_charset`] is the
+    /// separate, opt-in check `frust build`'s release lanes run over this
+    /// result before forwarding it anywhere.
     pub fn extra_features(&self) -> Vec<String> {
         self.features
             .iter()
@@ -296,6 +308,43 @@ impl BuildFlags {
             .filter(|token| !token.is_empty())
             .map(str::to_string)
             .collect()
+    }
+}
+
+/// Whether a single `--features` passthrough token matches the strict
+/// charset a release lane's own cargo-argv site requires: cargo's own
+/// bare-feature-name charset (`[A-Za-z0-9_.-]+`), optionally prefixed by one
+/// `<pkg>/` segment of the same charset — cargo's `pkg/feature`
+/// conditional-dependency-feature syntax. Anything else (in particular a
+/// shell metacharacter) is rejected: a validated CSV of these tokens is
+/// still base64-decoded and re-spliced, **unquoted**, into a shell command
+/// by the iOS release lane's own build phase
+/// (`templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s `cargo
+/// build ... $CARGO_FEATURES`), so a token carrying a shell metacharacter
+/// that reached that far would be a shell-injection primitive, not merely
+/// an odd cargo argument.
+pub(crate) fn feature_token_charset_ok(token: &str) -> bool {
+    fn segment_ok(segment: &str) -> bool {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    }
+    match token.split_once('/') {
+        Some((pkg, feature)) => segment_ok(pkg) && segment_ok(feature),
+        None => segment_ok(token),
+    }
+}
+
+/// Validates every token in `tokens` against [`feature_token_charset_ok`],
+/// returning the first offending token (owned, so the caller can name it in
+/// an error) on failure. `frust build`'s release lanes
+/// (`commands::build::validate_extra_features`) are the sole caller — see
+/// that function and [`feature_token_charset_ok`] for why.
+pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), String> {
+    match tokens.iter().find(|token| !feature_token_charset_ok(token)) {
+        Some(bad) => Err(bad.clone()),
+        None => Ok(()),
     }
 }
 
@@ -608,6 +657,49 @@ mod tests {
             }
             other => panic!("expected Build/Apk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn feature_token_charset_ok_accepts_plain_and_pkg_qualified_names() {
+        for token in [
+            "hybrid-tier",
+            "perf_trace",
+            "v1.2",
+            "frust/devtools",
+            "a-b_c.d/e-f_g.h",
+        ] {
+            assert!(feature_token_charset_ok(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn feature_token_charset_ok_rejects_shell_metacharacters() {
+        for token in [
+            "hybrid-tier;rm",
+            "$(rm -rf /)",
+            "a b",
+            "`whoami`",
+            "a|b",
+            "frust/devtools/extra",
+            "",
+            "frust/",
+            "/devtools",
+        ] {
+            assert!(!feature_token_charset_ok(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn validate_feature_token_charset_passes_on_all_valid_tokens() {
+        let tokens = vec!["hybrid-tier".to_string(), "frust/devtools".to_string()];
+        assert!(validate_feature_token_charset(&tokens).is_ok());
+    }
+
+    #[test]
+    fn validate_feature_token_charset_names_the_first_bad_token() {
+        let tokens = vec!["hybrid-tier".to_string(), "evil;touch".to_string()];
+        let err = validate_feature_token_charset(&tokens).unwrap_err();
+        assert_eq!(err, "evil;touch");
     }
 
     #[test]
