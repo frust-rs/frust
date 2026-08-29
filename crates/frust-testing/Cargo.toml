@@ -14,6 +14,12 @@ publish = false
 # renders — kept off `frust-render`/`vello`/`wgpu` so this crate stays a leaf
 # a headless golden test can depend on without pulling in a GPU backend.
 frust-scene = { workspace = true }
+# Backs `fonts::register_test_fonts` — registering the bundled test-only
+# fonts (`testing/fonts/`) into a `TextContext` so a golden/host test shapes
+# deterministically without any system font (docs/TESTING.md's Deterministic
+# Inputs). `frust-text` carries no `vello`/`wgpu` dependency itself, so this
+# does not compromise the leaf/no-GPU-backend charter above.
+frust-text = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 # Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin

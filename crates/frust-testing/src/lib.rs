@@ -22,15 +22,21 @@
 //!   ([`diff::diff_images`]/[`diff::DiffReport`]).
 //! - [`golden`]: golden-image load/compare/store
 //!   ([`golden::compare_golden`]), `UPDATE_GOLDENS=1`-gated writes.
+//! - [`fonts`]: bundled, permissively-licensed test fonts
+//!   ([`fonts::test_fonts`]/[`fonts::register_test_fonts`]) for a text golden
+//!   that must not depend on whatever font the host happens to have
+//!   installed — see that module's docs.
 
 pub mod case;
 pub mod diff;
+pub mod fonts;
 pub mod golden;
 pub mod meta;
 pub mod render;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
 pub use diff::{DiffOutcome, DiffReport, PixelDiff};
+pub use fonts::{register_test_fonts, test_fonts};
 pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};
