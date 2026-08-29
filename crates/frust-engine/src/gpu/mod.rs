@@ -26,6 +26,8 @@
 
 pub mod config;
 pub mod paint_texture;
+pub mod pipelines;
+pub mod shader_src;
 pub mod strips;
 
 pub use config::{GpuConfig, tex_width_bits};
@@ -33,6 +35,7 @@ pub use paint_texture::{
     GpuBlurredRoundedRect, GpuEncodedImage, GpuEncodedPaint, GpuLinearGradient, GpuRadialGradient,
     GpuSweepGradient,
 };
+pub use pipelines::{EnginePipeline, EngineShaderModule, EngineShaders};
 pub use strips::{GpuStrip, StripDraw};
 
 use crate::EngineError;
