@@ -18,6 +18,7 @@
 pub mod caps;
 pub mod context;
 pub mod lifecycle;
+pub mod lint;
 pub mod pipeline;
 pub mod pipeline_cache;
 pub mod shader;
@@ -35,6 +36,7 @@ pub use lifecycle::{
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
 };
+pub use lint::{check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
 pub use texture::{
     Attachment, ColorAttachment, DepthAttachment, RenderTarget, SceneTextureId, Texture,
     TextureDesc, TextureId, TextureRegistry,
