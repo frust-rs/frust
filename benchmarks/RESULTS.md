@@ -1485,6 +1485,21 @@ the attached 5120x2880 display made the window vanish from the accessibility
 tree in both arms (the process kept rendering), so no 5K surface was ever
 configured and none is reported.
 
+### Arm 7 — Browser WebGL2: **NO-GO, see `webgl2_arm.md`**
+
+Not measured, and not measurable in-tree at this SHA. Root `Cargo.toml`
+compiles neither wgpu's `gles` nor `webgpu` feature (deliberate trim,
+`Cargo.toml:89,92`), no shell targets `wasm32-unknown-unknown`, and
+`Cargo.lock` has no `wasm-bindgen-test` entry — so there is no wasm target
+and no browser surface to render a scene into. OPEN #1 (engine plan) was
+decided **(b)** on 2026-08-29: this plan adds no wgpu feature; the
+target-gated `wasm32` `gles`/`webgpu` section belongs to the Web Shell plan
+(`fplan_000001a02ee9100bPd4uUpRs`) instead. Full detail, upstream citations
+(vello_hybrid's own `wgpu_webgl` example and `vello_sparse_tests`' headless-
+Chrome recipe), and the planned Phase 2 desktop stand-in
+(`FRUST_ENGINE_DOWNLEVEL=1`) are in `benchmarks/harness/webgl2_arm.md`. No
+browser frame-time number is recorded here or there.
+
 ### Fit comparison against the classic S1 model
 
 `RESULTS.md`'s fine-floor Decision fits classic S1 as `t ≈ 9.6 + 38.7·s²` ms
