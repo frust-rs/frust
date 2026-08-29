@@ -15,16 +15,19 @@
 //! pure function over plain values, and only a handful of named entry points
 //! touch a live `wgpu::Device` or a real window handle.
 
+pub mod arena;
 pub mod caps;
 pub mod context;
 pub mod lifecycle;
 pub mod lint;
 pub mod pipeline;
 pub mod pipeline_cache;
+pub mod pool;
 pub mod shader;
 pub mod surface;
 pub mod texture;
 
+pub use arena::{BufferSlice, BufferUploader, HostBuffer};
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
 pub use lifecycle::{
@@ -33,6 +36,7 @@ pub use lifecycle::{
 };
 pub use lint::{check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
 pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
+pub use pool::{PoolKey, PoolStats, PooledTexture, TextureAllocator, TexturePool};
 pub use shader::{ShaderId, ShaderLibrary};
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
