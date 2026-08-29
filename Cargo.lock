@@ -2523,6 +2523,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "frust-scene",
+ "image",
+ "kurbo",
+ "log",
+ "peniko",
+ "serde",
+ "serde_json",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "frust-text"
 version = "0.1.0"
 dependencies = [

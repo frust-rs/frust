@@ -1,0 +1,33 @@
+[package]
+name = "frust-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Dev-only test infrastructure (golden/oracle/fuzz support for the render
+# stack), never shipped in an app's dependency graph — every consumer takes
+# it as a [dev-dependencies] edge only (enforced by tests/deps.rs's guard).
+publish = false
+
+[dependencies]
+# Renderer-agnostic scene display list every `SceneRenderer` implementation
+# renders — kept off `frust-render`/`vello`/`wgpu` so this crate stays a leaf
+# a headless golden test can depend on without pulling in a GPU backend.
+frust-scene = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+# Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin
+# Policy) — golden/oracle image encode-decode will consume this in a later
+# phase; declared now so every test-support crate in this plan resolves the
+# same pin rather than each pulling its own.
+image = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+# Backs the per-golden JSON metadata contract (`meta::GoldenMeta`).
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# tests/deps.rs parses every crate/plugin manifest to enforce the
+# dev-dependency-only guard above.
+toml = { workspace = true }
