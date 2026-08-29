@@ -25,9 +25,14 @@ log = { workspace = true }
 anyhow = { workspace = true }
 # Backs the per-golden JSON metadata contract (`meta::GoldenMeta`).
 serde = { workspace = true }
+# `golden.rs` writes the promoted-baseline/failure-artifact JSON
+# (`GoldenMeta`, `diff::DiffReport`) this crate's own `serde` derives exist
+# for — moved out of [dev-dependencies] (where it only backed this crate's
+# unit tests before this comparator/golden-IO layer existed) since it is now
+# exercised by production (non-`#[cfg(test)]`) code.
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # tests/deps.rs parses every crate/plugin manifest to enforce the
 # dev-dependency-only guard above.
 toml = { workspace = true }

@@ -18,11 +18,19 @@
 //! - [`meta`]: the per-golden JSON provenance record
 //!   ([`meta::GoldenMeta`]) `docs/TESTING.md`'s Golden Image Policy
 //!   requires alongside a promoted baseline.
+//! - [`diff`]: the per-pixel per-channel comparator every golden gate uses
+//!   ([`diff::diff_images`]/[`diff::DiffReport`]).
+//! - [`golden`]: golden-image load/compare/store
+//!   ([`golden::compare_golden`]), `UPDATE_GOLDENS=1`-gated writes.
 
 pub mod case;
+pub mod diff;
+pub mod golden;
 pub mod meta;
 pub mod render;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
+pub use diff::{DiffOutcome, DiffReport, PixelDiff};
+pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};
