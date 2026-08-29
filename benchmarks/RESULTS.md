@@ -1265,6 +1265,358 @@ frame period — see deviation 4.
    step, so no matrix cell, staging directory or published-cell path was
    touched.
 
+## vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)
+
+The GO/NO-GO numbers for the frust-engine plan's Phase 0: the experimental
+`vello_hybrid` render tier (`crates/frust-render/src/hybrid_tier.rs`;
+`RenderTier::Hybrid` is override-only — no probe ever selects it,
+`tier.rs`) measured against the vello-classic rows published above, plus the
+two platform questions (does the iOS Simulator render at all, does macOS
+Metal run the tier). **No adoption recommendation is made here — only the
+numbers, and an explicit statement of what could not be measured.**
+
+Driven by `benchmarks/harness/ab_matrix.sh`'s new `--tier` axis:
+
+```
+# hybrid arm (ONE cell — the arm ignores --aa/--scale, see below)
+bash benchmarks/harness/ab_matrix.sh --device 13261FDD40030W --device-name pixel5 \
+    --tier hybrid --scenarios s1,s2,s4,s5,s6 --runs 5 --duration 20
+# glyph-atlas-cache arm
+bash benchmarks/harness/ab_matrix.sh --device 13261FDD40030W --device-name pixel5 \
+    --tier hybrid_atlas --scenarios s6,s2 --runs 5 --duration 20
+```
+
+Each arm builds `benchmarks/frust_bench` and `examples/material3-demo` as
+
+```
+# hybrid
+frust build apk --profile --define FRUST_TRACE_RAW=1 \
+    --features hybrid-tier --define FRUST_RENDER_TIER=hybrid
+# hybrid_atlas = the same, plus
+    --define FRUST_HYBRID_ATLAS_CACHE=1
+```
+
+`FRUST_AA_MODE`/`FRUST_RENDER_SCALE` are deliberately NOT passed on a hybrid
+arm — they are vello-classic instruments (`context.rs`'s `parse_aa_mode`
+feeds vello's `AaSupport`; the scale knob forces vello's blit arm) and
+`vello_hybrid` reads neither, so each hybrid arm is one cell however long
+`--aa`/`--scale` are and its AA/scale table cells read `n/a`.
+
+The configuration is verified on the installed binaries rather than assumed
+from the command lines: both hybrid APKs log `frust-render tier=hybrid
+(experimental vello_hybrid path, format=Rgba8Unorm 1080x2340)` and
+`frust-perf render-path hybrid-direct (vello_hybrid into the acquired
+swapchain view ...)` once at startup, plus `frust-render hybrid
+atlas-cache=off` (hybrid) / `atlas-cache=on` + `frust-render measurement knob
+in effect: FRUST_HYBRID_ATLAS_CACHE=1` (hybrid_atlas). The surface is opaque
+on this device (`frust-render surface-caps: alpha_modes=[Inherit]
+chosen=Auto`), so the tier's translucent-surface warning never fires and
+every hybrid number below is an opaque-surface number.
+
+**Rendered output was spot-checked, not assumed.** Device screenshots of the
+hybrid build (S1 bubbles with radial-gradient fills and shaped labels — its
+own in-app readout showing `FPS: 89.8`; S5's full-width generated images;
+S6's Latin/CJK/Arabic/Hebrew/Devanagari paragraphs; material3-demo's home
+list) all render correctly, so the numbers below are not a blank or
+partially-drawn frame. The screenshots live outside the repo with the run's
+other scratch (`benchmarks/raw/` commits no images).
+
+### Arm 1 — Pixel 5 frame scenarios, hybrid vs classic
+
+Same device, protocol convention and settings as the classic-baseline
+section above (5 runs x 20 s, first 2 discarded, 3 kept;
+`--skip-device-state`), so the classic column is **cited** from the rows
+above, not re-measured.
+
+| Scenario | classic p50 / p95 (ms) — cited | hybrid p50 / p95 (ms) | hybrid frames kept | hybrid missed @16.67ms | hybrid encode+submit p50 (ms) |
+|---|---|---|---|---|---|
+| S1 — animation storm | 48.23 / 49.13 | **12.20** / 13.90 | 5,012 | 61 (1.2%) | 11.17 |
+| S2 — 10k-row scroll | 42.23 / 43.98 | **13.10** / 14.06 | 5,253 | 2 (0.0%) | 7.24 |
+| S4 — heavy-work responsiveness | 16.71 / 17.45 | **9.36** / 10.27 | 5,244 | 5 (0.1%) | 3.56 |
+| S5 — image pipeline | 94.71 / 98.52 | **11.47** / 12.30 | 5,242 | 0 | 5.43 |
+| S6 — text shaping stress | 22.44 / 23.36 | **11.59** / 12.38 | 5,252 | 0 | 7.22 |
+
+`Graphics (MB)` is **not captured** for any hybrid cell: `ab_matrix.sh`'s
+committed raw set is `run-NN.log` + `stats.txt` only (no `dumpsys meminfo`
+snapshot), exactly as for the cited fine-floor rows.
+
+**The S5 row is the "full-screen image" case, named precisely.** S5 is not
+one `Command::Image` covering the surface under a 0.5-alpha layer:
+`benchmarks/frust_bench/src/scenarios/s5_image.rs` scripts a virtualized
+vertical stream of 240 distinct generated 256x256 RGBA images (SplitMix64
+seed, decoded through the real `frust::decode_image_async` PNG path), each
+cell laid out at `(viewport.width - 2*8dp) x 256dp` with `ImageFit::Cover` —
+i.e. several *edge-to-edge* image quads per frame, scrolling on a 10 s-per-leg
+scripted timeline, with no translucent layer over them. It is the existing
+scenario the classic 94.71 ms figure was measured on, so the two columns are
+comparable to each other. The literal one-quad-under-a-0.5-alpha-layer case
+(LIMITATIONS.md's `render-snapshot-layer-tradeoffs`: in-vello image-quad
+attempt p50 96.9 ms vs the out-of-vello compositor's 1.8 ms) is a Pixel 5a
+perfetto measurement of a page-transition snapshot and is **cited, not
+re-measured, and not run on the hybrid tier** — see "Not measured" below.
+
+### Arm 2 — the CPU/GPU split (`frust-perf hybrid strip_us=<n> record_us=<n>`)
+
+The hybrid tier emits one line per frame under `perf-trace` + `FRUST_TRACE`
+(both on in a `--profile` build): `strip_us` is the CPU half — scene reset,
+base-colour ground and the whole shared command walk, i.e. every sparse strip
+`vello_hybrid` rasterizes on the CPU that frame — and `record_us` is the
+renderer's GPU **command-record** CPU time only. GPU *execution* is not in
+either window: on this direct-to-surface arm it lands inside the frame's
+`submit_us` (`docs/RENDER_ARCHITECTURE.md`'s render-path A/B caveat), so the
+GPU-side remainder is reported as whole-frame-minus-strip rather than as a
+GPU timer, which this build has none of.
+
+| Scenario | frame total p50 (ms) | strip_us p50 / p95 (ms) — CPU strip | record_us p50 (ms) | total − strip p50 (ms) — GPU-side remainder | acquire_us p50 (ms) |
+|---|---|---|---|---|---|
+| S1 | 12.20 | 5.42 / 5.96 | 0.62 | 6.78 | 0.05 |
+| S2 | 13.10 | 5.17 / 5.48 | 0.46 | 7.94 | 3.12 |
+| S4 | 9.36 | 0.98 / 1.37 | 0.42 | 8.38 | 5.63 |
+| S5 | 11.47 | 1.80 / 2.14 | 0.42 | 9.68 | 5.34 |
+| S6 | 11.59 | 5.10 / 5.17 | 0.47 | 6.49 | 3.88 |
+
+`acquire_us` is the blocking swapchain wait and is load-bearing for reading
+this table: the display ran at **90 Hz** (11.13 ms period, see deviations),
+so S2/S4/S5/S6 are partly display-paced — their frame total is an upper bound
+on the work, and the remainder column includes that wait. S1 is not
+(`acquire_us` p50 0.05 ms): its 12.20 ms is real work.
+
+### Arm 3 — glyph atlas cache on (`FRUST_HYBRID_ATLAS_CACHE=1`)
+
+glifo's experimental glyph atlas cache, priced on the two text-heaviest
+scenarios. Same device/protocol/runs; the atlas arm is a separate build and
+therefore a separate matrix run.
+
+| Scenario | hybrid p50 / p95 (ms) | hybrid + atlas p50 / p95 (ms) | strip_us p50: off → on (ms) | record_us p50: off → on (ms) |
+|---|---|---|---|---|
+| S6 — text shaping stress | 11.59 / 12.38 | **9.98** / 10.50 | 5.10 → **1.08** (−79%) | 0.47 → 0.51 |
+| S2 — 10k-row scroll | 13.10 / 14.06 | **11.31** / 12.39 | 5.17 → **2.46** (−52%) | 0.46 → 0.90 |
+
+The cache's effect is concentrated exactly where the split says it should be:
+the CPU strip half of a text frame drops by four fifths on S6 while
+`record_us` is unchanged. The whole-frame win is smaller than the strip win
+(1.61 ms on S6, 1.79 ms on S2) because both arms are partly display-paced at
+90 Hz (S6 `acquire_us` p50 3.88 ms off → 5.60 ms on: the freed CPU time is
+partly reabsorbed by the vsync wait).
+
+### Arm 4 — material3-demo push/pop nav
+
+One push/pop pass per arm (three tap/BACK pairs 1.6 s apart at 540,472 /
+540,734 / 540,996 — `ab_matrix.sh`'s `run_nav` recipe), no repeats, nothing
+discarded, same basis as the nav rows above.
+
+| Arm | basis | n (frames) | total_p50 (ms) | total_p95 (ms) | submit_p95 (ms) | acquire_p95 (ms) |
+|---|---|---|---|---|---|---|
+| hybrid | last-120 window | 120 of 136 | **15.22** | 18.41 | 17.66 | 0.11 |
+| hybrid + atlas | last-120 window | 120 of 127 | **16.49** | 20.49 | 19.68 | 0.10 |
+| classic, cache ON (cited, measured 2026-08-28) | last-120 window | 120 of 141 | 7.39 | — | 35.95 | 10.89 |
+| classic, cache ON (cited, fine-floor `area`/`1.0`) | summary line | 120 | 11 | — | 36 | 12 |
+
+**The hybrid nav column is an INLINE (uncached) number and the classic one is
+not — they are not the same path.** `renderer.rs` states it outright for this
+tier: "the snapshot cache and compositor are GPU-tier machinery this tier
+bypasses entirely". So the hybrid arm re-renders each transition frame from
+scratch, while both cited classic figures had the snapshot-layer cache ON.
+The classic *inline* comparison point this file already publishes is the
+fine-floor `area`/`0.75` cell (37 ms) and `area`/`0.5` cell (19 ms), where a
+scaled frame disables the cache by design — both at reduced resolution, so
+neither is a clean like-for-like against hybrid's full-resolution 15.22 ms.
+A classic, scale-1.0, cache-off (`FRUST_NO_SNAPSHOT_LAYERS=1`) nav pass was
+**not measured** — see below.
+
+### Arm 5 — iOS Simulator (iPhone 16, iOS 18.6, udid B911C0D8-D2FE-4FEF-84C5-E0C574D1A8A8)
+
+**It renders.** `examples/material3-demo` built and launched with the hybrid
+tier (`frust run -d "iPhone 16" --profile --define FRUST_TRACE_RAW=1 --define
+FRUST_RENDER_TIER=hybrid --features hybrid-tier`) draws its full home page —
+app bar, six list cards with icons, bottom navigation, all text — where
+vello classic is black on the Simulator by construction. The Simulator's own
+capability report in the same console confirms why: `Missing downlevel flags:
+DownlevelFlags(INDIRECT_EXECUTION | BASE_VERTEX | CUBE_ARRAY_TEXTURES |
+COMPARISON_SAMPLERS)` — `INDIRECT_EXECUTION` is exactly what vello classic
+requires (`docs/DEVELOPMENT.md`'s iOS Simulator note) — and the renderer
+still reports `frust-render tier=hybrid (experimental vello_hybrid path,
+format=Bgra8Unorm 1179x2556)` with **no wgpu error, no validation error and
+no panic** anywhere in the console. Two `xcrun simctl io <udid> screenshot`
+captures a few seconds apart differ, so the app is rendering live rather than
+showing one stalled frame.
+
+Frame *timings* on the Simulator are **not measured**: that console carried
+no `frust-perf raw` and no `frust-perf hybrid` lines at all, so there is no
+frame series to compute a percentile from (the Simulator is not a
+performance-representative target in any case — PROTOCOL §3).
+
+### Arm 6 — macOS Metal (desktop preview)
+
+Both arms run `examples/material3-demo` through the desktop shell on this
+Mac, built from that directory as
+`FRUST_TRACE=1 FRUST_TRACE_RAW=1 [FRUST_RENDER_TIER=hybrid] cargo run
+--profile profile --features [hybrid-tier,]frust/perf-trace` (the `frust`
+CLI refuses `--features` on the desktop-bundle targets, and a plain
+`cargo run` would compile out every `frust-perf` line, so the CLI's own
+debug/profile feature selection is reproduced by hand).
+
+| Arm | render path | surface | first frame total (ms) | frames 2..n: total p50 / p95 (ms) | n | encode p50 (ms) | strip_us / record_us p50 (ms) | acquire p50 (ms) |
+|---|---|---|---|---|---|---|---|---|
+| classic | `blit (no Rgba8Unorm)` | Bgra8Unorm 1600x1200 | 50.61 | 8.22 / 10.16 | 42 | 0.57 | n/a | 7.45 |
+| hybrid | `hybrid-direct` | Bgra8Unorm 1600x1200 | 8.30 | 8.16 / 16.98 | 48 | 0.01 | 0.59 / 0.17 | 7.28 |
+
+**Both arms sit on the display's frame period, so this table does not
+discriminate between them**: `acquire_us` p50 is ~7.3-7.5 ms of the ~8.2 ms
+frame on both — consistent with a 120 Hz (8.33 ms) period on the built-in
+Liquid Retina XDR display the window sat on, though the active refresh rate
+was not read from the system and is inferred from these numbers — and the
+non-paced work is sub-millisecond on both sides (classic `encode` 0.57 ms;
+hybrid `strip` 0.59 ms + `record` 0.17 ms). The hybrid tier **runs on macOS
+Metal without error** — that is the load-bearing result here. One observed
+one-off: an earlier cold-shader-cache launch of the same hybrid binary paid
+55.21 ms on its first frame (`record_us` 49.16 ms of it, i.e. pipeline
+creation); the later launch tabulated above paid 8.30 ms for the same first
+frame.
+
+**Window size: 1600x1200 physical (800x600 logical at 2x) — the 5120x2880
+target was NOT achieved.** `crates/frust-shell-desktop/src/app_handler.rs`
+hard-codes `INITIAL_SIZE = LogicalSize::new(800, 600)` and sets no maximise
+attribute, and the shell exposes no size knob, so a bigger window needs
+either a source change (outside this card's scope) or window-manager
+scripting. Accessibility scripting resized the window to 1300x944 points
+(~2600x1888 px) on the built-in display, but every attempt to move it onto
+the attached 5120x2880 display made the window vanish from the accessibility
+tree in both arms (the process kept rendering), so no 5K surface was ever
+configured and none is reported.
+
+### Fit comparison against the classic S1 model
+
+`RESULTS.md`'s fine-floor Decision fits classic S1 as `t ≈ 9.6 + 38.7·s²` ms
+on this GPU: ~9.6 ms fixed per full-resolution pass plus ~38.7 ms of
+pixel-proportional fine sweep. Against the `area`/`1.0` row (S1 48.23, S2
+42.23, S4 16.71):
+
+- **The ~10 ms fixed per-pass term is gone.** Hybrid's *entire* S1 frame is
+  12.20 ms, and its GPU-side remainder after the CPU strip half is 6.78 ms —
+  below the classic model's fixed term alone, on the scenario the model was
+  fitted to. Hybrid draws sparse strips, not a full-surface fine sweep, so
+  there is no per-pass surface sweep to pay.
+- Ratios at scale 1.0: S1 12.20 vs 48.23 (**3.95x**), S2 13.10 vs 42.23
+  (3.22x), S4 9.36 vs 16.71 (1.79x), S5 11.47 vs 94.71 (**8.26x**), S6 11.59
+  vs 22.44 (1.94x). S2/S4/S5/S6 are partly 90 Hz-paced (Arm 2's
+  `acquire_us` column), so those four ratios are lower bounds on the win.
+- **No `t(s)` curve can be fitted for hybrid.** The tier ignores
+  `FRUST_RENDER_SCALE` entirely, so only `s = 1.0` exists for it — the
+  scale-slope half of the classic model has no hybrid counterpart to compare
+  against, and none is invented here.
+
+### What could not be measured
+
+- **A classic scale-1.0, cache-off nav pass** (`FRUST_NO_SNAPSHOT_LAYERS=1`)
+  — not measured: it is a fourth APK build beyond this card's arms. Without
+  it, hybrid's inline nav (15.22 ms) has no full-resolution classic inline
+  number to sit beside; the cached classic figures (7.39 / 11 ms) and the
+  reduced-scale inline ones (37 / 19 ms) are what this file has.
+- **iOS Simulator frame times** — not measured: no `frust-perf raw` lines in
+  that console (renders-or-not was the question, and it renders).
+- **macOS at 5120x2880, and the root `PushLayer(alpha<1)` >4096-texture
+  question** — not measured: the desktop shell caps the window at its
+  hard-coded 800x600 logical (1600x1200 px) and no scripted route enlarged it
+  onto the 5K display, so no dimension ever approached `LayersConfig`'s
+  4096 `max_texture_size`; no error text exists to report because no such
+  frame was ever rendered.
+- **A macOS steady-state workload** — not measured: the desktop preview
+  renders on demand, so the only reproducible frame series available without
+  UI automation is the scripted window-resize sequence tabulated above.
+- **`Graphics (MB)` for every hybrid cell** — not captured: `ab_matrix.sh`
+  commits `run-NN.log` + `stats.txt` only.
+- **The literal full-surface-image-under-a-0.5-alpha-layer case on hybrid**
+  — not measured: that figure (96.9 ms in-vello vs 1.8 ms compositor) is a
+  Pixel 5a perfetto capture of a page-transition snapshot recorded in
+  LIMITATIONS.md, not a `frust_bench` scenario, so there is no hybrid arm of
+  it here. S5 (above) is the image-heavy scenario that does exist on both
+  tiers.
+- **Pixel 5a** — not measured: only the Pixel 5 (`13261FDD40030W`) was
+  attached for this pass. Every row above is the Pixel 5.
+
+#### Methodology deviations (vello_hybrid spike)
+
+**Device:** Pixel 5 (`redfin`, serial `13261FDD40030W`), Adreno 620,
+1080x2340, Android 14, USB. Display mode during every capture:
+`DisplayMode{id=1, 1080x2340, refreshRate=90.0}` with
+`mActiveRenderFrameRate=90.0` (~11.13 ms period), brightness 128, thermal
+status 0 (NONE), battery 100% on USB power — the same display mode and
+brightness the classic-baseline section recorded, so measured and cited rows
+are refresh-comparable.
+
+1. **Quick pass, not the PROTOCOL §4 convention:** 5 runs x 20 s per
+   scenario, first 2 discarded, 3 kept — chosen to match the rows this
+   section is compared against, not §4's >=10 x 30 s. The classic section's
+   own S1 anchor bounds that shortcut at 0.3-0.4 ms on this device.
+2. **No device-state fairness gate:** every scenario batch ran with
+   `--skip-device-state` (PROTOCOL §3 uncontrolled), as the fine-floor rows
+   did. The environment was recorded rather than enforced (see **Device**).
+3. **The classic column is cited, never re-measured** — S1/S2/S4 from the
+   fine-floor `area`/`1.0` row, S5/S6 and the measured nav row from the
+   Pixel 5 classic-baseline section above. Their own deviations apply
+   unchanged.
+4. **The hybrid arm's first nav pass was lost and re-driven.** The device's
+   screen dozed off during the matrix run (`svc power stayon usb` did not
+   hold), so that pass rendered nothing and `ab_matrix.sh` correctly reported
+   `SKIPPED` rather than a number. The committed hybrid nav pass was driven
+   by hand afterwards with `run_nav`'s exact recipe, with `svc power stayon
+   true` set, and is the one tabulated. The five scenario cells were
+   unaffected (1,667-1,752 frames per kept run throughout, ~87 fps).
+5. **Nav percentiles are computed from the pass's own raw frame lines, not
+   read from a summary,** using the same method for every arm:
+   `stats.py`'s `_nearest_rank_percentile` (imported, not reimplemented) over
+   the last 120 frames — `RING_CAPACITY`, the window `FrameStats::summary`
+   reports over. `FrameStats::emit_log` is rate-limited to one summary per
+   2 s of *accumulated* frame time and a three-pair push/pop pass sits right
+   at that threshold on this tier (hybrid 2.033 s, atlas 2.048 s), so a
+   summary is not guaranteed. Where one did fire, the derivation reproduces
+   it exactly: over the atlas arm's own summary window (its last 120 frames
+   as of `total_frames=124`) the computation yields
+   `total_p50=16.585 / p95=21.612 / p99=31.206 / submit_p95=20.586 /
+   acquire_p95=0.096`, i.e. the emitted `total_p50_ms=16 total_p95_ms=21
+   total_p99_ms=31 submit_p95_ms=20 acquire_p95_ms=0` once truncated the way
+   `emit_log` prints. (Its `over_60hz`/`over_120hz` fields are lifetime
+   counters, not window counts, and are 1 and 3 higher than the window's own
+   57/111 — the only two fields that do not reproduce, and by construction.)
+   The hybrid arm's hand-driven pass emitted a summary too
+   (`total_p50_ms=15 submit_p95_ms=17`), matching its derived 15.218 / 17.655.
+6. **`encode+submit p50` is derived, not `stats.py` `format_table` output** —
+   same computation as the classic-baseline section's column of that name
+   (each kept frame's `encode_us`+`submit_us` summed, then
+   `stats.py`'s own percentile). The `strip_us`/`record_us` columns are
+   derived the same way from the committed `frust-perf hybrid` lines, sliced
+   to each scenario's `bench-scenario-start/end` bracket exactly as
+   `stats.py` slices frames and with the identical first-2-runs discard.
+   `stats.py` itself needed no change: its parser matches the `frust-perf
+   raw` prefix and ignores every other `frust-perf` line, so the new hybrid
+   line rides the committed logs without disturbing any published row.
+7. **The two hybrid arms are separate builds and separate matrix runs**, so
+   the atlas comparison carries one build/install/thermal cycle of
+   between-run variation on top of the usual single-session noise.
+8. **macOS numbers come from a scripted window-resize sequence, not a
+   benchmark scenario** (six `set size of window 1` steps 1 s apart, identical
+   for both arms) — the only reproducible way found to make the on-demand
+   desktop shell render a frame series. They are single passes with no
+   warm-up discard, and both arms are display-paced (see Arm 6).
+9. **iOS Simulator evidence is log- and screenshot-based**, on a Simulator
+   rather than a device: a rendering-or-not answer, not a performance one.
+
+**Raw series:** `benchmarks/raw/pixel5/tier/hybrid/{s1,s2,s4,s5,s6}/` and
+`benchmarks/raw/pixel5/tier/hybrid_atlas/{s2,s6}/` as
+`run-NN.log` + `stats.txt`, sanitized by `run.sh`/`ab_matrix.sh` at capture
+time; the nav passes as
+`benchmarks/raw/pixel5/tier/{hybrid,hybrid_atlas}/nav/logcat-frust-perf.log`,
+sanitized in the single `adb logcat -d -v raw | grep -a 'frust-perf'` pipe
+(no unfiltered dump is written anywhere). Every scenario row above
+reproduces via `python3 benchmarks/harness/stats.py --scenario <sN>
+benchmarks/raw/pixel5/tier/<arm>/<sN>/run-*.log`. The cited classic rows keep
+pointing at their original series under
+`benchmarks/raw/pixel5/{fine-floor,classic-baseline}/`, neither moved nor
+duplicated. The macOS and iOS Simulator arms have no committed series: their
+consoles are host-side logs, not device captures in the harness's sanitized
+form.
+
 ---
 
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
