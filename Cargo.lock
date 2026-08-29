@@ -2177,6 +2177,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-engine"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "frust-gpu",
+ "frust-scene",
+ "glifo 0.3.0",
+ "kurbo",
+ "log",
+ "peniko",
+ "thiserror 2.0.20",
+ "vello_common 0.2.0",
+ "wgpu",
+]
+
+[[package]]
 name = "frust-glyph"
 version = "0.1.0"
 dependencies = [

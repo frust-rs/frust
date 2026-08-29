@@ -1,0 +1,23 @@
+[package]
+name = "frust-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust-gpu.workspace = true
+frust-scene.workspace = true
+vello_common.workspace = true
+glifo.workspace = true
+wgpu.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+kurbo.workspace = true
+peniko.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+perf-trace = ["frust-gpu/perf-trace"]
+full-scheduler = []
