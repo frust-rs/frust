@@ -37,6 +37,16 @@ serde = { workspace = true }
 # unit tests before this comparator/golden-IO layer existed) since it is now
 # exercised by production (non-`#[cfg(test)]`) code.
 serde_json = { workspace = true }
+# The CPU oracle's rasterizer (`oracle_cpu::CpuOracle`) — vello_cpu 0.2.0,
+# renamed at the workspace level so it coexists explicitly with the legacy
+# `vello_cpu = "=0.0.9"` the `cpu-tier` fallback uses (see the root manifest's
+# comment for why both identities are deliberate). A NORMAL dependency rather
+# than a dev one: `CpuOracle` is part of this crate's own API, and this whole
+# crate is `publish = false` and reachable only across a `[dev-dependencies]`
+# edge (tests/deps.rs's guard), so no production graph ever sees it. Not
+# `vello`/`wgpu` — the oracle rasterizes on the CPU, so this crate stays the
+# GPU-free leaf its module docs promise.
+vello_cpu_oracle = { workspace = true }
 
 [dev-dependencies]
 # tests/deps.rs parses every crate/plugin manifest to enforce the
