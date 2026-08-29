@@ -2952,7 +2952,9 @@ baseline for the engine plan" section, same Adreno 620 hardware:
 6. **macOS Metal** (desktop preview): hybrid runs without error via the `hybrid-direct` path; both
    arms were display-paced at the shell's hard-coded 1600×1200 physical window, non-discriminating
    between tiers; the 5120×2880 target and the root `PushLayer(alpha<1)` >4096-texture question
-   were not measured — the desktop shell exposes no window-size knob.
+   were not measured on this pass — the desktop shell now has a window-size knob
+   (`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`, `app_handler.rs`) that makes a 5120×2880 arm
+   reachable, but that arm has not been re-run with it; still **not measured**.
 7. **Browser WebGL2**: written NO-GO (RESULTS.md Arm 7, `benchmarks/harness/webgl2_arm.md`) — no
    wasm shell or target exists in this workspace; OPEN #1 decided **(b)**: the target-gated
    `wasm32` `gles`/`webgpu` section belongs to the Web Shell plan, not this one.
@@ -2975,9 +2977,12 @@ correct — and unwarned — on a premultiplied-expecting translucent surface (A
 `Inherit`/`PreMultiplied`); only a straight-alpha translucent surface (iOS's `PostMultiplied`) is
 refused (`hybrid_translucency_refused`), degrading to Mode A with one warning. Every number above
 is still an opaque-surface number regardless, independent of that refusal — the Pixel 5 surface
-itself resolves `alpha_modes=[Inherit] chosen=Auto`, opaque; and the desktop shell's hard-coded
+itself resolves `alpha_modes=[Inherit] chosen=Auto`, opaque; and the desktop shell's default
 800×600-logical window (`crates/frust-shell-desktop/src/app_handler.rs`'s `INITIAL_SIZE`) is why
-the macOS large-texture question above has no answer from either tier.
+the macOS large-texture question above has no answer from either tier as measured — that default is
+now overridable via the `FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED` knobs in the same file
+([DEVELOPMENT.md](DEVELOPMENT.md) § Instrumentation), so the arm is measurable once re-run at
+5120×2880.
 
 **Image-atlas capacity guard**: `ImageResidency` (`hybrid_tier.rs`) tracks `live_pixels` against a
 `pixel_budget` — half (`ATLAS_BUDGET_DIVISOR`) the device-clamped 8×4096² atlas capacity — and
