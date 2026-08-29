@@ -1,0 +1,105 @@
+[package]
+name = "frust-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Dev-only test infrastructure (golden/oracle/fuzz support for the render
+# stack), never shipped in an app's dependency graph — every consumer takes
+# it as a [dev-dependencies] edge only (enforced by tests/deps.rs's guard).
+publish = false
+
+[dependencies]
+# Renderer-agnostic scene display list every `SceneRenderer` implementation
+# renders — the vocabulary both oracle arms decode, and the only render input
+# a golden case is allowed to record through (`corpus::unit`'s
+# `SceneBuilder`-only rule).
+frust-scene = { workspace = true }
+# Backs `fonts::register_test_fonts` — registering the bundled test-only
+# fonts (`testing/fonts/`) into a `TextContext` so a golden/host test shapes
+# deterministically without any system font (docs/TESTING.md's Deterministic
+# Inputs). Also the one sanctioned way `corpus::unit`'s `unit-glyph-run` case
+# turns text into `frust_scene::GlyphRun`s: shaped against the bundled faces
+# only, never a host font.
+frust-text = { workspace = true }
+# Backs `oracle_classic::ClassicOracle` — the vello-classic (GPU) arm of the
+# oracle pair, a `SceneRenderer` over `frust_render::HeadlessRenderer`. This
+# is the ONE place this crate's former "GPU-free leaf" charter is relaxed, and
+# it is relaxed deliberately: an oracle PAIR needs both arms behind one trait,
+# and this crate is `publish = false`, reachable only across a
+# `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
+# ever sees the edge. `features = []` keeps the DEFAULT feature set (no
+# `cpu-tier`, no `hybrid-tier`, no `perf-trace`): the classic arm must be the
+# pipeline an app actually ships, and `cpu-tier` would additionally drag the
+# legacy `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own
+# graph beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
+frust-render = { workspace = true, features = [] }
+# Backs `frame.rs` — the GPU-free widget-frame capture (`RenderRoot::rebuild`
+# -> `layout_with_text` -> `paint` into a `frust_scene::SceneBuilder`, which
+# THIS crate implements `PaintScene` for). `corpus::widget` and `corpus::page`
+# record their scenes through a real retained widget tree rather than by hand,
+# so the tree is an input to this crate, not merely a consumer of it.
+frust-core = { workspace = true }
+# The baseline widget set `corpus::widget`'s cases are built from, with
+# `test-support` on for the `Leaf`/`SwapLeaf`/`Probe` fixtures — the same
+# non-default feature the design-system plugins already take as a
+# dev-dependency. A corpus case needs a leaf of known intrinsic size to pin a
+# container's geometry without dragging a content widget's own layout into the
+# picture.
+frust-widgets = { workspace = true, features = ["test-support"] }
+# `frame::pin_type_scale` rewrites every slot of a `Theme`'s type scale onto
+# the bundled test face, and every widget/page case installs the result on its
+# `RenderRoot`: the theme is a deterministic INPUT of a golden case
+# (docs/TESTING.md's Deterministic Inputs), pinned here rather than left to
+# whatever a shell would have seeded.
+frust-theme = { workspace = true }
+# The four design-system catalogs `corpus::page` reconstructs its pages from.
+# Root-workspace members, so a path edge here is an ordinary intra-workspace
+# dependency — and the only way a page case can be a REAL catalog page instead
+# of a hand-drawn imitation of one. Declared by path, the way the plugins
+# declare each other (`workspace.dependencies` carries no plugin entry).
+# `examples/material3-demo` is deliberately absent: it is an EXCLUDED
+# workspace and cannot be imported from here at all, which is why it carries
+# its own `tests/page_goldens.rs` over a path dev-dependency on this crate.
+frust-material = { path = "../../plugins/material" }
+frust-cupertino = { path = "../../plugins/cupertino" }
+frust-glyph = { path = "../../plugins/glyph" }
+frust-shadcn = { path = "../../plugins/shadcn" }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+# Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin
+# Policy) — golden/oracle image encode-decode will consume this in a later
+# phase; declared now so every test-support crate in this plan resolves the
+# same pin rather than each pulling its own.
+image = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+# Backs the per-golden JSON metadata contract (`meta::GoldenMeta`).
+serde = { workspace = true }
+# `golden.rs` writes the promoted-baseline/failure-artifact JSON
+# (`GoldenMeta`, `diff::DiffReport`) this crate's own `serde` derives exist
+# for — moved out of [dev-dependencies] (where it only backed this crate's
+# unit tests before this comparator/golden-IO layer existed) since it is now
+# exercised by production (non-`#[cfg(test)]`) code.
+serde_json = { workspace = true }
+# The CPU oracle's rasterizer (`oracle_cpu::CpuOracle`) — vello_cpu 0.2.0,
+# renamed at the workspace level so it coexists explicitly with the legacy
+# `vello_cpu = "=0.0.9"` the `cpu-tier` fallback uses (see the root manifest's
+# comment for why both identities are deliberate). A NORMAL dependency rather
+# than a dev one: `CpuOracle` is part of this crate's own API, and this whole
+# crate is `publish = false` and reachable only across a `[dev-dependencies]`
+# edge (tests/deps.rs's guard), so no production graph ever sees it. Not
+# `vello`/`wgpu` — this arm of the oracle pair rasterizes on the CPU, so it
+# runs on a GPU-less machine even though `frust-render` is now in the graph.
+vello_cpu_oracle = { workspace = true }
+# `frust_render::HeadlessRenderer`'s adapter/device/render API is `async`
+# (wgpu's requests and its error scope are futures) while `SceneRenderer` is
+# sync, so `oracle_classic` drives it with the same minimal block-on executor
+# `frust-render`'s own GPU tests use. A NORMAL dependency for the same reason
+# `vello_cpu_oracle` is one: `ClassicOracle` is part of this crate's API.
+pollster = { workspace = true }
+
+[dev-dependencies]
+# tests/deps.rs parses every crate/plugin manifest to enforce the
+# dev-dependency-only guard above.
+toml = { workspace = true }

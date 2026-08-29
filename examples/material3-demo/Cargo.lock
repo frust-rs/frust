@@ -1257,6 +1257,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-cupertino"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-glyph"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-material"
 version = "0.1.0"
 dependencies = [
@@ -1312,6 +1330,15 @@ dependencies = [
 name = "frust-scene"
 version = "0.1.0"
 dependencies = [
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-shadcn"
+version = "0.1.0"
+dependencies = [
+ "frust",
  "kurbo",
  "peniko",
 ]
@@ -1431,6 +1458,31 @@ dependencies = [
  "muda",
  "windows-sys 0.61.2",
  "winit",
+]
+
+[[package]]
+name = "frust-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
+ "frust-render",
+ "frust-scene",
+ "frust-shadcn",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "image",
+ "kurbo",
+ "log",
+ "peniko",
+ "pollster",
+ "serde",
+ "serde_json",
+ "vello_cpu",
 ]
 
 [[package]]
@@ -2133,6 +2185,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2493,6 +2551,7 @@ dependencies = [
  "frust",
  "frust-clipboard",
  "frust-material",
+ "frust-testing",
  "log",
 ]
 
@@ -3712,6 +3771,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_repr"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3996,7 +4068,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4299,6 +4371,18 @@ dependencies = [
  "peniko",
  "smallvec",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "vello_cpu"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ace506ca414548966fcf3c283be94eb1cad8254de488791ee698bf438b0890a9"
+dependencies = [
+ "bytemuck",
+ "glifo",
+ "hashbrown 0.17.1",
+ "vello_common",
 ]
 
 [[package]]
@@ -5517,6 +5601,12 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zune-core"

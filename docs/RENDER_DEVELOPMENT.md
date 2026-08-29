@@ -17,6 +17,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `vello_cpu =0.0.9` exact | Experimental CPU render tier (`frust-render`'s non-default `cpu-tier` feature), pre-1.0 unstable API, isolated behind the `SceneSink` encode seam so a breaking bump never reaches the default GPU path | the `cpu-tier` command in [DEVELOPMENT.md](DEVELOPMENT.md)'s Test section |
 | `vello_hybrid =0.2.0` exact | Hybrid-tier measurement spike (`frust-render`'s non-default `hybrid-tier` feature) — see Hybrid Tier below | `cargo build -p frust-render --features hybrid-tier --locked` and `cargo test -p frust-render --features hybrid-tier` |
 | `vello_common =0.2.0` / `glifo =0.3.0` exact | The `hybrid-tier` feature's vendored sparse-strips core (the engine plan's rendering core); pinned exactly like `vello_cpu` | same tripwire as `vello_hybrid` above, plus `cargo tree -d` |
+| `vello_cpu_oracle (=0.2.0, package vello_cpu, features std+text+u8_pipeline)` — dev-only | `frust-testing`'s CPU oracle arm rasterizes with the engine's own core (`vello_common`/`glifo` 0.2.0/0.3.0) rather than the legacy `cpu-tier` fallback's 0.0.9 identities; the published crate hits a `compile_error!` on `std`+`text` alone, so `u8_pipeline` is required, not decorative | `cargo test -p frust-testing --test dup_identities` (guard G6: exactly two `vello_common` identities, `0.0.9`/`0.2.0`, and two `glifo` identities, `0.1.1`/`0.3.0`) |
 
 The `vello`/`wgpu` pin is also what pins the iOS Simulator's render gap and the vello
 bitmap-emoji decode caveat — both recorded in [DEVELOPMENT.md](DEVELOPMENT.md)'s Known Issues.
@@ -56,6 +57,31 @@ follows it, so account for that remap before comparing timings across arms
 **Planned, not implemented.** `FRUST_ENGINE_DOWNLEVEL=1` — a future Phase-2 knob to request the
 WebGL2 downlevel limit profile against a desktop backend, as a browser stand-in — does not exist at
 this SHA (`benchmarks/harness/webgl2_arm.md`); do not treat it as a shipped instrument.
+
+## Golden / Oracle Tests
+
+`frust-testing`'s CPU-arm gate rides the standard `cargo test --workspace` chain in
+[DEVELOPMENT.md](DEVELOPMENT.md); the commands below isolate it and cover the GPU-gated arms:
+
+```bash
+# CPU arm only, no GPU/environment needed:
+cargo test -p frust-testing
+
+# Classic (GPU) golden + adversarial arms, pinned runner (adapter pin required — the
+# reference box also enumerates an Intel iGPU, so an unpinned run can silently land there):
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+  cargo test -p frust-testing --test goldens --test adversarial -- --ignored
+
+# Calibration reproduction (same pinned runner):
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+  cargo test -p frust-testing --test calibration -- --ignored
+
+# material3-demo's own standalone page-golden gate (CPU arm, no GPU needed):
+(cd examples/material3-demo && cargo test --test page_goldens)
+```
+
+`docs/TESTING.md` is the canonical golden-image/oracle/class runbook; the commands above are the
+render-stack-specific reproduction recipes for the pins and knobs this spoke owns.
 
 ## See Also
 

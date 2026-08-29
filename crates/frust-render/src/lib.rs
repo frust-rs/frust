@@ -32,6 +32,10 @@
 //! alpha-blended quad in a wgpu render pass AFTER vello, on every render arm,
 //! while the bracket's `alpha`/`scale` animate for free.
 //!
+//! [`HeadlessRenderer`] renders the same scenes with no surface at all — the
+//! offscreen oracle harness golden and pixel-regression tests compare against,
+//! resolving its adapter, limits and tier exactly as a real device does.
+//!
 //! Surface lifecycle is a first-class state machine: see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
@@ -45,6 +49,11 @@ mod context;
 mod convert;
 #[cfg(feature = "cpu-tier")]
 mod cpu_tier;
+// Offscreen (no surface, no swapchain) vello-classic rendering: the harness
+// the oracle/golden and pixel-regression tests render through. Reachable from
+// outside the crate, unlike the pre-pass modules, because those tests live
+// outside it — and still leaking no `vello`/`wgpu` type (see its module docs).
+mod headless;
 // Experimental vello_hybrid render tier (non-default `hybrid-tier` feature):
 // a third `SceneSink` over the same command walk, so the sparse-strip core can
 // be measured against vello on real scenes. Crate-private — its entry points
@@ -70,6 +79,10 @@ mod tier;
 
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
 pub use convert::encode_scene;
+pub use headless::{
+    GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessAa, HeadlessImage,
+    HeadlessMeta, HeadlessOptions, HeadlessRenderer, HeadlessSpec, ShaderOverrideSpec,
+};
 pub use lifecycle::{AcquireOutcome, EncodeOutcome, FrameOutcome, SurfacePhase};
 pub use renderer::{DeferredPresent, SurfaceAlphaRequest, SurfaceRenderer};
 pub use tier::{

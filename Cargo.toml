@@ -267,6 +267,31 @@ vello_cpu = "=0.0.9"
 vello_hybrid = { version = "=0.2.0", default-features = false, features = ["wgpu", "text"] }
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
 glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
+# Dev-only oracle for `frust-testing`: the SAME engine core the hybrid/engine
+# tier is built on (vello_common 0.2.0 + glifo 0.3.0), rasterized on the CPU
+# with no GPU in the loop, so a golden test compares the engine against its own
+# reference implementation rather than against a different renderer's. Renamed
+# (`vello_cpu_oracle`) rather than bumping the `vello_cpu = "=0.0.9"` row above:
+# the legacy `cpu-tier` fallback stays on 0.0.9, so BOTH `vello_common`
+# identities (0.0.9 and 0.2.0) coexist in the graph on purpose — the rename
+# makes that explicit at every use site, and
+# `crates/frust-testing/tests/dup_identities.rs` is the guard that asserts
+# exactly two of each (flipped to one when a later phase retires 0.0.9).
+# Exact-pinned like every other pre-1.0 render-stack row (docs/DEVELOPMENT.md's
+# Version-Pin Policy). Feature trim: `std` + `text` (glyph runs) + exactly one
+# rasterization pipeline. `u8_pipeline` is NOT optional decoration — vello_cpu
+# 0.2.0 carries `compile_error!("vello_cpu must have at least one of the u8 or
+# f32 pipelines enabled")`, so `default-features = false` without one of them
+# does not build; u8 (not `f32_pipeline`) because it is the default the engine
+# tier itself rasterizes with, and an oracle that used the f32 pipeline would
+# differ from the engine in rounding rather than in geometry. Everything else
+# the default set would drag in (`png`, and `multithreading`, which is not
+# default but would make rasterization thread-count dependent) stays off.
+vello_cpu_oracle = { package = "vello_cpu", version = "=0.2.0", default-features = false, features = [
+    "std",
+    "text",
+    "u8_pipeline",
+] }
 # frust-secure-storage's Apple Keychain + LocalAuthentication bindings —
 # same rationale/precedent as `objc2`/
 # `objc2-foundation` above: plain version strings (no `default-features`

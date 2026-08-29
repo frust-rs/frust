@@ -2343,7 +2343,7 @@ dependencies = [
  "pollster",
  "vello",
  "vello_common 0.2.0",
- "vello_cpu",
+ "vello_cpu 0.0.9",
  "vello_hybrid",
  "wgpu",
 ]
@@ -2520,6 +2520,32 @@ dependencies = [
  "muda",
  "windows-sys 0.61.2",
  "winit",
+]
+
+[[package]]
+name = "frust-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
+ "frust-render",
+ "frust-scene",
+ "frust-shadcn",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "image",
+ "kurbo",
+ "log",
+ "peniko",
+ "pollster",
+ "serde",
+ "serde_json",
+ "toml 1.1.4+spec-1.1.0",
+ "vello_cpu 0.2.0",
 ]
 
 [[package]]
@@ -8001,6 +8027,18 @@ dependencies = [
  "hashbrown 0.17.1",
  "png",
  "vello_common 0.0.9",
+]
+
+[[package]]
+name = "vello_cpu"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ace506ca414548966fcf3c283be94eb1cad8254de488791ee698bf438b0890a9"
+dependencies = [
+ "bytemuck",
+ "glifo 0.3.0",
+ "hashbrown 0.17.1",
+ "vello_common 0.2.0",
 ]
 
 [[package]]

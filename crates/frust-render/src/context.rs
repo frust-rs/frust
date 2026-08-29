@@ -30,7 +30,7 @@ use crate::renderer::SurfaceAlphaRequest;
 /// exposes them — mirrors `vello::util::RenderContext::new_device` so our
 /// hand-rolled device request stays behaviourally identical to vello's, apart
 /// from the `required_limits` we control.
-fn vello_optional_features() -> wgpu::Features {
+pub(crate) fn vello_optional_features() -> wgpu::Features {
     wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
 }
 
@@ -1374,7 +1374,7 @@ fn effective_instance_flags(flags: wgpu::InstanceFlags, is_emulator: bool) -> wg
 /// the device request never over-asks and fails on the simulator) and, on the
 /// simulator, has its uniform-buffer alignment forced up to 256 — see
 /// [`RenderContext::ensure_device`], the live call site.
-fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
+pub(crate) fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
     const IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT: u32 = 256;
     if is_ios_simulator
         && base.min_uniform_buffer_offset_alignment
@@ -1393,7 +1393,7 @@ fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits 
 /// / `x86_64-apple-ios` under the simulator), which sets `target_abi = "sim"`.
 /// Compile-time constant: the simulator mitigation only needs to apply to
 /// simulator builds, never physical-device or desktop ones.
-const fn is_ios_simulator() -> bool {
+pub(crate) const fn is_ios_simulator() -> bool {
     cfg!(all(target_os = "ios", target_abi = "sim"))
 }
 

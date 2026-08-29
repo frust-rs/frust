@@ -60,8 +60,16 @@ The repository already contains substantial non-pixel coverage:
   ratatui's `TestBackend` and `insta`.
 - `crates/frust-render`: scene-to-Vello conversion, surface lifecycle,
   pipeline-cache, tier-selection, CPU-tier, and adapter-workaround tests.
-- `crates/frust-render/tests/gpu_smoke.rs`: one ignored real-GPU offscreen
-  render/readback smoke test.
+- `crates/frust-render/tests/gpu_smoke.rs`: ignored real-GPU offscreen
+  render/readback smoke tests over `frust_render::HeadlessRenderer`
+  (`crates/frust-render/src/headless.rs`).
+- `crates/frust-testing`: the versioned golden corpus and comparator — a
+  renderer-agnostic `SceneRenderer` pair (`CpuOracle` over the dev-only
+  `vello_cpu` 0.2.0 pin, `ClassicOracle` over `HeadlessRenderer`), a 4-channel
+  diff with a separate alpha threshold and 1-px eroded-interior mask,
+  triptych/JSON failure artifacts under `target/frust-testing/`, and the
+  committed `testing/goldens/cpu/` class (unit, adversarial, widget, and page
+  cases, incl. `examples/material3-demo`'s standalone page goldens).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
@@ -72,11 +80,6 @@ The repository already contains substantial non-pixel coverage:
 
 Known gaps are tracked by the comprehensive-testing feature plan:
 
-- No reusable native headless RGBA rendering API.
-- No versioned raster golden corpus for framework widgets or Huddle screens.
-- No automated PNG comparison, diff artifact, or controlled baseline-update
-  workflow.
-- Text goldens currently depend on installed system fonts.
 - No automated Android emulator provisioning, launch, state normalization,
   screenshot comparison, or lifecycle matrix.
 - No committed CI configuration or dedicated self-hosted GPU-runner workflow.
@@ -188,10 +191,14 @@ NVIDIA documents `__VK_LAYER_NV_optimus=NVIDIA_only` as the way to restrict a
 Vulkan application's visible devices to NVIDIA GPUs in a PRIME configuration:
 [PRIME Render Offload](https://download.nvidia.com/XFree86/Linux-x86_64/495.44/README/primerenderoffload.html).
 
-`WGPU_ADAPTER_NAME` only affects code that calls wgpu's environment-aware
-adapter initializer. The current `gpu_smoke` test calls `request_adapter`
-directly, so use ICD/layer isolation until that test adopts the shared Frust
-adapter-selection path.
+`frust_render::HeadlessRenderer` (which `gpu_smoke` and every golden run now
+use) resolves its adapter via `wgpu::util::initialize_adapter_from_env_or_default`,
+so `WGPU_ADAPTER_NAME` works alongside `WGPU_BACKEND`/`VK_DRIVER_FILES` — on
+this dual-GPU host, `WGPU_ADAPTER_NAME=T400` is the standard pin. As a
+backstop, `FRUST_GOLDEN_EXPECT_ADAPTER` / `FRUST_GOLDEN_EXPECT_BACKEND` make a
+run fail before rendering when the resolved adapter or backend differs from
+the expectation, so a golden can never silently wear another adapter's label.
+ICD/layer isolation above remains available but is no longer required.
 
 ### GPU Run Metadata
 
@@ -216,17 +223,36 @@ color-space change. Review that migration as an intentional visual change.
 
 Store independent baselines for:
 
-- `cpu/`: deterministic `vello_cpu` reference images.
-- `vulkan-nvidia-t400/`: real Vello/wgpu output on the pinned T400 runner.
+- `cpu/`: deterministic `vello_cpu` 0.2.0 reference images — the committed,
+  baseline-required class (`testing/goldens/cpu/`).
+- `vulkan-nvidia-t400/`: real Vello/wgpu output on the pinned T400 runner (the
+  plan's single reference adapter for GPU goldens). Currently recording-only:
+  the GPU arm renders and probes on every ignored run but a baseline is
+  promoted deliberately via `UPDATE_GOLDENS=1`. A Mac runner would record
+  `metal-macos/`; an unknown adapter lands in the non-promotable
+  `classic-unclassified` staging class
+  (`crates/frust-testing/src/oracle_classic.rs`'s `golden_class`). Engine
+  classes (`engine-vulkan-t400/`, …) arrive with the engine phases.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the
   release fleet; never pretend one device represents every Android GPU/OEM.
 
-CPU and GPU output are not required to be byte-identical. Native offscreen and
-Android screenshots are never cross-compared: Android adds density, platform
-fonts, surface composition, system bars, color management, and potentially a
-different Vulkan implementation.
+CPU and GPU output are not required to be byte-identical — by how much is
+measured, not guessed: `testing/goldens/CALIBRATION.md` records the
+classic-vs-`vello_cpu` divergence distribution over the whole corpus on the
+T400 (whole-corpus p95: mean absolute error ≤ 2.5, pixels over channel-8
+≤ 4.8%; the per-channel max is deliberately not gated — antialiasing
+conflation on diagonal/curved edges exceeds the 1-px erosion mask, see that
+file's Legitimate Disagreements). The engine-vs-`vello_cpu` pair, by contrast,
+shares one geometry core and is expected near-exact (threshold 2, alpha
+compared). Native offscreen and Android screenshots are never cross-compared:
+Android adds density, platform fonts, surface composition, system bars, color
+management, and potentially a different Vulkan implementation.
+
+The committed corpus lives in plain git (no LFS) under a budget enforced by
+`cargo test -p frust-testing --test corpus_budget`: 8 MB total, 64 KB per PNG
+(`testing/goldens/README.md`).
 
 ### Deterministic Inputs
 
@@ -242,10 +268,18 @@ A golden case must fix all inputs that can affect pixels:
 - Font files and fallback order.
 - Base color, texture format, and Vello antialiasing configuration.
 
-Frust currently resolves `SystemUi` through the platform font collection.
-Comprehensive text goldens require a test-only bundled-font registration path.
-Until that exists, system-font goldens are runner-local and must record the
-installed font package/version; they are not portable reference images.
+Text golden portability is enforced, not assumed: `testing/fonts/` bundles
+four subsetted OFL/Apache faces (Latin, Arabic, CJK, COLR emoji — provenance,
+subset commands, and checksums in `testing/fonts/LICENSES.md`),
+`frust_testing::fonts::register_test_fonts` registers only those,
+`frame::pin_type_scale` rewrites the theme's type scale onto the bundled
+family, and `frame::foreign_font_runs` rejects any captured glyph run whose
+font bytes are not a bundled face. Residual gap: widget-internal text built
+via `text(label)` (`frust-widgets` button/checkbox/radio, the Material
+app-bar and Cupertino nav-bar titles, shadcn's `card_title`, Glyph's `tag`)
+hardcodes `TextStyle::default()` (`FontFamily::SystemUi`) with no theme seam,
+so widget/page golden cases pass those string slots empty and supply real
+text through view slots (tracked as an open action item).
 
 ### Comparison
 
