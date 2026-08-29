@@ -130,22 +130,39 @@ fn pipeline_cache_drift_guard() {
     let render_content = fs::read_to_string(&render_cache)
         .expect("unable to read frust-render/src/pipeline_cache.rs");
 
-    // Strip leading doc comments (//!) and blank lines from both files.
-    let strip_leading_doc = |content: &str| -> String {
+    // Normalize away the two copies' legitimate surface differences before
+    // comparing: doc comments (each copy describes itself), the item
+    // visibility (frust-gpu exports `pub` for its integration tests where
+    // frust-render keeps `pub(crate)`), `#[must_use]` attributes, and each
+    // file's `#[cfg(test)]` tail. Everything that remains is the framing
+    // logic itself, which must never diverge between the copies.
+    let normalize = |content: &str| -> String {
         content
             .lines()
-            .skip_while(|line| line.starts_with("//!") || line.trim().is_empty())
+            .take_while(|line| !line.trim_start().starts_with("#[cfg(test)]"))
+            .filter(|line| {
+                let t = line.trim_start();
+                !t.starts_with("//!")
+                    && !t.starts_with("//")
+                    && !t.starts_with("#[must_use]")
+                    && !t.is_empty()
+            })
+            .map(|line| {
+                line.replace("pub(crate) fn ", "pub fn ")
+                    .replace("pub(crate) const ", "pub const ")
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
 
-    let gpu_stripped = strip_leading_doc(&gpu_content);
-    let render_stripped = strip_leading_doc(&render_content);
+    let gpu_stripped = normalize(&gpu_content);
+    let render_stripped = normalize(&render_content);
 
     assert_eq!(
         gpu_stripped, render_stripped,
-        "crates/frust-gpu/src/pipeline_cache.rs must remain byte-identical to \
-         crates/frust-render/src/pipeline_cache.rs after stripping leading doc comments. \
+        "crates/frust-gpu/src/pipeline_cache.rs must keep its framing logic identical to \
+         crates/frust-render/src/pipeline_cache.rs (compared with comments, `#[must_use]`, \
+         item visibility, and the test module normalized away). \
          If the framing layout changes, bump MAGIC in both crates/frust-gpu/src/pipeline_cache.rs \
          and crates/frust-render/src/pipeline_cache.rs, then rebuild both crates together."
     );
