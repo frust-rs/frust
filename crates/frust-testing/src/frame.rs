@@ -690,7 +690,7 @@ mod tests {
     /// Negative control: text OUTSIDE the bundled Latin subset
     /// (`testing/fonts/LICENSES.md`), shaped through the SAME bundled family
     /// stack [`test_text_context`]'s callers pin against, reproduces the
-    /// review-round-0 Major this module's docs describe — none of `F`, `r`,
+    /// host-font leak this module's docs describe — none of `F`, `r`,
     /// `u`, `s`, `t` is in the subset, so fontique falls back past the
     /// registered stack to whatever font the host happens to have installed.
     ///
