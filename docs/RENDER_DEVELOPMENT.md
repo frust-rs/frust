@@ -54,9 +54,10 @@ follows it, so account for that remap before comparing timings across arms
 | `FRUST_HYBRID_ATLAS_CACHE=1` | Turns on `glifo`'s experimental glyph-atlas cache for every glyph run the hybrid tier draws (upstream calls it "not recommended for external use" — a knob, not a default); the only path to `vello_hybrid`'s glyph-atlas-exhaustion `expect` residual (see [LIMITATIONS.md](LIMITATIONS.md)). Logs `frust-render hybrid atlas-cache=on|off` once per process in any hybrid-tier build, plus one `log::warn!` naming the knob when on. Same compile-time-or-runtime shape as the others. | off |
 | hybrid per-frame trace line | Under `perf-trace` + `FRUST_TRACE`, the hybrid tier emits one `frust-perf hybrid strip_us=<n> record_us=<n>` line per frame: `strip_us` is the CPU half (scene reset through the shared command walk's sparse-strip rasterization), `record_us` is the renderer's GPU command-**record** CPU time only — GPU *execution* is not in either window, it lands inside the frame's `submit_us`, same as this tier's whole `HybridDirect` cost (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s Data Flow). **Compare whole-frame totals across tiers, never `encode_us`**: on the classic tier's blit arm the GPU render stays in `encode_us` (small `submit_us`), on its direct arm the render moves into `submit_us` instead — a third, incompatible split from the hybrid tier's own. | off (needs `perf-trace` + `FRUST_TRACE`) |
 
-**Planned, not implemented.** `FRUST_ENGINE_DOWNLEVEL=1` — a future Phase-2 knob to request the
-WebGL2 downlevel limit profile against a desktop backend, as a browser stand-in — does not exist at
-this SHA (`benchmarks/harness/webgl2_arm.md`); do not treat it as a shipped instrument.
+**Shipped in `frust-gpu`, absent in `frust-render`.** `FRUST_ENGINE_DOWNLEVEL=1` now exists as
+`frust-gpu`'s WebGL2 rehearsal knob (clamped `TierCaps` + clamped device request — see the GPU
+Substrate section below); the vello-classic tier documented in this table ignores it, and the
+browser/wasm measurement arm (`benchmarks/harness/webgl2_arm.md`) remains unimplemented.
 
 ## GPU Substrate (`frust-gpu`)
 
