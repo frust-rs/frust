@@ -1310,8 +1310,12 @@ swapchain view ...)` once at startup, plus `frust-render hybrid
 atlas-cache=off` (hybrid) / `atlas-cache=on` + `frust-render measurement knob
 in effect: FRUST_HYBRID_ATLAS_CACHE=1` (hybrid_atlas). The surface is opaque
 on this device (`frust-render surface-caps: alpha_modes=[Inherit]
-chosen=Auto`), so the tier's translucent-surface warning never fires and
-every hybrid number below is an opaque-surface number.
+chosen=Auto`), so every hybrid number below is an opaque-surface number —
+which costs the arm nothing either way, since the tier itself outputs
+PREMULTIPLIED alpha (`vello_hybrid`'s user-surface strip pipelines blend
+`PREMULTIPLIED_ALPHA_BLENDING`): it is correct on the premultiplied-expecting
+translucent modes (`Inherit`, `PreMultiplied`) and refuses translucency only
+on the straight-alpha one (iOS's `PostMultiplied`).
 
 **Rendered output was spot-checked, not assumed.** Device screenshots of the
 hybrid build (S1 bubbles with radial-gradient fills and shaped labels — its

@@ -869,6 +869,51 @@ fn blit_translucency_refused(
         && tier == crate::tier::RenderTier::Gpu
 }
 
+/// Whether a configured surface must **refuse** translucency because the
+/// hybrid tier's output convention is the opposite of the one its swapchain
+/// stores — the mirror image of [`blit_translucency_refused`], and the same
+/// remedy.
+///
+/// `vello_hybrid` presents **premultiplied** alpha: both of its user-surface
+/// strip pipelines are built with `BlendState::PREMULTIPLIED_ALPHA_BLENDING`
+/// (`vello_hybrid-0.2.0/src/render/wgpu/mod.rs:1248,1255`), so its fragments
+/// reach the swapchain already multiplied through by their own alpha — the
+/// exact opposite of vello's `render_to_texture`, which un-premultiplies at
+/// its final write ([`alpha_mode_needs_premultiply`]). So the predicate this
+/// arm needs is the exact opposite too:
+///
+/// - `Inherit`/`PreMultiplied` (Android's translucent mode, and the explicit
+///   one) expect premultiplied and receive premultiplied — **correct as-is**,
+///   no premultiply pass wanted and nothing to warn about. That is also why
+///   this arm is deliberately not routed through
+///   [`RenderPath::DirectPremultiplied`]: premultiplying again would darken
+///   every partial-alpha pixel by a second factor of `a`.
+/// - `PostMultiplied` (iOS's translucent mode,
+///   [`alpha_mode_is_straight_translucent`]) expects STRAIGHT alpha and would
+///   read `(C·a, a)` as `(C, a)` — every partial-alpha pixel too dark, over a
+///   Mode B punch-through hole. This tier owns no stage frust could
+///   un-premultiply in (`vello_hybrid` draws into the acquired view itself, so
+///   there is no intermediate to post-process), so the answer is the policy
+///   [`blit_translucency_refused`] already sets: refuse, degrading the app to
+///   Mode A (opaque base, no platform-view punch), rather than silently
+///   compositing wrong.
+/// - `Opaque`/`Auto` ignore alpha entirely and are untouched.
+///
+/// Takes `path_kind` rather than assuming it, so the predicate cannot be
+/// misapplied to a vello arm — those keep their own answers above. No `tier`
+/// parameter is needed: [`RenderPathKind::HybridDirect`] is reachable from the
+/// [`Hybrid`](crate::RenderTier::Hybrid) tier alone
+/// ([`choose_hybrid_render_path`]).
+///
+/// Pure and host-testable without a GPU, like its blit sibling.
+#[cfg(feature = "hybrid-tier")]
+fn hybrid_translucency_refused(
+    path_kind: RenderPathKind,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> bool {
+    path_kind == RenderPathKind::HybridDirect && alpha_mode_is_straight_translucent(alpha_mode)
+}
+
 /// Permanent surface-caps + chosen-alpha-mode line, logged once
 /// per surface configure (not once per process — a resize/recreate that picks
 /// a different mode is worth a fresh line, unlike the direct-to-surface probe
@@ -1228,9 +1273,11 @@ pub(crate) struct ConfiguredSurface {
     /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
     /// computed once at configure time (the mode never changes for a live
     /// surface; a resize reconfigures with the same `config`), *except* when
-    /// [`blit_translucency_refused`] forces it to `false`:
-    /// a GPU-tier blit-fallback surface cannot deliver the premultiplied
-    /// output such an alpha mode expects — `cpu-tier` is exempt).
+    /// either arm-specific refusal forces it to `false`: a GPU-tier
+    /// blit-fallback surface cannot deliver the premultiplied output such an
+    /// alpha mode expects ([`blit_translucency_refused`] — `cpu-tier` is
+    /// exempt), and the hybrid tier cannot deliver the straight output
+    /// `PostMultiplied` expects ([`hybrid_translucency_refused`]).
     ///
     /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
     /// at each read so the value a shell observes through
@@ -1245,9 +1292,11 @@ impl ConfiguredSurface {
     /// stores STRAIGHT alpha — iOS's `PostMultiplied` translucent mode.
     ///
     /// Reads [`Self::resolved_translucent`] rather than the raw alpha mode, so
-    /// a surface whose translucency was REFUSED
-    /// ([`blit_translucency_refused`]) answers `false`: it presents opaque, and
-    /// an opaque destination is exactly what the straight blend is exact for.
+    /// a surface whose translucency was REFUSED (by either
+    /// [`blit_translucency_refused`] or, for this mode specifically, the hybrid
+    /// tier's [`hybrid_translucency_refused`]) answers `false`: it presents
+    /// opaque, and an opaque destination is exactly what the straight blend is
+    /// exact for.
     ///
     /// [`crate::renderer::SurfaceRenderer`] folds this into the snapshot
     /// cache's enable decision (`renderer::snapshot_cache_enabled`): the
@@ -1937,30 +1986,37 @@ impl RenderContext {
             // [`RenderPath::Direct`] holds — nothing — and takes the same
             // encode/submit split.
             //
-            // Deliberately NOT reachable from the premultiply arm above: that
-            // one exists to premultiply an intermediate this tier never
-            // creates. A translucent, premultiplied-expecting surface is
-            // therefore outside the hybrid spike's scope, and says so once
-            // rather than quietly compositing over-bright.
+            // Deliberately NOT reachable from the premultiply arm above, and
+            // deliberately needing nothing from it: that arm premultiplies
+            // vello's straight output for a premultiplied-expecting swapchain,
+            // whereas `vello_hybrid` already presents premultiplied, so
+            // `Inherit`/`PreMultiplied` land here correct and untouched.
+            // The one combination this tier cannot serve is the opposite one —
+            // a swapchain storing STRAIGHT alpha — and
+            // [`hybrid_translucency_refused`] refuses it below.
             #[cfg(feature = "hybrid-tier")]
-            RenderPathKind::HybridDirect => {
-                if alpha_mode_needs_premultiply(alpha_mode) {
-                    log::warn!(
-                        "frust-render: hybrid tier on a premultiplied-expecting translucent \
-                         surface (alpha_mode={alpha_mode:?}) — this arm builds no premultiply \
-                         pass, so such a frame composites over-bright; measure the hybrid tier \
-                         on an opaque surface"
-                    );
-                }
-                RenderPath::Direct
-            }
+            RenderPathKind::HybridDirect => RenderPath::Direct,
         };
+        // The hybrid arm's refusal, resolved before the chain so the arm that
+        // is compiled out contributes a plain `false` rather than a `#[cfg]`
+        // inside the expression (same shape as `path_kind` above).
+        #[cfg(feature = "hybrid-tier")]
+        let hybrid_refused = hybrid_translucency_refused(path_kind, alpha_mode);
+        #[cfg(not(feature = "hybrid-tier"))]
+        let hybrid_refused = false;
         let resolved_translucent =
             if blit_translucency_refused(path_kind, alpha_mode, self.selected_tier()) {
                 log::warn!(
                     "frust-render: GPU-tier blit-fallback surface cannot deliver premultiplied \
                  output (alpha_mode={alpha_mode:?}) — refusing translucency, app degrades to \
                  Mode A"
+                );
+                false
+            } else if hybrid_refused {
+                log::warn!(
+                    "frust-render: hybrid tier presents premultiplied alpha, which a \
+                 straight-alpha translucent surface (alpha_mode={alpha_mode:?}) would read as \
+                 straight — refusing translucency, app degrades to Mode A"
                 );
                 false
             } else {
@@ -2807,6 +2863,94 @@ mod tests {
                 mode,
                 crate::tier::RenderTier::Gpu
             ));
+        }
+    }
+
+    #[cfg(feature = "hybrid-tier")]
+    #[test]
+    fn hybrid_refuses_straight_alpha_translucency() {
+        // `vello_hybrid` presents PREMULTIPLIED alpha, so the ONE surface it
+        // cannot serve is the straight-alpha translucent one (iOS's
+        // `PostMultiplied`), which would read `(C·a, a)` as `(C, a)` — too
+        // dark over a Mode B hole. The blit refusal cannot cover this: it
+        // gates on `RenderPathKind::Blit`, an arm this tier never takes.
+        assert!(hybrid_translucency_refused(
+            RenderPathKind::HybridDirect,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ));
+        assert!(!blit_translucency_refused(
+            RenderPathKind::HybridDirect,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            crate::tier::RenderTier::Hybrid,
+        ));
+        // Refused therefore beats the fall-through: `create_render_surface`
+        // stores `resolved_translucent = false`, which is verbatim what
+        // `SurfaceRenderer::surface_resolved_translucent` hands the shells, so
+        // they keep the opaque Mode A contract on this combination even though
+        // the mode itself is translucent.
+        assert!(alpha_mode_is_translucent(
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+    }
+
+    #[cfg(feature = "hybrid-tier")]
+    #[test]
+    fn hybrid_keeps_premultiplied_expecting_surfaces_translucent() {
+        // The regression guard that matters most, and the inversion this
+        // predicate exists to fix: Android's `Inherit` (and the explicit
+        // `PreMultiplied`) expect premultiplied and RECEIVE premultiplied from
+        // this tier — correct as-is. Neither refusal may fire, and the
+        // fall-through must keep reporting translucent, or a shipped Android
+        // translucent surface would silently lose its platform-view punch.
+        for mode in [
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ] {
+            assert!(
+                !hybrid_translucency_refused(RenderPathKind::HybridDirect, mode),
+                "{mode:?} is exactly what this tier already emits"
+            );
+            assert!(!blit_translucency_refused(
+                RenderPathKind::HybridDirect,
+                mode,
+                crate::tier::RenderTier::Hybrid,
+            ));
+            assert!(alpha_mode_is_translucent(mode), "{mode:?}");
+        }
+        // Alpha-ignoring modes are untouched — the opaque surface every
+        // measured hybrid number was taken on.
+        for mode in [
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Auto,
+        ] {
+            assert!(!hybrid_translucency_refused(
+                RenderPathKind::HybridDirect,
+                mode
+            ));
+            assert!(!alpha_mode_is_translucent(mode), "{mode:?}");
+        }
+    }
+
+    #[cfg(feature = "hybrid-tier")]
+    #[test]
+    fn hybrid_refusal_never_reaches_a_vello_arm() {
+        // The `path_kind` parameter is what keeps this predicate off vello's
+        // two arms: their output is straight, so `PostMultiplied` is the one
+        // mode they need no help with, and a refusal here would take
+        // translucency away from a surface that works today.
+        for path_kind in [RenderPathKind::Direct, RenderPathKind::Blit] {
+            for mode in [
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::Auto,
+            ] {
+                assert!(
+                    !hybrid_translucency_refused(path_kind, mode),
+                    "{path_kind:?}/{mode:?}"
+                );
+            }
         }
     }
 
