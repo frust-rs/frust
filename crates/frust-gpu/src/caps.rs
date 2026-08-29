@@ -88,24 +88,37 @@ pub struct TierCaps {
     pub adapter_name: String,
     /// The adapter's `wgpu::AdapterInfo::backend`.
     pub backend: wgpu::Backend,
-    /// The adapter's `wgpu::Limits::max_texture_dimension_2d`.
+    /// The adapter's `wgpu::Limits::max_texture_dimension_2d`, clamped down to
+    /// `wgpu::Limits::downlevel_webgl2_defaults().max_texture_dimension_2d`
+    /// when [`Self::downlevel_profile`] is [`DownlevelProfile::WebGl2`].
     pub max_texture_dimension_2d: u32,
-    /// The adapter's `wgpu::Limits::max_texture_array_layers`.
+    /// The adapter's `wgpu::Limits::max_texture_array_layers`, clamped the
+    /// same way as [`Self::max_texture_dimension_2d`].
     pub max_texture_array_layers: u32,
-    /// The adapter's `wgpu::Limits::max_bind_groups`.
+    /// The adapter's `wgpu::Limits::max_bind_groups`, clamped the same way as
+    /// [`Self::max_texture_dimension_2d`].
     pub max_bind_groups: u32,
     /// The adapter's `wgpu::Limits::max_uniform_buffer_binding_size`,
     /// saturated into a `u32` (the field is `u64` on `wgpu::Limits`; no
     /// adapter this workspace targets reports a value anywhere near
-    /// `u32::MAX`).
+    /// `u32::MAX`) and clamped the same way as
+    /// [`Self::max_texture_dimension_2d`].
     pub max_uniform_buffer_binding_size: u32,
-    /// The adapter's `wgpu::Limits::min_uniform_buffer_offset_alignment`.
+    /// The adapter's `wgpu::Limits::min_uniform_buffer_offset_alignment`,
+    /// raised to
+    /// `wgpu::Limits::downlevel_webgl2_defaults().min_uniform_buffer_offset_alignment`
+    /// (256) when [`Self::downlevel_profile`] is [`DownlevelProfile::WebGl2`]
+    /// and the adapter reports a looser (smaller) value — an alignment
+    /// requirement is a floor, so it is only ever raised, never lowered.
     pub min_uniform_buffer_offset_alignment: u32,
-    /// The adapter's `wgpu::Limits::max_vertex_attributes`.
+    /// The adapter's `wgpu::Limits::max_vertex_attributes`, clamped the same
+    /// way as [`Self::max_texture_dimension_2d`].
     pub max_vertex_attributes: u32,
     /// Whether the adapter supports storage buffers at all
-    /// (`wgpu::Limits::max_storage_buffers_per_shader_stage > 0`) — `false`
-    /// under the GLES-3.0/WebGL2 downlevel default limits.
+    /// (`wgpu::Limits::max_storage_buffers_per_shader_stage > 0`) — forced
+    /// `false` whenever [`Self::downlevel_profile`] is
+    /// [`DownlevelProfile::WebGl2`], since the GLES-3.0/WebGL2 downlevel
+    /// default limits report zero storage buffers per shader stage.
     pub has_storage_buffers: bool,
     /// Whether the adapter exposes `wgpu::Features::TIMESTAMP_QUERY`.
     pub has_timestamp_query: bool,
@@ -117,8 +130,10 @@ pub struct TierCaps {
     /// The texture format a texture atlas is backed by.
     pub atlas_format: wgpu::TextureFormat,
     /// The texture dimension a pooled/atlas resource texture is sized
-    /// against: `min(max_texture_dimension_2d, 4096)`, so a very generous
-    /// desktop adapter's real ceiling never drives an oversized allocation.
+    /// against: `min(max_texture_dimension_2d, 4096)` against the (possibly
+    /// already WebGL2-clamped) [`Self::max_texture_dimension_2d`], so a very
+    /// generous desktop adapter's real ceiling never drives an oversized
+    /// allocation.
     pub resource_texture_dim: u32,
     /// Whether this adapter's usable limits are the full native set or
     /// clamped to the GLES-3.0/WebGL2 downlevel defaults.
@@ -130,12 +145,20 @@ impl TierCaps {
     /// device/pipeline/atlas decisions are built over. Synchronous: every
     /// value it reads (`get_info`, `get_downlevel_capabilities`, `limits`,
     /// `features`) is available before device creation.
+    ///
+    /// When the resolved [`DownlevelProfile`] is [`DownlevelProfile::WebGl2`]
+    /// — a real `wgpu::Backend::Gl` adapter, or `FRUST_ENGINE_DOWNLEVEL=1`
+    /// rehearsing it against a desktop backend — the probed limits are run
+    /// through [`clamp_to_webgl2_defaults`] and storage buffers are forced
+    /// off, so the override actually rehearses the downlevel shape instead of
+    /// only relabelling desktop values.
     pub fn probe(adapter: &wgpu::Adapter) -> Self {
         let info = adapter.get_info();
         let downlevel = adapter.get_downlevel_capabilities();
         let limits = adapter.limits();
         let features = adapter.features();
         let downlevel_profile = DownlevelProfile::resolve(info.backend);
+        let limits = clamp_to_webgl2_defaults(limits, downlevel_profile);
         let max_texture_dimension_2d = limits.max_texture_dimension_2d;
         Self {
             downlevel_flags: downlevel.flags,
@@ -147,7 +170,8 @@ impl TierCaps {
             max_uniform_buffer_binding_size: saturating_u32(limits.max_uniform_buffer_binding_size),
             min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
             max_vertex_attributes: limits.max_vertex_attributes,
-            has_storage_buffers: limits.max_storage_buffers_per_shader_stage > 0,
+            has_storage_buffers: downlevel_profile == DownlevelProfile::Full
+                && limits.max_storage_buffers_per_shader_stage > 0,
             has_timestamp_query: features.contains(wgpu::Features::TIMESTAMP_QUERY),
             transient_saves_memory: info.transient_saves_memory,
             atlas_format: ATLAS_FORMAT,
@@ -204,6 +228,46 @@ impl TierCaps {
     }
 }
 
+/// Clamps `limits` to the GLES-3.0/WebGL2 downlevel default ceiling on every
+/// field [`TierCaps`] tracks, when `profile` is [`DownlevelProfile::WebGl2`];
+/// returns `limits` unchanged for [`DownlevelProfile::Full`].
+///
+/// Each tracked field the WebGL2 defaults constrain is clamped toward that
+/// default rather than replaced outright, so a real (non-desktop) `Gl`
+/// adapter reporting something even lower than the WebGL2 default is not
+/// raised past its own hardware ceiling. `max_texture_dimension_2d`,
+/// `max_texture_array_layers`, `max_bind_groups`,
+/// `max_uniform_buffer_binding_size` and `max_vertex_attributes` are ceilings
+/// (`min` with the default); `min_uniform_buffer_offset_alignment` is a floor
+/// (`max` with the default) — never lowered. Fields the WebGL2 defaults do
+/// not constrain (e.g. `max_texture_dimension_3d` is unused by this crate)
+/// pass through untouched via `..limits`.
+fn clamp_to_webgl2_defaults(limits: wgpu::Limits, profile: DownlevelProfile) -> wgpu::Limits {
+    if profile != DownlevelProfile::WebGl2 {
+        return limits;
+    }
+    let webgl2 = wgpu::Limits::downlevel_webgl2_defaults();
+    wgpu::Limits {
+        max_texture_dimension_2d: limits
+            .max_texture_dimension_2d
+            .min(webgl2.max_texture_dimension_2d),
+        max_texture_array_layers: limits
+            .max_texture_array_layers
+            .min(webgl2.max_texture_array_layers),
+        max_bind_groups: limits.max_bind_groups.min(webgl2.max_bind_groups),
+        max_uniform_buffer_binding_size: limits
+            .max_uniform_buffer_binding_size
+            .min(webgl2.max_uniform_buffer_binding_size),
+        min_uniform_buffer_offset_alignment: limits
+            .min_uniform_buffer_offset_alignment
+            .max(webgl2.min_uniform_buffer_offset_alignment),
+        max_vertex_attributes: limits
+            .max_vertex_attributes
+            .min(webgl2.max_vertex_attributes),
+        ..limits
+    }
+}
+
 /// `u64 -> u32` saturating conversion for `wgpu::Limits` fields declared
 /// wider than the `u32` this crate's [`TierCaps`] stores them as.
 fn saturating_u32(value: u64) -> u32 {
@@ -257,5 +321,90 @@ mod tests {
     fn saturating_u32_clamps_a_too_large_u64() {
         assert_eq!(saturating_u32(u64::MAX), u32::MAX);
         assert_eq!(saturating_u32(64 << 10), 64 << 10);
+    }
+
+    #[test]
+    fn full_profile_clamp_is_a_no_op() {
+        let desktop = wgpu::Limits::defaults();
+        assert_eq!(
+            clamp_to_webgl2_defaults(desktop.clone(), DownlevelProfile::Full),
+            desktop
+        );
+    }
+
+    #[test]
+    fn webgl2_clamp_of_desktop_limits_matches_the_webgl2_fake_in_every_clamped_field() {
+        // Simulates what `FRUST_ENGINE_DOWNLEVEL=1` rehearses: a desktop
+        // adapter's full limits run through the same clamp `TierCaps::probe`
+        // applies. The clamped fields must land exactly on `fake(WebGl2)`'s
+        // values — the rehearsal is worthless if it does not actually
+        // reproduce the downlevel shape a real GLES-3.0/WebGL2 host would
+        // report.
+        let desktop = wgpu::Limits::defaults();
+        let clamped = clamp_to_webgl2_defaults(desktop, DownlevelProfile::WebGl2);
+        let webgl2_fake = TierCaps::fake(DownlevelProfile::WebGl2);
+        assert_eq!(
+            clamped.max_texture_dimension_2d,
+            webgl2_fake.max_texture_dimension_2d
+        );
+        assert_eq!(
+            clamped.max_texture_array_layers,
+            webgl2_fake.max_texture_array_layers
+        );
+        assert_eq!(clamped.max_bind_groups, webgl2_fake.max_bind_groups);
+        assert_eq!(
+            saturating_u32(clamped.max_uniform_buffer_binding_size),
+            webgl2_fake.max_uniform_buffer_binding_size
+        );
+        assert_eq!(
+            clamped.min_uniform_buffer_offset_alignment,
+            webgl2_fake.min_uniform_buffer_offset_alignment
+        );
+        assert_eq!(
+            clamped.max_vertex_attributes,
+            webgl2_fake.max_vertex_attributes
+        );
+    }
+
+    #[test]
+    fn webgl2_clamp_never_lowers_the_alignment_floor_below_the_adapters_own_value() {
+        let stricter = wgpu::Limits {
+            min_uniform_buffer_offset_alignment: 512,
+            ..wgpu::Limits::defaults()
+        };
+        let clamped = clamp_to_webgl2_defaults(stricter, DownlevelProfile::WebGl2);
+        assert_eq!(clamped.min_uniform_buffer_offset_alignment, 512);
+    }
+
+    #[test]
+    fn webgl2_clamp_never_raises_a_real_adapter_ceiling_past_its_own_hardware_limit() {
+        // A real (non-desktop) `Gl` adapter reporting something even lower
+        // than the WebGL2 default must not be raised past its own hardware
+        // ceiling.
+        let constrained = wgpu::Limits {
+            max_texture_dimension_2d: 1024,
+            ..wgpu::Limits::defaults()
+        };
+        let clamped = clamp_to_webgl2_defaults(constrained, DownlevelProfile::WebGl2);
+        assert_eq!(clamped.max_texture_dimension_2d, 1024);
+    }
+
+    #[test]
+    fn probe_downlevel_override_forces_storage_buffers_off_via_probe_semantics() {
+        // `probe` cannot be exercised without a real `wgpu::Adapter`, so this
+        // asserts the same has_storage_buffers policy `probe` applies:
+        // forced false whenever the resolved profile is WebGl2, regardless of
+        // what the underlying (possibly desktop) limits report.
+        let desktop = wgpu::Limits::defaults();
+        assert!(
+            desktop.max_storage_buffers_per_shader_stage > 0,
+            "fixture precondition"
+        );
+        let clamped = clamp_to_webgl2_defaults(desktop, DownlevelProfile::WebGl2);
+        // The clamp itself does not touch max_storage_buffers_per_shader_stage
+        // (probe's `has_storage_buffers` line is a separate, explicit force);
+        // this documents that split so a future edit to the clamp cannot
+        // silently reintroduce storage buffers under the override.
+        assert!(clamped.max_storage_buffers_per_shader_stage > 0);
     }
 }

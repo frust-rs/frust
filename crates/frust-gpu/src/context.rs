@@ -33,7 +33,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Result, anyhow};
 
-use crate::caps::TierCaps;
+use crate::caps::{DownlevelProfile, TierCaps};
 
 /// Default `wgpu::Device` debug label, used when a caller supplies no
 /// [`ContextOptions::device_label`] of its own.
@@ -201,13 +201,28 @@ async fn create_device(
 
     let caps = TierCaps::probe(&adapter);
 
-    // The device request needs the adapter's full `wgpu::Limits`, which is why
-    // this reads the adapter directly rather than going through `caps`: the
-    // summarised capabilities carry the individual limits decisions are made
-    // from, not the struct `request_device` requires. Feeding the *adapter's*
-    // limits (rather than `Limits::default()`) is what keeps the request from
-    // over-asking and failing on a constrained mobile adapter.
-    let required_limits = effective_limits(adapter.limits(), is_ios_simulator());
+    // The device request is built from the resolved downlevel profile, not
+    // unconditionally from the adapter's raw limits: under
+    // `DownlevelProfile::WebGl2` (a real `Gl` backend, or
+    // `FRUST_ENGINE_DOWNLEVEL=1` rehearsing it) the request itself must ask
+    // for the GLES-3.0/WebGL2 downlevel default shape, or the override would
+    // only relabel a full desktop device rather than actually exercising it.
+    // `using_resolution` folds in the adapter's own texture-dimension limits
+    // so the request never asks for a resolution the adapter cannot satisfy
+    // (the swapchain may need more than the downlevel default allows) while
+    // every other WebGL2 default limit is requested as-is. Under
+    // `DownlevelProfile::Full` this reads the adapter directly rather than
+    // going through `caps`: the summarised capabilities carry the individual
+    // limits decisions are made from, not the struct `request_device`
+    // requires, and feeding the *adapter's* limits (rather than
+    // `Limits::default()`) is what keeps the request from over-asking and
+    // failing on a constrained mobile adapter.
+    let base_limits = if caps.downlevel_profile == DownlevelProfile::WebGl2 {
+        wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
+    } else {
+        adapter.limits()
+    };
+    let required_limits = effective_limits(base_limits, is_ios_simulator());
     let required_features = required_features(&caps, cfg!(feature = "perf-trace"));
 
     let (device, queue) = adapter
@@ -331,8 +346,10 @@ const IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT: u32 = 256;
 /// makes this unnecessary — drop it once a pinned wgpu release contains it.
 ///
 /// Pure decision logic, mirroring [`effective_instance_flags`]'s split of pure
-/// decision vs. platform lookup. It is fed the *adapter's* real limits (see
-/// [`create_device`]) so the device request never over-asks.
+/// decision vs. platform lookup. It is fed the profile-resolved base limits
+/// (see [`create_device`]) — the adapter's own limits under
+/// `DownlevelProfile::Full`, the WebGL2 downlevel defaults resolution-folded
+/// with the adapter otherwise — so the device request never over-asks.
 fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
     if is_ios_simulator
         && base.min_uniform_buffer_offset_alignment
@@ -617,6 +634,25 @@ mod tests {
             assert!(handle.caps.resource_texture_dim > 0);
             // Nothing has been submitted, so the latch must still be empty.
             assert_eq!(handle.first_uncaptured_error(), None);
+
+            // With `FRUST_ENGINE_DOWNLEVEL=1` set for the whole test process
+            // (the override is read once and cached in a `OnceLock`), both the
+            // probed caps and the created device must actually report the
+            // clamped WebGL2 shape rather than a desktop backend merely
+            // relabelled `WebGl2`. Without it, this rig's real backend
+            // (Vulkan/Metal/Dx12) must report `Full` unchanged, proving the
+            // knob rehearses the downlevel shape rather than always forcing
+            // it.
+            let downlevel_env_set = std::env::var("FRUST_ENGINE_DOWNLEVEL").is_ok_and(|v| v != "0");
+            if downlevel_env_set {
+                assert_eq!(handle.caps.downlevel_profile, DownlevelProfile::WebGl2);
+                assert!(!handle.caps.has_storage_buffers);
+                assert!(handle.caps.max_texture_dimension_2d <= 2048);
+                assert_eq!(handle.caps.min_uniform_buffer_offset_alignment, 256);
+                assert!(handle.device.limits().max_texture_dimension_2d > 0);
+            } else {
+                assert_eq!(handle.caps.downlevel_profile, DownlevelProfile::Full);
+            }
 
             let caps = context.caps().cloned().expect("caps after device creation");
             assert_eq!(caps.adapter_name, info.name);
