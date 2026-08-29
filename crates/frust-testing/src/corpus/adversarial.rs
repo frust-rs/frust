@@ -189,7 +189,13 @@ fn nan_transform() -> CorpusCase {
             family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
             ..TextStyle::new(16.0, BLACK)
         };
-        let layout = cx.layout("N", &style, None);
+        // "H" rather than an arbitrary letter: it is in the bundled Latin
+        // face's subset (`testing/fonts/LICENSES.md`), so this shapes against
+        // the registered test font instead of falling back to a HOST font —
+        // see `crate::frame::foreign_font_runs`, the byte-identity gate that
+        // now runs over this corpus and would otherwise flag a runner-local
+        // frame.
+        let layout = cx.layout("H", &style, None);
 
         let mut builder = SceneBuilder::new(scene);
         // Control, recorded BEFORE any malformed transform: must be
@@ -338,7 +344,15 @@ fn ten_thousand_glyphs() -> CorpusCase {
             family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
             ..TextStyle::new(8.0, WHITE)
         };
-        let layout = cx.layout("F", &style, None);
+        // "l" rather than an arbitrary letter: it is in the bundled Latin
+        // face's subset (`testing/fonts/LICENSES.md`), so this shapes against
+        // the registered test font instead of falling back to a HOST font —
+        // see `crate::frame::foreign_font_runs`, the byte-identity gate that
+        // now runs over this corpus and would otherwise flag a runner-local
+        // frame. The glyph id extracted below is repeated 10,000 times, so
+        // which bundled letter it comes from does not change what this case
+        // exercises.
+        let layout = cx.layout("l", &style, None);
         let seed = layout
             .to_scene_runs(Point::ORIGIN)
             .into_iter()

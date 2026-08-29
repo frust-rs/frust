@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust_testing::case::CaseSpec;
 use frust_testing::corpus::{CorpusCase, adversarial_cases, render_case};
+use frust_testing::frame::foreign_font_runs;
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
 use frust_testing::oracle_classic::ClassicOracle;
@@ -134,6 +135,17 @@ fn run_corpus(renderer: &mut dyn SceneRenderer, policy: &RunPolicy) {
     let mut skipped = 0_usize;
 
     for case in adversarial_cases() {
+        // Font determinism first, before this case's frame is even rendered —
+        // the same ordering `tests/goldens.rs`'s `run_corpus` and
+        // `frust_testing::run_cpu_goldens` both use.
+        let foreign = foreign_font_runs(&case.scene());
+        if !foreign.is_empty() {
+            for message in foreign {
+                failures.push(format!("[{}] font: {message}", case.spec.name));
+            }
+            continue;
+        }
+
         let Some(image) = render_case(renderer, &case)
             .unwrap_or_else(|err| panic!("case `{}` failed to render: {err:#}", case.spec.name))
         else {
@@ -285,6 +297,30 @@ fn the_unclassified_class_is_not_a_committed_golden_directory() {
         !goldens_root().join(UNCLASSIFIED_CLASS).exists(),
         "`{UNCLASSIFIED_CLASS}` is the refuse-to-promote fallback — it must never become a \
          committed golden class directory"
+    );
+}
+
+/// No case in the adversarial corpus shapes a glyph against a host font.
+///
+/// `run_corpus` above already refuses such a case as part of its own font
+/// check, but it refuses it as one failure among many in a golden run. This is
+/// the same property stated on its own — mirroring
+/// `tests/page_goldens.rs`'s `no_case_shapes_against_a_host_font` for the
+/// widget/page corpus — so a font regression reads as a font regression
+/// rather than as a baseline mismatch.
+#[test]
+fn no_case_shapes_against_a_host_font() {
+    let mut failures = Vec::new();
+    for case in adversarial_cases() {
+        for message in foreign_font_runs(&case.scene()) {
+            failures.push(format!("[{}] {message}", case.spec.name));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} non-portable frame(s):\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 

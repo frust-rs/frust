@@ -687,6 +687,48 @@ mod tests {
         );
     }
 
+    /// Negative control: text OUTSIDE the bundled Latin subset
+    /// (`testing/fonts/LICENSES.md`), shaped through the SAME bundled family
+    /// stack [`test_text_context`]'s callers pin against, reproduces the
+    /// review-round-0 Major this module's docs describe — none of `F`, `r`,
+    /// `u`, `s`, `t` is in the subset, so fontique falls back past the
+    /// registered stack to whatever font the host happens to have installed.
+    ///
+    /// A clean corpus proves nothing about whether [`foreign_font_runs`]
+    /// actually rejects that frame rather than passing everything silently —
+    /// this is the test that forces the leak and checks the gate catches it.
+    #[test]
+    fn a_scene_shaped_against_a_host_font_fails_the_gate() {
+        let mut cx = TextContext::new();
+        let registered = register_test_fonts(&mut cx);
+        let style = TextStyle {
+            family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
+            ..TextStyle::new(24.0, Color::BLACK)
+        };
+        // Deliberately outside the bundled Latin subset (`H`, `e`, `l`, `o`,
+        // `,`, space, `é`, U+0302) — the exact word this corpus used to
+        // record before the fix.
+        let layout = cx.layout("Frust", &style, None);
+
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            for run in layout.to_scene_runs(Point::new(4.0, 16.0)) {
+                builder.draw_glyph_run(run);
+            }
+        }
+
+        assert!(
+            glyph_run_count(&scene) > 0,
+            "the negative control must actually shape a glyph run to be a control at all"
+        );
+        assert!(
+            !foreign_font_runs(&scene).is_empty(),
+            "text outside the bundled subset must fall back to a host font, and \
+             foreign_font_runs must flag it rather than pass a runner-local frame silently"
+        );
+    }
+
     #[test]
     fn the_root_scale_reaches_the_recorded_geometry() {
         // The same view captured at scale 1 and scale 2: the scaled frame's

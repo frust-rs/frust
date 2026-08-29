@@ -40,6 +40,7 @@ use peniko::{Blob, Brush, Color, ImageAlphaType, ImageData, ImageFormat};
 use super::{CorpusCase, Expect, Probe};
 use crate::case::{BackendSet, CaseSpec, Tolerance};
 use crate::fonts::register_test_fonts;
+use crate::frame::SAMPLE_TEXT;
 use crate::oracle_cpu::ORACLE_ID;
 
 /// Every unit case renders into a `SIZE`x`SIZE` frame.
@@ -228,9 +229,15 @@ fn stroke_line() -> CorpusCase {
 /// naming exactly the four faces [`register_test_fonts`] registers, so no
 /// host font can participate (`docs/TESTING.md`'s Deterministic Inputs — a
 /// system-font golden is runner-local, not a portable reference). The string
-/// stays Latin-only and short: this case pins the GlyphRun COMMAND's
-/// lowering, not the shaper's script coverage, which
-/// `fonts.rs`'s own test already covers.
+/// is [`SAMPLE_TEXT`] rather than an arbitrary word: every one of its
+/// codepoints is in the bundled Latin face's subset
+/// (`testing/fonts/LICENSES.md`), so parley never needs to reach past the
+/// registered stack for a glyph — a word outside that subset (the previous
+/// `"Frust"`) sent fontique to a HOST font instead, making the promoted
+/// baseline runner-local (`crate::frame::foreign_font_runs` is the check that
+/// now catches this class of regression). This case pins the GlyphRun
+/// COMMAND's lowering, not the shaper's script coverage, which `fonts.rs`'s
+/// own test already covers.
 fn glyph_run() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let mut cx = frust_text::TextContext::new();
@@ -239,7 +246,7 @@ fn glyph_run() -> CorpusCase {
             family: FontFamily::stack(registered.iter().map(|f| f.name.clone())),
             ..TextStyle::new(24.0, BLACK)
         };
-        let layout = cx.layout("Frust", &style, None);
+        let layout = cx.layout(SAMPLE_TEXT, &style, None);
         let mut builder = SceneBuilder::new(scene);
         // An opaque white backdrop: black-on-transparent text would store its
         // whole antialiased ramp in the alpha channel alone, where a colour
