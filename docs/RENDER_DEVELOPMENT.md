@@ -58,6 +58,33 @@ follows it, so account for that remap before comparing timings across arms
 WebGL2 downlevel limit profile against a desktop backend, as a browser stand-in — does not exist at
 this SHA (`benchmarks/harness/webgl2_arm.md`); do not treat it as a shipped instrument.
 
+## GPU Substrate (`frust-gpu`)
+
+`frust-gpu` is the wgpu substrate under the future frust-owned render engine (device/surface/
+pipeline lifecycle, pipeline cache, shader loading, resource pool/arena, encoder, headless
+testing). It carries its own test/adapter-pin split, same shape as `frust-testing` above:
+
+```bash
+# Host-only arm, no GPU/environment needed:
+cargo test -p frust-gpu
+
+# Real-adapter arm, pinned runner (a multi-adapter host must pin explicitly, e.g. the
+# reference Linux rig also enumerates an Intel iGPU alongside the discrete T400; on a Mac
+# the pin is Metal's default adapter):
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
+```
+
+`bytemuck` (`derive` feature) is a `[workspace.dependencies]` row for `frust-gpu`'s
+plain-old-data GPU vertex/uniform types (`Pod`/`Zeroable`); `derive` is the only feature the
+workspace needs.
+
+`crates/frust-gpu/src/lint.rs` plus `tests/downlevel_rules.rs` are downlevel (WebGL2/GLES3.0)
+design-rule lints — a WGSL source scan for disallowed compute/storage/bit-intrinsic/
+depth-textureLoad usage, plus pipeline-layout bounds and WebGL2 limits checks — that run inside
+`cargo test -p frust-gpu`, i.e. the ordinary `cargo test --workspace` gate; they are green
+against the currently empty shader set and become load-bearing once the engine plan starts
+adding shaders.
+
 ## Golden / Oracle Tests
 
 `frust-testing`'s CPU-arm gate rides the standard `cargo test --workspace` chain in
