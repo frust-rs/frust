@@ -1016,11 +1016,11 @@ figure (parity) for mode-only questions.**
 **Status:** matrix run to completion on the Pixel 5 stand-in (area × 1.0/0.75/0.5, 3 kept of 5 runs per scenario), msaa cells excluded as corrupted, Decision recorded, raw series committed. **Row 1 is the pre-existing 2026-08-27 diagnosis baseline** (`area` / `1.0`, S1/S2 only, device-state gate skipped). **Rows 2–4 are the Pixel 5 stand-in `ab_matrix.sh` run** (2026-08-28, `--skip-device-state`, 5 runs × 20 s captured, 3 kept, 60Hz mode, USB power on).
 
 - Chipset: Snapdragon 765G / Adreno 620
-- Model: Google Pixel 5a (barbet), serial `17281JECB01994`
+- Model: Google Pixel 5a (barbet), serial redacted
 - OS: Android 14, build AP2A.240805.005
 - Display: 1080×2400 @ 420dpi, **60Hz only** — no high-refresh mode, so
   only the 16.67ms budget applies on this device (no 8.33ms column).
-- Pixel 5 stand-in: Google Pixel 5 (redfin, serial 13261FDD40030W, Snapdragon 765G / Adreno 620, 1080×2340, Android 14) stands in for the Pixel 5a in the rows below — same SoC and GPU as the Pixel 5a, 2.75× density.
+- Pixel 5 stand-in: Google Pixel 5 (redfin, serial redacted, Snapdragon 765G / Adreno 620, 1080×2340, Android 14) stands in for the Pixel 5a in the rows below — same SoC and GPU as the Pixel 5a, 2.75× density.
 
 ### Fine-floor A/B (remedy 3, plan fplan_000001a03fce41148yUkciag)
 
@@ -1162,7 +1162,7 @@ read with roughly that same error bar.
 
 #### Methodology deviations (classic baseline, this device)
 
-**Device:** Pixel 5 (`redfin`, serial `13261FDD40030W`), Adreno 620,
+**Device:** Pixel 5 (`redfin`, serial redacted), Adreno 620,
 1080x2340, Android 14, attached over USB. Display mode observed during every
 capture in this section: `DisplayMode{id=1, 1080x2340, refreshRate=90.0}`
 with `mActiveRenderFrameRate=90.0` (`dumpsys display`), i.e. a ~11.13 ms
@@ -1279,10 +1279,10 @@ Driven by `benchmarks/harness/ab_matrix.sh`'s new `--tier` axis:
 
 ```
 # hybrid arm (ONE cell — the arm ignores --aa/--scale, see below)
-bash benchmarks/harness/ab_matrix.sh --device 13261FDD40030W --device-name pixel5 \
+bash benchmarks/harness/ab_matrix.sh --device <pixel5-serial> --device-name pixel5 \
     --tier hybrid --scenarios s1,s2,s4,s5,s6 --runs 5 --duration 20
 # glyph-atlas-cache arm
-bash benchmarks/harness/ab_matrix.sh --device 13261FDD40030W --device-name pixel5 \
+bash benchmarks/harness/ab_matrix.sh --device <pixel5-serial> --device-name pixel5 \
     --tier hybrid_atlas --scenarios s6,s2 --runs 5 --duration 20
 ```
 
@@ -1551,12 +1551,12 @@ pixel-proportional fine sweep. Against the `area`/`1.0` row (S1 48.23, S2
   LIMITATIONS.md, not a `frust_bench` scenario, so there is no hybrid arm of
   it here. S5 (above) is the image-heavy scenario that does exist on both
   tiers.
-- **Pixel 5a** — not measured: only the Pixel 5 (`13261FDD40030W`) was
+- **Pixel 5a** — not measured: only the Pixel 5 (`redfin`, serial redacted) was
   attached for this pass. Every row above is the Pixel 5.
 
 #### Methodology deviations (vello_hybrid spike)
 
-**Device:** Pixel 5 (`redfin`, serial `13261FDD40030W`), Adreno 620,
+**Device:** Pixel 5 (`redfin`, serial redacted), Adreno 620,
 1080x2340, Android 14, USB. Display mode during every capture:
 `DisplayMode{id=1, 1080x2340, refreshRate=90.0}` with
 `mActiveRenderFrameRate=90.0` (~11.13 ms period), brightness 128, thermal
