@@ -65,9 +65,11 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   `RenderTier`, replacing the two former `!= RenderTier::Gpu` call sites so a tier added later can't
   fall through either check silently. On this path the whole render cost — CPU strip build *and*
   GPU execution — lands in `submit_us` (`encode_us` is only the scene copy into `vello_hybrid`'s own
-  scene type); a translucent, premultiplied-expecting surface (Android's `Inherit`) is outside this
-  arm's scope — it builds no premultiply pass and logs a warning instead of compositing
-  over-bright, so it is measured on opaque surfaces only (see LIMITATIONS.md).
+  scene type); `vello_hybrid` itself outputs premultiplied alpha, so a premultiplied-expecting
+  translucent surface (Android's `Inherit`/`PreMultiplied`) is correct as-is on this arm and raises
+  no warning — only the straight-alpha translucent mode (iOS's `PostMultiplied`) is refused
+  (`hybrid_translucency_refused`), resolving to Mode A with one warning. Every committed Pixel 5
+  number is still an opaque-surface number regardless (see LIMITATIONS.md).
 - `Command::ShaderQuad` instances render through a per-surface fragment-shader pre-pass into an
   offscreen texture composited into the scene ahead of the main encode.
 - `SurfaceAlphaRequest` resolves the platform's compositing/alpha mode to pick the presentation

@@ -165,7 +165,15 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `--features <spec>` (`build apk`/`appbundle`/`ios`/`ipa`, and `run`): `BuildFlags` is a `clap`
   wrapper flattening `BuildArgs` plus this repeatable, comma/space-splittable passthrough
   (`BuildFlags::extra_features`, cargo's own `--features` syntax). Resolved at the handler boundary
-  — never inside `BuildInfo`'s mode/flavor/defines/version funnel — and threaded into
+  — never inside `BuildInfo`'s mode/flavor/defines/version funnel. On the four release lanes only,
+  `extra_features()`'s output is charset-validated (`feature_token_charset_ok`/
+  `validate_feature_token_charset`, cargo's own `[A-Za-z0-9_.-]+`, optionally `<pkg>/`-prefixed;
+  `crates/frust-cli/src/cli.rs`) and then refused outright if any token would enable the in-app
+  devtools listener (`refuse_devtools_features`, `crates/frust-cli/src/commands/build.rs`;
+  `is_devtools_token` matches `devtools`, `frust/devtools`, any `*/devtools`, plus a one-level
+  app-manifest alias via `cargo_manifest::feature_enables_devtools`) — release artifacts must keep
+  the listener compiled out (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)'s Trust
+  model); debug/profile lanes and `frust run` skip both checks. The surviving list is threaded into
   `frust-drive::cargo_manifest::resolve_release_features(.., extra)`, which appends it strictly
   *after* the build mode's own `frust/perf-trace`+`frust/devtools`/`lean` selection. Reaches
   `android_build` (base64 `-Pfrust.cargoFeatures` CSV), `ios_build` (`FRUST_FEATURES` CSV),

@@ -144,8 +144,9 @@ adapter, `cpu` can always be forced, and `hybrid` needs a `hybrid-tier` build (r
 with a diagnosis otherwise) — all desktop-preview-only today, see
 [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md). **`--features <spec>` passthrough**
 (`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-splittable; appended after the
-mode's own feature selection; refused on `build macos|windows|linux`) is detailed in
-[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **High refresh-rate
+mode's own feature selection; refused on `build macos|windows|linux`; the four release lanes
+additionally refuse a devtools-enabling token and reject one outside cargo's strict feature
+charset) is detailed in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **High refresh-rate
 hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
 `preferredFrameRateRange`; Android calls `Surface.setFrameRate()` (API 30+) with the
 display's max rate — both hints, unverifiable on the iOS Simulator or most Android

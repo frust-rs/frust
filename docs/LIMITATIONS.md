@@ -2970,12 +2970,25 @@ number is an inline (uncached) figure with no full-resolution classic inline num
 whether an engine-tier page-snapshot cache is still needed, or the nav budget should be re-argued
 without one, is open before Phase 4.
 
-**Two hybrid-arm scope limits**: a translucent, premultiplied-expecting surface (Android's
-`Inherit` alpha mode) is outside the arm's scope — it builds no premultiply pass and logs a
-warning instead of compositing over-bright, so every number above is an opaque-surface number (the
-Pixel 5 surface itself resolves `alpha_modes=[Inherit] chosen=Auto`, opaque); and the desktop
-shell's hard-coded 800×600-logical window (`crates/frust-shell-desktop/src/app_handler.rs`'s
-`INITIAL_SIZE`) is why the macOS large-texture question above has no answer from either tier.
+**Two hybrid-arm scope limits**: `vello_hybrid` itself outputs premultiplied alpha, so it is
+correct — and unwarned — on a premultiplied-expecting translucent surface (Android's
+`Inherit`/`PreMultiplied`); only a straight-alpha translucent surface (iOS's `PostMultiplied`) is
+refused (`hybrid_translucency_refused`), degrading to Mode A with one warning. Every number above
+is still an opaque-surface number regardless, independent of that refusal — the Pixel 5 surface
+itself resolves `alpha_modes=[Inherit] chosen=Auto`, opaque; and the desktop shell's hard-coded
+800×600-logical window (`crates/frust-shell-desktop/src/app_handler.rs`'s `INITIAL_SIZE`) is why
+the macOS large-texture question above has no answer from either tier.
+
+**Image-atlas capacity guard**: `ImageResidency` (`hybrid_tier.rs`) tracks `live_pixels` against a
+`pixel_budget` — half (`ATLAS_BUDGET_DIVISOR`) the device-clamped 8×4096² atlas capacity — and
+skips a draw (`IMAGE_ATLAS_FULL`, warn-once) rather than panicking when an upload would cross it;
+an evicted image's pixels reopen the budget for a later upload. The budget is conservative, not a
+proof: the allocator's one guarantee is that a *fresh* atlas always fits a within-clamp image,
+atlas count only grows and is unobservable past the first few uploads, and the backing
+`guillotiere` allocator refuses on shape rather than area (module doc, `hybrid_tier.rs`). The glyph
+atlas carries no equivalent guard — glifo itself degrades on a full atlas, and `vello_hybrid`'s one
+glyph-atlas `expect` is reachable only with `FRUST_HYBRID_ATLAS_CACHE=1` — the accepted residual
+(see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)).
 
 **Applies to**: the frust-engine + frust-gpu plan's Phase 0 GO/NO-GO gate only.
 `RenderTier::Hybrid` stays override-only and non-default — nothing in a normal build changes.
@@ -2984,7 +2997,8 @@ shell's hard-coded 800×600-logical window (`crates/frust-shell-desktop/src/app_
 "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections (Arms
 1-7, "Fit comparison against the classic S1 model", "What could not be measured");
 `benchmarks/harness/webgl2_arm.md`; `crates/frust-render/src/hybrid_tier.rs` and `tier.rs`;
-`crates/frust-render/src/context.rs`'s `HybridDirect` arm and its premultiply-scope warning.
+`crates/frust-render/src/context.rs`'s `HybridDirect` arm and its `hybrid_translucency_refused`
+straight-alpha refusal.
 
 ---
 
