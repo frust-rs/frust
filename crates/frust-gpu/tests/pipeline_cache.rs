@@ -108,3 +108,62 @@ fn frame_layout_is_byte_stable() {
         b"FKPLCwg1\x02\x00\x00\x00ab\x02\x00\x00\x00cd".to_vec()
     );
 }
+
+#[test]
+fn pipeline_cache_drift_guard() {
+    use std::fs;
+    use std::path::Path;
+
+    // Derive workspace root from CARGO_MANIFEST_DIR (frust-gpu crate directory).
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("frust-gpu is a crate")
+        .parent()
+        .expect("crates is a directory");
+
+    let gpu_cache = workspace_root.join("crates/frust-gpu/src/pipeline_cache.rs");
+    let render_cache = workspace_root.join("crates/frust-render/src/pipeline_cache.rs");
+
+    let gpu_content =
+        fs::read_to_string(&gpu_cache).expect("unable to read frust-gpu/src/pipeline_cache.rs");
+    let render_content = fs::read_to_string(&render_cache)
+        .expect("unable to read frust-render/src/pipeline_cache.rs");
+
+    // Strip leading doc comments (//!) and blank lines from both files.
+    let strip_leading_doc = |content: &str| -> String {
+        content
+            .lines()
+            .skip_while(|line| line.starts_with("//!") || line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let gpu_stripped = strip_leading_doc(&gpu_content);
+    let render_stripped = strip_leading_doc(&render_content);
+
+    assert_eq!(
+        gpu_stripped, render_stripped,
+        "crates/frust-gpu/src/pipeline_cache.rs must remain byte-identical to \
+         crates/frust-render/src/pipeline_cache.rs after stripping leading doc comments. \
+         If the framing layout changes, bump MAGIC in both crates/frust-gpu/src/pipeline_cache.rs \
+         and crates/frust-render/src/pipeline_cache.rs, then rebuild both crates together."
+    );
+
+    // Verify MAGIC constant is identical in both files.
+    let extract_magic = |content: &str| -> String {
+        content
+            .lines()
+            .find(|line| line.contains("const MAGIC"))
+            .expect("MAGIC const not found")
+            .to_string()
+    };
+
+    let gpu_magic = extract_magic(&gpu_content);
+    let render_magic = extract_magic(&render_content);
+
+    assert_eq!(
+        gpu_magic, render_magic,
+        "MAGIC constant must be identical in both crates"
+    );
+}
