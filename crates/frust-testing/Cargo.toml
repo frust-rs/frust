@@ -34,6 +34,37 @@ frust-text = { workspace = true }
 # legacy `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own
 # graph beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
 frust-render = { workspace = true, features = [] }
+# Backs `frame.rs` — the GPU-free widget-frame capture (`RenderRoot::rebuild`
+# -> `layout_with_text` -> `paint` into a `frust_scene::SceneBuilder`, which
+# THIS crate implements `PaintScene` for). `corpus::widget` and `corpus::page`
+# record their scenes through a real retained widget tree rather than by hand,
+# so the tree is an input to this crate, not merely a consumer of it.
+frust-core = { workspace = true }
+# The baseline widget set `corpus::widget`'s cases are built from, with
+# `test-support` on for the `Leaf`/`SwapLeaf`/`Probe` fixtures — the same
+# non-default feature the design-system plugins already take as a
+# dev-dependency. A corpus case needs a leaf of known intrinsic size to pin a
+# container's geometry without dragging a content widget's own layout into the
+# picture.
+frust-widgets = { workspace = true, features = ["test-support"] }
+# `frame::pin_type_scale` rewrites every slot of a `Theme`'s type scale onto
+# the bundled test face, and every widget/page case installs the result on its
+# `RenderRoot`: the theme is a deterministic INPUT of a golden case
+# (docs/TESTING.md's Deterministic Inputs), pinned here rather than left to
+# whatever a shell would have seeded.
+frust-theme = { workspace = true }
+# The four design-system catalogs `corpus::page` reconstructs its pages from.
+# Root-workspace members, so a path edge here is an ordinary intra-workspace
+# dependency — and the only way a page case can be a REAL catalog page instead
+# of a hand-drawn imitation of one. Declared by path, the way the plugins
+# declare each other (`workspace.dependencies` carries no plugin entry).
+# `examples/material3-demo` is deliberately absent: it is an EXCLUDED
+# workspace and cannot be imported from here at all, which is why it carries
+# its own `tests/page_goldens.rs` over a path dev-dependency on this crate.
+frust-material = { path = "../../plugins/material" }
+frust-cupertino = { path = "../../plugins/cupertino" }
+frust-glyph = { path = "../../plugins/glyph" }
+frust-shadcn = { path = "../../plugins/shadcn" }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 # Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin

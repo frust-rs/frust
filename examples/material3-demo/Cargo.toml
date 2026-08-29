@@ -61,6 +61,21 @@ frust-clipboard = { path = "../../plugins/clipboard" }
 # `frust-perf` output. Mirrors `examples/glyph-catalog/Cargo.toml`'s block.
 log = "0.4"
 
+# Test-support only. `frust-testing` is the framework's dev-only golden/oracle
+# crate (`publish = false`, and a `[dev-dependencies]` edge is the ONLY edge
+# its own `tests/deps.rs` guard permits), and it is what makes
+# `tests/page_goldens.rs` possible from here: the GPU-free frame capture
+# (`frust_testing::frame`), the CPU oracle, and the shared `run_cpu_goldens`
+# gate. It is declared HERE rather than reached through the root workspace
+# because this package is EXCLUDED from that workspace (see the header above),
+# so it resolves nothing from the root graph — and because that exclusion is
+# also why this app's pages cannot live in `frust-testing`'s own
+# `corpus::page`: the root workspace cannot import an excluded member.
+# `widget_test.rs`'s module docs note the absence of exactly this edge as the
+# reason it could not walk a rendered tree; this closes that gap.
+[dev-dependencies]
+frust-testing = { path = "../../crates/frust-testing" }
+
 [features]
 # Release-lean log ceiling — see the `log` dependency above for why this is a
 # release-only opt-in rather than an unconditional manifest feature. The CLI

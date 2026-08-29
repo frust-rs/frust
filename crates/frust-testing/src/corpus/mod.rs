@@ -36,7 +36,9 @@
 //! passed through it.
 
 pub mod adversarial;
+pub mod page;
 pub mod unit;
+pub mod widget;
 
 use anyhow::Result;
 use frust_scene::Scene;
@@ -45,7 +47,9 @@ use crate::case::CaseSpec;
 use crate::render::{AlphaKind, RenderSpec, RenderedImage, SceneRenderer};
 
 pub use adversarial::adversarial_cases;
+pub use page::page_cases;
 pub use unit::unit_cases;
+pub use widget::widget_cases;
 
 /// What a [`Probe`] asserts about one pixel.
 ///

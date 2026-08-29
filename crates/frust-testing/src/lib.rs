@@ -34,14 +34,23 @@
 //! - [`oracle_classic`]: [`oracle_classic::ClassicOracle`], the GPU arm of
 //!   that pair over `frust-render`'s offscreen vello-classic renderer, plus
 //!   the adapter-to-golden-class routing ([`oracle_classic::golden_class`]).
+//! - [`frame`]: GPU-free capture of a REAL widget tree as a scene
+//!   ([`frame::frame`]/[`frame::record_view`]) — a `RenderRoot` rebuild,
+//!   layout-with-text and paint into a `SceneBuilder`, with the device scale
+//!   pushed at paint exactly as a shell pushes it — plus the font-determinism
+//!   proof ([`frame::foreign_font_runs`]) every widget/page baseline is gated
+//!   on.
 //! - [`corpus`]: the named golden cases themselves
-//!   ([`corpus::CorpusCase`]/[`corpus::Probe`]), starting with
-//!   [`corpus::unit`] — one case per `frust_scene::Command` variant.
+//!   ([`corpus::CorpusCase`]/[`corpus::Probe`]) — [`corpus::unit`] (one case
+//!   per `frust_scene::Command` variant), [`corpus::widget`] (baseline widget
+//!   states through a real tree) and [`corpus::page`] (catalog pages from the
+//!   four design-system plugin crates).
 
 pub mod case;
 pub mod corpus;
 pub mod diff;
 pub mod fonts;
+pub mod frame;
 pub mod golden;
 pub mod meta;
 pub mod oracle_classic;
@@ -49,9 +58,20 @@ pub mod oracle_cpu;
 pub mod render;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
-pub use corpus::{CorpusCase, Expect, Probe, render_case, straighten_alpha, unit_cases};
+pub use corpus::{
+    CorpusCase, Expect, Probe, page_cases, render_case, straighten_alpha, unit_cases, widget_cases,
+};
 pub use diff::{DiffOutcome, DiffReport, PixelDiff};
 pub use fonts::{register_test_fonts, test_fonts};
+pub use frame::{
+    CPU_CLASS, FrameSpec, GateReport, foreign_font_runs, frame, record_view, run_cpu_goldens,
+};
+/// The scene a captured frame is recorded into, re-exported so a consumer
+/// outside this workspace's graph — `examples/material3-demo`, which declares
+/// this crate as its only test-support edge — can spell
+/// [`corpus::CorpusCase::record`]'s signature without taking a second path
+/// dependency on `frust-scene` purely for the type name.
+pub use frust_scene::Scene;
 pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
 pub use oracle_classic::{ClassicOracle, UNCLASSIFIED_CLASS, golden_class};

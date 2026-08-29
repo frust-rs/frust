@@ -2527,9 +2527,16 @@ name = "frust-testing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
  "frust-render",
  "frust-scene",
+ "frust-shadcn",
  "frust-text",
+ "frust-theme",
+ "frust-widgets",
  "image",
  "kurbo",
  "log",
