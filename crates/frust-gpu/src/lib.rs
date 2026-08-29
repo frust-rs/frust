@@ -18,11 +18,16 @@
 pub mod caps;
 pub mod context;
 pub mod lifecycle;
+pub mod pipeline;
+pub mod pipeline_cache;
+pub mod shader;
 pub mod surface;
 pub mod texture;
 
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
+pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
+pub use shader::{ShaderId, ShaderLibrary};
 pub use lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase,
