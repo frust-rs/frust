@@ -55,6 +55,13 @@ const TICK: Duration = Duration::from_millis(50);
 /// panes.
 const PAGE_LINES: u64 = 10;
 
+/// The workbench's cargo-feature passthrough: none. `frust build`'s
+/// `--features` is a CLI flag surface, and the build modal offers no
+/// counterpart, so a workbench build compiles exactly the features its mode
+/// selects (`BuildMode::cargo_features`) — named rather than written inline so
+/// the empty slice at each pipeline call reads as a decision, not an omission.
+const NO_EXTRA_FEATURES: &[String] = &[];
+
 /// Pure check: the TUI requires interactive stdin AND stdout. Testable without
 /// a TTY.
 ///
@@ -773,6 +780,11 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
 /// into `android_build::build`/`ios_build::build`. `on_line` is the print-free
 /// drive cores' line sink — the caller routes it into the build session's log
 /// tab (never the raw-mode tty; the tty-garbling fix).
+///
+/// [`NO_EXTRA_FEATURES`] is passed to both mobile pipelines: the workbench's
+/// build modal exposes mode/flavor/defines/version, not cargo features, so a
+/// TUI build compiles exactly what the mode selects — the `--features`
+/// passthrough is a CLI flag surface only.
 fn run_build(
     runner: &dyn ProcessRunner,
     spec: &BuildSpec,
@@ -787,14 +799,22 @@ fn run_build(
                 split_per_abi: *split_per_abi,
                 abis: abis.clone(),
             };
-            android_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
-                .map(|artifacts| artifacts.paths)
+            android_build::build(
+                runner,
+                &spec.project_root,
+                &spec.info,
+                &target,
+                NO_EXTRA_FEATURES,
+                on_line,
+            )
+            .map(|artifacts| artifacts.paths)
         }
         BuildTargetSpec::Appbundle => android_build::build(
             runner,
             &spec.project_root,
             &spec.info,
             &AndroidArtifact::Appbundle,
+            NO_EXTRA_FEATURES,
             on_line,
         )
         .map(|artifacts| artifacts.paths),
@@ -806,15 +826,29 @@ fn run_build(
                 simulator: *simulator,
                 codesign: *codesign,
             };
-            ios_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
-                .map(|artifacts| artifacts.paths)
+            ios_build::build(
+                runner,
+                &spec.project_root,
+                &spec.info,
+                &target,
+                NO_EXTRA_FEATURES,
+                on_line,
+            )
+            .map(|artifacts| artifacts.paths)
         }
         BuildTargetSpec::Ipa { export_method } => {
             let target = IosArtifact::Ipa {
                 export_method: export_method.clone(),
             };
-            ios_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
-                .map(|artifacts| artifacts.paths)
+            ios_build::build(
+                runner,
+                &spec.project_root,
+                &spec.info,
+                &target,
+                NO_EXTRA_FEATURES,
+                on_line,
+            )
+            .map(|artifacts| artifacts.paths)
         }
         // The desktop pipeline reports non-fatal observations (a missing or
         // too-small icon, a generated Info.plist, an unsigned .app) as typed

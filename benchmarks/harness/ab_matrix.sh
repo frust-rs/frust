@@ -81,20 +81,22 @@
 # run.sh's own `run-NN.log` files, a `stats.txt` capturing the run.sh
 # stdout tail that carries stats.py's `p50=`/`p95=` table, and the nav
 # column's sanitized `logcat-frust-perf.log` — is copied into
-# `benchmarks/raw/<device-name>/fine-floor/<aa>-<scale>/<scenario>/`
-# (nav: `.../<aa>-<scale>/nav/logcat-frust-perf.log`), `<device-name>` from
+# `benchmarks/raw/<device-name>/<group>/<cell>/<scenario>/`
+# (nav: `.../<cell>/nav/logcat-frust-perf.log`) — `<group>` is `fine-floor`
+# for a run without --tier and `tier` for one with it, `<cell>` is
+# `<aa>-<scale>` or the tier cell label above; `<device-name>` from
 # `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
 # via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
 # exact committed files backing each cell (PROTOCOL §10's "raw series
 # committed alongside the computed table" rule). Each cell's artifacts are
 # first assembled in a staging directory under --out
-# (`<out>/stage/<aa>-<scale>/<sub>`, cleared per copy), every `cp` is
+# (`<out>/stage/<cell>/<sub>`, cleared per copy), every `cp` is
 # checked (a failed copy is a hard, loud failure — never a silently-short
 # raw series), the sanitization self-check `benchmarks/.gitignore`
 # documents as its pre-commit rule runs over the STAGED copy, and only a
 # copy that passes is moved into the committed tree: the destination cell
 # directory — built from the RESOLVED raw root and asserted to be exactly
-# `<raw-root>/<device-name>/fine-floor/<aa>-<scale>/<sub>`, nothing else
+# `<raw-root>/<device-name>/<group>/<cell>/<sub>`, nothing else
 # — is `rm -rf`'d immediately before the move (a rerun over a stale cell
 # never leaves a prior run's files mixed in with the new ones). A rejected
 # copy therefore never touches `benchmarks/raw/` at all, and a SKIPPED
@@ -130,8 +132,9 @@
 # purpose — awake, no keyguard showing — is left alone), and never under
 # --dry-run.
 #
-# Emits a Markdown table — columns `aa`, `scale`, one p50/p95 column pair per
-# `--scenarios` entry, `nav total_p50`, `nav submit_p95` — to stdout and to
+# Emits a Markdown table — columns `aa`, `scale` (preceded by `tier` when
+# --tier was passed), one p50/p95 column pair per `--scenarios` entry,
+# `nav total_p50`, `nav submit_p95` — to stdout and to
 # `<out>/ab_matrix.md`; each finished cell's row is ALSO appended to
 # `<out>/ab_matrix.rows.md` the moment it is measured, so a run that ends
 # early (a hard failure in a later cell, Ctrl-C) never loses the cells
@@ -147,6 +150,7 @@
 # performs the device-lock step above.
 #
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
+#                      [--tier classic,hybrid,hybrid_atlas]
 #                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
 #                      [--scenarios s1,s2,s4] [--runs 5] [--duration 20]
 #                      [--frust <path>] [--raw-root <dir>]
@@ -176,6 +180,46 @@
 #                      own` note), so the nav column's numbers at scale<1
 #                      measure the inline (uncached) path, not the cached
 #                      one — the emitted table repeats this in its footer.
+#   --tier <csv>       render tiers (arms) to sweep. Omitted entirely by
+#                      default — the matrix then behaves exactly as it did
+#                      before this axis existed (a single vello-classic arm,
+#                      the AA x scale matrix, raw series under
+#                      `<raw-root>/<device>/fine-floor/<aa>-<scale>/`).
+#                      Passing it turns on the tier axis and files that run's
+#                      raw series under `<raw-root>/<device>/tier/<cell>/`
+#                      instead, so a tier sweep never overwrites a fine-floor
+#                      cell. Values (validated up front, same posture as
+#                      --aa):
+#                        classic       stock vello — no --features, no
+#                                      FRUST_RENDER_TIER define; the AA and
+#                                      render-scale defines are passed exactly
+#                                      as they are without this axis. Cell
+#                                      label `classic-<aa>-<scale>`.
+#                        hybrid        the experimental `vello_hybrid` tier:
+#                                      `--features hybrid-tier --define
+#                                      FRUST_RENDER_TIER=hybrid` (the feature
+#                                      compiles the tier in, the define
+#                                      selects it — `RenderTier::Hybrid` is
+#                                      override-only, no probe ever picks it,
+#                                      `crates/frust-render/src/tier.rs`).
+#                                      Cell label `hybrid`.
+#                        hybrid_atlas  the same hybrid build plus `--define
+#                                      FRUST_HYBRID_ATLAS_CACHE=1` (glifo's
+#                                      experimental glyph atlas cache; the app
+#                                      logs `frust-render hybrid
+#                                      atlas-cache=on` once at startup). An
+#                                      ARM label, not a `RenderTier` value —
+#                                      the tier it selects is still `hybrid`.
+#                                      Cell label `hybrid_atlas`.
+#                      The two hybrid arms IGNORE --aa/--scale: `FRUST_AA_MODE`
+#                      and `FRUST_RENDER_SCALE` are vello-classic instruments
+#                      (`context.rs`'s `parse_aa_mode` feeds vello's
+#                      `AaSupport`; the scale knob forces vello's blit arm),
+#                      and `vello_hybrid` reads neither — so those defines are
+#                      NOT passed on a hybrid arm and its aa/scale table cells
+#                      read `n/a`. Each hybrid arm therefore contributes
+#                      exactly ONE cell to the matrix however long --aa/--scale
+#                      are, and the cell label records the tier instead.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
 #                      passed through to run.sh (default: s1,s2,s4). Each
 #                      value must be one of s1..s8, d1, d2, validated up
@@ -248,6 +292,12 @@ DEVICE=""
 DEVICE_NAME=""
 AA_LIST="area,msaa8,msaa16"
 SCALE_LIST="1.0,0.75,0.5"
+# The tier axis is OFF unless --tier is passed: TIER_AXIS gates the extra
+# table column, the `tier` raw-series group and the cell-label shape, so a
+# run without --tier is byte-identical to the pre-tier script (see the
+# header's --tier note).
+TIER_LIST="classic"
+TIER_AXIS=0
 SCENARIOS_LIST="s1,s2,s4"
 RUNS=5
 DURATION=20
@@ -288,7 +338,11 @@ MATERIAL3_DEMO_DIR="${REPO_ROOT}/examples/material3-demo"
 MATERIAL3_DEMO_PKG="it.f0x.material3demo"
 
 usage() {
-  sed -n '2,220p' "$0"
+  # The whole header comment block: line 2 through the last line before
+  # `set -uo pipefail`. Derived rather than a hard-coded upper bound, so
+  # adding an option to the header above can never silently truncate the
+  # usage text mid-option again.
+  sed -n "2,$(($(grep -n '^set -uo pipefail' "$0" | head -n1 | cut -d: -f1) - 1))p" "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -329,6 +383,17 @@ while [ $# -gt 0 ]; do
       ;;
     --scale=*)
       SCALE_LIST="${1#--scale=}"
+      shift
+      ;;
+    --tier)
+      [ $# -ge 2 ] || { echo "error: --tier requires a value" >&2; exit 2; }
+      TIER_LIST="$2"
+      TIER_AXIS=1
+      shift 2
+      ;;
+    --tier=*)
+      TIER_LIST="${1#--tier=}"
+      TIER_AXIS=1
       shift
       ;;
     --scenarios)
@@ -465,7 +530,12 @@ fi
 IFS=',' read -r -a AA_ARR <<<"${AA_LIST}"
 IFS=',' read -r -a SCALE_ARR <<<"${SCALE_LIST}"
 IFS=',' read -r -a SCENARIO_ARR <<<"${SCENARIOS_LIST}"
+IFS=',' read -r -a TIER_ARR <<<"${TIER_LIST}"
 
+if [ "${#TIER_ARR[@]}" -eq 0 ]; then
+  echo "error: --tier produced an empty list" >&2
+  exit 2
+fi
 if [ "${#AA_ARR[@]}" -eq 0 ]; then
   echo "error: --aa produced an empty list" >&2
   exit 2
@@ -477,6 +547,30 @@ fi
 if [ "${#SCENARIO_ARR[@]}" -eq 0 ]; then
   echo "error: --scenarios produced an empty list" >&2
   exit 2
+fi
+
+# --tier: each value must be one of the arms the header documents. Unlike
+# --aa this is NOT case-folded: the value is used verbatim as a cell label
+# (and so as a committed raw-series directory name), and two spellings of
+# one arm would file two cells for the same build.
+for tier in "${TIER_ARR[@]}"; do
+  case "${tier}" in
+    classic|hybrid|hybrid_atlas) ;;
+    *)
+      echo "error: --tier value '${tier}' is not one of classic, hybrid, hybrid_atlas" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# The raw-series group segment: a tier sweep files under `tier/`, a run
+# without --tier keeps writing the pre-existing `fine-floor/` tree. Only
+# ever one of these two literals — assert_raw_cell_dir builds the one
+# `rm -rf` this script performs out of it.
+if [ "${TIER_AXIS}" -eq 1 ]; then
+  RAW_GROUP="tier"
+else
+  RAW_GROUP="fine-floor"
 fi
 
 for aa in "${AA_ARR[@]}"; do
@@ -653,7 +747,7 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   esac
 
   echo "Output directory: ${OUT_DIR}"
-  echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/fine-floor/"
+  echo "Raw series root: ${RAW_ROOT_ABS}/${DEVICE_NAME}/${RAW_GROUP}/"
 else
   # A dry run resolves nothing and writes nothing: the cell paths it prints
   # use --raw-root as given.
@@ -679,35 +773,62 @@ print_cmd() {
   echo "  ${label}$*"
 }
 
-# raw_cell_dir <aa> <scale> <sub> — echoes
-# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<sub> (sub is a
-# scenario id, or "nav"), built from the RESOLVED raw root. Uses the
-# display placeholder for <device-name> when none was given (--dry-run
-# only — a live run requires --device-name).
-raw_cell_dir() {
-  local aa="$1" scale="$2" sub="$3"
-  echo "${RAW_ROOT_ABS}/${DEVICE_NAME_DISPLAY}/fine-floor/${aa}-${scale}/${sub}"
+# tier_ignores_render_knobs <tier> — true for an arm that does not read
+# FRUST_AA_MODE/FRUST_RENDER_SCALE (every non-classic tier: they are vello
+# instruments and `vello_hybrid` reads neither — see the header's --tier
+# note). Such an arm gets ONE cell per matrix run, not one per (aa, scale).
+tier_ignores_render_knobs() {
+  [ "$1" != "classic" ]
 }
 
-# stage_cell_dir <aa> <scale> <sub> — echoes the staging directory under
-# --out a cell is assembled and self-checked in before publish_cell moves
-# it into the committed tree: <out>/stage/<aa>-<scale>/<sub> (`<out>`
-# literally under --dry-run, which has no output directory).
+# cell_label <tier> <aa> <scale> — the cell's directory name and table
+# identity. Without the tier axis this is the pre-existing `<aa>-<scale>`,
+# unchanged; with it, `classic-<aa>-<scale>` for the vello arm (whose knobs
+# still vary) and the bare tier name for an arm that ignores them.
+cell_label() {
+  local tier="$1" aa="$2" scale="$3"
+  if [ "${TIER_AXIS}" -eq 0 ]; then
+    echo "${aa}-${scale}"
+  elif tier_ignores_render_knobs "${tier}"; then
+    echo "${tier}"
+  else
+    echo "${tier}-${aa}-${scale}"
+  fi
+}
+
+# raw_cell_dir <cell> <sub> — echoes
+# <raw-root-abs>/<device-name>/<group>/<cell>/<sub> (sub is a scenario id,
+# or "nav"; <group> is `fine-floor` or `tier`, <cell> comes from
+# cell_label), built from the RESOLVED raw root. Uses the display
+# placeholder for <device-name> when none was given (--dry-run only — a
+# live run requires --device-name).
+raw_cell_dir() {
+  local cell="$1" sub="$2"
+  echo "${RAW_ROOT_ABS}/${DEVICE_NAME_DISPLAY}/${RAW_GROUP}/${cell}/${sub}"
+}
+
+# stage_cell_dir <cell> <sub> — echoes the staging directory under --out a
+# cell is assembled and self-checked in before publish_cell moves it into
+# the committed tree: <out>/stage/<cell>/<sub> (`<out>` literally under
+# --dry-run, which has no output directory).
 stage_cell_dir() {
-  local aa="$1" scale="$2" sub="$3"
-  echo "${OUT_DIR:-<out>}/stage/${aa}-${scale}/${sub}"
+  local cell="$1" sub="$2"
+  echo "${OUT_DIR:-<out>}/stage/${cell}/${sub}"
 }
 
 # assert_raw_cell_dir <dir> — dies unless <dir> is exactly one cell
 # directory under the RESOLVED raw root —
-# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<sub>: four
-# non-empty segments below the root, no `..` segment anywhere, an absolute
-# root. Called by publish_cell immediately before its `rm -rf`, the only
+# <raw-root-abs>/<device-name>/<group>/<cell>/<sub>: four non-empty
+# segments below the root, the group segment exactly the `fine-floor`/
+# `tier` literal this run resolved, every segment drawn from
+# [A-Za-z0-9._-] (no glob metacharacter, no whitespace), no `..` segment
+# anywhere, an absolute root.
+# Called by publish_cell immediately before its `rm -rf`, the only
 # recursive delete this script performs, which must never be pointed
-# anywhere else whatever --raw-root, --device-name or the matrix values
-# were.
+# anywhere else whatever --raw-root, --device-name, --tier or the matrix
+# values were.
 assert_raw_cell_dir() {
-  local dir="$1" rel slashes
+  local dir="$1" rel slashes seg
   [ -n "${RAW_ROOT_ABS}" ] || die "assert_raw_cell_dir: the raw root is not resolved"
   case "${RAW_ROOT_ABS}" in
     /*) ;;
@@ -716,16 +837,30 @@ assert_raw_cell_dir() {
   case "${dir}" in
     *'/../'*|*'/..'|'../'*|'..') die "refusing to touch '${dir}': the path contains a '..' segment" ;;
   esac
+  case "${RAW_GROUP}" in
+    fine-floor|tier) ;;
+    *) die "assert_raw_cell_dir: unexpected raw-series group '${RAW_GROUP}'" ;;
+  esac
   case "${dir}" in
-    "${RAW_ROOT_ABS}"/*/fine-floor/*-*/*) ;;
-    *) die "refusing to touch '${dir}': not of the form ${RAW_ROOT_ABS}/<device-name>/fine-floor/<aa>-<scale>/<sub>" ;;
+    "${RAW_ROOT_ABS}"/*/"${RAW_GROUP}"/*/*) ;;
+    *) die "refusing to touch '${dir}': not of the form ${RAW_ROOT_ABS}/<device-name>/${RAW_GROUP}/<cell>/<sub>" ;;
   esac
   rel="${dir#"${RAW_ROOT_ABS}"/}"
   case "${rel}" in
     *//*|/*|*/) die "refusing to touch '${dir}': empty path segment in '${rel}'" ;;
   esac
   slashes="${rel//[^\/]/}"
-  [ "${#slashes}" -eq 3 ] || die "refusing to touch '${dir}': expected exactly <device-name>/fine-floor/<aa>-<scale>/<sub> below ${RAW_ROOT_ABS}, got '${rel}'"
+  [ "${#slashes}" -eq 3 ] || die "refusing to touch '${dir}': expected exactly <device-name>/${RAW_GROUP}/<cell>/<sub> below ${RAW_ROOT_ABS}, got '${rel}'"
+  # Every segment from a conservative charset: no glob metacharacter, no
+  # whitespace, nothing shell-special (parent traversal is already refused
+  # by the `..` check above). The cell label is built from
+  # --tier/--aa/--scale and the device name, all validated up front, so
+  # this is belt-and-braces on the one path this script deletes.
+  local IFS='/'
+  for seg in ${rel}; do
+    [[ "${seg}" =~ ^[A-Za-z0-9._-]+$ ]] \
+      || die "refusing to touch '${dir}': path segment '${seg}' is outside [A-Za-z0-9._-]"
+  done
 }
 
 # publish_cell <stage-dir> <cell-dir> — moves a cell that PASSED the
@@ -793,19 +928,19 @@ self_check_raw_dir() {
   esac
 }
 
-# copy_scenario_raw <scenario> <aa> <scale> <scen_out> <runsh_log> —
+# copy_scenario_raw <scenario> <cell> <scen_out> <runsh_log> —
 # assembles run.sh's own sanitized run-NN.log files plus a stats.txt (the
 # run.sh stdout tail carrying stats.py's p50=/p95= table) in the cell's
 # staging directory (cleared first), runs the raw-series sanitization
 # self-check THERE, and only then publishes the cell into
-# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/<scenario>/ (see
+# <raw-root-abs>/<device-name>/<group>/<cell>/<scenario>/ (see
 # publish_cell). Only ever called for a non-SKIPPED scenario result (see
 # the run loop) — every cp is checked, and a missing expected artifact
 # fails the self-check before anything is published.
 copy_scenario_raw() {
-  local scenario="$1" aa="$2" scale="$3" scen_out="$4" runsh_log="$5" cell_dir stage_dir
-  cell_dir="$(raw_cell_dir "${aa}" "${scale}" "${scenario}")"
-  stage_dir="$(stage_cell_dir "${aa}" "${scale}" "${scenario}")"
+  local scenario="$1" cell="$2" scen_out="$3" runsh_log="$4" cell_dir stage_dir
+  cell_dir="$(raw_cell_dir "${cell}" "${scenario}")"
+  stage_dir="$(stage_cell_dir "${cell}" "${scenario}")"
   if [ "${DRY_RUN}" -eq 1 ]; then
     print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
     return 0
@@ -831,18 +966,18 @@ copy_scenario_raw() {
   publish_cell "${stage_dir}" "${cell_dir}"
 }
 
-# copy_nav_raw <aa> <scale> <nav_log> — stages the already-sanitized nav
+# copy_nav_raw <cell> <nav_log> — stages the already-sanitized nav
 # log (see run_nav) as logcat-frust-perf.log in the cell's staging
 # directory (cleared first), runs the raw-series sanitization self-check
 # THERE, and only then publishes the cell into
-# <raw-root-abs>/<device-name>/fine-floor/<aa>-<scale>/nav/ (see
+# <raw-root-abs>/<device-name>/<group>/<cell>/nav/ (see
 # publish_cell). Only ever called for a non-SKIPPED nav result (see the
 # run loop) — the cp is checked, and a missing expected artifact fails the
 # self-check before anything is published.
 copy_nav_raw() {
-  local aa="$1" scale="$2" nav_log="$3" cell_dir stage_dir
-  cell_dir="$(raw_cell_dir "${aa}" "${scale}" "nav")"
-  stage_dir="$(stage_cell_dir "${aa}" "${scale}" "nav")"
+  local cell="$1" nav_log="$2" cell_dir stage_dir
+  cell_dir="$(raw_cell_dir "${cell}" "nav")"
+  stage_dir="$(stage_cell_dir "${cell}" "nav")"
   if [ "${DRY_RUN}" -eq 1 ]; then
     print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${nav_log} ${stage_dir}/logcat-frust-perf.log && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
     return 0
@@ -864,8 +999,13 @@ copy_nav_raw() {
 # when the run ends early with rows already measured (see cleanup).
 emit_table() {
   local status="$1" header sep scenario upper row
-  header="| AA mode | Render scale |"
-  sep="|---|---|"
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    header="| Tier | AA mode | Render scale |"
+    sep="|---|---|---|"
+  else
+    header="| AA mode | Render scale |"
+    sep="|---|---|"
+  fi
   for scenario in "${SCENARIO_ARR[@]}"; do
     upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
     header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
@@ -875,7 +1015,11 @@ emit_table() {
   sep="${sep}---|---|"
 
   echo
-  echo "## Fine-floor A/B matrix — device ${DEVICE}"
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    echo "## Render-tier A/B matrix (--tier ${TIER_LIST}) — device ${DEVICE}"
+  else
+    echo "## Fine-floor A/B matrix — device ${DEVICE}"
+  fi
   echo
   if [ -n "${status}" ]; then
     echo "${status}"
@@ -893,6 +1037,13 @@ emit_table() {
   echo "by design, so the nav column's numbers at scale<1 measure the inline"
   echo "(uncached) path, not the cached one."
   echo
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    echo "Tier note: FRUST_AA_MODE and FRUST_RENDER_SCALE are vello-classic"
+    echo "instruments — a non-classic tier reads neither, so those two defines"
+    echo "are not passed on its build and its AA/scale cells read n/a. Each"
+    echo "such arm is ONE cell per run, whatever --aa/--scale hold."
+    echo
+  fi
   echo "Nav-basis note: the nav columns come from ONE push/pop pass per cell"
   echo "(no repeated runs, nothing discarded as warm-up) — they report"
   echo "material3-demo's own in-process rolling percentiles off the LAST"
@@ -900,25 +1051,71 @@ emit_table() {
   echo "sample like the scenario columns above."
   echo
   echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4) — scenario columns only; see the nav-basis note above for the nav columns."
-  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/."
+  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
 }
 
-# build_apk <label> <app-dir> <aa> <scale> <log> — runs (or, under
+# tier_build_args <tier> <aa> <scale> — echoes the tier-specific tail of
+# the `frust build apk` command line, one argument per line (the caller
+# reads it into an array, so a value never re-splits on whitespace):
+#
+#   classic       --define FRUST_AA_MODE=<aa> --define FRUST_RENDER_SCALE=<scale>
+#   hybrid        --features hybrid-tier --define FRUST_RENDER_TIER=hybrid
+#   hybrid_atlas  the hybrid pair plus --define FRUST_HYBRID_ATLAS_CACHE=1
+#
+# The AA/scale defines are deliberately absent from the hybrid arms (see
+# the header's --tier note): they are vello-classic instruments, so passing
+# them there would bake a knob into a build that cannot read it and label
+# the cell with a setting it never had. `--define FRUST_TRACE_RAW=1` is
+# common to every arm and stays on the caller's line.
+tier_build_args() {
+  local tier="$1" aa="$2" scale="$3"
+  case "${tier}" in
+    classic)
+      printf '%s\n' "--define" "FRUST_AA_MODE=${aa}" "--define" "FRUST_RENDER_SCALE=${scale}"
+      ;;
+    hybrid)
+      printf '%s\n' "--features" "hybrid-tier" "--define" "FRUST_RENDER_TIER=hybrid"
+      ;;
+    hybrid_atlas)
+      printf '%s\n' "--features" "hybrid-tier" "--define" "FRUST_RENDER_TIER=hybrid" \
+        "--define" "FRUST_HYBRID_ATLAS_CACHE=1"
+      ;;
+    *)
+      die "tier_build_args: unknown tier '${tier}'"
+      ;;
+  esac
+}
+
+# tier_build_desc <tier> <aa> <scale> — the human-readable knob summary the
+# per-build progress line carries, matching what tier_build_args passes.
+tier_build_desc() {
+  local tier="$1" aa="$2" scale="$3"
+  case "${tier}" in
+    classic) echo "FRUST_AA_MODE=${aa} FRUST_RENDER_SCALE=${scale}" ;;
+    hybrid) echo "tier=hybrid, --features hybrid-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
+    hybrid_atlas) echo "tier=hybrid + FRUST_HYBRID_ATLAS_CACHE=1, --features hybrid-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
+    *) die "tier_build_desc: unknown tier '${tier}'" ;;
+  esac
+}
+
+# build_apk <label> <app-dir> <tier> <aa> <scale> <log> — runs (or, under
 # --dry-run, only prints) `<frust> build apk --profile --define ...` from
-# <app-dir>. A build failure is a hard, loud failure of the whole matrix —
-# never a SKIPPED cell (see header).
+# <app-dir>, with the arm's own defines/features from tier_build_args. A
+# build failure is a hard, loud failure of the whole matrix — never a
+# SKIPPED cell (see header).
 build_apk() {
-  local label="$1" app_dir="$2" aa="$3" scale="$4" log="$5"
-  echo "-- ${label}: build (FRUST_AA_MODE=${aa} FRUST_RENDER_SCALE=${scale}) --"
-  print_cmd "(cd ${app_dir} && " "${FRUST_BIN} build apk --profile --define FRUST_TRACE_RAW=1 --define FRUST_AA_MODE=${aa} --define FRUST_RENDER_SCALE=${scale})"
+  local label="$1" app_dir="$2" tier="$3" aa="$4" scale="$5" log="$6"
+  local -a tier_args=()
+  mapfile -t tier_args < <(tier_build_args "${tier}" "${aa}" "${scale}")
+  echo "-- ${label}: build ($(tier_build_desc "${tier}" "${aa}" "${scale}")) --"
+  print_cmd "(cd ${app_dir} && " "${FRUST_BIN} build apk --profile --define FRUST_TRACE_RAW=1 ${tier_args[*]})"
   if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
   fi
   if ! ( cd "${app_dir}" && "${FRUST_BIN}" build apk --profile \
       --define "FRUST_TRACE_RAW=1" \
-      --define "FRUST_AA_MODE=${aa}" \
-      --define "FRUST_RENDER_SCALE=${scale}" ) >"${log}" 2>&1; then
-    echo "error: ${label} build failed (aa=${aa} scale=${scale}) — see ${log}" >&2
+      "${tier_args[@]}" ) >"${log}" 2>&1; then
+    echo "error: ${label} build failed (tier=${tier} aa=${aa} scale=${scale}) — see ${log}" >&2
     exit 1
   fi
 }
@@ -1160,12 +1357,63 @@ wake_and_unlock_device() {
   fi
 }
 
+# --- Cell enumeration ----------------------------------------------------
+#
+# One entry per matrix cell, `<tier>|<aa>|<scale>`, in the order the run
+# drives them: tier outermost, then aa, then scale — so without --tier
+# (a single `classic` tier) the order is exactly the pre-tier `for aa; for
+# scale` sweep. An arm that ignores the render knobs (see
+# tier_ignores_render_knobs) contributes exactly ONE cell, carrying the
+# first --aa/--scale values purely as placeholders that its build never
+# passes on (build_apk/tier_build_args drop them) and its table row
+# reports as `n/a`.
+declare -a CELL_SPECS=()
+for tier in "${TIER_ARR[@]}"; do
+  for aa in "${AA_ARR[@]}"; do
+    for scale in "${SCALE_ARR[@]}"; do
+      CELL_SPECS+=("${tier}|${aa}|${scale}")
+      if tier_ignores_render_knobs "${tier}"; then break; fi
+    done
+    if tier_ignores_render_knobs "${tier}"; then break; fi
+  done
+done
+CELL_TOTAL="${#CELL_SPECS[@]}"
+
+# cell_banner <n> <tier> <aa> <scale> — the per-cell progress heading.
+# Without the tier axis it is the pre-tier wording, unchanged.
+cell_banner() {
+  local n="$1" tier="$2" aa="$3" scale="$4"
+  if [ "${TIER_AXIS}" -eq 0 ]; then
+    echo "=== cell ${n}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
+  elif tier_ignores_render_knobs "${tier}"; then
+    echo "=== cell ${n}: tier=${tier} (aa/scale n/a) (kept ${KEPT} of ${RUNS} runs) ==="
+  else
+    echo "=== cell ${n}: tier=${tier} aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
+  fi
+}
+
+# table_row_prefix <tier> <aa> <scale> — the leading identity columns of a
+# table row, matching emit_table's header for this run.
+table_row_prefix() {
+  local tier="$1" aa="$2" scale="$3"
+  if [ "${TIER_AXIS}" -eq 0 ]; then
+    echo "| ${aa} | ${scale} |"
+  elif tier_ignores_render_knobs "${tier}"; then
+    echo "| ${tier} | n/a | n/a |"
+  else
+    echo "| ${tier} | ${aa} | ${scale} |"
+  fi
+}
+
 # --- Dry run: print every command for every cell, then exit -------------
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "== ab_matrix.sh --dry-run =="
   echo "device: ${DEVICE} (never queried — --dry-run touches no device)"
   echo "device-name: ${DEVICE_NAME_DISPLAY}  raw-root: ${RAW_ROOT}"
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    echo "tier: ${TIER_LIST}  (raw-series group: ${RAW_GROUP}; a non-classic tier ignores --aa/--scale — one cell per arm)"
+  fi
   echo "aa: ${AA_LIST}  scale: ${SCALE_LIST}  scenarios: ${SCENARIOS_LIST}"
   echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}"
   echo "kept ${KEPT} of ${RUNS} runs per scenario (first ${DISCARD_FIRST} discarded as warm-up per PROTOCOL §4)"
@@ -1175,22 +1423,22 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   wake_and_unlock_device
   echo
   cell=0
-  for aa in "${AA_ARR[@]}"; do
-    for scale in "${SCALE_ARR[@]}"; do
-      cell=$((cell + 1))
-      echo "=== cell ${cell}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
-      build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${aa}" "${scale}" "/dev/null"
-      install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
-      for scenario in "${SCENARIO_ARR[@]}"; do
-        run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
-        copy_scenario_raw "${scenario}" "${aa}" "${scale}" "/dev/null" "/dev/null"
-      done
-      build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${aa}" "${scale}" "/dev/null"
-      install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
-      run_nav "/dev/null" >/dev/null
-      copy_nav_raw "${aa}" "${scale}" "/dev/null"
-      echo
+  for spec in "${CELL_SPECS[@]}"; do
+    IFS='|' read -r tier aa scale <<<"${spec}"
+    cell=$((cell + 1))
+    label="$(cell_label "${tier}" "${aa}" "${scale}")"
+    cell_banner "${cell}" "${tier}" "${aa}" "${scale}"
+    build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "${aa}" "${scale}" "/dev/null"
+    install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
+    for scenario in "${SCENARIO_ARR[@]}"; do
+      run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
+      copy_scenario_raw "${scenario}" "${label}" "/dev/null" "/dev/null"
     done
+    build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "${aa}" "${scale}" "/dev/null"
+    install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
+    run_nav "/dev/null" >/dev/null
+    copy_nav_raw "${label}" "/dev/null"
+    echo
   done
   echo "Dry run complete — ${cell} cell(s), 0 devices touched, nothing written to disk."
   exit 0
@@ -1198,66 +1446,65 @@ fi
 
 # --- Live run: drive the matrix ------------------------------------------
 
-CELL_TOTAL=$(( ${#AA_ARR[@]} * ${#SCALE_ARR[@]} ))
 : >"${OUT_DIR}/ab_matrix.rows.md" || die "cannot write ${OUT_DIR}/ab_matrix.rows.md"
 
 wake_and_unlock_device
 
 cell=0
-for aa in "${AA_ARR[@]}"; do
-  for scale in "${SCALE_ARR[@]}"; do
-    cell=$((cell + 1))
-    echo
-    echo "=== cell ${cell}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
+for spec in "${CELL_SPECS[@]}"; do
+  IFS='|' read -r tier aa scale <<<"${spec}"
+  cell=$((cell + 1))
+  label="$(cell_label "${tier}" "${aa}" "${scale}")"
+  echo
+  cell_banner "${cell}" "${tier}" "${aa}" "${scale}"
 
-    build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${aa}" "${scale}" \
-      "${OUT_DIR}/build/frust_bench-${aa}-${scale}.log"
-    install_apk "frust_bench" "$(frust_bench_apk_path)" \
-      "${OUT_DIR}/install/frust_bench-${aa}-${scale}.log"
+  build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "${aa}" "${scale}" \
+    "${OUT_DIR}/build/frust_bench-${label}.log"
+  install_apk "frust_bench" "$(frust_bench_apk_path)" \
+    "${OUT_DIR}/install/frust_bench-${label}.log"
 
-    row="| ${aa} | ${scale} |"
-    for scenario in "${SCENARIO_ARR[@]}"; do
-      scen_out="${OUT_DIR}/scenarios/${scenario}-${aa}-${scale}"
-      runsh_log="${OUT_DIR}/scenarios/${scenario}-${aa}-${scale}.runsh.log"
-      result="$(run_scenario "${scenario}" "${scen_out}" "${runsh_log}")"
-      if [[ "${result}" == SKIPPED* ]]; then
-        echo "${scenario}: ${result}"
-        echo "raw: not copied (SKIPPED)"
-        row="${row} SKIPPED | SKIPPED |"
-      else
-        copy_scenario_raw "${scenario}" "${aa}" "${scale}" "${scen_out}" "${runsh_log}"
-        p50="$(printf '%s' "${result}" | cut -d' ' -f1)"
-        p95="$(printf '%s' "${result}" | cut -d' ' -f2)"
-        row="${row} ${p50} | ${p95} |"
-      fi
-    done
-
-    build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${aa}" "${scale}" \
-      "${OUT_DIR}/build/material3demo-${aa}-${scale}.log"
-    install_apk "material3-demo" "$(material3_demo_apk_path)" \
-      "${OUT_DIR}/install/material3demo-${aa}-${scale}.log"
-
-    nav_log="${OUT_DIR}/nav/${aa}-${scale}.log"
-    nav_result="$(run_nav "${nav_log}")"
-    if [[ "${nav_result}" == SKIPPED* ]]; then
-      echo "nav: ${nav_result}"
+  row="$(table_row_prefix "${tier}" "${aa}" "${scale}")"
+  for scenario in "${SCENARIO_ARR[@]}"; do
+    scen_out="${OUT_DIR}/scenarios/${scenario}-${label}"
+    runsh_log="${OUT_DIR}/scenarios/${scenario}-${label}.runsh.log"
+    result="$(run_scenario "${scenario}" "${scen_out}" "${runsh_log}")"
+    if [[ "${result}" == SKIPPED* ]]; then
+      echo "${scenario}: ${result}"
       echo "raw: not copied (SKIPPED)"
       row="${row} SKIPPED | SKIPPED |"
     else
-      copy_nav_raw "${aa}" "${scale}" "${nav_log}"
-      nav_total_p50="$(printf '%s' "${nav_result}" | cut -d' ' -f1)"
-      nav_submit_p95="$(printf '%s' "${nav_result}" | cut -d' ' -f2)"
-      nav_frame_n="$(printf '%s' "${nav_result}" | cut -d' ' -f4)"
-      echo "nav: total_p50=${nav_total_p50} submit_p95=${nav_submit_p95} over n=${nav_frame_n} frames"
-      row="${row} ${nav_total_p50} | ${nav_submit_p95} |"
+      copy_scenario_raw "${scenario}" "${label}" "${scen_out}" "${runsh_log}"
+      p50="$(printf '%s' "${result}" | cut -d' ' -f1)"
+      p95="$(printf '%s' "${result}" | cut -d' ' -f2)"
+      row="${row} ${p50} | ${p95} |"
     fi
-
-    TABLE_ROWS+=("${row}")
-    # Durable the moment it exists: a later hard failure or a signal must
-    # not cost the cells already measured (the EXIT trap also prints them).
-    printf '%s\n' "${row}" >>"${OUT_DIR}/ab_matrix.rows.md" \
-      || echo "warning: could not append the row to ${OUT_DIR}/ab_matrix.rows.md" >&2
   done
+
+  build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "${aa}" "${scale}" \
+    "${OUT_DIR}/build/material3demo-${label}.log"
+  install_apk "material3-demo" "$(material3_demo_apk_path)" \
+    "${OUT_DIR}/install/material3demo-${label}.log"
+
+  nav_log="${OUT_DIR}/nav/${label}.log"
+  nav_result="$(run_nav "${nav_log}")"
+  if [[ "${nav_result}" == SKIPPED* ]]; then
+    echo "nav: ${nav_result}"
+    echo "raw: not copied (SKIPPED)"
+    row="${row} SKIPPED | SKIPPED |"
+  else
+    copy_nav_raw "${label}" "${nav_log}"
+    nav_total_p50="$(printf '%s' "${nav_result}" | cut -d' ' -f1)"
+    nav_submit_p95="$(printf '%s' "${nav_result}" | cut -d' ' -f2)"
+    nav_frame_n="$(printf '%s' "${nav_result}" | cut -d' ' -f4)"
+    echo "nav: total_p50=${nav_total_p50} submit_p95=${nav_submit_p95} over n=${nav_frame_n} frames"
+    row="${row} ${nav_total_p50} | ${nav_submit_p95} |"
+  fi
+
+  TABLE_ROWS+=("${row}")
+  # Durable the moment it exists: a later hard failure or a signal must
+  # not cost the cells already measured (the EXIT trap also prints them).
+  printf '%s\n' "${row}" >>"${OUT_DIR}/ab_matrix.rows.md" \
+    || echo "warning: could not append the row to ${OUT_DIR}/ab_matrix.rows.md" >&2
 done
 
 # --- Emit the Markdown table ----------------------------------------------
@@ -1269,4 +1516,4 @@ MATRIX_DONE=1
 echo
 echo "Matrix complete — ${cell} cell(s). Table written to ${OUT_DIR}/ab_matrix.md"
 echo "Transient build/install/scenario/nav logs are under ${OUT_DIR}/"
-echo "Sanitized raw series copied under ${RAW_ROOT}/${DEVICE_NAME}/fine-floor/"
+echo "Sanitized raw series copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/"

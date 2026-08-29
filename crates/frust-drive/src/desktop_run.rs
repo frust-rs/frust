@@ -64,12 +64,14 @@ pub fn desktop_plan(root: &Path, info: &BuildInfo) -> DesktopPlan {
 /// [`desktop_plan`] over a caller-resolved `features` list rather than the
 /// mode's own.
 ///
-/// The one caller that needs this is `frust run`'s desktop fallback, whose
-/// release-lean preflight ([`crate::cargo_manifest::resolve_release_features`])
-/// drops `lean` for an app that predates the feature: passing an undeclared
-/// `--features lean` to `cargo run` fails the whole build with cargo's opaque
-/// message. Passing `info.mode.cargo_features()` here is byte-identical to
-/// [`desktop_plan`].
+/// The one caller that needs this is `frust run`'s desktop fallback, which
+/// resolves its list through
+/// [`crate::cargo_manifest::resolve_release_features`] for two reasons: the
+/// release-lean preflight drops `lean` for an app that predates the feature
+/// (passing an undeclared `--features lean` to `cargo run` fails the whole
+/// build with cargo's opaque message), and `--features` passthrough entries
+/// are appended after the mode's own. Passing `info.mode.cargo_features()`
+/// here is byte-identical to [`desktop_plan`].
 pub fn desktop_plan_with_features(root: &Path, info: &BuildInfo, features: &[&str]) -> DesktopPlan {
     let mut args = vec!["run".to_string()];
     for arg in info.mode.cargo_profile_arg() {

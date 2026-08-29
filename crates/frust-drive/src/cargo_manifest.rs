@@ -26,6 +26,16 @@ note: this app's Cargo.toml declares no `lean` feature, so `frust --release` bui
 lean = [\"log/release_max_level_warn\"]\n\
 and a `log` dependency under [dependencies].";
 
+/// Reads and parses the app manifest at `<project_root>/Cargo.toml`, if it
+/// exists and is well-formed. `None` on a missing, unreadable, or
+/// unparseable manifest — every caller here picks its own fail-open/
+/// fail-closed stance for that case rather than sharing one.
+fn read_app_manifest(project_root: &Path) -> Option<DocumentMut> {
+    let path = project_root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.parse::<DocumentMut>().ok()
+}
+
 /// Whether the app manifest at `<project_root>/Cargo.toml` positively
 /// declares `[features].<feature>`.
 ///
@@ -36,16 +46,45 @@ and a `log` dependency under [dependencies].";
 /// manifest couldn't be read. Only a manifest that *positively parses and
 /// lacks* the feature returns `false`.
 pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
-    let path = project_root.join("Cargo.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return true; // fail open: missing/unreadable
-    };
-    let Ok(doc) = text.parse::<DocumentMut>() else {
-        return true; // fail open: unparseable
+    let Some(doc) = read_app_manifest(project_root) else {
+        return true; // fail open: missing/unreadable/unparseable
     };
     doc.get("features")
         .and_then(|features| features.as_table_like())
         .is_some_and(|table| table.contains_key(feature))
+}
+
+/// Whether the app's own `[features]` table defines `feature` as an alias
+/// that directly enables `frust/devtools` — e.g. `full =
+/// ["frust/devtools"]`. Deliberately cheap and non-transitive: only a
+/// feature whose *own* enabled-list literally names the string
+/// `"frust/devtools"` counts, with no recursive feature-graph walk through
+/// other app-defined aliases.
+///
+/// Used by `frust build`'s release lanes
+/// (`frust-cli::commands::build::refuse_devtools_features`) alongside the
+/// literal `devtools`/`frust/devtools`/`*/devtools` token checks, to catch
+/// an app-defined feature name that itself turns the devtools listener on.
+///
+/// **Fails closed** — the opposite of [`declares_feature`]'s courtesy
+/// fail-open stance — since this function exists purely to widen a security
+/// refusal: a missing or unparseable manifest must never be read as "this
+/// token is safe", it just means this extra (best-effort, one-level) check
+/// has nothing to add; the literal-spelling checks alongside it remain the
+/// actual defense.
+pub fn feature_enables_devtools(project_root: &Path, feature: &str) -> bool {
+    let Some(doc) = read_app_manifest(project_root) else {
+        return false; // fail closed: missing/unreadable/unparseable
+    };
+    doc.get("features")
+        .and_then(|features| features.as_table_like())
+        .and_then(|table| table.get(feature))
+        .and_then(|item| item.as_array())
+        .is_some_and(|enabled| {
+            enabled
+                .iter()
+                .any(|value| value.as_str() == Some("frust/devtools"))
+        })
 }
 
 /// Resolves the cargo `--features` a `mode` build selects for the app rooted
@@ -63,16 +102,36 @@ pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
 /// positively parses and lacks it, returning the migration hint as the
 /// warning; a declaring app — or one whose manifest can't be read, see
 /// [`declares_feature`] — keeps byte-identical features and gets no warning.
+///
+/// `extra` is the front-end's `--features` passthrough, appended **after** the
+/// mode's own selection and never filtered: the legacy-`lean` drop above is a
+/// migration courtesy for a feature this funnel chose by itself, whereas an
+/// `extra` name was asked for explicitly, so an app that doesn't declare it
+/// deserves cargo's own error rather than a silent removal. Appending rather
+/// than prepending is what keeps a mode's instrumentation first in the argv
+/// (and first in the Android/iOS CSVs), so a capture reads in selection order.
+/// An empty `extra` leaves the result byte-identical to the mode's own list.
 pub fn resolve_release_features(
     project_root: &Path,
     mode: BuildMode,
-) -> (Vec<&'static str>, Option<String>) {
+    extra: &[String],
+) -> (Vec<String>, Option<String>) {
     let features = mode.cargo_features();
-    if mode != BuildMode::Release || declares_feature(project_root, "lean") {
-        return (features.to_vec(), None);
-    }
-    let kept: Vec<&'static str> = features.iter().copied().filter(|f| *f != "lean").collect();
-    (kept, Some(LEAN_MIGRATION_HINT.to_string()))
+    let (kept, warning): (Vec<&'static str>, Option<String>) =
+        if mode != BuildMode::Release || declares_feature(project_root, "lean") {
+            (features.to_vec(), None)
+        } else {
+            (
+                features.iter().copied().filter(|f| *f != "lean").collect(),
+                Some(LEAN_MIGRATION_HINT.to_string()),
+            )
+        };
+    let resolved = kept
+        .into_iter()
+        .map(str::to_string)
+        .chain(extra.iter().cloned())
+        .collect();
+    (resolved, warning)
 }
 
 #[cfg(test)]
@@ -96,6 +155,13 @@ mod tests {
 
     fn write_manifest(dir: &Path, body: &str) {
         fs::write(dir.join("Cargo.toml"), body).unwrap();
+    }
+
+    /// No `--features` passthrough — the shape every pre-passthrough call had.
+    const NO_EXTRA: &[String] = &[];
+
+    fn extra(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
     }
 
     #[test]
@@ -145,10 +211,60 @@ mod tests {
     }
 
     #[test]
+    fn feature_enables_devtools_true_when_alias_names_frust_devtools() {
+        let dir = unique_dir("enables-devtools-true");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
+        );
+        assert!(feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_false_when_array_lacks_it() {
+        let dir = unique_dir("enables-devtools-false");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/perf-trace\"]\n",
+        );
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_false_when_feature_absent() {
+        let dir = unique_dir("enables-devtools-absent");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nother = []\n",
+        );
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_missing_manifest() {
+        let dir = unique_dir("enables-devtools-missing");
+        // No Cargo.toml written — unlike `declares_feature`, this must NOT
+        // fail open, since it exists to widen a security refusal.
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_unparseable_manifest() {
+        let dir = unique_dir("enables-devtools-garbage");
+        write_manifest(&dir, "this is { not ]= valid toml");
+        assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn resolve_release_drops_lean_and_warns_for_legacy_app() {
         let dir = unique_dir("resolve-legacy");
         write_manifest(&dir, "[package]\nname = \"app\"\n");
-        let (features, warning) = resolve_release_features(&dir, BuildMode::Release);
+        let (features, warning) = resolve_release_features(&dir, BuildMode::Release, NO_EXTRA);
         assert!(features.is_empty(), "{features:?}");
         let warning = warning.expect("legacy release app must warn");
         assert!(warning.contains("lean"), "{warning}");
@@ -163,7 +279,7 @@ mod tests {
             &dir,
             "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
         );
-        let (features, warning) = resolve_release_features(&dir, BuildMode::Release);
+        let (features, warning) = resolve_release_features(&dir, BuildMode::Release, NO_EXTRA);
         assert_eq!(features, vec!["lean"]);
         assert!(warning.is_none(), "{warning:?}");
         let _ = fs::remove_dir_all(&dir);
@@ -172,7 +288,7 @@ mod tests {
     #[test]
     fn resolve_release_fails_open_keeps_lean_when_manifest_missing() {
         let dir = unique_dir("resolve-missing");
-        let (features, warning) = resolve_release_features(&dir, BuildMode::Release);
+        let (features, warning) = resolve_release_features(&dir, BuildMode::Release, NO_EXTRA);
         assert_eq!(features, vec!["lean"]);
         assert!(warning.is_none(), "{warning:?}");
         let _ = fs::remove_dir_all(&dir);
@@ -187,13 +303,57 @@ mod tests {
         let dir = unique_dir("resolve-debug");
         write_manifest(&dir, "[package]\nname = \"app\"\n");
         for mode in [BuildMode::Debug, BuildMode::Profile] {
-            let (features, warning) = resolve_release_features(&dir, mode);
+            let (features, warning) = resolve_release_features(&dir, mode, NO_EXTRA);
             assert_eq!(
                 features,
                 vec!["frust/perf-trace", "frust/devtools"],
                 "mode {mode:?}"
             );
             assert!(warning.is_none(), "mode {mode:?}: {warning:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_features_are_appended_after_the_modes_own_selection() {
+        let dir = unique_dir("extra-after-mode");
+        write_manifest(&dir, "[package]\nname = \"app\"\n");
+        let (features, warning) =
+            resolve_release_features(&dir, BuildMode::Profile, &extra(&["hybrid-tier"]));
+        // Order is the contract: the mode's own instrumentation first, the
+        // passthrough last, so an argv/CSV reads in selection order.
+        assert_eq!(
+            features,
+            vec!["frust/perf-trace", "frust/devtools", "hybrid-tier"]
+        );
+        assert!(warning.is_none(), "{warning:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_features_survive_the_legacy_lean_drop() {
+        // The legacy-app `lean` drop is a courtesy for a feature this funnel
+        // selected itself; an explicitly requested passthrough is never
+        // filtered, even when the same manifest lacks `lean`.
+        let dir = unique_dir("extra-survives-lean-drop");
+        write_manifest(&dir, "[package]\nname = \"app\"\n");
+        let (features, warning) =
+            resolve_release_features(&dir, BuildMode::Release, &extra(&["hybrid-tier"]));
+        assert_eq!(features, vec!["hybrid-tier"]);
+        assert!(warning.is_some(), "legacy release app must still warn");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_extra_is_byte_identical_to_the_modes_own_list() {
+        let dir = unique_dir("extra-empty");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+        );
+        for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
+            let (features, _) = resolve_release_features(&dir, mode, NO_EXTRA);
+            assert_eq!(features, mode.cargo_features(), "mode {mode:?}");
         }
         let _ = fs::remove_dir_all(&dir);
     }

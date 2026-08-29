@@ -138,9 +138,15 @@ unlocking/pairing/Developer Mode). `run` defaults to debug (`build` defaults to
 release); with no device selected it falls back to a streamed `cargo run` (desktop
 preview, or `--watch` below) — first Android/iOS builds take a few minutes.
 
-`frust run --render-tier <gpu|cpu>` forces the desktop preview's render tier
+`frust run --render-tier <gpu|cpu|hybrid>` forces the desktop preview's render tier
 (`FRUST_RENDER_TIER` for a manual `cargo run`); `gpu` fails fast on an incapable
-adapter, `cpu` can always be forced (desktop-preview-only today). **High refresh-rate
+adapter, `cpu` can always be forced, and `hybrid` needs a `hybrid-tier` build (refused
+with a diagnosis otherwise) — all desktop-preview-only today, see
+[RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md). **`--features <spec>` passthrough**
+(`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-splittable; appended after the
+mode's own feature selection; refused on `build macos|windows|linux`; the four release lanes
+additionally refuse a devtools-enabling token and reject one outside cargo's strict feature
+charset) is detailed in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md). **High refresh-rate
 hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
 `preferredFrameRateRange`; Android calls `Surface.setFrameRate()` (API 30+) with the
 display's max rate — both hints, unverifiable on the iOS Simulator or most Android
@@ -268,7 +274,9 @@ from `frust build apk`/`run`'s pipeline gate (*Run*).
 `cpu-tier` (experimental `vello_cpu` render backend —
 [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s pins) is
 headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
-touching `frust-render`. `frust-native-widgets`' `demo-components` is a composite
+touching `frust-render`. Its `hybrid-tier` sibling (experimental `vello_hybrid` tier) is
+the same shape: `cargo test -p frust-render --features hybrid-tier`.
+`frust-native-widgets`' `demo-components` is a composite
 `NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
 rather than in `examples/playground` (which merely switches it on) because an app
 crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
@@ -417,7 +425,9 @@ coreutils`) until fixed.
 | `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
 | `FRUST_NO_ANIM_PACING` | Kill switch for animation-loop pacing only (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — a paced (`TickClass::CosmeticLoop`) frame request runs on its vsync as before; the whole-frame skip gate (`FRUST_NO_FRAME_GATE` row above) stays active regardless. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Narrower A/B valve than `FRUST_NO_FRAME_GATE` — reach for this when isolating pacing from skip-gate behavior. | off (pacing active) |
 | `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
-| `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
+| `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`/`hybrid`, the last needing a `hybrid-tier` build) — see *Run* above and [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md). | adapter-probed |
+| `FRUST_WINDOW_SIZE` | Desktop preview-window initial logical size, `<width>x<height>` (`frust-shell-desktop::app_handler`) — strict `^[0-9]+x[0-9]+$`, both ≥ 1; unset/invalid falls back to the default, invalid also logging one `log::warn!` naming the bad value. Compile-time-or-runtime like `FRUST_TRACE`, runtime winning; changing the knob's *value* (not just presence) forces a relink of `frust-shell-desktop` and downstream, so prefer the runtime env on desktop and reserve `--define` for device builds with no runtime env. Effective size/maximized/source logged once. | `800x600` |
+| `FRUST_WINDOW_MAXIMIZED` | Desktop preview-window `1`/`true` (case-insensitive) maximizes it at creation, winning visually over `FRUST_WINDOW_SIZE` when both are set. Same compile-time-or-runtime shape as `FRUST_TRACE`. | off |
 | `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`, requiring the same `perf-trace` build: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3 (`acquire_us`/`submit_us` as separate fields, superseding v2's single `present_us`); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |

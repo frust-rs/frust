@@ -108,14 +108,17 @@ pub fn stdout_is_tty() -> bool {
 /// variant-aware `./gradlew assemble<Flavor><Mode>` → variant-aware APK
 /// install → badging-derived launch → pid-scoped logcat streaming.
 /// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
-/// the mode/flavor/defines/version funnel.
+/// the mode/flavor/defines/version funnel and `extra_features` for the
+/// front-end's `--features` passthrough (appended to the mode's own cargo
+/// features; an empty slice reproduces the pre-passthrough invocation).
 pub fn run(
     runner: &dyn ProcessRunner,
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
 ) -> Result<u8> {
-    run_with_env(runner, root, device, info, &RealEnv)
+    run_with_env(runner, root, device, info, extra_features, &RealEnv)
 }
 
 /// The testable core of [`run`], taking an injected [`EnvLookup`] so
@@ -126,6 +129,7 @@ fn run_with_env(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     env: &dyn EnvLookup,
 ) -> Result<u8> {
     // The CLI path never cancels — the shared build/install/launch core is
@@ -134,7 +138,16 @@ fn run_with_env(
     // a killable logcat handle instead, honoring a cancel flag).
     let never = AtomicBool::new(false);
     let mut on_line = |line: &str| println!("{line}");
-    let prepared = match prepare_session(runner, root, device, info, env, &mut on_line, &never)? {
+    let prepared = match prepare_session(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        env,
+        &mut on_line,
+        &never,
+    )? {
         Some(prepared) => prepared,
         // Unreachable in the CLI path (`never` never sets), but keeps the
         // function total against the cancellable core.
@@ -180,11 +193,13 @@ struct PreparedSession {
 /// interrupted — a cancel requested mid-Gradle takes effect the moment that
 /// phase returns, matching the supervisor's documented kill boundary
 /// (`docs/ARCHITECTURE.md` / `supervise` module doc).
+#[allow(clippy::too_many_arguments)] // the passthrough is one more caller-supplied input, not a new dependency
 fn prepare_session(
     runner: &dyn ProcessRunner,
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     env: &dyn EnvLookup,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
@@ -247,13 +262,15 @@ fn prepare_session(
     // warning once through this session's `on_line` sink, so `cargo ndk`
     // never sees `--features lean` it can't resolve.
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
+        crate::cargo_manifest::resolve_release_features(&project.root, info.mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
 
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
-    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines, &features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let props =
+        crate::android_build::tasks::gradle_properties(&target, &info.defines, &feature_refs);
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
@@ -400,7 +417,11 @@ fn spawn_session_with_env(
     cancel: &AtomicBool,
     env: &dyn EnvLookup,
 ) -> Result<Option<AndroidLaunch>> {
-    let Some(prepared) = prepare_session(runner, root, device, info, env, on_line, cancel)? else {
+    // The supervisor seam exposes no `--features` flag surface of its own, so
+    // the passthrough is empty here — a TUI/MCP-driven session builds exactly
+    // what the mode selects, as it did before the passthrough existed.
+    let Some(prepared) = prepare_session(runner, root, device, info, &[], env, on_line, cancel)?
+    else {
         return Ok(None);
     };
     if cancel.load(Ordering::SeqCst) {
@@ -428,6 +449,11 @@ fn spawn_session_with_env(
 mod tests {
     use super::*;
     use crate::devices::Kind;
+
+    /// No `--features` passthrough — byte-identical to the pre-passthrough
+    /// invocation, which is what every case but an explicit passthrough test
+    /// asserts against.
+    const NO_EXTRA: &[String] = &[];
 
     fn android(id: &str, name: &str) -> Device {
         Device {
@@ -685,7 +711,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Debug, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let local_props = fs::read_to_string(android_dir.join("local.properties")).unwrap();
@@ -717,7 +744,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Release, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -759,6 +787,7 @@ mod tests {
                 &dir,
                 &device(),
                 &build_info,
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -814,6 +843,7 @@ mod tests {
                 &dir,
                 &device(),
                 &build_info,
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -851,7 +881,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Release, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             let message = err.to_string();
             assert!(message.contains("Gradle debug-signed"), "{message}");
             assert!(message.contains("external = true"), "{message}");
@@ -897,6 +928,7 @@ mod tests {
                 &dir,
                 &device(),
                 &build_info,
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -933,7 +965,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Profile, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -961,7 +994,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Release, Some("paid"));
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -975,7 +1009,8 @@ mod tests {
             let runner = preflight_ok_runner();
 
             let build_info = info(BuildMode::Release, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("keytool"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -1004,7 +1039,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Debug, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -1071,6 +1107,7 @@ mod tests {
                 &dir,
                 &device(),
                 &info(BuildMode::Debug, Some("dev")),
+                NO_EXTRA,
                 &fake_env().set("ANDROID_HOME", &android_home),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -1123,6 +1160,7 @@ mod tests {
                 &dir,
                 &device(),
                 &info(BuildMode::Debug, None),
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,

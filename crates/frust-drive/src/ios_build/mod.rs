@@ -55,18 +55,34 @@ pub struct BuiltArtifacts {
 /// terminal). The CLI (`commands::build`) passes an `on_line` that just
 /// `println!`s each line, preserving its stdout verbatim.
 ///
+/// `extra_features` is the front-end's `--features` passthrough, appended to
+/// the mode's own cargo features and carried down to `cargo` inside the same
+/// base64 `FRUST_FEATURES` build setting the mode's features ride (see
+/// [`encode_features`]); an empty slice reproduces the pre-passthrough
+/// invocation exactly. `frust-tui`'s build session has no flag surface for it
+/// and passes an empty slice.
+///
 /// **Frozen signature** — do not change it without updating every caller
 /// (`commands::build`, `frust-tui`'s build session, `ios_run`'s physical-run
 /// session) and this doc comment. The `on_line` sink was added by the
-/// tty-garbling fix.
+/// tty-garbling fix; `extra_features` by the cargo-feature passthrough.
 pub fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     info: &BuildInfo,
     target: &IosArtifact,
+    extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
-    build_with_env(runner, &RealEnv, project_dir, info, target, on_line)
+    build_with_env(
+        runner,
+        &RealEnv,
+        project_dir,
+        info,
+        target,
+        extra_features,
+        on_line,
+    )
 }
 
 /// The team-resolution-testable core: takes an injected [`EnvLookup`] so
@@ -78,6 +94,7 @@ fn build_with_env(
     project_dir: &Path,
     info: &BuildInfo,
     target: &IosArtifact,
+    extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
     let sc = schemes::resolve(info);
@@ -99,11 +116,12 @@ fn build_with_env(
     // down to `cargo` — cargo's opaque hard error. A declaring app keeps
     // byte-identical features and warns nothing.
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
+        crate::cargo_manifest::resolve_release_features(project_dir, info.mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
-    let features_b64 = encode_features(&features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let features_b64 = encode_features(&feature_refs);
 
     match target {
         IosArtifact::App {
@@ -333,6 +351,11 @@ mod tests {
     use crate::process::FakeProcessRunner;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    /// No `--features` passthrough — byte-identical to the pre-passthrough
+    /// invocation, which is what every case but an explicit passthrough test
+    /// asserts against.
+    const NO_EXTRA: &[String] = &[];
+
     fn ok(stdout: &str) -> Output {
         Output {
             success: true,
@@ -431,6 +454,7 @@ mod tests {
                 simulator: false,
                 codesign: true,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap();
@@ -461,6 +485,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap();
@@ -493,6 +518,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
         )
         .unwrap();
@@ -532,6 +558,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |l| lines.push(l.to_string()),
         )
         .unwrap();
@@ -540,6 +567,42 @@ mod tests {
             !lines.iter().any(|l| l.contains("lean")),
             "a declaring app must not warn: {lines:?}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The `--features` passthrough reaches `cargo` through the SAME base64
+    /// `FRUST_FEATURES` build setting the mode's own features ride, appended
+    /// after them. Registered exactly (base64 "lean,hybrid-tier"), so a
+    /// replaced selection or a reordered CSV produces a non-matching argv and
+    /// errors instead of silently passing.
+    #[test]
+    fn passthrough_features_ride_the_frust_features_setting_after_the_modes_own() {
+        let dir = temp_project("passthrough-ios");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+        )
+        .unwrap();
+        plant_products(&dir, "Release", false, "Runner.app");
+        let runner = base_runner().with(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbixoeWJyaWQtdGllcg== CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build",
+            ok("Build succeeded"),
+        );
+        let env = FakeEnv::new();
+        let artifacts = build_with_env(
+            &runner,
+            &env,
+            &dir,
+            &info(BuildMode::Release),
+            &IosArtifact::App {
+                simulator: false,
+                codesign: false,
+            },
+            &["hybrid-tier".to_string()],
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(artifacts.paths.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -561,6 +624,7 @@ mod tests {
                 simulator: true,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap();
@@ -597,6 +661,7 @@ mod tests {
                 simulator: false,
                 codesign: true,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap();
@@ -633,6 +698,7 @@ mod tests {
             &IosArtifact::Ipa {
                 export_method: "app-store-connect".to_string(),
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap();
@@ -683,6 +749,7 @@ mod tests {
                 &IosArtifact::Ipa {
                     export_method: method.to_string(),
                 },
+                NO_EXTRA,
                 &mut |_| {},
             )
             .unwrap();
@@ -711,6 +778,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap_err();
@@ -740,6 +808,7 @@ mod tests {
                 simulator: true,
                 codesign: false,
             },
+            NO_EXTRA,
             &mut |_| {},
         )
         .unwrap_err();

@@ -9,8 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use notify::{RecursiveMode, Watcher};
 
-use crate::build_args::BuildArgs;
-use crate::cli::RenderTierArg;
+use crate::cli::{BuildFlags, RenderTierArg};
 use frust_drive::android_run::{self, DeviceSelection};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
@@ -30,7 +29,7 @@ const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 /// always passing the real [`WatchHooks`] — the production default.
 pub fn run_in(
     runner: &dyn ProcessRunner,
-    build_args: BuildArgs,
+    build_args: BuildFlags,
     device_id: Option<String>,
     render_tier: Option<RenderTierArg>,
     watch: bool,
@@ -53,7 +52,7 @@ pub fn run_in(
 /// handler or filesystem watcher — see [`WatchHooks`]'s doc.
 fn run_in_with_hooks(
     runner: &dyn ProcessRunner,
-    build_args: BuildArgs,
+    build_args: BuildFlags,
     device_id: Option<String>,
     render_tier: Option<RenderTierArg>,
     watch: bool,
@@ -71,7 +70,12 @@ fn run_in_with_hooks(
         );
     }
 
-    let info = BuildInfo::from_args(build_args.into_drive(), BuildMode::Debug)
+    // The `--features` passthrough is resolved before the funnel and travels
+    // beside `info`, never inside it: `BuildInfo` validates what is being built
+    // (mode/flavor/defines/version), while these features are appended to the
+    // mode's own selection at each platform's cargo-argv site.
+    let extra_features = build_args.extra_features();
+    let info = BuildInfo::from_args(build_args.build.into_drive(), BuildMode::Debug)
         .map_err(|err| anyhow::anyhow!(err))?;
 
     // `--watch` always means the desktop preview (the bail above already
@@ -81,7 +85,7 @@ fn run_in_with_hooks(
     // non-deterministic. Reaches the exact call the `Desktop` arm below
     // would make anyway, just one step earlier.
     if watch {
-        return run_desktop_fallback(runner, &info, render_tier, watch, hooks);
+        return run_desktop_fallback(runner, &info, &extra_features, render_tier, watch, hooks);
     }
 
     let discoverers = devices::default_discoverers();
@@ -93,14 +97,16 @@ fn run_in_with_hooks(
     }
 
     match android_run::select_device(&found, device_id.as_deref()) {
-        DeviceSelection::Desktop => run_desktop_fallback(runner, &info, render_tier, watch, hooks),
+        DeviceSelection::Desktop => {
+            run_desktop_fallback(runner, &info, &extra_features, render_tier, watch, hooks)
+        }
         DeviceSelection::Auto(device) => {
             warn_render_tier_not_plumbed(render_tier);
-            run_on_device(runner, &device, &info)
+            run_on_device(runner, &device, &info, &extra_features)
         }
         DeviceSelection::Ambiguous(candidates) => {
             warn_render_tier_not_plumbed(render_tier);
-            select_from_prompt(runner, &candidates, &info)
+            select_from_prompt(runner, &candidates, &info, &extra_features)
         }
         DeviceSelection::Error(message) => bail!(message),
     }
@@ -122,16 +128,21 @@ fn warn_render_tier_not_plumbed(render_tier: Option<RenderTierArg>) {
 
 /// Dispatches a resolved [`Device`] to its platform's mode/flavor-aware
 /// drive pipeline.
-fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
+fn run_on_device(
+    runner: &dyn ProcessRunner,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+) -> Result<u8> {
     match (device.platform, device.kind) {
-        (Platform::Android, _) => run_android(runner, device, info),
+        (Platform::Android, _) => run_android(runner, device, info, extra_features),
         (Platform::Ios, Kind::Simulator) => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            ios_run::run(runner, &cwd, device, info)
+            ios_run::run(runner, &cwd, device, info, extra_features)
         }
         (Platform::Ios, Kind::PhysicalDevice) => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            ios_run::run_physical(runner, &cwd, device, info)
+            ios_run::run_physical(runner, &cwd, device, info, extra_features)
         }
         (Platform::Ios, Kind::Emulator) => {
             unreachable!("iOS devices are never discovered as Kind::Emulator")
@@ -167,6 +178,7 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
 fn run_desktop_fallback(
     runner: &dyn ProcessRunner,
     info: &BuildInfo,
+    extra_features: &[String],
     render_tier: Option<RenderTierArg>,
     watch: bool,
     hooks: WatchHooks,
@@ -179,11 +191,12 @@ fn run_desktop_fallback(
     // undeclared `--features lean` and cargo's opaque hard error. The `frust`
     // crate's own `perf-trace`/`devtools` (debug/profile) are never filtered.
     let (features, warning) =
-        frust_drive::cargo_manifest::resolve_release_features(&cwd, info.mode);
+        frust_drive::cargo_manifest::resolve_release_features(&cwd, info.mode, extra_features);
     if let Some(warning) = warning {
         println!("{warning}");
     }
-    let plan = desktop_run::desktop_plan_with_features(&cwd, info, &features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let plan = desktop_run::desktop_plan_with_features(&cwd, info, &feature_refs);
     let env = desktop_cargo_run_env(&plan, render_tier);
 
     if watch {
@@ -558,6 +571,7 @@ fn select_from_prompt(
     runner: &dyn ProcessRunner,
     candidates: &[Device],
     info: &BuildInfo,
+    extra_features: &[String],
 ) -> Result<u8> {
     if !android_run::stdout_is_tty() {
         println!("Multiple Android devices connected; pass -d <id> to select one:");
@@ -581,21 +595,34 @@ fn select_from_prompt(
     let index = android_run::parse_prompt_selection(&input, candidates.len())
         .map_err(|err| anyhow::anyhow!(err))?;
 
-    run_on_device(runner, &candidates[index], info)
+    run_on_device(runner, &candidates[index], info, extra_features)
 }
 
 /// Drives the full, mode/flavor-aware Android pipeline on `device` —
 /// delegates to `android_run::run`, which owns
 /// the pipeline body (mirroring `ios_run::run`'s shape).
-fn run_android(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
+fn run_android(
+    runner: &dyn ProcessRunner,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+) -> Result<u8> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    android_run::run(runner, &cwd, device, info)
+    android_run::run(runner, &cwd, device, info, extra_features)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The clap mirror `BuildFlags` wraps — still the funnel input every
+    // `BuildInfo` fixture below is built from.
+    use crate::build_args::BuildArgs;
     use frust_drive::process::{FakeProcessRunner, Output};
+
+    /// No `--features` passthrough — byte-identical to the pre-passthrough
+    /// invocation, which is what every case but an explicit passthrough test
+    /// asserts against.
+    const NO_EXTRA: &[String] = &[];
 
     fn ios_physical_device() -> Device {
         Device {
@@ -647,7 +674,8 @@ mod tests {
     #[test]
     fn run_on_device_delegates_physical_ios_device_to_ios_run_run_physical() {
         let runner = FakeProcessRunner::new();
-        let err = run_on_device(&runner, &ios_physical_device(), &debug_info()).unwrap_err();
+        let err =
+            run_on_device(&runner, &ios_physical_device(), &debug_info(), NO_EXTRA).unwrap_err();
         let message = err.to_string();
         assert!(!message.contains("lands in Phase 5"), "{message}");
         assert!(message.contains("frust.toml"), "{message}");
@@ -759,6 +787,31 @@ mod tests {
         assert_eq!(plan.args, vec!["run", "--release"]);
     }
 
+    /// The `--features` passthrough reaches the desktop `cargo run` argv as
+    /// its own `--features <name>` pair, AFTER the mode's own pair(s) — the
+    /// same append order the Android/iOS CSVs use, so one reading of the argv
+    /// tells which features came from the mode and which from the flag.
+    #[test]
+    fn desktop_cargo_run_args_append_passthrough_features_after_the_modes_own() {
+        let plan = desktop_run::desktop_plan_with_features(
+            Path::new("/tmp/project"),
+            &debug_info(),
+            &["frust/perf-trace", "frust/devtools", "hybrid-tier"],
+        );
+        assert_eq!(
+            plan.args,
+            vec![
+                "run",
+                "--features",
+                "frust/perf-trace",
+                "--features",
+                "frust/devtools",
+                "--features",
+                "hybrid-tier",
+            ]
+        );
+    }
+
     /// Declaring direction: a declaring app resolves to
     /// `["lean"]`, giving byte-identical argv to the pure mode → argv
     /// mapping above.
@@ -789,6 +842,7 @@ mod tests {
         let out = run_desktop_fallback(
             &runner,
             &debug_info(),
+            NO_EXTRA,
             Some(RenderTierArg::Cpu),
             false,
             WatchHooks::fake(),
@@ -806,7 +860,7 @@ mod tests {
         let runner = FakeProcessRunner::new();
         let err = run_in(
             &runner,
-            BuildArgs::default(),
+            BuildFlags::default(),
             Some("emulator-5554".to_string()),
             None,
             true,
@@ -850,7 +904,7 @@ mod tests {
 
         let err = run_in_with_hooks(
             &runner,
-            BuildArgs::default(),
+            BuildFlags::default(),
             None,
             None,
             true,

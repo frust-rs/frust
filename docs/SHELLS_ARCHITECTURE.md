@@ -126,7 +126,10 @@ the facade already carries `frust-widgets`' `IconData` (an in-UI vector icon).
 
 The shared core itself consumes exactly one field, the window title. Everything else is carried
 for the per-OS shells. `DesktopConfig::default()` reproduces the zero-config preview window
-exactly, so an app that configures nothing is unaffected by the seam's existence.
+exactly, so an app that configures nothing is unaffected by the seam's existence. The preview
+window's initial logical size and maximized state are a separate, `DesktopConfig`-independent pair
+of measurement knobs (`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`, applied by `app_handler`'s
+`apply_window_size`) — see [DEVELOPMENT.md](DEVELOPMENT.md) § Instrumentation.
 
 An icon is a decoded, tightly-packed RGBA8 buffer whose dimensions are an invariant checked at
 construction — this tier carries no image decoder, and an inconsistent icon would reach a platform

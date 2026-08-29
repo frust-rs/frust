@@ -32,6 +32,13 @@ const FAILURE_TAIL_LINES: usize = 50;
 /// unknown-feature error. This is the same mapping
 /// [`crate::desktop_run::desktop_plan`] builds for `cargo run`, so a bundle
 /// and a desktop preview compile the same app.
+///
+/// This funnel carries no `--features` passthrough: `desktop_build::build`'s
+/// entry point has no parameter for one, so `frust build macos|windows|linux`
+/// refuses `--features` at the CLI rather than accepting it and dropping it
+/// here (`commands::build`'s desktop arm). The empty slice below is therefore
+/// the only value this call can receive, and it keeps the resolved list
+/// byte-identical to the mode's own.
 pub(super) fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
@@ -39,7 +46,7 @@ pub(super) fn build(
     on_line: &mut dyn FnMut(&str),
 ) -> Result<(), DesktopBuildError> {
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
+        crate::cargo_manifest::resolve_release_features(project_dir, info.mode, &[]);
     if let Some(warning) = warning {
         on_line(&warning);
     }
@@ -50,7 +57,7 @@ pub(super) fn build(
     }
     for feature in &features {
         args.push("--features".to_string());
-        args.push((*feature).to_string());
+        args.push(feature.clone());
     }
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let printable = args.join(" ");

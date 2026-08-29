@@ -7,10 +7,11 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::cli::BuildTarget;
+use crate::cli::{BuildFlags, BuildTarget, validate_feature_token_charset};
 use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::android_run;
 use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::cargo_manifest;
 use frust_drive::desktop_build::{
     self, BundleReport, DesktopBundleTarget, InstallerFormat, InstallerReport,
 };
@@ -46,7 +47,10 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             split_per_abi,
             target_platform,
         } => {
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            let extra_features = build.extra_features();
+            validate_extra_features("build apk", &extra_features)?;
+            refuse_devtools_features("build apk", project_dir, &extra_features)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             let abis = resolve_abis(target_platform.as_deref())?;
             build_android(
@@ -57,19 +61,29 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                     split_per_abi,
                     abis,
                 },
+                &extra_features,
             )
         }
         BuildTarget::Appbundle {
             build,
             target_platform,
         } => {
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            let extra_features = build.extra_features();
+            validate_extra_features("build appbundle", &extra_features)?;
+            refuse_devtools_features("build appbundle", project_dir, &extra_features)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             // Validated for a clear error even though `Appbundle` doesn't
             // carry the resolved ABI list itself (Gradle's bundle task
             // packages every ABI in one `.aab`).
             resolve_abis(target_platform.as_deref())?;
-            build_android(runner, project_dir, &info, AndroidArtifact::Appbundle)
+            build_android(
+                runner,
+                project_dir,
+                &info,
+                AndroidArtifact::Appbundle,
+                &extra_features,
+            )
         }
         BuildTarget::Ios {
             build,
@@ -77,7 +91,10 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             no_codesign,
         } => {
             require_macos_host("build ios")?;
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            let extra_features = build.extra_features();
+            validate_extra_features("build ios", &extra_features)?;
+            refuse_devtools_features("build ios", project_dir, &extra_features)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
                 runner,
@@ -87,6 +104,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                     simulator,
                     codesign: !no_codesign,
                 },
+                &extra_features,
             )
         }
         BuildTarget::Ipa {
@@ -95,17 +113,22 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
         } => {
             require_macos_host("build ipa")?;
             validate_export_method(&export_method)?;
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            let extra_features = build.extra_features();
+            validate_extra_features("build ipa", &extra_features)?;
+            refuse_devtools_features("build ipa", project_dir, &extra_features)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
                 runner,
                 project_dir,
                 &info,
                 IosArtifact::Ipa { export_method },
+                &extra_features,
             )
         }
         BuildTarget::Macos { build, installer } => {
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            reject_unplumbed_features("build macos", &build)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
@@ -116,7 +139,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             )
         }
         BuildTarget::Windows { build, installer } => {
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            reject_unplumbed_features("build windows", &build)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
@@ -127,7 +151,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             )
         }
         BuildTarget::Linux { build, installer } => {
-            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+            reject_unplumbed_features("build linux", &build)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_desktop(
                 runner,
@@ -138,6 +163,87 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             )
         }
     }
+}
+
+/// Refuses `--features` on the three desktop-bundle targets, which are the
+/// one build lane the passthrough does not reach: `desktop_build::build`'s
+/// entry point carries no parameter for it, so the features would be silently
+/// dropped and the bundle would be compiled without the very feature the
+/// caller asked for — a wrong artifact that looks like a right one. Refusing
+/// up front, before `frust.toml` is read or anything is compiled, is the same
+/// stance `--watch` + `-d` takes on a combination the pipeline cannot honour.
+fn reject_unplumbed_features(command: &str, build: &BuildFlags) -> Result<()> {
+    let requested = build.extra_features();
+    if requested.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "`frust {command}` does not support --features yet (requested: {}); \
+         it is plumbed for `build apk`, `build appbundle`, `build ios`, `build ipa` and `run`",
+        requested.join(", ")
+    )
+}
+
+/// Rejects any `--features` passthrough token outside the strict charset
+/// [`crate::cli::feature_token_charset_ok`] requires, naming the offending
+/// token — see that function's doc comment for why a validated-charset
+/// token still matters this far downstream. Runs on all four release lanes
+/// (`build apk`/`appbundle`/`ios`/`ipa`) before any of them does anything
+/// else with the tokens; `frust run` is unaffected (see `BuildFlags`'s own
+/// doc comment on `features`).
+fn validate_extra_features(command: &str, extra_features: &[String]) -> Result<()> {
+    if let Err(bad) = validate_feature_token_charset(extra_features) {
+        bail!(
+            "`frust {command}` rejects --features token '{bad}': expected cargo's own \
+             feature-name charset ([A-Za-z0-9_.-]+), optionally prefixed by '<pkg>/'"
+        );
+    }
+    Ok(())
+}
+
+/// Whether `token` is one of the literal spellings that enable the in-app
+/// devtools listener: the bare name, its `frust`-qualified form, or any
+/// `<pkg>/devtools` spelling another crate might expose the same switch
+/// under.
+fn is_devtools_token(token: &str) -> bool {
+    token == "devtools" || token == "frust/devtools" || token.ends_with("/devtools")
+}
+
+/// Refuses a `--features` token that would compile the in-app devtools
+/// listener into a release-signed store artifact. `frust build`'s release
+/// lanes (`apk`/`appbundle`/`ios`/`ipa`) forward `--features` straight
+/// through `BuildMode::cargo_features`'s own devtools-off release
+/// selection, so an explicit `--features frust/devtools` (or an app-defined
+/// feature alias that itself enables it) would silently reopen the hole
+/// `docs/DEVTOOLS_ARCHITECTURE.md`'s Trust model relies on release builds
+/// closing ("a release build compiles the listener out entirely"). Checked
+/// both literally ([`is_devtools_token`]) and — cheaply, one level, no
+/// transitive feature-graph walk — against the app's own `[features]`
+/// table (`cargo_manifest::feature_enables_devtools`), so an app-defined
+/// alias for the switch is caught under its own name too. Mirrors
+/// [`reject_unplumbed_features`]'s stance: refuse before any work, naming
+/// every offending token.
+fn refuse_devtools_features(
+    command: &str,
+    project_dir: &Path,
+    extra_features: &[String],
+) -> Result<()> {
+    let offending: Vec<&str> = extra_features
+        .iter()
+        .map(String::as_str)
+        .filter(|&token| {
+            is_devtools_token(token) || cargo_manifest::feature_enables_devtools(project_dir, token)
+        })
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "`frust {command}` refuses --features that would enable the devtools listener on a \
+         release artifact ({}); the in-app devtools RPC service must stay compiled out of a \
+         store-distributed build (see docs/DEVTOOLS_ARCHITECTURE.md's Trust model)",
+        offending.join(", ")
+    )
 }
 
 fn require_macos_host(command: &str) -> Result<()> {
@@ -153,6 +259,7 @@ fn build_android(
     project_dir: &Path,
     info: &BuildInfo,
     target: AndroidArtifact,
+    extra_features: &[String],
 ) -> Result<u8> {
     let project = android_run::project::detect(project_dir)?;
     android_run::project::require_android_dir(&project.root)?;
@@ -165,9 +272,14 @@ fn build_android(
     // The drive core is print-free (its `on_line` sink was added by the
     // tty-garbling fix); the CLI restores today's behavior by `println!`ing
     // each streamed line verbatim.
-    let artifacts = android_build::build(runner, project_dir, info, &target, &mut |line| {
-        println!("{line}")
-    })?;
+    let artifacts = android_build::build(
+        runner,
+        project_dir,
+        info,
+        &target,
+        extra_features,
+        &mut |line| println!("{line}"),
+    )?;
     print_artifacts(&artifacts.paths);
     Ok(0)
 }
@@ -177,6 +289,7 @@ fn build_ios(
     project_dir: &Path,
     info: &BuildInfo,
     target: IosArtifact,
+    extra_features: &[String],
 ) -> Result<u8> {
     let project = ios_run::project::detect(project_dir)?;
     ios_run::project::require_ios_dir(&project.root)?;
@@ -188,9 +301,14 @@ fn build_ios(
     );
     // Print-free drive core (see `build_android` above); the CLI `println!`s
     // each streamed line to keep its stdout verbatim.
-    let artifacts = ios_build::build(runner, project_dir, info, &target, &mut |line| {
-        println!("{line}")
-    })?;
+    let artifacts = ios_build::build(
+        runner,
+        project_dir,
+        info,
+        &target,
+        extra_features,
+        &mut |line| println!("{line}"),
+    )?;
     print_artifacts(&artifacts.paths);
     Ok(0)
 }
@@ -309,6 +427,7 @@ fn validate_export_method(method: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::build_args::BuildArgs;
+    use crate::cli::BuildFlags;
     use frust_drive::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -391,7 +510,7 @@ mod tests {
         let dir = android_project_dir("apk-stub");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             split_per_abi: false,
             target_platform: None,
         };
@@ -409,7 +528,7 @@ mod tests {
         let dir = unique_project_dir("apk-no-android-dir");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             split_per_abi: false,
             target_platform: None,
         };
@@ -423,9 +542,12 @@ mod tests {
         let dir = android_project_dir("apk-conflicting-modes");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
-            build: BuildArgs {
-                debug: true,
-                release: true,
+            build: BuildFlags {
+                build: BuildArgs {
+                    debug: true,
+                    release: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             split_per_abi: false,
@@ -441,8 +563,11 @@ mod tests {
         let dir = android_project_dir("apk-bad-build-number");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
-            build: BuildArgs {
-                build_number: Some(0),
+            build: BuildFlags {
+                build: BuildArgs {
+                    build_number: Some(0),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             split_per_abi: false,
@@ -458,7 +583,7 @@ mod tests {
         let dir = android_project_dir("aab-stub");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Appbundle {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             target_platform: None,
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
@@ -486,7 +611,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Ipa {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             export_method: "bogus".to_string(),
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
@@ -506,7 +631,7 @@ mod tests {
         let dir = ios_project_dir("ios-pipeline");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Ios {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             simulator: true,
             no_codesign: true,
         };
@@ -525,7 +650,7 @@ mod tests {
         let dir = ios_project_dir("ios-non-macos");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Ios {
-            build: BuildArgs::default(),
+            build: BuildFlags::default(),
             simulator: true,
             no_codesign: true,
         };
@@ -548,15 +673,15 @@ mod tests {
     fn desktop_target_for(host: DesktopBundleTarget) -> BuildTarget {
         match host {
             DesktopBundleTarget::Macos => BuildTarget::Macos {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: false,
             },
             DesktopBundleTarget::Windows => BuildTarget::Windows {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: false,
             },
             DesktopBundleTarget::Linux => BuildTarget::Linux {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: false,
             },
         }
@@ -582,6 +707,166 @@ mod tests {
         // `DesktopBuildError::BinaryNotFound` — proof the release
         // invocation above was the one actually run.
         assert!(err.to_string().contains("no `release`"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--features` is refused on the three desktop-bundle targets rather
+    /// than accepted and dropped: `desktop_build::build` has no parameter to
+    /// carry it, and a bundle compiled WITHOUT a feature the caller asked for
+    /// is a wrong artifact that looks like a right one. The runner holds no
+    /// registrations at all, so a `cargo` invocation would itself error — the
+    /// refusal message proves the check runs before any work.
+    #[test]
+    fn build_desktop_rejects_the_features_passthrough_before_any_work() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            eprintln!("no desktop bundle target for this OS — skipping");
+            return;
+        };
+        let dir = unique_project_dir("desktop-features-rejected");
+        let runner = FakeProcessRunner::new();
+        let flags = BuildFlags {
+            features: vec!["hybrid-tier".to_string()],
+            ..Default::default()
+        };
+        let target = match host {
+            DesktopBundleTarget::Macos => BuildTarget::Macos {
+                build: flags,
+                installer: false,
+            },
+            DesktopBundleTarget::Windows => BuildTarget::Windows {
+                build: flags,
+                installer: false,
+            },
+            DesktopBundleTarget::Linux => BuildTarget::Linux {
+                build: flags,
+                installer: false,
+            },
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("--features"), "{message}");
+        assert!(message.contains("hybrid-tier"), "{message}");
+        assert!(message.contains("build apk"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The passthrough reaches the Android pipeline: `build apk --features`
+    /// gets past dispatch into `android_build`'s own preflight (the same
+    /// "reaches the pipeline" proof the flagless case above makes), so the
+    /// flag is threaded rather than rejected or ignored at the CLI boundary.
+    #[test]
+    fn build_apk_with_features_reaches_the_android_build_pipeline() {
+        let dir = android_project_dir("apk-features");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["hybrid-tier".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("rustup target add aarch64-linux-android"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `build appbundle --features frust/devtools` — the exact release
+    /// artifact the finding names (a store-bound `.aab`) — is refused
+    /// outright, before Gradle/`android_build` ever runs (the fake runner
+    /// holds no registrations at all, so a real invocation would itself
+    /// error with something unrelated).
+    #[test]
+    fn build_appbundle_refuses_frust_devtools_feature() {
+        let dir = android_project_dir("appbundle-devtools-refused");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Appbundle {
+            build: BuildFlags {
+                features: vec!["frust/devtools".to_string()],
+                ..Default::default()
+            },
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("frust/devtools"), "{message}");
+        assert!(message.contains("build appbundle"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The bare `devtools` spelling and any `<pkg>/devtools` spelling are
+    /// refused the same way as the fully-qualified `frust/devtools` above.
+    #[test]
+    fn build_apk_refuses_bare_and_pkg_qualified_devtools_spellings() {
+        for token in ["devtools", "some-plugin/devtools"] {
+            let dir = android_project_dir("apk-devtools-spelling");
+            let runner = FakeProcessRunner::new();
+            let target = BuildTarget::Apk {
+                build: BuildFlags {
+                    features: vec![token.to_string()],
+                    ..Default::default()
+                },
+                split_per_abi: false,
+                target_platform: None,
+            };
+            let err = run_in(&runner, &dir, target).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("devtools"), "token {token}: {message}");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An app-defined feature alias whose own `[features]` entry names
+    /// `frust/devtools` is refused under its own name too — the "cheap,
+    /// one-level" app-manifest check alongside the literal-spelling ones.
+    #[test]
+    fn build_apk_refuses_app_defined_alias_that_enables_devtools() {
+        let dir = android_project_dir("apk-devtools-alias");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["full".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("full"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A passthrough token carrying a shell metacharacter is rejected before
+    /// any work, naming the offending token — this is what stands between an
+    /// unvalidated CSV and the iOS release lane's unquoted `cargo build ...
+    /// $CARGO_FEATURES` shell expansion.
+    #[test]
+    fn build_apk_rejects_features_token_with_shell_metacharacters() {
+        let dir = android_project_dir("apk-shell-metacharacters");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["evil;touch /tmp/pwned".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("evil;touch"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -645,15 +930,15 @@ mod tests {
 
         let target = match host {
             DesktopBundleTarget::Macos => BuildTarget::Macos {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: true,
             },
             DesktopBundleTarget::Windows => BuildTarget::Windows {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: true,
             },
             DesktopBundleTarget::Linux => BuildTarget::Linux {
-                build: BuildArgs::default(),
+                build: BuildFlags::default(),
                 installer: true,
             },
         };

@@ -24,6 +24,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-render::snapshot` | `SnapshotCache` rasterizes each outermost `PushSnapshot`/`PopSnapshot` bracket once per content/size change into a cached texture and returns the frame's `FramePlan` |
 | `frust-render::compositor` | `Compositor` draws each `FramePlan` layer as one alpha-blended `CompositeTarget` quad, outside vello |
 | `frust-render::tier` | `select_render_tier` probes adapter capabilities to choose GPU (default) vs experimental CPU rendering, with an env/CLI override |
+| `frust-render::hybrid_tier` (crate-private, `#[cfg(feature = "hybrid-tier")]`) | A third `SceneSink` over `vello_hybrid`'s sparse-strip renderer, plus a `Blob`-id-keyed image-residency shim; the measurement spike backing `RenderTier::Hybrid` |
 | `frust-text::context` | `TextContext` owns Parley's font context and a shape cache; `register_fonts` hot-swaps app fonts and invalidates it |
 | `frust-text::layout` | `TextLayout` is a finished, measurable shaped block converting to `frust_scene` `GlyphRun`s |
 | `frust-text::style` | `TextStyle` and related types form the styling vocabulary (the M3 type-scale surface) |
@@ -33,18 +34,20 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 
 Both crates depend on `frust-scene` (CORE) for the `Scene`/`Command`/`GlyphRun` types — the stable
 widget↔GPU seam neither crate may bypass. `frust-render` additionally depends on `vello` and
-`wgpu`, and optionally on `vello_cpu` (exact-pinned) behind its non-default `cpu-tier` feature;
-`frust-text` depends on `parley`. `kurbo` and `peniko` supply the geometry/color vocabulary shared
-across both crates' public APIs and `frust-scene`'s. `frust-render` also depends on
-`android_system_properties` on Android.
+`wgpu`, and optionally on `vello_cpu` (exact-pinned) behind its non-default `cpu-tier` feature, and
+optionally on `vello_hybrid`/`vello_common`/`glifo` (exact-pinned, same shape) behind its equally
+non-default `hybrid-tier` feature; `frust-text` depends on `parley`. `kurbo` and `peniko` supply the
+geometry/color vocabulary shared across both crates' public APIs and `frust-scene`'s. `frust-render`
+also depends on `android_system_properties` on Android.
 
 `frust-render` confines every `vello`/`wgpu` type behind its own API: the only two opaque wgpu
 wrappers that ever leave the crate are `DetachedSurface` and `DeferredPresent`, used for
 cross-thread/cross-transaction handoff — a bare `wgpu::Surface` or `wgpu::Device` never does. The
-optional `cpu-tier` path is isolated behind the same `SceneSink` encode seam as the GPU path, so a
-breaking `vello_cpu` bump cannot reach the default GPU path. `frust-text` mirrors this: `parley`
-never appears outside `TextContext`/`TextStyle`/`TextLayout`, and `TextEditor` is the sole owner of
-UTF-16↔byte index conversion — everything else in the crate works in byte offsets.
+optional `cpu-tier` and `hybrid-tier` paths are each isolated behind the same `SceneSink` encode
+seam as the GPU path, so a breaking `vello_cpu`/`vello_hybrid` bump cannot reach the default GPU
+path. `frust-text` mirrors this: `parley` never appears outside
+`TextContext`/`TextStyle`/`TextLayout`, and `TextEditor` is the sole owner of UTF-16↔byte index
+conversion — everything else in the crate works in byte offsets.
 
 The scene-layer purity boundary these confinement rules enforce against `frust-scene`/`frust-core`
 is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -54,6 +57,19 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 - `frust_scene::Scene` → `encode_scene` → `vello::Scene` → `SurfaceRenderer::encode()`/`present()`,
   direct-to-surface when supported else an intermediate-texture blit, driven from a dedicated
   render thread by default.
+- Third render path, `hybrid-tier` builds only (`RenderTier::Hybrid`, override-only — see Key
+  Types): `HybridDirect` renders straight into the acquired swapchain view at the surface-reported
+  format, RENDER_ATTACHMENT — no intermediate, no blit, no `PremultiplyPass`, no snapshot
+  cache/compositor (`vello_hybrid` owns its own depth texture; one `CommandEncoder` per frame).
+  `tier_forces_blit`/`tier_compiled_in` (`context.rs`) are exhaustive per-tier matches over
+  `RenderTier`, replacing the two former `!= RenderTier::Gpu` call sites so a tier added later can't
+  fall through either check silently. On this path the whole render cost — CPU strip build *and*
+  GPU execution — lands in `submit_us` (`encode_us` is only the scene copy into `vello_hybrid`'s own
+  scene type); `vello_hybrid` itself outputs premultiplied alpha, so a premultiplied-expecting
+  translucent surface (Android's `Inherit`/`PreMultiplied`) is correct as-is on this arm and raises
+  no warning — only the straight-alpha translucent mode (iOS's `PostMultiplied`) is refused
+  (`hybrid_translucency_refused`), resolving to Mode A with one warning. Every committed Pixel 5
+  number is still an opaque-surface number regardless (see LIMITATIONS.md).
 - `Command::ShaderQuad` instances render through a per-surface fragment-shader pre-pass into an
   offscreen texture composited into the scene ahead of the main encode.
 - `SurfaceAlphaRequest` resolves the platform's compositing/alpha mode to pick the presentation
@@ -134,13 +150,20 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
   round-tripped through each platform's IME bridge.
 - Optional cpu-tier: `vello_cpu` rasterizes into a `Pixmap` uploaded into the same intermediate
   target the GPU blit path uses.
+- Optional hybrid-tier: `hybrid_tier::HybridSink` runs the same shared command walk as the GPU/CPU
+  sinks, rasterizing into `vello_hybrid` sparse strips; `RenderTier::Hybrid` is selectable only by
+  an explicit override (`FRUST_RENDER_TIER=hybrid` / `frust run --render-tier hybrid`, see
+  [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) — no adapter probe ever chooses it, since
+  `HYBRID_REQUIRED_DOWNLEVEL_FLAGS` is empty (`tier.rs`): the tier needs neither
+  `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION`, the two flags the GPU tier requires and the iOS
+  Simulator's Apple2 GPU family lacks.
 
 ## Key Types
 
 | Type | Purpose |
 |------|---------|
 | `RenderContext` / `SurfaceRenderer` / `SurfaceFactory` / `DetachedSurface` / `DeferredPresent` | Device ownership, surface lifecycle/present, and the two sanctioned opaque wgpu wrappers for cross-thread handoff |
-| `RenderTier` / `TierCaps` | GPU-vs-CPU render-backend selection, probed from adapter capabilities plus an override |
+| `RenderTier` / `TierCaps` | GPU-vs-CPU-vs-Hybrid render-backend selection, probed from adapter capabilities plus an override; `Hybrid` is override-only (see Data Flow) |
 | `SurfacePhase` / `FrameOutcome` / `EncodeOutcome` / `AcquireOutcome` | The surface-can-be-destroyed-anytime lifecycle state machine shared by every shell |
 | `encode_scene` | The sole function converting a `frust_scene::Scene` into a `vello::Scene` |
 | `CompositeLayer` / `FramePlan` | One cached page's placement/texture for the compositor to draw, and the frame's vello-pass/compositor-layer/hole split those cached pages imply (see Data Flow) |
