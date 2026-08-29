@@ -10,10 +10,22 @@
 //! [`caps::TierCaps::probe`] is the only place a real `wgpu::Adapter` is
 //! consulted; every decision built on top of it takes the plain
 //! [`caps::TierCaps`] value instead, so it stays testable with
-//! [`caps::TierCaps::fake`] and no GPU in the loop.
+//! [`caps::TierCaps::fake`] and no GPU in the loop. [`surface`] and
+//! [`lifecycle`] follow the same split: every policy decision they make is a
+//! pure function over plain values, and only a handful of named entry points
+//! touch a live `wgpu::Device` or a real window handle.
 
 pub mod caps;
 pub mod context;
+pub mod lifecycle;
+pub mod surface;
 
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
+pub use lifecycle::{
+    AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
+    SurfacePhase,
+};
+pub use surface::{
+    ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
+};
