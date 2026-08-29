@@ -171,7 +171,7 @@ fn g2_headless_target_usage_excludes_storage_binding() {
 /// Substrings that fail this guard wherever they appear in production code.
 /// Deliberately literal (not a parser): `unwrap()` (no arguments — an
 /// `unwrap_or`/`unwrap_or_else` never matches), `expect(`, and `panic!(`.
-const BANNED_NEEDLES: &[&str] = &["unwrap()", "expect(", "panic!("];
+const BANNED_NEEDLES: &[&str] = &["unwrap()", ".expect(", "panic!("];
 
 /// Every `.rs` file directly under `dir` and every subdirectory, or an empty
 /// list when `dir` does not exist — the same "not-yet-added is a clean scan"

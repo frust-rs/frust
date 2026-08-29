@@ -931,25 +931,23 @@ impl FrameResources {
             return;
         }
 
-        if self.instances.is_none() || self.instance_capacity < required {
-            let floor = MIN_INSTANCE_CAPACITY * size_of::<GpuStrip>() as u64;
-            let capacity = required
-                .checked_next_power_of_two()
-                .unwrap_or(required)
-                .max(floor);
-            self.instances = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("frust-engine strip instances"),
-                size: capacity,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.instance_capacity = capacity;
-        }
-
-        let buffer = self
-            .instances
-            .as_ref()
-            .expect("the instance buffer exists once a frame has instances");
+        let buffer = match &mut self.instances {
+            Some(buffer) if self.instance_capacity >= required => buffer,
+            slot => {
+                let floor = MIN_INSTANCE_CAPACITY * size_of::<GpuStrip>() as u64;
+                let capacity = required
+                    .checked_next_power_of_two()
+                    .unwrap_or(required)
+                    .max(floor);
+                self.instance_capacity = capacity;
+                slot.insert(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frust-engine strip instances"),
+                    size: capacity,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }))
+            }
+        };
         if !opaque.is_empty() {
             queue.write_buffer(buffer, 0, opaque);
         }

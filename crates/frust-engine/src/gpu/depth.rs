@@ -182,16 +182,15 @@ impl DepthAttachment {
     /// Allocates the engine-owned attachment if there is none at this extent,
     /// and returns its view.
     pub fn ensure(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &wgpu::TextureView {
-        let usable = self
+        if self
             .owned
             .as_ref()
-            .is_some_and(|depth| depth.matches(width, height));
-        if !usable {
-            self.owned = Some(DepthTexture::new(device, width, height));
+            .is_some_and(|depth| !depth.matches(width, height))
+        {
+            self.owned = None;
         }
         self.owned
-            .as_ref()
-            .expect("the owned depth attachment was just allocated")
+            .get_or_insert_with(|| DepthTexture::new(device, width, height))
             .view()
     }
 
