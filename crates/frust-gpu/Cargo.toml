@@ -1,0 +1,24 @@
+[package]
+name = "frust-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+kurbo.workspace = true
+peniko.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[features]
+default = []
+perf-trace = []
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_system_properties.workspace = true
+
+[dev-dependencies]
+pollster = "0.4"

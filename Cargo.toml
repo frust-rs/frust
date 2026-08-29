@@ -108,6 +108,11 @@ peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
 pollster = "0.4"
+# frust-gpu's plain-old-data GPU vertex/uniform types (`Pod`/`Zeroable`
+# derives) — the engine plan's foundation crate above wgpu. `derive` is the
+# only feature this workspace needs (no `extern_crate_alias`/`min_const_generics`
+# opt-ins).
+bytemuck = { version = "1.25", features = ["derive"] }
 # image decoding (frust-widgets' Image widget) — pinned exactly: 0.25.10 is
 # the only 0.25.x release whose MSRV is exactly the workspace's (1.88), not
 # lower; like the rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin
@@ -562,6 +567,13 @@ frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }
 frust-render = { path = "crates/frust-render" }
 frust-text = { path = "crates/frust-text" }
+# The engine plan's foundation crate above wgpu, and the engine crate built on
+# it. `crates/frust-engine` does not exist yet at this SHA (a later task adds
+# it) — declaring the row ahead of the crate is harmless: Cargo only resolves
+# a `[workspace.dependencies]` path when some member's manifest references it
+# via `{ workspace = true }`, and none does yet.
+frust-gpu = { path = "crates/frust-gpu" }
+frust-engine = { path = "crates/frust-engine" }
 # Neither edge carries `default-features = false` any more: both crates now
 # declare no default features at all. `frust-theme` is pure token
 # infrastructure (no design-language module, no bundled fonts) and
