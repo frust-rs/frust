@@ -158,7 +158,21 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
-  `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop.
+  `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop. `--render-tier
+  <gpu|cpu|hybrid>` forces the desktop preview's tier (`FRUST_RENDER_TIER` env on the spawned
+  `cargo run`); `hybrid` needs a `hybrid-tier` build, refused with a diagnosis otherwise
+  (`frust-render`'s `tier.rs`, see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
+- `--features <spec>` (`build apk`/`appbundle`/`ios`/`ipa`, and `run`): `BuildFlags` is a `clap`
+  wrapper flattening `BuildArgs` plus this repeatable, comma/space-splittable passthrough
+  (`BuildFlags::extra_features`, cargo's own `--features` syntax). Resolved at the handler boundary
+  — never inside `BuildInfo`'s mode/flavor/defines/version funnel — and threaded into
+  `frust-drive::cargo_manifest::resolve_release_features(.., extra)`, which appends it strictly
+  *after* the build mode's own `frust/perf-trace`+`frust/devtools`/`lean` selection. Reaches
+  `android_build` (base64 `-Pfrust.cargoFeatures` CSV), `ios_build` (`FRUST_FEATURES` CSV),
+  `android_run`, `ios_run`, and the desktop `cargo run` plan. `build macos|windows|linux` refuses it
+  outright (`reject_unplumbed_features`) — `desktop_build::build`'s entry point carries no parameter
+  for it, so silently dropping the flag would compile a bundle without the feature the caller asked
+  for.
 - `build macos|windows|linux`: `BuildTarget::{Macos, Windows, Linux}` each carry a shared
   `BuildArgs` plus an `--installer` flag (release-default; no `--no-codesign` — signing is
   `[macos] signing-identity`-driven). The handler calls `frust_drive::desktop_build::build`
@@ -239,6 +253,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 |------|---------|
 | `ProcessRunner` / `RealProcessRunner` / `FakeProcessRunner` | The seam every external tool invocation goes through, real or faked |
 | `BuildInfo` / `BuildMode` | The debug/profile/release + flavor funnel shared by run and build |
+| `BuildFlags` | Wraps `BuildArgs` plus the `--features` cargo-feature passthrough (`extra_features()`), deliberately outside the `BuildInfo` funnel — see Data Flow |
 | `Validator` / `DoctorReport` | The doctor subsystem's pluggable checks and its structured report |
 | `DeviceDiscovery` / `Device` | Device discovery abstraction and its result shape |
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold |

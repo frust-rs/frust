@@ -2925,6 +2925,69 @@ clamp, ceil, and filter cases); `crates/frust-render/src/renderer.rs`'s `snapsho
 
 ---
 
+### `render-hybrid-spike-outcome` — Phase 0 `vello_hybrid` spike: GO on the numbers, snapshot cache not provably deletable yet
+
+**Observed**: `benchmarks/RESULTS.md`'s "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal
+(engine plan Phase 0)" section measured the experimental `vello_hybrid` render tier
+(`RenderTier::Hybrid`, override-only, `hybrid-tier` feature) against that file's "Pixel 5 — classic
+baseline for the engine plan" section, same Adreno 620 hardware:
+
+1. **Frame scenarios, p50/p95 ms, hybrid vs classic**: S1 12.20/13.90 vs 48.23/49.13, S2
+   13.10/14.06 vs 42.23/43.98, S4 9.36/10.27 vs 16.71/17.45, S5 11.47/12.30 vs 94.71/98.52, S6
+   11.59/12.38 vs 22.44/23.36 — 1.8-8.3x faster; S2/S4/S5/S6 are partly paced by the device's 90Hz
+   mode, so those four ratios are lower bounds. The classic S1 model's ~9.6ms fixed
+   full-resolution-pass term (`t ≈ 9.6 + 38.7·s²` ms) is gone outright: hybrid's entire S1 frame
+   (12.20ms) sits below that fixed term alone.
+2. **CPU/GPU split** (`frust-perf hybrid strip_us=<n> record_us=<n>`): S1 CPU strip 5.42ms, GPU
+   command-record 0.62ms, GPU-side remainder (total − strip) 6.78ms.
+3. **Atlas-cache arm** (`FRUST_HYBRID_ATLAS_CACHE=1`, glifo's experimental glyph-atlas cache): S6
+   9.98/10.50 (strip 5.10→1.08ms, −79%), S2 11.31/12.39.
+4. **material3-demo nav push/pop**: hybrid inline `total_p50` 15.22ms / `submit_p95` 17.66ms vs
+   classic cache-ON `total_p50` 7.39ms — hybrid bypasses the snapshot cache/compositor entirely
+   (stated outright in `renderer.rs`), so this is not a like-for-like number; no classic
+   scale-1.0, cache-off inline pass was measured to compare against.
+5. **iOS Simulator** (iPhone 16, iOS 18.6): renders through `tier=hybrid` (full home page, text,
+   icons) where vello classic is black by construction (missing `INDIRECT_EXECUTION`); frame
+   timings were not measured (no `frust-perf` lines on that console).
+6. **macOS Metal** (desktop preview): hybrid runs without error via the `hybrid-direct` path; both
+   arms were display-paced at the shell's hard-coded 1600×1200 physical window, non-discriminating
+   between tiers; the 5120×2880 target and the root `PushLayer(alpha<1)` >4096-texture question
+   were not measured — the desktop shell exposes no window-size knob.
+7. **Browser WebGL2**: written NO-GO (RESULTS.md Arm 7, `benchmarks/harness/webgl2_arm.md`) — no
+   wasm shell or target exists in this workspace; OPEN #1 decided **(b)**: the target-gated
+   `wasm32` `gles`/`webgpu` section belongs to the Web Shell plan, not this one.
+
+**Decision**: Phase 0 is **GO on the numbers** — the fixed per-pass cost and the iOS-Simulator
+render blocker are both removed by a strips-on-wgpu core. Measured against the plan's ratified
+thresholds: nav `total_p50` ≤ 16.7ms is met inline (15.22ms) but is a ~2x regression against the
+cached classic path (7.39ms); full-screen-quad ≤ 3ms GPU is **not** met by S5 (11.47ms whole
+frame, ~9.7ms GPU-side remainder, partly display-paced); cold-page ≤ 8ms and Graphics ≤
+classic+10% were not measured on this pass.
+
+**Not provably deletable**: the snapshot-layer cache and compositor
+(`render-snapshot-layer-tradeoffs` above) cannot be retired on this evidence — the hybrid nav
+number is an inline (uncached) figure with no full-resolution classic inline number beside it, so
+whether an engine-tier page-snapshot cache is still needed, or the nav budget should be re-argued
+without one, is open before Phase 4.
+
+**Two hybrid-arm scope limits**: a translucent, premultiplied-expecting surface (Android's
+`Inherit` alpha mode) is outside the arm's scope — it builds no premultiply pass and logs a
+warning instead of compositing over-bright, so every number above is an opaque-surface number (the
+Pixel 5 surface itself resolves `alpha_modes=[Inherit] chosen=Auto`, opaque); and the desktop
+shell's hard-coded 800×600-logical window (`crates/frust-shell-desktop/src/app_handler.rs`'s
+`INITIAL_SIZE`) is why the macOS large-texture question above has no answer from either tier.
+
+**Applies to**: the frust-engine + frust-gpu plan's Phase 0 GO/NO-GO gate only.
+`RenderTier::Hybrid` stays override-only and non-default — nothing in a normal build changes.
+
+**Evidence**: `benchmarks/RESULTS.md`'s "Pixel 5 — classic baseline for the engine plan" and
+"vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections (Arms
+1-7, "Fit comparison against the classic S1 model", "What could not be measured");
+`benchmarks/harness/webgl2_arm.md`; `crates/frust-render/src/hybrid_tier.rs` and `tier.rs`;
+`crates/frust-render/src/context.rs`'s `HybridDirect` arm and its premultiply-scope warning.
+
+---
+
 ### `material-from-seed-diverges-from-baked-baseline` — `theme_from_seed`/`from_seed(#6750A4)` is not pixel-identical to `baseline()`
 
 **Observed**: `frust_material::from_seed`/`theme_from_seed` ports current
