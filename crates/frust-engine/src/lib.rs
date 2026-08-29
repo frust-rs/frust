@@ -16,11 +16,13 @@ pub mod cache;
 pub mod compile;
 pub mod config;
 pub mod error;
+pub mod gpu;
 
 pub use cache::{CachedRamp, GradientCache, GradientTextureLayout};
 pub use compile::paint::{BrushEncoding, LutRequest, encode_brush};
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use error::EngineError;
+pub use gpu::{GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 
 /// Alpha output mode for the render target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
