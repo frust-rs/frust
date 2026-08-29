@@ -62,6 +62,44 @@
 //! reuses its atlas slot on every later one; a handle unseen for
 //! [`IMAGE_EVICTION_FRAMES`] frames is destroyed, releasing its atlas region.
 //!
+//! # Atlas capacity
+//!
+//! `Renderer::upload_image` is infallible in its signature and `unwrap`s the
+//! allocation underneath, so an atlas that cannot fit one more image aborts the
+//! process (the workspace builds with `panic = "abort"`). Nothing upstream is
+//! either fallible or observable here — `Resources` keeps its `ImageCache`
+//! private, so neither the occupancy nor the atlas count can be read back — so
+//! [`ImageResidency`] keeps its own account of the pixels it has admitted and
+//! refuses an upload that would take it past [`atlas_pixel_budget`]. A refused
+//! image is skipped exactly like an oversized one (warn once, no draw); an
+//! evicted one returns its pixels to the account.
+//!
+//! What that account can and cannot promise, precisely:
+//!
+//! - The allocator's one *guarantee* is the fresh-atlas one: with `auto_grow`
+//!   on and the first-fit strategy, an image already inside the per-image
+//!   dimension clamp always fits a newly created atlas, so an allocation made
+//!   while the manager can still create one succeeds.
+//! - That guarantee cannot be leaned on for long. The atlas count only grows —
+//!   atlases are never destroyed — and is invisible from here, so past the first
+//!   few uploads there is nothing left to prove.
+//! - Beyond it the budget is *conservative, not a proof*. The backing allocator
+//!   is guillotiere's guillotine tree: it refuses on shape rather than on area
+//!   and documents its own coalescing as imperfect, so free area is not the same
+//!   as a free rectangle. [`ATLAS_BUDGET_DIVISOR`] answers that with headroom
+//!   rather than with a claim.
+//! - The headroom is shared, not spare: with `FRUST_HYBRID_ATLAS_CACHE` on the
+//!   glyph atlas allocates its slots from the *same* `ImageCache`.
+//!
+//! Glyph runs get no caller-side equivalent, because at this pin there is
+//! nothing for one to do: glifo already degrades on a full atlas (its slot
+//! allocation is an `ok()?`, and the run falls back to the uncached path), and
+//! `vello_hybrid`'s one glyph-atlas `expect` sits behind
+//! `FRUST_HYBRID_ATLAS_CACHE` — with the knob off the glyph atlas is never even
+//! created. It fires on a render error from the atlas pass, not on exhaustion,
+//! and upstream exposes no way to pre-check it. That residual is accepted and
+//! knob-gated.
+//!
 //! # Instrumentation
 //!
 //! Two knobs, both resolved once per process:
@@ -79,10 +117,13 @@
 //!
 //! # Base color
 //!
-//! `vello_hybrid`'s root render pass loads the target view rather than clearing
-//! it (it owns no `base_color` render parameter), so [`HybridTierRenderer`]
-//! fills the whole scene with the frame's base color as its first draw — the
-//! same thing the CPU tier does for the same reason.
+//! `Renderer::render` *does* clear the target view — to transparent black, from
+//! its own pass, before the strip passes load over it — and it owns no
+//! `base_color` render parameter, so nothing in it can paint an app background.
+//! The ground draw is therefore load-bearing rather than belt-and-braces:
+//! [`HybridTierRenderer`] fills the whole scene with the frame's base color as
+//! its first draw, and without it an opaque background would composite over
+//! transparent black. The CPU tier draws its own ground for the same reason.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -110,9 +151,30 @@ const FLATTEN_TOLERANCE: f64 = 0.1;
 const FALLBACK_PAINT: Color = Color::new([0.0, 0.0, 0.0, 0.0]);
 
 /// How many consecutive frames an uploaded image may go undrawn before its
-/// atlas slot is released. Sized to survive a scroll that carries an image just
-/// off-screen and back (a second at 60 Hz) without re-uploading it.
+/// atlas slot is released.
+///
+/// A frame count, not a duration, and the difference is real: it buys 1.00 s at
+/// 60 Hz, 0.67 s at 90 Hz and 0.50 s at 120 Hz, so the horizon *shrinks* as the
+/// panel gets faster. An image carried off-screen and back over a full second on
+/// a 120 Hz panel is re-uploaded, which is the accepted cost — re-uploading an
+/// already-decoded pixmap — against an unconditional per-frame `Instant::now()`
+/// that a wall-clock horizon would put on the frame path, which the
+/// Instrumentation conventions in `docs/CODE_STANDARDS.md` keep behind a trace
+/// gate. Sized so the common case survives on the 60 Hz panels this tier is
+/// being measured on: a fling that carries an image just past the edge and back.
 const IMAGE_EVICTION_FRAMES: u64 = 60;
+
+/// The share of the image atlas array's nominal pixel capacity this tier lets
+/// live uploads occupy: one `ATLAS_BUDGET_DIVISOR`th of it.
+///
+/// Halving it is headroom, not waste. A guillotine allocator refuses on the
+/// shape of its free rectangles rather than on their total area, so the account
+/// in [`ImageResidency`] has to leave room for fragmentation it cannot see; and
+/// the glyph atlas draws slots from the same `ImageCache` whenever
+/// `FRUST_HYBRID_ATLAS_CACHE` is on. Even halved the ceiling is far past any
+/// real scene — 8 x 4096 x 4096 / 2 is 67 Mpx of resident image — so the guard
+/// bites on a leak or an adversarial scene, not on a photo gallery.
+const ATLAS_BUDGET_DIVISOR: u64 = 2;
 
 /// Whether glifo's experimental glyph atlas cache is enabled for this
 /// process's glyph runs, resolved once from `FRUST_HYBRID_ATLAS_CACHE`
@@ -247,7 +309,10 @@ impl HybridTierRenderer {
             renderer,
             resources,
             bindings: TextureBindings::new(),
-            images: ImageResidency::new(max_atlas_image_dimension(device)),
+            images: ImageResidency::new(
+                max_atlas_image_dimension(device),
+                atlas_pixel_budget(device),
+            ),
             atlas_cache,
             width: w,
             height: h,
@@ -297,9 +362,9 @@ impl HybridTierRenderer {
         self.scene.reset();
         self.images.begin_frame();
 
-        // `vello_hybrid` loads the target view rather than clearing it (it has
-        // no `base_color` render parameter, unlike vello's `RenderParams`), so
-        // the ground is the frame's first draw.
+        // `vello_hybrid` clears the target view to transparent black and has no
+        // `base_color` render parameter (unlike vello's `RenderParams`), so the
+        // frame's background has to be a scene draw: the ground goes first.
         self.scene.set_transform(Affine::IDENTITY);
         self.scene.set_fill_rule(Fill::NonZero);
         self.scene.set_paint(PaintType::Solid(base_color));
@@ -417,6 +482,57 @@ fn max_atlas_image_dimension(device: &wgpu::Device) -> u32 {
         .min(device.limits().max_texture_dimension_2d)
 }
 
+/// How many atlas pixels [`ImageResidency`] may hold live at once on `device`:
+/// [`ATLAS_BUDGET_DIVISOR`]'s share of the capacity `vello_hybrid` will actually
+/// configure there. See the module docs' Atlas capacity section for what the
+/// budget does and does not promise.
+fn atlas_pixel_budget(device: &wgpu::Device) -> u64 {
+    let limits = device.limits();
+    atlas_pixel_budget_from(
+        AtlasConfig::default(),
+        limits.max_texture_dimension_2d,
+        limits.max_texture_array_layers,
+    )
+}
+
+/// The pixel ceiling `config` implies once a device allowing
+/// `max_texture_dimension_2d`-wide textures and `max_texture_array_layers`
+/// atlases has had its say.
+///
+/// Mirrors `vello_hybrid`'s own `MemorySettings::normalize`, which clamps the
+/// config against exactly those two limits before the renderer's `ImageCache`
+/// is built — reading them here is what attaches the account to the atlas that
+/// exists rather than to the default on paper. Split out from
+/// [`atlas_pixel_budget`] so the arithmetic is testable without a device, the
+/// same split [`parse_atlas_cache`] uses.
+fn atlas_pixel_budget_from(
+    config: AtlasConfig,
+    max_texture_dimension_2d: u32,
+    max_texture_array_layers: u32,
+) -> u64 {
+    let (atlas_width, atlas_height) = config.atlas_size;
+    let width = u64::from(atlas_width.min(max_texture_dimension_2d));
+    let height = u64::from(atlas_height.min(max_texture_dimension_2d));
+    let atlases = u64::try_from(config.max_atlases)
+        .unwrap_or(u64::MAX)
+        .min(u64::from(max_texture_array_layers));
+    // A device reporting no atlas layers at all yields a budget of zero, which
+    // refuses every upload — the conservative answer, since there would be no
+    // atlas to allocate from either.
+    width.saturating_mul(height).saturating_mul(atlases) / ATLAS_BUDGET_DIVISOR
+}
+
+/// The atlas pixels one upload of `pixmap` occupies.
+///
+/// `vello_hybrid`'s wgpu path allocates with zero padding at this pin, so the
+/// padded footprint the allocator is asked for is exactly the image's own pixel
+/// count. That constant is private upstream, so a pin that gave it a non-zero
+/// value would turn this into an under-count — one more thing
+/// [`ATLAS_BUDGET_DIVISOR`]'s headroom absorbs.
+fn atlas_pixels(pixmap: &Pixmap) -> u64 {
+    u64::from(pixmap.width()) * u64::from(pixmap.height())
+}
+
 /// Renderer-owned GPU state the sink reaches for on the only two commands that
 /// need it, behind a seam so the rest of the mapping runs on the host.
 pub(crate) trait HybridResources {
@@ -496,6 +612,9 @@ struct Resident {
     /// the image every frame, and the opaque case lets the renderer take its
     /// opaque draw path.
     may_have_transparency: bool,
+    /// The atlas pixels this upload was charged, held so eviction returns
+    /// exactly what admission took rather than a re-derived guess.
+    atlas_pixels: u64,
     /// The frame counter value when this image was last drawn.
     last_seen: u64,
 }
@@ -517,14 +636,23 @@ struct ImageResidency {
     /// Largest image edge the atlas can hold (see
     /// [`max_atlas_image_dimension`]).
     max_dimension: u32,
+    /// Atlas pixels currently admitted: the sum of `atlas_pixels` over
+    /// [`resident`](Self::resident), maintained incrementally so admitting an
+    /// image stays O(1) on the frame path.
+    live_pixels: u64,
+    /// The ceiling `live_pixels` may not cross (see [`atlas_pixel_budget`], and
+    /// the module docs' Atlas capacity section for what it promises).
+    pixel_budget: u64,
 }
 
 impl ImageResidency {
-    fn new(max_dimension: u32) -> Self {
+    fn new(max_dimension: u32, pixel_budget: u64) -> Self {
         Self {
             resident: HashMap::new(),
             frame: 0,
             max_dimension,
+            live_pixels: 0,
+            pixel_budget,
         }
     }
 
@@ -540,9 +668,10 @@ impl ImageResidency {
     /// `None` — the draw is skipped, never panicked — when the image cannot be
     /// made resident: a degenerate size, an edge larger than the atlas, a pixel
     /// format `vello_common` does not convert, a buffer whose length disagrees
-    /// with its declared size, or a refused upload. Each of those is a panic
-    /// inside `vello_common`'s own conversion or the renderer's allocation, so
-    /// they are checked here rather than discovered on the frame path.
+    /// with its declared size, no room left in the atlas budget, or a refused
+    /// upload. Each of those is a panic inside `vello_common`'s own conversion
+    /// or the renderer's allocation, so they are checked here rather than
+    /// discovered on the frame path.
     fn source(
         &mut self,
         data: &ImageData,
@@ -558,13 +687,27 @@ impl ImageResidency {
         }
 
         let pixmap = to_pixmap(data, self.max_dimension)?;
+        // Charged before the upload, never after: `upload_image` cannot report a
+        // refusal, so the only place this image can still be turned away is
+        // here.
+        let atlas_pixels = atlas_pixels(&pixmap);
+        if self.live_pixels.saturating_add(atlas_pixels) > self.pixel_budget {
+            warn_once(
+                &IMAGE_ATLAS_FULL,
+                "hybrid tier: image atlas budget is full; images will not be drawn until \
+                 resident ones are evicted",
+            );
+            return None;
+        }
         let may_have_transparency = pixmap.may_have_transparency();
         let id = upload(&pixmap)?;
+        self.live_pixels += atlas_pixels;
         self.resident.insert(
             key,
             Resident {
                 id,
                 may_have_transparency,
+                atlas_pixels,
                 last_seen: self.frame,
             },
         );
@@ -575,16 +718,22 @@ impl ImageResidency {
     }
 
     /// Drops every handle unseen for [`IMAGE_EVICTION_FRAMES`] frames, handing
-    /// each to `destroy` so its atlas region can be released.
+    /// each to `destroy` so its atlas region can be released and returning its
+    /// pixels to the capacity account.
     fn evict_stale(&mut self, mut destroy: impl FnMut(ImageId)) {
         let frame = self.frame;
+        // Summed into a local because the account lives beside the map `retain`
+        // is holding.
+        let mut reclaimed = 0;
         self.resident.retain(|_, resident| {
             if frame.saturating_sub(resident.last_seen) < IMAGE_EVICTION_FRAMES {
                 return true;
             }
+            reclaimed += resident.atlas_pixels;
             destroy(resident.id);
             false
         });
+        self.live_pixels = self.live_pixels.saturating_sub(reclaimed);
     }
 
     /// How many images are currently resident. Test-only.
@@ -630,6 +779,7 @@ fn to_pixmap(data: &ImageData, max_dimension: u32) -> Option<Arc<Pixmap>> {
 
 static IMAGE_TOO_LARGE: OnceLock<()> = OnceLock::new();
 static UNSUPPORTED_IMAGE_FORMAT: OnceLock<()> = OnceLock::new();
+static IMAGE_ATLAS_FULL: OnceLock<()> = OnceLock::new();
 
 /// Logs `message` the first time its `slot` is reached — a rejected image
 /// repeats every frame, and a per-frame warn would be its own performance
@@ -1002,9 +1152,13 @@ mod tests {
 
     impl RecordingOps {
         fn new() -> Self {
+            Self::with_budget(UNBOUNDED_ATLAS_PIXELS)
+        }
+
+        fn with_budget(pixel_budget: u64) -> Self {
             Self {
                 ops: Vec::new(),
-                images: ImageResidency::new(4096),
+                images: ImageResidency::new(TEST_MAX_DIMENSION, pixel_budget),
                 uploads: 0,
                 next_id: 0,
             }
@@ -1103,8 +1257,12 @@ mod tests {
 
     impl HostResources {
         fn new() -> Self {
+            Self::with_budget(UNBOUNDED_ATLAS_PIXELS)
+        }
+
+        fn with_budget(pixel_budget: u64) -> Self {
             Self {
-                images: ImageResidency::new(4096),
+                images: ImageResidency::new(TEST_MAX_DIMENSION, pixel_budget),
                 uploads: 0,
                 next_id: 0,
                 glyph_runs: 0,
@@ -1131,6 +1289,14 @@ mod tests {
             })
         }
     }
+
+    /// The per-image edge clamp the production renderer derives from the
+    /// default atlas config on any device that allows the full 4096.
+    const TEST_MAX_DIMENSION: u32 = 4096;
+
+    /// A capacity budget no test upload can reach, so the tests that are not
+    /// about the capacity guard never trip it.
+    const UNBOUNDED_ATLAS_PIXELS: u64 = u64::MAX;
 
     /// Runs `scene` through the sink over a recording backend and returns the
     /// primitives it lowered to.
@@ -1648,7 +1814,7 @@ mod tests {
     #[test]
     fn an_image_unseen_for_sixty_frames_is_evicted() {
         let data = image_of_size(4, 4);
-        let mut residency = ImageResidency::new(4096);
+        let mut residency = ImageResidency::new(TEST_MAX_DIMENSION, UNBOUNDED_ATLAS_PIXELS);
         residency.begin_frame();
         let mut uploads = 0;
         assert!(
@@ -1680,7 +1846,7 @@ mod tests {
     #[test]
     fn a_redrawn_image_is_never_evicted() {
         let data = image_of_size(4, 4);
-        let mut residency = ImageResidency::new(4096);
+        let mut residency = ImageResidency::new(TEST_MAX_DIMENSION, UNBOUNDED_ATLAS_PIXELS);
         let mut uploads = 0;
         for _ in 0..(IMAGE_EVICTION_FRAMES * 3) {
             residency.begin_frame();
@@ -1697,7 +1863,7 @@ mod tests {
 
     #[test]
     fn an_unuploadable_image_is_refused_rather_than_panicking() {
-        let mut residency = ImageResidency::new(64);
+        let mut residency = ImageResidency::new(64, UNBOUNDED_ATLAS_PIXELS);
         let mut uploads = 0;
         let mut try_upload = |data: &ImageData, residency: &mut ImageResidency| {
             residency.source(data, |_| {
@@ -1735,6 +1901,184 @@ mod tests {
             record(&scene).is_empty(),
             "a degenerate image must not touch the scene"
         );
+    }
+
+    /// The atlas budget derivation, against the two device limits
+    /// `vello_hybrid`'s own `MemorySettings::normalize` clamps the config with.
+    #[test]
+    fn the_atlas_budget_mirrors_the_config_the_device_will_allow() {
+        let config = AtlasConfig::default();
+        // The numbers the module docs quote, pinned against the dependency.
+        assert_eq!(config.max_atlases, 8);
+        assert_eq!(config.atlas_size, (4096, 4096));
+
+        // A device that allows the whole configured atlas array.
+        assert_eq!(
+            atlas_pixel_budget_from(config, 4096, 256),
+            8 * 4096 * 4096 / 2
+        );
+        // One that clamps the edge and the layer count both.
+        assert_eq!(
+            atlas_pixel_budget_from(config, 2048, 4),
+            4 * 2048 * 2048 / 2
+        );
+        // A roomier device does not grow the atlas past its own config.
+        assert_eq!(
+            atlas_pixel_budget_from(config, 16384, 2048),
+            8 * 4096 * 4096 / 2
+        );
+        // No array layers at all: nothing to allocate from, nothing admitted.
+        assert_eq!(atlas_pixel_budget_from(config, 4096, 0), 0);
+    }
+
+    /// Past the budget the draw is skipped and warned about, exactly as an
+    /// oversized image is — the arm that was unreachable while
+    /// `Renderer::upload_image` was the only thing that could refuse, and
+    /// `upload_image` cannot refuse, it aborts.
+    #[test]
+    fn an_exhausted_atlas_budget_skips_the_draw_instead_of_uploading() {
+        const EDGE: u32 = 8;
+        // Room for exactly two of them.
+        const BUDGET: u64 = (EDGE * EDGE * 2) as u64;
+
+        let images: Vec<ImageData> = (0..3).map(|_| image_of_size(EDGE, EDGE)).collect();
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            for image in &images {
+                builder.draw_image(image, Rect::new(0.0, 0.0, 8.0, 8.0));
+            }
+        }
+
+        let mut sink = HybridSink {
+            ops: RecordingOps::with_budget(BUDGET),
+        };
+        encode_into(&scene, &mut sink);
+        let ops = sink.ops.ops;
+
+        let resolved = ops
+            .iter()
+            .filter(|op| matches!(op, Op::ImageSource { resolved: true, .. }))
+            .count();
+        let refused = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    Op::ImageSource {
+                        resolved: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((resolved, refused), (2, 1));
+        // Two draws, not three: the refused image paints nothing at all, and
+        // leaves the scene where the second one left it.
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Op::FillRect(_)))
+                .count(),
+            2
+        );
+        assert!(matches!(
+            ops.last(),
+            Some(Op::ImageSource {
+                resolved: false,
+                ..
+            })
+        ));
+        assert_eq!(sink.ops.uploads, 2);
+        assert!(
+            IMAGE_ATLAS_FULL.get().is_some(),
+            "a budget refusal must warn (once per process)"
+        );
+    }
+
+    /// The same exhaustion driven through the production `SceneOps` over a real
+    /// hybrid scene, across the eviction horizon: distinct images inside one
+    /// window fill the budget and are skipped, then eviction hands the pixels
+    /// back and the next image uploads again.
+    #[test]
+    fn eviction_returns_atlas_budget_and_re_admits_uploads() {
+        const EDGE: u32 = 8;
+        const BUDGET: u64 = (EDGE * EDGE * 2) as u64;
+
+        let images: Vec<ImageData> = (0..4).map(|_| image_of_size(EDGE, EDGE)).collect();
+        let mut crowded = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut crowded);
+            for image in &images {
+                builder.draw_image(image, Rect::new(0.0, 0.0, 8.0, 8.0));
+            }
+        }
+
+        let mut hybrid = vello_hybrid::Scene::new(16, 16);
+        let mut resources = HostResources::with_budget(BUDGET);
+
+        // All four inside one frame, so all four are inside the eviction
+        // window: two are admitted, two are turned away, and the real scene
+        // takes the result without a panic.
+        hybrid.reset();
+        resources.images.begin_frame();
+        {
+            let mut sink = HybridSink {
+                ops: SceneOps {
+                    scene: &mut hybrid,
+                    resources: &mut resources,
+                },
+            };
+            encode_into(&crowded, &mut sink);
+        }
+        assert_eq!(resources.uploads, 2);
+        assert_eq!(resources.images.len(), 2);
+        assert_eq!(resources.images.live_pixels, BUDGET);
+
+        // Redrawing the same crowded scene inside the window changes nothing:
+        // the two residents are reused, the two refusals repeat.
+        for _ in 0..(IMAGE_EVICTION_FRAMES - 1) {
+            hybrid.reset();
+            resources.images.begin_frame();
+            let mut sink = HybridSink {
+                ops: SceneOps {
+                    scene: &mut hybrid,
+                    resources: &mut resources,
+                },
+            };
+            encode_into(&crowded, &mut sink);
+        }
+        assert_eq!(resources.uploads, 2);
+
+        // Now stop drawing them and cross the horizon.
+        for _ in 0..IMAGE_EVICTION_FRAMES {
+            resources.images.begin_frame();
+        }
+        let mut destroyed = Vec::new();
+        resources.images.evict_stale(|id| destroyed.push(id));
+        assert_eq!(destroyed.len(), 2);
+        assert_eq!(resources.images.len(), 0);
+        assert_eq!(resources.images.live_pixels, 0);
+
+        // The reclaimed pixels are spendable again.
+        let fresh = image_of_size(EDGE, EDGE);
+        let mut later = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut later);
+            builder.draw_image(&fresh, Rect::new(0.0, 0.0, 8.0, 8.0));
+        }
+        hybrid.reset();
+        resources.images.begin_frame();
+        {
+            let mut sink = HybridSink {
+                ops: SceneOps {
+                    scene: &mut hybrid,
+                    resources: &mut resources,
+                },
+            };
+            encode_into(&later, &mut sink);
+        }
+        assert_eq!(resources.uploads, 3);
+        assert_eq!(resources.images.len(), 1);
     }
 
     #[test]
