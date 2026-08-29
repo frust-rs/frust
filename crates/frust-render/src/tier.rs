@@ -245,10 +245,15 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     }
 }
 
-/// The env var [`render_tier_override_from_env`] reads (the
-/// override plumbing) — set directly, or by `frust run --render-tier
-/// gpu|cpu|hybrid` for the spawned desktop process (mobile: not plumbed in
-/// v1, see `frust-cli`'s `--render-tier` flag help text).
+/// The env var [`render_tier_override_from_env`] reads (the override
+/// plumbing) — a compile-time-or-runtime knob like every other `FRUST_*`
+/// knob (see `context::env_str`'s precedence: runtime wins when both are
+/// set, compile-time otherwise). Set directly at runtime, by `frust run
+/// --render-tier gpu|cpu|hybrid` for the spawned desktop process, or baked in
+/// at build time via `frust build|run --define FRUST_RENDER_TIER=<tier>` —
+/// the only way an override reaches an Android app process, which has no
+/// runtime env to set (mobile: `--render-tier` itself is not plumbed in v1,
+/// see `frust-cli`'s flag help text; `--define` is).
 pub const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
 /// Pure parse of a raw override string (`"gpu"`/`"cpu"`/`"hybrid"`,
@@ -278,14 +283,47 @@ pub fn parse_render_tier_override(raw: &str) -> Option<RenderTier> {
     }
 }
 
-/// Reads and parses [`RENDER_TIER_ENV_VAR`] from the process environment. An
-/// unset var is `None`; a set-but-invalid value is also `None` (a warning is
-/// logged by [`parse_render_tier_override`]) — an override is a convenience,
-/// never a hard config error.
+/// Pure precedence resolution over the two `FRUST_RENDER_TIER` sources —
+/// `compile_time` (an `option_env!("FRUST_RENDER_TIER")` value baked in at
+/// build time) and `runtime` (a `std::env::var` read) — via
+/// [`crate::context::env_str`]'s documented precedence (a non-empty runtime
+/// value wins even when a compile-time value is also set; compile-time is
+/// honoured only when runtime is absent or empty; neither present is
+/// `None`), then [`parse_render_tier_override`] on whichever raw string that
+/// resolves to. Split out from [`render_tier_override_from_env`]'s thin env
+/// wrapper so the precedence itself is unit-testable without mutating
+/// process-wide env state — the same pure-decision/platform-lookup split
+/// this module already follows for [`select_render_tier`], and the shape
+/// `hybrid_tier::atlas_cache_enabled`/`parse_atlas_cache` use for
+/// `FRUST_HYBRID_ATLAS_CACHE`.
+///
+/// An invalid value in whichever source wins precedence is `None` (with the
+/// existing [`parse_render_tier_override`] warning) — it is not retried
+/// against the other source, matching `env_str`'s "runtime wins outright"
+/// precedence rather than a per-field fallback.
+fn render_tier_override_from_sources(
+    compile_time: Option<&'static str>,
+    runtime: Option<String>,
+) -> Option<RenderTier> {
+    crate::context::env_str(compile_time, runtime).and_then(|raw| parse_render_tier_override(&raw))
+}
+
+/// Reads and parses [`RENDER_TIER_ENV_VAR`] from both the compile-time
+/// (`option_env!`, baked in at build time) and runtime (`std::env::var`)
+/// sources — the compile-time-or-runtime shape `context.rs`'s `aa_mode()`/
+/// `render_scale()` knobs use, via [`render_tier_override_from_sources`]. An
+/// Android app process has no runtime env, so the compile-time half (`frust
+/// build --define FRUST_RENDER_TIER=<tier>`) is the only way an override
+/// reaches it; a desktop process may still set the runtime var directly, and
+/// runtime wins when both are present. Neither source present, or a
+/// set-but-invalid value in whichever wins, is `None` (a warning is logged by
+/// [`parse_render_tier_override`]) — an override is a convenience, never a
+/// hard config error.
 pub fn render_tier_override_from_env() -> Option<RenderTier> {
-    std::env::var(RENDER_TIER_ENV_VAR)
-        .ok()
-        .and_then(|raw| parse_render_tier_override(&raw))
+    render_tier_override_from_sources(
+        option_env!("FRUST_RENDER_TIER"),
+        std::env::var(RENDER_TIER_ENV_VAR).ok(),
+    )
 }
 
 #[cfg(test)]
@@ -463,5 +501,55 @@ mod tests {
     fn invalid_override_value_is_ignored() {
         assert_eq!(parse_render_tier_override(""), None);
         assert_eq!(parse_render_tier_override("vello"), None);
+    }
+
+    #[test]
+    fn override_sources_compile_time_only() {
+        // No runtime value: the compile-time half is honoured — the only way
+        // an override reaches an Android app process (no runtime env).
+        assert_eq!(
+            render_tier_override_from_sources(Some("hybrid"), None),
+            Some(RenderTier::Hybrid)
+        );
+    }
+
+    #[test]
+    fn override_sources_runtime_wins_over_compile_time() {
+        // Both set: runtime wins outright, per `env_str`'s precedence.
+        assert_eq!(
+            render_tier_override_from_sources(Some("gpu"), Some("cpu".to_string())),
+            Some(RenderTier::Cpu)
+        );
+    }
+
+    #[test]
+    fn override_sources_neither_present_is_none() {
+        assert_eq!(render_tier_override_from_sources(None, None), None);
+    }
+
+    #[test]
+    fn override_sources_empty_runtime_falls_back_to_compile_time() {
+        // An empty runtime value is treated as unset by `env_str`, so the
+        // compile-time half still applies rather than resolving to `None`.
+        assert_eq!(
+            render_tier_override_from_sources(Some("hybrid"), Some(String::new())),
+            Some(RenderTier::Hybrid)
+        );
+    }
+
+    #[test]
+    fn override_sources_invalid_runtime_is_none_even_with_valid_compile_time() {
+        // Runtime wins precedence outright, so an invalid runtime value is
+        // NOT retried against a (valid) compile-time fallback — it resolves
+        // to `None`, with `parse_render_tier_override`'s existing warning.
+        assert_eq!(
+            render_tier_override_from_sources(Some("gpu"), Some("vello".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn override_sources_invalid_compile_time_with_no_runtime_is_none() {
+        assert_eq!(render_tier_override_from_sources(Some("vello"), None), None);
     }
 }
