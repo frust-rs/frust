@@ -18,6 +18,8 @@
 //! skipped — the engine grows them in later passes, and skipping is the
 //! conservative behaviour (a frame draws less, never wrong).
 
+pub mod paint;
+
 pub mod draw;
 
 pub use draw::{DepthCounter, EngineDraw};

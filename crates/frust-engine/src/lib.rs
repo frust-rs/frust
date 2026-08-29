@@ -12,10 +12,13 @@
 //! parsed at compile-time (via `option_env!`) or runtime (via `std::env::var`),
 //! supporting kill switches for layers, atlas, pooling, depth, and resource limits.
 
+pub mod cache;
 pub mod compile;
 pub mod config;
 pub mod error;
 
+pub use cache::{CachedRamp, GradientCache, GradientTextureLayout};
+pub use compile::paint::{BrushEncoding, LutRequest, encode_brush};
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use error::EngineError;
 
