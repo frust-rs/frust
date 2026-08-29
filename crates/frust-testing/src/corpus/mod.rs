@@ -35,6 +35,7 @@
 //! only caller: every image that reaches a comparator or a stored PNG has
 //! passed through it.
 
+pub mod adversarial;
 pub mod unit;
 
 use anyhow::Result;
@@ -43,6 +44,7 @@ use frust_scene::Scene;
 use crate::case::CaseSpec;
 use crate::render::{AlphaKind, RenderSpec, RenderedImage, SceneRenderer};
 
+pub use adversarial::adversarial_cases;
 pub use unit::unit_cases;
 
 /// What a [`Probe`] asserts about one pixel.
