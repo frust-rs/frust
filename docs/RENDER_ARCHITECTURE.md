@@ -25,6 +25,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-render::compositor` | `Compositor` draws each `FramePlan` layer as one alpha-blended `CompositeTarget` quad, outside vello |
 | `frust-render::tier` | `select_render_tier` probes adapter capabilities to choose GPU (default) vs experimental CPU rendering, with an env/CLI override |
 | `frust-render::hybrid_tier` (crate-private, `#[cfg(feature = "hybrid-tier")]`) | A third `SceneSink` over `vello_hybrid`'s sparse-strip renderer, plus a `Blob`-id-keyed image-residency shim; the measurement spike backing `RenderTier::Hybrid` |
+| `frust-render::headless` | Offscreen classic (vello/GPU) renderer for goldens/oracles: env-aware adapter resolution (`WGPU_ADAPTER_NAME`/`WGPU_BACKEND`), an expect-adapter/expect-backend fail-fast before any pixel is produced, row-padded readback, and the same limits/render-tier probe the live surface path resolves |
 | `frust-text::context` | `TextContext` owns Parley's font context and a shape cache; `register_fonts` hot-swaps app fonts and invalidates it |
 | `frust-text::layout` | `TextLayout` is a finished, measurable shaped block converting to `frust_scene` `GlyphRun`s |
 | `frust-text::style` | `TextStyle` and related types form the styling vocabulary (the M3 type-scale surface) |
@@ -163,6 +164,7 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 | Type | Purpose |
 |------|---------|
 | `RenderContext` / `SurfaceRenderer` / `SurfaceFactory` / `DetachedSurface` / `DeferredPresent` | Device ownership, surface lifecycle/present, and the two sanctioned opaque wgpu wrappers for cross-thread handoff |
+| `HeadlessRenderer` | Offscreen classic renderer reused across renders (one adapter/device/`vello::Renderer`); verifies its resolved adapter/backend against an expectation before rendering and returns plain RGBA8 bytes, never a `vello`/`wgpu` type |
 | `RenderTier` / `TierCaps` | GPU-vs-CPU-vs-Hybrid render-backend selection, probed from adapter capabilities plus an override; `Hybrid` is override-only (see Data Flow) |
 | `SurfacePhase` / `FrameOutcome` / `EncodeOutcome` / `AcquireOutcome` | The surface-can-be-destroyed-anytime lifecycle state machine shared by every shell |
 | `encode_scene` | The sole function converting a `frust_scene::Scene` into a `vello::Scene` |

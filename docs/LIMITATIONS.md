@@ -3710,3 +3710,21 @@ smaller version of the same tradeoff windowed virtualization already accepts els
 
 **Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `ballistic_is_pinned_outward`
 doc comments; `list_view.rs`'s local *One caveat* note on the same method.
+
+### `testing-vello-cpu-layer-recursion` — `vello_cpu` 0.2.0's nested-layer compositing recurses ~O(depth); deep-layer test renders need an oversized stack
+
+**Observed**: the adversarial golden case `adv-5k-layers` (5,000 nested `PushLayer`/`PopLayer`)
+overflows the default ~8 MiB `cargo test` thread stack inside `vello_cpu` 0.2.0's layer
+compositing, which recurses roughly once per open layer (bisected: 8 MiB fails, 16 MiB
+succeeds). This is stack depth, not heap: the case's own 128 MiB heap-delta budget holds
+comfortably (counting allocator + `VmHWM` cross-check).
+
+**Why accepted**: `vello_cpu` is a version-pinned external dependency (dev-only oracle pin
+`=0.2.0`); its compositing internals are not ours to restructure, and the recursion only bites
+at layer depths far beyond any real widget tree.
+
+**Workaround**: `crates/frust-testing/tests/adversarial.rs` runs every corpus-wide render on an
+explicit 64 MiB thread (`run_on_oversized_stack`), documented inline.
+
+**Evidence**: `crates/frust-testing/src/corpus/adversarial.rs`'s `adv-5k-layers` case and
+`tests/adversarial.rs`'s `five_thousand_nested_layers_stay_within_a_bounded_memory_budget`.

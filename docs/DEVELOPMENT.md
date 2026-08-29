@@ -295,6 +295,11 @@ cargo ndk -t arm64-v8a check -p frust-database
 cargo check -p frust-database --target aarch64-apple-ios
 ```
 
+**Render golden/oracle tests** (`frust-testing`) ride this gate's CPU arm automatically
+(root workspace member); the GPU golden/calibration runs and the material3-demo standalone
+page-golden gate are pinned-adapter and standalone-workspace commands respectively — see
+[RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) § Golden / Oracle Tests.
+
 **Manual/gated tests** (not part of the default `cargo test --workspace` run — each
 requires local hardware or is slow, and is marked `#[ignore]` with a reason):
 
