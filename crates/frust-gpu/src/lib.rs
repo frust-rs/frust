@@ -13,5 +13,7 @@
 //! [`caps::TierCaps::fake`] and no GPU in the loop.
 
 pub mod caps;
+pub mod context;
 
 pub use caps::{DownlevelProfile, TierCaps};
+pub use context::{Context, ContextOptions, DeviceHandle};
