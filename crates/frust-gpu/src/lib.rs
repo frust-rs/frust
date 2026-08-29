@@ -27,16 +27,16 @@ pub mod texture;
 
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
-pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
-pub use shader::{ShaderId, ShaderLibrary};
 pub use lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase,
 };
+pub use lint::{check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
+pub use pipeline::{PipelineCache, RenderPipelineDesc, VertexLayout};
+pub use shader::{ShaderId, ShaderLibrary};
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
 };
-pub use lint::{check_limits_against_webgl2, lint_pipeline_layout, lint_wgsl_dir};
 pub use texture::{
     Attachment, ColorAttachment, DepthAttachment, RenderTarget, SceneTextureId, Texture,
     TextureDesc, TextureId, TextureRegistry,
