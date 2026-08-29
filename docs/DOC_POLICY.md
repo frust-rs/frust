@@ -31,10 +31,13 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
+| `GPU`/`ENGINE` | crates/frust-gpu, frust-engine (not yet created) | – |
 
 **Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
+GPU/ENGINE get no spoke of their own — they document inside RENDER's (`RENDER_ARCHITECTURE.md`,
+`RENDER_DEVELOPMENT.md`) since the engine plan folds them into that unit's render pipeline.
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics
 conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`
 and `docs/LIMITATIONS.md` are auxiliary curated docs outside this schema set.

@@ -2188,6 +2188,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-gpu"
+version = "0.1.0"
+dependencies = [
+ "android_system_properties",
+ "anyhow",
+ "bytemuck",
+ "kurbo",
+ "log",
+ "peniko",
+ "pollster",
+ "tempfile",
+ "wgpu",
+]
+
+[[package]]
 name = "frust-haptics"
 version = "0.1.0"
 dependencies = [

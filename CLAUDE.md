@@ -51,3 +51,5 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
   `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals
   scaffold variant must all resolve the identical git+rev spec (two resolution routes
   would give Cargo two crate identities) — do not change one without the others.
+- engine-tier/hybrid-tier are non-default; never make them default outside the engine plan's
+  swap phase.

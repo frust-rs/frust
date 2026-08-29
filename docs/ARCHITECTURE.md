@@ -25,6 +25,7 @@ its own spoke — read this to orient, then follow one link.
 | CLI | `frust-cli`, `frust-drive`, `frust-mcp`, `frust-dap` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines; `frust-mcp` exposes the same driving/diagnosis surface to AI agents over an MCP Streamable HTTP server; `frust-dap` is a launch-orchestration DAP library with no process of its own — `frust-tui` is its only host | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
 | TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean); can embed an `frust-mcp` server and a `frust-dap` server, both over the same sessions, so an AI agent or an IDE debugger drives what the user sees | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
 | DEVTOOLS | `frust-devtools-protocol`, `frust-devtools` | Sanctioned dependency-free wire-protocol leaf plus the in-app loopback debug service (widget-tree inspection, frame stats, input injection) a shell hosts for `frust-drive`/`frust-tui` | [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
+| GPU | `frust-gpu` | The wgpu substrate for the future frust-owned render engine (device/surface/pipeline lifecycle, pipeline cache, shader loading, resource pool/arena, encoder, headless testing, downlevel design-rule lints); documented under RENDER | [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md) |
 
 ## Examples
 
@@ -81,6 +82,8 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   plugins `frust-glyph`/`frust-material`/`frust-cupertino`) sit *beside* the facade in an app's own
   dependency list, never inside it — `frust` itself carries `default = []`, no catalog feature to
   toggle.
+- **Engine-tier boundary** — `frust-gpu` depends on `wgpu`/`kurbo`/`peniko` only; `frust-engine`
+  depends on `frust-gpu` + `frust-scene`; nothing above RENDER depends on either.
 
 ```
 frust-reactive (leaf)              frust-paths (leaf)      tooling: frust-cli/-drive/-tui/-mcp/-dap

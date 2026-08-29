@@ -54,9 +54,37 @@ follows it, so account for that remap before comparing timings across arms
 | `FRUST_HYBRID_ATLAS_CACHE=1` | Turns on `glifo`'s experimental glyph-atlas cache for every glyph run the hybrid tier draws (upstream calls it "not recommended for external use" — a knob, not a default); the only path to `vello_hybrid`'s glyph-atlas-exhaustion `expect` residual (see [LIMITATIONS.md](LIMITATIONS.md)). Logs `frust-render hybrid atlas-cache=on|off` once per process in any hybrid-tier build, plus one `log::warn!` naming the knob when on. Same compile-time-or-runtime shape as the others. | off |
 | hybrid per-frame trace line | Under `perf-trace` + `FRUST_TRACE`, the hybrid tier emits one `frust-perf hybrid strip_us=<n> record_us=<n>` line per frame: `strip_us` is the CPU half (scene reset through the shared command walk's sparse-strip rasterization), `record_us` is the renderer's GPU command-**record** CPU time only — GPU *execution* is not in either window, it lands inside the frame's `submit_us`, same as this tier's whole `HybridDirect` cost (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s Data Flow). **Compare whole-frame totals across tiers, never `encode_us`**: on the classic tier's blit arm the GPU render stays in `encode_us` (small `submit_us`), on its direct arm the render moves into `submit_us` instead — a third, incompatible split from the hybrid tier's own. | off (needs `perf-trace` + `FRUST_TRACE`) |
 
-**Planned, not implemented.** `FRUST_ENGINE_DOWNLEVEL=1` — a future Phase-2 knob to request the
-WebGL2 downlevel limit profile against a desktop backend, as a browser stand-in — does not exist at
-this SHA (`benchmarks/harness/webgl2_arm.md`); do not treat it as a shipped instrument.
+**Shipped in `frust-gpu`, absent in `frust-render`.** `FRUST_ENGINE_DOWNLEVEL=1` now exists as
+`frust-gpu`'s WebGL2 rehearsal knob (clamped `TierCaps` + clamped device request — see the GPU
+Substrate section below); the vello-classic tier documented in this table ignores it, and the
+browser/wasm measurement arm (`benchmarks/harness/webgl2_arm.md`) remains unimplemented.
+
+## GPU Substrate (`frust-gpu`)
+
+`frust-gpu` is the wgpu substrate under the future frust-owned render engine (device/surface/
+pipeline lifecycle, pipeline cache, shader loading, resource pool/arena, encoder, headless
+testing). It carries its own test/adapter-pin split, same shape as `frust-testing` above:
+
+```bash
+# Host-only arm, no GPU/environment needed:
+cargo test -p frust-gpu
+
+# Real-adapter arm, pinned runner (a multi-adapter host must pin explicitly, e.g. the
+# reference Linux rig also enumerates an Intel iGPU alongside the discrete T400; on a Mac
+# the pin is Metal's default adapter):
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
+```
+
+`bytemuck` (`derive` feature) is a `[workspace.dependencies]` row for `frust-gpu`'s
+plain-old-data GPU vertex/uniform types (`Pod`/`Zeroable`); `derive` is the only feature the
+workspace needs.
+
+`crates/frust-gpu/src/lint.rs` plus `tests/downlevel_rules.rs` are downlevel (WebGL2/GLES3.0)
+design-rule lints — a WGSL source scan for disallowed compute/storage/bit-intrinsic/
+depth-textureLoad usage, plus pipeline-layout bounds and WebGL2 limits checks — that run inside
+`cargo test -p frust-gpu`, i.e. the ordinary `cargo test --workspace` gate; they are green
+against the currently empty shader set and become load-bearing once the engine plan starts
+adding shaders.
 
 ## Golden / Oracle Tests
 
