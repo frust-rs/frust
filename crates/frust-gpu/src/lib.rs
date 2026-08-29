@@ -19,6 +19,7 @@ pub mod caps;
 pub mod context;
 pub mod lifecycle;
 pub mod surface;
+pub mod texture;
 
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
@@ -28,4 +29,8 @@ pub use lifecycle::{
 };
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
+};
+pub use texture::{
+    Attachment, ColorAttachment, DepthAttachment, RenderTarget, SceneTextureId, Texture,
+    TextureDesc, TextureId, TextureRegistry,
 };
