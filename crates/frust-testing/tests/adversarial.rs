@@ -251,6 +251,22 @@ const RENDER_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// ([`five_thousand_nested_layers_stay_within_a_bounded_memory_budget`]
 /// below); every test that renders the whole corpus runs on this oversized
 /// stack so an incidental stack limit never masks what the heap does.
+/// Serializes every test in this binary that builds or renders corpus
+/// scenes. The memory-budget test below measures a PROCESS-GLOBAL counting
+/// allocator, so any sibling test allocating concurrently inflates its
+/// observed peak (seen as a deterministic ~30 MB overshoot once
+/// `no_case_shapes_against_a_host_font` joined this binary). The lock keeps
+/// each allocation-heavy window single-tenant without forcing
+/// `--test-threads=1` onto the whole run. Poison is ignored deliberately: one
+/// test's failure must not cascade into every sibling.
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn render_lock() -> std::sync::MutexGuard<'static, ()> {
+    RENDER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn run_on_oversized_stack<F: FnOnce() + Send + 'static>(f: F) {
     std::thread::Builder::new()
         .stack_size(RENDER_THREAD_STACK_BYTES)
@@ -264,6 +280,7 @@ fn run_on_oversized_stack<F: FnOnce() + Send + 'static>(f: F) {
 /// committed `cpu/` baselines, with no GPU involved.
 #[test]
 fn cpu_corpus_matches_its_goldens() {
+    let _serialized = render_lock();
     run_on_oversized_stack(|| {
         let mut oracle = CpuOracle::new();
         run_corpus(
@@ -310,6 +327,7 @@ fn the_unclassified_class_is_not_a_committed_golden_directory() {
 /// rather than as a baseline mismatch.
 #[test]
 fn no_case_shapes_against_a_host_font() {
+    let _serialized = render_lock();
     let mut failures = Vec::new();
     for case in adversarial_cases() {
         for message in foreign_font_runs(&case.scene()) {
@@ -334,6 +352,7 @@ fn no_case_shapes_against_a_host_font() {
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test adversarial -- --ignored`"]
 fn classic_corpus_matches_its_goldens() {
+    let _serialized = render_lock();
     run_on_oversized_stack(|| {
         let mut oracle = ClassicOracle::new(frust_render::HeadlessOptions::default())
             .expect("failed to create the classic (headless GPU) oracle");
@@ -463,6 +482,7 @@ fn five_thousand_nested_layers_stay_within_a_bounded_memory_budget() {
         .find(|case| case.spec.name == "adv-5k-layers")
         .expect("adv-5k-layers must exist in the adversarial corpus");
 
+    let _serialized = render_lock();
     let baseline_current = CURRENT_BYTES.load(Ordering::Relaxed);
     PEAK_BYTES.store(baseline_current, Ordering::Relaxed);
     let rss_before = peak_rss_kib();
