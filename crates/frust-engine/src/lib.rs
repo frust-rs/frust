@@ -12,9 +12,11 @@
 //! parsed at compile-time (via `option_env!`) or runtime (via `std::env::var`),
 //! supporting kill switches for layers, atlas, pooling, depth, and resource limits.
 
+pub mod compile;
 pub mod config;
 pub mod error;
 
+pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use error::EngineError;
 
 /// Alpha output mode for the render target.
