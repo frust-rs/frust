@@ -3,12 +3,15 @@
 //!
 //! `frust-testing` is `publish = false` and dev-only: no crate in this
 //! workspace depends on it outside `[dev-dependencies]` (enforced by
-//! `tests/deps.rs`'s guard). It stays a leaf — no `frust-render`, `vello`,
-//! or `wgpu` dependency — so a headless golden test can pull it in without
-//! dragging a GPU backend along; a GPU-backed [`render::SceneRenderer`]
-//! implementation (an adapter over the real `frust-render` pipeline, …) lives
-//! in whichever crate's tests construct it. The CPU oracle is the one
-//! concrete backend that ships here, because it needs no GPU at all.
+//! `tests/deps.rs`'s guard), so nothing here ever reaches a production
+//! dependency graph. Both arms of the oracle PAIR ship here — the GPU-free
+//! [`oracle_cpu::CpuOracle`] and the `frust-render`-backed
+//! [`oracle_classic::ClassicOracle`] — because [`corpus`] hands the same
+//! case to both behind one [`render::SceneRenderer`]. That is why this crate
+//! carries a `frust-render` edge (at its DEFAULT feature set); see the
+//! manifest's comment for why it is sound. Only `oracle_classic` needs a GPU
+//! at run time: every other module, the CPU arm included, runs on a machine
+//! without one.
 //!
 //! - [`render`]: the renderer-agnostic [`render::SceneRenderer`] trait plus
 //!   its [`render::RenderSpec`]/[`render::RenderedImage`]/
@@ -28,19 +31,29 @@
 //!   installed — see that module's docs.
 //! - [`oracle_cpu`]: [`oracle_cpu::CpuOracle`], the deterministic `vello_cpu`
 //!   0.2.0 reference renderer a golden case is compared against.
+//! - [`oracle_classic`]: [`oracle_classic::ClassicOracle`], the GPU arm of
+//!   that pair over `frust-render`'s offscreen vello-classic renderer, plus
+//!   the adapter-to-golden-class routing ([`oracle_classic::golden_class`]).
+//! - [`corpus`]: the named golden cases themselves
+//!   ([`corpus::CorpusCase`]/[`corpus::Probe`]), starting with
+//!   [`corpus::unit`] — one case per `frust_scene::Command` variant.
 
 pub mod case;
+pub mod corpus;
 pub mod diff;
 pub mod fonts;
 pub mod golden;
 pub mod meta;
+pub mod oracle_classic;
 pub mod oracle_cpu;
 pub mod render;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
+pub use corpus::{CorpusCase, Expect, Probe, render_case, straighten_alpha, unit_cases};
 pub use diff::{DiffOutcome, DiffReport, PixelDiff};
 pub use fonts::{register_test_fonts, test_fonts};
 pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
+pub use oracle_classic::{ClassicOracle, UNCLASSIFIED_CLASS, golden_class};
 pub use oracle_cpu::{CpuOracle, ORACLE_ID, SkipReport};
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};

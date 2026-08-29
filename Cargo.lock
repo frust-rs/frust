@@ -2527,12 +2527,14 @@ name = "frust-testing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "frust-render",
  "frust-scene",
  "frust-text",
  "image",
  "kurbo",
  "log",
  "peniko",
+ "pollster",
  "serde",
  "serde_json",
  "toml 1.1.4+spec-1.1.0",

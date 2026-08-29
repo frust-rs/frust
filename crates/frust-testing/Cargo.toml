@@ -11,15 +11,29 @@ publish = false
 
 [dependencies]
 # Renderer-agnostic scene display list every `SceneRenderer` implementation
-# renders — kept off `frust-render`/`vello`/`wgpu` so this crate stays a leaf
-# a headless golden test can depend on without pulling in a GPU backend.
+# renders — the vocabulary both oracle arms decode, and the only render input
+# a golden case is allowed to record through (`corpus::unit`'s
+# `SceneBuilder`-only rule).
 frust-scene = { workspace = true }
 # Backs `fonts::register_test_fonts` — registering the bundled test-only
 # fonts (`testing/fonts/`) into a `TextContext` so a golden/host test shapes
 # deterministically without any system font (docs/TESTING.md's Deterministic
-# Inputs). `frust-text` carries no `vello`/`wgpu` dependency itself, so this
-# does not compromise the leaf/no-GPU-backend charter above.
+# Inputs). Also the one sanctioned way `corpus::unit`'s `unit-glyph-run` case
+# turns text into `frust_scene::GlyphRun`s: shaped against the bundled faces
+# only, never a host font.
 frust-text = { workspace = true }
+# Backs `oracle_classic::ClassicOracle` — the vello-classic (GPU) arm of the
+# oracle pair, a `SceneRenderer` over `frust_render::HeadlessRenderer`. This
+# is the ONE place this crate's former "GPU-free leaf" charter is relaxed, and
+# it is relaxed deliberately: an oracle PAIR needs both arms behind one trait,
+# and this crate is `publish = false`, reachable only across a
+# `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
+# ever sees the edge. `features = []` keeps the DEFAULT feature set (no
+# `cpu-tier`, no `hybrid-tier`, no `perf-trace`): the classic arm must be the
+# pipeline an app actually ships, and `cpu-tier` would additionally drag the
+# legacy `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own
+# graph beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
+frust-render = { workspace = true, features = [] }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 # Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin
@@ -44,9 +58,15 @@ serde_json = { workspace = true }
 # than a dev one: `CpuOracle` is part of this crate's own API, and this whole
 # crate is `publish = false` and reachable only across a `[dev-dependencies]`
 # edge (tests/deps.rs's guard), so no production graph ever sees it. Not
-# `vello`/`wgpu` — the oracle rasterizes on the CPU, so this crate stays the
-# GPU-free leaf its module docs promise.
+# `vello`/`wgpu` — this arm of the oracle pair rasterizes on the CPU, so it
+# runs on a GPU-less machine even though `frust-render` is now in the graph.
 vello_cpu_oracle = { workspace = true }
+# `frust_render::HeadlessRenderer`'s adapter/device/render API is `async`
+# (wgpu's requests and its error scope are futures) while `SceneRenderer` is
+# sync, so `oracle_classic` drives it with the same minimal block-on executor
+# `frust-render`'s own GPU tests use. A NORMAL dependency for the same reason
+# `vello_cpu_oracle` is one: `ClassicOracle` is part of this crate's API.
+pollster = { workspace = true }
 
 [dev-dependencies]
 # tests/deps.rs parses every crate/plugin manifest to enforce the
