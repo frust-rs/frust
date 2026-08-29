@@ -28,7 +28,7 @@
 //! — safe to construct in a headless/no-AT-client CI environment.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use accesskit_winit::{
@@ -73,6 +73,167 @@ use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
+
+/// The env/compile-time var overriding [`INITIAL_SIZE`]: `<width>x<height>` in
+/// logical pixels (e.g. `2560x1440`). Measurement knob — see
+/// [`parse_window_size`] and [`window_size_config`]. Same
+/// compile-time-`option_env!`-or-runtime-`std::env::var` shape as
+/// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD`, runtime winning: it exists so a
+/// large-surface device/desktop gate (a macOS 5K display, say) can be measured
+/// without an accessibility-scripted window move, which loses the window.
+const WINDOW_SIZE_VAR: &str = "FRUST_WINDOW_SIZE";
+
+/// The env/compile-time var maximizing the preview window at creation
+/// (`1`/`true`, case-insensitive; every other value, including unset, leaves
+/// it un-maximized). Measurement knob, same shape as [`WINDOW_SIZE_VAR`]. When
+/// both knobs are set, [`WINDOW_SIZE_VAR`] is still applied but maximizing
+/// wins visually — the OS ignores a requested inner size for a window it
+/// maximizes at creation.
+const WINDOW_MAXIMIZED_VAR: &str = "FRUST_WINDOW_MAXIMIZED";
+
+/// Where an effective [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] value came
+/// from, for the one-line-once log [`window_size_config`] emits — the same
+/// "which build ran" evidence `frust-render`'s `FRUST_AA_MODE`/
+/// `FRUST_RENDER_SCALE` knobs log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WindowKnobSource {
+    /// Neither knob's env var carried a non-empty value — the byte-identical
+    /// default path (800x600, not maximized).
+    Default,
+    /// A non-empty value came from the compile-time `option_env!` half (baked
+    /// in by `frust build --define`).
+    Define,
+    /// A non-empty value came from the runtime process environment — wins
+    /// over a compile-time define when both are set.
+    Env,
+}
+
+impl std::fmt::Display for WindowKnobSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            WindowKnobSource::Default => "default",
+            WindowKnobSource::Define => "define",
+            WindowKnobSource::Env => "env",
+        })
+    }
+}
+
+/// Resolves one `FRUST_*` string-valued knob's raw value plus which half
+/// supplied it, checking both the compile-time (`option_env!`) and runtime
+/// (`std::env::var`) halves like `frust-render::context::env_str` — **runtime
+/// wins**: a non-empty runtime value is returned even when a compile-time
+/// value is also set; an empty (`""`) runtime value is treated as unset and
+/// falls through to the compile-time half. Not shared with `frust-render`'s
+/// copy (that one is crate-private to `frust-render`) — this crate's write
+/// scope is `app_handler.rs` alone, so the shape is duplicated rather than
+/// promoted to a shared crate.
+fn resolved_window_knob(
+    compile_time: Option<&'static str>,
+    runtime: Option<String>,
+) -> (Option<String>, WindowKnobSource) {
+    fn non_empty(value: Option<String>) -> Option<String> {
+        value.filter(|v| !v.is_empty())
+    }
+    if let Some(value) = non_empty(runtime) {
+        (Some(value), WindowKnobSource::Env)
+    } else if let Some(value) = non_empty(compile_time.map(str::to_string)) {
+        (Some(value), WindowKnobSource::Define)
+    } else {
+        (None, WindowKnobSource::Default)
+    }
+}
+
+/// Parses one `<width>x<height>` dimension: strictly `^[0-9]+$`, and at least
+/// 1 (a 0-sized axis is not a window).
+fn parse_window_dimension(raw: &str) -> Option<u32> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse::<u32>().ok().filter(|value| *value >= 1)
+}
+
+/// Parses a raw [`WINDOW_SIZE_VAR`] value (already resolved by
+/// [`resolved_window_knob`]) into a logical window size.
+///
+/// Strict: `^[0-9]+x[0-9]+$`, both components at least 1 — no surrounding
+/// whitespace inside either component, no sign, no decimal point, exactly one
+/// `x` separator (surrounding whitespace on the whole value is trimmed first,
+/// matching every other `FRUST_*` string knob's parser). An unset or empty
+/// value falls back to [`INITIAL_SIZE`] silently — that is simply "the knob
+/// wasn't touched". Any other value (missing/extra `x`, non-digit characters,
+/// a zero component, a component too large for `u32`) also falls back to
+/// `INITIAL_SIZE`, but logs one `log::warn!` naming the offending value, since
+/// that case is far more likely a typo than a deliberate default.
+fn parse_window_size(raw: Option<&str>) -> LogicalSize<u32> {
+    let Some(trimmed) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return INITIAL_SIZE;
+    };
+    if let Some((width_raw, height_raw)) = trimmed.split_once('x')
+        && let (Some(width), Some(height)) = (
+            parse_window_dimension(width_raw),
+            parse_window_dimension(height_raw),
+        )
+    {
+        return LogicalSize::new(width, height);
+    }
+    log::warn!(
+        "frust-shell-desktop: invalid {WINDOW_SIZE_VAR} value {trimmed:?}, expected \
+         <width>x<height> in logical pixels (e.g. 1280x720) with both at least 1, falling back \
+         to {}x{}",
+        INITIAL_SIZE.width,
+        INITIAL_SIZE.height
+    );
+    INITIAL_SIZE
+}
+
+/// Parses a raw [`WINDOW_MAXIMIZED_VAR`] value (already resolved by
+/// [`resolved_window_knob`]) into whether the preview window should be
+/// created maximized.
+///
+/// `1` and `true` (case-insensitive, surrounding whitespace trimmed) enable
+/// it; every other value, including unset, leaves the window un-maximized.
+/// Deliberately no warn-on-unrecognised arm, mirroring
+/// `frust-render::hybrid_tier::parse_atlas_cache`: unlike
+/// [`parse_window_size`]'s strict grammar this is a plain flag, and the
+/// effective value is logged either way by [`window_size_config`].
+fn parse_window_maximized(raw: Option<&str>) -> bool {
+    raw.map(str::trim)
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
+}
+
+/// The process-wide effective preview-window size/maximized configuration,
+/// resolved once from [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`]
+/// (compile-time-or-runtime, see [`resolved_window_knob`]) and cached — a
+/// knob change requires a fresh process, matching every other `FRUST_*` knob.
+/// Logs the effective choice exactly once, the same one-line-once convention
+/// `frust-render`'s `FRUST_AA_MODE`/`FRUST_RENDER_SCALE` knobs use, so a
+/// captured log proves which configuration a run used.
+fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
+    static CONFIG: OnceLock<(LogicalSize<u32>, bool, WindowKnobSource)> = OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        let (size_raw, size_source) = resolved_window_knob(
+            option_env!("FRUST_WINDOW_SIZE"),
+            std::env::var(WINDOW_SIZE_VAR).ok(),
+        );
+        let (maximized_raw, maximized_source) = resolved_window_knob(
+            option_env!("FRUST_WINDOW_MAXIMIZED"),
+            std::env::var(WINDOW_MAXIMIZED_VAR).ok(),
+        );
+        let size = parse_window_size(size_raw.as_deref());
+        let maximized = parse_window_maximized(maximized_raw.as_deref());
+        // Whichever of the two independent knobs was set from the
+        // higher-precedence half decides the reported source (`Env` >
+        // `Define` > `Default`) — a single log line describes the whole
+        // window configuration, not each knob separately.
+        let source = size_source.max(maximized_source);
+        log::info!(
+            "frust-shell-desktop window size={}x{} logical maximized={maximized} source={source}",
+            size.width,
+            size.height
+        );
+        (size, maximized, source)
+    })
+}
 
 /// User events posted to the desktop event loop from off the UI thread.
 ///
@@ -387,14 +548,35 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
 }
 
+/// Applies the resolved window-size configuration ([`window_size_config`]) to
+/// an in-progress [`WindowAttributes`]: the logical inner size always, plus
+/// `with_maximized(true)` when the maximized knob is on. A free function
+/// (rather than inlined in [`window_attributes`]) so the "known
+/// size/maximized in, attributes out" step is unit-testable host-side without
+/// touching the process environment.
+fn apply_window_size(
+    attributes: WindowAttributes,
+    size: LogicalSize<u32>,
+    maximized: bool,
+) -> WindowAttributes {
+    let attributes = attributes.with_inner_size(size);
+    if maximized {
+        attributes.with_maximized(true)
+    } else {
+        attributes
+    }
+}
+
 /// Assemble the preview window's [`WindowAttributes`] from the app's
 /// [`DesktopConfig`], then hand them to the extension's pre-create hook.
 ///
-/// The core's own three attributes come first so an extension can override any
-/// of them:
+/// The core's own attributes come first so an extension can override any of
+/// them:
 /// * the title, from [`DesktopConfig::window_title`] (the configured
 ///   `app_name`, else the `"Frust"` fallback this shell used to hardcode);
-/// * the initial logical size;
+/// * the initial logical size — [`INITIAL_SIZE`] by default, overridable via
+///   the [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] measurement knobs (see
+///   [`window_size_config`]);
 /// * `visible(false)` — the accessibility adapter must be constructed before
 ///   the window is ever shown (see [`Adapter::with_event_loop_proxy`]'s
 ///   contract), so `resumed` makes it visible itself once that is done.
@@ -406,10 +588,11 @@ fn window_attributes(
     config: &DesktopConfig,
     extensions: &mut impl DesktopExtensions,
 ) -> WindowAttributes {
+    let (size, maximized, _source) = window_size_config();
     let attributes = WindowAttributes::default()
         .with_title(config.window_title())
-        .with_inner_size(INITIAL_SIZE)
         .with_visible(false);
+    let attributes = apply_window_size(attributes, size, maximized);
     extensions.on_window_attributes(attributes)
 }
 
@@ -1849,13 +2032,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync,
-        MouseScrollDelta, NoExtensions, Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey,
-        WinitTheme, base_theme, brightness_change_to_notify, brightness_from_winit,
-        build_tree_update, cursor_change_to_apply, default_theme, finish,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, LogicalSize,
+        MouseScrollDelta, NoExtensions, Tree, TreeId, WindowKnobSource, WinitCursorIcon, WinitKey,
+        WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, cursor_change_to_apply, default_theme, finish,
         follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
         map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
-        physical_to_logical, theme_after_override_poll, window_attributes, winit_cursor_for,
+        parse_window_maximized, parse_window_size, physical_to_logical, resolved_window_knob,
+        theme_after_override_poll, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
@@ -3096,6 +3280,131 @@ mod tests {
             attributes.title, "overridden",
             "the hook sees the core's attributes and its result wins — the only \
              chance a per-OS shell gets at pre-create-only attributes"
+        );
+    }
+
+    // --- the FRUST_WINDOW_SIZE / FRUST_WINDOW_MAXIMIZED measurement knobs ---
+    //
+    // The parsers take explicit `Option<&str>` rather than touching the
+    // process environment (the `render_thread_kill_switch`/`frame_gate`
+    // precedent) — env-var tests that mutated `std::env` would race every
+    // other test in this binary sharing the same process.
+
+    #[test]
+    fn parse_window_size_valid() {
+        assert_eq!(
+            parse_window_size(Some("2560x1440")),
+            LogicalSize::new(2560, 1440)
+        );
+        // Surrounding whitespace on the whole value is trimmed, matching
+        // every other `FRUST_*` string knob's parser.
+        assert_eq!(
+            parse_window_size(Some("  1280x720  ")),
+            LogicalSize::new(1280, 720)
+        );
+        // The smallest legal value: both components at least 1.
+        assert_eq!(parse_window_size(Some("1x1")), LogicalSize::new(1, 1));
+    }
+
+    #[test]
+    fn parse_window_size_missing_falls_back_silently() {
+        assert_eq!(parse_window_size(None), super::INITIAL_SIZE);
+        assert_eq!(parse_window_size(Some("")), super::INITIAL_SIZE);
+        assert_eq!(parse_window_size(Some("   ")), super::INITIAL_SIZE);
+    }
+
+    #[test]
+    fn parse_window_size_zero_component_falls_back() {
+        assert_eq!(parse_window_size(Some("0x600")), super::INITIAL_SIZE);
+        assert_eq!(parse_window_size(Some("800x0")), super::INITIAL_SIZE);
+        assert_eq!(parse_window_size(Some("0x0")), super::INITIAL_SIZE);
+    }
+
+    #[test]
+    fn parse_window_size_invalid_falls_back() {
+        for invalid in [
+            "800",                      // no separator
+            "800x",                     // missing height
+            "x600",                     // missing width
+            "800x600x400",              // extra separator
+            "800X600",                  // wrong case separator
+            "800.5x600",                // not an integer
+            "-800x600",                 // signed
+            "800 x 600",                // inner whitespace around the separator
+            "eightx600",                // non-digit
+            "800xsix",                  // non-digit
+            "99999999999999999999x600", // overflows u32
+        ] {
+            assert_eq!(
+                parse_window_size(Some(invalid)),
+                super::INITIAL_SIZE,
+                "expected {invalid:?} to fall back to the default size"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_window_maximized_recognises_one_and_true() {
+        assert!(parse_window_maximized(Some("1")));
+        assert!(parse_window_maximized(Some("true")));
+        assert!(parse_window_maximized(Some("TRUE")));
+        assert!(parse_window_maximized(Some("  True  ")));
+    }
+
+    #[test]
+    fn parse_window_maximized_defaults_to_false() {
+        assert!(!parse_window_maximized(None));
+        assert!(!parse_window_maximized(Some("")));
+        assert!(!parse_window_maximized(Some("0")));
+        assert!(!parse_window_maximized(Some("yes")));
+        assert!(!parse_window_maximized(Some("2")));
+    }
+
+    #[test]
+    fn resolved_window_knob_runtime_wins_over_compile_time() {
+        assert_eq!(
+            resolved_window_knob(Some("800x600"), Some("2560x1440".to_string())),
+            (Some("2560x1440".to_string()), WindowKnobSource::Env)
+        );
+    }
+
+    #[test]
+    fn resolved_window_knob_empty_runtime_falls_through_to_compile_time() {
+        assert_eq!(
+            resolved_window_knob(Some("800x600"), Some(String::new())),
+            (Some("800x600".to_string()), WindowKnobSource::Define)
+        );
+    }
+
+    #[test]
+    fn resolved_window_knob_neither_set_is_default() {
+        assert_eq!(
+            resolved_window_knob(None, None),
+            (None, WindowKnobSource::Default)
+        );
+    }
+
+    #[test]
+    fn apply_window_size_sets_inner_size_and_leaves_maximized_off_by_default() {
+        let attributes = apply_window_size(
+            WindowAttributes::default(),
+            LogicalSize::new(1280, 720),
+            false,
+        );
+        assert_eq!(
+            attributes.inner_size,
+            Some(LogicalSize::new(1280, 720).into())
+        );
+        assert!(!attributes.maximized);
+    }
+
+    #[test]
+    fn apply_window_size_sets_maximized_when_requested() {
+        let attributes = apply_window_size(WindowAttributes::default(), super::INITIAL_SIZE, true);
+        assert!(
+            attributes.maximized,
+            "FRUST_WINDOW_MAXIMIZED=1 must set WindowAttributes::maximized — the size is still \
+             applied (documented), but the OS ignores it for a window maximized at creation"
         );
     }
 
