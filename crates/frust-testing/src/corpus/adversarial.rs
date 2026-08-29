@@ -79,6 +79,7 @@ pub fn adversarial_cases() -> Vec<CorpusCase> {
         snapshot_scale_alpha(),
         empty_scene(),
         unbalanced_pops(),
+        unbalanced_pop_in_snapshot(),
     ];
     cases.extend(one_px_divider_family());
     cases
@@ -748,6 +749,71 @@ fn unbalanced_pops() -> CorpusCase {
     }
 }
 
+/// `adv-unbalanced-pop-in-snapshot`: an unbalanced `PopClip` and an unbalanced
+/// `PopLayer`, each inside its own `alpha < 1.0` `PushSnapshot` bracket, plus
+/// the original review counterexample (a `PopClip` immediately followed by
+/// the bracket's own `PopSnapshot`).
+///
+/// `no_ref`: the malformed content's own pixels are not a stable contract —
+/// see `adv-nan-transform`'s identical rationale — the only portable
+/// assertion is that rendering does not panic and that ordinary content
+/// recorded after the malformed brackets is unaffected.
+///
+/// # Guards against
+///
+/// [`crate::oracle_cpu::CpuOracle`]'s inline `PushSnapshot`/`PopSnapshot`
+/// emulation tracks its own alpha layer via a `snapshot_layer_pushed` flag
+/// separate from the shared clip/opacity `groups` stack `PopClip`/`PopLayer`
+/// pop from. Before the fix this guards against, an unbalanced `PopClip` or
+/// `PopLayer` recorded inside the bracket (both individually documented as
+/// ignored-when-unmatched, `scene.rs`'s policy `adv-unbalanced-pops` already
+/// covers standalone) consumed the snapshot's own `groups` entry AND popped
+/// the one backend layer the bracket had pushed, while `snapshot_layer_pushed`
+/// stayed `true` — so the bracket's own `PopSnapshot` popped a SECOND,
+/// already-empty backend layer, underflowing `vello_cpu`'s layer stack and
+/// panicking. The GPU (`vello`) arm survives the identical scene because
+/// vello's resolver tolerates the imbalance the CPU rasterizer does not — an
+/// oracle-only crash on a scene a `SceneBuilder` can actually produce.
+fn unbalanced_pop_in_snapshot() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
+
+        // The original review counterexample: an unbalanced PopClip
+        // immediately consumes the bracket's own emulated alpha layer.
+        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.pop_clip();
+        builder.pop_snapshot();
+
+        // The PopLayer-shaped variant of the same desync.
+        builder.push_snapshot(2, rect, 0.5, 1.0);
+        builder.pop_layer();
+        builder.pop_snapshot();
+
+        // Control, recorded after both malformed brackets: recording and
+        // rendering must resume normally.
+        builder.fill_rect(Rect::new(44.0, 44.0, 60.0, 60.0), Brush::Solid(BLUE));
+    }
+    CorpusCase {
+        spec: case("adv-unbalanced-pop-in-snapshot").with_no_ref(true),
+        record,
+        probes: &[Probe {
+            x: 52,
+            y: 52,
+            expect: Expect::Exact([0, 0, 255, 255]),
+            why: "content recorded after an unbalanced PopClip and an unbalanced PopLayer, each \
+                  inside its own alpha < 1.0 snapshot bracket, must still land fully opaque and \
+                  unclipped at root",
+        }],
+        eroded_interior: false,
+        about: "an unbalanced PopClip and an unbalanced PopLayer, each inside its own alpha < \
+                1.0 PushSnapshot bracket — guards against the emulated snapshot layer's \
+                bookkeeping desyncing from the backend layer stack and panicking on the \
+                bracket's own PopSnapshot",
+    }
+}
+
 /// The device-pixel canvas every [`one_px_divider_family`] case renders into
 /// — fixed across the family so the same probe coordinates are comparable at
 /// every scale (`RenderSpec::scale` multiplies recorded geometry, never the
@@ -910,10 +976,12 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_twelve_documented_families_are_present() {
-        // The task names 12 cases; the 1-px-divider family is 3 CaseSpecs
-        // sharing one geometry helper (see `one_px_divider_family`'s docs for
-        // why), so the corpus totals 14 CaseSpecs across 12 families.
+    fn exactly_the_thirteen_documented_families_are_present() {
+        // 12 families were documented pre-p1-r1-02; the review-fix task added
+        // `adv-unbalanced-pop-in-snapshot` as a 13th. The 1-px-divider family
+        // is 3 CaseSpecs sharing one geometry helper (see
+        // `one_px_divider_family`'s docs for why), so the corpus totals 15
+        // CaseSpecs across 13 families.
         let cases = adversarial_cases();
         let mut families: BTreeSet<&str> = BTreeSet::new();
         for case in &cases {
@@ -925,7 +993,7 @@ mod tests {
                 .unwrap_or(case.spec.name);
             families.insert(family);
         }
-        assert_eq!(families.len(), 12, "{families:?}");
+        assert_eq!(families.len(), 13, "{families:?}");
     }
 
     #[test]
@@ -937,9 +1005,13 @@ mod tests {
             .collect();
         assert_eq!(
             no_ref,
-            BTreeSet::from(["adv-nan-transform", "adv-5k-layers"]),
-            "only the malformed-transform and the 5,000-layer depth cases have no stable \
-             baseline to compare against"
+            BTreeSet::from([
+                "adv-nan-transform",
+                "adv-5k-layers",
+                "adv-unbalanced-pop-in-snapshot"
+            ]),
+            "only the malformed-transform, the 5,000-layer depth, and the unbalanced-pop-in- \
+             snapshot cases have no stable baseline to compare against"
         );
     }
 

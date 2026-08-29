@@ -556,6 +556,19 @@ enum Group {
     Clip(Option<RoundedRectRadii>),
     /// An opacity group, carrying the alpha to re-push with.
     Layer(f32),
+    /// The alpha layer `PushSnapshot`'s inline emulation pushes when its
+    /// `alpha < 1.0`, backend-identical to [`Group::Layer`] (same
+    /// `push_layer`/`pop_layer` calls) but tagged separately so it is VISIBLE
+    /// to `PopClip`/`PopLayer`'s guard: a `SceneBuilder` can record either of
+    /// those with no matching push (`scene.rs`'s documented unbalanced-pop
+    /// policy), and since every group lives on one shared stack, such a pop
+    /// consumes whatever is innermost — which can be this entry rather than
+    /// its own kind. When that happens, `snapshot_layer_pushed` must be
+    /// cleared so the matching `PopSnapshot` does not pop the same
+    /// already-consumed backend layer a second time (the layer-stack
+    /// underflow this variant exists to prevent — `vello_cpu` panics on it,
+    /// unlike vello's GPU resolver, which tolerates the imbalance).
+    SnapshotLayer(f32),
 }
 
 /// Walks `commands` into `painter` under `root`, pre-multiplied onto every
@@ -641,8 +654,20 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 // vello tolerates the imbalance, and `vello_cpu` panics on a
                 // layer-stack underflow. An oracle must not be the component
                 // that dies on a malformed scene.
-                if groups.pop().is_some() {
+                //
+                // The popped entry can be a `Group::SnapshotLayer` rather than
+                // a `Group::Clip` — all three `Group` kinds share one stack,
+                // so an unbalanced pop consumes whichever is innermost. When
+                // it is the snapshot's own emulated layer, `pop_clip`'s
+                // backend call is still correct (it and `pop_layer` both
+                // reduce to the same `ctx.pop_layer()`), but the bookkeeping
+                // must say so or the matching `PopSnapshot` pops the same
+                // now-empty backend layer again (see `Group::SnapshotLayer`).
+                if let Some((kind, ..)) = groups.pop() {
                     painter.pop_clip();
+                    if matches!(kind, Group::SnapshotLayer(_)) {
+                        snapshot_layer_pushed = false;
+                    }
                 }
             }
             Command::Image {
@@ -679,9 +704,13 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 painter.push_layer(transform, rect, *alpha);
             }
             Command::PopLayer => {
-                // Guarded for the same reason as `PopClip` above.
-                if groups.pop().is_some() {
+                // Guarded for the same reason as `PopClip` above, including
+                // the same possibility of consuming a `Group::SnapshotLayer`.
+                if let Some((kind, ..)) = groups.pop() {
                     painter.pop_layer();
+                    if matches!(kind, Group::SnapshotLayer(_)) {
+                        snapshot_layer_pushed = false;
+                    }
                 }
             }
             Command::ClearRect { rect, transform } if groups.is_empty() => {
@@ -702,7 +731,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     for (kind, ..) in groups.iter().rev() {
                         match kind {
                             Group::Clip(_) => painter.pop_clip(),
-                            Group::Layer(_) => painter.pop_layer(),
+                            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
                         }
                     }
                     painter.clear_rect(Affine::IDENTITY, &punch);
@@ -710,7 +739,9 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                         match kind {
                             Group::Clip(None) => painter.push_clip(*t, r),
                             Group::Clip(Some(radii)) => painter.push_clip_rounded(*t, r, *radii),
-                            Group::Layer(alpha) => painter.push_layer(*t, r, *alpha),
+                            Group::Layer(alpha) | Group::SnapshotLayer(alpha) => {
+                                painter.push_layer(*t, r, *alpha)
+                            }
                         }
                     }
                 }
@@ -783,7 +814,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     }
                     if *alpha < 1.0 {
                         let corrected = root * snapshot_correction * *transform;
-                        groups.push((Group::Layer(*alpha), corrected, *rect));
+                        groups.push((Group::SnapshotLayer(*alpha), corrected, *rect));
                         painter.push_layer(corrected, rect, *alpha);
                         snapshot_layer_pushed = true;
                     }
@@ -794,6 +825,15 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 if snapshot_depth > 0 {
                     snapshot_depth -= 1;
                     if snapshot_depth == 0 {
+                        // `snapshot_layer_pushed` is only true here when the
+                        // `Group::SnapshotLayer` this bracket pushed is still
+                        // on the stack: `PopClip`/`PopLayer` clear the flag
+                        // themselves the moment either one consumes it (see
+                        // `Group::SnapshotLayer`'s docs), so this pop can
+                        // never underflow the backend's layer stack a second
+                        // time — the review counterexample this guards
+                        // against (`push_snapshot` alpha < 1.0, an unbalanced
+                        // `PopClip`/`PopLayer`, then `pop_snapshot`).
                         if snapshot_layer_pushed {
                             groups.pop();
                             painter.pop_layer();
@@ -812,7 +852,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     for (kind, ..) in groups.iter().rev() {
         match kind {
             Group::Clip(_) => painter.pop_clip(),
-            Group::Layer(_) => painter.pop_layer(),
+            Group::Layer(_) | Group::SnapshotLayer(_) => painter.pop_layer(),
         }
     }
 
@@ -1168,6 +1208,58 @@ mod tests {
             .render(&scene, &spec(8, Color::WHITE))
             .expect("an unbalanced scene still renders");
         assert_eq!(pixel(&image, 2, 2), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn an_unbalanced_pop_clip_inside_a_snapshot_layer_does_not_panic() {
+        // The review counterexample: an alpha < 1.0 `PushSnapshot` bracket
+        // emulates its alpha as a `groups` entry and pushes ONE backend
+        // layer; an unbalanced `PopClip` with no matching push then consumes
+        // that same entry (`groups.pop()` does not distinguish which kind of
+        // group is innermost) and pops the one backend layer that exists.
+        // The matching `PopSnapshot` must not pop a SECOND time — before the
+        // fix, it did unconditionally, underflowing `vello_cpu`'s layer
+        // stack and panicking.
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_snapshot(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
+            builder.pop_clip();
+            builder.pop_snapshot();
+            builder.fill_rect(Rect::new(0.0, 0.0, 4.0, 4.0), Brush::Solid(RED));
+        }
+        let mut oracle = CpuOracle::new();
+        let image = oracle
+            .render(&scene, &spec(8, Color::WHITE))
+            .expect("the counterexample must render without panicking");
+        assert_eq!(
+            pixel(&image, 2, 2),
+            [255, 0, 0, 255],
+            "rendering must resume normally after the desynced pop"
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_pop_layer_inside_a_snapshot_layer_does_not_panic() {
+        // Same shape as the `PopClip` counterexample above, exercising the
+        // `PopLayer` arm's own guard instead.
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            builder.push_snapshot(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
+            builder.pop_layer();
+            builder.pop_snapshot();
+            builder.fill_rect(Rect::new(0.0, 0.0, 4.0, 4.0), Brush::Solid(RED));
+        }
+        let mut oracle = CpuOracle::new();
+        let image = oracle
+            .render(&scene, &spec(8, Color::WHITE))
+            .expect("the PopLayer counterexample must render without panicking");
+        assert_eq!(
+            pixel(&image, 2, 2),
+            [255, 0, 0, 255],
+            "rendering must resume normally after the desynced pop"
+        );
     }
 
     #[test]
