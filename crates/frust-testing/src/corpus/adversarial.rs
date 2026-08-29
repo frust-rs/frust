@@ -977,9 +977,9 @@ mod tests {
 
     #[test]
     fn exactly_the_thirteen_documented_families_are_present() {
-        // 12 families were documented pre-p1-r1-02; the review-fix task added
-        // `adv-unbalanced-pop-in-snapshot` as a 13th. The 1-px-divider family
-        // is 3 CaseSpecs sharing one geometry helper (see
+        // 12 original families plus `adv-unbalanced-pop-in-snapshot`, the
+        // 13th, which guards the snapshot-bracket pop desync. The 1-px-divider
+        // family is 3 CaseSpecs sharing one geometry helper (see
         // `one_px_divider_family`'s docs for why), so the corpus totals 15
         // CaseSpecs across 13 families.
         let cases = adversarial_cases();
