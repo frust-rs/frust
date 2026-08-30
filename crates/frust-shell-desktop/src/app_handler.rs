@@ -192,8 +192,7 @@ fn parse_window_size(raw: Option<&str>) -> LogicalSize<u32> {
 ///
 /// `1` and `true` (case-insensitive, surrounding whitespace trimmed) enable
 /// it; every other value, including unset, leaves the window un-maximized.
-/// Deliberately no warn-on-unrecognised arm, mirroring
-/// `frust-render::hybrid_tier::parse_atlas_cache`: unlike
+/// Deliberately no warn-on-unrecognised arm: unlike
 /// [`parse_window_size`]'s strict grammar this is a plain flag, and the
 /// effective value is logged either way by [`window_size_config`].
 fn parse_window_maximized(raw: Option<&str>) -> bool {

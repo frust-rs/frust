@@ -9,7 +9,7 @@
 //! already cover this same directory's manifests for a different guard).
 //!
 //! - **G5**: the root `[workspace.dependencies]` rows for `vello_common`,
-//!   `glifo`, `vello_cpu`, `vello_cpu_oracle`, and `vello_hybrid` each carry a
+//!   `glifo`, `vello_cpu`, and `vello_cpu_oracle` each carry a
 //!   literal `=` version — the engine-core render stack is exact-pinned,
 //!   pre-1.0 and unstable, per `docs/RENDER_DEVELOPMENT.md`'s Version Pins.
 //! - **G7**: `frust-engine` never depends on `vello`/`vello_cpu`/
@@ -48,13 +48,7 @@ fn parse_manifest(path: &Path) -> toml::Table {
 /// Every `[workspace.dependencies]` row this guard requires to carry a
 /// literal `=` version — the engine-core render stack's exact-pinned rows
 /// (`docs/RENDER_DEVELOPMENT.md`'s Version Pins).
-const EXACT_PINNED_ROWS: &[&str] = &[
-    "vello_common",
-    "glifo",
-    "vello_cpu",
-    "vello_cpu_oracle",
-    "vello_hybrid",
-];
+const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu", "vello_cpu_oracle"];
 
 /// The version requirement string of `[workspace.dependencies].<name>`,
 /// whether the row is a bare string (`name = "=0.1.0"`) or a table
@@ -95,8 +89,8 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
         if !version.starts_with('=') {
             failures.push(format!(
                 "[workspace.dependencies].{name} = \"{version}\" is not exact-pinned — the \
-                 engine-core render stack (vello_common/glifo/vello_cpu/vello_cpu_oracle/\
-                 vello_hybrid) must carry a literal `=` version (docs/RENDER_DEVELOPMENT.md's \
+                 engine-core render stack (vello_common/glifo/vello_cpu/vello_cpu_oracle) \
+                 must carry a literal `=` version (docs/RENDER_DEVELOPMENT.md's \
                  Version Pins)"
             ));
         }

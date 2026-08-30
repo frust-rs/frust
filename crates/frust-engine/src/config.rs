@@ -69,8 +69,8 @@ pub fn depth_disabled() -> bool {
 /// Whether atlas allocation is disabled via `FRUST_ENGINE_NO_ATLAS`.
 /// Cached: read once per process.
 ///
-/// Reserved: parsed and cached, consulted by nothing yet; wired when its
-/// subsystem lands.
+/// Consulted by [`crate::cache::images::ImageResidency`]: when set, every
+/// image resolution answers a logged skip instead of touching the atlas.
 pub fn atlas_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| {
@@ -130,8 +130,8 @@ pub fn max_texture_size() -> u32 {
 /// Parsed as `(width, height)` or returns `None` if not set or invalid.
 /// Cached: read once per process.
 ///
-/// Reserved: parsed and cached, consulted by nothing yet; wired when its
-/// subsystem lands.
+/// Consulted by [`crate::cache::images::AtlasBudget`]: when set, it overrides
+/// the capability-chosen per-layer atlas extent (runtime wins).
 pub fn atlas_size() -> Option<(u32, u32)> {
     static ATLAS_SIZE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
     *ATLAS_SIZE.get_or_init(|| {

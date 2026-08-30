@@ -1254,19 +1254,25 @@ fn non_finite_geometry_is_refused_field_by_field() {
 /// rather than refusing the whole frame.
 ///
 /// The distinction is the difference between drawing less and drawing nothing:
-/// a clip the compiler has not implemented yet must not be able to blank a
-/// frame the geometry beside it would have rendered.
+/// a shader quad the compiler has not implemented yet must not be able to
+/// blank a frame the geometry beside it would have rendered.
+///
+/// A clip is deliberately not the case here any more, and neither is a layer, a
+/// snapshot bracket, a clear, an image or a blurred rounded rectangle: the
+/// compiler lowers all six now, so each one's own numbers are geometry the
+/// frame is refused for, pinned by `tests/clips.rs`, `tests/layers.rs`,
+/// `tests/images.rs` and `tests/blur_rrect.rs` respectively.
 #[test]
 fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
     let scene = scene_of(&[
-        Op::PushClip {
-            rect: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
+        Op::ShaderQuad {
+            dest: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
+            time: f32::NAN,
         },
         Op::FillRect {
             rect: Rect::new(0.0, 0.0, 16.0, 16.0),
             brush: Brush::Solid(RED),
         },
-        Op::PopClip,
     ]);
 
     let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
@@ -1282,10 +1288,18 @@ fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
 /// about a frame, and a refusal produced none — so a pool hostile enough to
 /// refuse nearly every case would leave them passing over nothing at all, with
 /// no test failing to say so. The floor sits far below the measured rate rather
-/// than pinned to it — 97 of 256 sampled scenes compile, against 216 of the
-/// same 256 with the geometry refusal taken back out, which is what hostile
-/// pools cost once the compiler refuses what is in them — so this guards
-/// against a collapse, not against ordinary drift in the pools.
+/// than pinned to it — eight samples of 256 scenes each compiled 51 to 73 of
+/// their 256, which is what hostile pools cost once the compiler refuses what
+/// is in them — so this guards against a collapse, not against ordinary drift
+/// in the pools.
+///
+/// The rate falls each time the compiler starts lowering another command,
+/// because a lowered command's own numbers become numbers the frame is refused
+/// for: it was around 97 of 256 while layers, snapshot brackets and clears were
+/// still skipped, and each of those three refuses roughly a quarter of the
+/// rectangles this generator hands it. That is the refusal working, not the
+/// generator decaying, so the floor is re-measured rather than the refusal
+/// narrowed.
 #[test]
 fn the_generator_still_produces_frames_that_compile() {
     const SAMPLES: u32 = 256;
@@ -1312,7 +1326,7 @@ fn the_generator_still_produces_frames_that_compile() {
 
     let compiled = compiled.get();
     assert!(
-        compiled * 4 >= SAMPLES,
+        compiled * 8 >= SAMPLES,
         "only {compiled} of {SAMPLES} generated scenes compiled — the properties that return \
          early on a refusal are close to vacuous"
     );

@@ -267,12 +267,11 @@ accesskit_ios = "=0.1.2"
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
 vello_cpu = "=0.0.9"
-# measurement spike: vello_hybrid 0.2.0 + companions, optional `hybrid-tier` feature
-# on frust-render, exact-pinned (pre-1.0 experimental), NOT default build
-vello_hybrid = { version = "=0.2.0", default-features = false, features = ["wgpu", "text"] }
+# frust-engine's own sparse-strip core (`engine-tier` feature on
+# frust-render), exact-pinned (pre-1.0 experimental), NOT default build.
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
 glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
-# Dev-only oracle for `frust-testing`: the SAME engine core the hybrid/engine
+# Dev-only oracle for `frust-testing`: the SAME engine core the engine
 # tier is built on (vello_common 0.2.0 + glifo 0.3.0), rasterized on the CPU
 # with no GPU in the loop, so a golden test compares the engine against its own
 # reference implementation rather than against a different renderer's. Renamed

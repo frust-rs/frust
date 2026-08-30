@@ -18,12 +18,14 @@
 //!   `render_to_texture` (intermediate) → acquire → blit (intermediate → acquired
 //!   swapchain view) → present.
 //!
-//! The experimental `hybrid-tier` path takes the direct arm's shape with its
-//! own renderer: encode copies the frame's scene, then acquire → one
-//! `vello_hybrid` render into the acquired swapchain view (its own command
-//! encoder, submitted there) → present. No intermediate, no blit, no vello.
+//! The `engine-tier` path takes the direct arm's shape with `frust-engine`: encode
+//! copies the frame's scene, then acquire → one `EngineRenderer::encode` into
+//! the acquired swapchain view and its surface-owned depth attachment
+//! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
+//! `end_frame`. No intermediate, no blit, no vello, no shader pre-pass and no
+//! snapshot cache.
 //!
-//! The two arms remap the v3 present spans — see [`SurfaceRenderer::submit`].
+//! This arm remaps the v3 present spans — see [`SurfaceRenderer::submit`].
 //!
 //! On the Gpu tier every arm also runs [`crate::compositor`]'s quad pass after
 //! vello, drawing the snapshot cache's cached pages onto the frame; a frame
@@ -46,7 +48,7 @@ use kurbo::Affine;
 use peniko::ImageData;
 
 use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-#[cfg(feature = "hybrid-tier")]
+#[cfg(feature = "engine-tier")]
 use crate::context::render_scaled;
 use crate::context::{
     AaMode, ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode,
@@ -133,7 +135,7 @@ struct ReadySurface {
 // (`SurfaceState::Ready`), so the size asymmetry costs nothing on the hot path
 // and boxing the GPU renderer would only add an indirection to every frame.
 #[cfg_attr(
-    any(feature = "cpu-tier", feature = "hybrid-tier"),
+    any(feature = "cpu-tier", feature = "engine-tier"),
     allow(clippy::large_enum_variant)
 )]
 enum TierBackend {
@@ -164,18 +166,31 @@ enum TierBackend {
     /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
     #[cfg(feature = "cpu-tier")]
     Cpu(Box<crate::cpu_tier::CpuTierRenderer>),
-    /// Experimental `vello_hybrid` path (`hybrid-tier` feature): CPU
-    /// sparse-strip rasterization composited into the acquired swapchain view
-    /// by its own renderer, which owns every intermediate it needs (depth
-    /// texture, strip/atlas buffers) and never submits — the frame's encoder
-    /// is created and submitted in [`SurfaceRenderer::submit`].
+    /// The frust-owned engine path (`engine-tier` feature): a
+    /// `frust_scene::Scene` compiled into sparse strips and recorded into the
+    /// frame's own `wgpu::CommandEncoder` by
+    /// [`frust_engine::EngineRenderer`], which never submits — the encoder is
+    /// created and submitted in [`SurfaceRenderer::submit`].
     ///
     /// Boxed for the CPU variant's reason. Carries no snapshot cache and no
     /// compositor: both are vello-path machinery living in
     /// [`TierBackend::Gpu`], and a tier being measured against vello is
     /// measured without them.
-    #[cfg(feature = "hybrid-tier")]
-    Hybrid(Box<crate::hybrid_tier::HybridTierRenderer>),
+    #[cfg(feature = "engine-tier")]
+    Engine {
+        engine: Box<frust_engine::EngineRenderer>,
+        /// How many of this surface's frames the engine has refused so far
+        /// (a scheduler escalation, an unserveable frame, a capacity ceiling).
+        ///
+        /// Counted rather than logged per frame: a refusal that reproduces
+        /// every frame would otherwise flood the log with one identical line
+        /// per vsync. The count feeds [`crate::context::decide_log_action`] —
+        /// the same latch the uncaptured-`wgpu`-error handler uses — so the
+        /// first few refusals are reported in full, the latch is announced
+        /// once, and the running total keeps surfacing on the periodic debug
+        /// bump afterwards.
+        refused_frames: u32,
+    },
 }
 
 /// The surface half of the lifecycle machine, parallel to [`SurfacePhase`].
@@ -299,25 +314,22 @@ pub struct SurfaceRenderer {
     /// the next one; [`Self::on_surface_destroyed`] clears it outright, since
     /// those handles belong to the cache dying with the surface.
     pending_composite: Option<PendingComposite>,
-    /// The hybrid tier's owned copy of the frame's scene — its counterpart to
+    /// The engine tier's owned copy of the frame's scene — its counterpart to
     /// [`Self::scene`], and reused across frames for the same reason.
     ///
-    /// `vello_hybrid` does its whole command walk inside `render`, which needs
-    /// the GPU resources only [`Self::submit`] has (the acquired swapchain
-    /// view), so the borrowed `&Scene` [`Self::encode`] is handed cannot
-    /// simply be re-read there: the frame's display list has to survive the
-    /// gap between the two calls. `encode` therefore `clone_from`s it into
-    /// this buffer — capacity reused, so a steady-state frame allocates
-    /// nothing — and `submit` renders from it.
+    /// `frust_engine::EngineRenderer::encode` needs the GPU resources only
+    /// [`Self::submit`] has (the acquired swapchain view), so the borrowed
+    /// `&Scene` [`Self::encode`] is handed has to survive the gap between the
+    /// two calls. `clone_from` reuses this buffer's capacity, so a
+    /// steady-state frame allocates nothing.
     ///
-    /// **Measurement note.** This makes the tiers' spans differ in kind, not
-    /// just in cost: on the GPU tier `encode_us` holds the scene TRANSLATION
-    /// (`convert` → `vello::Scene`), whereas on this tier it holds only a
-    /// memcpy and the entire strip-building walk lands in `submit_us` beside
-    /// the GPU work. Compare whole frames across the two tiers, never
-    /// `encode_us` against `encode_us`.
-    #[cfg(feature = "hybrid-tier")]
-    hybrid_scene: frust_scene::Scene,
+    /// **Measurement note.** The same span caveat applies: on this tier
+    /// `encode_us` holds a memcpy and nothing else — the whole scene compile
+    /// (strip building, paint encoding) plus command recording lands in
+    /// `submit_us`. Compare whole frames across tiers, never `encode_us`
+    /// against `encode_us`.
+    #[cfg(feature = "engine-tier")]
+    engine_scene: frust_scene::Scene,
 }
 
 /// The composite half of a frame, carried from [`SurfaceRenderer::encode`] to
@@ -356,8 +368,8 @@ impl SurfaceRenderer {
             pending_present: None,
             pending_base_color: None,
             pending_composite: None,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene: frust_scene::Scene::default(),
+            #[cfg(feature = "engine-tier")]
+            engine_scene: frust_scene::Scene::default(),
         }
     }
 
@@ -695,6 +707,14 @@ impl SurfaceRenderer {
                     RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
                         surface.config.format
                     }
+                    // Unreachable in this arm: the engine path is configured
+                    // for the engine tier alone
+                    // (`context::choose_engine_render_path`), which has no
+                    // compositor. Answered with the swapchain's own format
+                    // rather than left to a catch-all, so a future arm cannot
+                    // fall through this match silently.
+                    #[cfg(feature = "engine-tier")]
+                    RenderPath::EngineDirect { .. } => surface.config.format,
                 };
                 let compositor = Compositor::new(device, composite_format, pipeline_cache.as_ref());
                 // A translucent surface whose swapchain stores STRAIGHT alpha
@@ -761,54 +781,65 @@ impl SurfaceRenderer {
                     "frust-render: Cpu tier selected without the `cpu-tier` feature compiled in"
                 ));
             }
-            #[cfg(feature = "hybrid-tier")]
-            crate::RenderTier::Hybrid => {
+            #[cfg(feature = "engine-tier")]
+            crate::RenderTier::Engine => {
+                let device = &ctx.device_handle().device;
                 // Built for the format the swapchain was CONFIGURED with (the
                 // surface's own, `RENDER_ATTACHMENT` — see
-                // `context::choose_hybrid_render_path`), because
-                // `vello_hybrid` bakes the target format into its pipelines.
-                // A resize keeps that format (`RenderContext::resize_surface`
-                // rewrites only the dimensions), so `on_surface_changed` can
-                // resize this renderer in place; a format change arrives as a
-                // fresh surface, which lands back here.
+                // `context::choose_engine_render_path`), because the engine
+                // warms its strip pipelines for exactly one target format.
                 //
+                // A resize keeps that format (`RenderContext::resize_surface`
+                // rewrites only the dimensions), so `on_surface_changed`
+                // resizes the renderer in place; a FORMAT change arrives as a
+                // fresh surface and lands back here, building a renderer
+                // warmed for the new format — off the frame path, and seeded
+                // from the same persisted `wgpu::PipelineCache` blob handed to
+                // vello, so a re-warm after a format change is a driver-cache
+                // hit rather than a cold compile.
+                let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
+                let engine = frust_engine::EngineRenderer::new(
+                    device,
+                    &caps,
+                    surface.config.format,
+                    pipeline_cache.as_ref(),
+                )
+                .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
                 // One line per process naming the tier, next to the
                 // `render-path`/`aa-mode` lines, so a capture proves which
-                // renderer produced the frames it is timing rather than
-                // leaving it to be inferred from the command line.
-                static HYBRID_LOGGED: OnceLock<()> = OnceLock::new();
-                HYBRID_LOGGED.get_or_init(|| {
+                // renderer produced the frames it is timing.
+                static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
+                ENGINE_LOGGED.get_or_init(|| {
                     log::info!(
-                        "frust-render tier=hybrid (experimental vello_hybrid path, \
-                         format={:?} {}x{})",
+                        "frust-render tier=engine (frust-engine strip pipeline, format={:?} \
+                         {}x{}, adapter `{}`)",
                         surface.config.format,
                         surface.config.width,
-                        surface.config.height
+                        surface.config.height,
+                        caps.adapter_name
                     );
                     // Both knobs instrument vello's own passes — the AA mode
                     // is a `vello::AaConfig` and the scale sizes the blit
-                    // arm's intermediate — and this tier runs neither. Say so
+                    // arm's intermediate — and this tier runs neither. Said
                     // once, so a matrix run that sets them does not read the
                     // resulting numbers as an answer about them.
                     if aa_mode() != AaMode::Area || render_scaled() {
                         log::warn!(
                             "frust-render: FRUST_AA_MODE/FRUST_RENDER_SCALE are vello-only \
-                             instruments; the hybrid tier ignores both and renders at full \
+                             instruments; the engine tier ignores both and renders at full \
                              surface resolution"
                         );
                     }
                 });
-                TierBackend::Hybrid(Box::new(crate::hybrid_tier::HybridTierRenderer::new(
-                    &ctx.device_handle().device,
-                    surface.config.format,
-                    surface.config.width,
-                    surface.config.height,
-                )))
+                TierBackend::Engine {
+                    engine: Box::new(engine),
+                    refused_frames: 0,
+                }
             }
-            #[cfg(not(feature = "hybrid-tier"))]
-            crate::RenderTier::Hybrid => {
+            #[cfg(not(feature = "engine-tier"))]
+            crate::RenderTier::Engine => {
                 return Err(anyhow!(
-                    "frust-render: Hybrid tier selected without the `hybrid-tier` feature \
+                    "frust-render: Engine tier selected without the `engine-tier` feature \
                      compiled in"
                 ));
             }
@@ -889,14 +920,31 @@ impl SurfaceRenderer {
                     // `RenderContext`/`Pixmap` are sized.
                     cpu.resize(width, height);
                 }
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(hybrid) => {
-                    // Same shape as the CPU arm: the hybrid scene and the
-                    // renderer's own depth/config resources are sized, and it
-                    // re-derives them from the size given here. The pipelines
-                    // survive (only a FORMAT change would need a new
-                    // renderer, and a resize never changes one).
-                    hybrid.resize(width, height);
+                #[cfg(feature = "engine-tier")]
+                TierBackend::Engine { engine, .. } => {
+                    // The engine's own extent-sized resources (its intermediate
+                    // pool's parked entries, and the depth attachment it would
+                    // own if the surface did not) are re-established here,
+                    // off the frame path. The surface's own depth attachment
+                    // was recreated by `resize_surface` above, in the same
+                    // step that reconfigured the swapchain.
+                    //
+                    // The pipelines survive: only a FORMAT change would need a
+                    // renderer warmed for a different target, and a resize
+                    // never changes one — `resize_surface` rewrites the
+                    // dimensions alone. Asserted rather than assumed, since a
+                    // silent divergence would compile a fresh pipeline on the
+                    // frame path for every frame that followed.
+                    if engine.format() != ready.surface.config.format {
+                        log::warn!(
+                            "frust-render: engine renderer warmed for {:?} but the surface now \
+                             reports {:?} — a format change must arrive as a fresh surface, not \
+                             a resize",
+                            engine.format(),
+                            ready.surface.config.format
+                        );
+                    }
+                    engine.resize(&ctx.device_handle().device, width, height);
                 }
             }
         }
@@ -928,11 +976,12 @@ impl SurfaceRenderer {
                 TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
                 #[cfg(feature = "cpu-tier")]
                 TierBackend::Cpu(_) => {}
-                // Nothing to release ahead of time: this backend's textures
-                // (image atlas, depth) are owned by the `vello_hybrid`
-                // renderer that dies with the state below, in one step.
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(_) => {}
+                // Nothing to release ahead of time: every texture this
+                // backend holds (resource textures, the intermediate pool, its
+                // own depth attachment) dies with the renderer below, and the
+                // surface's depth attachment dies with the surface beside it.
+                #[cfg(feature = "engine-tier")]
+                TierBackend::Engine { .. } => {}
             }
         }
         // The same door `install_surface` enters by, which repeats the
@@ -1015,8 +1064,8 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             pending_composite,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene,
+            #[cfg(feature = "engine-tier")]
+            engine_scene,
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
@@ -1131,6 +1180,12 @@ impl SurfaceRenderer {
                     RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
                         (width, height, Affine::IDENTITY)
                     }
+                    // Unreachable inside the Gpu arm: the engine path belongs
+                    // to the engine tier alone. Answered with the direct arms'
+                    // values rather than a catch-all, so a path added later
+                    // cannot fall through this match silently.
+                    #[cfg(feature = "engine-tier")]
+                    RenderPath::EngineDirect { .. } => (width, height, Affine::IDENTITY),
                 };
                 let params =
                     |base_color, (target_width, target_height): (u32, u32)| vello::RenderParams {
@@ -1330,6 +1385,17 @@ impl SurfaceRenderer {
                             );
                         }
                     }
+                    // Unreachable inside the Gpu arm, for the `pass_*`
+                    // binding's reason: the engine path belongs to the engine
+                    // tier alone. Reported rather than rendered, since a vello
+                    // frame reaching it would be a wiring bug with no correct
+                    // arm to take.
+                    #[cfg(feature = "engine-tier")]
+                    RenderPath::EngineDirect { .. } => {
+                        return Err(anyhow!(
+                            "frust-render: the engine render path requires the engine tier"
+                        ));
+                    }
                 }
             }
             #[cfg(feature = "cpu-tier")]
@@ -1371,30 +1437,30 @@ impl SurfaceRenderer {
                     },
                 );
             }
-            #[cfg(feature = "hybrid-tier")]
-            TierBackend::Hybrid(_) => {
+            #[cfg(feature = "engine-tier")]
+            TierBackend::Engine { .. } => {
                 // This tier renders in `submit`, into the acquired swapchain
                 // view — the direct arm's split, which is why its surface is
-                // configured `RenderPath::Direct`
-                // (`context::choose_hybrid_render_path`). Any other path here
+                // configured `RenderPath::EngineDirect`
+                // (`context::choose_engine_render_path`). Any other path here
                 // is a wiring bug, reported rather than rendered.
-                if !matches!(&ready.surface.path, RenderPath::Direct) {
+                if !matches!(&ready.surface.path, RenderPath::EngineDirect { .. }) {
                     return Err(anyhow!(
-                        "frust-render: hybrid-tier requires the direct render path"
+                        "frust-render: engine-tier requires the engine render path"
                     ));
                 }
                 // The frame's whole CPU-side encode on this arm: copy the
                 // display list somewhere that outlives the borrow, since
-                // `HybridTierRenderer::render` does the command walk itself
-                // (it needs the renderer's own glyph/image atlases to do it).
-                // `clone_from` reuses the buffer's capacity, so a
-                // steady-state frame allocates nothing — see the field's
-                // measurement note.
-                hybrid_scene.clone_from(scene);
+                // `EngineRenderer::encode` compiles it itself in `submit`.
+                // `clone_from` reuses the buffer's capacity, so a steady-state
+                // frame allocates nothing — see the field's measurement note.
+                engine_scene.clone_from(scene);
                 // Carried to `submit` for the direct arm's reason: the render
                 // that consumes it runs there. `pending_composite` stays
                 // `None` — the snapshot cache and compositor are GPU-tier
-                // machinery this tier bypasses entirely.
+                // machinery this tier bypasses entirely, as is the shader
+                // pre-pass (a `Command::ShaderQuad` keeps the placeholder
+                // lowering `convert` gives it).
                 *pending_base_color = Some(base_color);
             }
         }
@@ -1630,8 +1696,8 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             pending_composite,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene,
+            #[cfg(feature = "engine-tier")]
+            engine_scene,
             ..
         } = self;
         // Taken unconditionally: a frame that reached `acquire` consumes its
@@ -1712,39 +1778,93 @@ impl SurfaceRenderer {
                         "frust-render: direct render path requires the GPU tier"
                     ));
                 }
-                // The hybrid tier's whole frame: one encoder, one
-                // `vello_hybrid` render into the acquired swapchain view, one
-                // submit. The renderer records into the encoder and never
-                // submits, so image-atlas uploads, evictions and the render
-                // passes all land in this one command buffer, in order,
-                // against the texture about to be presented.
-                //
-                // No compositor pass follows: cached snapshot pages are
-                // GPU-tier machinery (`TierBackend::Gpu`), and
-                // `pending_composite` is never set on this arm.
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(hybrid) => {
-                    // Set in `encode`; a well-formed frame always encoded
-                    // first — the same fallback the vello arm above takes.
-                    let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
-                    let mut encoder = device_handle.device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render hybrid"),
-                        },
-                    );
-                    hybrid
-                        .render(
-                            &device_handle.device,
-                            &device_handle.queue,
-                            &mut encoder,
-                            hybrid_scene,
-                            base_color,
-                            &swapchain_view,
-                        )
-                        .map_err(|e| anyhow!("frust-render: vello_hybrid render failed: {e}"))?;
-                    device_handle.queue.submit([encoder.finish()]);
+                // Unreachable: the engine tier configures its own path
+                // (`context::choose_engine_render_path`), never this one.
+                #[cfg(feature = "engine-tier")]
+                TierBackend::Engine { .. } => {
+                    return Err(anyhow!(
+                        "frust-render: direct render path requires the GPU tier"
+                    ));
                 }
             },
+            // The engine tier's whole frame: one encoder, one
+            // `EngineRenderer::encode` into the acquired swapchain view and
+            // the surface's own depth attachment, one submit, then the
+            // engine's end-of-frame maintenance. The renderer records into the
+            // encoder and never submits, so every pass of the frame lands in
+            // this one command buffer, in order, against the texture about to
+            // be presented.
+            //
+            // No compositor pass follows: cached snapshot pages are GPU-tier
+            // machinery, and `pending_composite` is never set on this arm.
+            #[cfg(feature = "engine-tier")]
+            RenderPath::EngineDirect { depth } => {
+                let TierBackend::Engine {
+                    engine,
+                    refused_frames,
+                } = backend
+                else {
+                    return Err(anyhow!(
+                        "frust-render: engine render path requires the engine tier"
+                    ));
+                };
+                // Set in `encode`; a well-formed frame always encoded first —
+                // the same fallback every other arm takes.
+                let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frust-render engine"),
+                        });
+                let result = engine.encode(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine_scene,
+                    frust_engine::EngineTarget {
+                        view: &swapchain_view,
+                        format: surface.config.format,
+                        width: surface.config.width,
+                        height: surface.config.height,
+                        // The surface's own attachment, recreated with the
+                        // swapchain (`context::RenderPath::EngineDirect`).
+                        // Nothing else writes it, so it is not pre-cleared:
+                        // the frame's first depth-using pass clears it.
+                        depth: Some(depth.view()),
+                        // The engine's strip pipelines write premultiplied
+                        // alpha, which is what this surface's swapchain
+                        // expects — an opaque one ignores alpha, and a
+                        // straight-alpha translucent one had its translucency
+                        // refused at configure time
+                        // (`context::engine_translucency_refused`).
+                        output: frust_engine::OutputAlpha::Premultiplied,
+                    },
+                    base_color,
+                    // The engine arm renders at the surface's own resolution:
+                    // `FRUST_RENDER_SCALE` is a vello instrument that sizes
+                    // the blit arm's intermediate, and this arm has none.
+                    Affine::IDENTITY,
+                );
+                match result {
+                    Ok(()) => {
+                        device_handle.queue.submit([encoder.finish()]);
+                        engine.end_frame(&device_handle.queue);
+                    }
+                    Err(error) => {
+                        // A refused frame left the encoder exactly as it was
+                        // found, so there is nothing to submit and the
+                        // acquired texture holds no frame — presenting it
+                        // would show undefined content. The frame is dropped
+                        // instead (the texture goes with this `None`), and the
+                        // refusal is counted rather than logged per vsync.
+                        *refused_frames = refused_frames.saturating_add(1);
+                        log_engine_refusal(*refused_frames, &error);
+                        engine.end_frame(&device_handle.queue);
+                        return Ok((FrameOutcome::Skipped, None));
+                    }
+                }
+            }
             // Direct-premultiplied: vello already rendered the
             // straight-alpha frame into the intermediate in `encode`; premultiply
             // it into the acquired swapchain texture so a premultiplied-expecting
@@ -1817,6 +1937,43 @@ impl SurfaceRenderer {
             }
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
+    }
+}
+
+/// Reports the `count`-th frame this surface's engine renderer refused, under
+/// [`crate::context::decide_log_action`]'s latch.
+///
+/// A refusal is a per-frame event on a path that can reproduce every vsync — a
+/// scheduler escalation on a layer shape the engine does not serve, or a
+/// capacity ceiling a busy frame keeps hitting — so logging each one would
+/// bury the log without adding information after the first few. The latch is
+/// the one the uncaptured-`wgpu`-error handler already uses: the first few
+/// refusals are logged in full, the latch is announced once naming the running
+/// total, and the periodic debug bump keeps the counter visible afterwards.
+/// Every line carries the count, so a capture read later says how many frames
+/// were lost, not merely that some were.
+#[cfg(feature = "engine-tier")]
+fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
+    match crate::context::decide_log_action(count) {
+        crate::context::LogAction::Log => {
+            log::warn!(
+                "frust-render: engine refused frame {count} on this surface — {error}; the \
+                 frame is dropped rather than presented"
+            );
+        }
+        crate::context::LogAction::SuppressionNotice => {
+            log::warn!(
+                "frust-render: further engine frame refusals suppressed (total so far: {count})"
+            );
+        }
+        crate::context::LogAction::Silent { debug_bump } => {
+            if debug_bump {
+                log::debug!(
+                    "frust-render: engine frame refusals now {count} on this surface (still \
+                     suppressed)"
+                );
+            }
+        }
     }
 }
 
@@ -2342,6 +2499,147 @@ mod tests {
             assert!(
                 shader_effects.needs_compile(program.id()),
                 "a disabled pre-pass must never call ensure_pipeline — zero GPU work"
+            );
+        }
+    }
+
+    /// The engine arm's real-device acceptance, headless.
+    ///
+    /// A windowed run is the arm's own acceptance and cannot happen on a box
+    /// with no display server, so this drives the exact `EngineTarget` the
+    /// engine arm of [`SurfaceRenderer::submit`] builds — the surface's
+    /// reported format at `RENDER_ATTACHMENT`, the surface-owned `Depth24Plus`
+    /// attachment, premultiplied output, the identity root — against an
+    /// offscreen target of the same shape, under a `wgpu` validation error
+    /// scope. What it proves is what the windowed run would: this seam's
+    /// target construction is accepted by a real device and produces the
+    /// frame's pixels. What it cannot prove is the swapchain half (acquire,
+    /// present, alpha-mode compositing), which stays owed to a display.
+    ///
+    /// Run over BOTH surface formats, since which one a swapchain reports
+    /// first is the platform's business and the engine warms its pipelines for
+    /// exactly the one it is handed.
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render --features engine-tier -- --ignored`"]
+    fn engine_arm_records_a_frame_into_its_target_without_validation_errors() {
+        /// Serializes every test in this binary that creates a GPU device, the
+        /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
+        /// driver serializes `vkDestroyDevice` against other Vulkan work on a
+        /// process-global mutex, and two tests tearing devices down at once
+        /// have deadlocked inside it. Poison is ignored deliberately — one
+        /// test's failure must not cascade into its siblings.
+        static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 64;
+
+        let (device, queue, caps) = pollster::block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks
+            // the GPU on a multi-adapter host instead of the run silently
+            // landing on whichever one enumerates first.
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+                .await
+                .expect("no compatible GPU adapter");
+            println!("frust-render engine arm adapter: {:?}", adapter.get_info());
+            let caps = frust_gpu::TierCaps::probe(&adapter);
+            // The limits production asks for, not the defaults, so the target
+            // this test builds is sized against the same ceiling
+            // `context::extent_within_limits` refuses on.
+            let limits = crate::context::effective_limits(
+                adapter.limits(),
+                crate::context::is_ios_simulator(),
+            );
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-render engine arm test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            (device, queue, caps)
+        });
+
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+                peniko::Brush::Solid(peniko::color::palette::css::RED),
+            );
+        }
+
+        for format in crate::context::SURFACE_FORMATS {
+            let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+            let depth = frust_engine::DepthTexture::new(&device, SIZE, SIZE);
+            let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+                .expect("failed to create the engine renderer");
+
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            engine
+                .encode(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &scene,
+                    frust_engine::EngineTarget {
+                        view: target.view(),
+                        format,
+                        width: SIZE,
+                        height: SIZE,
+                        depth: Some(depth.view()),
+                        output: frust_engine::OutputAlpha::Premultiplied,
+                    },
+                    peniko::Color::BLACK,
+                    Affine::IDENTITY,
+                )
+                .expect("the engine refused a plain opaque frame");
+            queue.submit([encoder.finish()]);
+            engine.end_frame(&queue);
+
+            // Pop the scope by polling the device, the shape every GPU suite
+            // in this workspace uses: the pop resolves only once the queue has
+            // been pumped.
+            let error = {
+                use std::task::{Context, Poll, Waker};
+                let waker = Waker::noop();
+                let mut cx = Context::from_waker(waker);
+                let mut pop = std::pin::pin!(scope.pop());
+                loop {
+                    match pop.as_mut().poll(&mut cx) {
+                        Poll::Ready(error) => break error,
+                        Poll::Pending => {
+                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                        }
+                    }
+                }
+            };
+            assert!(
+                error.is_none(),
+                "the engine arm's {format:?} target raised a validation error: {error:?}"
+            );
+
+            let pixels = target.read_back(&device, &queue);
+            let index = (((SIZE / 2) * SIZE + (SIZE / 2)) * 4) as usize;
+            let centre: [u8; 4] = pixels[index..index + 4]
+                .try_into()
+                .expect("a read-back row holds four bytes per pixel");
+            // Channel order differs between the two formats, so the assertion
+            // that holds for both is "opaque, and not the black it was cleared
+            // to" — the red rect reached the target.
+            assert_eq!(centre[3], 255, "{format:?}: the frame is not opaque");
+            assert!(
+                centre[0] != 0 || centre[1] != 0 || centre[2] != 0,
+                "{format:?}: the target still holds its clear colour ({centre:?})"
             );
         }
     }

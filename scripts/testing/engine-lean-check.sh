@@ -10,14 +10,20 @@
 # opt out of yet) and asserts ZERO `frust-engine`/`frust_engine` marker
 # strings in it, then attempts the ON arm as a positive control.
 #
-# THE ON ARM IS CURRENTLY A DESIGN SKIP, NOT A BUG: `frust-render` has no
-# engine-tier cargo feature yet (that seam is a later phase of the frust-engine
-# plan — see `docs/RENDER_ARCHITECTURE.md`'s Engine-tier boundary), so there is
-# no way to opt `material3-demo` into linking `frust-engine` today. Once that
-# feature lands, wire this script's ON arm to build with it enabled and assert
-# the markers ARE present (the mirror of `scripts/release-lean-check.sh`'s
-# `check_strings_present` positive control) — until then it reports SKIP, and
-# this file's own header is the reminder to come back and do that.
+# The ON arm is the positive control — the mirror of
+# `scripts/release-lean-check.sh`'s `check_strings_present`: it builds
+# `frust-render` with the `engine-tier` feature ON, from the ROOT workspace,
+# and asserts the same markers ARE present in the produced rlib. A check that
+# can only ever report absence proves nothing about its own sensitivity.
+#
+# THE ON ARM DELIBERATELY DOES NOT TARGET `material3-demo`. Opting an app into
+# the tier means turning on `frust-render/engine-tier` through the `frust`
+# facade, and the facade forwards no such feature to its shells (unlike
+# `perf-trace`/`devtools`/`engine-tier` — see `crates/frust/Cargo.toml`), so no
+# app in this repo can reach the feature today. `frust-render` itself is the
+# nearest reachable ON target: it is the crate that owns the feature and the
+# dependency edge the OFF arm is checking for the absence of. Point this arm at
+# an app build once the facade forwards the feature.
 #
 # Reuses `scripts/release-lean-check.sh`'s SKIP-vs-FAIL exit-code shape: a run
 # made entirely of skips must never report PASS.
@@ -27,12 +33,13 @@
 # Exits with:
 #   0 if every check executed (0 skipped) and passed
 #   1 if the arguments themselves are invalid (usage error)
-#   2 if the OFF arm's binary was built and FAILED the marker-absence check
-#     (frust-engine leaked into a build that never asked for it)
-#   3 if one or more checks were SKIPPED rather than executed — the ON arm
-#     (always, until the engine-tier feature exists) and/or the OFF arm (if
-#     even that build could not produce a binary on this box) — INCONCLUSIVE,
-#     never silently reported as PASS
+#   2 if a built artifact FAILED its marker check — the OFF arm's binary
+#     carrying frust-engine markers it never asked for, or the ON arm's rlib
+#     carrying none despite the feature being on (a check that cannot see what
+#     it is looking for)
+#   3 if one or more checks were SKIPPED rather than executed (a build that
+#     could not be produced on this box, or no `strings` command) —
+#     INCONCLUSIVE, never silently reported as PASS
 #
 # Documented as a manual gate (no CI), the same shape as
 # `scripts/release-lean-check.sh`.
@@ -46,7 +53,7 @@ APP_DIR="${REPO_ROOT}/examples/material3-demo"
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
-      sed -n '2,29p' "$0"
+      sed -n '2,42p' "$0"
       exit 0
       ;;
     *)
@@ -106,6 +113,40 @@ check_markers_absent() {
   done
 }
 
+# The mirror of `check_markers_absent`: the positive control, asserting each
+# marker IS present. A build that turned the feature on and still shows no
+# marker means the check above cannot see what it is looking for, which would
+# make every OFF-arm PASS meaningless — so this is a FAIL, not a SKIP.
+check_markers_present() {
+  local artifact="$1"
+  local label="$2"
+  shift 2
+  local patterns=("$@")
+
+  if [ ! -f "${artifact}" ]; then
+    echo "SKIP ${label}: artifact not found at ${artifact}"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    return
+  fi
+
+  if ! command -v strings >/dev/null 2>&1; then
+    echo "SKIP ${label}: 'strings' command not available"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    return
+  fi
+
+  local pattern count
+  for pattern in "${patterns[@]}"; do
+    count=$(strings "${artifact}" | grep -c -- "${pattern}" || true)
+    if [ "${count}" -gt 0 ]; then
+      echo "PASS ${label}: found ${count} occurrences of '${pattern}'"
+    else
+      echo "FAIL ${label}: found 0 occurrences of '${pattern}' (expected at least 1)"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  done
+}
+
 # --- OFF arm: material3-demo's ordinary (engine-tier OFF) release build ----
 
 echo "-- Building material3-demo desktop release (engine tier OFF) --"
@@ -149,13 +190,41 @@ echo "-- OFF-arm marker check (engine tier not requested anywhere in this build)
 check_markers_absent "${OFF_BIN}" "OFF-arm frust-engine markers" "frust-engine" "frust_engine"
 echo
 
-# --- ON arm: positive control, currently unreachable ------------------------
+# --- ON arm: positive control ----------------------------------------------
+
+echo "-- Building frust-render release with the engine tier ON --"
+
+# The ROOT workspace this time, not the standalone example: this arm builds the
+# crate that OWNS the feature. Honours a caller-exported CARGO_TARGET_DIR (this
+# repo's root builds normally run with one) and falls back to the workspace's
+# own `target/` when none is set — never the OFF arm's dedicated dir, which
+# belongs to the standalone example alone.
+ON_TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+ON_BUILD_LOG="$(mktemp)"
+trap 'rm -f "${BUILD_LOG}" "${ON_BUILD_LOG}"' EXIT
+
+if ! (cd "${REPO_ROOT}" && CARGO_TARGET_DIR="${ON_TARGET_DIR}" \
+      cargo build --release -p frust-render --features engine-tier) \
+      >"${ON_BUILD_LOG}" 2>&1; then
+  echo "SKIP ON-arm build: frust-render's engine-tier release build failed on this box (log \
+below) — a build failure never fakes a PASS here, it downgrades to INCONCLUSIVE"
+  cat "${ON_BUILD_LOG}"
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+  ON_ARTIFACT=""
+else
+  echo "ON-arm build OK."
+  # Cargo uplifts a library target into the profile dir under its plain name;
+  # fall back to the hashed copy under `deps/` if that ever stops holding.
+  ON_ARTIFACT="${ON_TARGET_DIR}/release/libfrust_render.rlib"
+  if [ ! -f "${ON_ARTIFACT}" ]; then
+    ON_ARTIFACT="$(ls -t "${ON_TARGET_DIR}"/release/deps/libfrust_render-*.rlib 2>/dev/null \
+      | head -n1)"
+  fi
+fi
+echo
 
 echo "-- ON-arm marker check (engine tier ON, positive control) --"
-echo "SKIP ON-arm: examples/material3-demo depends on no frust-engine feature and \
-frust-render exposes no engine-tier cargo feature to opt into yet (docs/RENDER_ARCHITECTURE.md's \
-Engine-tier boundary) — wire this arm up once that feature lands, per this script's own header."
-SKIP_COUNT=$((SKIP_COUNT + 1))
+check_markers_present "${ON_ARTIFACT}" "ON-arm frust-engine markers" "frust_engine"
 echo
 
 # --- Summary -----------------------------------------------------------

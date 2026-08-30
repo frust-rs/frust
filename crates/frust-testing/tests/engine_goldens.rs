@@ -1,56 +1,69 @@
-//! The engine's primary correctness gate: every corpus case this phase's
-//! engine can draw, rendered by [`EngineOracle`] and held against two
-//! references at once — `vello_cpu` 0.2.0 (hard) and the engine's own
-//! committed golden class (hard once promoted) — plus a recorded, advisory
-//! comparison against the vello-classic pipeline.
+//! The engine's primary correctness gate: every corpus case the engine can
+//! draw, rendered by [`EngineOracle`] and held against three references —
+//! `vello_cpu` 0.2.0 (P1), the engine's own committed golden class, and the
+//! vello-classic pipeline at `testing/goldens/CALIBRATION.md`'s measured
+//! perceptual band (P2). All three are HARD: nothing here is advisory.
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
 //!   cargo test -p frust-testing --test engine_goldens -- --ignored --nocapture
 //! ```
 //!
-//! The host-only tests in this file (scope coverage, class routing) run in the
-//! ordinary gate with no GPU.
+//! The host-only tests in this file (scope coverage, class routing, the
+//! command-support tripwire) run in the ordinary gate with no GPU.
 //!
 //! # The two comparisons, and why they are held to different bars
 //!
-//! - **engine vs `vello_cpu` is near-exact and gating.** Both rasterize the
-//!   same geometry with the same `vello_common` 0.2.0 strip generator at the
-//!   same flattening tolerance; only the *fill* differs (a GPU strip pass
-//!   against a CPU one). So the bar is the corpus's own tight default —
-//!   channel 2, alpha 2, zero tolerated mismatched pixels — carried straight
-//!   off each [`CaseSpec`], with a per-case escalation only through
-//!   [`ESCALATIONS`] and only with a stated reason. It is made on the
-//!   PREMULTIPLIED frames both arms natively produce rather than on their
+//! - **P1, engine vs `vello_cpu`, is near-exact.** Both rasterize the same
+//!   geometry with the same `vello_common` 0.2.0 strip generator at the same
+//!   flattening tolerance; only the *fill* differs (a GPU strip pass against a
+//!   CPU one). So the bar is each case's OWN [`CaseSpec::tolerance`] — the
+//!   corpus default of channel 2, alpha 2, zero tolerated mismatched pixels
+//!   for most cases, and [`Tolerance::exact`] for the two whose subject is
+//!   integer-aligned erase arithmetic (`unit-clear-rect`,
+//!   `adv-destout-in-layer`), which therefore compare PIXEL-EXACT here as well
+//!   as against their baseline. A per-case widening exists only through
+//!   [`ESCALATIONS`] and only with a stated reason. The comparison is made on
+//!   the PREMULTIPLIED frames both arms natively produce rather than on their
 //!   straightened forms — see [`render_raw`], where that is the difference
 //!   between measuring the rasterizers and measuring an unpremultiply's own
 //!   information loss.
-//! - **engine vs classic is a wide, measured band and ADVISORY here.** The two
-//!   are independent rasterizers, and the classic arm hands back STRAIGHT
-//!   alpha, so that comparison necessarily goes through [`render_case`]'s
-//!   conversion — the same footing `testing/goldens/CALIBRATION.md` measured
-//!   its numbers on. That file measured
-//!   how far they legitimately drift over this same corpus: mean absolute
-//!   error <= 2.5 and <= 4.8% of pixels over channel 8, both on the 1-px eroded
-//!   interior, with the per-channel maximum deliberately ungated (antialiasing
-//!   conflation along a diagonal or curved edge exceeds what a 1-px erosion
-//!   removes — see that file's Legitimate Disagreements). This phase RECORDS
-//!   those numbers per case and never fails on them; the gate hardens once the
-//!   engine covers the whole corpus.
+//! - **P2, engine vs classic, is a wide MEASURED band, and it gates.** The
+//!   two are independent rasterizers, and the classic arm
+//!   hands back STRAIGHT alpha, so that comparison necessarily goes through
+//!   [`render_case`]'s conversion — the same footing
+//!   `testing/goldens/CALIBRATION.md` measured its numbers on. That file
+//!   measured how far they legitimately drift over this corpus and derived the
+//!   budget applied here: mean absolute error <= [`CLASSIC_MEAN_BUDGET`] and
+//!   <= [`CLASSIC_PCT_OVER_8_BUDGET`]% of pixels over channel 8, both on the
+//!   1-px eroded interior. The per-channel maximum is recorded and never
+//!   gated: it is UNGATEABLE, because antialiasing conflation along a diagonal
+//!   or curved edge exceeds what a 1-px erosion removes, and the calibration's
+//!   own whole-corpus p95 for it came out at a full 255 (see that file's
+//!   Derived P2 budget and Legitimate Disagreements). A case that legitimately
+//!   sits outside the corpus-wide band carries a reviewed row in
+//!   [`BAND_ESCALATIONS`] rather than the whole gate being loosened to its
+//!   worst member.
 //!
 //! # Which cases are in scope
 //!
-//! The engine compiles axis-aligned rectangles, rounded rectangles, lines and
-//! arbitrary filled/stroked paths, and resolves solid and gradient paints.
-//! Clips, layers, glyph runs, images, blurs, shader quads and snapshot
-//! brackets are recognised and skipped by the compiler — a frame draws less,
-//! never wrong — so a case built out of them would compare an engine frame
-//! that legitimately omits its subject. [`PHASE_CASES`] names the cases whose
-//! subject the engine actually draws and [`DEFERRED_CASES`] every other one
-//! with the phase it waits for;
+//! The engine compiles axis-aligned rectangles, rounded rectangles, lines,
+//! arbitrary filled/stroked paths, rect and rounded clips, opacity layers,
+//! snapshot brackets, `ClearRect` hole punches, atlas-resident images and
+//! blurred rounded rects, and resolves solid and gradient paints. Two commands
+//! remain recognised-and-skipped by its compiler — [`Command::GlyphRun`] and
+//! [`Command::ShaderQuad`] — so a case that draws either would compare an
+//! engine frame legitimately missing the very thing the case exists to pin.
+//!
+//! [`PHASE_CASES`] names the cases the engine draws in full, across all four
+//! corpora ([`unit_cases`], [`adversarial_cases`], [`widget_cases`],
+//! [`page_cases`]), and [`DEFERRED_CASES`] every other one with why it waits.
+//! Two GPU-free tripwires keep those lists honest rather than aspirational:
 //! [`every_corpus_case_is_either_in_scope_or_deferred`] fails if a corpus
-//! addition appears in neither, so growth forces a decision instead of
-//! silently widening or narrowing the gate.
+//! addition appears in neither, and
+//! [`every_scoped_case_draws_only_commands_the_engine_compiles`] re-derives
+//! the membership rule from the scenes themselves, so a case cannot be listed
+//! in scope while recording a command the engine skips.
 //!
 //! # Promotion
 //!
@@ -66,9 +79,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
 
+use frust_scene::Command;
 use frust_testing::case::{CaseSpec, Tolerance};
 use frust_testing::corpus::{
-    CorpusCase, adversarial_cases, render_case, straighten_alpha, unit_cases,
+    CorpusCase, adversarial_cases, page_cases, render_case, straighten_alpha, unit_cases,
+    widget_cases,
 };
 use frust_testing::diff::{DiffReport, diff_images};
 use frust_testing::frame::foreign_font_runs;
@@ -80,76 +95,79 @@ use frust_testing::oracle_engine::{EngineOracle, EngineOracleOptions};
 use frust_testing::render::{RenderedImage, SceneRenderer};
 use frust_testing::{ENGINE_UNCLASSIFIED_CLASS, engine_golden_class};
 
-/// Every corpus case the engine draws in full this phase — rectangles,
-/// rounded rectangles, lines, arbitrary filled/stroked/dashed paths, and the
-/// empty scene whose whole subject is the clear pass.
+/// Every corpus case the engine draws in full — rectangles, rounded
+/// rectangles, lines, arbitrary filled/stroked/dashed paths, rect and rounded
+/// clips, opacity layers, snapshot brackets, `ClearRect` hole punches,
+/// atlas-resident images, blurred rounded rects, and the widget/page frames
+/// built out of those same commands.
+///
+/// Membership is not a judgement call: a case belongs here exactly when its
+/// scene records no [`Command::GlyphRun`] and no [`Command::ShaderQuad`], and
+/// [`every_scoped_case_draws_only_commands_the_engine_compiles`] re-derives
+/// that from the scenes on every run.
 const PHASE_CASES: &[&str] = &[
+    // Unit — one command at a time, recorded by hand.
     "unit-fill-rect",
     "unit-rounded-rect",
     "unit-stroke-line",
     "unit-path-fill",
     "unit-path-stroke",
     "unit-path-dashed",
+    "unit-clip-rect",
+    "unit-clip-rounded",
+    "unit-clip-balance",
+    "unit-layer-alpha",
+    "unit-layer-balance",
+    "unit-clear-rect",
+    "unit-snapshot-bracket",
+    "unit-snapshot-balance",
+    "unit-image",
+    "unit-blur-rrect",
+    // Adversarial — the degenerate and stress shapes of the same commands.
     "adv-degenerate-path",
     "adv-subpixel-rrect",
     "adv-empty-scene",
     "adv-1px-divider-1x",
     "adv-1px-divider-2x",
     "adv-1px-divider-2-75x",
+    "adv-clip-nest-8",
+    "adv-destout-in-layer",
+    "adv-snapshot-scale-alpha",
+    "adv-unbalanced-pops",
+    "adv-huge-image",
+    // Widget frames — a real `frust-core` render tree painted at phone size.
+    // Only the four glyph-free ones: the button cases deliberately carry an
+    // EMPTY label (`corpus::widget`'s module docs explain why the widget layer
+    // gives them no pinnable typography), and the flex case distributes
+    // coloured boxes, so all four are pure chrome — fills, rounded rects,
+    // strokes and clips at 824x1784, which is a far larger and busier frame
+    // than any unit case puts through the same comparators.
+    "widget-button-rest",
+    "widget-button-pressed",
+    "widget-button-disabled",
+    "widget-flex-layout",
 ];
 
 /// Every corpus case NOT in [`PHASE_CASES`], with why it waits.
 ///
-/// A case is deferred when its subject is a command the engine's compiler
-/// recognises and skips (so the frame it produces is deliberately missing the
-/// very thing the case exists to pin), or when it has no stable reference on
-/// any backend at all. Neither is a defect to chase here: both are
-/// "the engine does not draw this yet", and comparing anyway would gate this
-/// phase on a later one's work.
+/// Exactly two reasons are admissible: the case's subject is one of the two
+/// commands the compiler recognises and skips (so the frame it produces is
+/// deliberately missing the very thing the case exists to pin), or the case is
+/// `no_ref` and has no stable reference on any backend at all. Neither is a
+/// defect to chase here.
+/// [`every_deferred_case_is_deferred_for_a_reason_the_corpus_can_confirm`]
+/// checks that each row is one of those two and not a habit.
 const DEFERRED_CASES: &[(&str, &str)] = &[
-    ("unit-glyph-run", "glyph runs arrive with the text phase"),
-    ("adv-10k-glyphs", "glyph runs arrive with the text phase"),
-    ("unit-clip-rect", "clips arrive with the clip phase"),
-    ("unit-clip-rounded", "clips arrive with the clip phase"),
-    ("unit-clip-balance", "clips arrive with the clip phase"),
-    ("adv-clip-nest-8", "clips arrive with the clip phase"),
-    ("unit-layer-alpha", "layers arrive with the layer phase"),
-    ("unit-layer-balance", "layers arrive with the layer phase"),
     (
-        "unit-clear-rect",
-        "the hole punch is a layer-group contract; layers arrive with the layer phase",
+        "unit-glyph-run",
+        "the whole case is a glyph run, which the engine's compiler still recognises and \
+         skips — text arrives with the text phase",
     ),
     (
-        "unit-snapshot-bracket",
-        "snapshot brackets lower to layers; both arrive with the layer phase",
+        "adv-10k-glyphs",
+        "10,000 glyph runs, which the engine's compiler still recognises and skips — text \
+         arrives with the text phase",
     ),
-    (
-        "unit-snapshot-balance",
-        "snapshot brackets lower to layers; both arrive with the layer phase",
-    ),
-    (
-        "adv-destout-in-layer",
-        "a hole punch inside a layer group; layers arrive with the layer phase",
-    ),
-    (
-        "adv-snapshot-scale-alpha",
-        "snapshot brackets lower to layers; both arrive with the layer phase",
-    ),
-    (
-        "adv-unbalanced-pops",
-        "unwinds clip, layer AND snapshot stacks; all three arrive later",
-    ),
-    (
-        "adv-unbalanced-pop-in-snapshot",
-        "`no_ref`, and an unbalanced pop inside a translucent snapshot bracket — snapshot \
-         brackets lower to layers, which arrive with the layer phase",
-    ),
-    ("unit-image", "images need the atlas; they arrive with it"),
-    (
-        "adv-huge-image",
-        "images need the atlas; they arrive with it",
-    ),
-    ("unit-blur-rrect", "blur arrives with the filter phase"),
     (
         "unit-shader-quad",
         "a shader pre-pass the engine does not own; also skipped on the CPU arm, so there \
@@ -162,10 +180,39 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
     ),
     (
         "adv-5k-layers",
-        "`no_ref`: a depth-only memory-budget probe over 5,000 nested layers, which the \
-         engine skips until the layer phase",
+        "`no_ref`: a depth-only memory-budget probe over 5,000 nested layers whose own pixels \
+         are not a reference on any backend",
     ),
+    (
+        "adv-unbalanced-pop-in-snapshot",
+        "`no_ref`: an unbalanced pop inside a translucent snapshot bracket, whose recovery \
+         shape is deliberately not pinned to any backend's pixels",
+    ),
+    // Widget and page frames whose chrome is drawn around shaped labels — the
+    // glyph runs are the majority of what a reader compares in these frames,
+    // so an engine capture of one would be a page with its text missing.
+    ("widget-text-field-rest", TEXT_FRAME),
+    ("widget-text-field-caret", TEXT_FRAME),
+    ("widget-list-20-rows", TEXT_FRAME),
+    ("widget-checkbox-radio", TEXT_FRAME),
+    ("widget-slider", TEXT_FRAME),
+    ("widget-scaffold-chrome", TEXT_FRAME),
+    ("widget-stack-align", TEXT_FRAME),
+    ("widget-scroll-clipped", TEXT_FRAME),
+    ("widget-text-wrap", TEXT_FRAME),
+    ("page-material-home", TEXT_FRAME),
+    ("page-material-dialog", TEXT_FRAME),
+    ("page-cupertino-settings", TEXT_FRAME),
+    ("page-cupertino-controls", TEXT_FRAME),
+    ("page-glyph-dashboard", TEXT_FRAME),
+    ("page-glyph-surfaces", TEXT_FRAME),
+    ("page-shadcn-form", TEXT_FRAME),
+    ("page-shadcn-controls", TEXT_FRAME),
 ];
+
+/// The deferral reason every widget/page frame that shapes text shares.
+const TEXT_FRAME: &str = "the frame shapes glyph runs, which the engine's compiler still \
+                          recognises and skips — text arrives with the text phase";
 
 /// Per-case escalations off the corpus's tight default, each with the reason
 /// it is not the default's fault.
@@ -177,7 +224,21 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
 /// than on the shared [`CaseSpec`] because it is specific to the ENGINE-vs-CPU
 /// pairing — the same case's `cpu/` and classic comparisons are unaffected by
 /// anything written here.
-const ESCALATIONS: &[(&str, Tolerance, &str)] = &[];
+const ESCALATIONS: &[(&str, Tolerance, &str)] = &[(
+    "widget-button-disabled",
+    Tolerance {
+        channel: 3,
+        alpha: 3,
+        diff_pixels: 0,
+    },
+    "32 pixels (0.0022%) on the button's corner arcs differ by one level beyond the corpus \
+     tolerance (max delta [3,3,3,2]): a coverage-rounding difference between the GPU strip \
+     fill and `vello_cpu` on stacked TRANSLUCENT draws — the disabled state dims every colour's \
+     alpha, and the same geometry with opaque colours (`widget-button-rest`/`-pressed`) is 0 \
+     pixels differing. The identical 32 pixels, deltas and values reproduce on a tree predating \
+     the engine's layer execution, so this is the shared strip fill's rounding, not layer \
+     compositing",
+)];
 
 /// The fixed threshold the engine-vs-classic band is measured under, so
 /// "percent of pixels over 8" means the same thing for every case and the same
@@ -196,8 +257,79 @@ const CLASSIC_MEAN_BUDGET: f64 = 2.5;
 /// `CALIBRATION.md`'s measured whole-corpus p95 of "% pixels over channel 8"
 /// on the eroded interior, rounded up — the other half of that band. The
 /// per-channel maximum has no budget on purpose: it is ungateable, since edge
-/// conflation on a diagonal or curved boundary survives the 1-px erosion.
+/// conflation on a diagonal or curved boundary survives the 1-px erosion, and
+/// the calibration's own p95 for it came out at a full 255.
 const CLASSIC_PCT_OVER_8_BUDGET: f64 = 4.8;
+
+/// The engine-vs-classic band one case is held to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Band {
+    /// Maximum mean absolute error, averaged over the four channels.
+    mean: f64,
+    /// Maximum percentage of pixels over [`MEASURE_TOLERANCE`], post-erosion.
+    pct_over_8: f64,
+}
+
+/// The corpus-wide band from `CALIBRATION.md`'s Derived P2 budget.
+const CORPUS_BAND: Band = Band {
+    mean: CLASSIC_MEAN_BUDGET,
+    pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
+};
+
+/// Per-case widenings of [`CORPUS_BAND`], each with the measured reason it is
+/// not the corpus budget's fault.
+///
+/// The corpus budget is a whole-corpus p95, so by construction a handful of
+/// cases sit above it — `CALIBRATION.md`'s Legitimate Disagreements names them
+/// and says not to re-litigate them. Widening the shared budget to cover its
+/// worst member would blind the other cases; a reviewed row here keeps the
+/// tight budget everywhere else and states, per case, both the number measured
+/// and why the disagreement is two correct rasterizers rather than one wrong
+/// one.
+const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
+    (
+        "unit-blur-rrect",
+        Band {
+            mean: 5.0,
+            pct_over_8: 11.5,
+        },
+        "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
+         mean 4.581 / 10.986% and named it the one outlier driving the corpus-wide budget: the \
+         classic pipeline's Gaussian approximation and `vello_common`'s are independent \
+         implementations whose coverage ramps around a blurred edge are not bit-identical. The \
+         engine shares `vello_common`'s, so it inherits exactly that gap (measured 4.579 / \
+         10.791% here) — this row is the corpus-wide p95 failing to cover its own known outlier, \
+         not engine drift, and the engine's agreement with `vello_cpu` on this case is 0 pixels \
+         differing at channel 2",
+    ),
+    (
+        "unit-path-stroke",
+        Band {
+            mean: CLASSIC_MEAN_BUDGET,
+            pct_over_8: 5.6,
+        },
+        "a steep diagonal stroke, whose antialiased band is wider than the 1-px erosion removes \
+         — `CALIBRATION.md`'s Legitimate Disagreements names this exact case and measured the \
+         classic-vs-`vello_cpu` pair at 5.371%, already over the corpus p95 it helped set. Only \
+         the percentage is widened; the mean stays at the corpus budget, where the case measures \
+         0.530",
+    ),
+    (
+        "adv-huge-image",
+        Band {
+            mean: 3.0,
+            pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
+        },
+        "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
+         mean 2.988 / 2.3438% and its Legitimate Disagreements names it: `Command::Image` \
+         specifies no resampling filter, so the two arms' downsampled edge pixels around a \
+         minified image's boundary legitimately differ while the uniform-colour interior probe \
+         matches exactly. The engine agrees with `vello_cpu` on this case PIXEL FOR PIXEL (0 px \
+         differing at channel 2), so its engine-vs-classic band reproduces that calibration row \
+         exactly (measured mean 2.988 / 2.3438% here) — the corpus-wide p95 failing to cover a \
+         disagreement it never included, not engine drift",
+    ),
+];
 
 /// Serializes every test in this binary that creates a GPU device.
 ///
@@ -248,24 +380,66 @@ fn render_raw(renderer: &mut dyn SceneRenderer, case: &CorpusCase) -> Option<Ren
     Some(image)
 }
 
-/// Every corpus case this phase compares, in corpus order.
-fn scoped_cases() -> Vec<CorpusCase> {
+/// Every corpus case, across all four corpora, in corpus order.
+fn all_cases() -> Vec<CorpusCase> {
     unit_cases()
         .into_iter()
         .chain(adversarial_cases())
+        .chain(widget_cases())
+        .chain(page_cases())
+        .collect()
+}
+
+/// Every corpus case the engine gate compares, in corpus order.
+fn scoped_cases() -> Vec<CorpusCase> {
+    all_cases()
+        .into_iter()
         .filter(|case| PHASE_CASES.contains(&case.spec.name))
         .collect()
 }
 
-/// The tolerance `case` is compared against the CPU arm under: its own tight
-/// default unless [`ESCALATIONS`] names it.
-fn engine_tolerance(name: &str) -> (Tolerance, Option<&'static str>) {
+/// Whether `scene` records a command the engine's compiler recognises and
+/// skips — the mechanical membership rule [`PHASE_CASES`] is checked against.
+fn engine_skipped_commands(scene: &frust_scene::Scene) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    for command in scene.commands() {
+        let kind = match command {
+            Command::GlyphRun(_) => "GlyphRun",
+            Command::ShaderQuad { .. } => "ShaderQuad",
+            _ => continue,
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+/// The tolerance `case` is compared against the CPU arm under: the case's own
+/// [`CaseSpec::tolerance`] unless [`ESCALATIONS`] names it.
+///
+/// Taken off the case rather than hard-coded at the corpus default so a case
+/// declared [`Tolerance::exact`] — `unit-clear-rect`'s tile-unaligned erase,
+/// `adv-destout-in-layer`'s punch inside a layer group — is held pixel-exact
+/// across the arms as well as against its baseline. Those two cases assert
+/// erase arithmetic, where a one-level rounding difference is not a rounding
+/// difference at all but a pixel the engine failed to clear.
+fn engine_tolerance(spec: &CaseSpec) -> (Tolerance, Option<&'static str>) {
     ESCALATIONS
         .iter()
-        .find(|(case, _, _)| *case == name)
-        .map_or((Tolerance::new(), None), |(_, tolerance, why)| {
+        .find(|(case, _, _)| *case == spec.name)
+        .map_or((spec.tolerance, None), |(_, tolerance, why)| {
             (*tolerance, Some(*why))
         })
+}
+
+/// The engine-vs-classic band `name` is held to: [`CORPUS_BAND`] unless
+/// [`BAND_ESCALATIONS`] names it.
+fn classic_band(name: &str) -> (Band, Option<&'static str>) {
+    BAND_ESCALATIONS
+        .iter()
+        .find(|(case, _, _)| *case == name)
+        .map_or((CORPUS_BAND, None), |(_, band, why)| (*band, Some(*why)))
 }
 
 /// The repository commit this run's baselines would be attributed to — see
@@ -485,7 +659,7 @@ fn engine_corpus_matches_vello_cpu_and_its_goldens() {
         // The primary comparison: the two arms share one geometry core, so
         // this is the assertion that the GPU fill agrees with the CPU one —
         // made on the premultiplied frames both produced (see `render_raw`).
-        let (tolerance, escalation) = engine_tolerance(name);
+        let (tolerance, escalation) = engine_tolerance(&case.spec);
         let outcome = diff_images(
             &to_rgba_image(&reference),
             &to_rgba_image(&rendered),
@@ -566,14 +740,16 @@ fn engine_corpus_matches_vello_cpu_and_its_goldens() {
     );
 }
 
-/// Records how far the engine sits from the vello-classic pipeline over the
-/// same scoped cases, against `CALIBRATION.md`'s measured band.
+/// Holds the engine to `CALIBRATION.md`'s measured perceptual band against
+/// the vello-classic pipeline over the same scoped cases — P2, and it GATES.
 ///
-/// ADVISORY this phase: every number is printed, an over-band case is called
-/// out, and nothing here fails the build. The two are independent
-/// rasterizers — the band exists to make a *drift* visible while the engine is
-/// still growing its command coverage, and hardens into a gate once it covers
-/// the whole corpus.
+/// Every number is still printed, so a run reads as a measurement rather than
+/// a pass/fail bit, but a case outside its band fails the test. The two
+/// are independent rasterizers, so the band is wide and MEASURED rather than
+/// guessed (see the module docs), and its per-channel maximum stays ungated on
+/// purpose. A case that legitimately exceeds the corpus-wide budget carries a
+/// reviewed [`BAND_ESCALATIONS`] row; the shared budget is never loosened to
+/// its worst member.
 ///
 /// ```text
 /// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -581,7 +757,7 @@ fn engine_corpus_matches_vello_cpu_and_its_goldens() {
 /// ```
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test engine_goldens -- --ignored`"]
-fn engine_vs_classic_divergence_is_recorded_against_the_calibrated_band() {
+fn engine_vs_classic_divergence_stays_inside_the_calibrated_band() {
     let _serialized = render_lock();
     let mut engine = EngineOracle::new(&EngineOracleOptions::default())
         .expect("failed to create the engine oracle");
@@ -594,12 +770,13 @@ fn engine_vs_classic_divergence_is_recorded_against_the_calibrated_band() {
         classic.headless_meta()
     );
     println!(
-        "engine vs classic: measured under {MEASURE_TOLERANCE:?}, advisory band mean <= \
+        "engine vs classic: measured under {MEASURE_TOLERANCE:?}, gating band mean <= \
          {CLASSIC_MEAN_BUDGET}, % over 8 <= {CLASSIC_PCT_OVER_8_BUDGET}% (testing/goldens/\
-         CALIBRATION.md; per-channel max deliberately ungated)"
+         CALIBRATION.md; per-channel max deliberately ungated), {} reviewed per-case widening(s)",
+        BAND_ESCALATIONS.len()
     );
     println!(
-        "{:<24} {:>8} {:>10} {:>10}",
+        "{:<26} {:>8} {:>10} {:>10}",
         "case", "mean", "% over 8", "chan max"
     );
 
@@ -639,17 +816,23 @@ fn engine_vs_classic_divergence_is_recorded_against_the_calibrated_band() {
             .unwrap_or(0);
         let mean = report.mean_abs_error.iter().sum::<f64>() / report.mean_abs_error.len() as f64;
 
+        let (band, widening) = classic_band(name);
         println!(
-            "{name:<24} {mean:>8.3} {:>9.4}% {channel_max:>10}",
-            report.mismatched_percent
+            "{name:<26} {mean:>8.3} {:>9.4}% {channel_max:>10}{}",
+            report.mismatched_percent,
+            widening
+                .map(|why| format!(
+                    "  (widened to mean {} / {}%: {why})",
+                    band.mean, band.pct_over_8
+                ))
+                .unwrap_or_default()
         );
         measured += 1;
 
-        if mean > CLASSIC_MEAN_BUDGET || report.mismatched_percent > CLASSIC_PCT_OVER_8_BUDGET {
+        if mean > band.mean || report.mismatched_percent > band.pct_over_8 {
             over_band.push(format!(
-                "{name}: mean {mean:.3} (band {CLASSIC_MEAN_BUDGET}), % over 8 {:.4}% (band \
-                 {CLASSIC_PCT_OVER_8_BUDGET}%)",
-                report.mismatched_percent
+                "{name}: mean {mean:.3} (band {}), % over 8 {:.4}% (band {}%)",
+                band.mean, report.mismatched_percent, band.pct_over_8
             ));
         }
     }
@@ -657,24 +840,26 @@ fn engine_vs_classic_divergence_is_recorded_against_the_calibrated_band() {
     println!("engine vs classic: {measured} case(s) measured");
     if over_band.is_empty() {
         println!("engine vs classic: every measured case sits inside the calibrated band");
-    } else {
-        println!(
-            "engine vs classic: {} case(s) OUTSIDE the calibrated band (advisory this phase, \
-             recorded not failed):\n{}",
-            over_band.len(),
-            over_band.join("\n")
-        );
     }
+
+    assert!(
+        over_band.is_empty(),
+        "{} case(s) outside their calibrated engine-vs-classic band — either the engine drifted \
+         or the disagreement is a reviewed, legitimate one that belongs in BAND_ESCALATIONS with \
+         its measured number:\n{}",
+        over_band.len(),
+        over_band.join("\n")
+    );
 }
 
-/// Every corpus case is either in scope for this phase or deferred with a
+/// Every corpus case is either in scope for the engine gate or deferred with a
 /// reason — a GPU-free tripwire, so a corpus addition is caught on any machine
 /// rather than only on the pinned runner.
 #[test]
 fn every_corpus_case_is_either_in_scope_or_deferred() {
     let mut unmapped = Vec::new();
     let mut names = Vec::new();
-    for case in unit_cases().into_iter().chain(adversarial_cases()) {
+    for case in all_cases() {
         let name = case.spec.name;
         names.push(name);
         let scoped = PHASE_CASES.contains(&name);
@@ -721,26 +906,152 @@ fn every_deferred_case_states_why_it_waits() {
     }
 }
 
+/// Every scoped case draws only commands the engine's compiler actually
+/// compiles — the membership rule behind [`PHASE_CASES`], re-derived from the
+/// scenes rather than trusted.
+///
+/// A case listed in scope while recording a [`Command::GlyphRun`] or a
+/// [`Command::ShaderQuad`] would compare an engine frame that legitimately
+/// omits its subject, and would read as an engine defect. GPU-free, so the
+/// mistake is caught on any machine rather than only on the pinned runner.
+#[test]
+fn every_scoped_case_draws_only_commands_the_engine_compiles() {
+    let mut wrongly_scoped = Vec::new();
+    for case in scoped_cases() {
+        let skipped = engine_skipped_commands(&case.scene());
+        if !skipped.is_empty() {
+            wrongly_scoped.push(format!(
+                "`{}` records {} — the engine's compiler recognises and skips it, so an engine \
+                 frame of this case is missing what the case exists to pin",
+                case.spec.name,
+                skipped.join(" and ")
+            ));
+        }
+    }
+    assert!(
+        wrongly_scoped.is_empty(),
+        "{} case(s) in PHASE_CASES draw a command the engine does not compile — move each to \
+         DEFERRED_CASES until the phase that adds it:\n{}",
+        wrongly_scoped.len(),
+        wrongly_scoped.join("\n")
+    );
+}
+
+/// Every deferred case is deferred for one of the two reasons the corpus can
+/// confirm: it draws a command the engine skips, or it is `no_ref` and has no
+/// stable reference on any backend.
+///
+/// The complement of the tripwire above, and the one that keeps deferral from
+/// outliving its cause: once the engine compiles a command, every case built
+/// on it stops matching either clause here and this test says so, instead of
+/// the case quietly sitting out of the gate for another phase.
+#[test]
+fn every_deferred_case_is_deferred_for_a_reason_the_corpus_can_confirm() {
+    let cases = all_cases();
+    let mut stale = Vec::new();
+    for (name, _) in DEFERRED_CASES {
+        let Some(case) = cases.iter().find(|case| case.spec.name == *name) else {
+            continue;
+        };
+        let skipped = engine_skipped_commands(&case.scene());
+        if skipped.is_empty() && !case.spec.no_ref {
+            stale.push(format!(
+                "`{name}` draws only commands the engine compiles and is not `no_ref`"
+            ));
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "{} deferred case(s) whose deferral no longer has a cause — move each into \
+         PHASE_CASES:\n{}",
+        stale.len(),
+        stale.join("\n")
+    );
+}
+
 /// Every escalation names a case that exists and is actually looser than the
-/// tight default it replaces — a row that matched nothing, or that tightened
+/// tolerance it replaces — a row that matched nothing, or that tightened
 /// rather than widened, would be a silent no-op.
 #[test]
 fn every_escalation_is_a_real_widening_of_a_scoped_case() {
-    let default = Tolerance::new();
+    let cases = all_cases();
     for (name, tolerance, why) in ESCALATIONS {
         assert!(
             PHASE_CASES.contains(name),
-            "escalation for `{name}` names a case this phase does not compare"
+            "escalation for `{name}` names a case the gate does not compare"
         );
+        let base = cases
+            .iter()
+            .find(|case| case.spec.name == *name)
+            .map_or(Tolerance::new(), |case| case.spec.tolerance);
         assert!(
-            tolerance.channel > default.channel
-                || tolerance.alpha > default.alpha
-                || tolerance.diff_pixels > default.diff_pixels,
-            "escalation for `{name}` is not looser than the default {default:?}"
+            tolerance.channel > base.channel
+                || tolerance.alpha > base.alpha
+                || tolerance.diff_pixels > base.diff_pixels,
+            "escalation for `{name}` is not looser than the case's own {base:?}"
         );
         assert!(
             why.len() > 16,
             "`{name}`'s escalation reason is too thin to review: {why:?}"
+        );
+    }
+}
+
+/// Every engine-vs-classic band widening names a scoped case, is genuinely
+/// wider than the corpus budget it replaces, and states a reviewable reason.
+#[test]
+fn every_band_escalation_is_a_real_widening_of_a_scoped_case() {
+    for (name, band, why) in BAND_ESCALATIONS {
+        assert!(
+            PHASE_CASES.contains(name),
+            "band escalation for `{name}` names a case the gate does not measure"
+        );
+        assert!(
+            band.mean > CORPUS_BAND.mean || band.pct_over_8 > CORPUS_BAND.pct_over_8,
+            "band escalation for `{name}` is not wider than the corpus band {CORPUS_BAND:?}"
+        );
+        assert!(
+            band.mean >= CORPUS_BAND.mean && band.pct_over_8 >= CORPUS_BAND.pct_over_8,
+            "band escalation for `{name}` TIGHTENS one metric while widening the other — a \
+             widening row is not the place to smuggle a stricter budget in"
+        );
+        assert!(
+            why.len() > 16,
+            "`{name}`'s band-escalation reason is too thin to review: {why:?}"
+        );
+    }
+}
+
+/// The two cases whose subject is erase arithmetic are compared PIXEL-EXACT
+/// against the CPU arm, not at the corpus's rounding-step default.
+///
+/// `unit-clear-rect` punches its hole at a deliberately tile-unaligned edge
+/// and `adv-destout-in-layer` punches one inside a layer group; in both, a
+/// pixel that is one level off is a pixel the engine failed to clear, not a
+/// rounding difference. Both carry [`Tolerance::exact`] on their own
+/// [`CaseSpec`], and [`engine_tolerance`] is what carries it into the
+/// cross-arm comparison — this states that, so a change to either end is
+/// caught here rather than silently loosening the erase contract.
+#[test]
+fn the_erase_cases_are_compared_pixel_exact_against_the_cpu_arm() {
+    let cases = all_cases();
+    for name in ["unit-clear-rect", "adv-destout-in-layer"] {
+        let case = cases
+            .iter()
+            .find(|case| case.spec.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is no longer in the corpus"));
+        assert!(
+            PHASE_CASES.contains(&name),
+            "`{name}` must be in scope for the engine gate to hold its erase contract at all"
+        );
+        let (tolerance, escalation) = engine_tolerance(&case.spec);
+        assert_eq!(
+            tolerance,
+            Tolerance::exact(),
+            "`{name}` is compared against the CPU arm at {tolerance:?}, not pixel-exact{}",
+            escalation
+                .map(|why| format!(" (escalated: {why})"))
+                .unwrap_or_default()
         );
     }
 }

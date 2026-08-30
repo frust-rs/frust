@@ -1638,6 +1638,126 @@ form.
 
 ---
 
+## Engine vs classic — Phase 4 (`frust-engine` strip pipeline, opt-in)
+
+The frust-owned `frust-engine` sparse-strip pipeline
+(`crates/frust-engine`, reached through `frust-render`'s
+`RenderTier::Engine`) measured against the vello-classic rows published
+above. `RenderTier::Engine` is override-only AND build-gated: no probe ever
+selects it, and `FRUST_RENDER_TIER=engine` without the `engine-tier` feature
+is REFUSED rather than quietly served by vello (`tier.rs`), so every number
+in this section can only come from a build that actually carries the engine.
+
+Driven by `ab_matrix.sh`'s `--tier` axis, which gains an `engine` arm:
+
+```
+bash benchmarks/harness/ab_matrix.sh --device <pixel5-serial> --device-name pixel5 \
+    --tier engine --scenarios s1,s2,s5 --runs 5 --duration 20
+```
+
+Each arm builds `benchmarks/frust_bench` and `examples/material3-demo` as
+
+```
+frust build apk --profile --define FRUST_TRACE_RAW=1 \
+    --features engine-tier --define FRUST_RENDER_TIER=engine
+```
+
+`FRUST_AA_MODE`/`FRUST_RENDER_SCALE` are deliberately NOT passed on this arm,
+exactly as on the hybrid arms above: both are vello-classic instruments (the
+AA mode is a `vello::AaConfig`, the scale sizes vello's blit-arm
+intermediate) and `frust-engine` reads neither, so the arm's aa/scale table
+cells read `n/a` and it contributes ONE cell however long `--aa`/`--scale`
+are. A build that carries them anyway logs a single
+`FRUST_AA_MODE/FRUST_RENDER_SCALE are vello-only instruments` warning at
+startup.
+
+### Correctness context — NVIDIA T400 4GB, headless Vulkan
+
+This section was written on a headless Linux workstation (NVIDIA T400 4GB,
+Vulkan, driver 610.43.03), which is a CORRECTNESS rig, not a frame-time one:
+it shares no GPU, no display pipeline and no thermal envelope with the Pixel
+5, so nothing measured on it belongs in the device table below. What it does
+establish is which parts of the engine are ready to be timed at all —
+`cargo test -p frust-testing --test engine_goldens -- --ignored` under
+`WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400`,
+comparing every corpus case the engine's compiler accepts against `vello_cpu`
+0.2.0 and against the classic pipeline at `testing/goldens/CALIBRATION.md`'s
+measured band.
+
+Rects, rounded rects, lines, filled/stroked/dashed paths, gradients, rect and
+rounded clips (including 8-deep alternating nesting), atlas-resident images
+and the blurred rounded rect all agree with `vello_cpu` at 0 pixels differing
+under channel 2, and sit inside the calibrated band against classic. Three
+full 824x1784 widget frames do the same.
+
+Opacity layers, snapshot brackets and `ClearRect` hole punches do NOT: the
+engine compiles and schedules them but renders them as if they were absent
+(layer alpha ignored, punches not erased), and a 5000x5000 source image over
+the atlas ceiling draws nothing at all. Those cases are in the gate, and the
+gate is red on them. **No engine perf number should be read as
+representative until they render**, because a frame that skips its layer
+composites and its hole punches is doing less work than the one it would be
+timed against.
+
+### Pixel 5 — engine vs classic (not measured)
+
+**Not measured — owed: Pixel 5 run.** No device was attached to the rig this
+section was written on, and this file's discipline is that a scenario or
+device with no completed runs carries no numbers. Every engine cell below is
+therefore empty by rule, not by omission; the classic column is cited
+verbatim from the *Pixel 5 — classic baseline for the engine plan* section
+above (same raw series, not re-measured) so the comparison is set up and
+waiting for one pass.
+
+| Scenario | Classic (cited) p50 / p95 (ms) | Engine p50 / p95 (ms) | encode+submit p50 (ms) | Graphics avg (MB) |
+|---|---|---|---|---|
+| S1 — animation storm | 48.23 / 49.13 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+| S2 — long-list scroll | 42.23 / 43.98 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+| S5 — image pipeline | 94.71 / 98.52 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+| Full-screen image case | no classic row exists | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+
+**Nav — material3-demo push/pop.** The gate: `total_p50` ≤ **16.7 ms**
+through the engine tier, against the classic baseline's measured 7.39 ms
+(last-120 ring window, cache on) / 11 ms (cited fine-floor row), plus a
+visual pass for AA regression. MSAA is not involved on either side — the
+engine draws analytic strips.
+
+| Nav basis | n (frames) | total_p50 (ms) | encode+submit p50 (ms) | Graphics avg (MB) |
+|---|---|---|---|---|
+| classic — measured, cited from the baseline section above | 120 of 141 | 7.39 | see that section | 52.56 (S1 anchor) |
+| engine | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+
+Raw series: none. `benchmarks/raw/pixel5/tier/engine/` does not exist and
+carries no files — a tier run files its sanitized series there
+(`<scenario>/run-NN.log` + `stats.txt`, `nav/logcat-frust-perf.log`), and
+until one is captured there is nothing to commit. The cited classic rows keep
+pointing at their original series under
+`benchmarks/raw/pixel5/{fine-floor,classic-baseline}/`, neither moved nor
+duplicated.
+
+### What could not be measured
+
+- **Every Pixel 5 engine cell above** — not measured: no Android device was
+  attached to this rig. Owed as one `ab_matrix.sh --tier engine` pass.
+- **`encode+submit p50` on the engine arm** — not measured, and worth naming
+  separately: the engine records into one caller-owned `wgpu::CommandEncoder`
+  where the classic path spans vello's own encode plus a submit, so the two
+  columns are not the same instrument. The comparable figure is the SUM of
+  the engine's encode and submit spans, and the pass that produces it should
+  say so in its own row.
+- **A device build of the `engine` arm at all** — blocked, not merely
+  unmeasured: `engine-tier` exists on `frust-render` only. Neither
+  `benchmarks/frust_bench` nor `examples/material3-demo` (nor the `frust`
+  facade and the shells between them) carries the forwarding feature row that
+  `hybrid-tier = ["frust/hybrid-tier"]` is the pattern for, so
+  `--features engine-tier` is rejected by cargo before an APK exists. The
+  matrix arm is in place and dry-runs correctly; the feature chain is what it
+  is waiting on.
+- **Any engine number for layers, snapshots, hole punches or oversized
+  images** — not meaningful yet, for the correctness reason stated above.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB

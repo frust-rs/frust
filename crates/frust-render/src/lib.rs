@@ -54,13 +54,6 @@ mod cpu_tier;
 // outside the crate, unlike the pre-pass modules, because those tests live
 // outside it — and still leaking no `vello`/`wgpu` type (see its module docs).
 mod headless;
-// Experimental vello_hybrid render tier (non-default `hybrid-tier` feature):
-// a third `SceneSink` over the same command walk, so the sparse-strip core can
-// be measured against vello on real scenes. Crate-private — its entry points
-// take bare `wgpu` types, which this crate's API confines (see
-// `docs/RENDER_ARCHITECTURE.md`).
-#[cfg(feature = "hybrid-tier")]
-mod hybrid_tier;
 mod lifecycle;
 mod pipeline_cache;
 mod renderer;

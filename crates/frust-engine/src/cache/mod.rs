@@ -5,5 +5,10 @@
 //! mid-frame so handles handed out during encoding stay valid for that frame.
 
 pub mod gradients;
+pub mod images;
 
 pub use gradients::{BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, LutUpload};
+pub use images::{
+    AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload, MAX_UNSEEN_FRAMES,
+    ResidentImage,
+};

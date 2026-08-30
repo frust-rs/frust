@@ -22,16 +22,25 @@
 //! The whole file runs under a validation error scope, so a wrong bind group,
 //! a mismatched attachment or an out-of-range draw surfaces as a named error
 //! rather than as a plausible-looking image.
+//!
+//! One case here checks something subtler than the contract and equally
+//! device-bound: **queue-write ordering against atlas growth**. `wgpu` flushes
+//! the writes queued at a submit *before* that submit's command buffers, so a
+//! growth copy sharing the frame's encoder would execute after the frame's own
+//! atlas uploads and undo them. Only a real queue orders those two, which is
+//! why [`a_frame_that_grows_the_atlas_keeps_the_uploads_it_made_into_layer_zero`]
+//! lives with the GPU suite rather than with the host residency tests.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use frust_engine::cache::images::{AtlasBudget, is_mobile_tier};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, BezPath, Point, Rect};
-use peniko::color::palette::css::{BLUE, GREEN, RED};
+use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE};
 use peniko::{Brush, Color};
 
 /// Target extent every case renders at.
@@ -190,6 +199,167 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     pixels[index..index + 4]
         .try_into()
         .expect("a read-back row holds four bytes per pixel")
+}
+
+/// Renders `scene` over `base_color` on a fresh device and returns the target's
+/// pixels, failing on any validation error the frame raised.
+///
+/// The three cases below each want one frame and its bytes, and nothing else
+/// the earlier cases assert about the encoder; sharing the setup keeps what
+/// each of them actually pins on screen.
+fn rendered(scene: &Scene, base_color: Color) -> Vec<u8> {
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine round frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            base_color,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained before the pixels are read: a page bound through the wrong
+    // pipeline's derived layout, or a pass whose depth state disagrees with its
+    // attachment, names itself here where a pixel mismatch only says that
+    // something went wrong.
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frame raised {error:?}");
+    warm_up_ran(&renderer);
+
+    target.read_back(&device, &queue)
+}
+
+/// The rectangle the layer case paints and composites.
+const LAYER_RECT: Rect = Rect::new(64.0, 64.0, 192.0, 192.0);
+
+/// One 0.5-opacity layer over an opaque backdrop: two rounds, a page, and a
+/// composite.
+fn layer_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(
+        Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+        Brush::Solid(BLACK),
+    );
+    builder.push_layer(LAYER_RECT, 0.5);
+    builder.fill_rect(LAYER_RECT, Brush::Solid(WHITE));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_two_round_layer_frame_composites_its_page_with_the_layers_own_alpha() {
+    let _serialized = render_lock();
+    let pixels = rendered(&layer_scene(), Color::TRANSPARENT);
+
+    // White inside a 0.5 layer over opaque black: 255 * 0.5, which is the whole
+    // point of giving the layer a page rather than drawing its contents
+    // straight onto the surface (that would paint 255).
+    let inside = pixel(&pixels, 128, 128);
+    assert_eq!(inside[3], 255, "the backdrop keeps the surface opaque");
+    for channel in 0..3 {
+        let value = i32::from(inside[channel]);
+        assert!(
+            (value - 128).abs() <= 1,
+            "a 0.5 layer over black must composite to about 128, got {inside:?}"
+        );
+    }
+
+    // Outside the layer's own bounds the backdrop is untouched, so the
+    // composite is bounded by the layer rather than blitted over the frame.
+    assert_eq!(pixel(&pixels, 8, 8), [0, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, 248, 248), [0, 0, 0, 255]);
+}
+
+/// The right edge of the punch: one pixel past the 128-px boundary, so the
+/// probes just outside it sit in the SAME strip tile as the punch edge.
+///
+/// A whole-tile erase would take them with it; destination-out weights the
+/// erase by the source's own coverage instead, so the edge lands pixel-exact
+/// however it falls inside a tile.
+const PUNCH_EDGE: f64 = 129.0;
+
+/// An opaque red frame with a hole punched through its left side, recorded
+/// inside a layer group the punch has to be hoisted out of.
+fn punch_scene() -> Scene {
+    let edge = f64::from(SIZE);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(Rect::new(0.0, 0.0, edge, edge), Brush::Solid(RED));
+    builder.push_layer(Rect::new(0.0, 0.0, edge, edge), 1.0);
+    builder.clear_rect(Rect::new(0.0, 0.0, PUNCH_EDGE, edge));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_punch_erases_to_full_transparency_pixel_exact_at_a_tile_unaligned_edge() {
+    let _serialized = render_lock();
+    // A translucent presentation: the target's alpha is what the punch exists
+    // to open, so the pass runs.
+    let pixels = rendered(&punch_scene(), Color::TRANSPARENT);
+
+    assert_eq!(
+        pixel(&pixels, 64, 128),
+        [0, 0, 0, 0],
+        "the punch centre must reach full transparency, colour and alpha alike"
+    );
+    assert_eq!(
+        pixel(&pixels, 128, 128),
+        [0, 0, 0, 0],
+        "the last pixel inside the unaligned edge must be erased"
+    );
+    assert_eq!(
+        pixel(&pixels, 129, 128),
+        [255, 0, 0, 255],
+        "the pixel just past the edge shares its tile and must survive intact"
+    );
+    assert_eq!(
+        pixel(&pixels, 140, 128),
+        [255, 0, 0, 255],
+        "and so must the rest of the tile the edge falls in"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_punch_is_dropped_whole_on_a_target_that_disregards_alpha() {
+    let _serialized = render_lock();
+    // An opaque base colour seals every pixel of the surface, so its alpha
+    // carries nothing the punch could open. Destination-out darkens colour as
+    // well as erasing alpha, so issuing it here would leave a black rectangle
+    // where the display list says nothing changes.
+    let pixels = rendered(&punch_scene(), BLUE);
+
+    assert_eq!(
+        pixel(&pixels, 64, 128),
+        [255, 0, 0, 255],
+        "an opaque presentation reads exactly as it would without the clear"
+    );
+    assert_eq!(pixel(&pixels, 140, 128), [255, 0, 0, 255]);
 }
 
 #[test]
@@ -550,6 +720,436 @@ fn a_solid_frame_after_a_gradient_frame_is_unaffected_by_it() {
     assert_eq!(pixel(solid, 176, 176), [0, 0, 255, 255]);
     assert_eq!(pixel(solid, 56, 200), [0, 128, 0, 255]);
     assert_eq!(pixel(solid, 4, 4), [0, 0, 0, 0]);
+
+    warm_up_ran(&renderer);
+}
+
+/// The destination an image draw fills — exactly the image's own natural
+/// extent, on whole pixels, so the compiler's own quality downgrade for a
+/// unit-scale translation (see `compile::paint::resolved_quality`) applies
+/// and the atlas is sampled at nearest rather than bilinear: the read-back
+/// then matches the source texel for texel, with no filtering to tolerance
+/// for.
+const IMAGE_RECT: Rect = Rect::new(32.0, 32.0, 96.0, 96.0);
+
+/// An opaque `width` x `height` RGBA8 image, every texel the same colour.
+fn solid_image(width: u32, height: u32, rgba: [u8; 4]) -> peniko::ImageData {
+    let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for _ in 0..(width as usize) * (height as usize) {
+        data.extend_from_slice(&rgba);
+    }
+    peniko::ImageData {
+        data: peniko::Blob::new(std::sync::Arc::new(data)),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width,
+        height,
+    }
+}
+
+/// A single opaque-green image, drawn at its own natural size onto
+/// [`IMAGE_RECT`] — the whole atlas-residency and consumption path, from
+/// `Command::Image` to a strip instance sampling `atlas_texture_array`.
+fn image_scene() -> Scene {
+    let image = solid_image(64, 64, [0, 255, 0, 255]);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.draw_image(&image, IMAGE_RECT);
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_image_draw_samples_the_real_atlas_rather_than_leaving_its_draw_skipped() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine image frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &image_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("an image frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained first: a placeholder atlas view left bound under a real draw,
+    // or a bind group built against a stale one, surfaces here rather than
+    // as a merely-wrong pixel.
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the image frame raised {error:?}");
+
+    let pixels = target.read_back(&device, &queue);
+    assert_eq!(
+        pixel(&pixels, 64, 64),
+        [0, 255, 0, 255],
+        "the atlas-resident image reached the target rather than being skipped"
+    );
+    // Bounded by its own destination rectangle, not painted over the frame.
+    assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 250, 250), [0, 0, 0, 0]);
+
+    warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_image_survives_a_second_frame_with_no_new_upload() {
+    // The steady state the residency promises: an image drawn again without
+    // its pixels changing costs no re-upload, and the renderer's own image
+    // registry (populated from the *first* frame's upload) must still carry
+    // enough to lower the *second* frame's paint — proving the registry
+    // resolves an already-resident image, not only a freshly uploaded one.
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = image_scene();
+
+    let mut last = None;
+    for _ in 0..2 {
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine repeat image frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("both image frames encode");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        last = Some(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the repeated image frame raised {error:?}");
+
+    let pixels = last.expect("two frames ran");
+    assert_eq!(pixel(&pixels, 64, 64), [0, 255, 0, 255]);
+
+    warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_renderer_takes_the_atlas_budget_its_own_adapter_calls_for() {
+    // The adapter is known exactly once, when the renderer is built, and that
+    // is the only place the image atlas budget can be derived from it. Built
+    // without it, every renderer on every device silently kept the mobile
+    // tier's 1024-square layer — the desktop tier, the adapter's own ceilings
+    // and `FRUST_ENGINE_ATLAS_SIZE` all unreachable.
+    let _serialized = render_lock();
+    let (device, _queue, caps) = gpu();
+
+    let renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    assert_eq!(
+        renderer.atlas_budget(),
+        AtlasBudget::for_caps(&caps),
+        "the renderer's budget must be the one its adapter calls for"
+    );
+    if !is_mobile_tier(&caps) {
+        assert_eq!(
+            renderer.atlas_budget().atlas_size,
+            AtlasBudget::DESKTOP.atlas_size,
+            "an immediate-mode adapter takes the desktop layer extent"
+        );
+    }
+    assert!(renderer.atlas_budget().total_bytes() <= AtlasBudget::DESKTOP.total_bytes());
+}
+
+/// The atlas the growth case allocates in: one layer holds a single 64x48
+/// image plus a strip, so a second such image forces the array to grow while
+/// there is still room in layer 0 for a small one.
+const GROWTH_BUDGET: AtlasBudget = AtlasBudget {
+    atlas_size: (64, 64),
+    max_atlases: 4,
+};
+
+/// Where the growth case draws its three images, each at its own natural size
+/// on whole pixels so the atlas is sampled at nearest and the read-back matches
+/// the source exactly.
+const RESIDENT_RECT: Rect = Rect::new(0.0, 0.0, 64.0, 48.0);
+const LAYER_ZERO_RECT: Rect = Rect::new(0.0, 64.0, 32.0, 80.0);
+const GROWTH_RECT: Rect = Rect::new(0.0, 100.0, 64.0, 148.0);
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_frame_that_grows_the_atlas_keeps_the_uploads_it_made_into_layer_zero() {
+    // One frame that does both: a new image lands in the space left in layer 0
+    // while another forces the array from one layer to two. Growth copies every
+    // existing layer across, and that copy must be ordered BEFORE this frame's
+    // own queued writes — recorded into the frame's encoder it lands after them
+    // (wgpu flushes queued writes first) and puts pre-growth layer 0 back over
+    // the image just written into it. The loss is permanent: residency reports
+    // the image resident from then on, so no later frame re-uploads it.
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_atlas_budget(GROWTH_BUDGET);
+
+    let resident = solid_image(64, 48, [0, 255, 0, 255]);
+    let into_layer_zero = solid_image(32, 16, [0, 0, 255, 255]);
+    let forces_growth = solid_image(64, 48, [255, 0, 0, 255]);
+
+    // Frame one makes only `resident` resident, so the array is created with
+    // exactly one layer and the growth below is a real growth.
+    let first = {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_image(&resident, RESIDENT_RECT);
+        scene
+    };
+    // Frame two redraws it (a residency hit, no upload), allocates a small
+    // image into what is left of layer 0, and a second full-height one that
+    // only fits in a layer the array does not have yet.
+    let second = {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_image(&resident, RESIDENT_RECT);
+        builder.draw_image(&into_layer_zero, LAYER_ZERO_RECT);
+        builder.draw_image(&forces_growth, GROWTH_RECT);
+        scene
+    };
+
+    let mut last = None;
+    for scene in [&first, &second] {
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine atlas growth frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("both image frames encode");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        last = Some(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the growth frame raised {error:?}");
+
+    let pixels = last.expect("two frames ran");
+    // The whole point: written into layer 0 on the very frame that grew the
+    // array past it, and still there afterwards.
+    assert_eq!(
+        pixel(&pixels, 16, 72),
+        [0, 0, 255, 255],
+        "the image uploaded into layer 0 was overwritten by the growth copy"
+    );
+    // The image that forced the growth, in the new layer.
+    assert_eq!(pixel(&pixels, 32, 124), [255, 0, 0, 255]);
+    // And the image growth had to carry across from the old layer 0.
+    assert_eq!(pixel(&pixels, 32, 24), [0, 255, 0, 255]);
+
+    assert_eq!(
+        renderer.refused_atlas_regions(),
+        0,
+        "no region of a sound frame is ever declined"
+    );
+    assert!(
+        renderer.atlas_budget().max_atlases >= 2,
+        "the budget under test must admit the second layer"
+    );
+
+    warm_up_ran(&renderer);
+}
+
+/// The half of the frame the punch erases, and the rectangle the translucent
+/// layer covers — overlapping, so one probe sits inside both.
+const PUNCH_HALF: Rect = Rect::new(0.0, 0.0, 128.0, 256.0);
+const TRANSLUCENT_LAYER: Rect = Rect::new(64.0, 64.0, 192.0, 192.0);
+
+/// An opaque red backdrop, a hole punched through its left half, and a
+/// half-opacity white layer recorded *after* the punch and straddling its edge.
+fn punch_under_translucent_layer_scene() -> Scene {
+    let edge = f64::from(SIZE);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(Rect::new(0.0, 0.0, edge, edge), Brush::Solid(RED));
+    builder.clear_rect(PUNCH_HALF);
+    builder.push_layer(TRANSLUCENT_LAYER, 0.5);
+    builder.fill_rect(TRANSLUCENT_LAYER, Brush::Solid(WHITE));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_translucent_composite_recorded_after_a_clear_rect_is_erased_by_the_trailing_punch() {
+    // Pins today's behaviour rather than arguing for it. `ClearRect` is hoisted
+    // to the frame root and issued as ONE destination-out pass after every
+    // draw, layer composites included — so a layer recorded after the clear is
+    // erased inside the cleared rectangle even though the display list draws it
+    // on top. Outside that rectangle the same composite lands normally, which
+    // is what distinguishes "the punch runs last" from "the layer was dropped".
+    let _serialized = render_lock();
+    let pixels = rendered(&punch_under_translucent_layer_scene(), Color::TRANSPARENT);
+
+    assert_eq!(
+        pixel(&pixels, 96, 128),
+        [0, 0, 0, 0],
+        "inside both the layer and the punch, the trailing punch wins outright"
+    );
+    assert_eq!(
+        pixel(&pixels, 32, 32),
+        [0, 0, 0, 0],
+        "and the rest of the punched half is erased as it always was"
+    );
+
+    // The same composite, one probe to the right of the punch edge: half-white
+    // over opaque red, so the layer plainly did reach the target.
+    let composited = pixel(&pixels, 160, 128);
+    assert_eq!(composited[3], 255, "the backdrop keeps the surface opaque");
+    assert!(
+        composited[0] > 200,
+        "red survives under a half-opacity white: {composited:?}"
+    );
+    for channel in 1..3 {
+        let value = i32::from(composited[channel]);
+        assert!(
+            (value - 128).abs() <= 2,
+            "a 0.5 white layer over red must composite to about 128, got {composited:?}"
+        );
+    }
+
+    // Outside the layer and outside the punch, the backdrop is untouched.
+    assert_eq!(pixel(&pixels, 200, 32), [255, 0, 0, 255]);
+}
+
+/// The destination [`Rect`] a blurred rounded rectangle shadow is cast from —
+/// large enough, relative to its own standard deviation below, that the blur
+/// coverage at its centre is effectively saturated.
+const BLUR_RECT: Rect = Rect::new(64.0, 56.0, 192.0, 168.0);
+
+/// A red shadow with a 16px corner radius and an 8px blur standard
+/// deviation — the simplest case that still forces the whole
+/// `EncodedPaint::BlurredRoundedRect` path: the compiled draw rasterizes the
+/// padded bounding rectangle the compiler's `blur_rrect::inflated_bounds`
+/// produces, and every pixel inside it is coloured by the fragment shader's
+/// own gaussian falloff rather than by a flat fill.
+fn blurred_rect_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.draw_blurred_rounded_rect(BLUR_RECT, 16.0, 8.0, RED);
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_blurred_rounded_rect_draw_paints_a_falloff_rather_than_leaving_its_draw_skipped() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine blurred-rect frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &blurred_rect_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a blurred-rect frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained first: a dropped draw (the paint never wired up) shows here as
+    // nothing at all rather than as a validation error, so the pixel checks
+    // below are what actually distinguishes "skipped" from "drawn".
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the blurred-rect frame raised {error:?}");
+
+    let pixels = target.read_back(&device, &queue);
+
+    // Deep inside the shadow, far from every edge relative to the 8px
+    // standard deviation: the gaussian falloff has saturated, so the pixel
+    // is (near enough) fully opaque and red rather than the frame's own
+    // transparent clear colour.
+    let center = pixel(&pixels, 128, 112);
+    assert!(
+        center[0] > 200 && center[3] > 200,
+        "the shadow's centre should read as strongly opaque red, got {center:?}"
+    );
+    assert_eq!(center[1], 0);
+    assert_eq!(center[2], 0);
+
+    // Far outside even the blur's own padded bounding rectangle
+    // (`inflated_bounds` pads by 2.5 standard deviations, 20px here): the
+    // clear colour survives untouched.
+    assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 250, 250), [0, 0, 0, 0]);
 
     warm_up_ran(&renderer);
 }

@@ -2996,7 +2996,9 @@ glyph-atlas `expect` is reachable only with `FRUST_HYBRID_ATLAS_CACHE=1` — the
 (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)).
 
 **Applies to**: the frust-engine + frust-gpu plan's Phase 0 GO/NO-GO gate only.
-`RenderTier::Hybrid` stays override-only and non-default — nothing in a normal build changes.
+Historical: the spike tier this entry measured (`RenderTier::Hybrid`, `hybrid_tier.rs`,
+the `vello_hybrid` pin) has since been deleted — the engine tier is its successor; the
+entry stays as the record of the GO decision and its measured numbers.
 
 **Evidence**: `benchmarks/RESULTS.md`'s "Pixel 5 — classic baseline for the engine plan" and
 "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections (Arms
@@ -3757,3 +3759,61 @@ refuse finite values.
 **Trigger for removal**: the swap phase deletes the classic tier, at which
 point there is one behaviour; or a widget-visible need for the classic
 fallback semantics appears first.
+
+### `engine-image-minify-to-fit` — an image wider than one atlas layer renders minified where the classic tier renders it full-resolution
+
+**Observed** (evidence: `crates/frust-engine/src/cache/images.rs`'s
+`fit_extent`/`minify` and `crates/frust-engine/tests/images.rs`): the engine's
+image path is atlas-resident, and a source larger than one atlas layer
+(capability-chosen per-layer extent, mobile 1024² / desktop 2048², overridable
+via `FRUST_ENGINE_ATLAS_SIZE`) is downscaled to fit with an aspect-preserving
+box filter at upload time, logged once per image. The filter averages
+sRGB-encoded premultiplied bytes — exact for a uniform-colour source, very
+slightly dark on high-contrast content. The classic tier samples the
+full-resolution source with no such ceiling, so the two tiers' pixels around a
+minified image legitimately differ (the calibrated engine-vs-classic band
+carries a reviewed per-case widening for the corpus's over-ceiling case).
+
+**Accepted because**: cross-frame residency is the engine image path's whole
+design, and refusing an oversized image outright would turn a working widget
+blank on the engine tier for a size cliff the author cannot see; minifying is
+what comparable atlas-based renderers do, and the display size of an image
+that large is almost always far below its source resolution anyway. A
+linear-light filter would need a transfer-function table this crate does not
+carry.
+
+**Trigger for removal**: tiled residency (splitting an oversized source across
+atlas rectangles) or a dedicated non-atlas texture path for oversized sources;
+either removes the ceiling rather than softening it.
+
+### `engine-scheduler-skip-on-escalation` — a layer shape the engine's scheduler cannot serve skips the frame rather than falling back
+
+**Observed** (evidence: `crates/frust-engine/src/schedule/mod.rs`'s module
+contract and the `RenderPath::EngineDirect` submit arm in
+`crates/frust-render/src/renderer.rs`): the engine tier carries no second
+renderer — a frame whose layer shape the two-page scheduler cannot serve
+(a fan of three or more simultaneously isolated sibling layers, a chain
+deeper than four, a filter/blend/mask layer) returns
+`EngineError::SchedulerEscalation` and the surface presents nothing for that
+frame: the previously presented content persists, a refusal counter
+increments, and a rate-limited log names the reason — and since the shape is
+a property of the layer tree, a shape that refuses once refuses every frame,
+freezing the surface on its last presented image while the app keeps running.
+Two isolated siblings directly under the frame's own surface are served
+(opposite page parities in one root round); the same pair nested inside
+another isolated layer, and wider simultaneous fans, are the practical gap.
+The served set is also recording-order sensitive at its boundary: the greedy
+page allocator can serve a nested subtree followed by a flat sibling yet
+refuse the same pair recorded flat-first, so a shape near the two-page bound
+may schedule or skip depending on paint order.
+
+**Accepted because**: the engine tier is an opt-in measurement tier this
+phase; skipping loudly beats rendering the shape wrong, and per-frame
+fallback to the classic renderer would require carrying both backends on one
+surface — machinery the measured tier deliberately omits.
+
+**Trigger for removal**: hoisting the renderer's depth-writing opaque pass
+out of the root-round loop, which lets the scheduler serve same-parity
+sequential page reuse and sibling fans of any width within two live pages —
+tracked as an open action item; or the swap phase making the engine the only
+tier, at which point the served set must cover the widget tree's real shapes.

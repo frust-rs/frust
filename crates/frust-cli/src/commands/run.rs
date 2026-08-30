@@ -796,7 +796,7 @@ mod tests {
         let plan = desktop_run::desktop_plan_with_features(
             Path::new("/tmp/project"),
             &debug_info(),
-            &["frust/perf-trace", "frust/devtools", "hybrid-tier"],
+            &["frust/perf-trace", "frust/devtools", "engine-tier"],
         );
         assert_eq!(
             plan.args,
@@ -807,7 +807,7 @@ mod tests {
                 "--features",
                 "frust/devtools",
                 "--features",
-                "hybrid-tier",
+                "engine-tier",
             ]
         );
     }

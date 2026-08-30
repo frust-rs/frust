@@ -351,8 +351,9 @@ fn an_empty_scene_compiles_to_nothing() {
 
 #[test]
 fn commands_outside_the_compiler_scope_are_skipped_without_disturbing_depths() {
-    // Clips and layers are recognised but not yet compiled; the geometry
-    // between them must still record, with depths dense over what survived.
+    // Layers are recognised but not yet compiled; a clip is compiled but
+    // records no draw of its own. The geometry between them must still record,
+    // with depths dense over what survived.
     let scene = scene_of(|b| {
         b.push_clip(Rect::new(0.0, 0.0, 200.0, 200.0));
         b.fill_rect(Rect::new(10.0, 10.0, 60.0, 60.0), solid(RED));
@@ -617,7 +618,7 @@ fn a_culled_gradient_draw_leaves_no_orphan_entry() {
 }
 
 #[test]
-fn an_image_brush_stays_a_transparent_placeholder_rather_than_an_entry() {
+fn an_image_brush_encodes_an_indexed_paint_backed_by_atlas_residency() {
     let image = peniko::ImageBrush::new(peniko::ImageData {
         data: peniko::Blob::new(std::sync::Arc::new(vec![255_u8, 0, 0, 255])),
         format: peniko::ImageFormat::Rgba8,
@@ -633,11 +634,19 @@ fn an_image_brush_stays_a_transparent_placeholder_rather_than_an_entry() {
         .compile(&scene, Affine::IDENTITY, VIEWPORT)
         .expect("compiles");
 
-    // The geometry is still exercised; only the paint is a stand-in.
     assert_eq!(frame.draws().len(), 1);
-    assert!(frame.encoded_paints.is_empty());
+    assert_eq!(frame.image_draws, 1);
+    assert_eq!(frame.skipped_images, 0);
+    assert_eq!(frame.encoded_paints.len(), 1, "one image entry");
+    assert!(matches!(
+        &frame.encoded_paints[0],
+        vello_common::encode::EncodedPaint::Image(_)
+    ));
+    // The brush's pixels become resident on this first frame, so the frame
+    // carries exactly one upload for them.
+    assert_eq!(frame.image_uploads.len(), 1);
     match &frame.draws()[0].paint {
-        Paint::Solid(color) => assert_eq!(color.as_premul_rgba8().a, 0),
-        Paint::Indexed(_) => panic!("image brushes are not encoded yet"),
+        Paint::Indexed(indexed) => assert_eq!(indexed.index(), 0),
+        Paint::Solid(_) => panic!("an image brush encodes an indexed paint"),
     }
 }

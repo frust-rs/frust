@@ -29,7 +29,7 @@ frust-text = { workspace = true }
 # and this crate is `publish = false`, reachable only across a
 # `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
 # ever sees the edge. `features = []` keeps the DEFAULT feature set (no
-# `cpu-tier`, no `hybrid-tier`, no `perf-trace`): the classic arm must be the
+# `cpu-tier`, no `engine-tier`, no `perf-trace`): the classic arm must be the
 # pipeline an app actually ships, and `cpu-tier` would additionally drag the
 # legacy `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own
 # graph beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
