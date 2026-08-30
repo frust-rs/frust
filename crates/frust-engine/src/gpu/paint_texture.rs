@@ -9,8 +9,12 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::EngineError;
+use vello_common::encode::{EncodedGradient, EncodedKind, EncodedPaint, RadialKind};
 
+use crate::EngineError;
+use crate::cache::CachedRamp;
+
+use super::strips::PaintType;
 use super::{MIN_RESOURCE_TEXTURE_HEIGHT, TEXEL_BYTES_SHIFT, resource_texture_descriptor};
 
 /// An encoded image paint.
@@ -167,6 +171,18 @@ paint_record_bytes!(
 );
 
 impl GpuEncodedPaint {
+    /// The paint type a strip instance names this record by.
+    #[must_use]
+    pub const fn paint_type(&self) -> PaintType {
+        match self {
+            Self::Image(_) => PaintType::Image,
+            Self::LinearGradient(_) => PaintType::LinearGradient,
+            Self::RadialGradient(_) => PaintType::RadialGradient,
+            Self::SweepGradient(_) => PaintType::SweepGradient,
+            Self::BlurredRoundedRect(_) => PaintType::BlurredRoundedRect,
+        }
+    }
+
     /// This paint's bytes, exactly as they land in the encoded-paint texture.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
@@ -235,6 +251,154 @@ impl GpuEncodedPaint {
                 start
             })
             .collect()
+    }
+}
+
+/// Lower one `vello_common` encoded paint into the record the strip shader
+/// samples, or `None` when the engine cannot resolve it yet.
+///
+/// `ramp` is where the paint's colour ramp was made resident, which only a
+/// gradient needs and only a caller that already serviced the frame's LUT
+/// requests can supply — a gradient reaching here without one is dropped
+/// rather than pointed at whatever texels the LUT texture happens to hold.
+///
+/// Image and external-texture paints answer `None`: their pixels live in the
+/// glyph/image atlas, which the engine does not own yet, so there is no
+/// residency to name in a record. A blurred rounded rectangle answers `None`
+/// on the same rule — the display list's blurred-rect command is not lowered
+/// by the compiler, so no such entry can reach a frame, and a record built
+/// from an untravelled path would be a guess at the shader's contract rather
+/// than a wiring of it. Both become a dropped draw, not a wrongly-painted one.
+#[must_use]
+pub fn lower_encoded_paint(
+    paint: &EncodedPaint,
+    ramp: Option<CachedRamp>,
+) -> Option<GpuEncodedPaint> {
+    match paint {
+        EncodedPaint::Gradient(gradient) => Some(lower_gradient(gradient, ramp?)),
+        EncodedPaint::Image(_)
+        | EncodedPaint::ExternalTexture(_)
+        | EncodedPaint::BlurredRoundedRect(_) => None,
+    }
+}
+
+/// Lower a gradient whose ramp is resident at `ramp`.
+///
+/// The transform is the gradient's own encoded transform — already the inverse
+/// mapping from device space into gradient space — narrowed to `f32` because
+/// that is the width the record and the shader both read it at.
+fn lower_gradient(gradient: &EncodedGradient, ramp: CachedRamp) -> GpuEncodedPaint {
+    let transform = gradient.transform.as_coeffs().map(|coeff| coeff as f32);
+    let texture_width_and_extend_mode =
+        pack_texture_width_and_extend_mode(ramp.width, extend_mode(gradient.extend));
+    let gradient_start = ramp.lut_start;
+
+    match &gradient.kind {
+        EncodedKind::Linear(_) => GpuEncodedPaint::LinearGradient(GpuLinearGradient {
+            texture_width_and_extend_mode,
+            gradient_start,
+            transform,
+        }),
+        EncodedKind::Radial(radial) => {
+            let shape = RadialShape::of(radial);
+            GpuEncodedPaint::RadialGradient(GpuRadialGradient {
+                texture_width_and_extend_mode,
+                gradient_start,
+                transform,
+                kind_and_f_is_swapped: pack_kind_and_f_is_swapped(shape.kind, shape.f_is_swapped),
+                bias: shape.bias,
+                scale: shape.scale,
+                fp0: shape.fp0,
+                fp1: shape.fp1,
+                fr1: shape.fr1,
+                f_focal_x: shape.f_focal_x,
+                scaled_r0_squared: shape.scaled_r0_squared,
+            })
+        }
+        EncodedKind::Sweep(sweep) => GpuEncodedPaint::SweepGradient(GpuSweepGradient {
+            texture_width_and_extend_mode,
+            gradient_start,
+            transform,
+            start_angle: sweep.start_angle,
+            inv_angle_delta: sweep.inv_angle_delta,
+            _padding: [0, 0],
+        }),
+    }
+}
+
+/// The shader's extend-mode numbering.
+const fn extend_mode(extend: peniko::Extend) -> u32 {
+    match extend {
+        peniko::Extend::Pad => 0,
+        peniko::Extend::Repeat => 1,
+        peniko::Extend::Reflect => 2,
+    }
+}
+
+/// The radial gradient parameters flattened into the one field set the record
+/// carries.
+///
+/// The three radial shapes populate disjoint subsets of those fields, and the
+/// shader selects between them on `kind`; collecting them here keeps the
+/// record's construction one struct literal rather than a match arm per field.
+struct RadialShape {
+    kind: u32,
+    bias: f32,
+    scale: f32,
+    fp0: f32,
+    fp1: f32,
+    fr1: f32,
+    f_focal_x: f32,
+    f_is_swapped: bool,
+    scaled_r0_squared: f32,
+}
+
+impl RadialShape {
+    /// The unused fields of every shape, which the shader does not read for
+    /// that `kind`.
+    const ZERO: Self = Self {
+        kind: 0,
+        bias: 0.0,
+        scale: 0.0,
+        fp0: 0.0,
+        fp1: 0.0,
+        fr1: 0.0,
+        f_focal_x: 0.0,
+        f_is_swapped: false,
+        scaled_r0_squared: 0.0,
+    };
+
+    fn of(radial: &RadialKind) -> Self {
+        match radial {
+            RadialKind::Radial { bias, scale } => Self {
+                kind: 0,
+                bias: *bias,
+                scale: *scale,
+                ..Self::ZERO
+            },
+            RadialKind::Strip { scaled_r0_squared } => Self {
+                kind: 1,
+                scaled_r0_squared: *scaled_r0_squared,
+                ..Self::ZERO
+            },
+            RadialKind::Focal {
+                focal_data,
+                fp0,
+                fp1,
+            } => Self {
+                kind: 2,
+                // The focal shape reuses `bias`/`scale` as a second copy of the
+                // focal pair, matching the reference encoding the shader reads.
+                bias: *fp0,
+                scale: *fp1,
+                fp0: *fp0,
+                fp1: *fp1,
+                fr1: focal_data.fr1,
+                f_focal_x: focal_data.f_focal_x,
+                f_is_swapped: focal_data.f_is_swapped,
+                scaled_r0_squared: 0.0,
+            },
+        }
     }
 }
 

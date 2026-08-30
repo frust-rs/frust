@@ -43,16 +43,28 @@
 //! because the depth buffer re-establishes their ordering against the blended
 //! ones.
 //!
-//! # What a frame does not do yet
+//! # Paint resolution
 //!
-//! The scene compiler resolves every brush to a solid colour today, so a
-//! frame's encoded-paint side table is empty and no gradient ever reaches the
-//! GPU. The upload path for both resources is live — they are sized, grown,
-//! uploaded and bound every frame — and what is missing is the lowering from
-//! `vello_common::encode::EncodedPaint` into the [`GpuEncodedPaint`] records
-//! this module uploads. Until that exists, a draw carrying an indexed paint is
-//! skipped rather than stamped in a wrong colour: the same "a frame draws less,
-//! never wrong" rule the compiler follows for the commands it does not lower.
+//! A solid colour travels inside the strip instance itself. Anything else the
+//! compiler encoded — today, a gradient — is resolved once per frame before a
+//! single instance is built, in three steps that have to happen in this order:
+//!
+//! 1. the frame's LUT requests are serviced through the [`GradientCache`], so
+//!    every gradient's colour ramp is resident and has an offset into the
+//!    packed LUT buffer;
+//! 2. each encoded paint is lowered into the [`GpuEncodedPaint`] record the
+//!    fragment shader samples, carrying that offset; and
+//! 3. the records are serialized back to back, which fixes the texel each one
+//!    starts at — the index a strip instance names its paint by.
+//!
+//! Ramp offsets are only valid within the frame that took them: the cache
+//! compacts and rewrites them in [`EngineRenderer::end_frame`], which is why
+//! residency is decided here rather than at compile time.
+//!
+//! A paint that still cannot be resolved — an image, whose pixels need an
+//! atlas the engine does not own yet — leaves its draw skipped rather than
+//! stamped in a wrong colour: the same "a frame draws less, never wrong" rule
+//! the compiler follows for the commands it does not lower.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
@@ -64,27 +76,27 @@ use peniko::Color;
 use vello_common::fearless_simd::Level;
 use vello_common::paint::Paint;
 use vello_common::strip::Strip;
-use vello_common::tile::Tile;
 
-use crate::cache::{BYTES_PER_TEXEL, GradientCache, GradientTextureLayout};
+use crate::cache::{BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout};
+use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
 use crate::gpu::depth::DepthAttachment;
+use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, warm_up_descs};
+use crate::gpu::strips::{PaintType, pack_paint_descriptor};
 use crate::gpu::targets::IntermediateTargets;
 use crate::gpu::{self, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::{EngineTarget, OutputAlpha};
 
 /// The packed paint descriptor of an inline premultiplied solid colour.
 ///
-/// The strip shader reads a colour source from bits 29-30 and a paint type
-/// from bits 26-28; `payload` (colour source 0) and `solid` (paint type 0) are
-/// both zero, and a solid paint indexes no encoded-paint record, so the whole
-/// word is zero. Named rather than written as a bare `0` at its call site
-/// because the zero is a coincidence of the layout, not an absence of
-/// information.
-const SOLID_PAINT: u32 = 0;
+/// A solid paint indexes no encoded-paint record, so its descriptor carries
+/// only the colour source and paint type — both of which are zero, which is
+/// why this is named rather than written as a bare `0` at its call site: the
+/// zero is a coincidence of the layout, not an absence of information.
+const SOLID_PAINT: u32 = pack_paint_descriptor(PaintType::Solid, 0);
 
 /// The smallest resource-texture dimension the engine can address.
 ///
@@ -339,8 +351,12 @@ impl EngineRenderer {
             .then(|| target.depth.or_else(|| self.depth.owned_view()))
             .flatten();
 
+        // Paints are resolved before instances are built: an instance names
+        // its paint by the texel its record starts at, which only exists once
+        // the frame's ramps are resident and its records are laid out.
+        self.resources.resolve_paints(&frame, &mut self.gradients);
         self.scratch
-            .build_instances(&frame, depth_view.is_some(), &self.resources.paint_offsets);
+            .build_instances(&frame, depth_view.is_some(), &self.resources.paint_slots);
 
         // Everything that can fail does so here, ahead of the first
         // `begin_render_pass`.
@@ -600,26 +616,26 @@ impl Scratch {
         &mut self,
         frame: &CompiledFrame,
         depth_active: bool,
-        paint_offsets: &[u32],
+        paint_slots: &[Option<ResolvedPaint>],
     ) {
         self.opaque.clear();
         self.alpha.clear();
 
         let strips = frame.strip_buf();
         for draw in frame.draws() {
-            let Some((values, opaque)) = pack_paint(&draw.paint, draw.depth, paint_offsets) else {
+            let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots) else {
                 continue;
             };
             let Some(range) = strips.get(draw.strip_range.clone()) else {
                 continue;
             };
-            let to_opaque = opaque && depth_active;
+            let to_opaque = paint.opaque && depth_active;
 
             // A generation's last strip is its sentinel, which is what carries
             // the preceding strip's extent — so every instance comes from a
             // pair, and the sentinel itself never becomes one.
             for pair in range.windows(2) {
-                self.push_span(&pair[0], &pair[1], values, to_opaque);
+                self.push_span(&pair[0], &pair[1], paint, to_opaque);
             }
         }
     }
@@ -627,13 +643,18 @@ impl Scratch {
     /// Emits the instances the `strip`/`next` pair describes: the strip's own
     /// alpha-sampled span, plus the solid span filling the gap to `next` when
     /// the winding between them says there is one.
-    fn push_span(&mut self, strip: &Strip, next: &Strip, values: StripDraw, to_opaque: bool) {
-        let mut span = GpuStrip::from_strip_pair(strip, next, values);
+    fn push_span(&mut self, strip: &Strip, next: &Strip, paint: PackedPaint, to_opaque: bool) {
+        let values = paint.values_at(strip.x, strip.y);
+        let span = GpuStrip::from_strip_pair(strip, next, values);
         if span.width > 0 {
-            span.col_idx_or_rect_frac = alpha_column(span.col_idx_or_rect_frac);
             self.alpha.push(span);
         }
-        if let Some(gap) = GpuStrip::gap_fill(strip, next, values) {
+        // A gap starts where the strip ends rather than where it begins, so a
+        // position-sampled paint is re-evaluated at the gap's own origin — the
+        // gap is a different piece of the scene, not a continuation of the
+        // span's sampling.
+        if let Some(mut gap) = GpuStrip::gap_fill(strip, next, values) {
+            gap.payload = paint.payload_at(gap.x, gap.y);
             if to_opaque {
                 self.opaque.push(gap);
             } else {
@@ -652,51 +673,105 @@ impl Scratch {
     }
 }
 
-/// The alpha *column* the strip shader addresses coverage by, from the byte
-/// index a [`Strip`] carries.
+/// Where a strip instance's payload comes from.
 ///
-/// The two are different units, and the conversion is the shader's own. A
-/// strip's `alpha_idx` counts coverage *bytes* from the start of the frame's
-/// buffer; `GpuStrip::col_idx_or_rect_frac` is read as a column ordinal, which
-/// the fragment stage turns into a texel with `col / 4` and a channel within it
-/// with `col % 4` — one channel holding one pixel column's `Tile::HEIGHT`
-/// coverage bytes. So a column is `Tile::HEIGHT` bytes wide, which is the same
-/// unit `Strip::width_to` already reports a strip's width in.
-///
-/// Getting this wrong is invisible on fully-covered geometry and total on
-/// anti-aliased geometry: every alpha-sampled span reads past its own coverage,
-/// lands on unwritten texels, and resolves to zero alpha.
-fn alpha_column(alpha_idx: u32) -> u32 {
-    alpha_idx / u32::from(Tile::HEIGHT)
+/// A solid paint carries its colour there; every other paint reads its colour
+/// from a record instead, and spends the payload on the scene position the
+/// paint is sampled at — which is why the payload is per instance rather than
+/// per draw.
+#[derive(Debug, Clone, Copy)]
+enum PaintPayload {
+    /// A premultiplied RGBA8 colour, the same for every instance of the draw.
+    Solid(u32),
+    /// The instance's own scene-space origin, packed as a `u16` pair.
+    Position,
 }
 
-/// The per-draw shader values for `paint`, and whether it is opaque.
-///
-/// Answers `None` for an indexed paint the frame's encoded-paint table cannot
-/// resolve, which is every indexed paint until the lowering into
-/// [`GpuEncodedPaint`] records exists (see the module header). The draw is then
-/// skipped rather than stamped in a wrong colour.
-fn pack_paint(paint: &Paint, depth: u32, paint_offsets: &[u32]) -> Option<(StripDraw, bool)> {
-    match paint {
-        Paint::Solid(color) => Some((
-            StripDraw {
-                payload: color.as_premul_rgba8().to_u32(),
-                paint: SOLID_PAINT,
-                depth_index: depth,
-            },
-            color.is_opaque(),
-        )),
-        Paint::Indexed(indexed) => {
-            paint_offsets.get(indexed.index())?;
-            INDEXED_PAINT_WARNING.call_once(|| {
-                log::warn!(
-                    "indexed paints are not lowered to GPU records yet; those draws are skipped \
-                     (logged once)"
-                );
-            });
-            None
+/// One draw's paint, resolved to the values its instances repeat.
+#[derive(Debug, Clone, Copy)]
+struct PackedPaint {
+    payload: PaintPayload,
+    /// The packed paint descriptor, without [`RECT_STRIP_FLAG`](crate::gpu::strips::RECT_STRIP_FLAG).
+    paint: u32,
+    depth_index: u32,
+    /// Whether every pixel this paint produces is opaque, and so whether its
+    /// fully-covered spans may take the depth-writing pass.
+    opaque: bool,
+}
+
+impl PackedPaint {
+    /// The payload an instance whose scene origin is `(x, y)` carries.
+    fn payload_at(self, x: u16, y: u16) -> u32 {
+        match self.payload {
+            PaintPayload::Solid(rgba) => rgba,
+            PaintPayload::Position => pack_u16_pair(x, y),
         }
     }
+
+    /// The per-instance values for an instance whose scene origin is `(x, y)`.
+    fn values_at(self, x: u16, y: u16) -> StripDraw {
+        StripDraw {
+            payload: self.payload_at(x, y),
+            paint: self.paint,
+            depth_index: self.depth_index,
+        }
+    }
+}
+
+/// Two `u16`s in one word, low half first — the packing the shader's
+/// `unpack_u16_pair` reverses.
+fn pack_u16_pair(x: u16, y: u16) -> u32 {
+    u32::from(x) | (u32::from(y) << 16)
+}
+
+/// The shader values for `paint`, resolved against the frame's paint slots.
+///
+/// Answers `None` for an indexed paint the frame could not resolve — one whose
+/// entry is missing from `paint_slots` entirely, or one the lowering refused
+/// because the engine has nowhere to hold its pixels yet (see the module
+/// header). The draw is then skipped rather than stamped in a wrong colour.
+fn pack_paint(
+    paint: &Paint,
+    depth: u32,
+    paint_slots: &[Option<ResolvedPaint>],
+) -> Option<PackedPaint> {
+    match paint {
+        Paint::Solid(color) => Some(PackedPaint {
+            payload: PaintPayload::Solid(color.as_premul_rgba8().to_u32()),
+            paint: SOLID_PAINT,
+            depth_index: depth,
+            opaque: color.is_opaque(),
+        }),
+        Paint::Indexed(indexed) => {
+            let Some(Some(resolved)) = paint_slots.get(indexed.index()) else {
+                INDEXED_PAINT_WARNING.call_once(|| {
+                    log::warn!(
+                        "an indexed paint could not be lowered to a GPU record; those draws are \
+                         skipped (logged once)"
+                    );
+                });
+                return None;
+            };
+            Some(PackedPaint {
+                payload: PaintPayload::Position,
+                paint: pack_paint_descriptor(resolved.paint_type, resolved.texel_offset),
+                depth_index: depth,
+                opaque: resolved.opaque,
+            })
+        }
+    }
+}
+
+/// One encoded paint after lowering: where its record landed and how a strip
+/// instance names it.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedPaint {
+    /// How the fragment shader reads the record.
+    paint_type: PaintType,
+    /// The texel the record starts at in the encoded-paint texture.
+    texel_offset: u32,
+    /// Whether every pixel the paint produces is opaque.
+    opaque: bool,
 }
 
 /// One resource texture and the extent it currently holds.
@@ -755,10 +830,19 @@ struct FrameResources {
     config: wgpu::Buffer,
     instances: Option<wgpu::Buffer>,
     instance_capacity: u64,
-    /// The GPU records a frame's indexed paints resolve against, and the texel
-    /// each one starts at. Both stay empty until paint lowering exists.
+    /// The GPU records this frame's indexed paints resolve against, in
+    /// serialization order — which is the order the texel offsets in
+    /// `paint_slots` were taken from.
     paints_data: Vec<GpuEncodedPaint>,
-    paint_offsets: Vec<u32>,
+    /// One slot per encoded paint of the frame, indexed by
+    /// [`Paint::Indexed`](vello_common::paint::Paint::Indexed): `None` for one
+    /// the engine could not lower. Kept parallel to the *encoded* paints
+    /// rather than compacted to the lowered ones, because a draw names its
+    /// paint by the compiler's index.
+    paint_slots: Vec<Option<ResolvedPaint>>,
+    /// Reusable per-paint ramp residency, filled from a frame's LUT requests
+    /// before its paints are lowered.
+    paint_ramps: Vec<Option<CachedRamp>>,
     /// Reusable staging for the encoded-paint upload, padded to the texture's
     /// footprint.
     paint_staging: Vec<u8>,
@@ -792,10 +876,59 @@ impl FrameResources {
             instances: None,
             instance_capacity: 0,
             paints_data: Vec::new(),
-            paint_offsets: Vec::new(),
+            paint_slots: Vec::new(),
+            paint_ramps: Vec::new(),
             paint_staging: Vec::new(),
             bind_groups: HashMap::new(),
             bind_group_format: None,
+        }
+    }
+
+    /// Services `frame`'s LUT requests and lowers its encoded paints into the
+    /// records the shader samples.
+    ///
+    /// Leaves `paints_data` holding the lowered records in serialization order
+    /// and `paint_slots` naming, per *encoded* paint, the texel its record
+    /// starts at — or `None` where the paint could not be lowered.
+    ///
+    /// A solid-only frame leaves both empty and touches neither the cache nor
+    /// the paint texture, so it costs exactly what it did before paints were
+    /// wired up.
+    fn resolve_paints(&mut self, frame: &CompiledFrame, cache: &mut GradientCache) {
+        self.paints_data.clear();
+        self.paint_slots.clear();
+
+        if frame.encoded_paints.is_empty() {
+            return;
+        }
+
+        // Residency first, for the whole frame: a ramp's offset is only
+        // meaningful once the cache has finished baking this frame's misses,
+        // and a record built before that would name a ramp that had not been
+        // packed yet.
+        self.paint_ramps.clear();
+        self.paint_ramps.resize(frame.encoded_paints.len(), None);
+        for request in &frame.lut_requests {
+            let ramp = resolve_lut_request(*request, &frame.encoded_paints, cache);
+            if let Some(slot) = self.paint_ramps.get_mut(request.paint_index) {
+                *slot = ramp;
+            }
+        }
+
+        let mut texel_offset = 0;
+        for (index, paint) in frame.encoded_paints.iter().enumerate() {
+            let ramp = self.paint_ramps.get(index).copied().flatten();
+            let slot = lower_encoded_paint(paint, ramp).map(|record| {
+                let resolved = ResolvedPaint {
+                    paint_type: record.paint_type(),
+                    texel_offset,
+                    opaque: !paint.may_have_transparency(),
+                };
+                texel_offset += record.texel_len();
+                self.paints_data.push(record);
+                resolved
+            });
+            self.paint_slots.push(slot);
         }
     }
 
@@ -1197,35 +1330,66 @@ mod tests {
 
     #[test]
     fn a_solid_paint_travels_premultiplied_in_the_instance_payload() {
-        let (values, opaque) =
-            pack_paint(&Paint::from(RED), 3, &[]).expect("a solid paint always resolves");
+        let paint = pack_paint(&Paint::from(RED), 3, &[]).expect("a solid paint always resolves");
+        let values = paint.values_at(40, 12);
         assert_eq!(values.paint, SOLID_PAINT);
         assert_eq!(values.depth_index, 3);
         assert_eq!(values.payload, RED.premultiply().to_rgba8().to_u32());
-        assert!(opaque);
+        assert!(paint.opaque);
+        assert_eq!(
+            paint.values_at(0, 0).payload,
+            values.payload,
+            "a solid colour is the same wherever it is stamped"
+        );
 
-        let (_, opaque) = pack_paint(&Paint::from(RED.with_alpha(0.5)), 0, &[])
+        let paint = pack_paint(&Paint::from(RED.with_alpha(0.5)), 0, &[])
             .expect("a translucent solid paint still resolves");
-        assert!(!opaque, "a translucent paint never reaches the opaque pass");
+        assert!(
+            !paint.opaque,
+            "a translucent paint never reaches the opaque pass"
+        );
     }
 
     #[test]
     fn an_unresolvable_indexed_paint_skips_its_draw() {
         let indexed = Paint::Indexed(IndexedPaint::new(0));
-        assert!(pack_paint(&indexed, 0, &[]).is_none());
+        assert!(
+            pack_paint(&indexed, 0, &[]).is_none(),
+            "an index past the frame's slots resolves to nothing"
+        );
+        assert!(
+            pack_paint(&indexed, 0, &[None]).is_none(),
+            "so does a slot the lowering refused"
+        );
     }
 
     #[test]
-    fn an_alpha_column_is_tile_height_coverage_bytes_wide() {
-        // The shader selects a texel with `col / 4` and a channel with
-        // `col % 4`, so the first four columns must land in one texel's four
-        // channels — which they only do if a column is four bytes wide.
-        assert_eq!(Tile::HEIGHT, 4);
-        assert_eq!(alpha_column(0), 0);
-        assert_eq!(alpha_column(4), 1);
-        assert_eq!(alpha_column(12), 3);
-        assert_eq!(alpha_column(16), 4, "the fifth column starts a new texel");
-        assert_eq!(alpha_column(3104), 776);
+    fn a_resolved_indexed_paint_samples_at_each_instances_own_position() {
+        let slots = [Some(ResolvedPaint {
+            paint_type: PaintType::LinearGradient,
+            texel_offset: 6,
+            opaque: true,
+        })];
+        let paint = pack_paint(&Paint::Indexed(IndexedPaint::new(0)), 2, &slots)
+            .expect("a lowered paint resolves");
+
+        assert_eq!(
+            paint.paint,
+            pack_paint_descriptor(PaintType::LinearGradient, 6)
+        );
+        assert_eq!(paint.depth_index, 2);
+        // The payload is the instance's scene origin, not a colour, so two
+        // instances of the same draw carry different payloads.
+        assert_eq!(paint.payload_at(8, 4), 8 | (4 << 16));
+        assert_eq!(paint.payload_at(40, 4), 40 | (4 << 16));
+    }
+
+    #[test]
+    fn a_u16_pair_packs_low_half_first() {
+        assert_eq!(pack_u16_pair(0, 0), 0);
+        assert_eq!(pack_u16_pair(1, 0), 1);
+        assert_eq!(pack_u16_pair(0, 1), 1 << 16);
+        assert_eq!(pack_u16_pair(u16::MAX, u16::MAX), u32::MAX);
     }
 
     #[test]

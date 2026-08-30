@@ -22,6 +22,83 @@ const _: () = assert!(
 /// [`GpuStrip::col_idx_or_rect_frac`] as a coverage fraction.
 pub const RECT_STRIP_FLAG: u32 = 1 << 31;
 
+/// Bit the colour source starts at in [`GpuStrip::paint_and_rect_flag`].
+const COLOR_SOURCE_SHIFT: u32 = 29;
+
+/// Bit the paint type starts at in [`GpuStrip::paint_and_rect_flag`].
+const PAINT_TYPE_SHIFT: u32 = 26;
+
+/// Mask covering the encoded-paint texel index in
+/// [`GpuStrip::paint_and_rect_flag`] — everything below the paint type.
+pub const PAINT_TEXTURE_INDEX_MASK: u32 = (1 << PAINT_TYPE_SHIFT) - 1;
+
+/// The colour source saying the fragment shader reads
+/// [`GpuStrip::payload`] rather than sampling a rendered layer.
+///
+/// The only source the engine emits: layer compositing is later work, and an
+/// instance that named the layer source would sample the placeholder view
+/// bound in its place.
+const COLOR_SOURCE_PAYLOAD: u32 = 0;
+
+/// How the fragment shader turns an instance's payload into colour.
+///
+/// The discriminants are the shader's own paint-type numbering, not an
+/// arbitrary ordering — they are written into
+/// [`GpuStrip::paint_and_rect_flag`] as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum PaintType {
+    /// The payload is a premultiplied RGBA8 colour, used directly.
+    Solid = 0,
+    /// The payload is a sample position; the record names an atlas image.
+    Image = 1,
+    /// The payload is a sample position; the record names a linear gradient.
+    LinearGradient = 2,
+    /// The payload is a sample position; the record names a radial gradient.
+    RadialGradient = 3,
+    /// The payload is a sample position; the record names a sweep gradient.
+    SweepGradient = 4,
+    /// The payload is a sample position; the record names a blurred rounded
+    /// rectangle.
+    BlurredRoundedRect = 5,
+}
+
+/// The packed paint descriptor for a `paint_type` instance whose encoded-paint
+/// record starts at `texel_index`.
+///
+/// [`PaintType::Solid`] indexes no record and passes `0`; every other type
+/// carries the texel its record starts at, which is what
+/// `load_encoded_paint_texel` addresses the paint texture by. The index is
+/// masked rather than reported, because it is produced by this crate's own
+/// serialization — a paint table large enough to overflow 26 bits is refused
+/// by the paint texture's own capacity check long before it reaches here.
+#[must_use]
+pub const fn pack_paint_descriptor(paint_type: PaintType, texel_index: u32) -> u32 {
+    (COLOR_SOURCE_PAYLOAD << COLOR_SOURCE_SHIFT)
+        | ((paint_type as u32) << PAINT_TYPE_SHIFT)
+        | (texel_index & PAINT_TEXTURE_INDEX_MASK)
+}
+
+/// The alpha *column* the strip shader addresses coverage by, from the byte
+/// index a [`Strip`] carries.
+///
+/// The two are different units, and the conversion is the shader's own. A
+/// strip's `alpha_idx` counts coverage *bytes* from the start of the frame's
+/// buffer; [`GpuStrip::col_idx_or_rect_frac`] is read as a column ordinal,
+/// which the fragment stage turns into a texel with `col / 4` and a channel
+/// within it with `col % 4` — one channel holding one pixel column's
+/// `Tile::HEIGHT` coverage bytes. So a column is `Tile::HEIGHT` bytes wide,
+/// which is the same unit [`Strip::width_to`] already reports a strip's width
+/// in.
+///
+/// Getting this wrong is invisible on fully-covered geometry and total on
+/// anti-aliased geometry: every alpha-sampled span reads past its own
+/// coverage, lands on unwritten texels, and resolves to zero alpha.
+#[must_use]
+pub const fn alpha_column(alpha_idx: u32) -> u32 {
+    alpha_idx / Tile::HEIGHT as u32
+}
+
 /// One strip instance, matching the shaders' `StripInstance` byte for byte.
 ///
 /// Three of the fields are overloaded by [`RECT_STRIP_FLAG`], which is why
@@ -123,7 +200,7 @@ impl GpuStrip {
 
     /// The alpha-sampled instance for `strip`, `width` pixels wide.
     ///
-    /// The strip's own alpha index becomes the instance's first alpha column,
+    /// The strip's alpha index becomes the instance's first alpha *column*,
     /// and the instance is dense across its whole width: every column samples
     /// coverage.
     #[must_use]
@@ -133,7 +210,7 @@ impl GpuStrip {
             y: strip.y,
             width,
             dense_width_or_rect_height: width,
-            col_idx_or_rect_frac: strip.alpha_idx(),
+            col_idx_or_rect_frac: alpha_column(strip.alpha_idx()),
             payload: draw.payload,
             paint_and_rect_flag: draw.paint,
             depth_index: draw.depth_index,

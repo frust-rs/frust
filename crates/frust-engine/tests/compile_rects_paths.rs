@@ -5,11 +5,14 @@
 //! contract a GPU pass consumes rather than the compiler's internals. No GPU,
 //! device, or surface is involved: strip generation is pure CPU work.
 
+use frust_engine::compile::paint::LutRequest;
 use frust_engine::{EngineError, SceneCompiler};
 use frust_scene::{DashPattern, Scene, SceneBuilder};
 use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::color::palette::css::{BLUE, RED};
-use peniko::{Brush, Color};
+use peniko::{Brush, Color, Gradient};
+use vello_common::encode::EncodedPaint;
+use vello_common::paint::Paint;
 
 /// Viewport every case compiles against, comfortably larger than the geometry
 /// it records so nothing is culled by accident.
@@ -428,4 +431,136 @@ fn geometry_entirely_outside_the_viewport_records_no_draw() {
         .expect("compiles");
 
     assert!(frame.draws().is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Paint encoding: which brush leaves which entry in the frame's side table
+// ---------------------------------------------------------------------
+
+/// A two-stop linear gradient running left to right across `rect`.
+fn linear(rect: Rect) -> Brush {
+    Brush::Gradient(
+        Gradient::new_linear((rect.x0, rect.y0), (rect.x1, rect.y0)).with_stops([RED, BLUE]),
+    )
+}
+
+/// The index of `draw`'s paint in the frame's encoded-paint table.
+fn indexed(draw: &frust_engine::EngineDraw) -> usize {
+    match &draw.paint {
+        Paint::Indexed(indexed) => indexed.index(),
+        Paint::Solid(color) => panic!("expected an indexed paint, got the solid {color:?}"),
+    }
+}
+
+#[test]
+fn a_solid_only_scene_encodes_no_paint_entry_at_all() {
+    let scene = scene_of(|b| {
+        b.fill_rect(Rect::new(10.0, 10.0, 60.0, 60.0), solid(RED));
+        b.fill_path(diamond(), solid(BLUE));
+    });
+
+    let frame = compiler()
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+
+    assert_eq!(frame.draws().len(), 2);
+    assert!(
+        frame.encoded_paints.is_empty(),
+        "a solid colour travels inside the draw, costing no side-table entry"
+    );
+    assert!(frame.lut_requests.is_empty());
+    for draw in frame.draws() {
+        assert!(matches!(draw.paint, Paint::Solid(_)));
+    }
+}
+
+#[test]
+fn a_gradient_brush_encodes_an_indexed_paint_and_asks_for_its_ramp() {
+    let rect = Rect::new(20.0, 20.0, 120.0, 80.0);
+    let scene = scene_of(|b| b.fill_rect(rect, linear(rect)));
+
+    let frame = compiler()
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+
+    assert_eq!(frame.draws().len(), 1);
+    let index = indexed(&frame.draws()[0]);
+    assert_eq!(frame.encoded_paints.len(), 1);
+    assert!(matches!(
+        frame.encoded_paints[index],
+        EncodedPaint::Gradient(_)
+    ));
+    assert_eq!(
+        frame.lut_requests,
+        vec![LutRequest { paint_index: index }],
+        "the frame names the ramp the renderer must make resident"
+    );
+}
+
+#[test]
+fn every_gradient_draw_gets_its_own_entry_indexed_in_paint_order() {
+    let first = Rect::new(10.0, 10.0, 90.0, 50.0);
+    let second = Rect::new(10.0, 60.0, 90.0, 100.0);
+    let scene = scene_of(|b| {
+        b.fill_rect(first, linear(first));
+        b.fill_rect(second, solid(RED));
+        b.fill_path(diamond(), linear(second));
+    });
+
+    let frame = compiler()
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+
+    assert_eq!(frame.draws().len(), 3);
+    assert_eq!(frame.encoded_paints.len(), 2, "the solid draw adds nothing");
+    assert_eq!(indexed(&frame.draws()[0]), 0);
+    assert!(matches!(frame.draws()[1].paint, Paint::Solid(_)));
+    assert_eq!(indexed(&frame.draws()[2]), 1);
+    assert_eq!(
+        frame.lut_requests,
+        vec![LutRequest { paint_index: 0 }, LutRequest { paint_index: 1 }]
+    );
+}
+
+#[test]
+fn a_culled_gradient_draw_leaves_no_orphan_entry() {
+    // Off-viewport geometry records no draw, so the brush it would have been
+    // painted with must not reach the side table either — an entry nothing
+    // indexes would still be lowered, uploaded and made resident.
+    let offscreen = Rect::new(1000.0, 1000.0, 1100.0, 1100.0);
+    let scene = scene_of(|b| b.fill_rect(offscreen, linear(offscreen)));
+
+    let frame = compiler()
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+
+    assert!(frame.draws().is_empty());
+    assert!(frame.encoded_paints.is_empty());
+    assert!(frame.lut_requests.is_empty());
+}
+
+#[test]
+fn an_image_brush_stays_a_transparent_placeholder_rather_than_an_entry() {
+    let image = peniko::ImageBrush::new(peniko::ImageData {
+        data: peniko::Blob::new(std::sync::Arc::new(vec![255_u8, 0, 0, 255])),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width: 1,
+        height: 1,
+    });
+    let scene = scene_of(|b| {
+        b.fill_rect(Rect::new(10.0, 10.0, 60.0, 60.0), Brush::Image(image));
+    });
+
+    let frame = compiler()
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+
+    // The geometry is still exercised; only the paint is a stand-in.
+    assert_eq!(frame.draws().len(), 1);
+    assert!(frame.encoded_paints.is_empty());
+    match &frame.draws()[0].paint {
+        Paint::Solid(color) => assert_eq!(color.as_premul_rgba8().a, 0),
+        Paint::Indexed(_) => panic!("image brushes are not encoded yet"),
+    }
 }

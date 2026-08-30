@@ -368,3 +368,159 @@ fn a_caller_supplied_depth_attachment_is_used_instead_of_an_engine_owned_one() {
         "encoding against a caller depth raised {error:?}"
     );
 }
+
+/// The rectangle the gradient case fills, wide enough that the ramp is
+/// sampled across many distinct positions along its axis.
+const GRADIENT_RECT: Rect = Rect::new(32.0, 32.0, 224.0, 96.0);
+
+/// A red-to-blue gradient running left to right across [`GRADIENT_RECT`].
+///
+/// Pad extend and two stops: the simplest gradient that still forces the whole
+/// indexed-paint path — an encoded-paint record, a baked colour ramp, the LUT
+/// texture, and a strip instance carrying a sample position instead of a
+/// colour.
+fn gradient_scene() -> Scene {
+    let gradient = peniko::Gradient::new_linear(
+        (GRADIENT_RECT.x0, GRADIENT_RECT.y0),
+        (GRADIENT_RECT.x1, GRADIENT_RECT.y0),
+    )
+    .with_stops([RED, BLUE]);
+
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(GRADIENT_RECT, Brush::Gradient(gradient));
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_gradient_rect_renders_a_ramp_rather_than_one_flat_colour() {
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine gradient frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &gradient_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a gradient frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained first: a gradient draw that was skipped, or a paint texture that
+    // was never bound, shows up here far more legibly than in the pixels.
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the gradient frame raised {error:?}");
+
+    let pixels = target.read_back(&device, &queue);
+    let y = 64;
+    let near = pixel(&pixels, 40, y);
+    let middle = pixel(&pixels, 128, y);
+    let far = pixel(&pixels, 216, y);
+
+    // The draw reached the target at all: a dropped indexed paint would leave
+    // the cleared background here.
+    for (label, sample) in [("near", near), ("middle", middle), ("far", far)] {
+        assert_eq!(
+            sample[3], 255,
+            "the {label} sample is inside an opaque rectangle, got {sample:?}"
+        );
+    }
+
+    // Two distinct colours along the gradient axis: the ramp is sampled per
+    // fragment rather than one flat colour being stamped across the shape.
+    assert_ne!(
+        near, far,
+        "the two ends of the gradient axis must not match"
+    );
+    // The ramp runs the way the stops do, red at the start and blue at the end.
+    assert!(
+        near[0] > far[0] && near[2] < far[2],
+        "red should fall and blue should rise along the axis: {near:?} -> {middle:?} -> {far:?}"
+    );
+    assert!(
+        middle[0] < near[0] && middle[0] > far[0],
+        "the middle sample should sit between the two ends: {near:?} -> {middle:?} -> {far:?}"
+    );
+
+    // Outside the rectangle stays cleared, so the gradient is bounded by its
+    // own geometry rather than painted over the frame.
+    assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 128, 240), [0, 0, 0, 0]);
+
+    settle(&mut renderer, &device);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_solid_frame_after_a_gradient_frame_is_unaffected_by_it() {
+    // The paint texture and the gradient LUT persist across frames, so a
+    // solid-only frame following a gradient one must neither reference the
+    // stale records nor lose its own colours to them.
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut rendered = Vec::new();
+    for scene in [gradient_scene(), scene()] {
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine mixed paint frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("both frames encode");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        rendered.push(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frame pair raised {error:?}");
+
+    // The solid frame is exactly the solid frame, byte for byte where the
+    // gradient frame drew nothing and where it drew everything.
+    let solid = &rendered[1];
+    assert_eq!(pixel(solid, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(pixel(solid, 176, 176), [0, 0, 255, 255]);
+    assert_eq!(pixel(solid, 56, 200), [0, 128, 0, 255]);
+    assert_eq!(pixel(solid, 4, 4), [0, 0, 0, 0]);
+
+    settle(&mut renderer, &device);
+}

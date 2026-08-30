@@ -25,18 +25,18 @@ pub mod draw;
 pub use draw::{DepthCounter, EngineDraw};
 
 use kurbo::{Affine, BezPath, Cap, Join, Line, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke};
-use peniko::{Brush, Color, Fill};
+use peniko::{Brush, Fill};
 
 use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
 
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
-use vello_common::paint::Paint;
 use vello_common::record::CommandRecorder;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 use vello_common::tile::Tile;
 use vello_common::util::is_axis_aligned;
 
+use crate::compile::paint::{LutRequest, encode_brush};
 use crate::error::EngineError;
 
 /// Curve-flattening tolerance, in device pixels.
@@ -65,8 +65,15 @@ pub struct CompiledFrame {
     /// The recorded render graph, owning the frame's draws.
     pub recorder: CommandRecorder<EngineDraw>,
     /// Paints too complex to inline into a draw, indexed by
-    /// [`Paint::Indexed`].
+    /// [`Paint::Indexed`](vello_common::paint::Paint::Indexed).
     pub encoded_paints: Vec<EncodedPaint>,
+    /// The colour ramps `encoded_paints` needs made resident before the frame
+    /// is drawn, one per gradient entry.
+    ///
+    /// Deliberately not serviced here: the compiler holds no gradient cache,
+    /// so ramp residency is decided once per frame by the renderer rather than
+    /// per draw by the walk (see [`paint`]).
+    pub lut_requests: Vec<LutRequest>,
     /// How many of this frame's draws wrote their strip coverage directly as a
     /// rectangle, bypassing flattening and tiling (see [`fast_rect`]).
     ///
@@ -149,6 +156,7 @@ impl SceneCompiler {
             strips: StripStorage::new(GenerationMode::Append),
             recorder: CommandRecorder::new(width, height),
             encoded_paints: Vec::new(),
+            lut_requests: Vec::new(),
             fast_rect_draws: 0,
         };
         let mut depth = DepthCounter::new();
@@ -174,17 +182,17 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = root * *transform;
-                let paint = solid_paint(brush);
 
                 if let Some(device_rect) = fast_rect(*rect, transform) {
-                    let recorded = self.record(frame, depth, paint, |generator, storage| {
-                        generator.generate_filled_rect_fast(&device_rect, storage, None);
-                    });
+                    let recorded =
+                        self.record(frame, depth, brush, transform, |generator, storage| {
+                            generator.generate_filled_rect_fast(&device_rect, storage, None);
+                        });
                     if recorded {
                         frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
                     }
                 } else {
-                    self.record(frame, depth, paint, |generator, storage| {
+                    self.record(frame, depth, brush, transform, |generator, storage| {
                         generator.generate_filled_path(
                             rect.path_elements(FLATTEN_TOLERANCE),
                             Fill::NonZero,
@@ -203,10 +211,9 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = root * *transform;
-                let paint = solid_paint(brush);
                 let shape = RoundedRect::from_rect(*rect, rounded_rect_radii(*radii));
 
-                self.record(frame, depth, paint, |generator, storage| {
+                self.record(frame, depth, brush, transform, |generator, storage| {
                     generator.generate_filled_path(
                         shape.path_elements(FLATTEN_TOLERANCE),
                         Fill::NonZero,
@@ -225,11 +232,10 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = root * *transform;
-                let paint = solid_paint(brush);
                 let line = Line::new(*p0, *p1);
                 let stroke = round_stroke(*width);
 
-                self.record(frame, depth, paint, |generator, storage| {
+                self.record(frame, depth, brush, transform, |generator, storage| {
                     generator.generate_stroked_path(
                         line.path_elements(FLATTEN_TOLERANCE),
                         &stroke,
@@ -247,11 +253,10 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = root * *transform;
-                let paint = solid_paint(brush);
 
                 match style {
                     PathStyle::Fill => {
-                        self.record(frame, depth, paint, |generator, storage| {
+                        self.record(frame, depth, brush, transform, |generator, storage| {
                             generator.generate_filled_path(
                                 path.iter(),
                                 Fill::NonZero,
@@ -276,28 +281,40 @@ impl SceneCompiler {
 
                         match &dashed {
                             Some(dashed) => {
-                                self.record(frame, depth, paint, |generator, storage| {
-                                    generator.generate_stroked_path(
-                                        dashed.iter(),
-                                        &stroke,
-                                        transform,
-                                        None,
-                                        storage,
-                                        None,
-                                    );
-                                });
+                                self.record(
+                                    frame,
+                                    depth,
+                                    brush,
+                                    transform,
+                                    |generator, storage| {
+                                        generator.generate_stroked_path(
+                                            dashed.iter(),
+                                            &stroke,
+                                            transform,
+                                            None,
+                                            storage,
+                                            None,
+                                        );
+                                    },
+                                );
                             }
                             None => {
-                                self.record(frame, depth, paint, |generator, storage| {
-                                    generator.generate_stroked_path(
-                                        path.iter(),
-                                        &stroke,
-                                        transform,
-                                        None,
-                                        storage,
-                                        None,
-                                    );
-                                });
+                                self.record(
+                                    frame,
+                                    depth,
+                                    brush,
+                                    transform,
+                                    |generator, storage| {
+                                        generator.generate_stroked_path(
+                                            path.iter(),
+                                            &stroke,
+                                            transform,
+                                            None,
+                                            storage,
+                                            None,
+                                        );
+                                    },
+                                );
                             }
                         }
                     }
@@ -322,17 +339,23 @@ impl SceneCompiler {
         }
     }
 
-    /// Run `generate`, then record whatever strips it appended as one draw.
+    /// Run `generate`, then record whatever strips it appended as one draw
+    /// painted with `brush` under `transform`.
     ///
     /// Returns whether a draw was recorded. A generator call that produced no
     /// strips (fully culled, degenerate, or empty geometry) records nothing and
     /// consumes no depth, so a frame's depths stay dense over the draws that
     /// actually exist.
+    ///
+    /// The brush is encoded only once the strips are known to be non-empty, so
+    /// a culled draw leaves no orphan entry in the frame's encoded-paint table
+    /// and no ramp request for a gradient nothing paints with.
     fn record<F>(
         &mut self,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
-        paint: Paint,
+        brush: &Brush,
+        transform: Affine,
         generate: F,
     ) -> bool
     where
@@ -346,7 +369,10 @@ impl SceneCompiler {
             return false;
         }
 
-        let draw = EngineDraw::new(paint, depth.advance(), strip_range.clone());
+        let encoding = encode_brush(brush, transform, &mut frame.encoded_paints);
+        frame.lut_requests.extend(encoding.lut_request);
+
+        let draw = EngineDraw::new(encoding.paint, depth.advance(), strip_range.clone());
         frame
             .recorder
             .push_draw(draw, &frame.strips.strips[strip_range]);
@@ -454,29 +480,9 @@ fn rounded_rect_radii(radii: CornerRadii) -> RoundedRectRadii {
     )
 }
 
-/// A brush as a solid paint.
-///
-/// The solid-only seam the paint-encoding pass replaces: a gradient resolves to
-/// its first stop and an image brush to opaque black, both stand-ins that keep
-/// a draw recorded (and therefore its geometry exercised) rather than dropping
-/// it. Neither approximation is rendered anywhere yet.
-fn solid_paint(brush: &Brush) -> Paint {
-    let color = match brush {
-        Brush::Solid(color) => *color,
-        Brush::Gradient(gradient) => gradient
-            .stops
-            .first()
-            .map_or(Color::BLACK, |stop| stop.color.to_alpha_color()),
-        Brush::Image(_) => Color::BLACK,
-    };
-
-    Paint::from(color)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peniko::color::palette::css::RED;
 
     #[test]
     fn a_viewport_within_three_pixels_of_the_u16_ceiling_is_refused() {
@@ -496,12 +502,5 @@ mod tests {
         assert!(is_pixel_aligned(Rect::new(0.0, 0.0, 4.0, 4.0)));
         assert!(!is_pixel_aligned(Rect::new(0.0, 0.5, 4.0, 4.0)));
         assert!(!is_pixel_aligned(Rect::new(0.0, 0.0, 4.0, f64::INFINITY)));
-    }
-
-    #[test]
-    fn a_gradient_brush_falls_back_to_its_first_stop() {
-        let gradient = peniko::Gradient::new_linear((0.0, 0.0), (10.0, 0.0))
-            .with_stops([RED, peniko::color::palette::css::BLUE]);
-        assert_eq!(solid_paint(&Brush::Gradient(gradient)), Paint::from(RED));
     }
 }

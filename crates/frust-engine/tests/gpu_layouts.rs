@@ -10,10 +10,22 @@
 use std::mem::{align_of, offset_of, size_of};
 
 use frust_engine::EngineError;
+use frust_engine::cache::GradientCache;
+use frust_engine::compile::paint::{LutRequest, encode_brush, resolve_lut_request};
+use frust_engine::gpu::strips::PaintType;
 use frust_engine::gpu::{
     self, GpuBlurredRoundedRect, GpuConfig, GpuEncodedImage, GpuEncodedPaint, GpuLinearGradient,
     GpuRadialGradient, GpuStrip, GpuSweepGradient, StripDraw, paint_texture, strips,
 };
+use peniko::color::DynamicColor;
+use peniko::{
+    Brush, Color, ColorStop, ColorStops, Gradient, GradientKind, LinearGradientPosition,
+    RadialGradientPosition, SweepGradientPosition,
+};
+use vello_common::encode::EncodedPaint;
+use vello_common::fearless_simd::Level;
+use vello_common::kurbo::{Affine, Point};
+use vello_common::paint::Paint;
 use vello_common::strip::Strip;
 use vello_common::tile::Tile;
 
@@ -96,7 +108,9 @@ fn a_known_strip_converts_to_the_expected_instance_bytes() {
     assert_eq!(gpu_strip.y, 4);
     assert_eq!(gpu_strip.width, 16);
     assert_eq!(gpu_strip.dense_width_or_rect_height, 16);
-    assert_eq!(gpu_strip.col_idx_or_rect_frac, 64);
+    // The strip's alpha index counts coverage bytes; the instance field is
+    // read as a column ordinal, four bytes to the column.
+    assert_eq!(gpu_strip.col_idx_or_rect_frac, 16);
     assert_eq!(gpu_strip.payload, 0x0000_00ff);
     assert_eq!(gpu_strip.paint_and_rect_flag, 0x1234_5678);
     assert_eq!(gpu_strip.depth_index, 7);
@@ -107,12 +121,42 @@ fn a_known_strip_converts_to_the_expected_instance_bytes() {
     expected.extend_from_slice(&4_u16.to_ne_bytes());
     expected.extend_from_slice(&16_u16.to_ne_bytes());
     expected.extend_from_slice(&16_u16.to_ne_bytes());
-    expected.extend_from_slice(&64_u32.to_ne_bytes());
+    expected.extend_from_slice(&16_u32.to_ne_bytes());
     expected.extend_from_slice(&0x0000_00ff_u32.to_ne_bytes());
     expected.extend_from_slice(&0x1234_5678_u32.to_ne_bytes());
     expected.extend_from_slice(&7_u32.to_ne_bytes());
 
     assert_eq!(bytemuck::bytes_of(&gpu_strip), expected.as_slice());
+}
+
+#[test]
+fn a_strips_alpha_index_becomes_the_column_the_shader_addresses_coverage_by() {
+    // The fragment stage selects a texel with `col / 4` and a channel within
+    // it with `col % 4`, each channel holding one pixel column's `Tile::HEIGHT`
+    // coverage bytes. So a column is `Tile::HEIGHT` bytes wide, and the first
+    // four columns of the buffer must land in one texel's four channels.
+    assert_eq!(Tile::HEIGHT, 4);
+    for (alpha_idx, column) in [(0, 0), (4, 1), (12, 3), (16, 4), (3104, 776)] {
+        assert_eq!(strips::alpha_column(alpha_idx), column);
+    }
+
+    // Pinned against a known strip rather than the bare conversion: the
+    // instance is what the shader reads, and the unit mismatch this guards
+    // against is invisible on fully-covered geometry and total on
+    // anti-aliased geometry — every alpha-sampled span would read past its own
+    // coverage onto unwritten texels and resolve to zero alpha.
+    let strip = Strip::new(64, 8, 3104, false);
+    let next = next_strip(96, 8, 3104, 32);
+    let instance = GpuStrip::from_strip_pair(&strip, &next, draw());
+
+    assert_eq!(instance.width, 32, "a strip's width is already in columns");
+    assert_eq!(instance.col_idx_or_rect_frac, 776);
+    assert_eq!(
+        instance.col_idx_or_rect_frac + u32::from(instance.dense_width_or_rect_height),
+        808,
+        "the dense span ends where the next strip's own column begins",
+    );
+    assert_eq!(strips::alpha_column(next.alpha_idx()), 808);
 }
 
 #[test]
@@ -475,4 +519,148 @@ fn gradient_paint_fields_pack_and_unpack() {
     assert_eq!(paint_texture::pack_kind_and_f_is_swapped(0, false), 0);
     assert_eq!(paint_texture::pack_kind_and_f_is_swapped(2, false), 2);
     assert_eq!(paint_texture::pack_kind_and_f_is_swapped(1, true), 0b101);
+}
+
+// ---------------------------------------------------------------------
+// Lowering an encoded paint into the record a strip instance names
+// ---------------------------------------------------------------------
+
+/// A gradient of `kind` with two stops, encoded into `paints`.
+///
+/// Goes through the public brush-encoding seam rather than constructing an
+/// `EncodedGradient` by hand, so the lowering is exercised against exactly the
+/// entries a compiled frame produces.
+fn encode_gradient(kind: GradientKind, paints: &mut Vec<EncodedPaint>) -> usize {
+    let gradient = Gradient {
+        kind,
+        stops: ColorStops(
+            vec![
+                ColorStop {
+                    offset: 0.0,
+                    color: DynamicColor::from_alpha_color(Color::from_rgb8(255, 0, 0)),
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: DynamicColor::from_alpha_color(Color::from_rgb8(0, 0, 255)),
+                },
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let encoding = encode_brush(&Brush::Gradient(gradient), Affine::IDENTITY, paints);
+    match encoding.paint {
+        Paint::Indexed(indexed) => indexed.index(),
+        Paint::Solid(_) => panic!("a well-formed gradient encodes to an indexed paint"),
+    }
+}
+
+fn linear_gradient_kind() -> GradientKind {
+    LinearGradientPosition {
+        start: Point::new(0.0, 0.0),
+        end: Point::new(100.0, 0.0),
+    }
+    .into()
+}
+
+#[test]
+fn a_paint_descriptor_carries_the_colour_source_paint_type_and_texel_index() {
+    // A solid paint reads the payload (source 0) as a colour (type 0) and
+    // indexes no record, so its whole descriptor is zero.
+    assert_eq!(strips::pack_paint_descriptor(PaintType::Solid, 0), 0);
+
+    for (paint_type, expected) in [
+        (PaintType::Image, 1),
+        (PaintType::LinearGradient, 2),
+        (PaintType::RadialGradient, 3),
+        (PaintType::SweepGradient, 4),
+        (PaintType::BlurredRoundedRect, 5),
+    ] {
+        let packed = strips::pack_paint_descriptor(paint_type, 7);
+        assert_eq!((packed >> 26) & 0x7, expected, "paint type in bits 26-28");
+        assert_eq!((packed >> 29) & 0x3, 0, "the payload colour source");
+        assert_eq!(packed & strips::PAINT_TEXTURE_INDEX_MASK, 7);
+        assert_eq!(packed & strips::RECT_STRIP_FLAG, 0);
+    }
+
+    // The index occupies the low 26 bits and nothing above them.
+    let packed = strips::pack_paint_descriptor(PaintType::LinearGradient, u32::MAX);
+    assert_eq!(
+        packed & strips::PAINT_TEXTURE_INDEX_MASK,
+        strips::PAINT_TEXTURE_INDEX_MASK
+    );
+    assert_eq!(
+        (packed >> 26) & 0x7,
+        2,
+        "a wide index cannot reach the type"
+    );
+}
+
+#[test]
+fn a_gradient_lowers_to_the_record_its_kind_names() {
+    let mut cache = GradientCache::new(8, Level::new());
+    let mut paints = Vec::new();
+
+    let kinds = [
+        (linear_gradient_kind(), PaintType::LinearGradient),
+        (
+            RadialGradientPosition {
+                start_center: Point::new(0.0, 0.0),
+                start_radius: 0.0,
+                end_center: Point::new(0.0, 0.0),
+                end_radius: 50.0,
+            }
+            .into(),
+            PaintType::RadialGradient,
+        ),
+        (
+            SweepGradientPosition {
+                center: Point::new(50.0, 50.0),
+                start_angle: 0.0,
+                end_angle: std::f32::consts::TAU,
+            }
+            .into(),
+            PaintType::SweepGradient,
+        ),
+    ];
+
+    for (kind, expected) in kinds {
+        let index = encode_gradient(kind, &mut paints);
+        let ramp = resolve_lut_request(LutRequest { paint_index: index }, &paints, &mut cache)
+            .expect("the ramp bakes");
+
+        let record = paint_texture::lower_encoded_paint(&paints[index], Some(ramp))
+            .expect("a gradient with a resident ramp lowers");
+
+        assert_eq!(record.paint_type(), expected);
+        // Whatever the kind, the record names the ramp the cache packed.
+        let (width, extend) = match &record {
+            GpuEncodedPaint::LinearGradient(g) => {
+                assert_eq!(g.gradient_start, ramp.lut_start);
+                paint_texture::unpack_texture_width_and_extend_mode(g.texture_width_and_extend_mode)
+            }
+            GpuEncodedPaint::RadialGradient(g) => {
+                assert_eq!(g.gradient_start, ramp.lut_start);
+                paint_texture::unpack_texture_width_and_extend_mode(g.texture_width_and_extend_mode)
+            }
+            GpuEncodedPaint::SweepGradient(g) => {
+                assert_eq!(g.gradient_start, ramp.lut_start);
+                paint_texture::unpack_texture_width_and_extend_mode(g.texture_width_and_extend_mode)
+            }
+            other => panic!("expected a gradient record, got {other:?}"),
+        };
+        assert_eq!(width, ramp.width);
+        assert_eq!(extend, 0, "the scene layer only builds padded gradients");
+    }
+}
+
+#[test]
+fn a_gradient_without_a_resident_ramp_does_not_lower() {
+    let mut paints = Vec::new();
+    let index = encode_gradient(linear_gradient_kind(), &mut paints);
+
+    assert!(
+        paint_texture::lower_encoded_paint(&paints[index], None).is_none(),
+        "a record naming an unpacked ramp would sample arbitrary texels"
+    );
 }
