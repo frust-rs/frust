@@ -170,8 +170,8 @@ fn caps() -> TierCaps {
     TierCaps::fake(DownlevelProfile::Full)
 }
 
-/// Two sibling half-opacity layers over a scene that also draws `data` — the
-/// shape `Schedule::build` refuses (isolated layers branch rather than nest),
+/// Three sibling half-opacity layers over a scene that also draws `data` — a
+/// fan wider than the two page groups serve, so `Schedule::build` refuses it,
 /// recorded around a real image draw so the refusal lands on a frame that made
 /// an image resident.
 fn branching_layers_with_an_image(data: &ImageData) -> Scene {
@@ -182,6 +182,9 @@ fn branching_layers_with_an_image(data: &ImageData) -> Scene {
         b.pop_layer();
         b.push_layer(Rect::new(28.0, 0.0, 52.0, 24.0), 0.5);
         b.fill_rect(Rect::new(30.0, 2.0, 48.0, 20.0), Brush::Solid(RED));
+        b.pop_layer();
+        b.push_layer(Rect::new(56.0, 0.0, 80.0, 24.0), 0.5);
+        b.fill_rect(Rect::new(58.0, 2.0, 76.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
     })
 }

@@ -633,12 +633,12 @@ impl SceneCompiler {
                     let corrected = root * self.snapshots.correction() * *transform;
                     if *alpha < 1.0 && check_finite(corrected).is_ok() {
                         self.open_layer(frame, *rect, *alpha, corrected);
-                        self.snapshots.record_layer();
+                        self.snapshots.record_layer(self.groups.depth());
                     }
                 }
             }
             Command::PopSnapshot => {
-                if self.snapshots.leave() {
+                if self.snapshots.leave(self.groups.depth()) {
                     self.close_group(frame);
                 }
             }

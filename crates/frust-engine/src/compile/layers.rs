@@ -232,7 +232,7 @@ pub fn snapshot_correction(rect: Rect, scale: f64, transform: Affine) -> Affine 
 pub struct SnapshotStack {
     depth: usize,
     correction: Affine,
-    layer_open: bool,
+    layer_bracket: Option<usize>,
 }
 
 impl Default for SnapshotStack {
@@ -248,7 +248,7 @@ impl SnapshotStack {
         Self {
             depth: 0,
             correction: Affine::IDENTITY,
-            layer_open: false,
+            layer_bracket: None,
         }
     }
 
@@ -291,9 +291,11 @@ impl SnapshotStack {
     /// Separate from [`enter`](Self::enter) because opening the layer is the
     /// compiler's to do and can be declined — a bracket whose corrected
     /// transform does not survive composition opens none, and its pop must not
-    /// then close a bracket it never opened.
-    pub fn record_layer(&mut self) {
-        self.layer_open = true;
+    /// then close a bracket it never opened. `bracket` is the group stack's
+    /// depth just after the layer's own push — the handle [`leave`](Self::leave)
+    /// uses to tell whether that group is still the one it would close.
+    pub fn record_layer(&mut self, bracket: usize) {
+        self.layer_bracket = Some(bracket);
     }
 
     /// Leave a bracket, returning whether the outermost one just closed
@@ -301,8 +303,12 @@ impl SnapshotStack {
     /// group to close.
     ///
     /// A pop with no bracket open is ignored, the policy the display list
-    /// states for an unbalanced `PopSnapshot`.
-    pub fn leave(&mut self) -> bool {
+    /// states for an unbalanced `PopSnapshot`. `open_brackets` is the group
+    /// stack's current depth: when a stray pop inside the bracket's body has
+    /// already closed the group the snapshot opened, the recorded depth is no
+    /// longer reachable and no group is reported — closing one anyway would
+    /// lift an ancestor bracket the display list still holds open.
+    pub fn leave(&mut self, open_brackets: usize) -> bool {
         if self.depth == 0 {
             return false;
         }
@@ -312,9 +318,9 @@ impl SnapshotStack {
         }
 
         self.correction = Affine::IDENTITY;
-        let had_layer = self.layer_open;
-        self.layer_open = false;
-        had_layer
+        self.layer_bracket
+            .take()
+            .is_some_and(|bracket| bracket <= open_brackets)
     }
 }
 
@@ -431,9 +437,9 @@ mod tests {
         assert_eq!(stack.correction(), installed);
 
         // The inner pop restores nothing; the outer one restores everything.
-        assert!(!stack.leave());
+        assert!(!stack.leave(0));
         assert_eq!(stack.correction(), installed);
-        assert!(!stack.leave());
+        assert!(!stack.leave(0));
         assert_eq!(stack.correction(), Affine::IDENTITY);
         assert!(!stack.is_open());
     }
@@ -444,20 +450,35 @@ mod tests {
         let mut stack = SnapshotStack::new();
 
         stack.enter(rect, 1.0, Affine::IDENTITY);
-        stack.record_layer();
+        stack.record_layer(1);
         stack.enter(rect, 1.0, Affine::IDENTITY);
 
-        assert!(!stack.leave(), "the inner pop closes no group");
-        assert!(stack.leave(), "the outer pop closes the group it opened");
-        assert!(!stack.leave(), "an unbalanced pop closes nothing");
+        assert!(!stack.leave(1), "the inner pop closes no group");
+        assert!(stack.leave(1), "the outer pop closes the group it opened");
+        assert!(!stack.leave(1), "an unbalanced pop closes nothing");
     }
 
     #[test]
     fn an_unbalanced_pop_snapshot_is_ignored() {
         let mut stack = SnapshotStack::new();
-        assert!(!stack.leave());
-        assert!(!stack.leave());
+        assert!(!stack.leave(0));
+        assert!(!stack.leave(0));
         assert!(!stack.is_open());
         assert_eq!(stack.correction(), Affine::IDENTITY);
+    }
+
+    #[test]
+    fn a_stray_pop_inside_a_snapshot_body_does_not_hand_its_group_to_pop_snapshot() {
+        let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let mut stack = SnapshotStack::new();
+
+        stack.enter(rect, 1.0, Affine::IDENTITY);
+        stack.record_layer(2);
+
+        // A stray pop inside the body already closed the snapshot's own group:
+        // the group stack is back below the recorded depth, so the snapshot's
+        // pop must not report a group — closing one would lift an ancestor.
+        assert!(!stack.leave(1), "a lost bracket reports no group to close");
+        assert!(!stack.leave(1), "an unbalanced pop still closes nothing");
     }
 }
