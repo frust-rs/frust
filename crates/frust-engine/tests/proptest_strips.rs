@@ -1254,19 +1254,24 @@ fn non_finite_geometry_is_refused_field_by_field() {
 /// rather than refusing the whole frame.
 ///
 /// The distinction is the difference between drawing less and drawing nothing:
-/// a clip the compiler has not implemented yet must not be able to blank a
-/// frame the geometry beside it would have rendered.
+/// a layer bracket the compiler has not implemented yet must not be able to
+/// blank a frame the geometry beside it would have rendered.
+///
+/// A clip is deliberately not the case here any more: the compiler lowers one
+/// now, so a clip's own rectangle and radii are geometry the frame is refused
+/// for, pinned by `tests/clips.rs`.
 #[test]
 fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
     let scene = scene_of(&[
-        Op::PushClip {
+        Op::PushLayer {
             rect: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
+            alpha: 0.5,
         },
         Op::FillRect {
             rect: Rect::new(0.0, 0.0, 16.0, 16.0),
             brush: Brush::Solid(RED),
         },
-        Op::PopClip,
+        Op::PopLayer,
     ]);
 
     let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)

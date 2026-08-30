@@ -351,8 +351,9 @@ fn an_empty_scene_compiles_to_nothing() {
 
 #[test]
 fn commands_outside_the_compiler_scope_are_skipped_without_disturbing_depths() {
-    // Clips and layers are recognised but not yet compiled; the geometry
-    // between them must still record, with depths dense over what survived.
+    // Layers are recognised but not yet compiled; a clip is compiled but
+    // records no draw of its own. The geometry between them must still record,
+    // with depths dense over what survived.
     let scene = scene_of(|b| {
         b.push_clip(Rect::new(0.0, 0.0, 200.0, 200.0));
         b.fill_rect(Rect::new(10.0, 10.0, 60.0, 60.0), solid(RED));

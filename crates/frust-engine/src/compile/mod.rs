@@ -12,16 +12,21 @@
 //! between calls, and [`compile`](SceneCompiler::compile) returns everything a
 //! frame produced in one [`CompiledFrame`].
 //!
-//! Only the geometry primitives are compiled here: axis-aligned and rounded
-//! rectangles, lines, and arbitrary filled/stroked paths. Clips, layers,
-//! glyphs, images, shader quads and snapshot brackets are recognised and
-//! skipped — the engine grows them in later passes, and skipping is the
-//! conservative behaviour (a frame draws less, never wrong).
+//! Compiled here: the geometry primitives — axis-aligned and rounded
+//! rectangles, lines, arbitrary filled/stroked paths — and the clip bracket
+//! around them, which lowers to a scissor rectangle or a coverage mask and never
+//! to an intermediate texture (see [`clip`]). Layers, glyphs, images, shader
+//! quads and snapshot brackets are recognised and skipped — the engine grows
+//! them in later passes, and skipping is the conservative behaviour (a frame
+//! draws less, never wrong).
+
+pub mod clip;
 
 pub mod paint;
 
 pub mod draw;
 
+pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 
 use kurbo::{
@@ -31,6 +36,7 @@ use peniko::{Brush, Fill};
 
 use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
 
+use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
 use vello_common::record::CommandRecorder;
@@ -83,6 +89,17 @@ pub struct CompiledFrame {
     /// the fast path's admission rule is measurable from outside the compiler
     /// rather than inferred from a strip count that both paths can produce.
     pub fast_rect_draws: u32,
+    /// How many of this frame's clips lowered to a scissor rectangle, costing
+    /// no rasterization at all (see [`clip`]).
+    pub scissor_clips: u32,
+    /// How many of this frame's clips lowered to a coverage mask.
+    pub mask_clips: u32,
+    /// How many strips this frame's coverage masks cost.
+    ///
+    /// Observational, and the counter the clip lowering's whole claim rests on:
+    /// a frame whose clips all scissored reports zero here, which is what
+    /// "a rectangular clip is free" means measured rather than asserted.
+    pub clip_mask_strips: usize,
 }
 
 impl CompiledFrame {
@@ -109,6 +126,7 @@ impl CompiledFrame {
 #[derive(Debug)]
 pub struct SceneCompiler {
     generator: StripGenerator,
+    clips: ClipStack,
 }
 
 impl SceneCompiler {
@@ -121,6 +139,7 @@ impl SceneCompiler {
         let level = Level::try_detect().unwrap_or(Level::baseline());
         Self {
             generator: StripGenerator::new(width, height, level),
+            clips: ClipStack::new(),
         }
     }
 
@@ -156,6 +175,7 @@ impl SceneCompiler {
         }
 
         self.generator.reset(width, height);
+        self.clips.reset();
 
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
@@ -163,12 +183,19 @@ impl SceneCompiler {
             encoded_paints: Vec::new(),
             lut_requests: Vec::new(),
             fast_rect_draws: 0,
+            scissor_clips: 0,
+            mask_clips: 0,
+            clip_mask_strips: 0,
         };
         let mut depth = DepthCounter::new();
 
         for command in scene.commands() {
             self.compile_command(command, root, &mut frame, &mut depth);
         }
+
+        frame.scissor_clips = self.clips.scissor_clips();
+        frame.mask_clips = self.clips.mask_clips();
+        frame.clip_mask_strips = self.clips.mask_strips();
 
         Ok(frame)
     }
@@ -189,24 +216,35 @@ impl SceneCompiler {
                 let transform = root * *transform;
 
                 if let Some(device_rect) = fast_rect(*rect, transform) {
-                    let recorded =
-                        self.record(frame, depth, brush, transform, |generator, storage| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, None);
-                        });
+                    let recorded = self.record(
+                        frame,
+                        depth,
+                        brush,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
+                        },
+                    );
                     if recorded {
                         frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
                     }
                 } else {
-                    self.record(frame, depth, brush, transform, |generator, storage| {
-                        generator.generate_filled_path(
-                            rect.path_elements(FLATTEN_TOLERANCE),
-                            Fill::NonZero,
-                            transform,
-                            None,
-                            storage,
-                            None,
-                        );
-                    });
+                    self.record(
+                        frame,
+                        depth,
+                        brush,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_path(
+                                rect.path_elements(FLATTEN_TOLERANCE),
+                                Fill::NonZero,
+                                transform,
+                                None,
+                                storage,
+                                clip,
+                            );
+                        },
+                    );
                 }
             }
             Command::RoundedRect {
@@ -218,16 +256,22 @@ impl SceneCompiler {
                 let transform = root * *transform;
                 let shape = RoundedRect::from_rect(*rect, rounded_rect_radii(*radii));
 
-                self.record(frame, depth, brush, transform, |generator, storage| {
-                    generator.generate_filled_path(
-                        shape.path_elements(FLATTEN_TOLERANCE),
-                        Fill::NonZero,
-                        transform,
-                        None,
-                        storage,
-                        None,
-                    );
-                });
+                self.record(
+                    frame,
+                    depth,
+                    brush,
+                    transform,
+                    |generator, storage, clip| {
+                        generator.generate_filled_path(
+                            shape.path_elements(FLATTEN_TOLERANCE),
+                            Fill::NonZero,
+                            transform,
+                            None,
+                            storage,
+                            clip,
+                        );
+                    },
+                );
             }
             Command::Line {
                 p0,
@@ -240,16 +284,22 @@ impl SceneCompiler {
                 let line = Line::new(*p0, *p1);
                 let stroke = round_stroke(*width);
 
-                self.record(frame, depth, brush, transform, |generator, storage| {
-                    generator.generate_stroked_path(
-                        line.path_elements(FLATTEN_TOLERANCE),
-                        &stroke,
-                        transform,
-                        None,
-                        storage,
-                        None,
-                    );
-                });
+                self.record(
+                    frame,
+                    depth,
+                    brush,
+                    transform,
+                    |generator, storage, clip| {
+                        generator.generate_stroked_path(
+                            line.path_elements(FLATTEN_TOLERANCE),
+                            &stroke,
+                            transform,
+                            None,
+                            storage,
+                            clip,
+                        );
+                    },
+                );
             }
             Command::Path {
                 path,
@@ -261,16 +311,22 @@ impl SceneCompiler {
 
                 match style {
                     PathStyle::Fill => {
-                        self.record(frame, depth, brush, transform, |generator, storage| {
-                            generator.generate_filled_path(
-                                path.iter(),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                None,
-                            );
-                        });
+                        self.record(
+                            frame,
+                            depth,
+                            brush,
+                            transform,
+                            |generator, storage, clip| {
+                                generator.generate_filled_path(
+                                    path.iter(),
+                                    Fill::NonZero,
+                                    transform,
+                                    None,
+                                    storage,
+                                    clip,
+                                );
+                            },
+                        );
                     }
                     PathStyle::Stroke { width, dash } => {
                         let stroke = round_stroke(*width);
@@ -291,14 +347,14 @@ impl SceneCompiler {
                                     depth,
                                     brush,
                                     transform,
-                                    |generator, storage| {
+                                    |generator, storage, clip| {
                                         generator.generate_stroked_path(
                                             dashed.iter(),
                                             &stroke,
                                             transform,
                                             None,
                                             storage,
-                                            None,
+                                            clip,
                                         );
                                     },
                                 );
@@ -309,14 +365,14 @@ impl SceneCompiler {
                                     depth,
                                     brush,
                                     transform,
-                                    |generator, storage| {
+                                    |generator, storage, clip| {
                                         generator.generate_stroked_path(
                                             path.iter(),
                                             &stroke,
                                             transform,
                                             None,
                                             storage,
-                                            None,
+                                            clip,
                                         );
                                     },
                                 );
@@ -325,14 +381,28 @@ impl SceneCompiler {
                     }
                 }
             }
+            Command::PushClip { rect, transform } => {
+                self.clips
+                    .push_rect(*rect, root * *transform, &mut self.generator);
+            }
+            Command::PushClipRounded {
+                rect,
+                radii,
+                transform,
+            } => {
+                self.clips.push_rounded(
+                    *rect,
+                    rounded_rect_radii(*radii),
+                    root * *transform,
+                    &mut self.generator,
+                );
+            }
+            Command::PopClip => self.clips.pop(),
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
             // frame.
             Command::GlyphRun(_)
-            | Command::PushClip { .. }
-            | Command::PushClipRounded { .. }
-            | Command::PopClip
             | Command::Image { .. }
             | Command::BlurredRoundedRect { .. }
             | Command::PushLayer { .. }
@@ -344,13 +414,19 @@ impl SceneCompiler {
         }
     }
 
-    /// Run `generate`, then record whatever strips it appended as one draw
-    /// painted with `brush` under `transform`.
+    /// Run `generate` under the active clip, then record whatever strips
+    /// survived as one draw painted with `brush` under `transform`.
+    ///
+    /// `generate` is handed the clip stack's coverage mask to pass on to the
+    /// strip generator, which is what intersects a mask clip while the draw's
+    /// own coverage is produced; the scissor is applied afterwards, to the run
+    /// the generator appended. A scissor admitting nothing skips generation
+    /// entirely rather than generating coverage to throw away.
     ///
     /// Returns whether a draw was recorded. A generator call that produced no
-    /// strips (fully culled, degenerate, or empty geometry) records nothing and
-    /// consumes no depth, so a frame's depths stay dense over the draws that
-    /// actually exist.
+    /// strips (fully culled, clipped away, degenerate, or empty geometry)
+    /// records nothing and consumes no depth, so a frame's depths stay dense
+    /// over the draws that actually exist.
     ///
     /// The brush is encoded only once the strips are known to be non-empty, so
     /// a culled draw leaves no orphan entry in the frame's encoded-paint table
@@ -364,10 +440,16 @@ impl SceneCompiler {
         generate: F,
     ) -> bool
     where
-        F: FnOnce(&mut StripGenerator, &mut StripStorage),
+        F: FnOnce(&mut StripGenerator, &mut StripStorage, Option<PathDataRef<'_>>),
     {
+        if self.clips.blocks_everything() {
+            return false;
+        }
+
         let start = frame.strips.strips.len();
-        generate(&mut self.generator, &mut frame.strips);
+        let alpha_start = frame.strips.alphas.len();
+        generate(&mut self.generator, &mut frame.strips, self.clips.mask());
+        self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
         if strip_range.is_empty() {
@@ -452,12 +534,19 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// Only the commands the compiler actually lowers are checked. A command it
 /// recognises and skips contributes no geometry to the frame, so refusing the
 /// whole frame over one would draw *nothing* where skipping draws less — the
-/// weaker outcome. The match is exhaustive over every [`Command`] variant, the
-/// same as [`SceneCompiler::compile_command`]'s: a variant added to the enum
-/// fails to compile here until it is placed in the lowered group or the
-/// skipped one. Moving a variant *between* those two groups is not itself
-/// compiler-enforced — the match stays exhaustive either way — so that half of
-/// the discipline still has to be kept by hand alongside `compile_command`.
+/// weaker outcome. A clip is checked because it *is* lowered: its rectangle and
+/// radii decide whether the clip scissors or masks and where its edges land, so
+/// a non-finite one is refused on the same terms as a fill's, matching the
+/// refusal its transform already drew. A lowered command carrying no geometry
+/// at all ([`Command::PopClip`]) has nothing to check and sits with the skipped
+/// group.
+///
+/// The match is exhaustive over every [`Command`] variant, the same as
+/// [`SceneCompiler::compile_command`]'s: a variant added to the enum fails to
+/// compile here until it is placed in the checked group or the unchecked one.
+/// Moving a variant *between* those two groups is not itself compiler-enforced
+/// — the match stays exhaustive either way — so that half of the discipline
+/// still has to be kept by hand alongside `compile_command`.
 fn check_geometry(command: &Command) -> Result<(), EngineError> {
     let finite = match command {
         Command::FillRect { rect, .. } => rect.is_finite(),
@@ -466,10 +555,12 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
             p0.is_finite() && p1.is_finite() && width.is_finite()
         }
         Command::Path { path, style, .. } => path.is_finite() && style_is_finite(style),
-        // Recognised but not lowered — see above.
+        Command::PushClip { rect, .. } => rect.is_finite(),
+        Command::PushClipRounded { rect, radii, .. } => {
+            rect.is_finite() && radii_are_finite(*radii)
+        }
+        // Carrying no geometry of their own — see above.
         Command::GlyphRun(_)
-        | Command::PushClip { .. }
-        | Command::PushClipRounded { .. }
         | Command::PopClip
         | Command::Image { .. }
         | Command::BlurredRoundedRect { .. }
@@ -564,6 +655,11 @@ pub fn dash_cycle_is_normalizable(dash: &DashPattern) -> bool {
 /// indistinguishable from the general path: the composed transform must keep
 /// the rectangle axis-aligned (no rotation or skew), and the transformed
 /// rectangle must land on whole pixels, so no edge needs partial coverage.
+///
+/// [`clip`] admits a rectangular clip to its scissor path by the same rule and
+/// through this same function: a rectangle whose coverage can be written
+/// exactly is a rectangle whose *clip* can be applied exactly, so the two share
+/// one admission rule rather than two that could drift apart.
 fn fast_rect(rect: Rect, transform: Affine) -> Option<Rect> {
     if !is_axis_aligned(&transform) {
         return None;
