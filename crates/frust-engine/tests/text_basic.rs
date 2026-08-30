@@ -14,9 +14,10 @@
 //! phase's golden corpus, not here — including the `unit-glyph-run` and
 //! `adv-10k-glyphs` cases, both of which need the `frust-testing` corpus this
 //! crate does not depend on. What is host-testable about text — one draw per
-//! inked glyph, one encoded paint per run, dense painter-order depths, a
-//! refused frame for numbers that would not converge, and a colour glyph going
-//! missing rather than landing wrong — is pinned below.
+//! inked glyph, one encoded paint per run, dense painter-order depths, and a
+//! refused frame for numbers that would not converge — is pinned below.
+//! Colour glyphs have a file of their own, `text_color_hint.rs`; what is
+//! pinned here is only that one does not disturb the run around it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -377,7 +378,10 @@ fn a_non_finite_run_transform_refuses_the_frame() {
 }
 
 #[test]
-fn a_colour_glyph_goes_missing_rather_than_landing_wrong() {
+fn a_colour_glyph_paints_its_own_layers_rather_than_the_runs_brush() {
+    // The tripwire only; `text_color_hint.rs` pins what those layers are, what
+    // they paint with, and what a colour glyph the engine cannot express does
+    // instead.
     let frame = compile_run(run(
         font(EMOJI_FONT),
         &[EMOJI],
@@ -386,22 +390,13 @@ fn a_colour_glyph_goes_missing_rather_than_landing_wrong() {
         Affine::translate((8.0, 44.0)),
     ));
 
-    assert_eq!(
-        frame.glyph_draws, 0,
-        "a COLR glyph paints nothing on this path"
-    );
+    assert_eq!(frame.glyph_draws, 1, "a COLR glyph is drawn, not refused");
+    assert_eq!(frame.skipped_glyphs, 0);
     assert!(
-        frame.skipped_glyphs > 0,
-        "and says so through the frame's own counter"
+        frame.draws().len() > 1,
+        "and costs one draw per colour layer"
     );
-    assert!(
-        frame.draws().is_empty(),
-        "no layer of it leaks out as an uncoloured shape"
-    );
-    assert!(
-        frame.strip_buf().is_empty(),
-        "and it leaves no strips behind for nothing to reference"
-    );
+    assert!(!frame.strip_buf().is_empty());
 }
 
 #[test]
@@ -422,8 +417,10 @@ fn a_colour_glyph_leaves_the_frames_own_clip_state_untouched() {
     }));
 
     assert_eq!(
-        after_emoji.glyph_draws, outlines_only.glyph_draws,
-        "every outline glyph after a colour glyph still paints"
+        after_emoji.glyph_draws,
+        outlines_only.glyph_draws + 1,
+        "every outline glyph after a colour glyph still paints, and the \
+         colour glyph itself counts once"
     );
     assert_eq!(
         after_emoji.scissor_clips, 0,

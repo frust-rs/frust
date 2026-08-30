@@ -68,6 +68,7 @@
 
 pub(crate) mod atlas_policy;
 pub(crate) mod backend;
+pub(crate) mod color;
 
 use glifo::{AtlasConfig, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
 use kurbo::Affine;
