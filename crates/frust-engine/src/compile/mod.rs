@@ -13,21 +13,28 @@
 //! frame produced in one [`CompiledFrame`].
 //!
 //! Compiled here: the geometry primitives — axis-aligned and rounded
-//! rectangles, lines, arbitrary filled/stroked paths — and the clip bracket
-//! around them, which lowers to a scissor rectangle or a coverage mask and never
-//! to an intermediate texture (see [`clip`]). Layers, glyphs, images, shader
-//! quads and snapshot brackets are recognised and skipped — the engine grows
-//! them in later passes, and skipping is the conservative behaviour (a frame
-//! draws less, never wrong).
+//! rectangles, lines, arbitrary filled/stroked paths — the clip bracket around
+//! them, which lowers to a scissor rectangle or a coverage mask and never to an
+//! intermediate texture (see [`clip`]), the opacity-layer and snapshot brackets
+//! that group them (see [`layers`]), and the hole punch that erases what they
+//! painted (see [`clear`]). Glyphs, images, blurred rectangles and shader quads
+//! are recognised and skipped — the engine grows them in later passes, and
+//! skipping is the conservative behaviour (a frame draws less, never wrong).
+
+pub mod clear;
 
 pub mod clip;
+
+pub mod layers;
 
 pub mod paint;
 
 pub mod draw;
 
+pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
+pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
 use kurbo::{
     Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
@@ -44,6 +51,7 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 use vello_common::tile::Tile;
 use vello_common::util::is_axis_aligned;
 
+use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush};
 use crate::error::EngineError;
 
@@ -75,6 +83,13 @@ pub struct CompiledFrame {
     /// Paints too complex to inline into a draw, indexed by
     /// [`Paint::Indexed`](vello_common::paint::Paint::Indexed).
     pub encoded_paints: Vec<EncodedPaint>,
+    /// The frame's hole punches, hoisted to the root and issued as one
+    /// destination-out pass after every draw (see [`clear`]).
+    ///
+    /// Deliberately not draws: a punch erases rather than paints, and keeping
+    /// it out of the recording is what lets a target that disregards alpha
+    /// drop the whole pass and read the frame unchanged.
+    pub clears: Vec<ClearPunch>,
     /// The colour ramps `encoded_paints` needs made resident before the frame
     /// is drawn, one per gradient entry.
     ///
@@ -127,6 +142,9 @@ impl CompiledFrame {
 pub struct SceneCompiler {
     generator: StripGenerator,
     clips: ClipStack,
+    groups: GroupStack,
+    snapshots: SnapshotStack,
+    punches: Vec<StagedPunch>,
 }
 
 impl SceneCompiler {
@@ -140,6 +158,9 @@ impl SceneCompiler {
         Self {
             generator: StripGenerator::new(width, height, level),
             clips: ClipStack::new(),
+            groups: GroupStack::new(),
+            snapshots: SnapshotStack::new(),
+            punches: Vec::new(),
         }
     }
 
@@ -176,11 +197,15 @@ impl SceneCompiler {
 
         self.generator.reset(width, height);
         self.clips.reset();
+        self.groups.reset();
+        self.snapshots.reset();
+        self.punches.clear();
 
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
             recorder: CommandRecorder::new(width, height),
             encoded_paints: Vec::new(),
+            clears: Vec::new(),
             lut_requests: Vec::new(),
             fast_rect_draws: 0,
             scissor_clips: 0,
@@ -192,6 +217,9 @@ impl SceneCompiler {
         for command in scene.commands() {
             self.compile_command(command, root, &mut frame, &mut depth);
         }
+
+        self.close_open_groups(&mut frame);
+        self.generate_punches(&mut frame);
 
         frame.scissor_clips = self.clips.scissor_clips();
         frame.mask_clips = self.clips.mask_clips();
@@ -207,13 +235,50 @@ impl SceneCompiler {
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
     ) {
+        // The frame root with any open snapshot bracket's presentation scale
+        // composed ahead of it (see [`layers`]). The identity outside a
+        // bracket, so this is the plain frame root for every frame that
+        // records none.
+        let combined = root * self.snapshots.correction();
+
+        // A correction composes a transform the up-front walk never saw, and
+        // the product can leave the finite device grid even though both
+        // factors are on it. Such a command draws nothing rather than refusing
+        // the frame: the refusal is the up-front walk's to make over the
+        // numbers a scene actually carries, and a bracket's presentation scale
+        // is not one of them. Only a command *inside* a snapshot bracket can
+        // land here at all — outside one the composition is the frame root's,
+        // which that walk already checked.
+        //
+        // Drawing nothing is not the same as doing nothing: a command that
+        // opens a bracket still has to open one, or its pop would close the
+        // bracket around it instead. So a bracket lands blocked rather than
+        // absent, which draws nothing inside it and balances its own pop.
+        let on_grid = command_transform(command)
+            .is_none_or(|transform| check_finite(combined * transform).is_ok());
+        if !on_grid {
+            match command {
+                Command::PushClip { .. }
+                | Command::PushClipRounded { .. }
+                | Command::PushLayer { .. } => self.open_blocked_group(),
+                // The correction is the outermost bracket's, so a bracket
+                // reaching here is a nested one, whose presentation is ignored
+                // anyway; only its depth has to be counted.
+                Command::PushSnapshot { rect, .. } => {
+                    self.snapshots.enter(*rect, 1.0, Affine::IDENTITY);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match command {
             Command::FillRect {
                 rect,
                 brush,
                 transform,
             } => {
-                let transform = root * *transform;
+                let transform = combined * *transform;
 
                 if let Some(device_rect) = fast_rect(*rect, transform) {
                     let recorded = self.record(
@@ -253,7 +318,7 @@ impl SceneCompiler {
                 brush,
                 transform,
             } => {
-                let transform = root * *transform;
+                let transform = combined * *transform;
                 let shape = RoundedRect::from_rect(*rect, rounded_rect_radii(*radii));
 
                 self.record(
@@ -280,7 +345,7 @@ impl SceneCompiler {
                 brush,
                 transform,
             } => {
-                let transform = root * *transform;
+                let transform = combined * *transform;
                 let line = Line::new(*p0, *p1);
                 let stroke = round_stroke(*width);
 
@@ -307,7 +372,7 @@ impl SceneCompiler {
                 brush,
                 transform,
             } => {
-                let transform = root * *transform;
+                let transform = combined * *transform;
 
                 match style {
                     PathStyle::Fill => {
@@ -382,22 +447,73 @@ impl SceneCompiler {
                 }
             }
             Command::PushClip { rect, transform } => {
-                self.clips
-                    .push_rect(*rect, root * *transform, &mut self.generator);
+                let transform = combined * *transform;
+                self.clips.push_rect(*rect, transform, &mut self.generator);
+                self.groups.push_clip(transform.transform_rect_bbox(*rect));
             }
             Command::PushClipRounded {
                 rect,
                 radii,
                 transform,
             } => {
+                let transform = combined * *transform;
                 self.clips.push_rounded(
                     *rect,
                     rounded_rect_radii(*radii),
-                    root * *transform,
+                    transform,
                     &mut self.generator,
                 );
+                self.groups.push_clip(transform.transform_rect_bbox(*rect));
             }
-            Command::PopClip => self.clips.pop(),
+            Command::PushLayer {
+                rect,
+                alpha,
+                transform,
+            } => {
+                self.open_layer(frame, *rect, *alpha, combined * *transform);
+            }
+            // One bracket stack serves all three kinds, so whichever pop
+            // arrives closes the innermost open bracket (see [`layers`]). A pop
+            // with nothing open is ignored: an unbalanced widget tree must not
+            // be able to lift a bracket a sibling still relies on.
+            Command::PopClip | Command::PopLayer => self.close_group(frame),
+            Command::ClearRect { rect, transform } => {
+                let transform = combined * *transform;
+                // Hoisted here rather than at the end of the frame because
+                // this is the only point the brackets confining it are still
+                // open; its coverage is generated once the frame's draws are
+                // done (see [`clear`]).
+                let punch = clear::punch_rect(*rect, transform, self.groups.bounds());
+                if let Some(device) = punch {
+                    self.punches.push(StagedPunch {
+                        device,
+                        depth: depth.advance(),
+                    });
+                }
+            }
+            Command::PushSnapshot {
+                rect,
+                alpha,
+                scale,
+                transform,
+                ..
+            } => {
+                if self.snapshots.enter(*rect, *scale, *transform) {
+                    // The bracket's own correction is the one that applies to
+                    // the layer it opens, so the transform is recomposed here
+                    // rather than reusing `combined` from before the entry.
+                    let corrected = root * self.snapshots.correction() * *transform;
+                    if *alpha < 1.0 && check_finite(corrected).is_ok() {
+                        self.open_layer(frame, *rect, *alpha, corrected);
+                        self.snapshots.record_layer();
+                    }
+                }
+            }
+            Command::PopSnapshot => {
+                if self.snapshots.leave() {
+                    self.close_group(frame);
+                }
+            }
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
@@ -405,12 +521,113 @@ impl SceneCompiler {
             Command::GlyphRun(_)
             | Command::Image { .. }
             | Command::BlurredRoundedRect { .. }
-            | Command::PushLayer { .. }
-            | Command::PopLayer
-            | Command::ClearRect { .. }
-            | Command::ShaderQuad { .. }
-            | Command::PushSnapshot { .. }
-            | Command::PopSnapshot => {}
+            | Command::ShaderQuad { .. } => {}
+        }
+    }
+
+    /// Open a layer bracket: its rectangle's clip, and — below full opacity —
+    /// a recorded layer for the scheduler to give a page of its own.
+    ///
+    /// The clip and the bracket are pushed together and unconditionally, which
+    /// is what keeps the two stacks in step for [`close_group`](Self::close_group).
+    fn open_layer(&mut self, frame: &mut CompiledFrame, rect: Rect, alpha: f32, transform: Affine) {
+        self.clips.push_rect(rect, transform, &mut self.generator);
+
+        let isolated = layers::lower_layer(alpha) == LayerLowering::Isolated;
+        if isolated {
+            frame.recorder.push_layer(layers::layer_props(alpha), None);
+        }
+        self.groups
+            .push_layer(transform.transform_rect_bbox(rect), isolated);
+    }
+
+    /// Open a bracket that admits nothing, for a push whose transform does not
+    /// land on the device grid.
+    ///
+    /// A degenerate rectangle under the identity, rather than the push's own
+    /// geometry under its own transform: the point is to reach an empty
+    /// scissor without handing the flattener a transform it cannot subdivide
+    /// against, which is the very thing that made this push unusable.
+    fn open_blocked_group(&mut self) {
+        self.clips
+            .push_rect(Rect::ZERO, Affine::IDENTITY, &mut self.generator);
+        self.groups.push_clip(Rect::ZERO);
+    }
+
+    /// Close the innermost open bracket, undoing exactly what opened it.
+    ///
+    /// The recording is only popped when this bracket is the one that pushed
+    /// it *and* the recording agrees a layer is open — the recorder's own pop
+    /// panics on an empty layer stack, and the frame path returns errors
+    /// rather than panicking (E17).
+    fn close_group(&mut self, frame: &mut CompiledFrame) {
+        let Some(group) = self.groups.pop() else {
+            return;
+        };
+        if group.closes_clip() {
+            self.clips.pop();
+        }
+        if group.closes_layer() && frame.recorder.has_layers() {
+            frame.recorder.pop_layer();
+        }
+    }
+
+    /// Close every bracket the display list left open at the end of the frame.
+    ///
+    /// A recorded layer that is never popped has no bounds — the recorder
+    /// computes them at the pop — so an unbalanced push would otherwise leave
+    /// the scheduler a layer it cannot place. Closing here is the same policy
+    /// an unbalanced pop gets, applied at the other end.
+    fn close_open_groups(&mut self, frame: &mut CompiledFrame) {
+        while !self.groups.is_empty() {
+            self.close_group(frame);
+        }
+        self.snapshots.reset();
+    }
+
+    /// Generate the coverage for every punch the frame hoisted.
+    ///
+    /// Runs after the walk, so the strips land past every draw's own range and
+    /// no draw references them. The punch is rasterized at the frame root
+    /// under no clip at all — being hoisted out of its brackets is exactly
+    /// what the confinement in [`clear::punch_rect`] already accounted for —
+    /// and takes the fast rectangle path whenever its edges fall on whole
+    /// pixels, which is what makes a pixel-aligned punch pixel-exact however
+    /// its edges fall inside a tile.
+    fn generate_punches(&mut self, frame: &mut CompiledFrame) {
+        for index in 0..self.punches.len() {
+            let Some(punch) = self.punches.get(index).copied() else {
+                continue;
+            };
+
+            let start = frame.strips.strips.len();
+            match fast_rect(punch.device, Affine::IDENTITY) {
+                Some(device) => {
+                    self.generator
+                        .generate_filled_rect_fast(&device, &mut frame.strips, None);
+                }
+                None => {
+                    self.generator.generate_filled_path(
+                        punch.device.path_elements(FLATTEN_TOLERANCE),
+                        Fill::NonZero,
+                        Affine::IDENTITY,
+                        None,
+                        &mut frame.strips,
+                        None,
+                    );
+                }
+            }
+
+            let strip_range = start..frame.strips.strips.len();
+            if strip_range.is_empty() {
+                continue;
+            }
+
+            frame.clears.push(ClearPunch {
+                strip_range,
+                bounds: clear::device_bounds(punch.device),
+                depth: punch.depth,
+            });
         }
     }
 
@@ -537,9 +754,16 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// weaker outcome. A clip is checked because it *is* lowered: its rectangle and
 /// radii decide whether the clip scissors or masks and where its edges land, so
 /// a non-finite one is refused on the same terms as a fill's, matching the
-/// refusal its transform already drew. A lowered command carrying no geometry
-/// at all ([`Command::PopClip`]) has nothing to check and sits with the skipped
-/// group.
+/// refusal its transform already drew. A layer and a snapshot bracket are
+/// checked on those same terms, and for the same reason: each lowers its
+/// rectangle through the clip stack, so a non-finite one reaches the flattener
+/// exactly as a clip's would. Their `alpha` and `scale` are checked alongside
+/// it because neither is decoration — an alpha decides whether the layer
+/// isolates, and a scale composes a transform every command inside the bracket
+/// is drawn under. A clear is checked because its rectangle *is* the coverage
+/// it erases with. A lowered command carrying no geometry at all
+/// ([`Command::PopClip`] and its two siblings) has nothing to check and sits
+/// with the skipped group.
 ///
 /// The match is exhaustive over every [`Command`] variant, the same as
 /// [`SceneCompiler::compile_command`]'s: a variant added to the enum fails to
@@ -559,16 +783,18 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         Command::PushClipRounded { rect, radii, .. } => {
             rect.is_finite() && radii_are_finite(*radii)
         }
+        Command::PushLayer { rect, alpha, .. } => rect.is_finite() && alpha.is_finite(),
+        Command::ClearRect { rect, .. } => rect.is_finite(),
+        Command::PushSnapshot {
+            rect, alpha, scale, ..
+        } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
         // Carrying no geometry of their own — see above.
         Command::GlyphRun(_)
         | Command::PopClip
         | Command::Image { .. }
         | Command::BlurredRoundedRect { .. }
-        | Command::PushLayer { .. }
         | Command::PopLayer
-        | Command::ClearRect { .. }
         | Command::ShaderQuad { .. }
-        | Command::PushSnapshot { .. }
         | Command::PopSnapshot => true,
     };
 
