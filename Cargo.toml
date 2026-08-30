@@ -562,6 +562,9 @@ axum = "0.8"
 base64 = "0.22"
 # frust-mcp: the `CancellationToken` graceful-shutdown seam wired to ctrl-c.
 tokio-util = "0.7"
+# frust-engine's diagnostic microbenches (harness = false) — pinned to the
+# current release (0.8.2); never a compile or test gate.
+criterion = "0.8.2"
 # intra-workspace
 frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }
