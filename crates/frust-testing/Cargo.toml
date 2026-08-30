@@ -126,3 +126,8 @@ pollster = { workspace = true }
 # tests/deps.rs parses every crate/plugin manifest to enforce the
 # dev-dependency-only guard above.
 toml = { workspace = true }
+# tests/fuzz.rs — the cross-oracle differential: generated scenes rendered on
+# the engine and on `vello_cpu` and held to the same near-exact bar the engine
+# goldens use. A DEV dependency (unlike the oracle crates above): the generator
+# lives in the test target, not in this crate's own API.
+proptest = { workspace = true }

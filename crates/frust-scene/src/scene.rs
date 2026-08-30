@@ -387,6 +387,21 @@ impl Scene {
     pub(crate) fn push(&mut self, command: Command) {
         self.commands.push(command);
     }
+
+    /// How many [`Command::PushSnapshot`] brackets are still open.
+    ///
+    /// `#[doc(hidden)]`, and deliberately not part of the stable widget-facing
+    /// API: a widget has no business reading the bracket depth mid-recording,
+    /// and nothing in the framework branches on it. It exists so a property
+    /// test outside this crate can assert the balance contract the field's own
+    /// docs state — that a balanced sequence leaves the depth at zero and an
+    /// unmatched [`crate::SceneBuilder::pop_snapshot`] never drives it below
+    /// zero — which is otherwise unobservable from the command stream alone,
+    /// since an ignored pop records nothing to observe.
+    #[doc(hidden)]
+    pub fn snapshot_depth(&self) -> usize {
+        self.snapshot_depth
+    }
 }
 
 #[cfg(test)]

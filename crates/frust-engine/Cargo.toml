@@ -25,6 +25,10 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# `tests/proptest_strips.rs` — the compiler's property suite: it never panics,
+# its allocation stays inside a bound in the command count, a re-compile is
+# byte-identical, and the strips it emits stay inside the viewport.
+proptest.workspace = true
 
 [features]
 default = []
@@ -57,6 +61,11 @@ bench = false
 [[test]]
 name = "paint_encoding"
 path = "tests/paint_encoding.rs"
+bench = false
+
+[[test]]
+name = "proptest_strips"
+path = "tests/proptest_strips.rs"
 bench = false
 
 [[test]]

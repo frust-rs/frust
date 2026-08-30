@@ -565,6 +565,21 @@ tokio-util = "0.7"
 # frust-engine's diagnostic microbenches (harness = false) — pinned to the
 # current release (0.8.2); never a compile or test gate.
 criterion = "0.8.2"
+# Property/fuzz generator behind the scene/engine invariant suites
+# (`frust-scene`'s `proptest_commands`, `frust-engine`'s `proptest_strips`,
+# `frust-testing`'s `fuzz`) — pinned to the current release (1.11.0) per the
+# Version-Pin Policy; the tripwire is those three test targets. `fork` and
+# `timeout` are dropped from the default set: both exist to run each case in a
+# forked child so a hang or an abort is survivable, and every suite here is
+# either a pure-CPU call or a GPU render already serialized behind a mutex, so
+# keeping them would add `rusty-fork`/`tempfile`/`wait-timeout` to the lockfile
+# for machinery nothing uses. `std` (the `Config`/`TestRunner` host surface) and
+# `bit-set` (the collection shrinker's own index set) are what the strategies
+# actually need.
+proptest = { version = "1.11.0", default-features = false, features = [
+    "std",
+    "bit-set",
+] }
 # intra-workspace
 frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }
