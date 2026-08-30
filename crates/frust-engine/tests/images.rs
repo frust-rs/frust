@@ -224,27 +224,98 @@ fn an_image_larger_than_u16_is_skipped_rather_than_panicking() {
     assert!(frame.image_uploads.is_empty());
 }
 
+/// A source far larger than [`TEST_BUDGET`]'s layer, at a non-square aspect
+/// ratio so a fit applied per axis rather than uniformly would show.
+///
+/// The corpus's own `adv-huge-image` is 5000 square; this is the same shape at
+/// a size a host test can build and box-filter in the time a host test should
+/// take, and the golden gate is where the literal case is measured.
+const OVERSIZED: (u32, u32) = (512, 256);
+
 #[test]
-fn a_five_thousand_square_image_is_refused_by_the_budget_not_by_a_panic() {
-    // The `adv-huge-image` case: well inside `u16::MAX`, so nothing upstream
-    // objects, but far past any atlas layer this budget will create.
+fn an_image_larger_than_the_atlas_is_minified_to_fit_rather_than_skipped() {
+    // The `adv-huge-image` shape: well inside `u16::MAX`, so nothing upstream
+    // objects, but far past any atlas layer this budget will create. It is
+    // downsampled to fit and drawn, not dropped.
     let mut compiler = compiler();
-    let scene = scene_of(|b| b.draw_image(&image(5000, 1), DEST));
+    let scene = scene_of(|b| b.draw_image(&image(OVERSIZED.0, OVERSIZED.1), DEST));
 
     let frame = compile(&mut compiler, &scene);
 
-    assert_eq!(frame.skipped_images, 1);
-    assert_eq!(frame.image_draws, 0);
-    assert!(frame.image_uploads.is_empty());
-    assert_eq!(compiler.images().entry_count(), 0);
+    assert_eq!(frame.skipped_images, 0, "a big image is not a skipped one");
+    assert_eq!(frame.image_draws, 1);
+    assert_eq!(frame.draws().len(), 1);
+    assert_eq!(compiler.images().entry_count(), 1);
+    assert_eq!(compiler.images().minified(), 1);
 
-    // The same refusal, named: the atlas is what could not hold it.
-    let mut residency = ImageResidency::new(TEST_BUDGET);
+    // Fitted to the layer, aspect preserved, with the source extent recorded
+    // beside it — the upload carries exactly the region's texels, not the
+    // source's.
+    let upload = &frame.image_uploads[0];
+    assert_eq!(upload.region.size, [64, 32]);
+    assert_eq!(upload.natural, [OVERSIZED.0, OVERSIZED.1]);
+    assert_eq!(
+        (upload.pixels.width(), upload.pixels.height()),
+        (64, 32),
+        "the atlas write covers the region it was allocated for"
+    );
+    assert_eq!(
+        upload.pixels.data_as_u8_slice().len(),
+        upload.region.byte_len()
+    );
+}
+
+#[test]
+fn a_minified_records_transform_lands_on_the_resident_rectangle() {
+    // The correction the renderer applies: the compiler composed the paint
+    // transform against the SOURCE extent (it is all it knows before residency
+    // is consulted), while the shader samples the smaller resident rectangle.
+    // A record left uncorrected would address 512 texels of a 64-texel
+    // rectangle and read nothing but its clamped edge.
+    let mut compiler = compiler();
+    let dest = Rect::new(8.0, 8.0, 40.0, 40.0);
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| b.draw_image(&image(OVERSIZED.0, OVERSIZED.1), dest)),
+    );
+
+    let resident = frame_resident(&frame);
+    assert_eq!(resident.minify_scale(), Some((0.125, 0.125)));
+
+    // Uncorrected, the entry maps the destination's far corner onto the
+    // source's own extent.
+    let entry = only_image_entry(&frame);
+    let corner = entry.transform * kurbo::Point::new(dest.x1, dest.y1);
+    assert!((corner.x - f64::from(OVERSIZED.0)).abs() < 1e-6);
+    assert!((corner.y - f64::from(OVERSIZED.1)).abs() < 1e-6);
+
+    // Corrected, it maps onto the resident rectangle instead — which is the
+    // arithmetic `renderer::fit_minified` performs on the lowered record, so
+    // this states the ratio that record has to be scaled by.
+    let (scale_x, scale_y) = resident.minify_scale().expect("a minified image");
+    assert!((corner.x * f64::from(scale_x) - 64.0).abs() < 1e-6);
+    assert!((corner.y * f64::from(scale_y) - 32.0).abs() < 1e-6);
+}
+
+#[test]
+fn an_atlas_with_no_room_left_is_still_a_skip() {
+    // Minification fits an image to a LAYER, not to the space left in one: a
+    // budget already exhausted refuses the next allocation exactly as before.
+    let full = AtlasBudget {
+        atlas_size: (64, 64),
+        max_atlases: 1,
+    };
+    let mut residency = ImageResidency::new(full);
     residency.begin_frame();
+    residency
+        .resolve(&image(64, 64))
+        .expect("the first image fills the one layer");
+
     assert!(matches!(
-        residency.resolve(&image(5000, 1)),
+        residency.resolve(&image_of(32, 32, [0, 0, 255, 255])),
         Err(ImageSkip::NoAtlasSpace { .. })
     ));
+    assert_eq!(residency.skipped(), 1);
 }
 
 #[test]
@@ -446,6 +517,7 @@ fn frame_resident(frame: &CompiledFrame) -> frust_engine::ResidentImage {
     frust_engine::ResidentImage {
         id,
         region: upload.region,
+        natural: upload.natural,
         padding: u32::from(ATLAS_PADDING),
         may_have_transparency,
     }

@@ -31,7 +31,7 @@ use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, BezPath, Point, Rect};
-use peniko::color::palette::css::{BLUE, GREEN, RED};
+use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE};
 use peniko::{Brush, Color};
 
 /// Target extent every case renders at.
@@ -190,6 +190,167 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     pixels[index..index + 4]
         .try_into()
         .expect("a read-back row holds four bytes per pixel")
+}
+
+/// Renders `scene` over `base_color` on a fresh device and returns the target's
+/// pixels, failing on any validation error the frame raised.
+///
+/// The three cases below each want one frame and its bytes, and nothing else
+/// the earlier cases assert about the encoder; sharing the setup keeps what
+/// each of them actually pins on screen.
+fn rendered(scene: &Scene, base_color: Color) -> Vec<u8> {
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine round frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            scene,
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            base_color,
+            Affine::IDENTITY,
+        )
+        .expect("a well-formed frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained before the pixels are read: a page bound through the wrong
+    // pipeline's derived layout, or a pass whose depth state disagrees with its
+    // attachment, names itself here where a pixel mismatch only says that
+    // something went wrong.
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frame raised {error:?}");
+    warm_up_ran(&renderer);
+
+    target.read_back(&device, &queue)
+}
+
+/// The rectangle the layer case paints and composites.
+const LAYER_RECT: Rect = Rect::new(64.0, 64.0, 192.0, 192.0);
+
+/// One 0.5-opacity layer over an opaque backdrop: two rounds, a page, and a
+/// composite.
+fn layer_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(
+        Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+        Brush::Solid(BLACK),
+    );
+    builder.push_layer(LAYER_RECT, 0.5);
+    builder.fill_rect(LAYER_RECT, Brush::Solid(WHITE));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_two_round_layer_frame_composites_its_page_with_the_layers_own_alpha() {
+    let _serialized = render_lock();
+    let pixels = rendered(&layer_scene(), Color::TRANSPARENT);
+
+    // White inside a 0.5 layer over opaque black: 255 * 0.5, which is the whole
+    // point of giving the layer a page rather than drawing its contents
+    // straight onto the surface (that would paint 255).
+    let inside = pixel(&pixels, 128, 128);
+    assert_eq!(inside[3], 255, "the backdrop keeps the surface opaque");
+    for channel in 0..3 {
+        let value = i32::from(inside[channel]);
+        assert!(
+            (value - 128).abs() <= 1,
+            "a 0.5 layer over black must composite to about 128, got {inside:?}"
+        );
+    }
+
+    // Outside the layer's own bounds the backdrop is untouched, so the
+    // composite is bounded by the layer rather than blitted over the frame.
+    assert_eq!(pixel(&pixels, 8, 8), [0, 0, 0, 255]);
+    assert_eq!(pixel(&pixels, 248, 248), [0, 0, 0, 255]);
+}
+
+/// The right edge of the punch: one pixel past the 128-px boundary, so the
+/// probes just outside it sit in the SAME strip tile as the punch edge.
+///
+/// A whole-tile erase would take them with it; destination-out weights the
+/// erase by the source's own coverage instead, so the edge lands pixel-exact
+/// however it falls inside a tile.
+const PUNCH_EDGE: f64 = 129.0;
+
+/// An opaque red frame with a hole punched through its left side, recorded
+/// inside a layer group the punch has to be hoisted out of.
+fn punch_scene() -> Scene {
+    let edge = f64::from(SIZE);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(Rect::new(0.0, 0.0, edge, edge), Brush::Solid(RED));
+    builder.push_layer(Rect::new(0.0, 0.0, edge, edge), 1.0);
+    builder.clear_rect(Rect::new(0.0, 0.0, PUNCH_EDGE, edge));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_punch_erases_to_full_transparency_pixel_exact_at_a_tile_unaligned_edge() {
+    let _serialized = render_lock();
+    // A translucent presentation: the target's alpha is what the punch exists
+    // to open, so the pass runs.
+    let pixels = rendered(&punch_scene(), Color::TRANSPARENT);
+
+    assert_eq!(
+        pixel(&pixels, 64, 128),
+        [0, 0, 0, 0],
+        "the punch centre must reach full transparency, colour and alpha alike"
+    );
+    assert_eq!(
+        pixel(&pixels, 128, 128),
+        [0, 0, 0, 0],
+        "the last pixel inside the unaligned edge must be erased"
+    );
+    assert_eq!(
+        pixel(&pixels, 129, 128),
+        [255, 0, 0, 255],
+        "the pixel just past the edge shares its tile and must survive intact"
+    );
+    assert_eq!(
+        pixel(&pixels, 140, 128),
+        [255, 0, 0, 255],
+        "and so must the rest of the tile the edge falls in"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_punch_is_dropped_whole_on_a_target_that_disregards_alpha() {
+    let _serialized = render_lock();
+    // An opaque base colour seals every pixel of the surface, so its alpha
+    // carries nothing the punch could open. Destination-out darkens colour as
+    // well as erasing alpha, so issuing it here would leave a black rectangle
+    // where the display list says nothing changes.
+    let pixels = rendered(&punch_scene(), BLUE);
+
+    assert_eq!(
+        pixel(&pixels, 64, 128),
+        [255, 0, 0, 255],
+        "an opaque presentation reads exactly as it would without the clear"
+    );
+    assert_eq!(pixel(&pixels, 140, 128), [255, 0, 0, 255]);
 }
 
 #[test]

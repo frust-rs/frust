@@ -1,6 +1,6 @@
-//! The six render pipelines the engine draws with, as plain values.
+//! The eight render pipelines the engine draws with, as plain values.
 //!
-//! Four of them rasterize sparse strips out of the one `strip.wgsl` program,
+//! Six of them rasterize sparse strips out of the one `strip.wgsl` program,
 //! differing only in their render state; the other two clear and copy
 //! intermediate textures. Each is described by a
 //! [`frust_gpu::RenderPipelineDesc`] — a value holding no GPU handle — so the
@@ -9,7 +9,7 @@
 //! That is the substrate's stated contract: a frame is never the first place a
 //! pipeline gets compiled.
 //!
-//! ## The four strip variants
+//! ## The six strip variants
 //!
 //! | Variant | Target | Blend | Depth |
 //! |---|---|---|---|
@@ -17,12 +17,31 @@
 //! | [`EnginePipeline::StripAlpha`] | the frame's target format | premultiplied | none |
 //! | [`EnginePipeline::StripDepthAlpha`] | the frame's target format | premultiplied | test, no write |
 //! | [`EnginePipeline::StripOpaque`] | the frame's target format | none | test and write |
+//! | [`EnginePipeline::StripDestOut`] | the frame's target format | [`DEST_OUT_BLEND`] | none |
+//! | [`EnginePipeline::StripDepthDestOut`] | the frame's target format | [`DEST_OUT_BLEND`] | test, no write |
 //!
 //! The depth comparison is [`wgpu::CompareFunction::LessEqual`] against a
 //! [`DEPTH_FORMAT`] attachment, which is what the vertex stage's own z
 //! encoding expects: `strip.wgsl` maps painter's-order index 0 (the backmost
 //! draw) to z = 1.0 and each draw in front of it to a smaller z, so drawing
 //! front-to-back lets the opaque pass reject everything already covered.
+//!
+//! ## The destination-out pair
+//!
+//! The hole punch [`crate::compile::clear`] lowers is a strip run like any
+//! other — same program, same instance layout — and differs only in its blend
+//! state, which is why it is a pipeline variant rather than a shader of its
+//! own. [`DEST_OUT_BLEND`] computes `dst · (1 − src.a)` in fixed function, for
+//! the colour *and* the alpha component, which is what erases a rectangle to
+//! `(0, 0, 0, 0)` without a shader-side composite reading a target it is also
+//! writing.
+//!
+//! There are two of them for the same reason there are two alpha variants: a
+//! pipeline's depth state has to agree with whether the pass it runs in
+//! attaches a depth buffer at all, and the engine's depth attachment is
+//! optional (no attachment, or `FRUST_ENGINE_NO_DEPTH`). The depth-testing one
+//! is what restores the paint order the display list recorded; the other is
+//! the same trade the two draw passes already make when they collapse into one.
 //!
 //! ## Bind groups
 //!
@@ -50,7 +69,26 @@ use super::shader_src;
 /// surface's own format.
 pub const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// The depth attachment format the two depth-testing strip variants use.
+/// The fixed-function destination-out blend the punch pass draws with.
+///
+/// `src · 0 + dst · (1 − src.a)`, applied to the colour *and* the alpha
+/// component — the `COMPOSE_DEST_OUT` arm of `shaders/blend.wgsl` evaluated for
+/// a premultiplied source, without the shader-side composite that arm would
+/// need a readable backdrop for. See [`crate::compile::clear`]'s module doc for
+/// why the erase is a destination-out composite rather than a clear op.
+pub const DEST_OUT_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: DEST_OUT_COMPONENT,
+    alpha: DEST_OUT_COMPONENT,
+};
+
+/// The one blend component [`DEST_OUT_BLEND`] applies to both channels.
+const DEST_OUT_COMPONENT: wgpu::BlendComponent = wgpu::BlendComponent {
+    src_factor: wgpu::BlendFactor::Zero,
+    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+    operation: wgpu::BlendOperation::Add,
+};
+
+/// The depth attachment format the depth-testing strip variants use.
 ///
 /// 24 bits is what the vertex stage's z encoding is quantized to (it divides
 /// the painter's-order index by `1 << 24`), so a wider format would buy no
@@ -136,6 +174,12 @@ pub enum EnginePipeline {
     /// Strips into the frame's own target, opaque, depth-tested and
     /// depth-writing.
     StripOpaque,
+    /// Hole-punch coverage into the frame's own target, destination-out, no
+    /// depth.
+    StripDestOut,
+    /// Hole-punch coverage into the frame's own target, destination-out,
+    /// depth-tested but not depth-writing.
+    StripDepthDestOut,
     /// Clears rectangular regions of an intermediate target.
     Clear,
     /// Copies rectangular regions between intermediate targets.
@@ -144,11 +188,13 @@ pub enum EnginePipeline {
 
 impl EnginePipeline {
     /// Every pipeline the engine warms up, in warm-up order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::StripIntermediate,
         Self::StripAlpha,
         Self::StripDepthAlpha,
         Self::StripOpaque,
+        Self::StripDestOut,
+        Self::StripDepthDestOut,
         Self::Clear,
         Self::Copy,
     ];
@@ -161,6 +207,8 @@ impl EnginePipeline {
             Self::StripAlpha => "strip-alpha",
             Self::StripDepthAlpha => "strip-depth-alpha",
             Self::StripOpaque => "strip-opaque",
+            Self::StripDestOut => "strip-dest-out",
+            Self::StripDepthDestOut => "strip-depth-dest-out",
             Self::Clear => "clear",
             Self::Copy => "copy",
         }
@@ -172,7 +220,12 @@ impl EnginePipeline {
     pub const fn is_strip(self) -> bool {
         matches!(
             self,
-            Self::StripIntermediate | Self::StripAlpha | Self::StripDepthAlpha | Self::StripOpaque
+            Self::StripIntermediate
+                | Self::StripAlpha
+                | Self::StripDepthAlpha
+                | Self::StripOpaque
+                | Self::StripDestOut
+                | Self::StripDepthDestOut
         )
     }
 
@@ -185,7 +238,9 @@ impl EnginePipeline {
             Self::StripIntermediate
             | Self::StripAlpha
             | Self::StripDepthAlpha
-            | Self::StripOpaque => STRIP_BIND_GROUPS,
+            | Self::StripOpaque
+            | Self::StripDestOut
+            | Self::StripDepthDestOut => STRIP_BIND_GROUPS,
             Self::Clear => 0,
             Self::Copy => COPY_BIND_GROUPS,
         }
@@ -194,12 +249,16 @@ impl EnginePipeline {
     /// The color format this pipeline writes, given the frame's target
     /// format.
     ///
-    /// Only the three variants that draw into the frame's own target take it;
-    /// the rest are pinned to [`INTERMEDIATE_FORMAT`].
+    /// Only the variants that draw into the frame's own target take it; the
+    /// rest are pinned to [`INTERMEDIATE_FORMAT`].
     #[must_use]
     pub const fn format(self, target_format: wgpu::TextureFormat) -> wgpu::TextureFormat {
         match self {
-            Self::StripAlpha | Self::StripDepthAlpha | Self::StripOpaque => target_format,
+            Self::StripAlpha
+            | Self::StripDepthAlpha
+            | Self::StripOpaque
+            | Self::StripDestOut
+            | Self::StripDepthDestOut => target_format,
             Self::StripIntermediate | Self::Clear | Self::Copy => INTERMEDIATE_FORMAT,
         }
     }
@@ -211,6 +270,7 @@ impl EnginePipeline {
             Self::StripIntermediate | Self::StripAlpha | Self::StripDepthAlpha => {
                 Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
             }
+            Self::StripDestOut | Self::StripDepthDestOut => Some(DEST_OUT_BLEND),
             Self::StripOpaque | Self::Clear | Self::Copy => None,
         }
     }
@@ -219,9 +279,13 @@ impl EnginePipeline {
     #[must_use]
     pub fn depth(self) -> Option<wgpu::DepthStencilState> {
         match self {
-            Self::StripDepthAlpha => Some(depth_state(false)),
+            Self::StripDepthAlpha | Self::StripDepthDestOut => Some(depth_state(false)),
             Self::StripOpaque => Some(depth_state(true)),
-            Self::StripIntermediate | Self::StripAlpha | Self::Clear | Self::Copy => None,
+            Self::StripIntermediate
+            | Self::StripAlpha
+            | Self::StripDestOut
+            | Self::Clear
+            | Self::Copy => None,
         }
     }
 
@@ -232,7 +296,9 @@ impl EnginePipeline {
             Self::StripIntermediate
             | Self::StripAlpha
             | Self::StripDepthAlpha
-            | Self::StripOpaque => vec![GpuStrip::vertex_layout()],
+            | Self::StripOpaque
+            | Self::StripDestOut
+            | Self::StripDepthDestOut => vec![GpuStrip::vertex_layout()],
             Self::Clear => vec![clear_vertex_layout()],
             Self::Copy => vec![copy_vertex_layout()],
         }
@@ -245,7 +311,9 @@ impl EnginePipeline {
             Self::StripIntermediate
             | Self::StripAlpha
             | Self::StripDepthAlpha
-            | Self::StripOpaque => EngineShaderModule::Strip,
+            | Self::StripOpaque
+            | Self::StripDestOut
+            | Self::StripDepthDestOut => EngineShaderModule::Strip,
             Self::Clear => EngineShaderModule::Clear,
             Self::Copy => EngineShaderModule::Copy,
         }
@@ -417,7 +485,7 @@ mod tests {
 
     #[test]
     fn the_warm_up_list_covers_every_pipeline_exactly_once() {
-        assert_eq!(EnginePipeline::ALL.len(), 6);
+        assert_eq!(EnginePipeline::ALL.len(), 8);
         for (i, a) in EnginePipeline::ALL.iter().enumerate() {
             for b in EnginePipeline::ALL.iter().skip(i + 1) {
                 assert_ne!(a, b, "the warm-up list repeats {}", a.label());
@@ -481,6 +549,8 @@ mod tests {
             EnginePipeline::StripAlpha,
             EnginePipeline::StripDepthAlpha,
             EnginePipeline::StripOpaque,
+            EnginePipeline::StripDestOut,
+            EnginePipeline::StripDepthDestOut,
         ];
         for pipeline in strips {
             assert_eq!(pipeline.module(), EngineShaderModule::Strip);
@@ -520,11 +590,65 @@ mod tests {
             Some(true),
             "the opaque variant establishes the depth later passes test against"
         );
-        for pipeline in [EnginePipeline::StripDepthAlpha, EnginePipeline::StripOpaque] {
+        for pipeline in [
+            EnginePipeline::StripDepthAlpha,
+            EnginePipeline::StripOpaque,
+            EnginePipeline::StripDepthDestOut,
+        ] {
             let depth = pipeline.depth().expect("a depth-testing variant");
             assert_eq!(depth.format, DEPTH_FORMAT);
             assert_eq!(depth.depth_compare, Some(wgpu::CompareFunction::LessEqual));
         }
+    }
+
+    /// The punch pair erases `dst · (1 − src.a)` in fixed function, colour and
+    /// alpha alike, and differs from the alpha pair in nothing but that blend
+    /// and its depth state.
+    ///
+    /// Stated as arithmetic over the blend factors rather than as a comparison
+    /// against a named `wgpu` preset: `wgpu` has no destination-out preset, and
+    /// a punch that darkened colour without erasing alpha (or the reverse)
+    /// would leave exactly the residue `compile::clear`'s contract forbids.
+    #[test]
+    fn the_dest_out_variants_erase_colour_and_alpha_alike() {
+        for pipeline in [
+            EnginePipeline::StripDestOut,
+            EnginePipeline::StripDepthDestOut,
+        ] {
+            let blend = pipeline.blend().expect("a destination-out variant blends");
+            assert_eq!(blend, DEST_OUT_BLEND);
+            assert_eq!(
+                blend.color,
+                blend.alpha,
+                "{} must erase alpha exactly as it erases colour",
+                pipeline.label()
+            );
+            for component in [blend.color, blend.alpha] {
+                assert_eq!(component.src_factor, wgpu::BlendFactor::Zero);
+                assert_eq!(
+                    component.dst_factor,
+                    wgpu::BlendFactor::OneMinusSrcAlpha,
+                    "{} must weight the destination by the source's own coverage",
+                    pipeline.label()
+                );
+                assert_eq!(component.operation, wgpu::BlendOperation::Add);
+            }
+            assert_eq!(pipeline.format(TARGET), TARGET, "the punch is a frame pass");
+            assert_eq!(pipeline.bind_group_count(), STRIP_BIND_GROUPS);
+        }
+
+        assert_eq!(
+            EnginePipeline::StripDestOut.depth(),
+            None,
+            "the depth-free punch runs when the frame has no depth attachment"
+        );
+        assert_eq!(
+            EnginePipeline::StripDepthDestOut
+                .depth()
+                .and_then(|d| d.depth_write_enabled),
+            Some(false),
+            "a punch tests the depth the opaque pass established without writing it"
+        );
     }
 
     #[test]
@@ -638,6 +762,14 @@ mod tests {
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register(&mut library, &device);
         assert_eq!(library.len(), 3, "one module per engine shader source");
+        assert_eq!(
+            EnginePipeline::ALL
+                .iter()
+                .filter(|pipeline| pipeline.is_strip())
+                .count(),
+            6,
+            "six render states over the one strip program"
+        );
 
         let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
         let descs = warm_up_descs(&shaders, TARGET);

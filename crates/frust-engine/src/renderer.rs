@@ -18,30 +18,58 @@
 //!   the command buffers submitted after them and so land before the passes
 //!   that read them.
 //!
-//! # The three passes
+//! # The frame's passes
 //!
-//! A frame records up to three passes into that encoder, in this order.
+//! A frame records into that encoder, in this order.
 //!
 //! 1. **Clear.** Clears the colour target to the frame's base colour, and the
 //!    depth attachment to the far plane unless the caller stated it is already
 //!    populated (see [`crate::gpu::depth`]). It draws nothing; separating it
 //!    from the strip passes is what lets a frame with no draws at all still
 //!    resolve to a clean surface.
-//! 2. **Opaque strips**, depth-tested and depth-writing, unblended. Only the
-//!    fully-covered interior spans of opaque draws reach it — an anti-aliased
-//!    edge is by definition not opaque. The depth it establishes is what lets
-//!    the alpha pass reject fragments an opaque draw in front of them already
-//!    covered.
-//! 3. **Alpha strips**, premultiplied-blended, in painter order. Depth-tested
+//! 2. **One pass per [layer round](crate::schedule), innermost first.** Each
+//!    renders one isolated layer into a pooled intermediate
+//!    [page](crate::schedule::pages) it clears to transparent, at the page's
+//!    own origin — so every instance is shifted by the layer's tile-aligned
+//!    bounds — and through the page's own viewport uniform. A round's ops run
+//!    in the order [`Schedule::build`] listed them, so a finished child page
+//!    composites into its parent exactly where the recording entered it.
+//! 3. **Opaque strips**, depth-tested and depth-writing, unblended. Only the
+//!    fully-covered interior spans of opaque draws *in the root round* reach it
+//!    — an anti-aliased edge is by definition not opaque, and a page carries no
+//!    depth attachment for the split to be sound against. The depth it
+//!    establishes is what lets the alpha pass reject fragments an opaque draw
+//!    in front of them already covered.
+//! 4. **Alpha strips**, premultiplied-blended, in painter order. Depth-tested
 //!    but not depth-writing when a depth attachment is in play; a plain
 //!    painter's-algorithm pass when it is not.
+//! 5. **The hole punch**, destination-out, when the frame recorded a
+//!    `ClearRect` — see [`crate::compile::clear`] for the whole contract this
+//!    pass implements.
 //!
 //! With depth unavailable — no attachment, or `FRUST_ENGINE_NO_DEPTH` set —
-//! passes 2 and 3 collapse into one blended pass carrying *every* instance in
+//! passes 3 and 4 collapse into one blended pass carrying *every* instance in
 //! painter order. That is a correctness requirement rather than a fallback
 //! detail: routing the opaque spans into a separate, earlier pass is only sound
 //! because the depth buffer re-establishes their ordering against the blended
 //! ones.
+//!
+//! # Compositing a layer
+//!
+//! A finished page reaches its parent as ONE instanced quad through the same
+//! strip program every draw goes through, flagged as a whole rectangle and
+//! naming the layer colour source: the fragment stage then reads the page
+//! bound as `layer_input_texture` at the quad's own texel and scales it by the
+//! opacity packed into the instance's low byte. The page is bound through a
+//! bind group of its own rather than the frame's shared one, because group 0
+//! carries both the pass's viewport uniform and that layer input, and a page
+//! round's viewport is its own.
+//!
+//! A composite carries the deepest painter's-order index of everything inside
+//! the layer it composites, nested layers included. That is what keeps a
+//! translucent layer correctly ordered against the root round's own draws
+//! without giving the scheduler a depth model: every draw recorded before the
+//! layer sits behind that index and every draw recorded after it sits in front.
 //!
 //! # Paint resolution
 //!
@@ -69,15 +97,24 @@
 //! when the frame that compiled it reports the entry's region evicted.
 //!
 //! A paint that still cannot be resolved — an image the atlas has no room
-//! for, a gradient whose ramp could not be baked, an external texture (not
-//! bound yet; Phase 9) — leaves its draw skipped rather than stamped in a
-//! wrong colour: the same "a frame draws less, never wrong" rule the compiler
+//! for, a gradient whose ramp could not be baked, an external texture (nothing
+//! binds one yet) — leaves its draw skipped rather than stamped in a wrong
+//! colour: the same "a frame draws less, never wrong" rule the compiler
 //! follows for the commands it does not lower.
+//!
+//! An image the atlas holds a *minified* copy of is the one paint whose lowered
+//! record needs a correction here. The compiler composed its natural-to-device
+//! transform against the source's declared extent, before residency was
+//! consulted and so before the fit was known; the shader samples the resident
+//! rectangle. [`ResidentImage::minify_scale`] is the ratio between the two, and
+//! folding it into the lowered record's transform is what keeps a downsampled
+//! image landing on the destination rectangle the display list asked for.
 
+use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
-use frust_gpu::{PipelineCache, ShaderLibrary, TextureId, TierCaps};
+use frust_gpu::{PipelineCache, PooledTexture, ShaderLibrary, TextureId, TierCaps};
 use frust_scene::Scene;
 use kurbo::Affine;
 use peniko::Color;
@@ -99,8 +136,10 @@ use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, warm_up_descs};
 use crate::gpu::strips::{PaintType, pack_paint_descriptor};
-use crate::gpu::targets::IntermediateTargets;
+use crate::gpu::targets::{IntermediateTargets, IntermediateTexture};
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
+use crate::schedule::pages::{PageConfig, PageSize};
+use crate::schedule::{Composite, PageParity, Round, RoundOp, Schedule};
 use crate::{EngineTarget, OutputAlpha};
 
 /// The packed paint descriptor of an inline premultiplied solid colour.
@@ -125,6 +164,27 @@ const MIN_RESOURCE_TEXTURE_DIM: u32 = 64;
 /// on the second frame.
 const MIN_INSTANCE_CAPACITY: u64 = 4096;
 
+/// The colour source a composite instance names its finished page by:
+/// `COLOR_SOURCE_LAYER` in bits 29-30 of the packed paint descriptor.
+///
+/// Deliberately not built through
+/// [`pack_paint_descriptor`](crate::gpu::strips::pack_paint_descriptor): that
+/// helper packs a paint type and a paint-record index into the low bits, and a
+/// composite spends the same bits on a constant opacity instead. Two readings
+/// of one word, so each is written where its own reading is obvious.
+const LAYER_PAINT_SOURCE: u32 = 1 << 29;
+
+/// The premultiplied source colour a hole-punch instance erases with.
+///
+/// Opaque white. Destination-out weights the erase by the source's own *alpha*
+/// and multiplies its colour by zero, so the colour channels never reach the
+/// target and only full alpha matters — it is what makes a fully covered pixel
+/// read exactly `(0, 0, 0, 0)`.
+const PUNCH_SOURCE: u32 = u32::MAX;
+
+/// The label every intermediate page is acquired from the pool under.
+const PAGE_LABEL: &str = "frust-engine layer page";
+
 static INDEXED_PAINT_WARNING: Once = Once::new();
 
 /// One surface's 2D render engine: a scene in, recorded passes out.
@@ -142,6 +202,9 @@ pub struct EngineRenderer {
     gradients: GradientCache,
     depth: DepthAttachment,
     targets: IntermediateTargets,
+    /// The bounds an intermediate page is sized between — the policy half of
+    /// page sizing, kept beside the pool the extents are requested from.
+    pages: PageConfig,
     textures: HashMap<TextureId, wgpu::TextureView>,
     resources: FrameResources,
     scratch: Scratch,
@@ -191,6 +254,7 @@ impl EngineRenderer {
             gradients,
             depth: DepthAttachment::new(),
             targets: IntermediateTargets::new(caps),
+            pages: PageConfig::default(),
             textures: HashMap::new(),
             resources: FrameResources::new(device, dim),
             scratch: Scratch::default(),
@@ -213,6 +277,12 @@ impl EngineRenderer {
     #[must_use]
     pub fn targets(&self) -> &IntermediateTargets {
         &self.targets
+    }
+
+    /// The bounds this renderer sizes intermediate layer pages between.
+    #[must_use]
+    pub fn page_config(&self) -> PageConfig {
+        self.pages
     }
 
     /// Finishes pipeline warm-up on the calling thread, returning only once
@@ -330,11 +400,15 @@ impl EngineRenderer {
     /// grid the strip pipeline addresses, [`EngineError::InvalidTransform`] for
     /// a non-finite transform, [`EngineError::InvalidGeometry`] for non-finite
     /// command geometry (rect extents, radii, path points, stroke or dash
-    /// values), [`EngineError::AlphaCapacity`] when a frame's
-    /// coverage outgrows the alpha texture, and [`EngineError::PaintCapacity`]
-    /// when its encoded paints or colour ramps outgrow theirs. Every one of
-    /// them is returned before anything is recorded, so a refused frame leaves
-    /// `encoder` exactly as it was found.
+    /// values), [`EngineError::SchedulerEscalation`] for a layer shape the
+    /// engine's scheduler does not serve,
+    /// [`EngineError::IntermediateTextureTooLarge`] for a layer no page can be
+    /// sized to, [`EngineError::AlphaCapacity`] when a frame's coverage
+    /// outgrows the alpha texture, and [`EngineError::PaintCapacity`] when its
+    /// encoded paints or colour ramps outgrow theirs. Every one of them is
+    /// returned before anything is recorded, so a refused frame leaves
+    /// `encoder` exactly as it was found — which is what lets the caller route
+    /// it to another renderer rather than present it half-drawn.
     #[expect(
         clippy::too_many_arguments,
         reason = "the seam frust-render drives: device, queue, encoder, scene, \
@@ -355,6 +429,20 @@ impl EngineRenderer {
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
 
+        // The frame's pass plan, settled before anything is allocated or
+        // recorded: a layer shape this scheduler does not serve, or one larger
+        // than a page can be sized to, refuses the whole frame here so the
+        // caller can route it elsewhere rather than present it half-drawn.
+        let rounds = Schedule::build(&frame.recorder, &self.caps, &self.pages)?;
+        let ceiling = self.targets.max_texture_size();
+        for round in &rounds {
+            if let Some(page) = round.page()
+                && (page.size.width > ceiling || page.size.height > ceiling)
+            {
+                return Err(EngineError::IntermediateTextureTooLarge);
+            }
+        }
+
         // Depth is available only when there is an attachment to use and the
         // kill switch is off. Settling that before a single instance is built
         // is what keeps the opaque/alpha split and the pass shape in agreement.
@@ -362,16 +450,36 @@ impl EngineRenderer {
         if depth_enabled && target.depth.is_none() {
             self.depth.ensure(device, target.width, target.height);
         }
+        // Cloned out of the renderer rather than borrowed from it: an engine-
+        // owned attachment lives in `self.depth`, and recording the frame needs
+        // `self` mutably (the page pool, the pipeline cache). A `wgpu`
+        // texture view is a reference-counted handle, so the clone is a
+        // refcount bump once per frame rather than an allocation.
         let depth_view = depth_enabled
             .then(|| target.depth.or_else(|| self.depth.owned_view()))
-            .flatten();
+            .flatten()
+            .cloned();
+        let depth_view = depth_view.as_ref();
+
+        // Destination-out erases colour as well as alpha, so a target whose
+        // alpha is disregarded would take a black rectangle where the display
+        // list says nothing changes. A frame cleared to an opaque base colour
+        // is exactly that target — every pixel of it presents opaquely — and is
+        // the only such statement `encode` is handed, so it is what the skip
+        // `compile::clear`'s contract calls for is decided on.
+        let punches = !frame.clears.is_empty() && !is_opaque(base_color);
 
         // Paints are resolved before instances are built: an instance names
         // its paint by the texel its record starts at, which only exists once
         // the frame's ramps are resident and its records are laid out.
         self.resources.resolve_paints(&frame, &mut self.gradients);
-        self.scratch
-            .build_instances(&frame, depth_view.is_some(), &self.resources.paint_slots);
+        self.scratch.build(
+            &frame,
+            &rounds,
+            depth_view.is_some(),
+            punches,
+            &self.resources.paint_slots,
+        );
 
         // Grown or created ahead of this frame's own atlas evictions/uploads
         // (recorded into `queue` below) and ahead of any pass that samples
@@ -405,27 +513,81 @@ impl EngineRenderer {
             .upload_instances(device, queue, &self.scratch);
 
         let format = target.format;
-        let alpha_variant = if depth_view.is_some() {
+        let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
+        self.record_frame(
+            device, queue, encoder, &target, depth_view, base_color, &pipelines,
+        );
+
+        Ok(())
+    }
+
+    /// Builds (or takes from the cache) every pipeline this frame's passes
+    /// need, and the bind groups each of them will be bound through.
+    ///
+    /// All of it happens before the first `begin_render_pass`: a pipeline
+    /// compiled mid-recording would be the very stall the warm-up exists to
+    /// avoid, and a bind group is only valid against the pipeline that derived
+    /// its layout.
+    fn frame_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        depth: bool,
+    ) -> FramePipelines {
+        let alpha_variant = if depth {
             EnginePipeline::StripDepthAlpha
         } else {
             EnginePipeline::StripAlpha
         };
-        let alpha_pipeline = self
-            .pipelines
-            .get_or_create(device, &alpha_variant.desc(&self.shaders, format))
-            .clone();
-        let opaque_pipeline = depth_view.is_some().then(|| {
-            self.pipelines
-                .get_or_create(
-                    device,
-                    &EnginePipeline::StripOpaque.desc(&self.shaders, format),
-                )
-                .clone()
-        });
+        let punch_variant = if depth {
+            EnginePipeline::StripDepthDestOut
+        } else {
+            EnginePipeline::StripDestOut
+        };
+
+        let mut frame = FramePipelines {
+            alpha: (
+                alpha_variant,
+                self.pipelines
+                    .get_or_create(device, &alpha_variant.desc(&self.shaders, format))
+                    .clone(),
+            ),
+            opaque: None,
+            page: None,
+            punch: None,
+        };
+        if depth && !self.scratch.opaque.is_empty() {
+            frame.opaque = Some(
+                self.pipelines
+                    .get_or_create(
+                        device,
+                        &EnginePipeline::StripOpaque.desc(&self.shaders, format),
+                    )
+                    .clone(),
+            );
+        }
+        if self.scratch.page_rounds() > 0 {
+            frame.page = Some(
+                self.pipelines
+                    .get_or_create(
+                        device,
+                        &EnginePipeline::StripIntermediate.desc(&self.shaders, format),
+                    )
+                    .clone(),
+            );
+        }
+        if self.scratch.punch.1 > 0 {
+            frame.punch = Some((
+                punch_variant,
+                self.pipelines
+                    .get_or_create(device, &punch_variant.desc(&self.shaders, format))
+                    .clone(),
+            ));
+        }
 
         self.resources
-            .ensure_bind_groups(device, alpha_variant, &alpha_pipeline, format);
-        if let Some(pipeline) = opaque_pipeline.as_ref() {
+            .ensure_bind_groups(device, frame.alpha.0, &frame.alpha.1, format);
+        if let Some(pipeline) = frame.opaque.as_ref() {
             self.resources.ensure_bind_groups(
                 device,
                 EnginePipeline::StripOpaque,
@@ -433,33 +595,43 @@ impl EngineRenderer {
                 format,
             );
         }
+        if let Some(pipeline) = frame.page.as_ref() {
+            self.resources.ensure_bind_groups(
+                device,
+                EnginePipeline::StripIntermediate,
+                pipeline,
+                format,
+            );
+        }
+        if let Some((variant, pipeline)) = frame.punch.as_ref() {
+            self.resources
+                .ensure_bind_groups(device, *variant, pipeline, format);
+        }
+        self.resources
+            .ensure_page_configs(device, self.scratch.page_rounds());
 
-        self.record_passes(
-            encoder,
-            &target,
-            depth_view,
-            base_color,
-            opaque_pipeline
-                .as_ref()
-                .map(|p| (EnginePipeline::StripOpaque, p)),
-            (alpha_variant, &alpha_pipeline),
-        );
-
-        Ok(())
+        frame
     }
 
-    /// Records the clear pass and whichever strip passes have instances.
+    /// Records the clear pass, every round's own pass, and the hole punch.
     ///
     /// Every pass opened here is ended before the method returns, which is the
     /// half of the encode contract a caller cannot check for itself.
-    fn record_passes(
-        &self,
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one frame's full recording state, each piece owned by a \
+                  different part of the renderer; bundling them would move the \
+                  same assembly one call up"
+    )]
+    fn record_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &EngineTarget<'_>,
         depth_view: Option<&wgpu::TextureView>,
         base_color: Color,
-        opaque: Option<(EnginePipeline, &wgpu::RenderPipeline)>,
-        alpha: (EnginePipeline, &wgpu::RenderPipeline),
+        pipelines: &FramePipelines,
     ) {
         let depth_load = self.depth.load_op(target.depth.is_some());
 
@@ -477,80 +649,308 @@ impl EngineRenderer {
             multiview_mask: None,
         }));
 
+        // Every field below is reached through `self.<field>` rather than
+        // through a method: the page pool is borrowed mutably for the whole
+        // walk while the instance buffer, the bind groups and the plan are
+        // borrowed immutably, and only disjoint field borrows let those
+        // coexist.
         let Some(instances) = self.resources.instances.as_ref() else {
             return;
         };
+        let dim = self.caps.resource_texture_dim;
         let opaque_count = self.scratch.opaque.len() as u32;
-        let alpha_count = self.scratch.alpha.len() as u32;
+        // The alpha region starts where the opaque one ends, so every segment's
+        // own index is relative to that.
+        let base = opaque_count;
 
-        if opaque_count > 0
-            && let Some((variant, pipeline)) = opaque
-        {
-            self.strip_pass(
+        // The two ping-pong groups, each holding the finished page a later
+        // round composites (see [`crate::schedule`]).
+        let mut live: [Option<PooledTexture>; 2] = [None, None];
+        let mut page_slot = 0_usize;
+
+        for plan in &self.scratch.rounds {
+            let own = match plan.page {
+                None => None,
+                Some(page) => match self.targets.acquire(
+                    device,
+                    page.size.width,
+                    page.size.height,
+                    PAGE_LABEL,
+                ) {
+                    IntermediateTexture::Texture(pooled) => Some((page.parity, pooled)),
+                    // Unreachable: every page extent was checked against this
+                    // pool's own ceiling before the first pass was recorded.
+                    // Skipping the round draws less rather than taking a device
+                    // error mid-frame.
+                    IntermediateTexture::TooLarge { .. } => continue,
+                },
+            };
+
+            // The round's viewport uniform. A page's is written here rather
+            // than with the frame's other uploads because only the pool knows
+            // the extent it quantized the request up to, and NDC is computed
+            // against the attachment's real extent. Distinct buffers, so the
+            // write ordering against the frame's own config never matters.
+            let config = match &own {
+                None => &self.resources.config,
+                Some((_, pooled)) => {
+                    let Some(config) = self.resources.page_configs.get(page_slot) else {
+                        continue;
+                    };
+                    let (width, height) = pooled.size();
+                    queue.write_buffer(
+                        config,
+                        0,
+                        bytemuck::bytes_of(&GpuConfig::new(width, height, dim, dim)),
+                    );
+                    page_slot = page_slot.saturating_add(1);
+                    config
+                }
+            };
+
+            let variant = match &own {
+                None => pipelines.alpha.0,
+                Some(_) => EnginePipeline::StripIntermediate,
+            };
+            let pipeline = match (&own, pipelines.page.as_ref()) {
+                (None, _) => &pipelines.alpha.1,
+                (Some(_), Some(page)) => page,
+                (Some(_), None) => continue,
+            };
+            let Some(groups) = self.resources.bind_groups.get(&variant) else {
+                continue;
+            };
+
+            // A page round binds its own viewport uniform; the root round's is
+            // already the one the shared set carries.
+            let page_resources = own.as_ref().map(|_| {
+                resources_bind_group(
+                    device,
+                    pipeline,
+                    &self.resources.alphas.view,
+                    config,
+                    &self.resources.placeholders.layer_input,
+                )
+            });
+            let resources = page_resources.as_ref().unwrap_or(&groups.resources);
+
+            let segments = self
+                .scratch
+                .segments
+                .get(plan.segments.clone())
+                .unwrap_or(&[]);
+            let mut composites: Vec<wgpu::BindGroup> = Vec::new();
+            for segment in segments {
+                if let Segment::Composite(_, parity) = *segment {
+                    // A group with no live page samples the transparent
+                    // placeholder, which composites nothing — the same "draw
+                    // less, never wrong" answer an unresolvable paint gets.
+                    let view = live[parity.index()].as_ref().map_or(
+                        &self.resources.placeholders.layer_input,
+                        PooledTexture::view,
+                    );
+                    composites.push(resources_bind_group(
+                        device,
+                        pipeline,
+                        &self.resources.alphas.view,
+                        config,
+                        view,
+                    ));
+                }
+            }
+
+            // The opaque pass belongs to the root round and runs ahead of it:
+            // the depth it writes is what the round's own blended instances,
+            // composites included, are then tested against.
+            if own.is_none()
+                && opaque_count > 0
+                && let Some(opaque) = pipelines.opaque.as_ref()
+                && let Some(opaque_groups) =
+                    self.resources.bind_groups.get(&EnginePipeline::StripOpaque)
+            {
+                record_pass(
+                    encoder,
+                    &PassPlan {
+                        label: "frust-engine opaque strips",
+                        view: target.view,
+                        load: wgpu::LoadOp::Load,
+                        depth: depth_view,
+                        pipeline: opaque,
+                        groups: opaque_groups,
+                        resources: &opaque_groups.resources,
+                        composites: &[],
+                        instances,
+                        base: 0,
+                        segments: &[Segment::Strips(0, opaque_count)],
+                    },
+                );
+            }
+
+            let (view, label, load, depth) = match &own {
+                Some((_, pooled)) => (
+                    pooled.view(),
+                    PAGE_LABEL,
+                    // A pooled texture holds whatever its last holder left
+                    // there, so a page is always cleared rather than loaded.
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    None,
+                ),
+                None => (
+                    target.view,
+                    "frust-engine alpha strips",
+                    wgpu::LoadOp::Load,
+                    depth_view,
+                ),
+            };
+
+            record_pass(
                 encoder,
-                "frust-engine opaque strips",
-                target.view,
-                depth_view,
-                variant,
-                pipeline,
-                instances,
-                GpuStrip::instance_range(0, opaque_count),
+                &PassPlan {
+                    label,
+                    view,
+                    load,
+                    depth,
+                    pipeline,
+                    groups,
+                    resources,
+                    composites: &composites,
+                    instances,
+                    base,
+                    segments,
+                },
+            );
+
+            // The pages this round consumed are free the moment its pass ends,
+            // which is what bounds a chain of any depth to two live pages.
+            for (index, slot) in live.iter_mut().enumerate() {
+                if plan.released.get(index).copied().unwrap_or(false)
+                    && let Some(page) = slot.take()
+                {
+                    self.targets.release(page);
+                }
+            }
+            if let Some((parity, pooled)) = own
+                && let Some(previous) = live[parity.index()].replace(pooled)
+            {
+                self.targets.release(previous);
+            }
+        }
+
+        let (punch_first, punch_count) = self.scratch.punch;
+        if punch_count > 0
+            && let Some((variant, pipeline)) = pipelines.punch.as_ref()
+            && let Some(groups) = self.resources.bind_groups.get(variant)
+        {
+            record_pass(
+                encoder,
+                &PassPlan {
+                    label: "frust-engine hole punch",
+                    view: target.view,
+                    load: wgpu::LoadOp::Load,
+                    depth: depth_view,
+                    pipeline,
+                    groups,
+                    resources: &groups.resources,
+                    composites: &[],
+                    instances,
+                    base,
+                    segments: &[Segment::Strips(punch_first, punch_count)],
+                },
             );
         }
 
-        if alpha_count > 0 {
-            self.strip_pass(
-                encoder,
-                "frust-engine alpha strips",
-                target.view,
-                depth_view,
-                alpha.0,
-                alpha.1,
-                instances,
-                GpuStrip::instance_range(opaque_count, alpha_count),
-            );
+        for page in live.into_iter().flatten() {
+            self.targets.release(page);
         }
     }
+}
 
-    /// Records one strip pass: load the colour target, bind `variant`'s own
-    /// bind groups, and draw `range` out of the shared instance buffer.
-    ///
-    /// The bind groups are looked up per pipeline variant rather than shared,
-    /// because every engine pipeline uses wgpu's *derived* layout — a layout
-    /// derived from a shader module is exclusive to the pipeline that derived
-    /// it, so a bind group built against one variant's layout is rejected by
-    /// another's even when the two layouts are structurally identical.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one pass's full recording state; a struct would name the \
-                  same borrows without shortening their list"
-    )]
-    fn strip_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        label: &str,
-        view: &wgpu::TextureView,
-        depth_view: Option<&wgpu::TextureView>,
-        variant: EnginePipeline,
-        pipeline: &wgpu::RenderPipeline,
-        instances: &wgpu::Buffer,
-        range: core::ops::Range<u32>,
-    ) {
-        let Some(bind_groups) = self.resources.bind_groups.get(&variant) else {
-            return;
+/// The pipelines one frame's passes are recorded with, resolved once before the
+/// first `begin_render_pass`.
+///
+/// Only `alpha` is unconditional: the rest exist exactly when the frame has
+/// work for them, so a plain frame compiles and binds nothing it will not draw.
+#[derive(Debug)]
+struct FramePipelines {
+    /// The blended pass over the frame's own target, with its variant — which
+    /// of the two it is depends on whether depth is in play.
+    alpha: (EnginePipeline, wgpu::RenderPipeline),
+    /// The depth-writing pass, when depth is available and the frame has
+    /// fully covered spans to route into it.
+    opaque: Option<wgpu::RenderPipeline>,
+    /// The pass a layer page is rendered through, when the frame has one.
+    page: Option<wgpu::RenderPipeline>,
+    /// The destination-out pass, with its variant, when the frame punches.
+    punch: Option<(EnginePipeline, wgpu::RenderPipeline)>,
+}
+
+/// One pass's full recording state, assembled before the pass is begun.
+///
+/// A struct rather than an argument list because the composite groups have to
+/// be built (and so borrowed) before `begin_render_pass` takes the encoder, and
+/// naming them together is what makes that ordering obvious at the call site.
+struct PassPlan<'a> {
+    label: &'a str,
+    view: &'a wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    depth: Option<&'a wgpu::TextureView>,
+    pipeline: &'a wgpu::RenderPipeline,
+    /// The pipeline variant's own groups 1-3.
+    groups: &'a StripBindGroups,
+    /// Group 0 for the pass's ordinary strip segments.
+    resources: &'a wgpu::BindGroup,
+    /// Group 0 per composite segment, in the order the segments name them.
+    composites: &'a [wgpu::BindGroup],
+    instances: &'a wgpu::Buffer,
+    /// The instance index every segment's own index is relative to.
+    base: u32,
+    segments: &'a [Segment],
+}
+
+/// Records one pass: load the colour target, then draw each segment in order.
+///
+/// Group 0 is re-bound per segment because a composite reads its page through
+/// that group while an ordinary strip reads the placeholder; groups 1-3 are the
+/// variant's own and never change within a pass. A pass with one segment — every
+/// frame that records no layer — sets them exactly once.
+fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(plan.label),
+        color_attachments: &[Some(color_attachment(plan.view, plan.load))],
+        depth_stencil_attachment: plan
+            .depth
+            .map(|view| depth_attachment(view, wgpu::LoadOp::Load)),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(plan.pipeline);
+    pass.set_vertex_buffer(0, plan.instances.slice(..));
+
+    let mut composite = 0_usize;
+    for segment in plan.segments {
+        let (group, range) = match *segment {
+            Segment::Strips(first, count) => {
+                if count == 0 {
+                    continue;
+                }
+                (
+                    plan.resources,
+                    GpuStrip::instance_range(plan.base.saturating_add(first), count),
+                )
+            }
+            Segment::Composite(first, _) => {
+                let Some(group) = plan.composites.get(composite) else {
+                    continue;
+                };
+                composite = composite.saturating_add(1);
+                (
+                    group,
+                    GpuStrip::instance_range(plan.base.saturating_add(first), 1),
+                )
+            }
         };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(label),
-            color_attachments: &[Some(color_attachment(view, wgpu::LoadOp::Load))],
-            depth_stencil_attachment: depth_view
-                .map(|view| depth_attachment(view, wgpu::LoadOp::Load)),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(pipeline);
-        bind_groups.bind(&mut pass);
-        pass.set_vertex_buffer(0, instances.slice(..));
+        plan.groups.bind_with(&mut pass, group);
         pass.draw(GpuStrip::vertex_range(), range);
     }
 }
@@ -608,6 +1008,19 @@ fn clear_color(base_color: Color, output: OutputAlpha) -> wgpu::Color {
     }
 }
 
+/// Whether a frame cleared to `base_color` presents opaquely, and so whether
+/// its alpha channel carries anything a hole punch could reveal.
+///
+/// The engine's only statement about the target's own alpha handling:
+/// [`EngineTarget`] describes how the alpha it produces is *interpreted*
+/// (premultiplied or straight), never whether it is used at all. A base colour
+/// at full alpha seals every pixel of the surface, which is exactly the
+/// presentation [`crate::compile::clear`]'s contract says to skip the
+/// destination-out pass on.
+fn is_opaque(base_color: Color) -> bool {
+    base_color.components[3] >= 1.0
+}
+
 /// The target extent on the `u16` device grid the strip pipeline addresses.
 fn grid_size(width: u32, height: u32) -> Result<(u16, u16), EngineError> {
     let width = u16::try_from(width).map_err(|_| EngineError::TargetTooLarge)?;
@@ -615,61 +1028,243 @@ fn grid_size(width: u32, height: u32) -> Result<(u16, u16), EngineError> {
     Ok((width, height))
 }
 
-/// The frame's instance buffers, retained so a steady-state frame refills them
-/// rather than reallocating them.
+/// One unit of drawing inside a round's pass, in execution order.
+///
+/// Instance indices are relative to the alpha region of the shared instance
+/// buffer, which is why [`PassPlan::base`] exists rather than the indices being
+/// absolute: the opaque region is laid out first and its own segment addresses
+/// from zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Segment {
+    /// Ordinary strip instances, as `(first, count)`.
+    Strips(u32, u32),
+    /// One composite quad at `first`, sampling the finished page in the named
+    /// group.
+    Composite(u32, PageParity),
+}
+
+/// One scheduled round, resolved to the instances and target it draws with.
+#[derive(Debug, Clone)]
+struct RoundPlan {
+    /// The page this round renders into, or `None` for the frame's own target.
+    page: Option<PagePlan>,
+    /// This round's slice of [`Scratch::segments`], in execution order.
+    segments: Range<usize>,
+    /// Page groups this round consumed, indexed by
+    /// [`PageParity::index`]; each returns to the pool once the pass ends.
+    released: [bool; 2],
+}
+
+/// The pooled page one round renders into.
+#[derive(Debug, Clone, Copy)]
+struct PagePlan {
+    parity: PageParity,
+    size: PageSize,
+}
+
+/// The frame's instance buffers and pass plan, retained so a steady-state frame
+/// refills them rather than reallocating them.
+///
+/// The segments of every round live in one flat vector rather than a vector per
+/// round, so a frame with layers costs no allocation once the first one has
+/// grown these buffers.
 #[derive(Debug, Default)]
 struct Scratch {
-    /// Fully-covered spans of opaque draws, drawn unblended with depth write.
+    /// Fully-covered spans of the root round's opaque draws, drawn unblended
+    /// with depth write.
     opaque: Vec<GpuStrip>,
-    /// Everything else, drawn premultiplied-blended in painter order.
+    /// Everything else, drawn premultiplied-blended in painter order and laid
+    /// out round by round in execution order.
     alpha: Vec<GpuStrip>,
+    /// Every round's segments, back to back; [`RoundPlan::segments`] slices it.
+    segments: Vec<Segment>,
+    /// The frame's rounds, innermost layer first and the surface last.
+    rounds: Vec<RoundPlan>,
+    /// The hole punch's own instances, as `(first, count)` into the alpha
+    /// region — past every round's segments, so dropping the punch pass leaves
+    /// the frame exactly as the display list would read without the clear.
+    punch: (u32, u32),
+    /// The deepest painter's-order index inside each recorded layer, which is
+    /// the depth its composite carries. Filled as the rounds are walked, which
+    /// is sound because a layer's own round always precedes the round that
+    /// composites it.
+    layer_depth: Vec<u32>,
 }
 
 impl Scratch {
-    /// Turns a compiled frame's draws into instances, routing each to the pass
-    /// that can draw it.
+    /// Turns a scheduled frame into instances and a per-round pass plan,
+    /// routing each instance to the pass that can draw it.
     ///
     /// A draw's anti-aliased spans always land in the blended buffer: partial
     /// coverage is not opaque however opaque the paint is. Its fully-covered
-    /// spans land in the opaque buffer only when the paint is opaque *and*
-    /// depth is available to re-establish their ordering against the blended
-    /// ones — otherwise the frame is a plain painter's-algorithm walk and
-    /// everything stays in the one buffer, in order.
-    fn build_instances(
+    /// spans land in the opaque buffer only when the paint is opaque, depth is
+    /// available to re-establish their ordering against the blended ones, *and*
+    /// the draw belongs to the root round — a page has no depth attachment, so
+    /// its own round is a plain painter's-algorithm walk.
+    fn build(
         &mut self,
         frame: &CompiledFrame,
+        rounds: &[Round],
         depth_active: bool,
+        punches: bool,
         paint_slots: &[Option<ResolvedPaint>],
     ) {
         self.opaque.clear();
         self.alpha.clear();
+        self.segments.clear();
+        self.rounds.clear();
+        self.punch = (0, 0);
+        self.layer_depth.clear();
+        self.layer_depth.resize(frame.recorder.layers.len(), 0);
 
+        let draws = frame.draws();
         let strips = frame.strip_buf();
-        for draw in frame.draws() {
-            let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots) else {
-                continue;
-            };
-            let Some(range) = strips.get(draw.strip_range.clone()) else {
-                continue;
-            };
-            let to_opaque = paint.opaque && depth_active;
 
-            // A generation's last strip is its sentinel, which is what carries
-            // the preceding strip's extent — so every instance comes from a
-            // pair, and the sentinel itself never becomes one.
-            for pair in range.windows(2) {
-                self.push_span(&pair[0], &pair[1], paint, to_opaque);
+        for round in rounds {
+            let page = round.page();
+            // A page holds its layer at the page's own origin, so every
+            // instance of the round is shifted by the layer's bounds.
+            let origin = page.map_or((0, 0), |page| (page.bounds.x0, page.bounds.y0));
+            let split_opaque = page.is_none() && depth_active;
+
+            let first_segment = self.segments.len();
+            let mut deepest = 0_u32;
+            let mut run_start = self.alpha.len() as u32;
+
+            for op in &round.ops {
+                match op {
+                    RoundOp::Draws(range) => {
+                        let batch = draws
+                            .get(range.start as usize..range.end as usize)
+                            .unwrap_or(&[]);
+                        for draw in batch {
+                            deepest = deepest.max(draw.depth);
+                            let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots)
+                            else {
+                                continue;
+                            };
+                            let Some(run) = strips.get(draw.strip_range.clone()) else {
+                                continue;
+                            };
+                            let to_opaque = paint.opaque && split_opaque;
+
+                            // A generation's last strip is its sentinel, which
+                            // is what carries the preceding strip's extent — so
+                            // every instance comes from a pair, and the
+                            // sentinel itself never becomes one.
+                            for pair in run.windows(2) {
+                                self.push_span(&pair[0], &pair[1], paint, to_opaque, origin);
+                            }
+                        }
+                    }
+                    RoundOp::Composite(composite) => {
+                        // Consecutive draw batches merge into one segment; a
+                        // composite is what breaks the run, because it binds a
+                        // different page as its colour source.
+                        let end = self.alpha.len() as u32;
+                        if end > run_start {
+                            self.segments
+                                .push(Segment::Strips(run_start, end - run_start));
+                        }
+
+                        let depth = self
+                            .layer_depth
+                            .get(composite.layer as usize)
+                            .copied()
+                            .unwrap_or(0);
+                        deepest = deepest.max(depth);
+                        self.segments
+                            .push(Segment::Composite(end, composite.parity));
+                        self.alpha
+                            .push(composite_instance(composite, origin, depth));
+                        run_start = self.alpha.len() as u32;
+                    }
+                }
+            }
+
+            let end = self.alpha.len() as u32;
+            if end > run_start {
+                self.segments
+                    .push(Segment::Strips(run_start, end - run_start));
+            }
+
+            if let Some(page) = page
+                && let Some(slot) = self.layer_depth.get_mut(page.layer as usize)
+            {
+                *slot = deepest;
+            }
+
+            let mut released = [false; 2];
+            for parity in &round.released {
+                released[parity.index()] = true;
+            }
+
+            self.rounds.push(RoundPlan {
+                page: page.map(|page| PagePlan {
+                    parity: page.parity,
+                    size: page.size,
+                }),
+                segments: first_segment..self.segments.len(),
+                released,
+            });
+        }
+
+        if punches {
+            self.build_punches(frame);
+        }
+    }
+
+    /// Turns the frame's hoisted punches into the destination-out pass's own
+    /// instances, appended past every round's.
+    ///
+    /// Each punch is a strip run like any other, drawn with an opaque source so
+    /// the blend state's `1 − src.a` reaches zero exactly where the coverage is
+    /// full, and carrying the painter-order depth it was hoisted from.
+    fn build_punches(&mut self, frame: &CompiledFrame) {
+        let first = self.alpha.len() as u32;
+        let strips = frame.strip_buf();
+
+        for punch in &frame.clears {
+            let paint = PackedPaint {
+                payload: PaintPayload::Solid(PUNCH_SOURCE),
+                paint: SOLID_PAINT,
+                depth_index: punch.depth,
+                // An erase never joins the depth-writing pass: it establishes
+                // no colour for a later fragment to be rejected against.
+                opaque: false,
+            };
+            let Some(run) = strips.get(punch.strip_range.clone()) else {
+                continue;
+            };
+            for pair in run.windows(2) {
+                self.push_span(&pair[0], &pair[1], paint, false, (0, 0));
             }
         }
+
+        self.punch = (first, (self.alpha.len() as u32).saturating_sub(first));
     }
 
     /// Emits the instances the `strip`/`next` pair describes: the strip's own
     /// alpha-sampled span, plus the solid span filling the gap to `next` when
     /// the winding between them says there is one.
-    fn push_span(&mut self, strip: &Strip, next: &Strip, paint: PackedPaint, to_opaque: bool) {
+    ///
+    /// `origin` shifts the instance's *geometry* into the round's target while
+    /// its paint is still sampled at the scene position the strip was
+    /// rasterized at — a layer's contents move into its page, the gradient or
+    /// image painting them does not.
+    fn push_span(
+        &mut self,
+        strip: &Strip,
+        next: &Strip,
+        paint: PackedPaint,
+        to_opaque: bool,
+        origin: (u16, u16),
+    ) {
         let values = paint.values_at(strip.x, strip.y);
-        let span = GpuStrip::from_strip_pair(strip, next, values);
+        let mut span = GpuStrip::from_strip_pair(strip, next, values);
         if span.width > 0 {
+            span.x = span.x.saturating_sub(origin.0);
+            span.y = span.y.saturating_sub(origin.1);
             self.alpha.push(span);
         }
         // A gap starts where the strip ends rather than where it begins, so a
@@ -678,6 +1273,8 @@ impl Scratch {
         // span's sampling.
         if let Some(mut gap) = GpuStrip::gap_fill(strip, next, values) {
             gap.payload = paint.payload_at(gap.x, gap.y);
+            gap.x = gap.x.saturating_sub(origin.0);
+            gap.y = gap.y.saturating_sub(origin.1);
             if to_opaque {
                 self.opaque.push(gap);
             } else {
@@ -686,14 +1283,57 @@ impl Scratch {
         }
     }
 
+    /// How many of this frame's rounds render into a pooled page.
+    fn page_rounds(&self) -> usize {
+        self.rounds
+            .iter()
+            .filter(|plan| plan.page.is_some())
+            .count()
+    }
+
     /// The instance bytes, opaque buffer first, so one vertex buffer serves
-    /// both passes and each is a contiguous instance range into it.
+    /// every pass and each is a contiguous instance range into it.
     fn instance_bytes(&self) -> (&[u8], &[u8]) {
         (
             bytemuck::cast_slice(&self.opaque),
             bytemuck::cast_slice(&self.alpha),
         )
     }
+}
+
+/// The single quad that composites a finished page onto `origin`-shifted
+/// target.
+///
+/// A whole-rectangle instance with no fractional edges: a layer's bounds are
+/// tile-aligned, so the quad covers whole pixels and the fragment stage leaves
+/// its coverage at one. The payload is the page texel the quad's top-left
+/// corner samples — the page holds the layer at its own origin, so that is
+/// `Composite::source`'s origin and not the layer's device position.
+fn composite_instance(composite: &Composite, origin: (u16, u16), depth: u32) -> GpuStrip {
+    let bounds = composite.bounds;
+    let source = composite.source();
+
+    GpuStrip::from_rect(
+        bounds.x0.saturating_sub(origin.0),
+        bounds.y0.saturating_sub(origin.1),
+        bounds.width(),
+        bounds.height(),
+        0,
+        StripDraw {
+            payload: pack_u16_pair(source.x0, source.y0),
+            paint: LAYER_PAINT_SOURCE | u32::from(pack_opacity(composite.opacity)),
+            depth_index: depth,
+        },
+    )
+}
+
+/// A layer's constant opacity as the eight bits a composite instance carries.
+///
+/// Clamped rather than refused: the scheduler already admits only opacities
+/// strictly between zero and one, and rounding is what keeps a 0.5 layer at
+/// exactly the 128 the reference renderer's own packing produces.
+fn pack_opacity(opacity: f32) -> u8 {
+    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Where a strip instance's payload comes from.
@@ -844,13 +1484,22 @@ struct FrameResources {
     alphas: ResourceTexture,
     paints: ResourceTexture,
     gradients: ResourceTexture,
-    /// Stand-ins for the three bindings the strip shader declares but nothing
-    /// in a frame writes yet: the layer input a composited layer would be
-    /// sampled from, the glyph/image atlas array, and an externally bound
-    /// texture. Every declared binding has to be bound for a pass to validate,
-    /// whether or not an instance samples it.
+    /// Stand-ins for the strip shader's bindings a given pass has nothing real
+    /// for: the layer input (a real page when a composite is being drawn, this
+    /// otherwise), the glyph/image atlas array until the first image is
+    /// resident, and an externally bound texture, which nothing writes yet.
+    /// Every declared binding has to be bound for a pass to validate, whether
+    /// or not an instance samples it.
     placeholders: Placeholders,
     config: wgpu::Buffer,
+    /// One viewport uniform per page round of the busiest frame so far.
+    ///
+    /// A round's NDC mapping is against the extent of the attachment it writes,
+    /// and a page's extent is neither the frame's nor the same from one round
+    /// to the next, so each needs a buffer of its own — a bind group holds the
+    /// whole buffer, not an offset into one. Grown only, like every other
+    /// retained resource here.
+    page_configs: Vec<wgpu::Buffer>,
     instances: Option<wgpu::Buffer>,
     instance_capacity: u64,
     /// The GPU records this frame's indexed paints resolve against, in
@@ -901,12 +1550,8 @@ impl FrameResources {
             ),
             gradients: ResourceTexture::new(device, &gradient_texture_descriptor(dim, min)),
             placeholders: Placeholders::new(device),
-            config: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("frust-engine config uniform"),
-                size: GpuConfig::SIZE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
+            config: device.create_buffer(&config_descriptor("frust-engine config uniform")),
+            page_configs: Vec::new(),
             instances: None,
             instance_capacity: 0,
             paints_data: Vec::new(),
@@ -964,7 +1609,10 @@ impl FrameResources {
             let lowered = match paint {
                 EncodedPaint::Image(image) => image_id(image)
                     .and_then(|id| self.image_registry.get(&id))
-                    .and_then(|resident| lower_encoded_image(image, resident)),
+                    .and_then(|resident| {
+                        lower_encoded_image(image, resident)
+                            .map(|record| fit_minified(record, resident))
+                    }),
                 _ => {
                     let ramp = self.paint_ramps.get(index).copied().flatten();
                     lower_encoded_paint(paint, ramp)
@@ -1037,6 +1685,7 @@ impl FrameResources {
                 ResidentImage {
                     id,
                     region: upload.region,
+                    natural: upload.natural,
                     padding: u32::from(ATLAS_PADDING),
                     may_have_transparency: image.may_have_transparency,
                 },
@@ -1096,6 +1745,17 @@ impl FrameResources {
         }
         for upload in &frame.image_uploads {
             atlas.write_region(queue, upload.region, upload.pixels.data_as_u8_slice());
+        }
+    }
+
+    /// Makes sure there is one viewport uniform per page round of this frame.
+    ///
+    /// Grown only: the buffers are 32 bytes each and a frame that once needed
+    /// four keeps them rather than reallocating on the next frame that does.
+    fn ensure_page_configs(&mut self, device: &wgpu::Device, rounds: usize) {
+        while self.page_configs.len() < rounds {
+            self.page_configs
+                .push(device.create_buffer(&config_descriptor("frust-engine page config uniform")));
         }
     }
 
@@ -1307,6 +1967,49 @@ fn image_id(image: &EncodedImage) -> Option<ImageId> {
     }
 }
 
+/// A lowered image record corrected for an atlas rectangle that holds a
+/// *minified* copy of the source.
+///
+/// The record's transform maps a device position back onto the image's own
+/// texels, and the compiler composed it against the source's declared extent —
+/// it had to, since that is all it knows before residency is consulted. Scaling
+/// its output by [`ResidentImage::minify_scale`] retargets it at the smaller
+/// rectangle actually uploaded, which is the whole correction a downsampled
+/// image needs: the record's `image_size` and `image_offset` already describe
+/// the resident rectangle.
+///
+/// A record stored at full size is returned untouched, which is every image but
+/// one larger than an atlas layer.
+fn fit_minified(record: GpuEncodedPaint, resident: &ResidentImage) -> GpuEncodedPaint {
+    let Some((x, y)) = resident.minify_scale() else {
+        return record;
+    };
+    let GpuEncodedPaint::Image(mut image) = record else {
+        return record;
+    };
+
+    // `[a, b, c, d, tx, ty]`, mapping `(u, v)` to `(a·u + c·v + tx, b·u + d·v +
+    // ty)`: the x row is scaled by one factor and the y row by the other.
+    image.transform[0] *= x;
+    image.transform[2] *= x;
+    image.transform[4] *= x;
+    image.transform[1] *= y;
+    image.transform[3] *= y;
+    image.transform[5] *= y;
+
+    GpuEncodedPaint::Image(image)
+}
+
+/// The descriptor every `Config` uniform buffer is created with.
+fn config_descriptor(label: &str) -> wgpu::BufferDescriptor<'_> {
+    wgpu::BufferDescriptor {
+        label: Some(label),
+        size: GpuConfig::SIZE,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    }
+}
+
 /// The texel copy layout of a full resource-texture upload.
 fn resource_layout(bytes_per_row: u32, rows: u32) -> wgpu::TexelCopyBufferLayout {
     wgpu::TexelCopyBufferLayout {
@@ -1418,24 +2121,8 @@ impl StripBindGroups {
         paints: &wgpu::TextureView,
         gradients: &wgpu::TextureView,
     ) -> Self {
-        let resources_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine strip resources"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(alphas),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: config.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&placeholders.layer_input),
-                },
-            ],
-        });
+        let resources_group =
+            resources_bind_group(device, pipeline, alphas, config, &placeholders.layer_input);
         let images = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frust-engine strip images"),
             layout: &pipeline.get_bind_group_layout(1),
@@ -1475,13 +2162,54 @@ impl StripBindGroups {
         }
     }
 
-    /// Sets all four groups on `pass`.
-    fn bind(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_bind_group(0, &self.resources, &[]);
+    /// Sets all four groups on `pass`, taking group 0 from `resources` rather
+    /// than from this set.
+    ///
+    /// Group 0 is the one that varies within a pass: it carries both the pass's
+    /// viewport uniform and the layer input a composite samples, so a page
+    /// round and every composite in it substitute their own. Groups 1-3 are
+    /// frame-wide and belong to the pipeline variant.
+    fn bind_with(&self, pass: &mut wgpu::RenderPass<'_>, resources: &wgpu::BindGroup) {
+        pass.set_bind_group(0, resources, &[]);
         pass.set_bind_group(1, &self.images, &[]);
         pass.set_bind_group(2, &self.paints, &[]);
         pass.set_bind_group(3, &self.gradients, &[]);
     }
+}
+
+/// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
+/// uniform, and the texture a composite reads its finished page from.
+///
+/// Built against one pipeline rather than shared, because every engine pipeline
+/// uses wgpu's *derived* layout — a layout derived from a shader module is
+/// exclusive to the pipeline that derived it, so a bind group built against one
+/// variant's layout is rejected by another's even when the two layouts are
+/// structurally identical.
+fn resources_bind_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    alphas: &wgpu::TextureView,
+    config: &wgpu::Buffer,
+    layer_input: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frust-engine strip resources"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(alphas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: config.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(layer_input),
+            },
+        ],
+    })
 }
 
 #[cfg(test)]

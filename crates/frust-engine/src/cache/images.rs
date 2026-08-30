@@ -19,6 +19,24 @@
 //! re-allocated in the same frame, so clearing after uploading would erase the
 //! image that just moved in.
 //!
+//! ## An image larger than the atlas is minified, not dropped
+//!
+//! A source whose own extent will not fit one atlas layer is downsampled to fit
+//! ([`fit_extent`], [`minify`]) instead of being refused. A photograph decoded
+//! at its capture resolution is routinely several times the atlas budget while
+//! its destination rectangle is a thumbnail, so refusing it drops a draw the
+//! display list plainly describes; and every texel past the destination's own
+//! scale is one the sampler would have thrown away anyway.
+//!
+//! The filter is a plain box average over the premultiplied texels, hand-written
+//! rather than pulled in: the workspace's version pins are law, an image decoder
+//! is not a dependency this crate carries, and a box average is exactly right
+//! for the minification direction (every output texel is the mean of the source
+//! texels it covers). The aspect ratio is preserved, so the paint transform's
+//! two axes stay in step; what changes is the resident rectangle's extent, which
+//! [`ResidentImage::natural`] records alongside it so the consumer can rescale
+//! the encoded paint's own transform into the smaller rectangle.
+//!
 //! ## Two things are refused rather than attempted
 //!
 //! 1. **A format or size `vello_common` panics on.**
@@ -28,7 +46,9 @@
 //!    declared extent trips [`Pixmap::from_parts_with_opacity`]'s own assertion.
 //!    All three are checked here, *before* the call, so an oversized or
 //!    malformed image is an [`ImageSkip`] the frame path reports rather than a
-//!    panic it takes (E17).
+//!    panic it takes (E17). These, plus an atlas with no room left in it, are
+//!    now the only things [`ImageResidency::skipped`] counts: an image that is
+//!    merely *big* is minified and drawn.
 //! 2. **Anything at all, when `FRUST_ENGINE_NO_ATLAS` is set.** The kill switch
 //!    ([`crate::config::atlas_disabled`]) makes every resolution answer
 //!    [`ImageSkip::AtlasDisabled`], so no atlas is allocated, nothing is
@@ -43,10 +63,11 @@
 //! that stops drawing an image should give its texels back promptly, while an
 //! image drawn every other frame must never be mistaken for gone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use frust_gpu::{DownlevelProfile, TierCaps};
+use peniko::color::PremulRgba8;
 use peniko::{ImageData, ImageFormat};
 use thiserror::Error;
 use vello_common::image_cache::ImageCache;
@@ -309,7 +330,21 @@ pub struct ResidentImage {
     /// The handle an [`ImageSource::OpaqueId`] carries.
     pub id: ImageId,
     /// The atlas rectangle holding the image's own pixels, padding excluded.
+    ///
+    /// Equal to [`natural`](Self::natural) unless the source was minified to
+    /// fit the atlas, in which case it is the smaller rectangle actually
+    /// uploaded.
     pub region: AtlasRegion,
+    /// The source's own declared extent, before any minification.
+    ///
+    /// Carried because it is the extent a paint transform was composed against
+    /// — `compile::paint::encode_image_command` derives its natural-to-dest
+    /// mapping from the `ImageData`'s declared size, which it reads before this
+    /// residency is consulted. A consumer that ends up sampling a *minified*
+    /// rectangle has to fold [`minify_scale`](Self::minify_scale) into that
+    /// transform, and this is the half of the ratio the atlas rectangle does
+    /// not carry.
+    pub natural: [u32; 2],
     /// Transparent padding pixels around `region` in the atlas.
     pub padding: u32,
     /// Whether the image's premultiplied pixels include any non-opaque texel.
@@ -322,6 +357,25 @@ impl ResidentImage {
     pub fn source(&self) -> ImageSource {
         ImageSource::opaque_id_with_transparency_hint(self.id, self.may_have_transparency)
     }
+
+    /// The per-axis factor mapping a natural-space texel coordinate onto the
+    /// resident rectangle, or `None` when the source was stored at full size.
+    ///
+    /// `None` rather than `Some((1.0, 1.0))` so a caller can skip the rescale
+    /// entirely on the overwhelmingly common path, and so "was this image
+    /// minified?" is one question rather than a float comparison.
+    #[must_use]
+    pub fn minify_scale(&self) -> Option<(f32, f32)> {
+        if self.region.size == self.natural {
+            return None;
+        }
+        let natural_w = self.natural[0].max(1) as f32;
+        let natural_h = self.natural[1].max(1) as f32;
+        Some((
+            self.region.size[0] as f32 / natural_w,
+            self.region.size[1] as f32 / natural_h,
+        ))
+    }
 }
 
 /// One region's texels, waiting to be written into the atlas array.
@@ -333,6 +387,13 @@ impl ResidentImage {
 pub struct ImageUpload {
     /// Where the texels go.
     pub region: AtlasRegion,
+    /// The source's own declared extent, before any minification — see
+    /// [`ResidentImage::natural`], whose value this is.
+    ///
+    /// Carried on the upload because a consumer rebuilding its own view of
+    /// residency from a compiled frame has the upload and nothing else, and
+    /// `region` alone cannot say whether it holds a minified copy.
+    pub natural: [u32; 2],
     /// The premultiplied pixels, row-major and exactly `region`'s extent.
     pub pixels: Arc<Pixmap>,
 }
@@ -342,6 +403,10 @@ pub struct ImageUpload {
 struct Entry {
     id: ImageId,
     region: AtlasRegion,
+    /// The source extent this entry was allocated for, which is what a later
+    /// frame's `ImageData` is matched against — `region` may be the minified
+    /// rectangle and so says nothing about the source.
+    natural: [u32; 2],
     may_have_transparency: bool,
     last_seen: u64,
 }
@@ -364,6 +429,11 @@ pub struct ImageResidency {
     uploads: Vec<ImageUpload>,
     evictions: Vec<AtlasRegion>,
     skipped: u64,
+    minified: u64,
+    /// Blob keys whose minification has already been reported, so a source that
+    /// is redrawn — or reaped and made resident again — logs once rather than
+    /// once per residency.
+    reported_minify: HashSet<u64>,
     /// Scratch for the reap's key list, kept so a frame that evicts allocates
     /// nothing.
     reaped: Vec<u64>,
@@ -403,6 +473,8 @@ impl ImageResidency {
             uploads: Vec::new(),
             evictions: Vec::new(),
             skipped: 0,
+            minified: 0,
+            reported_minify: HashSet::new(),
             reaped: Vec::new(),
         }
     }
@@ -447,9 +519,24 @@ impl ImageResidency {
     }
 
     /// How many resolutions have been refused over this residency's lifetime.
+    ///
+    /// Counts only images that could not be uploaded at all — a format or
+    /// extent the conversion refuses, a disabled atlas, or an atlas with no
+    /// room left. A source merely larger than one atlas layer is minified to
+    /// fit and never reaches this counter.
     #[must_use]
     pub fn skipped(&self) -> u64 {
         self.skipped
+    }
+
+    /// How many sources have been downsampled to fit the atlas over this
+    /// residency's lifetime.
+    ///
+    /// Observational, and the counter that makes "an image too large for the
+    /// atlas is minified, not dropped" measurable rather than asserted.
+    #[must_use]
+    pub fn minified(&self) -> u64 {
+        self.minified
     }
 
     /// The regions whose texels must be cleared before this frame's uploads.
@@ -513,12 +600,13 @@ impl ImageResidency {
 
         let key = data.data.id();
         if let Some(entry) = self.entries.get_mut(&key)
-            && entry.region.size == [data.width, data.height]
+            && entry.natural == [data.width, data.height]
         {
             entry.last_seen = self.frame;
             return Ok(ResidentImage {
                 id: entry.id,
                 region: entry.region,
+                natural: entry.natural,
                 padding: u32::from(ATLAS_PADDING),
                 may_have_transparency: entry.may_have_transparency,
             });
@@ -540,26 +628,36 @@ impl ImageResidency {
             return Err(ImageSkip::UnsupportedFormat(data.format));
         };
 
+        let natural = [data.width, data.height];
+        // Minified before the allocation rather than after it: the packer is
+        // asked for the rectangle that is actually going to be uploaded, so an
+        // over-ceiling source never takes (and then has to give back) space at
+        // its declared extent.
+        let (width, height) = fit_extent(natural, self.budget.atlas_size);
+        let pixels = if [width, height] == natural {
+            pixels
+        } else {
+            self.note_minify(key, natural, [width, height]);
+            Arc::new(minify(&pixels, width, height))
+        };
+
+        let no_space = || ImageSkip::NoAtlasSpace {
+            width,
+            height,
+            atlas_width: self.budget.atlas_size.0,
+            atlas_height: self.budget.atlas_size.1,
+        };
+
         let id = self
             .cache
-            .allocate(data.width, data.height, ATLAS_PADDING)
-            .map_err(|_| ImageSkip::NoAtlasSpace {
-                width: data.width,
-                height: data.height,
-                atlas_width: self.budget.atlas_size.0,
-                atlas_height: self.budget.atlas_size.1,
-            })?;
+            .allocate(width, height, ATLAS_PADDING)
+            .map_err(|_| no_space())?;
 
         let Some(resource) = self.cache.get(id) else {
             // A successful allocation always populates its slot; refusing here
             // keeps the frame path free of the `expect` the reference renderer
             // takes at this same point.
-            return Err(ImageSkip::NoAtlasSpace {
-                width: data.width,
-                height: data.height,
-                atlas_width: self.budget.atlas_size.0,
-                atlas_height: self.budget.atlas_size.1,
-            });
+            return Err(no_space());
         };
 
         let region = AtlasRegion {
@@ -575,18 +673,47 @@ impl ImageResidency {
             Entry {
                 id,
                 region,
+                natural,
                 may_have_transparency,
                 last_seen: self.frame,
             },
         );
-        self.uploads.push(ImageUpload { region, pixels });
+        self.uploads.push(ImageUpload {
+            region,
+            natural,
+            pixels,
+        });
 
         Ok(ResidentImage {
             id,
             region,
+            natural,
             padding: u32::from(ATLAS_PADDING),
             may_have_transparency,
         })
+    }
+
+    /// Count and report one source downsampled to fit the atlas.
+    ///
+    /// Once per blob id, at warning level: a minified image is a silent quality
+    /// decision the application may not have intended (a full-resolution photo
+    /// where a thumbnail was wanted), so it says so — but a scene redrawing it
+    /// every frame must not repeat the message.
+    fn note_minify(&mut self, key: u64, natural: [u32; 2], fitted: [u32; 2]) {
+        self.minified = self.minified.saturating_add(1);
+        if !self.reported_minify.insert(key) {
+            return;
+        }
+        log::warn!(
+            "image {}x{} is larger than the {}x{} atlas budget; uploading a {}x{} box-filtered \
+             copy instead (reported once per image)",
+            natural[0],
+            natural[1],
+            self.budget.atlas_size.0,
+            self.budget.atlas_size.1,
+            fitted[0],
+            fitted[1],
+        );
     }
 
     /// Deallocate every entry unseen for [`MAX_UNSEEN_FRAMES`], recording each
@@ -619,6 +746,121 @@ impl ImageResidency {
         self.cache.deallocate(entry.id);
         self.evictions.push(padded(entry.region, ATLAS_PADDING));
     }
+}
+
+/// The extent `natural` is stored at inside an `atlas`-sized layer: itself when
+/// it already fits, and otherwise the largest rectangle of the same aspect ratio
+/// that does.
+///
+/// The scale is taken as the smaller of the two axis ratios and applied to both,
+/// so the two axes of the paint transform stay in step — a per-axis fit would
+/// stretch the image. Each axis is floored (never rounding *up* past the layer)
+/// and then held at one texel: a source that scales below a whole texel still
+/// has to have somewhere to be, and a zero-extent allocation is not a rectangle
+/// the packer or the shader can address.
+#[must_use]
+pub fn fit_extent(natural: [u32; 2], atlas: (u32, u32)) -> (u32, u32) {
+    let (width, height) = (natural[0], natural[1]);
+    if width <= atlas.0 && height <= atlas.1 {
+        return (width, height);
+    }
+
+    let scale = (f64::from(atlas.0) / f64::from(width.max(1)))
+        .min(f64::from(atlas.1) / f64::from(height.max(1)));
+    let axis = |value: u32, ceiling: u32| {
+        let scaled = (f64::from(value) * scale).floor();
+        // `as` on a non-finite or out-of-range float saturates in Rust, so the
+        // clamps below are the whole check rather than a second line of defence.
+        (scaled as u32).clamp(1, ceiling.max(1))
+    };
+
+    (axis(width, atlas.0), axis(height, atlas.1))
+}
+
+/// `source` box-filtered down to `width` x `height`.
+///
+/// Every output texel is the unweighted mean of the half-open source rectangle
+/// it covers, computed on the premultiplied bytes the atlas stores — which is
+/// the space the samples are composited in, so averaging there is what keeps a
+/// partially transparent source from bleeding its colour outward.
+///
+/// Minification only: a request at or above the source's own extent copies the
+/// texels straight across rather than inventing any, since a box filter has no
+/// magnification arm and the caller never asks for one ([`fit_extent`] only ever
+/// shrinks).
+#[must_use]
+pub fn minify(source: &Pixmap, width: u32, height: u32) -> Pixmap {
+    let source_w = u32::from(source.width());
+    let source_h = u32::from(source.height());
+    let width = width.clamp(1, source_w.max(1));
+    let height = height.clamp(1, source_h.max(1));
+
+    let texels = source.data();
+    let mut out = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+    let mut may_have_transparency = false;
+
+    for y in 0..height {
+        // Half-open source rows, derived from the output row rather than
+        // accumulated, so rounding never leaves a gap or an overlap between
+        // consecutive rows.
+        let y0 = (u64::from(y) * u64::from(source_h) / u64::from(height)) as u32;
+        let y1 = ((u64::from(y) + 1) * u64::from(source_h) / u64::from(height)) as u32;
+        let y1 = y1.max(y0.saturating_add(1)).min(source_h);
+
+        for x in 0..width {
+            let x0 = (u64::from(x) * u64::from(source_w) / u64::from(width)) as u32;
+            let x1 = ((u64::from(x) + 1) * u64::from(source_w) / u64::from(width)) as u32;
+            let x1 = x1.max(x0.saturating_add(1)).min(source_w);
+
+            let mut sum = [0_u64; 4];
+            let mut count = 0_u64;
+            for row in y0..y1 {
+                let base = (row as usize).saturating_mul(source_w as usize);
+                for column in x0..x1 {
+                    let Some(texel) = texels.get(base.saturating_add(column as usize)) else {
+                        continue;
+                    };
+                    sum[0] += u64::from(texel.r);
+                    sum[1] += u64::from(texel.g);
+                    sum[2] += u64::from(texel.b);
+                    sum[3] += u64::from(texel.a);
+                    count += 1;
+                }
+            }
+
+            // A count of zero is unreachable — both ranges are non-empty by
+            // construction — and flooring it at one rather than branching keeps
+            // the divide-by-zero panic off the frame path (E17) while answering
+            // a transparent texel if it ever were reachable, since the sums
+            // would then be zero too.
+            let divisor = count.max(1);
+            // Round to nearest rather than truncating: a uniform source has to
+            // come back bit-identical, which truncating an exact integer mean
+            // already gives, but a near-uniform one must not drift a level
+            // darker.
+            let mean = |channel: usize| {
+                ((sum[channel] + divisor / 2) / divisor).min(u64::from(u8::MAX)) as u8
+            };
+
+            let texel = PremulRgba8 {
+                r: mean(0),
+                g: mean(1),
+                b: mean(2),
+                a: mean(3),
+            };
+            may_have_transparency |= texel.a != u8::MAX;
+            out.push(texel);
+        }
+    }
+
+    // Both extents were clamped into `1..=u16::MAX` above (a source pixmap's own
+    // extents are `u16`), so neither conversion can lose information.
+    Pixmap::from_parts_with_opacity(
+        out,
+        width.min(u32::from(u16::MAX)) as u16,
+        height.min(u32::from(u16::MAX)) as u16,
+        may_have_transparency,
+    )
 }
 
 /// `region` grown by `padding` on every side, clamped at the layer origin.
@@ -797,14 +1039,185 @@ mod tests {
     }
 
     #[test]
-    fn an_image_larger_than_the_atlas_is_skipped_rather_than_panicking() {
+    fn an_image_larger_than_the_atlas_is_minified_to_fit_rather_than_skipped() {
         let mut residency = residency();
         residency.begin_frame();
 
-        let skip = residency.resolve(&image(128, 8)).expect_err("too wide");
+        // Twice the layer's width at a 16:1 aspect ratio: the width sets the
+        // scale, and the height follows it rather than being fitted on its own.
+        let resident = residency.resolve(&image(128, 8)).expect("minified to fit");
+
+        assert_eq!(resident.region.size, [64, 4]);
+        assert_eq!(resident.natural, [128, 8]);
+        assert_eq!(resident.minify_scale(), Some((0.5, 0.5)));
+        assert_eq!(residency.minified(), 1);
+        assert_eq!(residency.skipped(), 0, "a big image is not a skipped one");
+        assert_eq!(residency.uploads().len(), 1);
+        let upload = &residency.uploads()[0];
+        assert_eq!(
+            (upload.pixels.width(), upload.pixels.height()),
+            (64, 4),
+            "the upload carries exactly the region's texels"
+        );
+    }
+
+    #[test]
+    fn an_atlas_with_no_room_left_is_still_a_skip() {
+        // Minification fits an image to a LAYER, not to the space left in one:
+        // a budget already full refuses the next allocation as it always did.
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (64, 64),
+            max_atlases: 1,
+        });
+        residency.begin_frame();
+        residency
+            .resolve(&image(64, 64))
+            .expect("fills the one layer");
+
+        let skip = residency
+            .resolve(&image(32, 32))
+            .expect_err("nothing is left to allocate from");
         assert!(matches!(skip, ImageSkip::NoAtlasSpace { .. }));
         assert_eq!(residency.skipped(), 1);
-        assert!(residency.uploads().is_empty());
+        assert_eq!(residency.minified(), 0);
+    }
+
+    #[test]
+    fn a_minified_image_stays_resident_across_frames_at_its_declared_extent() {
+        // Residency is keyed on the SOURCE extent, not the resident one: an
+        // entry matched against its own minified rectangle would miss every
+        // frame and re-upload the image on each of them.
+        let mut residency = residency();
+        let data = image(128, 8);
+
+        for _ in 0..8 {
+            residency.begin_frame();
+            let resident = residency.resolve(&data).expect("minified to fit");
+            assert_eq!(resident.natural, [128, 8]);
+        }
+
+        assert_eq!(residency.entry_count(), 1);
+        assert_eq!(
+            residency.minified(),
+            1,
+            "downsampled once, not once a frame"
+        );
+        assert!(
+            residency.uploads().is_empty(),
+            "no re-upload after the first"
+        );
+    }
+
+    #[test]
+    fn a_fit_extent_preserves_the_aspect_ratio_and_never_grows() {
+        let atlas = (64, 64);
+        // Already inside the layer: unchanged, both axes.
+        assert_eq!(fit_extent([64, 64], atlas), (64, 64));
+        assert_eq!(fit_extent([8, 4], atlas), (8, 4));
+
+        // The `adv-huge-image` shape, at this budget's scale.
+        assert_eq!(fit_extent([5000, 5000], (2048, 2048)), (2048, 2048));
+
+        // The tighter axis sets the scale for both.
+        assert_eq!(fit_extent([128, 8], atlas), (64, 4));
+        assert_eq!(fit_extent([8, 128], atlas), (4, 64));
+        assert_eq!(fit_extent([1000, 10], atlas), (64, 1));
+
+        // A non-square layer is fitted per axis and still uniformly scaled.
+        assert_eq!(fit_extent([400, 400], (100, 50)), (50, 50));
+    }
+
+    #[test]
+    fn an_extreme_aspect_ratio_still_fits_at_one_texel_rather_than_none() {
+        // 10000:1 into a 64-square layer scales the short axis to 0.0064 texels.
+        // A zero extent is not a rectangle the packer or the shader can
+        // address, so it is held at one.
+        let fitted = fit_extent([10_000, 1], (64, 64));
+        assert_eq!(fitted, (64, 1));
+
+        let mut residency = residency();
+        residency.begin_frame();
+        let resident = residency
+            .resolve(&image(10_000, 1))
+            .expect("a sliver still becomes a rectangle");
+        assert_eq!(resident.region.size, [64, 1]);
+    }
+
+    #[test]
+    fn a_uniform_source_minifies_to_exactly_its_own_colour() {
+        // What `adv-huge-image` rests on: a uniform source comes back bit
+        // identical whatever the scale, so the case's `Exact` probe is a
+        // property of the filter rather than a tolerance.
+        let texel = PremulRgba8 {
+            r: 255,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let source = Pixmap::from_parts_with_opacity(vec![texel; 100 * 100], 100, 100, false);
+
+        let small = minify(&source, 7, 3);
+        assert_eq!((small.width(), small.height()), (7, 3));
+        assert!(small.data().iter().all(|out| *out == texel));
+        assert!(
+            !small.may_have_transparency(),
+            "an opaque source stays opaque"
+        );
+    }
+
+    #[test]
+    fn a_box_filter_averages_the_source_texels_each_output_covers() {
+        // A 2x1 source of black and white halves down to one texel, which must
+        // be their mean rather than either end.
+        let black = PremulRgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = PremulRgba8 {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let source = Pixmap::from_parts_with_opacity(vec![black, white], 2, 1, false);
+
+        let small = minify(&source, 1, 1);
+        assert_eq!((small.width(), small.height()), (1, 1));
+        // 255 / 2 rounded to nearest.
+        assert_eq!(small.data()[0].r, 128);
+        assert_eq!(small.data()[0].a, 255);
+
+        // Transparency is recomputed from the result, not inherited: averaging
+        // an opaque and a fully transparent texel produces a partial one.
+        let clear = PremulRgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        let mixed = Pixmap::from_parts_with_opacity(vec![white, clear], 2, 1, true);
+        let small = minify(&mixed, 1, 1);
+        assert_eq!(small.data()[0].a, 128);
+        assert!(small.may_have_transparency());
+    }
+
+    #[test]
+    fn minify_never_magnifies() {
+        let texel = PremulRgba8 {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        };
+        let source = Pixmap::from_parts_with_opacity(vec![texel; 4], 2, 2, false);
+
+        // A request above the source's own extent is clamped to it rather than
+        // inventing texels the box filter has no arm for.
+        let same = minify(&source, 8, 8);
+        assert_eq!((same.width(), same.height()), (2, 2));
+        assert!(same.data().iter().all(|out| *out == texel));
     }
 
     #[test]
