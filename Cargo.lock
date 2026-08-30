@@ -2122,6 +2122,7 @@ dependencies = [
  "anyhow",
  "frust-core",
  "frust-reactive",
+ "frust-render",
  "frust-scene",
  "frust-shell-android",
  "frust-shell-common",

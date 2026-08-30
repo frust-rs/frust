@@ -90,6 +90,11 @@ lean = ["log/release_max_level_warn"]
 # paired with `--define FRUST_RENDER_TIER=hybrid` to actually select the tier
 # the feature compiled in.
 hybrid-tier = ["frust/hybrid-tier"]
+# The frust-owned engine render tier, forwarded to the facade's own
+# `engine-tier` feature. Empty by default and selected by no build mode — a matrix
+# arm reaches it with an explicit `frust build --features engine-tier`,
+# paired with `--define FRUST_RENDER_TIER=engine` to actually select the tier.
+engine-tier = ["frust/engine-tier"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution. `lto = "fat"` + `codegen-units = 1`

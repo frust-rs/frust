@@ -43,6 +43,11 @@ frust-shell-common = { workspace = true }
 # 01/facade-authoring-seam) so the re-export resolves in the library itself,
 # not just a test build.
 frust-scene = { workspace = true }
+# The render abstraction layer: pulled in transitively via shells but named
+# here directly for the `engine-tier` feature forwarding (p4-07c). The
+# facade needs to make the `engine-tier` feature available so apps can opt in
+# to the frust-engine render path.
+frust-render = { workspace = true }
 # Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
 # can shape its own glyph runs without naming `frust-text`. Already in the
 # graph transitively via frust-widgets/frust-theme; named here (promoted from
@@ -174,3 +179,9 @@ hybrid-tier = [
     "frust-shell-android/hybrid-tier",
     "frust-shell-ios/hybrid-tier",
 ]
+# The frust-owned engine render tier: re-exports engine-tier from frust-render,
+# the sole crate that owns the tier. Empty by default — a build that never asks
+# for it carries no `frust-engine` or `frust-gpu` symbols. Unlike `perf-trace`/
+# `devtools`, NO build mode selects this — it is reached only by an explicit
+# `frust run|build --features engine-tier`.
+engine-tier = ["frust-render/engine-tier"]
