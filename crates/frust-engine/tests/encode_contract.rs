@@ -25,6 +25,8 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
@@ -50,6 +52,28 @@ const SECOND_PASS_CLEAR: wgpu::Color = wgpu::Color {
 
 /// A pixel-aligned rectangle, taking the compiler's fast rectangle path.
 const FILL_RECT: Rect = Rect::new(32.0, 32.0, 96.0, 96.0);
+
+/// Serializes every test in this binary that creates a GPU device — the same
+/// guard the other GPU suites in this workspace take, for the same reason.
+///
+/// What it is *not* for any more: the warm-up worker holding its own handle on
+/// the device. The pipeline cache stops and joins that worker when it is
+/// dropped, so no compile can still be in flight when a renderer goes away.
+///
+/// What it is still for: the driver. These tests each build their own
+/// `wgpu::Device`, and the NVIDIA Vulkan driver serializes `vkDestroyDevice`
+/// against other Vulkan work on a process-global mutex — two of these tests
+/// tearing their devices down at once deadlocked inside `vkDestroyDevice`
+/// itself, with no frame of this workspace's own code anywhere on the stuck
+/// threads. Held from the first line of each test, the guard outlives that
+/// test's device (locals drop in reverse), so only one device is ever alive.
+/// Poison is ignored deliberately: one test's failure must not cascade into
+/// every sibling.
+static RENDER_LOCK: Mutex<()> = Mutex::new(());
+
+fn render_lock() -> MutexGuard<'static, ()> {
+    RENDER_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Blocks on `future` by polling it to completion.
 ///
@@ -143,20 +167,20 @@ fn scene() -> Scene {
     scene
 }
 
-/// Finishes the renderer's background pipeline warm-up before the test drops
-/// the device.
+/// Asserts the renderer really did compile pipelines for the frames above.
 ///
-/// Not a nicety. Warm-up runs on a worker holding its own handle on the
-/// `wgpu::Device`, and a test that returns while it is still compiling drops
-/// the device out from under it — which the driver reports as a heap
-/// corruption at process exit, long after every assertion has passed. Forcing
-/// the warm-up to completion keeps a teardown race from failing a run whose
-/// assertions all succeeded, or from being read as a rendering fault.
-fn settle(renderer: &mut EngineRenderer, device: &wgpu::Device) {
-    renderer.finish_warm_up(device);
+/// This used to force warm-up to completion before the test returned, because
+/// the warm-up worker holds its own handle on the `wgpu::Device` and dropping
+/// the device while it was still compiling was a driver-level teardown hazard
+/// rather than a clean cancellation. It no longer has to: the pipeline cache
+/// stops and joins its worker when it is dropped, which happens with the
+/// renderer, before the device this test owns goes anywhere. What is left is
+/// the cheap end-of-test check that the frames were drawn with compiled
+/// pipelines rather than none at all.
+fn warm_up_ran(renderer: &EngineRenderer) {
     assert!(
         renderer.compiled_pipelines() > 0,
-        "warm-up compiled no pipeline at all"
+        "the frames above compiled no pipeline at all"
     );
 }
 
@@ -171,6 +195,7 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
 fn encode_records_into_the_callers_encoder_without_submitting_or_leaving_a_pass_open() {
+    let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -257,12 +282,13 @@ fn encode_records_into_the_callers_encoder_without_submitting_or_leaving_a_pass_
     let unrelated_pixels = unrelated.read_back(&device, &queue);
     assert_eq!(pixel(&unrelated_pixels, 128, 128), [0, 0, 255, 255]);
 
-    settle(&mut renderer, &device);
+    warm_up_ran(&renderer);
 }
 
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
 fn a_renderer_encodes_frame_after_frame_and_survives_a_resize() {
+    let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -311,7 +337,7 @@ fn a_renderer_encodes_frame_after_frame_and_survives_a_resize() {
         );
     }
 
-    settle(&mut renderer, &device);
+    warm_up_ran(&renderer);
 
     let error = drain_error_scope(&device, scope);
     assert!(error.is_none(), "repeat encoding raised {error:?}");
@@ -320,6 +346,7 @@ fn a_renderer_encodes_frame_after_frame_and_survives_a_resize() {
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
 fn a_caller_supplied_depth_attachment_is_used_instead_of_an_engine_owned_one() {
+    let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -360,7 +387,7 @@ fn a_caller_supplied_depth_attachment_is_used_instead_of_an_engine_owned_one() {
     let pixels = target.read_back(&device, &queue);
     assert_eq!(pixel(&pixels, 64, 64), [255, 0, 0, 255]);
 
-    settle(&mut renderer, &device);
+    warm_up_ran(&renderer);
 
     let error = drain_error_scope(&device, scope);
     assert!(
@@ -395,6 +422,7 @@ fn gradient_scene() -> Scene {
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
 fn a_gradient_rect_renders_a_ramp_rather_than_one_flat_colour() {
+    let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -467,7 +495,7 @@ fn a_gradient_rect_renders_a_ramp_rather_than_one_flat_colour() {
     assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
     assert_eq!(pixel(&pixels, 128, 240), [0, 0, 0, 0]);
 
-    settle(&mut renderer, &device);
+    warm_up_ran(&renderer);
 }
 
 #[test]
@@ -476,6 +504,7 @@ fn a_solid_frame_after_a_gradient_frame_is_unaffected_by_it() {
     // The paint texture and the gradient LUT persist across frames, so a
     // solid-only frame following a gradient one must neither reference the
     // stale records nor lose its own colours to them.
+    let _serialized = render_lock();
     let (device, queue, caps) = gpu();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -522,5 +551,5 @@ fn a_solid_frame_after_a_gradient_frame_is_unaffected_by_it() {
     assert_eq!(pixel(solid, 56, 200), [0, 128, 0, 255]);
     assert_eq!(pixel(solid, 4, 4), [0, 0, 0, 0]);
 
-    settle(&mut renderer, &device);
+    warm_up_ran(&renderer);
 }
