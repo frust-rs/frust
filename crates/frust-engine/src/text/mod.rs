@@ -29,9 +29,31 @@
 //! `glifo`'s defaults happen to be: no normalized coordinates, and the default
 //! (no-op) embolden. Hinting is the one knob set *against* the default:
 //! `glifo` hints by default, the classic tier does not hint at all, and a
-//! hinted outline lands on different pixels — so hinting is off here, and the
-//! device-class policy that may turn it back on is a decision of its own, not
-//! a default inherited by accident.
+//! hinted outline lands on different pixels — so a run built here states its
+//! own hinting choice explicitly too, rather than inheriting `glifo`'s.
+//!
+//! # The hinting policy, split in two
+//!
+//! Whether a run ends up hinted is two independent questions, answered on two
+//! sides of the `glifo` boundary:
+//!
+//! - **Device class**, this crate's half: [`lower_glyph_run`]'s `hint`
+//!   parameter, which [`SceneCompiler`](crate::compile::SceneCompiler) derives
+//!   from the adapter's `TierCaps` in
+//!   [`SceneCompiler::for_caps`](crate::compile::SceneCompiler::for_caps) —
+//!   on for a desktop-class adapter, off for a mobile one, off by default
+//!   until an adapter is known (the same caution
+//!   [`AtlasBudget::MOBILE`](crate::cache::AtlasBudget::MOBILE) is chosen
+//!   for). Nothing here decides *when* a hinted outline would actually help;
+//!   it only decides whether the device is one hinting is worth paying for at
+//!   all.
+//! - **Transform shape**, `glifo`'s own half and not reimplemented here:
+//!   [`GlyphRunBuilder::hint`] documents that hinting is applied only when the
+//!   run's combined transform is a positive uniform scale with no vertical
+//!   skew or rotation, and falls back to an unhinted direct draw otherwise —
+//!   vertical-only hinting cannot answer for a transform it cannot express as
+//!   a single vertical scale. A rotated or skewed run is therefore unhinted
+//!   regardless of what `hint` this module passes, on `glifo`'s own terms.
 //!
 //! # Cost
 //!
@@ -117,7 +139,11 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// transform from. `paint` is the run's brush as the compiler encoded it once
 /// against that same transform (see [`backend`]'s module doc for why once is
 /// enough), and `context_brush` is the brush it was encoded from, which
-/// `glifo` reads back for a colour glyph's context colour.
+/// `glifo` reads back for a colour glyph's context colour. `hint` is the
+/// device-class half of the hinting policy this module's doc splits out —
+/// [`SceneCompiler`](crate::compile::SceneCompiler)'s own choice, passed
+/// through unchanged; `glifo` still applies its transform-shape half on top
+/// (see the module doc).
 ///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
@@ -126,6 +152,7 @@ pub(crate) fn lower_glyph_run(
     transform: Affine,
     paint: Paint,
     context_brush: &peniko::Brush,
+    hint: bool,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
     let GlyphRunTargets {
@@ -157,7 +184,7 @@ pub(crate) fn lower_glyph_run(
     .font_size(run.font_size)
     .font_embolden(FontEmbolden::default())
     .normalized_coords(&[])
-    .hint(false)
+    .hint(hint)
     .fill_glyphs(run.glyphs.iter().map(|glyph| Glyph {
         id: glyph.id,
         x: glyph.x,

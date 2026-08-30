@@ -69,7 +69,9 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 use vello_common::tile::Tile;
 use vello_common::util::is_axis_aligned;
 
-use crate::cache::images::{AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload};
+use crate::cache::images::{
+    AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload, is_mobile_tier,
+};
 use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
@@ -218,6 +220,14 @@ pub struct SceneCompiler {
     punches: Vec<StagedPunch>,
     images: ImageResidency,
     glyphs: GlyphPrepCache,
+    /// Whether a glyph run's outline is hinted before it is rasterized (see
+    /// [`crate::text`]'s module doc for the split this half of the policy
+    /// answers). Mobile-safe by default — `false`, the same "known nothing
+    /// about the device yet" reasoning [`Self::new`] gives
+    /// [`AtlasBudget::MOBILE`] — and set from the adapter's own class by
+    /// [`Self::for_caps`], or directly by [`Self::set_hint_text`] for a test
+    /// that wants either answer without a `TierCaps` in hand.
+    hint_text: bool,
 }
 
 impl SceneCompiler {
@@ -238,9 +248,31 @@ impl SceneCompiler {
     }
 
     /// A compiler sized for a `width` x `height` viewport, with image
-    /// residency budgeted for `caps`' adapter.
+    /// residency budgeted for `caps`' adapter and glyph hinting decided by
+    /// `caps`' device class.
+    ///
+    /// Hinting is turned on for a desktop-class adapter and left off for a
+    /// mobile one — the same `!`[`is_mobile_tier`] split
+    /// [`AtlasBudget::for_caps`] draws its own tier from, so a caller with an
+    /// adapter in hand only ever answers the mobile-or-desktop question once.
+    /// See [`crate::text`]'s module doc for why hinting defaults off and what
+    /// the other half of the policy — the transform predicate `glifo` applies
+    /// on top of this — is not this crate's to make.
     pub fn for_caps(width: u16, height: u16, caps: &TierCaps) -> Self {
-        Self::with_atlas_budget(width, height, AtlasBudget::for_caps(caps))
+        let mut compiler = Self::with_atlas_budget(width, height, AtlasBudget::for_caps(caps));
+        compiler.hint_text = !is_mobile_tier(caps);
+        compiler
+    }
+
+    /// Set whether a glyph run's outline is hinted before it is rasterized,
+    /// bypassing [`Self::for_caps`]' `TierCaps` reading.
+    ///
+    /// For a test that wants a chosen answer without building a `TierCaps` —
+    /// [`Self::new`] and [`Self::with_atlas_budget`] already default to the
+    /// mobile-safe `false`, so this is also how a caller that built one of
+    /// those turns hinting on.
+    pub fn set_hint_text(&mut self, hint_text: bool) {
+        self.hint_text = hint_text;
     }
 
     /// A compiler sized for a `width` x `height` viewport, with image
@@ -255,6 +287,7 @@ impl SceneCompiler {
             punches: Vec::new(),
             images: ImageResidency::new(budget),
             glyphs: GlyphPrepCache::default(),
+            hint_text: false,
         }
     }
 
@@ -830,6 +863,10 @@ impl SceneCompiler {
             return;
         };
 
+        // Read out ahead of the destructure below: `hint_text` is `Copy`, and
+        // reading it through `self` after the destructure moved out its other
+        // fields would fight the borrow checker for no reason.
+        let hint_text = self.hint_text;
         // Destructured rather than passed as `self`, because the sink borrows
         // the generator and the clip stack mutably while the glyph caches are
         // borrowed mutably alongside them.
@@ -844,6 +881,7 @@ impl SceneCompiler {
             transform,
             paint,
             &run.brush,
+            hint_text,
             GlyphRunTargets {
                 generator,
                 clips,

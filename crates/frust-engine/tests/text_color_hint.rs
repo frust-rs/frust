@@ -1,5 +1,6 @@
-//! Colour (COLR) glyphs: what a colour glyph costs a frame, and what it
-//! refuses.
+//! Colour (COLR) glyphs and the hinting policy: what a colour glyph costs a
+//! frame and what it refuses, and which half of "is this run hinted" belongs
+//! to `SceneCompiler` rather than to `glifo`.
 //!
 //! Sibling of `text_basic.rs` and driven the same way — a `frust_scene::Scene`
 //! recorded through `SceneBuilder`, compiled by `SceneCompiler`, read back
@@ -17,12 +18,25 @@
 //! clip, that they take dense painter-order depths, that they cull and clip
 //! like any other draw, and that a warm cache re-compiles them byte-identically
 //! — is pinned below.
+//!
+//! The hinting cases below pin the other half of `p5-03`'s undeliverable
+//! scope (see `frust_engine::text`'s module doc): `SceneCompiler::for_caps`
+//! turns hinting on for a desktop-class `TierCaps` and off for a mobile one,
+//! `SceneCompiler::set_hint_text` answers the same question directly for a
+//! case that wants either answer without building one, and the retained
+//! `GlyphPrepCache` a compiler carries across frames must not leak a hinted
+//! outline into an unhinted frame or back — `glifo`'s own outline cache keys
+//! on its hint flag for exactly that reason. What is *not* pinned here is the
+//! transform-shape half of the policy (a rotated or skewed run is unhinted
+//! regardless of `hint_text`): that predicate lives inside `glifo` and is
+//! `glifo`'s own to test.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use frust_engine::SceneCompiler;
 use frust_engine::compile::CompiledFrame;
+use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
 use peniko::color::palette::css::RED;
@@ -43,6 +57,20 @@ const ARABIC_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoSansArabic
 
 /// Noto Sans JP, subsetted to `日本語`.
 const CJK_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf");
+
+/// Noto Sans, subsetted to Latin plus combining marks — the same bundled face
+/// `text_basic.rs` hints its own cases against.
+const LATIN_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoSans-Subset.ttf");
+
+/// `LATIN_FONT`'s `H`, `e`, `l`, `o`, read off its own character map — the
+/// same ids `text_basic.rs` uses.
+const HELLO_GLYPHS: [u32; 5] = [5, 6, 7, 7, 8];
+
+/// A font size small enough that vertical hinting's pixel-grid snapping has
+/// something to move: at a large size a hinted and an unhinted stem already
+/// sit close enough to the same pixel that the two outlines can coincide by
+/// chance, which is exactly the opposite of what these cases need to pin.
+const SMALL_LATIN_SIZE: f32 = 9.0;
 
 /// [`EMOJI_FONT`]'s U+1F600, a COLRv1 base glyph with no `glyf` outline of its
 /// own. Its paint graph is a gradient layer followed by nine solid ones.
@@ -122,6 +150,45 @@ fn compile(scene: &Scene) -> CompiledFrame {
 
 fn compile_run(glyph_run: GlyphRun) -> CompiledFrame {
     compile(&scene_of(|builder| builder.draw_glyph_run(glyph_run)))
+}
+
+/// A compiler with `hint_text` set directly, bypassing `TierCaps`.
+fn compiler_hinted(hint_text: bool) -> SceneCompiler {
+    let mut compiler = compiler();
+    compiler.set_hint_text(hint_text);
+    compiler
+}
+
+/// `HELLO_GLYPHS` at [`SMALL_LATIN_SIZE`], translate-only (so the transform is
+/// the positive-uniform-scale-without-skew shape `glifo` hints under) — the
+/// small Latin run every hinting case below draws.
+fn small_latin_run() -> GlyphRun {
+    GlyphRun {
+        font: font(LATIN_FONT),
+        font_size: SMALL_LATIN_SIZE,
+        brush: Brush::Solid(RED),
+        transform: Affine::translate((4.0, 32.0)),
+        glyphs: HELLO_GLYPHS
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Glyph {
+                id: *id,
+                x: index as f32 * (SMALL_LATIN_SIZE * 0.6),
+                y: 0.0,
+            })
+            .collect(),
+    }
+}
+
+/// Compile `glyph_run` once against `compiler`.
+fn compile_with(mut compiler: SceneCompiler, glyph_run: GlyphRun) -> CompiledFrame {
+    compiler
+        .compile(
+            &scene_of(|builder| builder.draw_glyph_run(glyph_run)),
+            Affine::IDENTITY,
+            VIEWPORT,
+        )
+        .expect("an in-range scene compiles")
 }
 
 // ---------------------------------------------------------------------
@@ -403,4 +470,132 @@ fn a_run_of_cjk_glyphs_draws_one_per_glyph() {
 
     assert_eq!(frame.glyph_draws, CJK_GLYPHS.len() as u32);
     assert_eq!(frame.skipped_glyphs, 0);
+}
+
+// ---------------------------------------------------------------------
+// The hinting policy's device-class half
+// ---------------------------------------------------------------------
+
+#[test]
+fn hinting_changes_a_small_latin_runs_output_on_a_desktop_class_compiler() {
+    let unhinted = compile_with(compiler_hinted(false), small_latin_run());
+    let hinted = compile_with(compiler_hinted(true), small_latin_run());
+
+    assert_eq!(
+        unhinted.glyph_draws, hinted.glyph_draws,
+        "the same glyphs paint either way"
+    );
+    assert!(
+        unhinted.strip_buf() != hinted.strip_buf() || unhinted.alphas() != hinted.alphas(),
+        "vertical hinting snaps at least one stem in this small run to a \
+         different pixel than the unhinted outline lands on"
+    );
+}
+
+#[test]
+fn a_hinted_runs_output_is_byte_stable_across_two_frames() {
+    let mut compiler = compiler_hinted(true);
+    let scene = scene_of(|builder| builder.draw_glyph_run(small_latin_run()));
+
+    let cold = compiler
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("the first frame compiles");
+    let warm = compiler
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("the second frame compiles");
+
+    assert_eq!(
+        cold.strip_buf(),
+        warm.strip_buf(),
+        "a hinted outline rasterizes identically on a warm cache, the same \
+         guarantee the colour-glyph cache case above pins for an unhinted one"
+    );
+    assert_eq!(cold.alphas(), warm.alphas());
+    assert_eq!(cold.glyph_draws, warm.glyph_draws);
+}
+
+#[test]
+fn a_mobile_tier_compiler_draws_unhinted_output_byte_identical_to_hint_text_false() {
+    let mobile = compile_with(
+        SceneCompiler::for_caps(
+            VIEWPORT.0,
+            VIEWPORT.1,
+            &TierCaps::fake(DownlevelProfile::WebGl2),
+        ),
+        small_latin_run(),
+    );
+    let explicit_unhinted = compile_with(compiler_hinted(false), small_latin_run());
+
+    assert_eq!(
+        mobile.strip_buf(),
+        explicit_unhinted.strip_buf(),
+        "a mobile-class TierCaps draws the same unhinted output the run \
+         always drew before this policy could turn hinting on"
+    );
+    assert_eq!(mobile.alphas(), explicit_unhinted.alphas());
+    assert_eq!(mobile.glyph_draws, explicit_unhinted.glyph_draws);
+}
+
+#[test]
+fn a_desktop_tier_compiler_draws_hinted_output_byte_identical_to_hint_text_true() {
+    let desktop = compile_with(
+        SceneCompiler::for_caps(
+            VIEWPORT.0,
+            VIEWPORT.1,
+            &TierCaps::fake(DownlevelProfile::Full),
+        ),
+        small_latin_run(),
+    );
+    let explicit_hinted = compile_with(compiler_hinted(true), small_latin_run());
+
+    assert_eq!(desktop.strip_buf(), explicit_hinted.strip_buf());
+    assert_eq!(desktop.alphas(), explicit_hinted.alphas());
+    assert_eq!(desktop.glyph_draws, explicit_hinted.glyph_draws);
+}
+
+#[test]
+fn flipping_hint_text_on_one_compiler_never_serves_a_stale_cache_entry() {
+    // One compiler, one retained `GlyphPrepCache`, three frames that toggle
+    // `hint_text` between them — pinning that `glifo`'s outline cache (keyed
+    // on its own `hint` flag) never hands a frame the other frame's outline
+    // rather than fetching its own.
+    let mut compiler = compiler();
+    let scene = scene_of(|builder| builder.draw_glyph_run(small_latin_run()));
+
+    compiler.set_hint_text(true);
+    let hinted_first = compiler
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("a hinted frame compiles");
+
+    compiler.set_hint_text(false);
+    let unhinted = compiler
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("an unhinted frame compiles");
+
+    compiler.set_hint_text(true);
+    let hinted_second = compiler
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("hinting turned back on compiles");
+
+    let baseline_hinted = compile_with(compiler_hinted(true), small_latin_run());
+    let baseline_unhinted = compile_with(compiler_hinted(false), small_latin_run());
+
+    assert_eq!(
+        hinted_first.strip_buf(),
+        baseline_hinted.strip_buf(),
+        "the first hinted frame matches a compiler that was hinted from the start"
+    );
+    assert_eq!(
+        unhinted.strip_buf(),
+        baseline_unhinted.strip_buf(),
+        "turning hinting off does not keep serving the hinted frame's cached \
+         outline"
+    );
+    assert_eq!(
+        hinted_second.strip_buf(),
+        baseline_hinted.strip_buf(),
+        "and turning it back on again does not keep serving the unhinted \
+         frame's cached outline either — both directions round-trip cleanly \
+         on the one retained cache"
+    );
 }
