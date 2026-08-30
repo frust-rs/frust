@@ -1770,6 +1770,30 @@ cited classic-baseline rows keep pointing at their original series under
 `benchmarks/raw/pixel5/{fine-floor,classic-baseline}/`, neither moved nor
 duplicated.
 
+### Device notes — iPhone Mode A and Windows smoke
+
+**iPhone SE (serial redacted), engine tier, Mode A: RENDERS.** material3-demo
+built with the engine tier and launched over the CLI's `devicectl` route
+comes up as an opaque app window drawing the catalog — cards, icons and
+chevrons, text absent per the glyph scope above — and the process stayed
+alive for the whole 40-minute observation; visual check performed at the
+desk. That is the expected resolution for an iOS PostMultiplied surface:
+EngineDirect with translucency refused, and no `PremultiplyPass` on the
+engine arm. Frame timings deliberately not recorded — the full iOS pass
+belongs to the presentation-path phase.
+
+**Dell (Windows 11, Intel UHD Graphics 730), engine tier: RENDERS clean.**
+The default build's dependency graph carries no `frust-engine` at all
+(`cargo tree -p frust -e normal`: zero hits over the 532-line graph — the
+byte-identity expectation), and the engine-tier build renders the windowed
+demo with no wgpu validation errors, verified both unpinned and pinned to
+Vulkan via `WGPU_BACKEND=vulkan` (the desktop shell's log filter does not
+surface the unpinned run's backend choice; Vulkan instance activity was
+present at startup either way). Screenshot-level visual pass clean. Rig
+note: Windows Smart App Control blocked one freshly-compiled build-script
+executable (`os error 4551`); recompiling that script (new file hash)
+cleared it without policy changes.
+
 ### What could not be measured
 
 - **A true one-quad full-screen image number** — S5 is the named proxy and
