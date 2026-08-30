@@ -2,19 +2,32 @@
 //!
 //! Covers the two halves of the paint path against the public seam only: which
 //! `peniko::Brush` becomes which encoded paint, and how the ramps those paints ask
-//! for are packed, shared and reclaimed.
+//! for are packed, shared and reclaimed. The image and blurred-rounded-rect cases
+//! at the bottom cover the GPU-side half too — lowering an `EncodedPaint` into the
+//! record the strip shader reads, at the host level: record bytes, texel offsets,
+//! and the paint descriptor a strip instance names a record by.
 
+use std::sync::Arc;
+
+use frust_engine::cache::images::{AtlasBudget, ImageResidency};
 use frust_engine::cache::{GradientCache, GradientTextureLayout};
-use frust_engine::compile::paint::{encode_brush, resolve_lut_request};
+use frust_engine::compile::blur_rrect::encode_blurred_rounded_rect;
+use frust_engine::compile::paint::{encode_brush, encode_image_command, resolve_lut_request};
+use frust_engine::gpu::atlas::lower_encoded_image;
+use frust_engine::gpu::paint_texture::lower_encoded_paint;
+use frust_engine::gpu::strips::{PAINT_TEXTURE_INDEX_MASK, PaintType, pack_paint_descriptor};
+use frust_engine::gpu::{GpuBlurredRoundedRect, GpuEncodedImage, GpuEncodedPaint};
+use frust_scene::CornerRadii;
+use peniko::color::palette::css::RED;
 use peniko::color::{ColorSpaceTag, DynamicColor, HueDirection, PremulRgba8};
 use peniko::{
-    Brush, Color, ColorStop, ColorStops, Gradient, GradientKind, LinearGradientPosition,
-    RadialGradientPosition, SweepGradientPosition,
+    Blob, Brush, Color, ColorStop, ColorStops, Gradient, GradientKind, ImageAlphaType, ImageData,
+    ImageFormat, LinearGradientPosition, RadialGradientPosition, SweepGradientPosition,
 };
 use vello_common::encode::{EncodedKind, EncodedPaint};
 use vello_common::fearless_simd::Level;
-use vello_common::kurbo::{Affine, Point};
-use vello_common::paint::Paint;
+use vello_common::kurbo::{Affine, Point, Rect};
+use vello_common::paint::{Paint, PremulColor};
 
 /// Three stops with the middle one at `offset`, so varying `offset` varies the
 /// baked ramp — and therefore the cache key — while everything else stays equal.
@@ -375,4 +388,222 @@ fn texture_capacity_bounds_the_packed_buffer() {
         layout.byte_capacity(),
         "worst-case residency exactly fills the texture"
     );
+}
+
+// ---------------------------------------------------------------------
+// p4-05b: lowering an image and a blurred rounded rect into the records
+// the strip shader reads, at the host level (no GPU).
+// ---------------------------------------------------------------------
+
+/// An opaque `width` x `height` RGBA8 image, straight alpha.
+fn image_data(width: u32, height: u32) -> ImageData {
+    let len = (width as usize) * (height as usize) * 4;
+    ImageData {
+        data: Blob::new(Arc::new(vec![255_u8; len])),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width,
+        height,
+    }
+}
+
+/// An atlas small enough that a test allocation is easy to reason about.
+fn test_budget() -> AtlasBudget {
+    AtlasBudget {
+        atlas_size: (64, 64),
+        max_atlases: 1,
+    }
+}
+
+#[test]
+fn an_image_paint_lowers_to_a_record_naming_its_atlas_rectangle() {
+    let mut images = ImageResidency::new(test_budget());
+    images.begin_frame();
+    let mut paints = Vec::new();
+
+    let data = image_data(16, 8);
+    let dest = Rect::new(0.0, 0.0, 32.0, 16.0);
+    let encoding = encode_image_command(&data, dest, Affine::IDENTITY, &mut paints, &mut images)
+        .expect("a 16x8 image fits a 64x64 atlas");
+
+    let EncodedPaint::Image(image) = &paints[encoding.paint_index] else {
+        panic!("expected an image paint");
+    };
+    let record = lower_encoded_image(image, &encoding.resident)
+        .expect("the residency `encode_image_command` returned names this same entry");
+
+    assert_eq!(record.paint_type(), PaintType::Image);
+    assert_eq!(record.byte_len(), 48, "a `GpuEncodedImage` is 48 bytes");
+    assert_eq!(record.texel_len(), 3);
+
+    match record {
+        GpuEncodedPaint::Image(GpuEncodedImage {
+            image_params,
+            image_size,
+            image_offset,
+            image_padding,
+            ..
+        }) => {
+            let region = encoding.resident.region;
+            assert_eq!(image_size >> 16, region.size[0], "width in the high half");
+            assert_eq!(image_size & 0xFFFF, region.size[1]);
+            assert_eq!(image_offset >> 16, region.offset[0], "x in the high half");
+            assert_eq!(image_offset & 0xFFFF, region.offset[1]);
+            assert_eq!(
+                (image_params >> 6) & 0xFF,
+                region.layer,
+                "the atlas layer, packed at bits 6-13"
+            );
+            assert_eq!(
+                (image_params >> 14) & 1,
+                0,
+                "an atlas-resident image is not an external source"
+            );
+            assert_eq!(image_padding, encoding.resident.padding);
+        }
+        other => panic!("expected an image record, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_image_paint_with_no_matching_residency_does_not_lower() {
+    // Both images share one residency, so their `ImageId`s are guaranteed
+    // distinct (sequential slot indices) rather than merely likely to be —
+    // two residencies each starting fresh would both mint id zero for their
+    // own first image, which would pass this guard by coincidence rather
+    // than exercise it.
+    let mut images = ImageResidency::new(test_budget());
+    images.begin_frame();
+    let mut paints = Vec::new();
+
+    let first = encode_image_command(
+        &image_data(16, 8),
+        Rect::new(0.0, 0.0, 32.0, 16.0),
+        Affine::IDENTITY,
+        &mut paints,
+        &mut images,
+    )
+    .expect("fits the atlas");
+    let second = encode_image_command(
+        &image_data(4, 4),
+        Rect::new(0.0, 0.0, 4.0, 4.0),
+        Affine::IDENTITY,
+        &mut paints,
+        &mut images,
+    )
+    .expect("fits the atlas");
+    assert_ne!(first.resident.id, second.resident.id);
+
+    // The first entry's own paint, lowered against the *second* image's
+    // residency — a mismatch [`lower_encoded_image`] guards against the
+    // same way a gradient lowered against the wrong ramp would be.
+    let EncodedPaint::Image(image) = &paints[first.paint_index] else {
+        panic!("expected an image paint");
+    };
+    assert!(
+        lower_encoded_image(image, &second.resident).is_none(),
+        "a record naming a different image's rectangle would sample the wrong texels"
+    );
+}
+
+#[test]
+fn a_blurred_rounded_rect_paint_always_lowers_since_its_record_needs_no_external_residency() {
+    let mut paints = Vec::new();
+    let rect = Rect::new(0.0, 0.0, 40.0, 30.0);
+
+    let paint = encode_blurred_rounded_rect(
+        rect,
+        CornerRadii::uniform(6.0),
+        3.0,
+        RED,
+        Affine::IDENTITY,
+        &mut paints,
+    );
+    let index = match paint {
+        Paint::Indexed(indexed) => indexed.index(),
+        Paint::Solid(_) => panic!("a blurred rounded rectangle always encodes indexed"),
+    };
+
+    // Unlike a gradient, the record needs no ramp — `None` still lowers.
+    let record = lower_encoded_paint(&paints[index], None)
+        .expect("a blurred rounded rectangle carries everything its record needs inline");
+
+    assert_eq!(record.paint_type(), PaintType::BlurredRoundedRect);
+    assert_eq!(
+        record.byte_len(),
+        80,
+        "a `GpuBlurredRoundedRect` is 80 bytes"
+    );
+    assert_eq!(record.texel_len(), 5);
+
+    match record {
+        GpuEncodedPaint::BlurredRoundedRect(GpuBlurredRoundedRect {
+            color,
+            invert,
+            size,
+            ..
+        }) => {
+            assert_eq!(
+                color,
+                PremulColor::from_alpha_color(RED)
+                    .as_premul_rgba8()
+                    .to_u32()
+            );
+            assert_eq!(invert, 0, "the display list carries no inset-shadow flag");
+            assert_eq!(size, [40.0, 30.0]);
+        }
+        other => panic!("expected a blurred-rounded-rect record, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_image_and_a_blurred_rect_record_serialize_back_to_back_at_the_offsets_a_draw_names_them_by() {
+    let mut images = ImageResidency::new(test_budget());
+    images.begin_frame();
+    let mut paints = Vec::new();
+    let data = image_data(16, 8);
+    let image_encoding = encode_image_command(
+        &data,
+        Rect::new(0.0, 0.0, 32.0, 16.0),
+        Affine::IDENTITY,
+        &mut paints,
+        &mut images,
+    )
+    .expect("fits");
+    let EncodedPaint::Image(image) = &paints[image_encoding.paint_index] else {
+        panic!("expected an image paint");
+    };
+    let image_record =
+        lower_encoded_image(image, &image_encoding.resident).expect("residency matches");
+
+    let mut blur_paints = Vec::new();
+    let blur_paint = encode_blurred_rounded_rect(
+        Rect::new(0.0, 0.0, 20.0, 20.0),
+        CornerRadii::uniform(4.0),
+        1.0,
+        RED,
+        Affine::IDENTITY,
+        &mut blur_paints,
+    );
+    let blur_index = match blur_paint {
+        Paint::Indexed(indexed) => indexed.index(),
+        Paint::Solid(_) => panic!("always indexed"),
+    };
+    let blur_record = lower_encoded_paint(&blur_paints[blur_index], None).expect("always lowers");
+
+    let records = [image_record, blur_record];
+    assert_eq!(
+        GpuEncodedPaint::texel_offsets(&records),
+        vec![0, 3],
+        "the image's 48 bytes occupy three texels before the blurred rect starts"
+    );
+    assert_eq!(GpuEncodedPaint::serialized_len(&records), 48 + 80);
+
+    // The paint descriptor a strip instance would carry for each, matching
+    // the texel each record actually starts at.
+    let image_descriptor = pack_paint_descriptor(PaintType::Image, 0);
+    let blur_descriptor = pack_paint_descriptor(PaintType::BlurredRoundedRect, 3);
+    assert_ne!(image_descriptor, blur_descriptor);
+    assert_eq!(image_descriptor & PAINT_TEXTURE_INDEX_MASK, 0);
+    assert_eq!(blur_descriptor & PAINT_TEXTURE_INDEX_MASK, 3);
 }

@@ -9,7 +9,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use vello_common::encode::{EncodedGradient, EncodedKind, EncodedPaint, RadialKind};
+use vello_common::encode::{
+    EncodedBlurredRoundedRectangle, EncodedGradient, EncodedKind, EncodedPaint, RadialKind,
+};
 
 use crate::EngineError;
 use crate::cache::CachedRamp;
@@ -262,13 +264,20 @@ impl GpuEncodedPaint {
 /// requests can supply — a gradient reaching here without one is dropped
 /// rather than pointed at whatever texels the LUT texture happens to hold.
 ///
-/// Image and external-texture paints answer `None`: their pixels live in the
-/// glyph/image atlas, which the engine does not own yet, so there is no
-/// residency to name in a record. A blurred rounded rectangle answers `None`
-/// on the same rule — the display list's blurred-rect command is not lowered
-/// by the compiler, so no such entry can reach a frame, and a record built
-/// from an untravelled path would be a guess at the shader's contract rather
-/// than a wiring of it. Both become a dropped draw, not a wrongly-painted one.
+/// A blurred rounded rectangle carries everything its record needs inside the
+/// encoded entry itself (see [`lower_blurred_rounded_rect`]), so it always
+/// lowers.
+///
+/// An image paint answers `None` here rather than taking a third parameter:
+/// its record needs the atlas rectangle the image's residency was allocated
+/// at, which — unlike a ramp's cache-key lookup — is a stateful, per-frame
+/// resolution keyed by an opaque `vello_common::paint::ImageId` (see
+/// [`crate::renderer`]'s image registry) rather than a value this function's
+/// signature can carry without breaking every other caller of it.
+/// [`crate::gpu::atlas::lower_encoded_image`] is the image counterpart this
+/// dispatcher intentionally does not fold in; the renderer calls it directly
+/// once a frame's residency is known. An external texture answers `None`
+/// unconditionally — the engine does not bind one yet (Phase 9).
 #[must_use]
 pub fn lower_encoded_paint(
     paint: &EncodedPaint,
@@ -276,10 +285,36 @@ pub fn lower_encoded_paint(
 ) -> Option<GpuEncodedPaint> {
     match paint {
         EncodedPaint::Gradient(gradient) => Some(lower_gradient(gradient, ramp?)),
-        EncodedPaint::Image(_)
-        | EncodedPaint::ExternalTexture(_)
-        | EncodedPaint::BlurredRoundedRect(_) => None,
+        EncodedPaint::BlurredRoundedRect(entry) => Some(lower_blurred_rounded_rect(entry)),
+        EncodedPaint::Image(_) | EncodedPaint::ExternalTexture(_) => None,
     }
+}
+
+/// Lower a blurred rounded rectangle's encoded entry into the record the
+/// strip shader's `calculate_blurred_rounded_rect` reads.
+///
+/// `entry.transform` is already the full inverse affine (device space into
+/// the rectangle's own local, origin-zeroed space) — the same
+/// "already-inverted, narrow to `f32`" shape [`lower_gradient`] applies to its
+/// own transform — and `entry.x_advance`/`entry.y_advance` are redundant with
+/// that transform's own linear part, so neither is read here.
+fn lower_blurred_rounded_rect(entry: &EncodedBlurredRoundedRectangle) -> GpuEncodedPaint {
+    let transform = entry.transform.as_coeffs().map(|coeff| coeff as f32);
+
+    GpuEncodedPaint::BlurredRoundedRect(GpuBlurredRoundedRect {
+        transform,
+        color: entry.color.as_premul_rgba8().to_u32(),
+        invert: u32::from(entry.invert),
+        params0: [
+            entry.exponent,
+            entry.recip_exponent,
+            entry.scale,
+            entry.std_dev_inv,
+        ],
+        params1: [entry.min_edge, entry.w, entry.h, entry.r1],
+        size: [entry.width, entry.height],
+        _padding1: [0, 0],
+    })
 }
 
 /// Lower a gradient whose ramp is resident at `ramp`.

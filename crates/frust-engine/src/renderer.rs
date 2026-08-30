@@ -46,25 +46,33 @@
 //! # Paint resolution
 //!
 //! A solid colour travels inside the strip instance itself. Anything else the
-//! compiler encoded — today, a gradient — is resolved once per frame before a
-//! single instance is built, in three steps that have to happen in this order:
+//! compiler encoded — a gradient, an image, a blurred rounded rectangle — is
+//! resolved once per frame before a single instance is built, in three steps
+//! that have to happen in this order:
 //!
-//! 1. the frame's LUT requests are serviced through the [`GradientCache`], so
-//!    every gradient's colour ramp is resident and has an offset into the
-//!    packed LUT buffer;
+//! 1. residency is settled for the whole frame: the frame's LUT requests are
+//!    serviced through the [`GradientCache`] so every gradient's colour ramp
+//!    has an offset into the packed LUT buffer, and every image paint's atlas
+//!    rectangle is looked up (or learned, the first time it is drawn) in the
+//!    renderer's own image registry — see [`FrameResources::resolve_paints`];
 //! 2. each encoded paint is lowered into the [`GpuEncodedPaint`] record the
-//!    fragment shader samples, carrying that offset; and
+//!    fragment shader samples, carrying that residency; and
 //! 3. the records are serialized back to back, which fixes the texel each one
 //!    starts at — the index a strip instance names its paint by.
 //!
 //! Ramp offsets are only valid within the frame that took them: the cache
 //! compacts and rewrites them in [`EngineRenderer::end_frame`], which is why
-//! residency is decided here rather than at compile time.
+//! residency is decided here rather than at compile time. An image's atlas
+//! rectangle, by contrast, is stable for as long as the image stays resident
+//! (the compiler's [`crate::cache::images::ImageResidency`] does not move a
+//! live image), so the renderer's own registry only ever forgets an entry
+//! when the frame that compiled it reports the entry's region evicted.
 //!
-//! A paint that still cannot be resolved — an image, whose pixels need an
-//! atlas the engine does not own yet — leaves its draw skipped rather than
-//! stamped in a wrong colour: the same "a frame draws less, never wrong" rule
-//! the compiler follows for the commands it does not lower.
+//! A paint that still cannot be resolved — an image the atlas has no room
+//! for, a gradient whose ramp could not be baked, an external texture (not
+//! bound yet; Phase 9) — leaves its draw skipped rather than stamped in a
+//! wrong colour: the same "a frame draws less, never wrong" rule the compiler
+//! follows for the commands it does not lower.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
@@ -73,21 +81,26 @@ use frust_gpu::{PipelineCache, ShaderLibrary, TextureId, TierCaps};
 use frust_scene::Scene;
 use kurbo::Affine;
 use peniko::Color;
+use vello_common::encode::{EncodedImage, EncodedPaint};
 use vello_common::fearless_simd::Level;
-use vello_common::paint::Paint;
+use vello_common::paint::{ImageId, ImageSource, Paint};
 use vello_common::strip::Strip;
 
-use crate::cache::{BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout};
+use crate::cache::images::ATLAS_PADDING;
+use crate::cache::{
+    AtlasBudget, BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, ResidentImage,
+};
 use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
+use crate::gpu::atlas::lower_encoded_image;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, warm_up_descs};
 use crate::gpu::strips::{PaintType, pack_paint_descriptor};
 use crate::gpu::targets::IntermediateTargets;
-use crate::gpu::{self, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
+use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::{EngineTarget, OutputAlpha};
 
 /// The packed paint descriptor of an inline premultiplied solid colour.
@@ -359,6 +372,14 @@ impl EngineRenderer {
         self.resources.resolve_paints(&frame, &mut self.gradients);
         self.scratch
             .build_instances(&frame, depth_view.is_some(), &self.resources.paint_slots);
+
+        // Grown or created ahead of this frame's own atlas evictions/uploads
+        // (recorded into `queue` below) and ahead of any pass that samples
+        // the array — a layer copy on growth is recorded into `encoder`, so it
+        // has to land in the command buffer before `record_passes`' own.
+        let atlas_budget = self.compiler.images().budget();
+        self.resources
+            .ensure_atlas(device, encoder, atlas_budget, frame.atlas_layers);
 
         // Everything that can fail does so here, ahead of the first
         // `begin_render_pass`.
@@ -856,6 +877,17 @@ struct FrameResources {
     /// means different pipelines, so the whole map is dropped rather than
     /// accumulating a set per format ever rendered to.
     bind_group_format: Option<wgpu::TextureFormat>,
+    /// The real image atlas array, created lazily by the first frame that
+    /// makes an image resident and grown from then on — `None` is exactly
+    /// [`Placeholders::atlas_array`]'s domain, a renderer that has never
+    /// drawn an image.
+    atlas: Option<AtlasArray>,
+    /// The atlas rectangle every image the renderer has ever drawn currently
+    /// holds, keyed by the stable [`ImageId`] the compiler's own residency
+    /// minted it. See [`FrameResources::resolve_paints`] for how this is
+    /// kept in step with residency across frames without reaching into the
+    /// compiler's own cache.
+    image_registry: HashMap<ImageId, ResidentImage>,
 }
 
 impl FrameResources {
@@ -883,11 +915,13 @@ impl FrameResources {
             paint_staging: Vec::new(),
             bind_groups: HashMap::new(),
             bind_group_format: None,
+            atlas: None,
+            image_registry: HashMap::new(),
         }
     }
 
-    /// Services `frame`'s LUT requests and lowers its encoded paints into the
-    /// records the shader samples.
+    /// Services `frame`'s LUT and image residency, then lowers its encoded
+    /// paints into the records the shader samples.
     ///
     /// Leaves `paints_data` holding the lowered records in serialization order
     /// and `paint_slots` naming, per *encoded* paint, the texel its record
@@ -895,16 +929,24 @@ impl FrameResources {
     ///
     /// A solid-only frame leaves both empty and touches neither the cache nor
     /// the paint texture, so it costs exactly what it did before paints were
-    /// wired up.
+    /// wired up. Image residency is still serviced even then, since an image
+    /// can be evicted on a frame that draws nothing at all (see
+    /// [`Self::update_image_registry`]).
     fn resolve_paints(&mut self, frame: &CompiledFrame, cache: &mut GradientCache) {
         self.paints_data.clear();
         self.paint_slots.clear();
+
+        // Kept in step every frame, not only when this frame's own paints
+        // need it: an image reaped by the compiler's age-based eviction while
+        // nothing draws it must still be forgotten here, or a later draw that
+        // reuses its freed rectangle's `ImageId` would read the stale entry.
+        self.update_image_registry(frame);
 
         if frame.encoded_paints.is_empty() {
             return;
         }
 
-        // Residency first, for the whole frame: a ramp's offset is only
+        // Ramp residency next, for the whole frame: a ramp's offset is only
         // meaningful once the cache has finished baking this frame's misses,
         // and a record built before that would name a ramp that had not been
         // packed yet.
@@ -919,8 +961,16 @@ impl FrameResources {
 
         let mut texel_offset = 0;
         for (index, paint) in frame.encoded_paints.iter().enumerate() {
-            let ramp = self.paint_ramps.get(index).copied().flatten();
-            let slot = lower_encoded_paint(paint, ramp).map(|record| {
+            let lowered = match paint {
+                EncodedPaint::Image(image) => image_id(image)
+                    .and_then(|id| self.image_registry.get(&id))
+                    .and_then(|resident| lower_encoded_image(image, resident)),
+                _ => {
+                    let ramp = self.paint_ramps.get(index).copied().flatten();
+                    lower_encoded_paint(paint, ramp)
+                }
+            };
+            let slot = lowered.map(|record| {
                 let resolved = ResolvedPaint {
                     paint_type: record.paint_type(),
                     texel_offset,
@@ -931,6 +981,121 @@ impl FrameResources {
                 resolved
             });
             self.paint_slots.push(slot);
+        }
+    }
+
+    /// Keeps [`Self::image_registry`] in step with the compiler's own image
+    /// residency, without reaching into it: the residency's rectangles are
+    /// not reachable from here (see [`crate::gpu::paint_texture::lower_encoded_paint`]'s
+    /// doc for why), so this reconstructs the same information from what a
+    /// compiled frame already reports.
+    ///
+    /// Two passes. First, every region this frame's residency reaped is
+    /// forgotten — `frame.image_evictions` names it by rectangle, and a
+    /// rectangle uniquely identifies the one image that held it (padding is
+    /// always zero in this engine, so the reported and the stored rectangle
+    /// are the same value; see [`crate::cache::images`]'s module doc). Second,
+    /// `frame.encoded_paints` is walked in the compiler's own draw order,
+    /// pairing every id this registry has not already forgotten-or-learned
+    /// with the next unclaimed entry of `frame.image_uploads`, in order. That
+    /// pairing is sound rather than a guess: both sequences come from the
+    /// same per-draw walk inside [`crate::compile::SceneCompiler::compile`],
+    /// and an id this registry has not seen before is — because the eviction
+    /// pass above kept the two in agreement — exactly an id the residency has
+    /// not seen before either, which is precisely when the residency pushes
+    /// an upload. A same-frame evict-then-reallocate that happens to reuse a
+    /// freed `ImageId` is still handled correctly: the eviction pass above
+    /// has already dropped that id from the registry by rectangle, before the
+    /// walk below ever runs, so the reused id is treated as unseen and paired
+    /// with its own fresh upload rather than the evicted one's stale entry.
+    fn update_image_registry(&mut self, frame: &CompiledFrame) {
+        if !frame.image_evictions.is_empty() {
+            self.image_registry
+                .retain(|_, resident| !frame.image_evictions.contains(&resident.region));
+        }
+
+        let mut next_upload = 0_usize;
+        for paint in &frame.encoded_paints {
+            let EncodedPaint::Image(image) = paint else {
+                continue;
+            };
+            let Some(id) = image_id(image) else {
+                continue;
+            };
+            if self.image_registry.contains_key(&id) {
+                continue;
+            }
+            // Fewer uploads than not-yet-registered ids would mean a
+            // compiler/residency invariant broke; leaving the id unregistered
+            // here drops its draws rather than lowering a guessed rectangle.
+            let Some(upload) = frame.image_uploads.get(next_upload) else {
+                continue;
+            };
+            next_upload += 1;
+            self.image_registry.insert(
+                id,
+                ResidentImage {
+                    id,
+                    region: upload.region,
+                    padding: u32::from(ATLAS_PADDING),
+                    may_have_transparency: image.may_have_transparency,
+                },
+            );
+        }
+    }
+
+    /// Grows or creates the image atlas array to hold `layers` layers at
+    /// `budget`'s per-layer extent, clearing the live bind groups when it
+    /// does — a bind group built against the old (or absent) atlas view would
+    /// otherwise sample nothing, or a freed texture.
+    ///
+    /// A frame that has never made an image resident (`layers == 0`) leaves
+    /// the atlas unset, so the strip shader's binding stays on
+    /// [`Placeholders::atlas_array`] until the first one is.
+    fn ensure_atlas(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        budget: AtlasBudget,
+        layers: u32,
+    ) -> bool {
+        let grew = match &mut self.atlas {
+            None if layers == 0 => false,
+            None => {
+                self.atlas = Some(AtlasArray::with_layers(
+                    device,
+                    budget.atlas_size.0,
+                    budget.atlas_size.1,
+                    layers,
+                ));
+                true
+            }
+            Some(atlas) => atlas.ensure_layers(device, encoder, layers),
+        };
+        if grew {
+            self.bind_groups.clear();
+        }
+        grew
+    }
+
+    /// Flushes `frame`'s atlas evictions and uploads against the live atlas
+    /// array, evictions first — a rectangle this frame's residency freed may
+    /// already hold a fresh upload by the time this runs (see
+    /// [`crate::cache::images`]'s module doc), so clearing after writing
+    /// would erase the image that just moved in.
+    ///
+    /// A no-op until [`Self::ensure_atlas`] has created the array: both are
+    /// driven by the same `frame.atlas_layers`, so an empty plan and an
+    /// absent atlas always agree.
+    fn upload_atlas(&self, queue: &wgpu::Queue, frame: &CompiledFrame) {
+        let Some(atlas) = self.atlas.as_ref() else {
+            return;
+        };
+        for region in &frame.image_evictions {
+            atlas.clear_region(queue, *region);
+        }
+        for upload in &frame.image_uploads {
+            atlas.write_region(queue, upload.region, upload.pixels.data_as_u8_slice());
         }
     }
 
@@ -991,7 +1156,8 @@ impl FrameResources {
         }
     }
 
-    /// Uploads the frame's coverage, paint records, colour ramps and config.
+    /// Uploads the frame's coverage, paint records, colour ramps, atlas
+    /// evictions/uploads and config.
     fn upload(
         &mut self,
         queue: &wgpu::Queue,
@@ -1000,6 +1166,8 @@ impl FrameResources {
         size: (u16, u16),
         dim: u32,
     ) {
+        self.upload_atlas(queue, frame);
+
         let alphas = &self.alphas;
         gpu::with_padded_alphas(
             &mut frame.strips.alphas,
@@ -1107,16 +1275,35 @@ impl FrameResources {
         if self.bind_groups.contains_key(&variant) {
             return;
         }
+        let atlas_view = self
+            .atlas
+            .as_ref()
+            .map(AtlasArray::view)
+            .unwrap_or(&self.placeholders.atlas_array);
         let groups = StripBindGroups::new(
             device,
             pipeline,
             &self.alphas.view,
             &self.config,
             &self.placeholders,
+            atlas_view,
             &self.paints.view,
             &self.gradients.view,
         );
         self.bind_groups.insert(variant, groups);
+    }
+}
+
+/// The [`ImageId`] an encoded image paint names, or `None` for the one
+/// [`ImageSource`] variant no residency ever mints — the paint carrying its
+/// pixels inline as a [`vello_common::pixmap::Pixmap`] rather than through a
+/// handle. The compiler's own image encoding always produces the handle form
+/// (see [`crate::compile::paint::encode_image`]), so a compiled frame never
+/// exercises the `None` arm; it exists because the type itself admits both.
+fn image_id(image: &EncodedImage) -> Option<ImageId> {
+    match image.source {
+        ImageSource::OpaqueId { id, .. } => Some(id),
+        ImageSource::Pixmap(_) => None,
     }
 }
 
@@ -1208,15 +1395,26 @@ struct StripBindGroups {
 }
 
 impl StripBindGroups {
-    /// Takes the seven resources one by one rather than a `&FrameResources`
+    /// Takes the eight resources one by one rather than a `&FrameResources`
     /// so the caller can build a set while holding the map it lands in
     /// mutably.
+    ///
+    /// `atlas` is the live [`AtlasArray`] view once the renderer has one, or
+    /// [`Placeholders::atlas_array`] until then — the caller picks, since
+    /// only it knows which the frame's own `atlas_layers` calls for.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bind-group build's full resource list; a struct would \
+                  only rename the same borrows the caller already holds \
+                  mutably in `FrameResources`"
+    )]
     fn new(
         device: &wgpu::Device,
         pipeline: &wgpu::RenderPipeline,
         alphas: &wgpu::TextureView,
         config: &wgpu::Buffer,
         placeholders: &Placeholders,
+        atlas: &wgpu::TextureView,
         paints: &wgpu::TextureView,
         gradients: &wgpu::TextureView,
     ) -> Self {
@@ -1244,7 +1442,7 @@ impl StripBindGroups {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&placeholders.atlas_array),
+                    resource: wgpu::BindingResource::TextureView(atlas),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

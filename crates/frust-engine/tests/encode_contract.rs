@@ -553,3 +553,227 @@ fn a_solid_frame_after_a_gradient_frame_is_unaffected_by_it() {
 
     warm_up_ran(&renderer);
 }
+
+/// The destination an image draw fills — exactly the image's own natural
+/// extent, on whole pixels, so the compiler's own quality downgrade for a
+/// unit-scale translation (see `compile::paint::resolved_quality`) applies
+/// and the atlas is sampled at nearest rather than bilinear: the read-back
+/// then matches the source texel for texel, with no filtering to tolerance
+/// for.
+const IMAGE_RECT: Rect = Rect::new(32.0, 32.0, 96.0, 96.0);
+
+/// An opaque `width` x `height` RGBA8 image, every texel the same colour.
+fn solid_image(width: u32, height: u32, rgba: [u8; 4]) -> peniko::ImageData {
+    let mut data = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for _ in 0..(width as usize) * (height as usize) {
+        data.extend_from_slice(&rgba);
+    }
+    peniko::ImageData {
+        data: peniko::Blob::new(std::sync::Arc::new(data)),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width,
+        height,
+    }
+}
+
+/// A single opaque-green image, drawn at its own natural size onto
+/// [`IMAGE_RECT`] — the whole atlas-residency and consumption path, from
+/// `Command::Image` to a strip instance sampling `atlas_texture_array`.
+fn image_scene() -> Scene {
+    let image = solid_image(64, 64, [0, 255, 0, 255]);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.draw_image(&image, IMAGE_RECT);
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_image_draw_samples_the_real_atlas_rather_than_leaving_its_draw_skipped() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine image frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &image_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("an image frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained first: a placeholder atlas view left bound under a real draw,
+    // or a bind group built against a stale one, surfaces here rather than
+    // as a merely-wrong pixel.
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the image frame raised {error:?}");
+
+    let pixels = target.read_back(&device, &queue);
+    assert_eq!(
+        pixel(&pixels, 64, 64),
+        [0, 255, 0, 255],
+        "the atlas-resident image reached the target rather than being skipped"
+    );
+    // Bounded by its own destination rectangle, not painted over the frame.
+    assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 250, 250), [0, 0, 0, 0]);
+
+    warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_image_survives_a_second_frame_with_no_new_upload() {
+    // The steady state the residency promises: an image drawn again without
+    // its pixels changing costs no re-upload, and the renderer's own image
+    // registry (populated from the *first* frame's upload) must still carry
+    // enough to lower the *second* frame's paint — proving the registry
+    // resolves an already-resident image, not only a freshly uploaded one.
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let scene = image_scene();
+
+    let mut last = None;
+    for _ in 0..2 {
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine repeat image frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("both image frames encode");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        last = Some(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the repeated image frame raised {error:?}");
+
+    let pixels = last.expect("two frames ran");
+    assert_eq!(pixel(&pixels, 64, 64), [0, 255, 0, 255]);
+
+    warm_up_ran(&renderer);
+}
+
+/// The destination [`Rect`] a blurred rounded rectangle shadow is cast from —
+/// large enough, relative to its own standard deviation below, that the blur
+/// coverage at its centre is effectively saturated.
+const BLUR_RECT: Rect = Rect::new(64.0, 56.0, 192.0, 168.0);
+
+/// A red shadow with a 16px corner radius and an 8px blur standard
+/// deviation — the simplest case that still forces the whole
+/// `EncodedPaint::BlurredRoundedRect` path: the compiled draw rasterizes the
+/// padded bounding rectangle the compiler's `blur_rrect::inflated_bounds`
+/// produces, and every pixel inside it is coloured by the fragment shader's
+/// own gaussian falloff rather than by a flat fill.
+fn blurred_rect_scene() -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.draw_blurred_rounded_rect(BLUR_RECT, 16.0, 8.0, RED);
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_blurred_rounded_rect_draw_paints_a_falloff_rather_than_leaving_its_draw_skipped() {
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-engine blurred-rect frame"),
+    });
+    renderer
+        .encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &blurred_rect_scene(),
+            EngineTarget {
+                view: target.view(),
+                format: FORMAT,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: OutputAlpha::Premultiplied,
+            },
+            Color::TRANSPARENT,
+            Affine::IDENTITY,
+        )
+        .expect("a blurred-rect frame encodes");
+    queue.submit([encoder.finish()]);
+    renderer.end_frame(&queue);
+
+    // Drained first: a dropped draw (the paint never wired up) shows here as
+    // nothing at all rather than as a validation error, so the pixel checks
+    // below are what actually distinguishes "skipped" from "drawn".
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the blurred-rect frame raised {error:?}");
+
+    let pixels = target.read_back(&device, &queue);
+
+    // Deep inside the shadow, far from every edge relative to the 8px
+    // standard deviation: the gaussian falloff has saturated, so the pixel
+    // is (near enough) fully opaque and red rather than the frame's own
+    // transparent clear colour.
+    let center = pixel(&pixels, 128, 112);
+    assert!(
+        center[0] > 200 && center[3] > 200,
+        "the shadow's centre should read as strongly opaque red, got {center:?}"
+    );
+    assert_eq!(center[1], 0);
+    assert_eq!(center[2], 0);
+
+    // Far outside even the blur's own padded bounding rectangle
+    // (`inflated_bounds` pads by 2.5 standard deviations, 20px here): the
+    // clear colour survives untouched.
+    assert_eq!(pixel(&pixels, 4, 4), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 250, 250), [0, 0, 0, 0]);
+
+    warm_up_ran(&renderer);
+}
