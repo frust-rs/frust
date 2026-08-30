@@ -44,7 +44,7 @@ frust-shell-common = { workspace = true }
 # not just a test build.
 frust-scene = { workspace = true }
 # The render abstraction layer: pulled in transitively via shells but named
-# here directly for the `engine-tier` feature forwarding (p4-07c). The
+# here directly for the `engine-tier` feature forwarding. The
 # facade needs to make the `engine-tier` feature available so apps can opt in
 # to the frust-engine render path.
 frust-render = { workspace = true }

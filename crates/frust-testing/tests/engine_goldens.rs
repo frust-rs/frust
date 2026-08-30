@@ -224,7 +224,21 @@ const TEXT_FRAME: &str = "the frame shapes glyph runs, which the engine's compil
 /// than on the shared [`CaseSpec`] because it is specific to the ENGINE-vs-CPU
 /// pairing — the same case's `cpu/` and classic comparisons are unaffected by
 /// anything written here.
-const ESCALATIONS: &[(&str, Tolerance, &str)] = &[];
+const ESCALATIONS: &[(&str, Tolerance, &str)] = &[(
+    "widget-button-disabled",
+    Tolerance {
+        channel: 3,
+        alpha: 3,
+        diff_pixels: 0,
+    },
+    "32 pixels (0.0022%) on the button's corner arcs differ by one level beyond the corpus \
+     tolerance (max delta [3,3,3,2]): a coverage-rounding difference between the GPU strip \
+     fill and `vello_cpu` on stacked TRANSLUCENT draws — the disabled state dims every colour's \
+     alpha, and the same geometry with opaque colours (`widget-button-rest`/`-pressed`) is 0 \
+     pixels differing. The identical 32 pixels, deltas and values reproduce on a tree predating \
+     the engine's layer execution, so this is the shared strip fill's rounding, not layer \
+     compositing",
+)];
 
 /// The fixed threshold the engine-vs-classic band is measured under, so
 /// "percent of pixels over 8" means the same thing for every case and the same
@@ -299,6 +313,21 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
          classic-vs-`vello_cpu` pair at 5.371%, already over the corpus p95 it helped set. Only \
          the percentage is widened; the mean stays at the corpus budget, where the case measures \
          0.530",
+    ),
+    (
+        "adv-huge-image",
+        Band {
+            mean: 3.0,
+            pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
+        },
+        "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
+         mean 2.988 / 2.3438% and its Legitimate Disagreements names it: `Command::Image` \
+         specifies no resampling filter, so the two arms' downsampled edge pixels around a \
+         minified image's boundary legitimately differ while the uniform-colour interior probe \
+         matches exactly. The engine agrees with `vello_cpu` on this case PIXEL FOR PIXEL (0 px \
+         differing at channel 2), so its engine-vs-classic band reproduces that calibration row \
+         exactly (measured mean 2.988 / 2.3438% here) — the corpus-wide p95 failing to cover a \
+         disagreement it never included, not engine drift",
     ),
 ];
 
