@@ -277,7 +277,7 @@ impl GpuEncodedPaint {
 /// [`crate::gpu::atlas::lower_encoded_image`] is the image counterpart this
 /// dispatcher intentionally does not fold in; the renderer calls it directly
 /// once a frame's residency is known. An external texture answers `None`
-/// unconditionally — the engine does not bind one yet (Phase 9).
+/// unconditionally — the engine does not bind one yet.
 #[must_use]
 pub fn lower_encoded_paint(
     paint: &EncodedPaint,
