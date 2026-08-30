@@ -150,7 +150,7 @@
 # performs the device-lock step above.
 #
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
-#                      [--tier classic,hybrid,hybrid_atlas]
+#                      [--tier classic,hybrid,hybrid_atlas,engine]
 #                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
 #                      [--scenarios s1,s2,s4] [--runs 5] [--duration 20]
 #                      [--frust <path>] [--raw-root <dir>]
@@ -211,15 +211,38 @@
 #                                      ARM label, not a `RenderTier` value —
 #                                      the tier it selects is still `hybrid`.
 #                                      Cell label `hybrid_atlas`.
-#                      The two hybrid arms IGNORE --aa/--scale: `FRUST_AA_MODE`
+#                        engine        the frust-owned `frust-engine` strip
+#                                      pipeline: `--features engine-tier
+#                                      --define FRUST_RENDER_TIER=engine` (the
+#                                      feature compiles the tier in, the define
+#                                      selects it — `RenderTier::Engine` is
+#                                      override-only AND build-gated, no probe
+#                                      ever picks it, and a define without the
+#                                      feature is REFUSED rather than quietly
+#                                      served by vello,
+#                                      `crates/frust-render/src/tier.rs`).
+#                                      Cell label `engine`. Like the hybrid
+#                                      arms, this needs the measured app to
+#                                      expose an `engine-tier` feature of its
+#                                      own forwarding to `frust-render`'s (the
+#                                      `hybrid-tier = ["frust/hybrid-tier"]`
+#                                      row in benchmarks/frust_bench and
+#                                      examples/material3-demo is the pattern);
+#                                      without it cargo rejects the arm's
+#                                      --features at build time rather than
+#                                      producing a mislabelled APK.
+#                      Every non-classic arm IGNORES --aa/--scale: `FRUST_AA_MODE`
 #                      and `FRUST_RENDER_SCALE` are vello-classic instruments
 #                      (`context.rs`'s `parse_aa_mode` feeds vello's
-#                      `AaSupport`; the scale knob forces vello's blit arm),
-#                      and `vello_hybrid` reads neither — so those defines are
-#                      NOT passed on a hybrid arm and its aa/scale table cells
-#                      read `n/a`. Each hybrid arm therefore contributes
-#                      exactly ONE cell to the matrix however long --aa/--scale
-#                      are, and the cell label records the tier instead.
+#                      `AaSupport`; the scale knob sizes vello's blit-arm
+#                      intermediate), and neither `vello_hybrid` nor
+#                      `frust-engine` reads them — both log a warning once when
+#                      a build carries them anyway (`renderer.rs`'s
+#                      `TierBackend` arms) — so those defines are NOT passed on
+#                      such an arm and its aa/scale table cells read `n/a`. Each
+#                      one therefore contributes exactly ONE cell to the matrix
+#                      however long --aa/--scale are, and the cell label records
+#                      the tier instead.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
 #                      passed through to run.sh (default: s1,s2,s4). Each
 #                      value must be one of s1..s8, d1, d2, validated up
@@ -555,9 +578,9 @@ fi
 # one arm would file two cells for the same build.
 for tier in "${TIER_ARR[@]}"; do
   case "${tier}" in
-    classic|hybrid|hybrid_atlas) ;;
+    classic|hybrid|hybrid_atlas|engine) ;;
     *)
-      echo "error: --tier value '${tier}' is not one of classic, hybrid, hybrid_atlas" >&2
+      echo "error: --tier value '${tier}' is not one of classic, hybrid, hybrid_atlas, engine" >&2
       exit 2
       ;;
   esac
@@ -775,8 +798,9 @@ print_cmd() {
 
 # tier_ignores_render_knobs <tier> — true for an arm that does not read
 # FRUST_AA_MODE/FRUST_RENDER_SCALE (every non-classic tier: they are vello
-# instruments and `vello_hybrid` reads neither — see the header's --tier
-# note). Such an arm gets ONE cell per matrix run, not one per (aa, scale).
+# instruments, and neither `vello_hybrid` nor `frust-engine` reads them — see
+# the header's --tier note). Such an arm gets ONE cell per matrix run, not one
+# per (aa, scale).
 tier_ignores_render_knobs() {
   [ "$1" != "classic" ]
 }
@@ -1061,12 +1085,17 @@ emit_table() {
 #   classic       --define FRUST_AA_MODE=<aa> --define FRUST_RENDER_SCALE=<scale>
 #   hybrid        --features hybrid-tier --define FRUST_RENDER_TIER=hybrid
 #   hybrid_atlas  the hybrid pair plus --define FRUST_HYBRID_ATLAS_CACHE=1
+#   engine        --features engine-tier --define FRUST_RENDER_TIER=engine
 #
-# The AA/scale defines are deliberately absent from the hybrid arms (see
-# the header's --tier note): they are vello-classic instruments, so passing
-# them there would bake a knob into a build that cannot read it and label
-# the cell with a setting it never had. `--define FRUST_TRACE_RAW=1` is
-# common to every arm and stays on the caller's line.
+# The AA/scale defines are deliberately absent from every non-classic arm
+# (see the header's --tier note): they are vello-classic instruments, so
+# passing them there would bake a knob into a build that cannot read it and
+# label the cell with a setting it never had. The feature and the define are
+# always passed together on such an arm — the define alone selects a tier the
+# build has no code for, which `frust-render` refuses outright rather than
+# serving through vello, so a half-specified arm would fail at startup instead
+# of measuring anything. `--define FRUST_TRACE_RAW=1` is common to every arm
+# and stays on the caller's line.
 tier_build_args() {
   local tier="$1" aa="$2" scale="$3"
   case "${tier}" in
@@ -1079,6 +1108,9 @@ tier_build_args() {
     hybrid_atlas)
       printf '%s\n' "--features" "hybrid-tier" "--define" "FRUST_RENDER_TIER=hybrid" \
         "--define" "FRUST_HYBRID_ATLAS_CACHE=1"
+      ;;
+    engine)
+      printf '%s\n' "--features" "engine-tier" "--define" "FRUST_RENDER_TIER=engine"
       ;;
     *)
       die "tier_build_args: unknown tier '${tier}'"
@@ -1094,6 +1126,7 @@ tier_build_desc() {
     classic) echo "FRUST_AA_MODE=${aa} FRUST_RENDER_SCALE=${scale}" ;;
     hybrid) echo "tier=hybrid, --features hybrid-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
     hybrid_atlas) echo "tier=hybrid + FRUST_HYBRID_ATLAS_CACHE=1, --features hybrid-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
+    engine) echo "tier=engine, --features engine-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
     *) die "tier_build_desc: unknown tier '${tier}'" ;;
   esac
 }
