@@ -9,6 +9,9 @@
 //! sparse-strip path behind the equally non-default `hybrid-tier` feature: a
 //! measurement spike that is never probed for — only an explicit override
 //! selects it, and only in a build that compiled the feature in.
+//! [`RenderTier::Engine`] is the frust-owned `frust-engine` strip pipeline
+//! behind the non-default `engine-tier` feature, override-only on exactly the
+//! same terms.
 //!
 //! [`select_render_tier`] is pure decision logic over [`TierCaps`] (a plain
 //! struct a caller builds from a real `wgpu::Adapter`'s downlevel flags +
@@ -40,6 +43,16 @@ pub enum RenderTier {
     /// selected by a probe would make "which tier did this capture run?" a
     /// question about the adapter rather than about the command line.
     Hybrid,
+    /// The frust-owned render engine (`frust-engine`: a `frust_scene::Scene`
+    /// compiled into sparse strips and drawn by ordinary render passes over
+    /// `frust-gpu`), only selectable when the `engine-tier` feature is
+    /// compiled in.
+    ///
+    /// Override-only for [`Self::Hybrid`]'s reason and one more: this tier is
+    /// the subject of an on-device comparison against vello, so which tier a
+    /// capture ran must be answerable from the command line rather than from
+    /// the adapter. [`select_render_tier`] never reaches it by probe.
+    Engine,
 }
 
 /// Plain-data capability inputs [`select_render_tier`] probes. Built from a
@@ -82,6 +95,24 @@ pub const GPU_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags =
 /// raises no capability objection to this tier; the only thing that can refuse
 /// it is a build without the `hybrid-tier` feature.
 pub const HYBRID_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags = wgpu::DownlevelFlags::empty();
+
+/// The [`wgpu::DownlevelFlags`] the engine tier (`frust-engine`) cannot run
+/// without: **none of them**.
+///
+/// Deliberately empty, exactly as [`HYBRID_REQUIRED_DOWNLEVEL_FLAGS`] is, and
+/// for a stronger version of the same reason. `frust-engine` is built to the
+/// GLES-3.0/WebGL2 downlevel ceiling by design rule — no compute pass, no
+/// storage buffer, no indirect draw (`frust-gpu`'s `lint` module enforces that
+/// against the engine's own shaders) — so it runs on adapters where vello
+/// cannot: precisely the `COMPUTE_SHADERS`/`INDIRECT_EXECUTION` pair
+/// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] demands and the iOS Simulator's `Apple2`
+/// GPU family cannot supply. An adapter that fails the GPU probe therefore
+/// raises no capability objection here either; the only thing that can refuse
+/// this tier is a build without the `engine-tier` feature.
+///
+/// Named as a constant rather than left implicit so a flag the engine ever
+/// does need is honoured by [`select_render_tier`] without a second edit.
+pub const ENGINE_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags = wgpu::DownlevelFlags::empty();
 
 /// What [`select_render_tier`] decided is actually usable in this build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +164,9 @@ pub struct TierSelection {
 ///   ([`TierOutcome::Unavailable`] naming `Hybrid`) rather than ignored, so a
 ///   capture asked for on the hybrid tier can never be a vello frame wearing
 ///   the wrong label.
+/// - [`RenderTier::Engine`] is override-only and build-gated on exactly the
+///   same terms, against [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] and the
+///   `engine-tier` feature.
 pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) -> TierSelection {
     let gpu_capable = caps.downlevel_flags.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS);
     // Always true today: [`HYBRID_REQUIRED_DOWNLEVEL_FLAGS`] is empty by
@@ -142,6 +176,11 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     let hybrid_capable = caps
         .downlevel_flags
         .contains(HYBRID_REQUIRED_DOWNLEVEL_FLAGS);
+    // Always true today for `hybrid_capable`'s reason:
+    // [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is empty by design too.
+    let engine_capable = caps
+        .downlevel_flags
+        .contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS);
 
     if let Some(tier) = override_tier {
         // A `Gpu` override cannot conjure a capability the adapter lacks: an
@@ -190,6 +229,31 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
                     },
                     caps.adapter_name,
                     if hybrid_capable { "supports" } else { "lacks" },
+                ),
+            };
+        }
+        // The engine tier is override-only AND build-gated, refused for the
+        // same reason and in the same shape as the hybrid tier above: a run
+        // asked for on `engine` that rendered through vello instead would put
+        // a mislabelled number into the comparison the tier exists to produce.
+        if tier == RenderTier::Engine && !(cfg!(feature = "engine-tier") && engine_capable) {
+            return TierSelection {
+                outcome: TierOutcome::Unavailable {
+                    would_be: RenderTier::Engine,
+                },
+                diagnosis: format!(
+                    "frust-render: engine render tier explicitly requested via override, but \
+                     REFUSED — the `engine-tier` feature is {} and adapter `{}` {} the engine \
+                     tier's required downlevel flags \
+                     ({ENGINE_REQUIRED_DOWNLEVEL_FLAGS:?}). Rebuild with `--features \
+                     frust-render/engine-tier`.",
+                    if cfg!(feature = "engine-tier") {
+                        "compiled in"
+                    } else {
+                        "NOT compiled in"
+                    },
+                    caps.adapter_name,
+                    if engine_capable { "supports" } else { "lacks" },
                 ),
             };
         }
@@ -249,15 +313,16 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
 /// plumbing) — a compile-time-or-runtime knob like every other `FRUST_*`
 /// knob (see `context::env_str`'s precedence: runtime wins when both are
 /// set, compile-time otherwise). Set directly at runtime, by `frust run
-/// --render-tier gpu|cpu|hybrid` for the spawned desktop process, or baked in
+/// --render-tier gpu|cpu|hybrid|engine` for the spawned desktop process, or baked in
 /// at build time via `frust build|run --define FRUST_RENDER_TIER=<tier>` —
 /// the only way an override reaches an Android app process, which has no
 /// runtime env to set (mobile: `--render-tier` itself is not plumbed in v1,
 /// see `frust-cli`'s flag help text; `--define` is).
 pub const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
-/// Pure parse of a raw override string (`"gpu"`/`"cpu"`/`"hybrid"`,
-/// case-insensitive) into a [`RenderTier`], or `None` (with a logged warning)
+/// Pure parse of a raw override string (`"gpu"`/`"cpu"`/`"hybrid"`/
+/// `"engine"`, case-insensitive) into a [`RenderTier`], or `None` (with a
+/// logged warning)
 /// for anything else. Split out from the env lookup
 /// ([`render_tier_override_from_env`]) so it is unit-testable without mutating
 /// process-wide env state, mirroring `context.rs`'s pure-decision/
@@ -273,10 +338,13 @@ pub fn parse_render_tier_override(raw: &str) -> Option<RenderTier> {
         // than "invalid value, ignored" followed by a vello frame recorded as
         // a hybrid measurement.
         "hybrid" => Some(RenderTier::Hybrid),
+        // Ungated for `"hybrid"`'s reason, and refused the same way one level
+        // up when the `engine-tier` feature is absent.
+        "engine" => Some(RenderTier::Engine),
         other => {
             log::warn!(
                 "frust-render: ignoring invalid {RENDER_TIER_ENV_VAR}={other:?} (expected \
-                 \"gpu\", \"cpu\" or \"hybrid\")"
+                 \"gpu\", \"cpu\", \"hybrid\" or \"engine\")"
             );
             None
         }
@@ -473,6 +541,61 @@ mod tests {
     }
 
     #[test]
+    fn engine_requires_no_downlevel_flags() {
+        // The engine tier's reason for existing on the adapters that refuse
+        // the GPU tier: an adapter with NO downlevel flags at all satisfies
+        // its requirement, while failing the GPU one.
+        let none = wgpu::DownlevelFlags::empty();
+        assert!(none.contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS));
+        assert!(!none.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS));
+    }
+
+    #[test]
+    fn engine_override_is_build_gated() {
+        // Refused without the feature (nothing to select), honoured with it —
+        // on an adapter with no downlevel flags at all, since the engine tier
+        // requires none.
+        let selection = select_render_tier(
+            &caps(wgpu::DownlevelFlags::empty()),
+            Some(RenderTier::Engine),
+        );
+        if cfg!(feature = "engine-tier") {
+            assert_eq!(
+                selection.outcome,
+                TierOutcome::Available(RenderTier::Engine)
+            );
+        } else {
+            assert_eq!(
+                selection.outcome,
+                TierOutcome::Unavailable {
+                    would_be: RenderTier::Engine
+                }
+            );
+            assert!(selection.diagnosis.contains("REFUSED"));
+            assert!(selection.diagnosis.contains("engine-tier"));
+        }
+    }
+
+    #[test]
+    fn engine_is_never_auto_probed() {
+        // The rule the whole on-device comparison rests on: no probe result
+        // may be `Engine`, however capable or incapable the adapter is.
+        for flags in [
+            wgpu::DownlevelFlags::all(),
+            wgpu::DownlevelFlags::empty(),
+            wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::COMPUTE_SHADERS,
+            wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION,
+        ] {
+            let selection = select_render_tier(&caps(flags), None);
+            assert_ne!(
+                selection.outcome,
+                TierOutcome::Available(RenderTier::Engine),
+                "probe selected Engine for {flags:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_gpu_and_cpu_case_insensitively() {
         assert_eq!(parse_render_tier_override("gpu"), Some(RenderTier::Gpu));
         assert_eq!(parse_render_tier_override("GPU"), Some(RenderTier::Gpu));
@@ -494,6 +617,21 @@ mod tests {
         assert_eq!(
             parse_render_tier_override("Hybrid"),
             Some(RenderTier::Hybrid)
+        );
+    }
+
+    #[test]
+    fn parses_engine_in_every_build() {
+        // Parsed in EVERY build for `parses_hybrid_in_every_build`'s reason:
+        // an override that cannot be honoured is refused loudly one level up,
+        // never dropped here into a vello frame wearing an engine label.
+        assert_eq!(
+            parse_render_tier_override("engine"),
+            Some(RenderTier::Engine)
+        );
+        assert_eq!(
+            parse_render_tier_override("Engine"),
+            Some(RenderTier::Engine)
         );
     }
 

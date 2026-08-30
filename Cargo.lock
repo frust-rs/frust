@@ -2461,6 +2461,8 @@ version = "0.1.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
+ "frust-engine",
+ "frust-gpu",
  "frust-scene",
  "glifo 0.3.0",
  "kurbo",

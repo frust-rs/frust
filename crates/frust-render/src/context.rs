@@ -390,6 +390,72 @@ pub(crate) enum RenderPathKind {
     /// the direct-to-surface probe nor `force_blit` participates.
     #[cfg(feature = "hybrid-tier")]
     HybridDirect,
+    /// `frust-engine` renders into the acquired swapchain texture, which needs
+    /// only `RENDER_ATTACHMENT` in whatever format the surface reports — the
+    /// same demands [`Self::HybridDirect`] makes, for the same structural
+    /// reason (ordinary render passes, no compute storage write), plus a
+    /// depth attachment the surface carries alongside it
+    /// ([`RenderPath::EngineDirect`]). Chosen by
+    /// [`choose_engine_render_path`] for the
+    /// [`Engine`](crate::RenderTier::Engine) tier alone, so neither the
+    /// direct-to-surface probe nor `force_blit` participates.
+    #[cfg(feature = "engine-tier")]
+    EngineDirect,
+}
+
+/// What [`choose_engine_render_path`] decided about a surface's resolved alpha
+/// mode: either the engine arm applies, or this build's engine has no path for
+/// that surface.
+///
+/// A two-variant answer rather than a bare [`RenderPathKind`] because
+/// "unsupported" is a real outcome on this tier and must not be spelled as
+/// some other path: the engine owns no intermediate to blit from and no stage
+/// to un-premultiply in, so there is nothing to silently degrade to.
+#[cfg(feature = "engine-tier")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EngineRenderPath {
+    /// The engine arm applies, at this [`RenderPathKind`].
+    Supported(RenderPathKind),
+    /// The engine has no arm for this surface's resolved alpha mode. The
+    /// surface still renders through the engine, with its translucency
+    /// refused — see [`engine_translucency_refused`].
+    Unsupported,
+}
+
+/// The engine tier's render path for a surface whose resolved alpha mode is
+/// `alpha_mode`: [`RenderPathKind::EngineDirect`], or
+/// [`EngineRenderPath::Unsupported`] — never [`RenderPathKind::Blit`].
+///
+/// A sibling of [`choose_render_path`] rather than a branch inside it, for
+/// [`choose_hybrid_render_path`]'s reasons: the engine targets an ordinary
+/// render attachment in the surface's own format, so the
+/// `Rgba8Unorm`/`STORAGE_BINDING` probe that decides vello's arm has nothing
+/// to say here, and `force_blit` has no blit arm to force it onto. Unlike that
+/// sibling it does take an argument, because the engine's output convention
+/// makes one alpha mode genuinely unserveable:
+///
+/// - `Opaque`/`Auto` ignore alpha entirely — served.
+/// - `Inherit` (Android's translucent mode) and `PreMultiplied` expect
+///   PREMULTIPLIED alpha, which is what the engine's strip pipelines already
+///   write ([`crate::compositor`]'s premultiplied convention, and the same
+///   thing `vello_hybrid` does — see [`hybrid_translucency_refused`]). Served
+///   as-is: no [`PremultiplyPass`], which would darken every partial-alpha
+///   pixel by a second factor of `a`.
+/// - `PostMultiplied` (iOS's translucent mode) expects STRAIGHT alpha and
+///   would read `(C·a, a)` as `(C, a)` — every partial-alpha pixel too dark.
+///   The engine draws into the acquired view itself, so there is no
+///   intermediate to un-premultiply in, and an un-premultiplying engine output
+///   arm does not exist yet. Answered [`EngineRenderPath::Unsupported`] rather
+///   than served wrong.
+///
+/// Pure and mode-only, so it is host-testable without a surface.
+#[cfg(feature = "engine-tier")]
+pub(crate) fn choose_engine_render_path(alpha_mode: wgpu::CompositeAlphaMode) -> EngineRenderPath {
+    if alpha_mode_is_straight_translucent(alpha_mode) {
+        EngineRenderPath::Unsupported
+    } else {
+        EngineRenderPath::Supported(RenderPathKind::EngineDirect)
+    }
 }
 
 /// Pure direct-to-surface path policy: choose [`Direct`] only
@@ -454,6 +520,10 @@ pub(crate) fn tier_forces_blit(tier: crate::tier::RenderTier) -> bool {
         // ([`choose_hybrid_render_path`]); an intermediate plus a blit would
         // be a pass it never asked for.
         crate::tier::RenderTier::Hybrid => false,
+        // Renders into the acquired swapchain view too
+        // ([`choose_engine_render_path`]), and owns no intermediate to blit
+        // from.
+        crate::tier::RenderTier::Engine => false,
     }
 }
 
@@ -470,6 +540,7 @@ pub(crate) fn tier_compiled_in(tier: crate::tier::RenderTier) -> bool {
         crate::tier::RenderTier::Gpu => true,
         crate::tier::RenderTier::Cpu => cfg!(feature = "cpu-tier"),
         crate::tier::RenderTier::Hybrid => cfg!(feature = "hybrid-tier"),
+        crate::tier::RenderTier::Engine => cfg!(feature = "engine-tier"),
     }
 }
 
@@ -659,6 +730,13 @@ fn log_render_path(
                 "hybrid-direct",
                 "vello_hybrid into the acquired swapchain view (RENDER_ATTACHMENT, \
                  surface-reported format)"
+                    .to_string(),
+            ),
+            #[cfg(feature = "engine-tier")]
+            RenderPathKind::EngineDirect => (
+                "engine-direct",
+                "frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, \
+                 surface-reported format, surface-owned depth)"
                     .to_string(),
             ),
         };
@@ -912,6 +990,55 @@ fn hybrid_translucency_refused(
     alpha_mode: wgpu::CompositeAlphaMode,
 ) -> bool {
     path_kind == RenderPathKind::HybridDirect && alpha_mode_is_straight_translucent(alpha_mode)
+}
+
+/// Whether a configured surface must **refuse** translucency because the
+/// engine tier has no arm for its resolved alpha mode — the engine's copy of
+/// [`hybrid_translucency_refused`], and the same remedy.
+///
+/// `frust-engine`'s strip pipelines write premultiplied alpha, so
+/// `Inherit`/`PreMultiplied` are correct as-is and `Opaque`/`Auto` ignore
+/// alpha entirely; only iOS's straight-alpha `PostMultiplied` is unserveable,
+/// which is exactly what [`choose_engine_render_path`] answers
+/// [`EngineRenderPath::Unsupported`] for. Rather than a second predicate that
+/// could drift from that one, this asks it: an `Unsupported` surface refuses
+/// translucency and degrades the app to Mode A (opaque base, no platform-view
+/// punch), staying on the engine arm — the tier is being measured, and
+/// swapping it for vello on one surface would put the wrong renderer's number
+/// into the comparison.
+///
+/// Takes `path_kind` rather than assuming it, so the predicate cannot be
+/// misapplied to a vello arm. No `tier` parameter is needed:
+/// [`RenderPathKind::EngineDirect`] is reachable from the
+/// [`Engine`](crate::RenderTier::Engine) tier alone.
+#[cfg(feature = "engine-tier")]
+fn engine_translucency_refused(
+    path_kind: RenderPathKind,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> bool {
+    path_kind == RenderPathKind::EngineDirect
+        && choose_engine_render_path(alpha_mode) == EngineRenderPath::Unsupported
+}
+
+/// Whether a `width` x `height` target fits the device's own
+/// `max_texture_dimension_2d`.
+///
+/// The engine arm is the caller: its swapchain is a plain `RENDER_ATTACHMENT`
+/// texture and it is paired with a depth attachment of the identical extent
+/// ([`RenderPath::EngineDirect`]), so an over-ceiling surface would be two
+/// texture creations wgpu refuses — a validation error mid-configure rather
+/// than a diagnosis. Asked once, up front, against the limits the device was
+/// actually requested with ([`effective_limits`], which is what
+/// `wgpu::Device::limits` reports back), so the surface is refused with a
+/// message naming the ceiling instead.
+///
+/// Pure and host-testable. Compiled with the engine arm alone, which is its
+/// only caller: vello's own arms are sized from the same surface extent and
+/// would benefit identically, but they predate this check and keep their
+/// existing behaviour.
+#[cfg(feature = "engine-tier")]
+pub(crate) fn extent_within_limits(width: u32, height: u32, max_dimension_2d: u32) -> bool {
+    width <= max_dimension_2d && height <= max_dimension_2d
 }
 
 /// Permanent surface-caps + chosen-alpha-mode line, logged once
@@ -1258,6 +1385,26 @@ pub(crate) enum RenderPath {
         /// the ceil'd axis has no unpainted strip left in it.
         root: Affine,
     },
+    /// The engine tier's arm ([`RenderPathKind::EngineDirect`]): `frust-engine`
+    /// records its passes straight into the acquired swapchain view, so like
+    /// [`Self::Direct`] there is no intermediate and no blitter — but unlike
+    /// it, the frame needs a depth attachment matching the target extent, and
+    /// this is what owns it.
+    ///
+    /// Owned HERE rather than left to the engine's own lazily allocated
+    /// attachment because the surface is what knows when the extent changed:
+    /// [`RenderContext::resize_surface`] recreates it in the same step that
+    /// reconfigures the swapchain, keeping the reallocation off the frame
+    /// path, and the pairing can never disagree with the colour attachment it
+    /// is attached beside.
+    #[cfg(feature = "engine-tier")]
+    EngineDirect {
+        /// The `Depth24Plus` attachment this surface's frames test against,
+        /// sized to the swapchain and recreated with it. Handed to the engine
+        /// as `EngineTarget::depth`; the engine clears it each frame (it is
+        /// not pre-cleared — nothing else writes it).
+        depth: frust_engine::DepthTexture,
+    },
 }
 
 /// A configured swapchain surface plus the render-path resources for the arm it
@@ -1321,6 +1468,10 @@ impl ConfiguredSurface {
         let blit_target = match &self.path {
             RenderPath::Blit { target_size, .. } => Some(*target_size),
             RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => None,
+            // The engine arm renders at the surface's own resolution: the
+            // scale knob is a vello instrument (`effective_render_scale`).
+            #[cfg(feature = "engine-tier")]
+            RenderPath::EngineDirect { .. } => None,
         };
         path_render_scaled((self.config.width, self.config.height), blit_target)
     }
@@ -1867,22 +2018,38 @@ impl RenderContext {
         let capabilities = surface.get_capabilities(&handle.adapter);
         probe_direct_to_surface_capability(&capabilities);
         let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
-        // The hybrid tier decides its path on its own terms
-        // ([`choose_hybrid_render_path`]) — it shares neither the probe nor
-        // the valve `choose_render_path` weighs. Every other tier takes the
-        // untouched vello decision.
-        #[cfg(feature = "hybrid-tier")]
-        let path_kind = if tier == crate::tier::RenderTier::Hybrid {
-            choose_hybrid_render_path()
-        } else {
-            choose_render_path(has_rgba8unorm, has_storage_binding, force_blit)
+        // Resolved BEFORE the path decision, not after it: the engine arm's
+        // path answer is a function of the resolved alpha mode
+        // ([`choose_engine_render_path`]), which the vello arms' answer is
+        // not. The mode itself is derived from the request and the surface's
+        // reported caps alone, so moving the call up changes nothing for the
+        // arms that ignore it; its own log line stays where it was.
+        let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
+        // The hybrid and engine tiers decide their paths on their own terms
+        // ([`choose_hybrid_render_path`]/[`choose_engine_render_path`]) — they
+        // share neither the probe nor the valve `choose_render_path` weighs.
+        // Every other tier takes the untouched vello decision.
+        //
+        // An engine surface whose alpha mode has no engine arm still lands on
+        // `EngineDirect`: the tier owns no intermediate to degrade onto, so
+        // the refusal is spent on the surface's translucency instead
+        // ([`engine_translucency_refused`]) rather than on its render path.
+        #[cfg(any(feature = "hybrid-tier", feature = "engine-tier"))]
+        let path_kind = match tier {
+            #[cfg(feature = "hybrid-tier")]
+            crate::tier::RenderTier::Hybrid => choose_hybrid_render_path(),
+            #[cfg(feature = "engine-tier")]
+            crate::tier::RenderTier::Engine => match choose_engine_render_path(alpha_mode) {
+                EngineRenderPath::Supported(kind) => kind,
+                EngineRenderPath::Unsupported => RenderPathKind::EngineDirect,
+            },
+            _ => choose_render_path(has_rgba8unorm, has_storage_binding, force_blit),
         };
-        #[cfg(not(feature = "hybrid-tier"))]
+        #[cfg(not(any(feature = "hybrid-tier", feature = "engine-tier")))]
         let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
         log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
         log_render_scale(width, height, self.effective_render_scale());
 
-        let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
         log_surface_alpha_caps(&capabilities, alpha_mode);
 
         // Direct arm: the swapchain itself is the vello render target, so it must
@@ -1918,6 +2085,39 @@ impl RenderContext {
             // `render_to_texture` target format.
             #[cfg(feature = "hybrid-tier")]
             RenderPathKind::HybridDirect => {
+                let format = capabilities
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|it| SURFACE_FORMATS.contains(it))
+                    .ok_or_else(|| {
+                        anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
+                    })?;
+                (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            }
+            // Engine arm: `frust-engine` builds its strip pipelines for the
+            // format it is handed and draws through ordinary render passes, so
+            // — exactly like the hybrid arm above, and duplicated for the same
+            // reason (the two lists are free to diverge) — the swapchain needs
+            // `RENDER_ATTACHMENT` and nothing else, in whichever supported
+            // format the surface reports first.
+            //
+            // The extent is checked here, once, for both this texture and the
+            // depth attachment sized against it below: an over-ceiling surface
+            // is refused with a diagnosis naming the limit, rather than
+            // handed to wgpu as two texture creations it rejects
+            // ([`extent_within_limits`]).
+            #[cfg(feature = "engine-tier")]
+            RenderPathKind::EngineDirect => {
+                let max_dimension_2d = handle.device.limits().max_texture_dimension_2d;
+                if !extent_within_limits(width, height, max_dimension_2d) {
+                    return Err(anyhow!(
+                        "frust-render: engine tier refuses a {width}x{height} surface — the \
+                         device's max_texture_dimension_2d is {max_dimension_2d}, and both the \
+                         swapchain and the depth attachment paired with it are sized from this \
+                         extent"
+                    ));
+                }
                 let format = capabilities
                     .formats
                     .iter()
@@ -1996,6 +2196,22 @@ impl RenderContext {
             // [`hybrid_translucency_refused`] refuses it below.
             #[cfg(feature = "hybrid-tier")]
             RenderPathKind::HybridDirect => RenderPath::Direct,
+            // The engine arm carries exactly one per-surface resource: the
+            // depth attachment its opaque pass establishes and its alpha pass
+            // tests against, sized to the swapchain that was just configured
+            // (the extent was checked against the device ceiling above).
+            //
+            // Deliberately NOT reachable from the premultiply arm, and
+            // deliberately needing nothing from it: that arm premultiplies
+            // vello's straight output for a premultiplied-expecting swapchain,
+            // whereas `frust-engine` already writes premultiplied, so
+            // `Inherit`/`PreMultiplied` land here correct and untouched. The
+            // one combination this tier cannot serve is the opposite one —
+            // [`engine_translucency_refused`] refuses it below.
+            #[cfg(feature = "engine-tier")]
+            RenderPathKind::EngineDirect => RenderPath::EngineDirect {
+                depth: frust_engine::DepthTexture::new(&handle.device, width, height),
+            },
         };
         // The hybrid arm's refusal, resolved before the chain so the arm that
         // is compiled out contributes a plain `false` rather than a `#[cfg]`
@@ -2004,6 +2220,11 @@ impl RenderContext {
         let hybrid_refused = hybrid_translucency_refused(path_kind, alpha_mode);
         #[cfg(not(feature = "hybrid-tier"))]
         let hybrid_refused = false;
+        // The engine arm's refusal, resolved the same way for the same reason.
+        #[cfg(feature = "engine-tier")]
+        let engine_refused = engine_translucency_refused(path_kind, alpha_mode);
+        #[cfg(not(feature = "engine-tier"))]
+        let engine_refused = false;
         let resolved_translucent =
             if blit_translucency_refused(path_kind, alpha_mode, self.selected_tier()) {
                 log::warn!(
@@ -2017,6 +2238,14 @@ impl RenderContext {
                     "frust-render: hybrid tier presents premultiplied alpha, which a \
                  straight-alpha translucent surface (alpha_mode={alpha_mode:?}) would read as \
                  straight — refusing translucency, app degrades to Mode A"
+                );
+                false
+            } else if engine_refused {
+                log::warn!(
+                    "frust-render: the engine tier writes premultiplied alpha and has no \
+                 un-premultiplying output arm, which a straight-alpha translucent surface \
+                 (alpha_mode={alpha_mode:?}) would read as straight — refusing translucency, app \
+                 degrades to Mode A"
                 );
                 false
             } else {
@@ -2100,6 +2329,33 @@ impl RenderContext {
                 let (_new_texture, new_view) =
                     create_targets(width, height, &self.device_handle().device);
                 *intermediate_view = new_view;
+            }
+            // A depth attachment must match its colour attachment's extent
+            // exactly, so the resize recreates it here — in the same step that
+            // reconfigures the swapchain, keeping the allocation off the frame
+            // path. Skipped when the extent is unchanged
+            // (`DepthTexture::matches`), which is what a reconfigure with the
+            // same size costs today on every other arm too.
+            //
+            // An over-ceiling extent keeps the existing attachment rather than
+            // creating one wgpu would refuse: the swapchain reconfigure below
+            // is what fails on such a size, and a frame encoded against a
+            // mismatched depth attachment is refused by the engine rather than
+            // submitted ([`extent_within_limits`], the same ceiling
+            // `create_render_surface` refuses on).
+            #[cfg(feature = "engine-tier")]
+            RenderPath::EngineDirect { depth } => {
+                let device = &self.device_handle().device;
+                let max_dimension_2d = device.limits().max_texture_dimension_2d;
+                if !extent_within_limits(width, height, max_dimension_2d) {
+                    log::warn!(
+                        "frust-render: engine tier cannot resize to {width}x{height} — the \
+                         device's max_texture_dimension_2d is {max_dimension_2d}; keeping the \
+                         previous depth attachment"
+                    );
+                } else if !depth.matches(width, height) {
+                    *depth = frust_engine::DepthTexture::new(device, width, height);
+                }
             }
             RenderPath::Direct => {}
         }
@@ -2438,6 +2694,9 @@ mod tests {
         assert!(!tier_forces_blit(crate::tier::RenderTier::Gpu));
         assert!(tier_forces_blit(crate::tier::RenderTier::Cpu));
         assert!(!tier_forces_blit(crate::tier::RenderTier::Hybrid));
+        // Same trap, same answer: the engine tier renders into the acquired
+        // swapchain view and owns no intermediate to blit from.
+        assert!(!tier_forces_blit(crate::tier::RenderTier::Engine));
     }
 
     #[test]
@@ -2453,6 +2712,87 @@ mod tests {
             tier_compiled_in(crate::tier::RenderTier::Hybrid),
             cfg!(feature = "hybrid-tier")
         );
+        assert_eq!(
+            tier_compiled_in(crate::tier::RenderTier::Engine),
+            cfg!(feature = "engine-tier")
+        );
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn engine_render_path_is_never_blit() {
+        // The R10 trap on this tier: the engine owns no intermediate, so no
+        // alpha mode — served or refused — may route it through the blit arm.
+        // Asserted across EVERY mode rather than the served ones only, because
+        // the refusal is the arm most likely to reach for a fallback.
+        for mode in [
+            wgpu::CompositeAlphaMode::Auto,
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ] {
+            assert_ne!(
+                choose_engine_render_path(mode),
+                EngineRenderPath::Supported(RenderPathKind::Blit),
+                "engine path resolved to Blit for {mode:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn engine_serves_opaque_and_premultiplied_modes() {
+        // Premultiplied output meets a premultiplied-expecting swapchain, and
+        // an opaque one ignores alpha entirely: all three are served with no
+        // premultiply pass in between.
+        for mode in [
+            wgpu::CompositeAlphaMode::Auto,
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ] {
+            assert_eq!(
+                choose_engine_render_path(mode),
+                EngineRenderPath::Supported(RenderPathKind::EngineDirect),
+                "engine refused {mode:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn engine_refuses_straight_alpha_translucency() {
+        // iOS's translucent mode is the one the engine has no arm for; the
+        // surface still renders through the engine, with its translucency
+        // refused.
+        assert_eq!(
+            choose_engine_render_path(wgpu::CompositeAlphaMode::PostMultiplied),
+            EngineRenderPath::Unsupported
+        );
+        assert!(engine_translucency_refused(
+            RenderPathKind::EngineDirect,
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+        assert!(!engine_translucency_refused(
+            RenderPathKind::EngineDirect,
+            wgpu::CompositeAlphaMode::Inherit
+        ));
+        // Never misapplied to a vello arm.
+        assert!(!engine_translucency_refused(
+            RenderPathKind::Blit,
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn extent_limits_refuse_only_an_over_ceiling_axis() {
+        assert!(extent_within_limits(4096, 4096, 4096));
+        assert!(extent_within_limits(1, 1, 4096));
+        // Either axis alone is enough to refuse.
+        assert!(!extent_within_limits(4097, 4096, 4096));
+        assert!(!extent_within_limits(4096, 4097, 4096));
     }
 
     #[cfg(feature = "hybrid-tier")]

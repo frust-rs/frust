@@ -116,13 +116,14 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Force the render tier (`gpu`/`cpu`/`hybrid`) `frust-render`
-        /// probes for at startup, by setting `FRUST_RENDER_TIER` for the
-        /// launched process (see docs/DEVELOPMENT.md;
-        /// `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `cpu` and `hybrid` are experimental
-        /// tiers the app must have been BUILT with (`frust-render`'s
-        /// non-default `cpu-tier`/`hybrid-tier` features); otherwise the
+        /// Force the render tier (`gpu`/`cpu`/`hybrid`/`engine`)
+        /// `frust-render` probes for at startup, by setting
+        /// `FRUST_RENDER_TIER` for the launched process (see
+        /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
+        /// / `RENDER_TIER_ENV_VAR`). `cpu`, `hybrid` and `engine` are
+        /// non-default tiers the app must have been BUILT with
+        /// (`frust-render`'s `cpu-tier`/`hybrid-tier`/`engine-tier`
+        /// features); otherwise the
         /// launched process refuses the override at startup and says so.
         /// **Desktop-preview only in v1**: the
         /// `cargo run` fallback gets the env var directly; plumbing an
@@ -355,7 +356,7 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
 /// string ([`RenderTierArg::env_value`]) must stay in sync with
 /// `frust_render::parse_render_tier_override`'s accepted values by hand.
 ///
-/// The two experimental tiers are listed here unconditionally, exactly
+/// The three non-default tiers are listed here unconditionally, exactly
 /// because this enum is hand-synced rather than derived: which of them a
 /// given app actually contains is a property of the app's own cargo features,
 /// which this CLI neither knows nor builds — it only sets an env var for the
@@ -366,6 +367,7 @@ pub enum RenderTierArg {
     Gpu,
     Cpu,
     Hybrid,
+    Engine,
 }
 
 impl RenderTierArg {
@@ -375,6 +377,7 @@ impl RenderTierArg {
             RenderTierArg::Gpu => "gpu",
             RenderTierArg::Cpu => "cpu",
             RenderTierArg::Hybrid => "hybrid",
+            RenderTierArg::Engine => "engine",
         }
     }
 }
@@ -764,6 +767,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_run_with_render_tier_engine() {
+        let cli = Cli::parse_from(["frust", "run", "--render-tier", "engine"]);
+        match cli.command.unwrap() {
+            Command::Run { render_tier, .. } => {
+                assert_eq!(render_tier, Some(RenderTierArg::Engine));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_run_without_render_tier_is_none() {
         let cli = Cli::parse_from(["frust", "run"]);
         match cli.command.unwrap() {
@@ -791,6 +805,7 @@ mod tests {
         // accepted strings — this crate depends on no render crate to check
         // it against.
         assert_eq!(RenderTierArg::Hybrid.env_value(), "hybrid");
+        assert_eq!(RenderTierArg::Engine.env_value(), "engine");
     }
 
     #[test]
