@@ -247,9 +247,16 @@ classic-vs-`vello_cpu` divergence distribution over the whole corpus on the
 T400 (whole-corpus p95: mean absolute error ≤ 2.5, pixels over channel-8
 ≤ 4.8%; the per-channel max is deliberately not gated — antialiasing
 conflation on diagonal/curved edges exceeds the 1-px erosion mask, see that
-file's Legitimate Disagreements). The engine-vs-`vello_cpu` pair, by contrast,
+file's Legitimate Disagreements). That calibrated band is no longer advisory:
+`crates/frust-testing/tests/engine_goldens.rs` asserts the engine-vs-classic
+divergence stays inside it as a hard per-case gate, with any per-case widening
+recorded as a reviewed row (`ESCALATIONS` for the engine-vs-CPU tolerance,
+`BAND_ESCALATIONS` for the band), each carrying its measured number and the
+reason the disagreement is two correct rasterizers rather than one wrong one —
+the threshold lives on the named test, never an ad hoc retry path. The
+engine-vs-`vello_cpu` pair, by contrast,
 shares one geometry core and is measured near-exact (threshold 2, alpha
-compared; whole-image max |Δ| ≤ 1 across the Phase-3 corpus). That comparison
+compared; whole-image max |Δ| ≤ 1 across the rect/path/gradient corpus). That comparison
 is made in premultiplied space: straightening divides by the pixel's own
 alpha, which amplifies a 1-level difference by up to 255× at hairline/dash
 coverage — a diff there measures the conversion's information loss, not the

@@ -3757,3 +3757,29 @@ refuse finite values.
 **Trigger for removal**: the swap phase deletes the classic tier, at which
 point there is one behaviour; or a widget-visible need for the classic
 fallback semantics appears first.
+
+### `engine-image-minify-to-fit` — an image wider than one atlas layer renders minified where the classic tier renders it full-resolution
+
+**Observed** (evidence: `crates/frust-engine/src/cache/images.rs`'s
+`fit_extent`/`minify` and `crates/frust-engine/tests/images.rs`): the engine's
+image path is atlas-resident, and a source larger than one atlas layer
+(capability-chosen per-layer extent, mobile 1024² / desktop 2048², overridable
+via `FRUST_ENGINE_ATLAS_SIZE`) is downscaled to fit with an aspect-preserving
+box filter at upload time, logged once per image. The filter averages
+sRGB-encoded premultiplied bytes — exact for a uniform-colour source, very
+slightly dark on high-contrast content. The classic tier samples the
+full-resolution source with no such ceiling, so the two tiers' pixels around a
+minified image legitimately differ (the calibrated engine-vs-classic band
+carries a reviewed per-case widening for the corpus's over-ceiling case).
+
+**Accepted because**: cross-frame residency is the engine image path's whole
+design, and refusing an oversized image outright would turn a working widget
+blank on the engine tier for a size cliff the author cannot see; minifying is
+what comparable atlas-based renderers do, and the display size of an image
+that large is almost always far below its source resolution anyway. A
+linear-light filter would need a transfer-function table this crate does not
+carry.
+
+**Trigger for removal**: tiled residency (splitting an oversized source across
+atlas rectangles) or a dedicated non-atlas texture path for oversized sources;
+either removes the ceiling rather than softening it.

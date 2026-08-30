@@ -214,10 +214,10 @@ already have caught first).
   glyphs (per each case's own probes), and the measured divergence here sits
   comfortably inside the corpus's overall p95 rather than driving it.
 
-## Follow-up owed
+## Adoption
 
-`crates/frust-testing/tests/calibration.rs`'s own module docs and
-`docs/TESTING.md`'s Golden Image Policy/Comparison sections should reference
-this file and the recommended gate once Phase 3+ adopts a numeric budget —
-tracked as a documentation update for the doc-maintainer task in this plan's
-phase (`tsk_000001a049d613a7rTZyvzHD`), not made here.
+The recommended gate is adopted: `crates/frust-testing/tests/engine_goldens.rs`
+holds the engine-vs-classic divergence to this file's Derived P2 budget as a
+hard per-case assertion, with per-case widenings recorded as reviewed
+`BAND_ESCALATIONS` rows citing this file's Legitimate Disagreements.
+`docs/TESTING.md`'s Comparison section references both.
