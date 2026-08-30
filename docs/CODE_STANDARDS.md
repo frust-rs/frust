@@ -22,6 +22,9 @@ off this index — read this plus the one that covers what you are touching:
     `on_surface_created_from_android_window`/ `on_surface_created_from_metal_layer`
     (`renderer.rs`) — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
     `wgpu::Surface`.
+  - `frust-gpu`'s own `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — the
+    engine-substrate crate's sibling pair to the `frust-render` sites above, same raw
+    `ANativeWindow*`/`CAMetalLayer*`-to-`wgpu::Surface` contract, each `# Safety`-noted.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary (`extern "system"`
     exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s
     `JavaVM` stash), `android_app!`'s generated exports, and the render-thread split's
