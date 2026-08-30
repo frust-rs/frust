@@ -28,6 +28,7 @@ pub mod error;
 pub mod gpu;
 pub mod renderer;
 pub mod schedule;
+pub(crate) mod text;
 
 pub use cache::{
     AtlasBudget, AtlasRegion, CachedRamp, GradientCache, GradientTextureLayout, ImageResidency,

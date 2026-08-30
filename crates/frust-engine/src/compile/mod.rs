@@ -8,11 +8,13 @@
 //!
 //! The compiler owns the retained scratch a
 //! [`StripGenerator`] needs (line buffer, tiles, flatten/stroke context) so a
-//! steady-state frame reuses those allocations, and the one piece of state that
-//! genuinely spans frames — the [`ImageResidency`] that keeps an image's atlas
-//! rectangle alive for as long as the scene keeps drawing it. Everything else
-//! is per-frame: [`compile`](SceneCompiler::compile) returns what a frame
-//! produced in one [`CompiledFrame`] and keeps nothing of it.
+//! steady-state frame reuses those allocations, and the two pieces of state
+//! that genuinely span frames — the [`ImageResidency`] that keeps an image's
+//! atlas rectangle alive for as long as the scene keeps drawing it, and the
+//! [`GlyphPrepCache`] that keeps a glyph's fetched outline and its font's
+//! hinting instance alive on the same terms. Everything else is per-frame:
+//! [`compile`](SceneCompiler::compile) returns what a frame produced in one
+//! [`CompiledFrame`] and keeps nothing of it.
 //!
 //! Compiled here: the geometry primitives — axis-aligned and rounded
 //! rectangles, lines, arbitrary filled/stroked paths — the clip bracket around
@@ -24,9 +26,11 @@
 //! (see [`paint`] and [`crate::cache::images`]), and blurred rounded
 //! rectangles, whose padded bounding rectangle is rasterized the same way and
 //! painted by a gaussian-falloff paint the fragment shader evaluates per pixel
-//! (see [`blur_rrect`]). Glyphs and shader quads are recognised and skipped —
-//! the engine grows them in later passes, and skipping is the conservative
-//! behaviour (a frame draws less, never wrong).
+//! (see [`blur_rrect`]), and glyph runs, whose outlines are fetched and scaled
+//! by `glifo` and then rasterized as any other filled path would be, painted
+//! by the run's own brush (see [`crate::text`]). Shader quads are recognised
+//! and skipped — the engine grows them in a later pass, and skipping is the
+//! conservative behaviour (a frame draws less, never wrong).
 
 pub mod blur_rrect;
 
@@ -53,7 +57,9 @@ use kurbo::{
 use peniko::{Brush, Color, Fill, ImageData};
 
 use frust_gpu::TierCaps;
-use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
+use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
+
+use glifo::GlyphPrepCache;
 
 use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
@@ -68,17 +74,22 @@ use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
+use crate::text::{GlyphRunTargets, font_is_readable, lower_glyph_run};
 
 /// Curve-flattening tolerance, in device pixels.
 ///
 /// The value `vello_hybrid`'s own scene recorder flattens at; keeping it
 /// identical is what lets the two rasterizers be compared strip-for-strip.
-const FLATTEN_TOLERANCE: f64 = 0.1;
+pub(crate) const FLATTEN_TOLERANCE: f64 = 0.1;
 
 /// Raised the first time an image is refused residency, so a scene that draws
 /// an unsupported image says so at least once at warning level without the
 /// per-frame repetition a per-skip warning would produce.
 static IMAGE_SKIP_WARNING: Once = Once::new();
+
+/// Raised the first time a glyph run is refused for an unreadable font, on the
+/// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
+static FONT_SKIP_WARNING: Once = Once::new();
 
 /// Everything one compiled frame produced.
 ///
@@ -160,6 +171,21 @@ pub struct CompiledFrame {
     /// a frame whose clips all scissored reports zero here, which is what
     /// "a rectangular clip is free" means measured rather than asserted.
     pub clip_mask_strips: usize,
+    /// How many of this frame's draws painted one glyph outline.
+    ///
+    /// A glyph run costs one draw per glyph that produced coverage, so this is
+    /// bounded by — and usually below — the run's own glyph count: a glyph
+    /// clipped away or carrying no ink (a space) records nothing.
+    pub glyph_draws: u32,
+    /// How many glyphs were dropped because the engine has no way to paint
+    /// them on this path — a colour (COLR) glyph, a bitmap-strike glyph, or a
+    /// stroked outline.
+    ///
+    /// Observational, and the counter that makes "a glyph the engine cannot
+    /// paint goes missing rather than landing wrong" measurable rather than
+    /// asserted, the same way [`skipped_images`](Self::skipped_images) does
+    /// for images.
+    pub skipped_glyphs: u32,
 }
 
 impl CompiledFrame {
@@ -191,6 +217,7 @@ pub struct SceneCompiler {
     snapshots: SnapshotStack,
     punches: Vec<StagedPunch>,
     images: ImageResidency,
+    glyphs: GlyphPrepCache,
 }
 
 impl SceneCompiler {
@@ -227,6 +254,7 @@ impl SceneCompiler {
             snapshots: SnapshotStack::new(),
             punches: Vec::new(),
             images: ImageResidency::new(budget),
+            glyphs: GlyphPrepCache::default(),
         }
     }
 
@@ -313,6 +341,12 @@ impl SceneCompiler {
         // available to this frame's own allocations and its clear is ordered
         // ahead of their uploads.
         self.images.begin_frame();
+        // Once per compiled frame, which is the cadence `glifo` ages its
+        // outline entries by. Ahead of the walk rather than after it for the
+        // same reason as the reap above: the glyphs this frame is about to
+        // draw should be stamped as used *after* the ageing pass, not before
+        // it.
+        self.glyphs.maintain();
 
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
@@ -329,6 +363,8 @@ impl SceneCompiler {
             atlas_layers: 0,
             image_draws: 0,
             skipped_images: 0,
+            glyph_draws: 0,
+            skipped_glyphs: 0,
         };
         let mut depth = DepthCounter::new();
 
@@ -738,12 +774,87 @@ impl SceneCompiler {
                     );
                 }
             }
+            Command::GlyphRun(run) => {
+                self.compile_glyph_run(run, combined * run.transform, frame, depth);
+            }
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
             // frame.
-            Command::GlyphRun(_) | Command::ShaderQuad { .. } => {}
+            Command::ShaderQuad { .. } => {}
         }
+    }
+
+    /// Draw one glyph run: its brush encoded once, then every glyph's outline
+    /// rasterized under the active clip (see [`crate::text`]).
+    ///
+    /// `transform` is the run's own transform composed with the frame root.
+    /// The brush is encoded against it once for the whole run rather than once
+    /// per glyph, because that transform *is* the paint's placement — a glyph
+    /// moves the outline, never the paint behind it — so a gradient-brushed
+    /// line of text costs one encoded entry and one colour ramp.
+    ///
+    /// A run whose brush cannot be encoded draws nothing, on the same terms an
+    /// image draw the atlas refuses does: the refusal is already counted in
+    /// [`CompiledFrame::skipped_images`] by the encoding, and every glyph in
+    /// the run simply goes missing rather than being painted with a
+    /// substitute. An image-brushed run is likewise counted as the one image
+    /// draw its single encoding is, not as one per glyph.
+    ///
+    /// A run whose font cannot be read is refused the same way and for a
+    /// harder reason: the text backend's font gate is what keeps a blob that
+    /// is not a font off the frame path at all (see [`crate::text`]).
+    fn compile_glyph_run(
+        &mut self,
+        run: &GlyphRun,
+        transform: Affine,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+    ) {
+        // All three checked before the brush is encoded, so a run that can
+        // draw nothing leaves no orphan entry in the frame's encoded-paint
+        // table and no ramp request for a gradient nothing paints with — the
+        // same rule [`record`](Self::record) keeps for a shape.
+        if run.glyphs.is_empty() || self.clips.blocks_everything() {
+            return;
+        }
+        if !font_is_readable(run.font.font()) {
+            note_font_skip();
+            let glyphs = u32::try_from(run.glyphs.len()).unwrap_or(u32::MAX);
+            frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(glyphs);
+            return;
+        }
+
+        let Some(paint) = self.encode_paint(PaintSource::Brush(&run.brush), transform, frame)
+        else {
+            return;
+        };
+
+        // Destructured rather than passed as `self`, because the sink borrows
+        // the generator and the clip stack mutably while the glyph caches are
+        // borrowed mutably alongside them.
+        let Self {
+            generator,
+            clips,
+            glyphs,
+            ..
+        } = self;
+        let outcome = lower_glyph_run(
+            run,
+            transform,
+            paint,
+            &run.brush,
+            GlyphRunTargets {
+                generator,
+                clips,
+                prep: glyphs,
+                frame,
+                depth,
+            },
+        );
+
+        frame.glyph_draws = frame.glyph_draws.saturating_add(outcome.drawn);
+        frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(outcome.skipped);
     }
 
     /// Open a layer bracket: its rectangle's clip, and — below full opacity —
@@ -1020,6 +1131,22 @@ fn note_image_skip(skip: ImageSkip) {
     log::debug!("image draw skipped: {skip}");
 }
 
+/// Report a glyph run whose font could not be read.
+///
+/// The same once-warning-then-debug shape [`note_image_skip`] uses, and for
+/// the same reason: a missing line of text is otherwise invisible, while a
+/// scene that keeps drawing against an unloaded font would repeat the message
+/// every frame.
+fn note_font_skip() {
+    FONT_SKIP_WARNING.call_once(|| {
+        log::warn!(
+            "glyph run skipped: its font blob is not a readable face \
+             (further skips are logged at debug level)"
+        );
+    });
+    log::debug!("glyph run skipped: its font blob is not a readable face");
+}
+
 /// The transform a command carries, or `None` for one that carries none.
 fn command_transform(command: &Command) -> Option<Affine> {
     match command {
@@ -1109,7 +1236,14 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// reach the flattener and the paint encoding exactly as a non-finite rounded
 /// rect's radii already do. A lowered command carrying no geometry at all
 /// ([`Command::PopClip`] and its two siblings) has nothing to check and sits
-/// with the skipped group.
+/// with the skipped group. A glyph run's font size and per-glyph positions are
+/// checked for the same reason a stroke width is: they are not decoration
+/// either, but the numbers every glyph's own draw transform is derived from
+/// ([`crate::text`]), so a non-finite one reaches the flattener as a transform
+/// no subdivision converges against. The scan is per glyph and therefore the
+/// one check here whose cost grows with a command's contents — bounded by the
+/// glyph count the run already carries, and paid once per frame rather than
+/// once per glyph drawn.
 ///
 /// The match is exhaustive over every [`Command`] variant, the same as
 /// [`SceneCompiler::compile_command`]'s: a variant added to the enum fails to
@@ -1141,9 +1275,9 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
             std_dev,
             ..
         } => rect.is_finite() && radii_are_finite(*radii) && std_dev.is_finite(),
+        Command::GlyphRun(run) => glyph_run_is_finite(run),
         // Carrying no geometry of their own — see above.
-        Command::GlyphRun(_)
-        | Command::PopClip
+        Command::PopClip
         | Command::PopLayer
         | Command::ShaderQuad { .. }
         | Command::PopSnapshot => true,
@@ -1154,6 +1288,23 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
     } else {
         Err(EngineError::InvalidGeometry)
     }
+}
+
+/// Whether a glyph run's own numbers are finite.
+///
+/// The font size and every glyph position, because those are exactly the run's
+/// numbers that end up inside a transform: `glifo` absorbs the font size into
+/// each glyph's draw transform and translates that transform by the glyph's
+/// position, so either one non-finite produces a transform the flattener
+/// subdivides against forever. The font itself is not checked — a malformed or
+/// unreadable face yields no outline and draws nothing, which is a missing
+/// glyph rather than an unbounded loop.
+fn glyph_run_is_finite(run: &GlyphRun) -> bool {
+    run.font_size.is_finite()
+        && run
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.x.is_finite() && glyph.y.is_finite())
 }
 
 /// Whether every corner radius is finite.
