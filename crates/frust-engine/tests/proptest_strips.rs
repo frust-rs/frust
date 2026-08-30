@@ -1254,21 +1254,20 @@ fn non_finite_geometry_is_refused_field_by_field() {
 /// rather than refusing the whole frame.
 ///
 /// The distinction is the difference between drawing less and drawing nothing:
-/// a blurred rectangle the compiler has not implemented yet must not be able to
+/// a shader quad the compiler has not implemented yet must not be able to
 /// blank a frame the geometry beside it would have rendered.
 ///
 /// A clip is deliberately not the case here any more, and neither is a layer, a
-/// snapshot bracket, a clear or an image: the compiler lowers all five now, so
-/// each one's own numbers are geometry the frame is refused for, pinned by
-/// `tests/clips.rs`, `tests/layers.rs` and `tests/images.rs`.
+/// snapshot bracket, a clear, an image or a blurred rounded rectangle: the
+/// compiler lowers all six now, so each one's own numbers are geometry the
+/// frame is refused for, pinned by `tests/clips.rs`, `tests/layers.rs`,
+/// `tests/images.rs` and `tests/blur_rrect.rs` respectively.
 #[test]
 fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
     let scene = scene_of(&[
-        Op::BlurredRoundedRect {
-            rect: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
-            radii: CornerRadii::uniform(f64::NAN),
-            std_dev: f64::INFINITY,
-            color: RED,
+        Op::ShaderQuad {
+            dest: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
+            time: f32::NAN,
         },
         Op::FillRect {
             rect: Rect::new(0.0, 0.0, 16.0, 16.0),

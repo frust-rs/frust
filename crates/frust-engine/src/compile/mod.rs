@@ -19,12 +19,16 @@
 //! them, which lowers to a scissor rectangle or a coverage mask and never to an
 //! intermediate texture (see [`clip`]), the opacity-layer and snapshot brackets
 //! that group them (see [`layers`]), the hole punch that erases what they
-//! painted (see [`clear`]), and images, whose destination rectangle is
+//! painted (see [`clear`]), images, whose destination rectangle is
 //! rasterized like any other fill and painted by an atlas-backed image paint
-//! (see [`paint`] and [`crate::cache::images`]). Glyphs, blurred rectangles and
-//! shader quads are recognised and skipped — the engine grows them in later
-//! passes, and skipping is the conservative behaviour (a frame draws less,
-//! never wrong).
+//! (see [`paint`] and [`crate::cache::images`]), and blurred rounded
+//! rectangles, whose padded bounding rectangle is rasterized the same way and
+//! painted by a gaussian-falloff paint the fragment shader evaluates per pixel
+//! (see [`blur_rrect`]). Glyphs and shader quads are recognised and skipped —
+//! the engine grows them in later passes, and skipping is the conservative
+//! behaviour (a frame draws less, never wrong).
+
+pub mod blur_rrect;
 
 pub mod clear;
 
@@ -46,7 +50,7 @@ use std::sync::Once;
 use kurbo::{
     Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
 };
-use peniko::{Brush, Fill, ImageData};
+use peniko::{Brush, Color, Fill, ImageData};
 
 use frust_gpu::TierCaps;
 use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
@@ -60,6 +64,7 @@ use vello_common::tile::Tile;
 use vello_common::util::is_axis_aligned;
 
 use crate::cache::images::{AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload};
+use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
@@ -659,13 +664,64 @@ impl SceneCompiler {
                     );
                 }
             }
+            Command::BlurredRoundedRect {
+                rect,
+                radii,
+                std_dev,
+                color,
+                transform,
+            } => {
+                let transform = combined * *transform;
+                let source = PaintSource::BlurredRect {
+                    rect: *rect,
+                    radii: *radii,
+                    std_dev: *std_dev,
+                    color: *color,
+                };
+                // The strip generator rasterizes the padded bounding
+                // rectangle, not `rect` itself and not a rounded shape — see
+                // [`blur_rrect`]'s module doc for why. It takes the same fast
+                // rectangle path a fill or an image does whenever that padded
+                // rectangle lands pixel-aligned under `transform`.
+                let bounds = inflated_bounds(*rect, *std_dev);
+
+                if let Some(device_rect) = fast_rect(bounds, transform) {
+                    let recorded = self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
+                        },
+                    );
+                    if recorded {
+                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+                    }
+                } else {
+                    self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_path(
+                                bounds.path_elements(FLATTEN_TOLERANCE),
+                                Fill::NonZero,
+                                transform,
+                                None,
+                                storage,
+                                clip,
+                            );
+                        },
+                    );
+                }
+            }
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
             // frame.
-            Command::GlyphRun(_)
-            | Command::BlurredRoundedRect { .. }
-            | Command::ShaderQuad { .. } => {}
+            Command::GlyphRun(_) | Command::ShaderQuad { .. } => {}
         }
     }
 
@@ -864,6 +920,25 @@ impl SceneCompiler {
                 &mut frame.encoded_paints,
                 &mut self.images,
             ),
+            PaintSource::BlurredRect {
+                rect,
+                radii,
+                std_dev,
+                color,
+            } => {
+                // Unlike an image, this can never be refused (see
+                // [`encode_blurred_rounded_rect`]'s doc), so it returns
+                // straight away rather than joining the fallible match below.
+                let paint = encode_blurred_rounded_rect(
+                    rect,
+                    radii,
+                    std_dev,
+                    color,
+                    transform,
+                    &mut frame.encoded_paints,
+                );
+                return Some(paint);
+            }
         };
 
         match encoded {
@@ -896,6 +971,19 @@ enum PaintSource<'a> {
         data: &'a ImageData,
         /// The destination rectangle, in the command's own coordinate space.
         dest: Rect,
+    },
+    /// A [`Command::BlurredRoundedRect`]'s shadow parameters, in the
+    /// command's own (pre-transform) coordinate space.
+    BlurredRect {
+        /// The un-padded rectangle the shadow is cast from.
+        rect: Rect,
+        /// Per-corner radii, collapsed to their largest at encode time (see
+        /// [`blur_rrect`]).
+        radii: CornerRadii,
+        /// The blur's standard deviation.
+        std_dev: f64,
+        /// The shadow's base colour.
+        color: Color,
     },
 }
 
@@ -991,8 +1079,14 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// it erases with. An image's destination rectangle is checked on those same
 /// terms — it is both the coverage the image paints through and the scale its
 /// natural-to-destination transform is derived from, so a non-finite one would
-/// reach the flattener and the paint encoding alike. A lowered command carrying
-/// no geometry at all
+/// reach the flattener and the paint encoding alike. A blurred rounded
+/// rectangle's rectangle, corner radii and standard deviation are checked on
+/// those same terms — together they decide the padded rectangle the strip
+/// generator rasterizes ([`blur_rrect::inflated_bounds`]) and the falloff the
+/// fragment shader evaluates from the encoded paint
+/// ([`blur_rrect::encode_blurred_rounded_rect`]), so a non-finite one would
+/// reach the flattener and the paint encoding exactly as a non-finite rounded
+/// rect's radii already do. A lowered command carrying no geometry at all
 /// ([`Command::PopClip`] and its two siblings) has nothing to check and sits
 /// with the skipped group.
 ///
@@ -1020,10 +1114,15 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
             rect, alpha, scale, ..
         } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
         Command::Image { dest, .. } => dest.is_finite(),
+        Command::BlurredRoundedRect {
+            rect,
+            radii,
+            std_dev,
+            ..
+        } => rect.is_finite() && radii_are_finite(*radii) && std_dev.is_finite(),
         // Carrying no geometry of their own — see above.
         Command::GlyphRun(_)
         | Command::PopClip
-        | Command::BlurredRoundedRect { .. }
         | Command::PopLayer
         | Command::ShaderQuad { .. }
         | Command::PopSnapshot => true,

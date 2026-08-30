@@ -33,6 +33,7 @@ pub use cache::{
     AtlasBudget, AtlasRegion, CachedRamp, GradientCache, GradientTextureLayout, ImageResidency,
     ImageSkip, ImageUpload, ResidentImage,
 };
+pub use compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 pub use compile::paint::{
     BrushEncoding, ImageEncoding, LutRequest, encode_brush, encode_image, encode_image_brush,
     encode_image_command,
