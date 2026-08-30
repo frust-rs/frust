@@ -31,15 +31,21 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-text::style` | `TextStyle` and related types form the styling vocabulary (the M3 type-scale surface) |
 | `frust-text::editor` | `TextEditor` wraps Parley's `PlainEditor` for caret/selection/composition; the sole owner of UTF-16↔byte IME index conversion |
 
-## GPU Substrate (`frust-gpu`)
+## GPU Substrate (`frust-gpu`, `frust-engine`)
 
-`frust-gpu` is the `wgpu` adapter/device/surface substrate the future frust-owned render engine
+`frust-gpu` is the `wgpu` adapter/device/surface substrate the frust-owned render engine
 (`frust-engine`) builds on. It owns no scene display list, no shader pipeline for a specific
 renderer, and no `vello`/`glifo` dependency — its job is everything directly above `wgpu` itself:
 probing adapter capabilities, and turning that into instances, devices, surfaces, and pooled GPU
-resources a renderer built on top can consume without re-deriving them. It has no spoke of its own
-(see [DOC_POLICY.md](DOC_POLICY.md)); it documents here because the engine plan folds it into
-RENDER's pipeline.
+resources a renderer built on top can consume without re-deriving them. Neither crate has a spoke
+of its own (see [DOC_POLICY.md](DOC_POLICY.md)); both document here because the engine plan folds
+them into RENDER's pipeline.
+
+`frust-engine` is that render engine: a stateless-per-frame compiler that walks a `frust_scene::Scene`
+into sparse strips (vello_common/glifo's rasterizer core), packs them into the GPU layouts its
+ported WGSL reads, and records a frame's passes into a caller-owned `wgpu::CommandEncoder`. It
+depends on `frust-gpu` for device/pipeline/pool substrate and on `frust-scene` for the display list;
+every rendering path returns an `EngineError` rather than panicking (E17).
 
 ### Module Structure (`frust-gpu`)
 
@@ -55,7 +61,7 @@ RENDER's pipeline.
 | `frust-gpu::pool` + `frust-gpu::arena` | `TexturePool` recycles per-frame scratch textures keyed on a 256-px-quantized extent, aged out after 60 unused frames (not `frust-render`'s 2-frame compositor-scratch window, which is wrong for a size that keeps changing across a resize drag), applying `wgpu::TextureUsages::TRANSIENT` only where `TierCaps::transient_saves_memory` says it helps; `HostBuffer` bump-allocates every small per-frame GPU upload into one buffer, flushed with a single `write_buffer` and reset at frame start, growing geometrically and never shrinking |
 | `frust-gpu::encoder` | `CommandBuffer` wraps one `wgpu::CommandEncoder` under a single-submit borrowing contract: a caller records render passes and staged uploads only, never submits, and holds no borrow past return (glyph-atlas uploads are the one sanctioned exception, submitting their own encoder ahead of the scene pass) |
 | `frust-gpu::headless` | `HeadlessTarget` is an offscreen `RENDER_ATTACHMENT \| COPY_SRC` target with no swapchain, for engine-seam tests and tooling; `read_back` strips wgpu's mandatory row padding so an arbitrary width reads back exact |
-| `frust-gpu::lint` | WGSL-directory and pipeline-layout-descriptor scans enforcing the engine's downlevel design rules (E1–E18: no compute, no storage buffers/textures, uniform/bind-group/vertex-attribute ceilings) as design-rule tripwires over the future engine shader directory, plus `check_limits_against_webgl2` for adapter-limit conformance |
+| `frust-gpu::lint` | WGSL-directory and pipeline-layout-descriptor scans enforcing the engine's downlevel design rules (E1–E18: no compute, no storage buffers/textures, uniform/bind-group/vertex-attribute ceilings) as design-rule tripwires, run against `frust-engine`'s own shader directory; plus `check_limits_against_webgl2` for adapter-limit conformance |
 
 ### Design Rule
 
@@ -65,6 +71,21 @@ built on top of it — tier/pipeline/pool/surface choices alike — is a pure fu
 `surface` follow the identical pure-decision/platform-lookup split: a small set of named,
 platform-gated lookups (`is_android_emulator`, `is_ios_simulator`) answer what the environment is,
 and everything downstream of them is a plain-value decision.
+
+### Module Structure (`frust-engine`)
+
+| Module | Responsibility |
+|--------|-----------------|
+| `frust-engine::compile` | `SceneCompiler` is a stateless walk over `frust_scene::Scene::commands` producing a `CompiledFrame` (strips, draws, encoded paints, LUT requests); a fast-rect path writes strip coverage directly for an axis-aligned, pixel-aligned rectangle, a dash pattern is pre-expanded to a plain path before stroking, and `DepthCounter` hands out the frame's monotonic painter-order depths |
+| `frust-engine::compile::paint` | `encode_brush` turns a `peniko::Brush` into a `vello_common::Paint` plus, for a gradient, a `LutRequest` naming the ramp its `EncodedPaint` entry still needs made resident — serviced once per frame by the renderer rather than per draw |
+| `frust-engine::cache` | `GradientCache` keys ramp residency by a gradient's colour-affecting properties (stops, colour space, hue direction), not its geometry, so two placements of the same gradient share one entry; ramps live in one packed `Rgba8Unorm` byte buffer compacted on LRU eviction, each cached ramp naming its record by texel offset |
+| `frust-engine::gpu` | The GPU-side data layouts the strip shaders read, byte-compatible with the `vello_hybrid` reference: `GpuStrip` (the per-instance quad), `GpuEncodedPaint` family (gradient/image/blur records in the encoded-paint texture), and `GpuConfig` (the per-draw uniform block); sizing/addressing/packing are pure functions over plain values, returning `EngineError` where the reference asserts |
+| `frust-engine::gpu::pipelines` + `shaders/` | Six pipelines — four strip variants (intermediate, alpha, depth-tested alpha, opaque) differing only in target/blend/depth state, plus clear and copy — each a plain `frust_gpu::RenderPipelineDesc` warmed up before any frame needs it; WGSL is ported with hand-inlined imports (no WESL resolver at this MSRV) and stays within the four-bind-group WebGL2 ceiling |
+| `frust-engine::renderer` | `EngineRenderer::new`/`encode`/`resize`/`end_frame`/`bind_texture`/`unbind_texture` — the public seam a host drives one surface's frames through; `encode` records clear→opaque(depth)→alpha into the caller's own `wgpu::CommandEncoder`, never submits it, and leaves no pass open on return; with no depth attachment available the two draw passes collapse into one blended painter-order pass, a correctness requirement rather than a fallback |
+| `frust-engine::gpu::depth` | `DepthAttachment` is `Depth24Plus`, either caller-supplied (paired with `set_depth_pre_cleared` so the frame loads rather than clears a populated buffer) or engine-owned and lazily allocated, reallocated only when the target extent changes |
+| `frust-engine::gpu::targets` | A per-renderer `IntermediateTargets` pool for off-screen layers/scratch copies, capping any request at `min(adapter max, 8192)` and answering an over-ceiling request with `IntermediateTexture::TooLarge` rather than a device error |
+
+`tests/structure.rs` is a host-only structural guard, no GPU device or adapter created: G1 runs `frust-gpu`'s WGSL-directory lint against `frust-engine`'s shipped shaders, G2 checks the engine's downlevel limits profile against the WebGL2 ceiling, and E17 greps `compile/`, `gpu/` and `renderer.rs` for a bare `unwrap`/`expect`/`panic!` outside test code.
 
 ## Layer Dependencies
 
@@ -89,8 +110,8 @@ The scene-layer purity boundary these confinement rules enforce against `frust-s
 is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 `frust-gpu` sits outside that graph: it depends on `wgpu`/`kurbo`/`peniko` only, not on
-`frust-scene`/`frust-render`/`frust-text`. The future `frust-engine` depends on `frust-gpu` +
-`frust-scene`; nothing above RENDER depends on either — the same engine-tier boundary
+`frust-scene`/`frust-render`/`frust-text`. `frust-engine` depends on `frust-gpu` + `frust-scene`;
+nothing above RENDER depends on either — the same engine-tier boundary
 [ARCHITECTURE.md](ARCHITECTURE.md) records at the cross-unit level.
 
 ## Data Flow

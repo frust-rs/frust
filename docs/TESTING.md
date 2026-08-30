@@ -232,7 +232,10 @@ Store independent baselines for:
   `metal-macos/`; an unknown adapter lands in the non-promotable
   `classic-unclassified` staging class
   (`crates/frust-testing/src/oracle_classic.rs`'s `golden_class`). Engine
-  classes (`engine-vulkan-t400/`, …) arrive with the engine phases.
+  classes reuse the classic class name under an `engine-` prefix
+  (`engine-vulkan-nvidia-t400/`, recording-only, promoted the same way), so one
+  adapter table routes both arms; an unreviewed adapter lands in
+  `engine-unclassified`.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the
@@ -245,8 +248,12 @@ T400 (whole-corpus p95: mean absolute error ≤ 2.5, pixels over channel-8
 ≤ 4.8%; the per-channel max is deliberately not gated — antialiasing
 conflation on diagonal/curved edges exceeds the 1-px erosion mask, see that
 file's Legitimate Disagreements). The engine-vs-`vello_cpu` pair, by contrast,
-shares one geometry core and is expected near-exact (threshold 2, alpha
-compared). Native offscreen and Android screenshots are never cross-compared:
+shares one geometry core and is measured near-exact (threshold 2, alpha
+compared; whole-image max |Δ| ≤ 1 across the Phase-3 corpus). That comparison
+is made in premultiplied space: straightening divides by the pixel's own
+alpha, which amplifies a 1-level difference by up to 255× at hairline/dash
+coverage — a diff there measures the conversion's information loss, not the
+rasterizers. Native offscreen and Android screenshots are never cross-compared:
 Android adds density, platform fonts, surface composition, system bars, color
 management, and potentially a different Vulkan implementation.
 
