@@ -1690,71 +1690,101 @@ and the blurred rounded rect all agree with `vello_cpu` at 0 pixels differing
 under channel 2, and sit inside the calibrated band against classic. Three
 full 824x1784 widget frames do the same.
 
-Opacity layers, snapshot brackets and `ClearRect` hole punches do NOT: the
-engine compiles and schedules them but renders them as if they were absent
-(layer alpha ignored, punches not erased), and a 5000x5000 source image over
-the atlas ceiling draws nothing at all. Those cases are in the gate, and the
-gate is red on them. **No engine perf number should be read as
-representative until they render**, because a frame that skips its layer
-composites and its hole punches is doing less work than the one it would be
-timed against.
+Opacity layers, snapshot brackets, `ClearRect` hole punches and over-ceiling
+images did NOT render when this section was first written; all four now do —
+the scheduler's rounds and the DestOut punch pass execute, over-ceiling
+images are minified to fit the atlas, and the once-red golden cases are green
+on the T400 and on the Mac Metal recording class
+(`testing/goldens/engine-metal-macos/`, Apple M4). The one command still
+recognised-and-skipped is `Command::GlyphRun` (with `ShaderQuad`): **the
+engine draws no text until the text phase lands**, so in every number below
+an engine frame excludes glyph rasterization that the classic frame beside
+it includes. The scenario mix keeps that gap small (S1 bubbles and S5 images
+are geometry/image-bound; S2's row labels are the largest text content in
+the set), but the caveat applies to every row.
 
-### Pixel 5 — engine vs classic (not measured)
+### Pixel 5 — engine vs classic (measured)
 
-**Not measured — owed: Pixel 5 run.** No device was attached to the rig this
-section was written on, and this file's discipline is that a scenario or
-device with no completed runs carries no numbers. Every engine cell below is
-therefore empty by rule, not by omission; the classic column is cited
-verbatim from the *Pixel 5 — classic baseline for the engine plan* section
-above (same raw series, not re-measured) so the comparison is set up and
-waiting for one pass.
+One same-day pass on the Pixel 5 (`redfin`, serial redacted; both arms'
+committed logs report the same ~11.13 ms `period_us`, so the two are
+refresh-comparable):
 
-| Scenario | Classic (cited) p50 / p95 (ms) | Engine p50 / p95 (ms) | encode+submit p50 (ms) | Graphics avg (MB) |
+```
+bash benchmarks/harness/ab_matrix.sh --device <pixel5-serial> --device-name pixel5 \
+    --tier classic,engine --aa area --scale 1.0 --scenarios s1,s2,s5 --runs 5 --duration 20
+```
+
+The classic arm was RE-MEASURED as a same-day control at the baseline's own
+area/1.0 basis rather than only cited: its cells land within ~1.3% of the
+cited baseline (S1 48.29 vs 48.23, S2 42.53 vs 42.23, S5 93.50 vs 94.71
+p50), so rig drift is not a factor in the comparison. Scenario percentiles
+are computed over the kept 3 of 5 runs (first 2 discarded as warm-up); the
+5-run x 20 s quick-pass sizing sits below PROTOCOL §4's ≥10-run/30 s
+convention, the same deviation the hybrid pass above carries.
+`encode+submit p50` sums each kept frame's `encode_us`+`submit_us` before
+the percentile step (the arm-remap caveat below explains why the sum is the
+comparable figure). `Graphics avg (MB)` averages the kept runs' post-run
+`dumpsys meminfo` Graphics PSS, snapshots committed as `run-NN.pss_*.txt`
+beside each series.
+
+| Scenario | Classic p50 / p95 (ms) — same-day control | Engine p50 / p95 (ms) | Engine encode+submit p50 (ms) | Engine Graphics avg (MB) |
 |---|---|---|---|---|
-| S1 — animation storm | 48.23 / 49.13 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
-| S2 — long-list scroll | 42.23 / 43.98 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
-| S5 — image pipeline | 94.71 / 98.52 | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
-| Full-screen image case | no classic row exists | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+| S1 — animation storm | 48.29 / 49.22 | **11.72** / 12.74 | 10.39 | 53.29 (classic control 52.44) |
+| S2 — long-list scroll | 42.53 / 43.96 | **9.09** / 14.01 | 2.61 | 51.16 (classic control 53.41) |
+| S5 — image pipeline | 93.50 / 97.41 | **13.04** / 13.80 | 11.42 | 56.41 (classic control 54.91) |
+| Full-screen image case | — (S5 is the named case; see note) | = S5 row | 11.42 | 56.41 |
 
-**Nav — material3-demo push/pop.** The gate: `total_p50` ≤ **16.7 ms**
-through the engine tier, against the classic baseline's measured 7.39 ms
-(last-120 ring window, cache on) / 11 ms (cited fine-floor row), plus a
-visual pass for AA regression. MSAA is not involved on either side — the
-engine draws analytic strips.
+**The full-screen image row is S5, named precisely** — the same naming the
+hybrid section above establishes: S5's cells are several edge-to-edge
+`ImageFit::Cover` quads per frame and no separate one-quad scenario exists,
+so S5 is the measurable UPPER BOUND for the ratified full-screen-quad ≤3 ms
+GPU threshold, not a direct read of it. This build has no GPU timer
+(pass-boundary timestamps belong to the presentation-path phase), and
+S5's whole-pipe encode+submit p50 of 11.42 ms bounds several quads plus
+decode traffic, not one composited quad. Graphics stays within +2.7% of the
+classic control at worst (S5), inside the ratified classic+10% threshold.
+
+**Nav — material3-demo push/pop, the phase gate.** Engine
+`total_p50` = **10 ms ≤ 16.7 ms — the gate PASSES**, on the same
+in-process last-120-frame ring the classic baseline used. The same-day
+classic control ring reads 8 ms (cited baseline 7.39 ms, cache on), so the
+engine's inline no-cache transition costs ~1.25x the classic cached path —
+not the ~2x the hybrid spike measured inline (15.22 ms) — and its tail is
+tighter than classic's on the very same pass: p95 16 vs 41 ms, p99 21 vs
+67 ms, over-60 Hz misses 8 vs 23. The engine summary reports `skipped=0`:
+no scheduler-escalation frame skip fired anywhere in the nav pass. Visual
+pass: no AA regression on shape edges (analytic strips; MSAA uninvolved,
+E11) — glyph runs excluded per the scope caveat above.
 
 | Nav basis | n (frames) | total_p50 (ms) | encode+submit p50 (ms) | Graphics avg (MB) |
 |---|---|---|---|---|
-| classic — measured, cited from the baseline section above | 120 of 141 | 7.39 | see that section | 52.56 (S1 anchor) |
-| engine | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run | not measured — owed: Pixel 5 run |
+| classic — same-day control, cache on (cited baseline: 7.39) | 120-frame ring of 132 captured | 8 | 1.73 (full 139-frame raw series) | 52.44 (S1 anchor, this pass) |
+| engine — inline, no snapshot cache | 120-frame ring of 158 captured | **10** | 3.08 (full 171-frame raw series) | 53.29 (S1 anchor, this pass) |
 
-Raw series: none. `benchmarks/raw/pixel5/tier/engine/` does not exist and
-carries no files — a tier run files its sanitized series there
-(`<scenario>/run-NN.log` + `stats.txt`, `nav/logcat-frust-perf.log`), and
-until one is captured there is nothing to commit. The cited classic rows keep
-pointing at their original series under
+Raw series: committed under `benchmarks/raw/pixel5/tier/classic-area-1.0/`
+and `benchmarks/raw/pixel5/tier/engine/` (`<scenario>/run-NN.log` +
+`stats.txt` + `run-NN.pss_*.txt`, `nav/logcat-frust-perf.log`), mirroring
+the hybrid tier's layout above; every percentile in both tables reproduces
+from those files via `stats.py` (`--scenario sN --discard-first 2`). The
+cited classic-baseline rows keep pointing at their original series under
 `benchmarks/raw/pixel5/{fine-floor,classic-baseline}/`, neither moved nor
 duplicated.
 
 ### What could not be measured
 
-- **Every Pixel 5 engine cell above** — not measured: no Android device was
-  attached to this rig. Owed as one `ab_matrix.sh --tier engine` pass.
-- **`encode+submit p50` on the engine arm** — not measured, and worth naming
-  separately: the engine records into one caller-owned `wgpu::CommandEncoder`
-  where the classic path spans vello's own encode plus a submit, so the two
-  columns are not the same instrument. The comparable figure is the SUM of
-  the engine's encode and submit spans, and the pass that produces it should
-  say so in its own row.
-- **A device build of the `engine` arm at all** — blocked, not merely
-  unmeasured: `engine-tier` exists on `frust-render` only. Neither
-  `benchmarks/frust_bench` nor `examples/material3-demo` (nor the `frust`
-  facade and the shells between them) carries the forwarding feature row that
-  `hybrid-tier = ["frust/hybrid-tier"]` is the pattern for, so
-  `--features engine-tier` is rejected by cargo before an APK exists. The
-  matrix arm is in place and dry-runs correctly; the feature chain is what it
-  is waiting on.
-- **Any engine number for layers, snapshots, hole punches or oversized
-  images** — not meaningful yet, for the correctness reason stated above.
+- **A true one-quad full-screen image number** — S5 is the named proxy and
+  an upper bound; the direct read needs the GPU-timestamp work of the
+  presentation-path phase.
+- **`encode+submit` symmetry** — the two arms' columns are not the same
+  instrument: classic spans vello's own encode plus a submit, while the
+  engine records into one caller-owned `wgpu::CommandEncoder` whose GPU
+  execution lands in `submit_us` on this direct-to-surface path. Both
+  columns are the per-frame sum, the comparable whole-pipe figure; neither
+  is a GPU timer.
+- **S6 (text) and any glyph-bearing content on the engine arm** — out of
+  scope until the text phase lands; every engine number above excludes
+  glyph rasterization the classic frame beside it includes.
+- **Pixel 5a** — this pass ran on the Pixel 5 only.
 
 ---
 
