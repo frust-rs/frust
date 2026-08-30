@@ -146,7 +146,7 @@ and `frust-shell-windows` additionally `frust-theme`.
 | `Theme` | The design-language token bundle (color/type/shape/elevation/motion) recovered from context |
 | `ReactiveRuntime` / `FrameWaker` | The leaf signal/task executor and the wake signal it raises on a tracked write |
 | `SurfaceRenderer` | `frust-render`'s per-surface encode/present owner (direct-to-surface or blit) |
-| `RenderTier` | The GPU (`vello`) rendering path, default; the optional non-default `cpu-tier` feature substitutes a `vello_cpu` software fallback for the same surface target, and the non-default `hybrid-tier` feature adds an override-only `Hybrid` variant no adapter probe ever selects |
+| `RenderTier` | The GPU (`vello`) rendering path, default; the optional non-default `cpu-tier` feature substitutes a `vello_cpu` software fallback for the same surface target, and the non-default `engine-tier` feature adds an override-only `Engine` variant (the frust-owned `frust-engine` strip pipeline) no adapter probe ever selects |
 
 ## See Also
 

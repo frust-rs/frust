@@ -159,8 +159,8 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
   `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop. `--render-tier
-  <gpu|cpu|hybrid>` forces the desktop preview's tier (`FRUST_RENDER_TIER` env on the spawned
-  `cargo run`); `hybrid` needs a `hybrid-tier` build, refused with a diagnosis otherwise
+  <gpu|cpu|engine>` forces the desktop preview's tier (`FRUST_RENDER_TIER` env on the spawned
+  `cargo run`); `engine` needs an `engine-tier` build, refused with a diagnosis otherwise
   (`frust-render`'s `tier.rs`, see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
 - `--features <spec>` (`build apk`/`appbundle`/`ios`/`ipa`, and `run`): `BuildFlags` is a `clap`
   wrapper flattening `BuildArgs` plus this repeatable, comma/space-splittable passthrough

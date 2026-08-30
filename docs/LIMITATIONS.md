@@ -2996,7 +2996,9 @@ glyph-atlas `expect` is reachable only with `FRUST_HYBRID_ATLAS_CACHE=1` — the
 (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)).
 
 **Applies to**: the frust-engine + frust-gpu plan's Phase 0 GO/NO-GO gate only.
-`RenderTier::Hybrid` stays override-only and non-default — nothing in a normal build changes.
+Historical: the spike tier this entry measured (`RenderTier::Hybrid`, `hybrid_tier.rs`,
+the `vello_hybrid` pin) has since been deleted — the engine tier is its successor; the
+entry stays as the record of the GO decision and its measured numbers.
 
 **Evidence**: `benchmarks/RESULTS.md`'s "Pixel 5 — classic baseline for the engine plan" and
 "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections (Arms
@@ -3783,3 +3785,28 @@ carry.
 **Trigger for removal**: tiled residency (splitting an oversized source across
 atlas rectangles) or a dedicated non-atlas texture path for oversized sources;
 either removes the ceiling rather than softening it.
+
+### `engine-scheduler-skip-on-escalation` — a layer shape the engine's scheduler cannot serve skips the frame rather than falling back
+
+**Observed** (evidence: `crates/frust-engine/src/schedule/mod.rs`'s module
+contract and the `RenderPath::EngineDirect` submit arm in
+`crates/frust-render/src/renderer.rs`): the engine tier carries no second
+renderer — a frame whose layer shape the two-page scheduler cannot serve
+(a fan of three or more simultaneously isolated sibling layers, a chain
+deeper than four, a filter/blend/mask layer) returns
+`EngineError::SchedulerEscalation` and the surface presents nothing for that
+frame: the previously presented content persists, a refusal counter
+increments, and a rate-limited log names the reason. Two isolated siblings
+per parent are served (opposite page parities in one root round); wider
+simultaneous fans are the practical gap.
+
+**Accepted because**: the engine tier is an opt-in measurement tier this
+phase; skipping loudly beats rendering the shape wrong, and per-frame
+fallback to the classic renderer would require carrying both backends on one
+surface — machinery the measured tier deliberately omits.
+
+**Trigger for removal**: hoisting the renderer's depth-writing opaque pass
+out of the root-round loop, which lets the scheduler serve same-parity
+sequential page reuse and sibling fans of any width within two live pages —
+tracked as an open action item; or the swap phase making the engine the only
+tier, at which point the served set must cover the widget tree's real shapes.

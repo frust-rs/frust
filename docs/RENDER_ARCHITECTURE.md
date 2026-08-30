@@ -23,8 +23,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-render::convert` | `encode_scene` converts a `frust_scene::Scene` into a `vello::Scene` |
 | `frust-render::snapshot` | `SnapshotCache` rasterizes each outermost `PushSnapshot`/`PopSnapshot` bracket once per content/size change into a cached texture and returns the frame's `FramePlan` |
 | `frust-render::compositor` | `Compositor` draws each `FramePlan` layer as one alpha-blended `CompositeTarget` quad, outside vello |
-| `frust-render::tier` | `select_render_tier` probes adapter capabilities to choose GPU (default) vs experimental CPU rendering, with an env/CLI override |
-| `frust-render::hybrid_tier` (crate-private, `#[cfg(feature = "hybrid-tier")]`) | A third `SceneSink` over `vello_hybrid`'s sparse-strip renderer, plus a `Blob`-id-keyed image-residency shim; the measurement spike backing `RenderTier::Hybrid` |
+| `frust-render::tier` | `select_render_tier` probes adapter capabilities to choose GPU (default) vs experimental CPU rendering; `RenderTier::Engine` (the `frust-engine` strip pipeline) is a third variant reachable only through an explicit env/CLI override, never through the probe |
 | `frust-render::headless` | Offscreen classic (vello/GPU) renderer for goldens/oracles: env-aware adapter resolution (`WGPU_ADAPTER_NAME`/`WGPU_BACKEND`), an expect-adapter/expect-backend fail-fast before any pixel is produced, row-padded readback, and the same limits/render-tier probe the live surface path resolves |
 | `frust-text::context` | `TextContext` owns Parley's font context and a shape cache; `register_fonts` hot-swaps app fonts and invalidates it |
 | `frust-text::layout` | `TextLayout` is a finished, measurable shaped block converting to `frust_scene` `GlyphRun`s |
@@ -38,8 +37,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 renderer, and no `vello`/`glifo` dependency — its job is everything directly above `wgpu` itself:
 probing adapter capabilities, and turning that into instances, devices, surfaces, and pooled GPU
 resources a renderer built on top can consume without re-deriving them. Neither crate has a spoke
-of its own (see [DOC_POLICY.md](DOC_POLICY.md)); both document here because the engine plan folds
-them into RENDER's pipeline.
+of its own (see [DOC_POLICY.md](DOC_POLICY.md)); both document here because `frust-engine`'s render
+pipeline is built on `frust-gpu` and reaches a surface only through RENDER.
 
 `frust-engine` is that render engine: a stateless-per-frame compiler that walks a `frust_scene::Scene`
 into sparse strips (vello_common/glifo's rasterizer core), packs them into the GPU layouts its
@@ -80,11 +79,11 @@ and everything downstream of them is a plain-value decision.
 | `frust-engine::compile::clip` | `ClipStack` lowers every `PushClip`/`PushClipRounded` to one of two shapes on one stack, never to an intermediate texture: a rectangle `fast_rect`'s axis-aligned, pixel-aligned rule admits becomes a `RectU16` scissor intersected into the enclosing one and applied by rewriting each draw's own strip coverage after generation; every other clip rasterizes once into a coverage mask through `vello_common::clip::ClipContext`, whose own nesting supplies the intersection; an unbalanced `PopClip` is ignored rather than underflowing either stack |
 | `frust-engine::compile::layers` + `clear` | One `GroupStack` bracket stack serves `PushClip`/`PushLayer`/`PushSnapshot` alike, so whichever `Pop*` arrives closes the innermost open bracket; a `PushLayer` at `alpha >= 1.0` lowers to its rectangle's clip alone, below that it also records an isolated layer for the scheduler; a `PushSnapshot` bracket takes the display list's own inline emulation — a presentation scale composed as a correction ahead of every inner command's transform, sub-unity alpha as a nested layer — with only the outermost bracket's parameters honoured; `ClearRect` is hoisted past every open bracket to the frame root as a `ClearPunch` in `CompiledFrame::clears`, kept outside `draws()` so a target that disregards alpha can drop the punch pass and read the frame unchanged |
 | `frust-engine::cache` | `GradientCache` keys ramp residency by a gradient's colour-affecting properties (stops, colour space, hue direction), not its geometry, so two placements of the same gradient share one entry; ramps live in one packed `Rgba8Unorm` byte buffer compacted on LRU eviction, each cached ramp naming its record by texel offset |
-| `frust-engine::cache::images` + `frust-engine::gpu::atlas` | `ImageResidency` keys an atlas rectangle on a `peniko::Blob`'s process-unique id over `vello_common`'s `ImageCache`/`MultiAtlasManager`, so the same decoded image reuses its rectangle across every frame it is drawn on; residency is budgeted mobile `(1024, 1024)` x4 layers or desktop `(2048, 2048)` x8 layers by `AtlasBudget::for_caps`, and a source over its layer's own extent is minified to fit with an aspect-preserving box filter rather than refused; an entry unseen for `MAX_UNSEEN_FRAMES` is reaped and its rectangle reported for clearing. `AtlasArray` owns one `Rgba8Unorm` `D2Array` texture the strip shader samples, growing it a layer at a time (never shrinking) and tracking growth with a generation counter a caller can compare against |
-| `frust-engine::gpu` | The GPU-side data layouts the strip shaders read, byte-compatible with the `vello_hybrid` reference: `GpuStrip` (the per-instance quad), `GpuEncodedPaint` family (gradient/image/blur records in the encoded-paint texture), and `GpuConfig` (the per-draw uniform block); sizing/addressing/packing are pure functions over plain values, returning `EngineError` where the reference asserts |
+| `frust-engine::cache::images` + `frust-engine::gpu::atlas` | `ImageResidency` keys an atlas rectangle on a `peniko::Blob`'s process-unique id over `vello_common`'s `ImageCache`/`MultiAtlasManager`, so the same decoded image reuses its rectangle across every frame it is drawn on; residency is budgeted mobile `(1024, 1024)` x4 layers or desktop `(2048, 2048)` x8 layers by `AtlasBudget::for_caps`, and a source over its layer's own extent is minified to fit with an aspect-preserving box filter rather than refused; an entry unseen for `MAX_UNSEEN_FRAMES` is reaped and its rectangle reported for clearing; residency is committed only once the frame's own eviction/upload plan is serviced (`ImageResidency::acknowledge_plan`), so a frame refused after compiling re-offers the same pending plan on the next one rather than recording an atlas rectangle resident with unwritten texels. `AtlasArray` owns one `Rgba8Unorm` `D2Array` texture the strip shader samples, growing it a layer at a time (never shrinking) and tracking growth with a generation counter a caller can compare against |
+| `frust-engine::gpu` | The GPU-side data layouts the strip shaders read, byte-compatible with the sparse-strip reference renderer's own layouts: `GpuStrip` (the per-instance quad), `GpuEncodedPaint` family (gradient/image/blur records in the encoded-paint texture), and `GpuConfig` (the per-draw uniform block); sizing/addressing/packing are pure functions over plain values, returning `EngineError` where the reference asserts |
 | `frust-engine::gpu::pipelines` + `shaders/` | Eight pipelines — six strip variants (intermediate, alpha, depth-tested alpha, opaque, and a destination-out pair the hole-punch pass draws with) differing only in target/blend/depth state, plus clear and copy — each a plain `frust_gpu::RenderPipelineDesc` warmed up before any frame needs it; WGSL is ported with hand-inlined imports (no WESL resolver at this MSRV) and stays within the four-bind-group WebGL2 ceiling |
-| `frust-engine::renderer` | `EngineRenderer::new`/`encode`/`resize`/`end_frame`/`bind_texture`/`unbind_texture` — the public seam a host drives one surface's frames through; `encode` schedules the compiled frame into rounds and records clear→opaque(depth)→each round's own pass (a pooled page per isolated layer, a finished page composited into its parent as one instanced quad, painter-order depth carried per composite)→the destination-out punch pass into the caller's own `wgpu::CommandEncoder`, never submits it, and leaves no pass open on return; the punch pass is skipped whole on a target that disregards alpha; with no depth attachment available the two draw passes collapse into one blended painter-order pass, a correctness requirement rather than a fallback |
-| `frust-engine::schedule` + `schedule::pages` | `Schedule::build` turns a recording into `Vec<Round>`, innermost isolated layer first and the frame's own surface last, bottom-up over a chain of at most `MAX_CHAIN_DEPTH` (4) nested isolated layers; each layer's page comes from one of two ping-pong groups keyed on its depth's parity, bounding a chain of any depth to `MAX_LIVE_PAGES` (2) live intermediate pages at once; a layer shape outside that — branching, deeper nesting, a filter layer, a non-default blend, a mask or layer clip path — is refused with `SchedulerEscalation { reason }` rather than rendered wrong, routing the frame to the reference renderer instead; the general algorithm this narrows from is a stub behind the `full-scheduler` feature |
+| `frust-engine::renderer` | `EngineRenderer::new`/`encode`/`resize`/`end_frame`/`bind_texture`/`unbind_texture` — the public seam a host drives one surface's frames through; `encode` schedules the compiled frame into rounds and records clear→opaque(depth)→each round's own pass (a pooled page per isolated layer, a finished page composited into its parent as one instanced quad, painter-order depth carried per composite)→the destination-out punch pass into the caller's own `wgpu::CommandEncoder`, never submits it, and leaves no pass open on return; the punch pass is skipped whole on a target that disregards alpha; with no depth attachment available the two draw passes collapse into one blended painter-order pass, a correctness requirement rather than a fallback. One carve-out to "never submits": growing the image atlas array submits one copy-only maintenance command buffer of its own, ahead of the frame's own writes — `wgpu` flushes a submit's queued writes before that submit's command buffers, so the growth copy must precede the frame's atlas uploads rather than ride inside them |
+| `frust-engine::schedule` + `schedule::pages` | `Schedule::build` turns a recording into `Vec<Round>`, innermost isolated layer first and the frame's own surface last, bottom-up over a chain of at most `MAX_CHAIN_DEPTH` (4) nested isolated layers; each layer's page comes from one of two ping-pong groups keyed on its depth's parity, bounding a chain of any depth to `MAX_LIVE_PAGES` (2) live intermediate pages at once — two isolated siblings under one parent, on opposite page parities, is the shape this bounds for; a wider fan needing a third live page at once, a deeper chain, a filter layer, a non-default blend, or a mask/layer clip path is refused with `SchedulerEscalation { reason }` rather than rendered wrong, which the caller treats as a skipped frame, not a route to a second renderer — the engine tier carries none; the general algorithm this narrows from is a stub behind the `full-scheduler` feature |
 | `frust-engine::gpu::depth` | `DepthAttachment` is `Depth24Plus`, either caller-supplied (paired with `set_depth_pre_cleared` so the frame loads rather than clears a populated buffer) or engine-owned and lazily allocated, reallocated only when the target extent changes |
 | `frust-engine::gpu::targets` | A per-renderer `IntermediateTargets` pool for off-screen layers/scratch copies, capping any request at `min(adapter max, 8192)` and answering an over-ceiling request with `IntermediateTexture::TooLarge` rather than a device error |
 
@@ -95,17 +94,19 @@ and everything downstream of them is a plain-value decision.
 Both crates depend on `frust-scene` (CORE) for the `Scene`/`Command`/`GlyphRun` types — the stable
 widget↔GPU seam neither crate may bypass. `frust-render` additionally depends on `vello` and
 `wgpu`, and optionally on `vello_cpu` (exact-pinned) behind its non-default `cpu-tier` feature, and
-optionally on `vello_hybrid`/`vello_common`/`glifo` (exact-pinned, same shape) behind its equally
-non-default `hybrid-tier` feature; `frust-text` depends on `parley`. `kurbo` and `peniko` supply the
+optionally on `frust-engine`/`frust-gpu` (workspace-internal, unpinned) behind its equally
+non-default `engine-tier` feature; `frust-text` depends on `parley`. `kurbo` and `peniko` supply the
 geometry/color vocabulary shared across both crates' public APIs and `frust-scene`'s. `frust-render`
 also depends on `android_system_properties` on Android.
 
 `frust-render` confines every `vello`/`wgpu` type behind its own API: the only two opaque wgpu
 wrappers that ever leave the crate are `DetachedSurface` and `DeferredPresent`, used for
 cross-thread/cross-transaction handoff — a bare `wgpu::Surface` or `wgpu::Device` never does. The
-optional `cpu-tier` and `hybrid-tier` paths are each isolated behind the same `SceneSink` encode
-seam as the GPU path, so a breaking `vello_cpu`/`vello_hybrid` bump cannot reach the default GPU
-path. `frust-text` mirrors this: `parley` never appears outside
+optional `cpu-tier` path is isolated behind the same `SceneSink` encode seam as the GPU path, so a
+breaking `vello_cpu` bump cannot reach the default GPU path; the optional `engine-tier` path is
+isolated a different way — its own `TierBackend::Engine` arm in `renderer.rs`, sharing neither
+`convert.rs`'s command walk nor a `SceneSink` — so a breaking `frust-engine`/`frust-gpu` bump
+likewise cannot reach the default GPU path. `frust-text` mirrors this: `parley` never appears outside
 `TextContext`/`TextStyle`/`TextLayout`, and `TextEditor` is the sole owner of UTF-16↔byte index
 conversion — everything else in the crate works in byte offsets.
 
@@ -122,19 +123,28 @@ nothing above RENDER depends on either — the same engine-tier boundary
 - `frust_scene::Scene` → `encode_scene` → `vello::Scene` → `SurfaceRenderer::encode()`/`present()`,
   direct-to-surface when supported else an intermediate-texture blit, driven from a dedicated
   render thread by default.
-- Third render path, `hybrid-tier` builds only (`RenderTier::Hybrid`, override-only — see Key
-  Types): `HybridDirect` renders straight into the acquired swapchain view at the surface-reported
-  format, RENDER_ATTACHMENT — no intermediate, no blit, no `PremultiplyPass`, no snapshot
-  cache/compositor (`vello_hybrid` owns its own depth texture; one `CommandEncoder` per frame).
-  `tier_forces_blit`/`tier_compiled_in` (`context.rs`) are exhaustive per-tier matches over
-  `RenderTier`, replacing the two former `!= RenderTier::Gpu` call sites so a tier added later can't
-  fall through either check silently. On this path the whole render cost — CPU strip build *and*
-  GPU execution — lands in `submit_us` (`encode_us` is only the scene copy into `vello_hybrid`'s own
-  scene type); `vello_hybrid` itself outputs premultiplied alpha, so a premultiplied-expecting
-  translucent surface (Android's `Inherit`/`PreMultiplied`) is correct as-is on this arm and raises
-  no warning — only the straight-alpha translucent mode (iOS's `PostMultiplied`) is refused
-  (`hybrid_translucency_refused`), resolving to Mode A with one warning. Every committed Pixel 5
-  number is still an opaque-surface number regardless (see LIMITATIONS.md).
+- Third render path, `engine-tier` builds only (`RenderTier::Engine`, override-only — see Key
+  Types): `context::choose_engine_render_path` resolves a surface's alpha mode to
+  `RenderPathKind::EngineDirect` for `Opaque`/`Auto` and Android's `Inherit`/`PreMultiplied` — the
+  engine's strip pipelines already write premultiplied alpha, so these are served as-is with no
+  `PremultiplyPass`; iOS's `PostMultiplied` (straight-alpha translucent) has no un-premultiplying
+  output arm to serve it and is answered `EngineRenderPath::Unsupported` — the surface still
+  renders through `EngineDirect`, with translucency refused (Mode A) rather than composited wrong.
+  `EngineDirect` renders straight into the acquired swapchain view, `RENDER_ATTACHMENT` only in
+  whatever format the surface reports — no intermediate, no blit, plus a `Depth24Plus` attachment
+  configured alongside the swapchain; `tier_forces_blit` excludes `Engine` for that reason.
+  `TierBackend::Engine` wires `EngineRenderer::new` from a `frust_gpu::TierCaps::probe` of the live
+  adapter, the surface's own configured format, and the same persisted `PipelineCache` handed to
+  vello, so a re-warm after a format change hits the driver cache rather than cold-compiling.
+  `submit`'s `EngineDirect` arm records the whole frame — `engine.encode` into one caller-owned
+  `wgpu::CommandEncoder`, one `queue.submit`, then `engine.end_frame` — never opening a second
+  encoder; an `EngineError` from `encode` leaves that encoder untouched, so nothing is submitted and
+  the acquired texture is dropped rather than presented: the frame is `FrameOutcome::Skipped`, a
+  `refused_frames` counter increments, `log_engine_refusal` logs through the same rate-limited
+  `decide_log_action` latch every other refusal path uses, and the previous frame's swapchain
+  content simply persists on screen. There is no fallback renderer on this tier — a refused frame is
+  never retried through vello or the CPU tier; which renderer draws a surface is decided once at
+  configure time, not per frame.
 - `Command::ShaderQuad` instances render through a per-surface fragment-shader pre-pass into an
   offscreen texture composited into the scene ahead of the main encode.
 - `SurfaceAlphaRequest` resolves the platform's compositing/alpha mode to pick the presentation
@@ -215,13 +225,14 @@ nothing above RENDER depends on either — the same engine-tier boundary
   round-tripped through each platform's IME bridge.
 - Optional cpu-tier: `vello_cpu` rasterizes into a `Pixmap` uploaded into the same intermediate
   target the GPU blit path uses.
-- Optional hybrid-tier: `hybrid_tier::HybridSink` runs the same shared command walk as the GPU/CPU
-  sinks, rasterizing into `vello_hybrid` sparse strips; `RenderTier::Hybrid` is selectable only by
-  an explicit override (`FRUST_RENDER_TIER=hybrid` / `frust run --render-tier hybrid`, see
-  [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) — no adapter probe ever chooses it, since
-  `HYBRID_REQUIRED_DOWNLEVEL_FLAGS` is empty (`tier.rs`): the tier needs neither
-  `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION`, the two flags the GPU tier requires and the iOS
-  Simulator's Apple2 GPU family lacks.
+- Optional engine-tier: `RenderTier::Engine` is selectable only by an explicit override
+  (`FRUST_RENDER_TIER=engine` / `frust run --render-tier engine`, see
+  [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) — `select_render_tier` never returns it from a
+  probe, since `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is deliberately empty (`tier.rs`): the tier needs
+  neither `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION`, the two flags the GPU tier requires and the
+  iOS Simulator's Apple2 GPU family lacks, so it runs on exactly the adapters the GPU tier refuses.
+  An override onto a build without the `engine-tier` feature is refused with a diagnosis naming the
+  missing feature, never silently rendered through vello under an engine label.
 
 ## Key Types
 
@@ -229,7 +240,7 @@ nothing above RENDER depends on either — the same engine-tier boundary
 |------|---------|
 | `RenderContext` / `SurfaceRenderer` / `SurfaceFactory` / `DetachedSurface` / `DeferredPresent` | Device ownership, surface lifecycle/present, and the two sanctioned opaque wgpu wrappers for cross-thread handoff |
 | `HeadlessRenderer` | Offscreen classic renderer reused across renders (one adapter/device/`vello::Renderer`); verifies its resolved adapter/backend against an expectation before rendering and returns plain RGBA8 bytes, never a `vello`/`wgpu` type |
-| `RenderTier` / `TierCaps` | GPU-vs-CPU-vs-Hybrid render-backend selection, probed from adapter capabilities plus an override; `Hybrid` is override-only (see Data Flow) |
+| `RenderTier` / `TierCaps` | GPU-vs-CPU-vs-Engine render-backend selection, probed from adapter capabilities plus an override; `Engine` is override-only (see Data Flow) |
 | `SurfacePhase` / `FrameOutcome` / `EncodeOutcome` / `AcquireOutcome` | The surface-can-be-destroyed-anytime lifecycle state machine shared by every shell |
 | `encode_scene` | The sole function converting a `frust_scene::Scene` into a `vello::Scene` |
 | `CompositeLayer` / `FramePlan` | One cached page's placement/texture for the compositor to draw, and the frame's vello-pass/compositor-layer/hole split those cached pages imply (see Data Flow) |

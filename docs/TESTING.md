@@ -121,12 +121,12 @@ The experimental CPU render tier is outside the default feature set:
 cargo test -p frust-render --features cpu-tier
 ```
 
-So is the experimental hybrid render tier (host tests only, incl. its 60-frame image-residency
-contract — the device/GPU tests it also carries are `#[ignore]`d):
+So is the opt-in engine render tier (host tests only — the device/GPU tests it
+also carries are `#[ignore]`d):
 
 ```bash
-cargo test -p frust-render --features hybrid-tier
-cargo clippy -p frust-render --features hybrid-tier,perf-trace --all-targets -- -D warnings
+cargo test -p frust-render --features engine-tier
+cargo clippy -p frust-render --features engine-tier,perf-trace --all-targets -- -D warnings
 ```
 
 Target compile gates and slow ignored scaffold/build tests remain listed in
@@ -621,9 +621,10 @@ user content into golden artifacts or CI logs.
 Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
 `benchmarks/harness/ab_matrix.sh --tier classic,hybrid,hybrid_atlas` drives the render-tier A/B
-matrix (classic vello vs. the experimental `hybrid`/`hybrid`+glyph-atlas-cache tiers) across a
-caller-chosen `--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` for the tier's
-feature/env knobs and `benchmarks/RESULTS.md`'s "vello_hybrid spike" section for recorded numbers.
+matrix (classic vello vs. the opt-in `engine` tier) across a caller-chosen
+`--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` for the tier's
+feature/env knobs and `benchmarks/RESULTS.md` for recorded numbers (its retired
+spike section is history).
 
 Scheduled robustness work should include:
 
