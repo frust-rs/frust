@@ -242,16 +242,37 @@ impl GradientCache {
     /// Borrow the packed bytes padded out to `layout`'s full byte footprint,
     /// ready to hand to a texel copy.
     ///
-    /// Returns `None` when no ramps are packed. The padding is applied to the
-    /// cache's own buffer and undone when the returned [`LutUpload`] drops, so an
-    /// upload costs one resize rather than a copy of every ramp.
+    /// Returns `None` when no ramps are packed, and when `layout` is too small
+    /// to hold them. The second case is a *refusal*, logged rather than
+    /// silently served: padding to a footprint below the packed length would
+    /// truncate the buffer instead of extending it, uploading a prefix of the
+    /// ramps under offsets computed for all of them — every gradient past the
+    /// cut would sample whatever the texture already held. Skipping the upload
+    /// leaves the previous frame's texels in place, which is stale but
+    /// coherent, and leaves `has_changed` set so the next upload against a
+    /// large enough layout still happens.
+    ///
+    /// The padding is applied to the cache's own buffer and undone when the
+    /// returned [`LutUpload`] drops, so a served upload costs one resize rather
+    /// than a copy of every ramp.
     pub fn begin_upload(&mut self, layout: GradientTextureLayout) -> Option<LutUpload<'_>> {
         if self.luts.is_empty() {
             return None;
         }
 
+        let logical_len = self.luts.len();
+        if layout.byte_capacity() < logical_len {
+            log::warn!(
+                "gradient LUT upload skipped: {logical_len} packed bytes do not fit a \
+                 {}x{} texture ({} bytes)",
+                layout.width,
+                layout.height,
+                layout.byte_capacity(),
+            );
+            return None;
+        }
+
         let mut bytes = self.take_luts();
-        let logical_len = bytes.len();
         bytes.resize(layout.byte_capacity(), 0);
 
         Some(LutUpload {
@@ -397,4 +418,44 @@ fn bake_ramp<S: Simd>(simd: S, gradient: &EncodedGradient, output: &mut Vec<u8>)
     let bytes: &[u8] = bytemuck::cast_slice(lut.lut());
     output.extend_from_slice(bytes);
     lut.width()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cache holding `len` bytes of packed ramps, with no baking involved:
+    /// the refusal is a decision over the buffer's length against the
+    /// texture's footprint, and needs no real gradient to exercise.
+    fn packed(len: usize) -> GradientCache {
+        let mut cache = GradientCache::new(8, Level::baseline());
+        cache.restore_luts(vec![0xAB; len]);
+        cache
+    }
+
+    #[test]
+    fn an_upload_into_a_texture_smaller_than_the_packed_ramps_is_refused() {
+        let layout = GradientTextureLayout::square(4);
+        let mut cache = packed(layout.byte_capacity() + 4);
+
+        assert!(
+            cache.begin_upload(layout).is_none(),
+            "a too-small layout must refuse rather than truncate"
+        );
+        assert_eq!(
+            cache.luts_size(),
+            layout.byte_capacity() + 4,
+            "the refusal leaves every packed ramp byte in place"
+        );
+    }
+
+    #[test]
+    fn an_upload_exactly_filling_the_texture_is_served() {
+        let layout = GradientTextureLayout::square(4);
+        let mut cache = packed(layout.byte_capacity());
+
+        let upload = cache.begin_upload(layout).expect("an exact fit is served");
+        assert_eq!(upload.len(), layout.byte_capacity());
+        assert_eq!(upload.logical_len(), layout.byte_capacity());
+    }
 }

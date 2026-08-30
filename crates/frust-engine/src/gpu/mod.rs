@@ -24,6 +24,7 @@
 //! only — never shrink — up to the same dimension, past which the frame path
 //! returns an error instead of asserting.
 
+pub mod atlas;
 pub mod config;
 pub mod depth;
 pub mod paint_texture;
@@ -32,6 +33,7 @@ pub mod shader_src;
 pub mod strips;
 pub mod targets;
 
+pub use atlas::{ATLAS_FORMAT, ATLAS_USAGES, AtlasArray, lower_encoded_image};
 pub use config::{GpuConfig, tex_width_bits};
 pub use depth::{DepthAttachment, DepthTexture};
 pub use paint_texture::{

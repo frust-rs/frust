@@ -8,18 +8,23 @@
 //!
 //! The compiler owns the retained scratch a
 //! [`StripGenerator`] needs (line buffer, tiles, flatten/stroke context) so a
-//! steady-state frame reuses those allocations; it holds no per-frame state
-//! between calls, and [`compile`](SceneCompiler::compile) returns everything a
-//! frame produced in one [`CompiledFrame`].
+//! steady-state frame reuses those allocations, and the one piece of state that
+//! genuinely spans frames — the [`ImageResidency`] that keeps an image's atlas
+//! rectangle alive for as long as the scene keeps drawing it. Everything else
+//! is per-frame: [`compile`](SceneCompiler::compile) returns what a frame
+//! produced in one [`CompiledFrame`] and keeps nothing of it.
 //!
 //! Compiled here: the geometry primitives — axis-aligned and rounded
 //! rectangles, lines, arbitrary filled/stroked paths — the clip bracket around
 //! them, which lowers to a scissor rectangle or a coverage mask and never to an
 //! intermediate texture (see [`clip`]), the opacity-layer and snapshot brackets
-//! that group them (see [`layers`]), and the hole punch that erases what they
-//! painted (see [`clear`]). Glyphs, images, blurred rectangles and shader quads
-//! are recognised and skipped — the engine grows them in later passes, and
-//! skipping is the conservative behaviour (a frame draws less, never wrong).
+//! that group them (see [`layers`]), the hole punch that erases what they
+//! painted (see [`clear`]), and images, whose destination rectangle is
+//! rasterized like any other fill and painted by an atlas-backed image paint
+//! (see [`paint`] and [`crate::cache::images`]). Glyphs, blurred rectangles and
+//! shader quads are recognised and skipped — the engine grows them in later
+//! passes, and skipping is the conservative behaviour (a frame draws less,
+//! never wrong).
 
 pub mod clear;
 
@@ -36,11 +41,14 @@ pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
+use std::sync::Once;
+
 use kurbo::{
     Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
 };
-use peniko::{Brush, Fill};
+use peniko::{Brush, Fill, ImageData};
 
+use frust_gpu::TierCaps;
 use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
 
 use vello_common::clip::PathDataRef;
@@ -51,8 +59,9 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 use vello_common::tile::Tile;
 use vello_common::util::is_axis_aligned;
 
+use crate::cache::images::{AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload};
 use crate::compile::clear::StagedPunch;
-use crate::compile::paint::{LutRequest, encode_brush};
+use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
 
 /// Curve-flattening tolerance, in device pixels.
@@ -60,6 +69,11 @@ use crate::error::EngineError;
 /// The value `vello_hybrid`'s own scene recorder flattens at; keeping it
 /// identical is what lets the two rasterizers be compared strip-for-strip.
 const FLATTEN_TOLERANCE: f64 = 0.1;
+
+/// Raised the first time an image is refused residency, so a scene that draws
+/// an unsupported image says so at least once at warning level without the
+/// per-frame repetition a per-skip warning would produce.
+static IMAGE_SKIP_WARNING: Once = Once::new();
 
 /// Everything one compiled frame produced.
 ///
@@ -109,6 +123,32 @@ pub struct CompiledFrame {
     pub scissor_clips: u32,
     /// How many of this frame's clips lowered to a coverage mask.
     pub mask_clips: u32,
+    /// Atlas regions whose texels must be cleared before this frame draws,
+    /// freed by the residency reap at the head of the frame.
+    ///
+    /// Serviced **before** [`image_uploads`](Self::image_uploads): a rectangle
+    /// freed this frame can be re-allocated in the same frame, so clearing
+    /// after writing would erase the image that just moved in.
+    pub image_evictions: Vec<AtlasRegion>,
+    /// Atlas regions whose texels must be written before this frame draws, one
+    /// per image that became resident during it.
+    ///
+    /// Empty in the steady state: an image drawn on a thousand consecutive
+    /// frames appears here exactly once, on the first.
+    pub image_uploads: Vec<ImageUpload>,
+    /// The atlas array depth this frame's paints address — the layer count the
+    /// array texture must have grown to before the uploads are written.
+    pub atlas_layers: u32,
+    /// How many of this frame's draws painted with an atlas-backed image.
+    pub image_draws: u32,
+    /// How many image draws were dropped because the image could not be made
+    /// resident (unsupported format, oversized, malformed, atlas full, or the
+    /// atlas disabled outright).
+    ///
+    /// Observational, and the counter that makes "an image the engine cannot
+    /// hold is a skipped draw, not a panicked frame" measurable rather than
+    /// asserted.
+    pub skipped_images: u32,
     /// How many strips this frame's coverage masks cost.
     ///
     /// Observational, and the counter the clip lowering's whole claim rests on:
@@ -145,6 +185,7 @@ pub struct SceneCompiler {
     groups: GroupStack,
     snapshots: SnapshotStack,
     punches: Vec<StagedPunch>,
+    images: ImageResidency,
 }
 
 impl SceneCompiler {
@@ -153,7 +194,26 @@ impl SceneCompiler {
     /// The size is re-asserted on every [`compile`](Self::compile) call, so
     /// this is only the initial allocation hint; pass the surface's current
     /// size to avoid an immediate resize.
+    ///
+    /// Image residency starts on [`AtlasBudget::MOBILE`], the smaller of the
+    /// two tiers. A compiler built without an adapter in hand knows nothing
+    /// about the device it will end up on, and over-budgeting a phone costs
+    /// real memory while under-budgeting a desktop costs only an extra atlas
+    /// layer — call [`for_caps`](Self::for_caps) or
+    /// [`set_atlas_budget`](Self::set_atlas_budget) once the adapter is known.
     pub fn new(width: u16, height: u16) -> Self {
+        Self::with_atlas_budget(width, height, AtlasBudget::MOBILE)
+    }
+
+    /// A compiler sized for a `width` x `height` viewport, with image
+    /// residency budgeted for `caps`' adapter.
+    pub fn for_caps(width: u16, height: u16, caps: &TierCaps) -> Self {
+        Self::with_atlas_budget(width, height, AtlasBudget::for_caps(caps))
+    }
+
+    /// A compiler sized for a `width` x `height` viewport, with image
+    /// residency budgeted explicitly.
+    pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
         let level = Level::try_detect().unwrap_or(Level::baseline());
         Self {
             generator: StripGenerator::new(width, height, level),
@@ -161,7 +221,36 @@ impl SceneCompiler {
             groups: GroupStack::new(),
             snapshots: SnapshotStack::new(),
             punches: Vec::new(),
+            images: ImageResidency::new(budget),
         }
+    }
+
+    /// The images this compiler currently holds resident.
+    pub fn images(&self) -> &ImageResidency {
+        &self.images
+    }
+
+    /// Re-budget image residency, dropping every image currently resident.
+    ///
+    /// The atlas geometry is what an allocation's coordinates mean, so a change
+    /// to it invalidates every rectangle already handed out: residency starts
+    /// over and each image re-uploads on the next frame that draws it. A caller
+    /// that owns the atlas texture must recreate it at the new extent in the
+    /// same step — this is an adapter-change or start-up operation, never a
+    /// per-frame one.
+    pub fn set_atlas_budget(&mut self, budget: AtlasBudget) {
+        self.set_image_residency(ImageResidency::new(budget));
+    }
+
+    /// Replace this compiler's image residency wholesale, dropping every image
+    /// currently resident.
+    ///
+    /// The same invalidation [`set_atlas_budget`](Self::set_atlas_budget)
+    /// carries, exposed for the residencies a budget alone cannot express — a
+    /// deliberately [disabled](ImageResidency::disabled) one, or one a caller
+    /// built against an adapter's own capabilities.
+    pub fn set_image_residency(&mut self, images: ImageResidency) {
+        self.images = images;
     }
 
     /// Compile `scene` for a `size` viewport, with `root` applied ahead of
@@ -200,6 +289,10 @@ impl SceneCompiler {
         self.groups.reset();
         self.snapshots.reset();
         self.punches.clear();
+        // Ahead of the walk, so a rectangle this frame's reap frees is
+        // available to this frame's own allocations and its clear is ordered
+        // ahead of their uploads.
+        self.images.begin_frame();
 
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
@@ -211,6 +304,11 @@ impl SceneCompiler {
             scissor_clips: 0,
             mask_clips: 0,
             clip_mask_strips: 0,
+            image_evictions: Vec::new(),
+            image_uploads: Vec::new(),
+            atlas_layers: 0,
+            image_draws: 0,
+            skipped_images: 0,
         };
         let mut depth = DepthCounter::new();
 
@@ -224,6 +322,10 @@ impl SceneCompiler {
         frame.scissor_clips = self.clips.scissor_clips();
         frame.mask_clips = self.clips.mask_clips();
         frame.clip_mask_strips = self.clips.mask_strips();
+        let (evictions, uploads) = self.images.take_plan();
+        frame.image_evictions = evictions;
+        frame.image_uploads = uploads;
+        frame.atlas_layers = self.images.layers();
 
         Ok(frame)
     }
@@ -284,7 +386,7 @@ impl SceneCompiler {
                     let recorded = self.record(
                         frame,
                         depth,
-                        brush,
+                        PaintSource::Brush(brush),
                         transform,
                         |generator, storage, clip| {
                             generator.generate_filled_rect_fast(&device_rect, storage, clip);
@@ -297,7 +399,7 @@ impl SceneCompiler {
                     self.record(
                         frame,
                         depth,
-                        brush,
+                        PaintSource::Brush(brush),
                         transform,
                         |generator, storage, clip| {
                             generator.generate_filled_path(
@@ -324,7 +426,7 @@ impl SceneCompiler {
                 self.record(
                     frame,
                     depth,
-                    brush,
+                    PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
                         generator.generate_filled_path(
@@ -352,7 +454,7 @@ impl SceneCompiler {
                 self.record(
                     frame,
                     depth,
-                    brush,
+                    PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
                         generator.generate_stroked_path(
@@ -379,7 +481,7 @@ impl SceneCompiler {
                         self.record(
                             frame,
                             depth,
-                            brush,
+                            PaintSource::Brush(brush),
                             transform,
                             |generator, storage, clip| {
                                 generator.generate_filled_path(
@@ -410,7 +512,7 @@ impl SceneCompiler {
                                 self.record(
                                     frame,
                                     depth,
-                                    brush,
+                                    PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
                                         generator.generate_stroked_path(
@@ -428,7 +530,7 @@ impl SceneCompiler {
                                 self.record(
                                     frame,
                                     depth,
-                                    brush,
+                                    PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
                                         generator.generate_stroked_path(
@@ -514,12 +616,54 @@ impl SceneCompiler {
                     self.close_group(frame);
                 }
             }
+            Command::Image {
+                data,
+                dest,
+                transform,
+            } => {
+                let transform = combined * *transform;
+                let source = PaintSource::Image { data, dest: *dest };
+
+                // An image is its destination rectangle's coverage under an
+                // image paint — the same two rectangle paths a solid fill
+                // takes, so a pixel-aligned image costs no flattening either.
+                if let Some(device_rect) = fast_rect(*dest, transform) {
+                    let recorded = self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
+                        },
+                    );
+                    if recorded {
+                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+                    }
+                } else {
+                    self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_path(
+                                dest.path_elements(FLATTEN_TOLERANCE),
+                                Fill::NonZero,
+                                transform,
+                                None,
+                                storage,
+                                clip,
+                            );
+                        },
+                    );
+                }
+            }
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
             // frame.
             Command::GlyphRun(_)
-            | Command::Image { .. }
             | Command::BlurredRoundedRect { .. }
             | Command::ShaderQuad { .. } => {}
         }
@@ -632,7 +776,7 @@ impl SceneCompiler {
     }
 
     /// Run `generate` under the active clip, then record whatever strips
-    /// survived as one draw painted with `brush` under `transform`.
+    /// survived as one draw painted from `source` under `transform`.
     ///
     /// `generate` is handed the clip stack's coverage mask to pass on to the
     /// strip generator, which is what intersects a mask clip while the draw's
@@ -645,14 +789,17 @@ impl SceneCompiler {
     /// records nothing and consumes no depth, so a frame's depths stay dense
     /// over the draws that actually exist.
     ///
-    /// The brush is encoded only once the strips are known to be non-empty, so
+    /// The paint is encoded only once the strips are known to be non-empty, so
     /// a culled draw leaves no orphan entry in the frame's encoded-paint table
-    /// and no ramp request for a gradient nothing paints with.
+    /// and no ramp request for a gradient nothing paints with. An image the
+    /// atlas refuses arrives *after* that point, so its coverage is rolled back
+    /// to where the generator started rather than left behind as strips no draw
+    /// references.
     fn record<F>(
         &mut self,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
-        brush: &Brush,
+        source: PaintSource<'_>,
         transform: Affine,
         generate: F,
     ) -> bool
@@ -673,15 +820,95 @@ impl SceneCompiler {
             return false;
         }
 
-        let encoding = encode_brush(brush, transform, &mut frame.encoded_paints);
-        frame.lut_requests.extend(encoding.lut_request);
+        let Some(paint) = self.encode_paint(source, transform, frame) else {
+            frame.strips.strips.truncate(start);
+            frame.strips.alphas.truncate(alpha_start);
+            return false;
+        };
 
-        let draw = EngineDraw::new(encoding.paint, depth.advance(), strip_range.clone());
+        let draw = EngineDraw::new(paint, depth.advance(), strip_range.clone());
         frame
             .recorder
             .push_draw(draw, &frame.strips.strips[strip_range]);
         true
     }
+
+    /// Encode `source` into the paint a draw carries, or `None` when the paint
+    /// cannot be resolved and the draw is to be dropped.
+    ///
+    /// Only an image can answer `None`: a solid and a gradient are always
+    /// encodable (a degenerate gradient falls back to a solid), while an image
+    /// needs atlas space the residency may refuse.
+    fn encode_paint(
+        &mut self,
+        source: PaintSource<'_>,
+        transform: Affine,
+        frame: &mut CompiledFrame,
+    ) -> Option<vello_common::paint::Paint> {
+        let encoded = match source {
+            PaintSource::Brush(Brush::Image(brush)) => encode_image_brush(
+                brush,
+                transform,
+                &mut frame.encoded_paints,
+                &mut self.images,
+            ),
+            PaintSource::Brush(brush) => {
+                let encoding = encode_brush(brush, transform, &mut frame.encoded_paints);
+                frame.lut_requests.extend(encoding.lut_request);
+                return Some(encoding.paint);
+            }
+            PaintSource::Image { data, dest } => encode_image_command(
+                data,
+                dest,
+                transform,
+                &mut frame.encoded_paints,
+                &mut self.images,
+            ),
+        };
+
+        match encoded {
+            Ok(encoding) => {
+                frame.image_draws = frame.image_draws.saturating_add(1);
+                Some(encoding.paint)
+            }
+            Err(skip) => {
+                frame.skipped_images = frame.skipped_images.saturating_add(1);
+                note_image_skip(skip);
+                None
+            }
+        }
+    }
+}
+
+/// What a draw is painted with, as the walk hands it to
+/// [`SceneCompiler::record`].
+///
+/// An image is not a [`Brush`] in the display list — [`Command::Image`] carries
+/// its pixels and a destination rectangle directly — so the two arrive by
+/// different routes and are distinguished here rather than by forcing one into
+/// the shape of the other.
+enum PaintSource<'a> {
+    /// A solid, gradient or image brush recorded on a shape command.
+    Brush(&'a Brush),
+    /// A [`Command::Image`]'s pixels scaled to fill `dest`.
+    Image {
+        /// The decoded image to make resident.
+        data: &'a ImageData,
+        /// The destination rectangle, in the command's own coordinate space.
+        dest: Rect,
+    },
+}
+
+/// Report an image the atlas refused.
+///
+/// The first refusal in a process is a warning, because a blank image where one
+/// was expected is otherwise invisible; the rest are debug, because a scene
+/// that keeps drawing a refused image would repeat the message every frame.
+fn note_image_skip(skip: ImageSkip) {
+    IMAGE_SKIP_WARNING.call_once(|| {
+        log::warn!("image draw skipped: {skip} (further skips are logged at debug level)");
+    });
+    log::debug!("image draw skipped: {skip}");
 }
 
 /// The transform a command carries, or `None` for one that carries none.
@@ -761,7 +988,11 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// it because neither is decoration — an alpha decides whether the layer
 /// isolates, and a scale composes a transform every command inside the bracket
 /// is drawn under. A clear is checked because its rectangle *is* the coverage
-/// it erases with. A lowered command carrying no geometry at all
+/// it erases with. An image's destination rectangle is checked on those same
+/// terms — it is both the coverage the image paints through and the scale its
+/// natural-to-destination transform is derived from, so a non-finite one would
+/// reach the flattener and the paint encoding alike. A lowered command carrying
+/// no geometry at all
 /// ([`Command::PopClip`] and its two siblings) has nothing to check and sits
 /// with the skipped group.
 ///
@@ -788,10 +1019,10 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         Command::PushSnapshot {
             rect, alpha, scale, ..
         } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
+        Command::Image { dest, .. } => dest.is_finite(),
         // Carrying no geometry of their own — see above.
         Command::GlyphRun(_)
         | Command::PopClip
-        | Command::Image { .. }
         | Command::BlurredRoundedRect { .. }
         | Command::PopLayer
         | Command::ShaderQuad { .. }

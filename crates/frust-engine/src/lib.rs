@@ -16,7 +16,10 @@
 //! Configuration is process-global and cached, selected from environment
 //! variables read at compile time (`option_env!`) or run time
 //! (`std::env::var`); see [`config`] for the kill switches over layers, atlas,
-//! pooling, depth and resource limits.
+//! pooling, depth and resource limits. `FRUST_ENGINE_NO_ATLAS` and
+//! `FRUST_ENGINE_ATLAS_SIZE` are consulted by [`cache::images`]: the first
+//! makes every image draw a logged skip, the second overrides the atlas extent
+//! the adapter's tier would otherwise choose.
 
 pub mod cache;
 pub mod compile;
@@ -26,13 +29,20 @@ pub mod gpu;
 pub mod renderer;
 pub mod schedule;
 
-pub use cache::{CachedRamp, GradientCache, GradientTextureLayout};
-pub use compile::paint::{BrushEncoding, LutRequest, encode_brush};
+pub use cache::{
+    AtlasBudget, AtlasRegion, CachedRamp, GradientCache, GradientTextureLayout, ImageResidency,
+    ImageSkip, ImageUpload, ResidentImage,
+};
+pub use compile::paint::{
+    BrushEncoding, ImageEncoding, LutRequest, encode_brush, encode_image, encode_image_brush,
+    encode_image_command,
+};
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use error::EngineError;
 pub use gpu::{
-    DepthAttachment, DepthTexture, EnginePipeline, EngineShaderModule, EngineShaders, GpuConfig,
-    GpuEncodedPaint, GpuStrip, IntermediateTargets, IntermediateTexture, StripDraw,
+    ATLAS_FORMAT, AtlasArray, DepthAttachment, DepthTexture, EnginePipeline, EngineShaderModule,
+    EngineShaders, GpuConfig, GpuEncodedPaint, GpuStrip, IntermediateTargets, IntermediateTexture,
+    StripDraw, lower_encoded_image,
 };
 pub use renderer::EngineRenderer;
 pub use schedule::{Composite, PageParity, PageTarget, Round, RoundOp, RoundTarget, Schedule};
