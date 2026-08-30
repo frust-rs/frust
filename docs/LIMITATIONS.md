@@ -3728,3 +3728,32 @@ explicit 64 MiB thread (`run_on_oversized_stack`), documented inline.
 
 **Evidence**: `crates/frust-testing/src/corpus/adversarial.rs`'s `adv-5k-layers` case and
 `tests/adversarial.rs`'s `five_thousand_nested_layers_stay_within_a_bounded_memory_budget`.
+
+### `engine-invalid-geometry-refusal-diverges-from-classic` — the engine refuses non-finite geometry the classic tier still draws through fallbacks
+
+**Observed** (evidence: `crates/frust-engine/tests/proptest_strips.rs`'s
+documented reproducer sites and the measured numbers recorded there):
+`frust-engine`'s `SceneCompiler::compile` validates every lowered
+command's geometry up front (rect extents, corner radii, path points, stroke
+width, dash on/off/phase must be finite — and an effective dash cycle must
+also be *normalizable*: its derived period `on + off` finite and positive with
+the phase reducible into it, since two individually finite lengths can
+overflow the period to `+inf` and spin kurbo's dash iterator forever) and
+refuses the frame with `EngineError::InvalidGeometry` otherwise — required for totality: a `NaN`
+corner radius on an unbounded rect made `compile` never return, and a `NaN`
+stroke width cost ~420 ms/4.8 MB producing zero strips. The vello-classic tier
+has no such gate; notably a `NaN` dash pattern falls back to a solid stroke
+(`DashPattern::is_effective`'s documented behaviour) where the engine refuses
+the frame.
+
+**Accepted because**: the diverging inputs are already erroneous (non-finite
+geometry describes nothing drawable); refusing loudly beats hanging, panicking
+in kurbo, or silently stroking malformed output, and the classic tier is
+scheduled for deletion at the engine swap. A magnitude-based hang class
+(`f64::MAX`-scale finite coordinates driving proportional flattening work)
+remains open and is tracked as its own action item; the up-front check cannot
+refuse finite values.
+
+**Trigger for removal**: the swap phase deletes the classic tier, at which
+point there is one behaviour; or a widget-visible need for the classic
+fallback semantics appears first.

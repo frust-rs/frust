@@ -77,7 +77,9 @@
 //! `Pixmap::take_unpremultiplied`'s route.
 
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
-use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke};
+use kurbo::{
+    Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+};
 use peniko::{BlendMode, Brush, Color, Compose, Fill, ImageData, Mix};
 use vello_cpu_oracle::{
     Image, ImageSource, Level, PaintType, Pixmap, RenderContext, RenderSettings, Resources,
@@ -299,6 +301,32 @@ impl SceneRenderer for CpuOracle {
             "RenderSpec scale must be finite and positive, got {}",
             spec.scale
         );
+        // The identical up-front refusal `frust-engine`'s `SceneCompiler`
+        // applies before it lowers a dash pattern (see that crate's
+        // `compile::dash_cycle_is_normalizable`): a scene the engine refuses
+        // for this reason must be refused here too, before this walk ever
+        // reaches `dash_path`, or the two arms of a differential would
+        // disagree about a scene one of them hangs on rather than one of them
+        // rejects.
+        for command in scene.commands() {
+            if let Command::Path {
+                style:
+                    PathStyle::Stroke {
+                        dash: Some(dash), ..
+                    },
+                ..
+            } = command
+            {
+                anyhow::ensure!(
+                    dash_cycle_is_normalizable(dash),
+                    "dash pattern (on={}, off={}, phase={}) has a derived period kurbo::dash \
+                     cannot normalize — its catch-up loop would spin rather than terminate",
+                    dash.on,
+                    dash.off,
+                    dash.phase
+                );
+            }
+        }
 
         self.resize(width, height);
         self.ctx.reset();
@@ -762,9 +790,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                             // does: `vello_cpu`'s `set_stroke` ignores a
                             // `Stroke`'s dash fields, so flattening at the
                             // decode site is what keeps the two comparable.
-                            let dashed: BezPath =
-                                kurbo::dash(path.iter(), dash.phase, &[dash.on, dash.off])
-                                    .collect();
+                            let dashed = dash_path(path, *dash);
                             painter.stroke_path(transform, brush, &dashed, *width);
                         }
                         // No pattern, or a degenerate one: a solid stroke.
@@ -857,6 +883,98 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     }
 
     routed
+}
+
+/// `path` expanded into the sub-paths `dash` breaks it into.
+///
+/// Element for element the engine compiler's own dash lowering, normalization
+/// included, because the differential compares the two rasterizers' *fill* and
+/// nothing else: a lowering that differed here would report geometry the two
+/// were never handed in common.
+///
+/// Both ends of the expansion go through [`well_formed`]. The input needs it
+/// because `kurbo::dash` mishandles a subpath that closes without ever
+/// producing a segment: it emits that subpath's closing element ahead of the
+/// `MoveTo` meant to open the output, so a path whose *first* subpath is a
+/// zero-length closed one (a dashed arc at zero sweep records exactly that)
+/// dashes to a sequence beginning with `ClosePath`. Such a sequence is not a
+/// path any consumer can read — `BezPath`'s own "begins with `MoveTo`"
+/// invariant is asserted in a debug build and silently strokes malformed
+/// geometry in a release one. Normalizing those subpaths away first removes
+/// the input the iterator gets wrong; normalizing the result as well makes the
+/// well-formedness of what this returns a property of this function rather
+/// than of the dash iterator's internal states.
+///
+/// Only ever called here once [`dash_cycle_is_normalizable`] has passed
+/// `dash` — `kurbo::dash` itself does not bound its catch-up loop against a
+/// non-normalizable cycle. `pub` (rather than `pub(crate)`) so a differential
+/// test can pin this crate's copy of the lowering against `frust-engine`'s
+/// directly, rather than only through a rendered image.
+pub fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
+    let source = well_formed(path.iter());
+    well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
+}
+
+/// Whether a dash pattern's derived cycle survives kurbo's own normalization
+/// arithmetic, so `kurbo::dash` terminates instead of spinning forever.
+///
+/// The identical rule `frust-engine`'s `compile::dash_cycle_is_normalizable`
+/// enforces, kept in lockstep here so a scene the engine refuses is refused by
+/// this oracle too. See that function's docs for why
+/// [`frust_scene::DashPattern::is_effective`]'s own period check is not
+/// enough on its own: `on + off` can overflow to `+inf` for two individually
+/// finite lengths, and `phase.rem_euclid` on an infinite period overflows with
+/// it.
+///
+/// Public so the cross-crate parity test can pin this copy against the
+/// engine's, exactly as `dash_path`/`well_formed` are pinned.
+pub fn dash_cycle_is_normalizable(dash: &frust_scene::DashPattern) -> bool {
+    if !dash.is_effective() {
+        return true;
+    }
+    let period = dash.on + dash.off;
+    period.is_finite() && period > 0.0 && dash.phase.rem_euclid(period).is_finite()
+}
+
+/// `elements` as a path every consumer can read: opened by a `MoveTo`, and
+/// carrying no `ClosePath` that closes a subpath with no segments in it.
+///
+/// Both rules drop elements that describe no geometry — an element before the
+/// first `MoveTo` has no start point to be drawn from, and closing a subpath
+/// that never left its start point adds no segment — so a well-formed path in
+/// yields itself back unchanged.
+///
+/// `pub` for the same cross-crate-parity reason as [`dash_path`].
+pub fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+    let mut out = BezPath::new();
+    // Tracked rather than read back off `out`: `BezPath::is_empty` asks whether
+    // a path holds any SEGMENT, which a path holding only its opening `MoveTo`
+    // does not.
+    let mut opened = false;
+    let mut segments_in_subpath = 0_usize;
+
+    for element in elements {
+        match element {
+            PathEl::MoveTo(_) => {
+                opened = true;
+                segments_in_subpath = 0;
+                out.push(element);
+            }
+            PathEl::ClosePath => {
+                if segments_in_subpath > 0 {
+                    segments_in_subpath = 0;
+                    out.push(element);
+                }
+            }
+            PathEl::LineTo(_) | PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                if opened {
+                    segments_in_subpath += 1;
+                    out.push(element);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The scene's per-corner radii in the `kurbo` shape vocabulary — the one

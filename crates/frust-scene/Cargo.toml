@@ -8,3 +8,9 @@ license.workspace = true
 [dependencies]
 kurbo.workspace = true
 peniko.workspace = true
+
+[dev-dependencies]
+# `tests/proptest_commands.rs` — the display list's property suite: a builder
+# that accepts any command sequence without panicking, a balanced sequence that
+# balances, and a fingerprint that survives a whole-bracket translate/scale.
+proptest.workspace = true

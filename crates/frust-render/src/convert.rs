@@ -10,7 +10,7 @@
 //! only `peniko` types in its own public API).
 
 use frust_scene::{Command, DashPattern, GlyphRun, PathStyle, Scene};
-use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Stroke};
+use kurbo::{Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -491,12 +491,14 @@ fn encode_commands<'a>(
                 match style {
                     PathStyle::Fill => sink.fill_path(transform, brush, path),
                     PathStyle::Stroke { width, dash } => match dash {
-                        Some(dash) if dash.is_effective() => {
+                        Some(dash) if dash.is_effective() && dash_cycle_is_normalizable(dash) => {
                             let dashed = dash_path(path, *dash);
                             sink.stroke_path(transform, brush, &dashed, *width);
                         }
-                        // No pattern, or a degenerate one (see
-                        // `DashPattern::is_effective`): a plain solid stroke.
+                        // No pattern, a degenerate one (see
+                        // `DashPattern::is_effective`), or one whose derived
+                        // cycle would spin `kurbo::dash` forever (see
+                        // `dash_cycle_is_normalizable`): a plain solid stroke.
                         _ => sink.stroke_path(transform, brush, path, *width),
                     },
                 }
@@ -645,6 +647,37 @@ fn radii_of(radii: frust_scene::CornerRadii) -> RoundedRectRadii {
     )
 }
 
+/// Whether a dash pattern's derived cycle survives kurbo's own normalization
+/// arithmetic, so `kurbo::dash` terminates instead of spinning forever.
+///
+/// [`DashPattern::is_effective`] already screens out a non-positive or
+/// sub-epsilon pattern in favour of a solid stroke, but its own period check —
+/// `on + off >= DASH_PERIOD_EPSILON` — can itself be fooled: two individually
+/// finite lengths can sum past `f64::MAX` into `+inf`, and `+inf >=
+/// DASH_PERIOD_EPSILON` still reads as effective. kurbo doubles this crate's
+/// on/off pair into its own length-2 dash array, so the period it derives is
+/// always `on + off`; once that overflows, `phase.rem_euclid(period)`
+/// overflows with it, and the catch-up loop `kurbo::dash` runs before it ever
+/// pulls a `PathEl` adds an infinite step to a value that never converges —
+/// `on = off = f64::MAX`, `phase = -1.0` hangs this way. Refusing here, where
+/// `on`, `off` and `phase` already passed their own finiteness checks, is what
+/// keeps that unbounded loop out of the frame path.
+///
+/// A private copy rather than a `frust-engine` import: this crate must not
+/// depend on the engine crate, so the CPU-tier `dash_cycle_is_normalizable`
+/// there and this one are kept in parity by hand, the same way this module's
+/// `dash_path`/`well_formed` mirror the engine's oracle copies.
+fn dash_cycle_is_normalizable(dash: &DashPattern) -> bool {
+    if !dash.is_effective() {
+        // A degenerate pattern never reaches `dash_path`: `is_effective` is
+        // what routes it to a solid stroke instead, so its derived period is
+        // moot here.
+        return true;
+    }
+    let period = dash.on + dash.off;
+    period.is_finite() && period > 0.0 && dash.phase.rem_euclid(period).is_finite()
+}
+
 /// Expands `path` into its dash segments — the sub-paths a dashed stroke is
 /// actually made of.
 ///
@@ -655,8 +688,69 @@ fn radii_of(radii: frust_scene::CornerRadii) -> RoundedRectRadii {
 /// the same iterator vello itself uses, so the GPU tier's output is unchanged
 /// by taking this route. Each dash becomes its own open sub-path, capped and
 /// joined by the single `Stroke` the sink applies to the whole result.
+///
+/// Both ends of the expansion go through [`well_formed`]. The input needs it
+/// because `kurbo::dash` mishandles a subpath that closes without ever
+/// producing a segment: it emits that subpath's closing element ahead of the
+/// `MoveTo` meant to open the output, so a path whose *first* subpath is a
+/// zero-length closed one (a dashed arc at zero sweep records exactly that)
+/// dashes to a sequence beginning with `ClosePath`. Such a sequence is not a
+/// path any consumer can read — `BezPath`'s own "begins with `MoveTo`"
+/// invariant is asserted in a debug build and silently strokes malformed
+/// geometry in a release one. Normalizing those subpaths away first removes
+/// the input the iterator gets wrong; normalizing the result as well makes the
+/// well-formedness of what this returns a property of this function rather
+/// than of the dash iterator's internal states.
+///
+/// Callers here only ever reach `kurbo::dash` once
+/// [`dash_cycle_is_normalizable`] has passed the pattern, since `kurbo::dash`
+/// itself does not bound its catch-up loop against a non-normalizable cycle.
 fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
-    kurbo::dash(path.iter(), dash.phase, &[dash.on, dash.off]).collect()
+    let source = well_formed(path.iter());
+    well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
+}
+
+/// `elements` as a path every consumer can read: opened by a `MoveTo`, and
+/// carrying no `ClosePath` that closes a subpath with no segments in it.
+///
+/// Both rules drop elements that describe no geometry — an element before the
+/// first `MoveTo` has no start point to be drawn from, and closing a subpath
+/// that never left its start point adds no segment — so a well-formed path in
+/// yields itself back unchanged.
+///
+/// A private copy of the same normalization `frust-engine`'s CPU-tier
+/// lowering applies, kept in parity by hand for the same layering reason as
+/// [`dash_cycle_is_normalizable`].
+fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+    let mut out = BezPath::new();
+    // Tracked rather than read back off `out`: `BezPath::is_empty` asks
+    // whether a path holds any SEGMENT, which a path holding only its
+    // opening `MoveTo` does not.
+    let mut opened = false;
+    let mut segments_in_subpath = 0_usize;
+
+    for element in elements {
+        match element {
+            PathEl::MoveTo(_) => {
+                opened = true;
+                segments_in_subpath = 0;
+                out.push(element);
+            }
+            PathEl::ClosePath => {
+                if segments_in_subpath > 0 {
+                    segments_in_subpath = 0;
+                    out.push(element);
+                }
+            }
+            PathEl::LineTo(_) | PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                if opened {
+                    segments_in_subpath += 1;
+                    out.push(element);
+                }
+            }
+        }
+    }
+    out
 }
 
 impl SceneSink for vello::Scene {
@@ -2059,6 +2153,75 @@ mod tests {
                 "{dash:?} should stroke solid"
             );
         }
+    }
+
+    /// A pattern whose `on`/`off`/`phase` fields are each individually
+    /// finite, but whose derived period (`on + off`) overflows to infinity,
+    /// passes `DashPattern::is_effective` (`+inf >= DASH_PERIOD_EPSILON` reads
+    /// as true) yet would spin `kurbo::dash`'s catch-up loop forever before it
+    /// ever pulls a `PathEl` — so the walk must also refuse it and stroke
+    /// solid, and must do so promptly rather than hanging.
+    #[test]
+    fn non_normalizable_dash_cycle_strokes_solid_promptly() {
+        let dash = DashPattern::new(f64::MAX, f64::MAX).with_phase(-1.0);
+        assert!(dash.is_effective(), "fixture should pass is_effective");
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = horizontal_line_path(10.0);
+        builder.stroke_path_dashed(path.clone(), 2.0, dash, Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::StrokePath {
+                path,
+                width: 2.0,
+                transform: Affine::IDENTITY,
+            }],
+            "a non-normalizable dash cycle should stroke solid"
+        );
+    }
+
+    /// A path whose first sub-path closes without ever producing a segment
+    /// (a dashed arc at zero sweep records exactly this shape) must not panic
+    /// the classic lowering — `kurbo::dash` otherwise emits that sub-path's
+    /// `ClosePath` ahead of the output's opening `MoveTo`, which trips
+    /// `BezPath`'s "begins with `MoveTo`" debug assertion.
+    #[test]
+    fn zero_length_closed_subpath_ahead_of_a_real_one_does_not_panic() {
+        let mut path = BezPath::new();
+        path.push(PathEl::MoveTo(Point::new(0.0, 0.0)));
+        path.push(PathEl::ClosePath);
+        path.push(PathEl::MoveTo(Point::new(0.0, 0.0)));
+        path.push(PathEl::LineTo(Point::new(10.0, 0.0)));
+
+        let dashed = dash_path(&path, DashPattern::new(2.0, 2.0));
+
+        assert!(
+            matches!(dashed.elements().first(), Some(PathEl::MoveTo(_))),
+            "a well-formed dash expansion must open with MoveTo, got {:?}",
+            dashed.elements()
+        );
+    }
+
+    /// The normalizability guard changes nothing for a pattern that was
+    /// already dashable: this is the same expansion `dashed_line_decodes_...`
+    /// pins, checked here directly against `dash_path`'s output so a
+    /// regression in the guard's placement (rather than its condition) also
+    /// shows up.
+    #[test]
+    fn normal_dash_pattern_is_unaffected_by_the_normalizability_guard() {
+        let dash = DashPattern::new(2.0, 2.0);
+        assert!(dash.is_effective());
+        assert!(dash_cycle_is_normalizable(&dash));
+
+        let path = horizontal_line_path(10.0);
+        let dashed = dash_path(&path, dash);
+
+        assert_close(&sorted_dash_lengths(&dashed), &[2.0, 2.0, 2.0]);
     }
 
     /// The per-corner and dashed commands must reach a real `vello::Scene`

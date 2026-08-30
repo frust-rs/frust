@@ -31,7 +31,7 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
-| `GPU`/`ENGINE` | crates/frust-gpu, frust-engine (not yet created) | – |
+| `GPU`/`ENGINE` | crates/frust-gpu, crates/frust-engine | – |
 
 **Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, editors/vscode-frust.
 

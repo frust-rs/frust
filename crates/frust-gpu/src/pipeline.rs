@@ -10,7 +10,10 @@
 //!   hashed.
 //! - [`PipelineCache::warm_up`] takes a list of those descs and builds them on
 //!   a worker thread when the surface is installed, so the variants an app is
-//!   known to need exist before the first frame asks for one.
+//!   known to need exist before the first frame asks for one. At most one such
+//!   worker is ever alive per cache, and [`PipelineCache::shutdown`] — which
+//!   `Drop` calls — joins it, so no thread holding a clone of the device
+//!   outlives the cache.
 //! - [`PipelineCache::get_or_create`] compiles a variant at most once. If the
 //!   render thread asks for a variant that is still *queued* for the warm-up
 //!   worker, it does not wait its turn: it **steals** the job, builds it
@@ -53,6 +56,27 @@
 //! falls back to an uncached compile rather than risking a wrong hit. It takes
 //! thousands of distinct blend states to get there, so it is a safety net, not
 //! a path.
+//!
+//! ## The warm-up worker
+//!
+//! One worker at a time, spawned on demand and **exiting when the queue
+//! drains** rather than parking: a surface reinstall calls `warm_up` again,
+//! and the choice keeps a long-lived cache from holding an idle thread (and a
+//! device clone) for the process lifetime. The liveness flag is set and
+//! cleared inside the same critical section that enqueues jobs and claims
+//! them, so a worker on its way out can never be mistaken for one that will
+//! still pick up the job just queued.
+//!
+//! A compile that unwinds marks its variant [`JobState::Failed`] instead of
+//! leaving it claimable-but-unreachable: the queue entry is already spent, so
+//! a `Pending` job nobody re-queues is a job the worker can never build again
+//! and `queued_variants` would count forever. `Failed` is terminal for the
+//! *queue* only — the next [`PipelineCache::get_or_create`] for that variant
+//! rebuilds it, and a second failure unwinds into that caller rather than
+//! parking it on a build that will never publish. The worker catches the
+//! unwind so one bad variant costs its own pipeline and not the rest of the
+//! queue; an inline build does not, because there the requester is the right
+//! place for the failure to land.
 //!
 //! ## Persisted driver cache
 //!
@@ -351,6 +375,10 @@ enum JobState {
     Building,
     /// Built; the pipeline is in `Inner::built`.
     Done,
+    /// A compile of this variant unwound. Terminal as far as the warm-up
+    /// queue is concerned — its place in the queue is spent, so no worker
+    /// will claim it again — but a later request rebuilds it inline.
+    Failed,
 }
 
 /// One warm-up job: the variant to build and how far along it is.
@@ -370,6 +398,16 @@ struct Inner<P> {
     queue: VecDeque<u64>,
     /// How many compiles have actually run — the "compiled once" evidence.
     compiles: u64,
+    /// Whether a warm-up worker is draining `queue` right now. Only ever
+    /// written while the lock is held, which is what makes "one worker" a
+    /// fact rather than a race: see the module docs.
+    worker_live: bool,
+    /// Set once the cache is shutting down; a worker claims nothing more, so
+    /// teardown waits for at most the compile already in flight.
+    shutdown: bool,
+    /// Bumped every time liveness is claimed, so a departing worker can tell
+    /// whether the flag it is about to clear is still its own.
+    worker_epoch: u64,
 }
 
 impl<P> Default for Inner<P> {
@@ -379,14 +417,24 @@ impl<P> Default for Inner<P> {
             jobs: HashMap::new(),
             queue: VecDeque::new(),
             compiles: 0,
+            worker_live: false,
+            shutdown: false,
+            worker_epoch: 0,
         }
     }
 }
 
 impl<P> Inner<P> {
     /// Claims the next still-pending job, marking it `Building`.
+    ///
+    /// Returning `None` also clears `worker_live`, in this same critical
+    /// section: a caller that enqueues after this point sees no live worker
+    /// and spawns one, so the job it just listed cannot fall between the
+    /// worker's last look at the queue and its exit.
     fn claim_next_pending(&mut self) -> Option<(u64, RenderPipelineDesc)> {
-        while let Some(key) = self.queue.pop_front() {
+        while !self.shutdown
+            && let Some(key) = self.queue.pop_front()
+        {
             if let Some(job) = self.jobs.get_mut(&key)
                 && job.state == JobState::Pending
             {
@@ -394,6 +442,7 @@ impl<P> Inner<P> {
                 return Some((key, job.desc.clone()));
             }
         }
+        self.worker_live = false;
         None
     }
 }
@@ -422,11 +471,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Holds a job `Building` for the duration of one compile, and puts it back to
-/// `Pending` if that compile unwinds — without this a panicking worker would
-/// leave every waiter blocked on a build that will never finish. A job
-/// released this way is claimable again (the next request builds it inline),
-/// even though its place in the warm-up queue is already gone.
+/// Holds a job `Building` for the duration of one compile, and marks it
+/// [`JobState::Failed`] if that compile unwinds — without this a panicking
+/// builder would leave every waiter blocked on a build that will never finish.
+///
+/// `Failed` rather than `Pending` because the job's place in the warm-up queue
+/// is already spent: a `Pending` entry no worker can reach is a phantom that
+/// `queued_variants` would report for the process lifetime. The failure stays
+/// visible to the next requester, which rebuilds the variant inline.
 struct BuildGuard<'a, P> {
     shared: &'a Shared<P>,
     key: u64,
@@ -456,6 +508,26 @@ impl<'a, P> BuildGuard<'a, P> {
     }
 }
 
+/// Clears the worker-liveness flag if a drain leaves by any route other than
+/// the ordinary "queue empty" one, which clears it under the lock itself.
+///
+/// The epoch check is what stops a departing worker from clearing liveness
+/// that a *newer* worker has since claimed — without it, an abnormal exit
+/// racing a fresh `warm_up` could leave two workers on one queue.
+struct LiveWorkerGuard<'a, P> {
+    shared: &'a Shared<P>,
+    epoch: u64,
+}
+
+impl<P> Drop for LiveWorkerGuard<'_, P> {
+    fn drop(&mut self) {
+        let mut inner = lock(&self.shared.inner);
+        if inner.worker_epoch == self.epoch {
+            inner.worker_live = false;
+        }
+    }
+}
+
 impl<P> Drop for BuildGuard<'_, P> {
     fn drop(&mut self) {
         if !self.armed {
@@ -463,7 +535,7 @@ impl<P> Drop for BuildGuard<'_, P> {
         }
         let mut inner = lock(&self.shared.inner);
         if let Some(job) = inner.jobs.get_mut(&self.key) {
-            job.state = JobState::Pending;
+            job.state = JobState::Failed;
         }
         drop(inner);
         self.shared.built.notify_all();
@@ -487,6 +559,8 @@ struct VariantCache<P> {
     overflow: Option<Arc<P>>,
     keys: KeyPacker,
     warned_key_space: bool,
+    /// The one warm-up worker, kept so [`VariantCache::shutdown`] can join it.
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl<P> Default for VariantCache<P> {
@@ -497,7 +571,14 @@ impl<P> Default for VariantCache<P> {
             overflow: None,
             keys: KeyPacker::default(),
             warned_key_space: false,
+            worker: None,
         }
+    }
+}
+
+impl<P> Drop for VariantCache<P> {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -555,8 +636,11 @@ impl<P> VariantCache<P> {
                         .wait(inner)
                         .unwrap_or_else(PoisonError::into_inner);
                 }
-                // Queued but unstarted — steal it and build it inline.
-                Some(JobState::Pending) => {
+                // Queued but unstarted — steal it and build it inline. Same
+                // for a variant whose last compile unwound: the queue will
+                // never come back to it, so the requester rebuilds it here
+                // (and eats the failure itself if it unwinds again).
+                Some(JobState::Pending | JobState::Failed) => {
                     if let Some(job) = inner.jobs.get_mut(&key) {
                         job.state = JobState::Building;
                     }
@@ -593,7 +677,12 @@ impl<P> VariantCache<P> {
 
     /// Records `descs` as warm-up jobs, skipping any variant already built or
     /// already queued. Compiles nothing itself.
-    fn enqueue(&mut self, descs: &[RenderPipelineDesc]) {
+    ///
+    /// Returns whether the caller must start a worker: `true` only when there
+    /// is pending work and no live worker to take it, in which case the
+    /// liveness flag is claimed here, under the same lock that queued the
+    /// jobs. A cache that is shutting down never asks for one.
+    fn enqueue(&mut self, descs: &[RenderPipelineDesc]) -> bool {
         let mut inner = lock(&self.shared.inner);
         for desc in descs {
             let Some(key) = self.keys.key_for(desc) else {
@@ -616,22 +705,98 @@ impl<P> VariantCache<P> {
             );
             inner.queue.push_back(key);
         }
+        if inner.shutdown || inner.worker_live || inner.queue.is_empty() {
+            return false;
+        }
+        inner.worker_live = true;
+        inner.worker_epoch += 1;
+        true
     }
 
     /// Builds every still-pending queued job. This is the warm-up worker's
     /// whole body; a job the render thread stole in the meantime is skipped.
+    ///
+    /// A compile that unwinds is caught here rather than tearing the worker
+    /// down with the rest of the queue unbuilt: [`BuildGuard`] has already
+    /// marked that one variant failed, and the drain moves on.
     fn drain_queue<F>(shared: &Arc<Shared<P>>, compile: F)
     where
         F: Fn(&RenderPipelineDesc) -> P,
     {
+        let _live = LiveWorkerGuard {
+            shared,
+            epoch: lock(&shared.inner).worker_epoch,
+        };
         loop {
             let claimed = lock(&shared.inner).claim_next_pending();
             let Some((key, desc)) = claimed else {
                 return;
             };
-            let guard = BuildGuard::new(shared, key);
-            let pipeline = Arc::new(compile(&desc));
-            guard.publish(pipeline);
+            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let guard = BuildGuard::new(shared, key);
+                guard.publish(Arc::new(compile(&desc)));
+            }));
+            if built.is_err() {
+                log::error!(
+                    "frust-gpu: a warm-up compile panicked; that variant is left to be \
+                     rebuilt on request and the rest of the queue continues"
+                );
+            }
+        }
+    }
+
+    /// Queues `descs` and makes sure exactly one worker is draining them.
+    ///
+    /// `make_compile` is called once per thread that needs one — the worker,
+    /// or the calling thread when the spawn fails and the queue has to be
+    /// drained inline rather than silently not warmed at all.
+    fn warm_up<F>(&mut self, descs: &[RenderPipelineDesc], make_compile: impl Fn() -> F)
+    where
+        P: Send + Sync + 'static,
+        F: Fn(&RenderPipelineDesc) -> P + Send + 'static,
+    {
+        if !self.enqueue(descs) {
+            return;
+        }
+        // The previous worker has already cleared the liveness flag and is on
+        // its way out; joining it here is what keeps "no worker outlives the
+        // cache" true of the handle this cache actually holds.
+        self.join_worker();
+
+        let worker_shared = self.shared();
+        let worker_compile = make_compile();
+        let spawned = std::thread::Builder::new()
+            .name("frust-gpu pipeline warm-up".to_string())
+            .spawn(move || VariantCache::drain_queue(&worker_shared, worker_compile));
+        match spawned {
+            Ok(handle) => self.worker = Some(handle),
+            Err(err) => {
+                log::warn!(
+                    "frust-gpu: could not spawn the pipeline warm-up thread ({err}); \
+                     building the listed variants inline"
+                );
+                VariantCache::drain_queue(&self.shared(), make_compile());
+            }
+        }
+    }
+
+    /// Stops the warm-up worker and waits for it, so nothing this cache
+    /// spawned can still be holding the device once it returns.
+    ///
+    /// Idempotent, and terminal: the shutdown flag stays set, so a later
+    /// `warm_up` queues its variants without starting a worker and they are
+    /// built on request instead.
+    fn shutdown(&mut self) {
+        lock(&self.shared.inner).shutdown = true;
+        self.join_worker();
+    }
+
+    /// Joins the worker if one is recorded, reporting a panic that escaped it.
+    fn join_worker(&mut self) {
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            log::error!("frust-gpu: the pipeline warm-up worker panicked");
         }
     }
 
@@ -714,28 +879,33 @@ impl PipelineCache {
     /// Queues `descs` and builds them on a worker thread.
     ///
     /// Call it once the surface (and therefore the device) exists, with every
-    /// variant the app is known to draw. Returns immediately; the worker is
-    /// detached, and the render thread never blocks on it — a variant it asks
-    /// for early is stolen out of the queue instead.
+    /// variant the app is known to draw. Returns immediately, and the render
+    /// thread never blocks on the worker — a variant it asks for early is
+    /// stolen out of the queue instead.
+    ///
+    /// Safe to call repeatedly: a surface reinstall enqueues its variants
+    /// against the live worker rather than starting a second one, and a call
+    /// whose variants are all built already starts nothing at all.
     ///
     /// If the thread cannot be spawned the queue is drained inline instead, so
     /// warm-up degrades to a synchronous build rather than silently not
     /// happening.
     pub fn warm_up(&mut self, device: &wgpu::Device, descs: &[RenderPipelineDesc]) {
-        self.core.enqueue(descs);
-        let shared = self.core.shared();
-        let worker_shared = Arc::clone(&shared);
-        let worker_compile = self.compiler(device);
-        let spawned = std::thread::Builder::new()
-            .name("frust-gpu pipeline warm-up".to_string())
-            .spawn(move || VariantCache::drain_queue(&worker_shared, worker_compile));
-        if let Err(err) = spawned {
-            log::warn!(
-                "frust-gpu: could not spawn the pipeline warm-up thread ({err}); \
-                 building the listed variants inline"
-            );
-            VariantCache::drain_queue(&shared, self.compiler(device));
-        }
+        let shaders = Arc::clone(&self.shaders);
+        let driver_cache = self.driver_cache.clone();
+        self.core
+            .warm_up(descs, || compiler(device, &shaders, driver_cache.as_ref()));
+    }
+
+    /// Stops warm-up and joins the worker, so no thread holding a clone of the
+    /// device outlives this cache.
+    ///
+    /// [`Drop`] calls this; call it explicitly to order the wait before other
+    /// teardown of your own. It is idempotent, and terminal — afterwards
+    /// [`Self::warm_up`] records its variants without starting a worker, and
+    /// they are compiled on first request.
+    pub fn shutdown(&mut self) {
+        self.core.shutdown();
     }
 
     /// How many pipelines this cache has actually compiled.
@@ -749,19 +919,20 @@ impl PipelineCache {
     pub fn queued_variants(&self) -> usize {
         self.core.queued_variants()
     }
+}
 
-    /// A self-contained compile function for a worker thread: it owns clones
-    /// of the device, library and driver cache, all of which are `Arc`-backed
-    /// handles.
-    fn compiler(
-        &self,
-        device: &wgpu::Device,
-    ) -> impl Fn(&RenderPipelineDesc) -> wgpu::RenderPipeline + Send + 'static + use<> {
-        let device = device.clone();
-        let shaders = Arc::clone(&self.shaders);
-        let driver_cache = self.driver_cache.clone();
-        move |desc| build_render_pipeline(&device, &shaders, driver_cache.as_ref(), desc)
-    }
+/// A self-contained compile function for a worker thread: it owns clones of
+/// the device, library and driver cache, all of which are `Arc`-backed
+/// handles.
+fn compiler(
+    device: &wgpu::Device,
+    shaders: &Arc<ShaderLibrary>,
+    driver_cache: Option<&wgpu::PipelineCache>,
+) -> impl Fn(&RenderPipelineDesc) -> wgpu::RenderPipeline + Send + 'static + use<> {
+    let device = device.clone();
+    let shaders = Arc::clone(shaders);
+    let driver_cache = driver_cache.cloned();
+    move |desc| build_render_pipeline(&device, &shaders, driver_cache.as_ref(), desc)
 }
 
 /// Creates one `wgpu::RenderPipeline` from a desc — the only place in this
@@ -824,7 +995,7 @@ fn build_render_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Stands in for a `wgpu::RenderPipeline` so the queue/steal policy runs
     /// with no device: it records which variant it was built from.
@@ -1104,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panicking_compile_leaves_the_job_claimable_again() {
+    fn an_abandoned_build_marks_the_job_failed_rather_than_pending() {
         let cache = VariantCache::<FakePipeline>::default();
         let shared = cache.shared();
         let guard = BuildGuard::new(&shared, 42);
@@ -1119,9 +1290,232 @@ mod tests {
         drop(guard);
         assert_eq!(
             lock(&shared.inner).jobs.get(&42).map(|job| job.state),
-            Some(JobState::Pending),
-            "an abandoned build must leave the job claimable again"
+            Some(JobState::Failed),
+            "an abandoned build must not leave a Pending job no worker can claim"
         );
+    }
+
+    /// A compile that panics once, then behaves — the failure mode a driver
+    /// or a malformed shader produces on exactly one variant.
+    struct PanicOnce {
+        counter: Arc<Counter>,
+        armed: AtomicBool,
+    }
+
+    impl PanicOnce {
+        fn new(counter: &Arc<Counter>) -> Self {
+            Self {
+                counter: Arc::clone(counter),
+                armed: AtomicBool::new(true),
+            }
+        }
+
+        fn compile(&self, desc: &RenderPipelineDesc) -> FakePipeline {
+            assert!(
+                !self.armed.swap(false, Ordering::SeqCst),
+                "the fake compile fails its first call"
+            );
+            self.counter.compile(desc)
+        }
+    }
+
+    #[test]
+    fn a_panicking_warm_up_compile_costs_one_variant_and_not_the_queue() {
+        let mut cache = VariantCache::<FakePipeline>::default();
+        let counter = Arc::new(Counter::default());
+        let failing = PanicOnce::new(&counter);
+        let listed: Vec<_> = [1u32, 2, 4]
+            .into_iter()
+            .map(|sample_count| RenderPipelineDesc {
+                sample_count,
+                ..desc()
+            })
+            .collect();
+
+        cache.enqueue(&listed);
+        VariantCache::drain_queue(&cache.shared(), |d| failing.compile(d));
+
+        // The unwind took its own variant down and nothing else: the drain
+        // carried on and built the other two.
+        assert_eq!(counter.count(), 2);
+        assert_eq!(
+            cache.queued_variants(),
+            0,
+            "a failed job must not be counted as still queued forever"
+        );
+
+        // And the failed variant is rebuilt on request rather than waited on.
+        assert_eq!(
+            cache
+                .get_or_create(&listed[0], |d| counter.compile(d))
+                .sample_count,
+            1
+        );
+        assert_eq!(counter.count(), 3);
+
+        // Everything the worker did build is still a hit.
+        for desc in &listed {
+            cache.get_or_create(desc, |d| counter.compile(d));
+        }
+        assert_eq!(counter.count(), 3);
+    }
+
+    #[test]
+    fn a_panicking_inline_build_surfaces_to_the_requester_and_leaves_it_rebuildable() {
+        let mut cache = VariantCache::<FakePipeline>::default();
+        let counter = Arc::new(Counter::default());
+        let failing = PanicOnce::new(&counter);
+        let desc = desc();
+        cache.enqueue(std::slice::from_ref(&desc));
+
+        // The render thread steals the queued job; its compile unwinds, and
+        // the failure lands on the requester rather than anywhere silent.
+        let stolen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.get_or_create(&desc, |d| failing.compile(d));
+        }));
+        assert!(
+            stolen.is_err(),
+            "an inline compile must not swallow a panic"
+        );
+        assert_eq!(counter.count(), 0);
+
+        // The next request rebuilds it instead of blocking on a build that
+        // will never publish.
+        assert_eq!(cache.get_or_create(&desc, |d| counter.compile(d)).serial, 0);
+        assert_eq!(counter.count(), 1);
+        assert_eq!(cache.queued_variants(), 0);
+    }
+
+    /// A latch a fake compile parks on, so a warm-up worker can be held
+    /// mid-drain while the test makes further `warm_up` calls against the
+    /// same cache.
+    #[derive(Default)]
+    struct Latch {
+        open: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl Latch {
+        fn wait(&self) {
+            let mut open = lock(&self.open);
+            while !*open {
+                open = self
+                    .changed
+                    .wait(open)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+
+        fn open(&self) {
+            *lock(&self.open) = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn shader_variants(count: u32) -> Vec<RenderPipelineDesc> {
+        (0..count)
+            .map(|i| RenderPipelineDesc {
+                shader: ShaderId::from_raw(i),
+                ..desc()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repeated_warm_up_calls_keep_at_most_one_worker() {
+        let mut cache = VariantCache::<FakePipeline>::default();
+        let counter = Arc::new(Counter::default());
+        let latch = Arc::new(Latch::default());
+        let workers = AtomicU64::new(0);
+        let listed = shader_variants(6);
+
+        // Every worker this cache starts calls the factory exactly once, so
+        // counting factory calls counts workers.
+        let make_compile = || {
+            workers.fetch_add(1, Ordering::SeqCst);
+            let counter = Arc::clone(&counter);
+            let latch = Arc::clone(&latch);
+            let held = AtomicBool::new(false);
+            move |d: &RenderPipelineDesc| {
+                if !held.swap(true, Ordering::SeqCst) {
+                    latch.wait();
+                }
+                counter.compile(d)
+            }
+        };
+
+        // One worker starts on the first listed variant and is held there,
+        // so it is unambiguously still live for every later call.
+        cache.warm_up(&listed[..1], make_compile);
+        for _ in 0..8 {
+            cache.warm_up(&listed, make_compile);
+        }
+        assert_eq!(
+            workers.load(Ordering::SeqCst),
+            1,
+            "a live worker must absorb further warm-up calls, not be joined by more"
+        );
+
+        latch.open();
+        cache.shutdown();
+
+        // Whatever the worker did not reach before shutdown is built on
+        // request; either way each variant is compiled exactly once.
+        for desc in &listed {
+            cache.get_or_create(desc, |d| counter.compile(d));
+        }
+        assert_eq!(counter.count(), listed.len() as u64);
+        assert_eq!(cache.compiled_variants(), listed.len() as u64);
+    }
+
+    #[test]
+    fn dropping_the_cache_joins_its_worker() {
+        // Stands in for the `wgpu::Device` handle a real compile function
+        // clones into the worker: if the thread outlived the cache, this
+        // clone would still be alive after the drop.
+        let device = Arc::new(());
+        let counter = Arc::new(Counter::default());
+        let listed = shader_variants(4);
+
+        let mut cache = VariantCache::<FakePipeline>::default();
+        cache.warm_up(&listed, || {
+            let device = Arc::clone(&device);
+            let counter = Arc::clone(&counter);
+            move |d: &RenderPipelineDesc| {
+                let _held = Arc::clone(&device);
+                counter.compile(d)
+            }
+        });
+        drop(cache);
+
+        assert_eq!(
+            Arc::strong_count(&device),
+            1,
+            "no warm-up worker may outlive the cache that started it"
+        );
+    }
+
+    #[test]
+    fn warming_up_after_shutdown_starts_no_worker_and_still_builds_on_request() {
+        let mut cache = VariantCache::<FakePipeline>::default();
+        let counter = Arc::new(Counter::default());
+        let workers = AtomicU64::new(0);
+        let listed = shader_variants(3);
+
+        cache.shutdown();
+        // Idempotent: a second call is a no-op, not a double join.
+        cache.shutdown();
+        cache.warm_up(&listed, || {
+            workers.fetch_add(1, Ordering::SeqCst);
+            let counter = Arc::clone(&counter);
+            move |d: &RenderPipelineDesc| counter.compile(d)
+        });
+
+        assert_eq!(workers.load(Ordering::SeqCst), 0);
+        for desc in &listed {
+            cache.get_or_create(desc, |d| counter.compile(d));
+        }
+        assert_eq!(counter.count(), listed.len() as u64);
     }
 
     /// Pops a validation error scope, pumping the device until the pop

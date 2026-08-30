@@ -92,6 +92,29 @@ serde_json = { workspace = true }
 # `vello`/`wgpu` — this arm of the oracle pair rasterizes on the CPU, so it
 # runs on a GPU-less machine even though `frust-render` is now in the graph.
 vello_cpu_oracle = { workspace = true }
+# Back `oracle_engine::EngineOracle` — the sparse-strip ENGINE arm of the
+# oracle set, a `SceneRenderer` over `frust_engine::EngineRenderer` recording
+# into a `frust_gpu::HeadlessTarget`. Declared for the same reason
+# `frust-render` above is, and under the same charter: an oracle set needs
+# every arm behind one trait, `corpus` hands the same case to all of them, and
+# this crate is `publish = false`, reachable only across a
+# `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
+# ever sees the engine tier through here. NORMAL rather than dev dependencies
+# for the same reason `vello_cpu_oracle` is one: `EngineOracle` lives in
+# `src/` and is part of this crate's own API. `tests/pins_and_deps.rs`'s G7
+# boundary is untouched — it forbids an engine-tier edge from `frust-core`/
+# `frust-widgets`/`frust`/`plugins/*`, and this crate is none of those.
+frust-engine = { workspace = true }
+frust-gpu = { workspace = true }
+# Named directly because the engine seam is spelled in wgpu's own vocabulary:
+# `EngineTarget` carries a `wgpu::TextureView`/`wgpu::TextureFormat` and
+# `EngineRenderer::encode` records into a `wgpu::CommandEncoder` the CALLER
+# owns, and neither engine-tier crate re-exports wgpu, so an adapter for that
+# seam has to name it. It stays confined to `oracle_engine`'s internals: no
+# `wgpu` type appears in this crate's public API, which speaks plain bytes,
+# `kurbo` and `peniko` exactly as before (`docs/CODE_STANDARDS.md`'s
+# "Leaking `vello`/`wgpu` types outside `frust-render`").
+wgpu = { workspace = true }
 # `frust_render::HeadlessRenderer`'s adapter/device/render API is `async`
 # (wgpu's requests and its error scope are futures) while `SceneRenderer` is
 # sync, so `oracle_classic` drives it with the same minimal block-on executor
@@ -103,3 +126,8 @@ pollster = { workspace = true }
 # tests/deps.rs parses every crate/plugin manifest to enforce the
 # dev-dependency-only guard above.
 toml = { workspace = true }
+# tests/fuzz.rs — the cross-oracle differential: generated scenes rendered on
+# the engine and on `vello_cpu` and held to the same near-exact bar the engine
+# goldens use. A DEV dependency (unlike the oracle crates above): the generator
+# lives in the test target, not in this crate's own API.
+proptest = { workspace = true }

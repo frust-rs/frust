@@ -34,6 +34,10 @@
 //! - [`oracle_classic`]: [`oracle_classic::ClassicOracle`], the GPU arm of
 //!   that pair over `frust-render`'s offscreen vello-classic renderer, plus
 //!   the adapter-to-golden-class routing ([`oracle_classic::golden_class`]).
+//! - [`oracle_engine`]: [`oracle_engine::EngineOracle`], the sparse-strip
+//!   engine arm over `frust-engine` and a `frust-gpu` headless target, with
+//!   its own `engine-`-prefixed class routing
+//!   ([`oracle_engine::engine_golden_class`]).
 //! - [`frame`]: GPU-free capture of a REAL widget tree as a scene
 //!   ([`frame::frame`]/[`frame::record_view`]) — a `RenderRoot` rebuild,
 //!   layout-with-text and paint into a `SceneBuilder`, with the device scale
@@ -55,6 +59,7 @@ pub mod golden;
 pub mod meta;
 pub mod oracle_classic;
 pub mod oracle_cpu;
+pub mod oracle_engine;
 pub mod render;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
@@ -76,4 +81,7 @@ pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
 pub use oracle_classic::{ClassicOracle, UNCLASSIFIED_CLASS, golden_class};
 pub use oracle_cpu::{CpuOracle, ORACLE_ID, SkipReport};
+pub use oracle_engine::{
+    ENGINE_UNCLASSIFIED_CLASS, EngineOracle, EngineOracleOptions, engine_golden_class,
+};
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};

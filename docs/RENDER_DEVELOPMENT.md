@@ -59,9 +59,9 @@ follows it, so account for that remap before comparing timings across arms
 Substrate section below); the vello-classic tier documented in this table ignores it, and the
 browser/wasm measurement arm (`benchmarks/harness/webgl2_arm.md`) remains unimplemented.
 
-## GPU Substrate (`frust-gpu`)
+## GPU Substrate (`frust-gpu`, `frust-engine`)
 
-`frust-gpu` is the wgpu substrate under the future frust-owned render engine (device/surface/
+`frust-gpu` is the wgpu substrate under the frust-owned render engine (device/surface/
 pipeline lifecycle, pipeline cache, shader loading, resource pool/arena, encoder, headless
 testing). It carries its own test/adapter-pin split, same shape as `frust-testing` above:
 
@@ -85,6 +85,31 @@ depth-textureLoad usage, plus pipeline-layout bounds and WebGL2 limits checks �
 `cargo test -p frust-gpu`, i.e. the ordinary `cargo test --workspace` gate; they are green
 against the currently empty shader set and become load-bearing once the engine plan starts
 adding shaders.
+
+`frust-engine` is the render engine built on that substrate (scene compile, paint/gradient
+encoding, GPU strip layouts, the ported WGSL pipelines, `EngineRenderer`). Same adapter-pin
+split as `frust-gpu`, mandatory on a multi-adapter host:
+
+```bash
+# Host-only arm, no GPU/environment needed:
+cargo test -p frust-engine
+
+# Real-adapter arm, pinned runner (adapter pin mandatory on a multi-adapter host):
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> cargo test -p frust-engine -- --ignored
+
+# Goldens: engine output compared against the reference renderer, same adapter pin plus an
+# expect-adapter fail-fast:
+WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
+  cargo test -p frust-testing --test engine_goldens --test alpha_polarity -- --ignored
+
+# Diagnostic only — never a gate:
+cargo bench -p frust-engine -- --quick
+```
+
+`bash scripts/testing/engine-lean-check.sh` is the engine's lean-weight gate (same SKIP≠FAIL exit
+shape as `scripts/release-lean-check.sh`): the OFF arm builds `examples/material3-demo` with
+today's ordinary default (no `frust-engine`/`frust_engine` markers) and fails on a leak; the ON
+arm is a design-skip until `frust-render` grows an engine-tier feature to build it against.
 
 ## Golden / Oracle Tests
 

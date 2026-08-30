@@ -1,0 +1,78 @@
+[package]
+name = "frust-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# `benches/scenes.rs` is a module `benches/main.rs` pulls in (fixture
+# builders), not a bench target of its own — autodiscovery would otherwise
+# register it as a second libtest-harnessed target and `cargo bench`'s
+# trailing args (e.g. `--quick`) would fail against it the same way they
+# fail against the lib/integration tests below.
+autobenches = false
+
+[dependencies]
+frust-gpu.workspace = true
+frust-scene.workspace = true
+vello_common.workspace = true
+glifo.workspace = true
+wgpu.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+kurbo.workspace = true
+peniko.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+# `tests/proptest_strips.rs` — the compiler's property suite: it never panics,
+# its allocation stays inside a bound in the command count, a re-compile is
+# byte-identical, and the strips it emits stay inside the viewport.
+proptest.workspace = true
+
+[features]
+default = []
+perf-trace = ["frust-gpu/perf-trace"]
+full-scheduler = []
+
+# `bench = false` on the lib and every integration test below keeps `cargo
+# bench` from also running them through the default libtest harness, which
+# does not understand criterion's own CLI flags (e.g. `--quick`) and would
+# otherwise be the first target `cargo bench -p frust-engine -- --quick`
+# hits, before ever reaching the criterion bench itself.
+[lib]
+bench = false
+
+[[test]]
+name = "compile_rects_paths"
+path = "tests/compile_rects_paths.rs"
+bench = false
+
+[[test]]
+name = "encode_contract"
+path = "tests/encode_contract.rs"
+bench = false
+
+[[test]]
+name = "gpu_layouts"
+path = "tests/gpu_layouts.rs"
+bench = false
+
+[[test]]
+name = "paint_encoding"
+path = "tests/paint_encoding.rs"
+bench = false
+
+[[test]]
+name = "proptest_strips"
+path = "tests/proptest_strips.rs"
+bench = false
+
+[[test]]
+name = "structure"
+path = "tests/structure.rs"
+bench = false
+
+[[bench]]
+name = "main"
+harness = false

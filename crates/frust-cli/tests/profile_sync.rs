@@ -23,7 +23,7 @@
 //! The template manifest contains minijinja placeholders elsewhere in the
 //! file, so the blocks are extracted line-wise rather than TOML-parsed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Extracts `package name -> opt-level` from every `[profile.dev.package.<name>]`
@@ -150,6 +150,44 @@ fn shader_stack_dev_overrides_identical_across_synced_manifests() {
             "[profile.dev.package.*] overrides in {} have drifted from the \
              root Cargo.toml — every hand-synced manifest must stay identical \
              (see DEVELOPMENT.md's profile-sync rule)",
+            path.display()
+        );
+    }
+}
+
+/// STRENGTHENS `shader_stack_dev_overrides_identical_across_synced_manifests`
+/// above: that test only compares the *values* of the override names it
+/// already knows about, so a crate added to one manifest's
+/// `[profile.dev.package.*]` block but forgotten in another escapes it
+/// entirely (both blocks agree on every key the shorter one has, and neither
+/// test looks at the KEY SET). This one compares the full set of override
+/// names across all five manifests instead.
+#[test]
+fn shader_stack_dev_override_name_set_is_identical_across_synced_manifests() {
+    let manifests = synced_manifests();
+
+    let name_sets: Vec<BTreeSet<String>> = manifests
+        .iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            dev_package_overrides(&text).into_keys().collect()
+        })
+        .collect();
+
+    assert!(
+        !name_sets[0].is_empty(),
+        "root Cargo.toml has no [profile.dev.package.*] overrides — the \
+         shader-stack dev-profile fix has been removed?"
+    );
+    for (path, other) in manifests.iter().zip(&name_sets).skip(1) {
+        assert_eq!(
+            &name_sets[0],
+            other,
+            "[profile.dev.package.*] override NAMES in {} differ from the root \
+             Cargo.toml — a crate added to one manifest's shader-stack overrides but not \
+             the others would otherwise escape the value-only comparison above (see \
+             DEVELOPMENT.md's profile-sync rule)",
             path.display()
         );
     }
