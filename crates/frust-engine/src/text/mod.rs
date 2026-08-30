@@ -37,9 +37,19 @@
 //!
 //! The outline and hinting caches are retained across frames by the compiler
 //! (they are the reason a steady-state frame of text costs no font-table work
-//! at all), and maintained once per compiled frame. The glyph atlas is not
-//! wired in: every glyph is drawn as strips, so a run costs one draw per glyph
-//! and no texture residency at all.
+//! at all), and maintained once per compiled frame. Every glyph is drawn as
+//! strips, so a run costs one draw per glyph and no texture residency at all:
+//! [`backend`]'s [`GlyphRunBackend`](glifo::GlyphRunBackend) hands `glifo`
+//! [`AtlasCacher::Disabled`](glifo::AtlasCacher::Disabled) whichever way it is
+//! called.
+//!
+//! [`atlas_policy`] is the decision half of turning that around — which glyphs
+//! would earn a slot, keyed so an animated size cannot shred the cache, and in
+//! what order a frame's one atlas pass services them. It is complete and
+//! host-tested on its own; what it is still waiting for is the draw path that
+//! consults it, since a cached glyph reaches the sink as an image paint and
+//! [`backend`] has no encoding for one yet. Until then the two agree: no glyph
+//! is cached, and the pixels are the outline path's.
 //!
 //! # The font gate
 //!
@@ -56,18 +66,24 @@
 //! version; the gate closes the class a plain display list can actually
 //! deliver.
 
+pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 
-use glifo::{FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
+use glifo::{AtlasConfig, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
 use kurbo::Affine;
 use peniko::FontData;
 use vello_common::paint::Paint;
 use vello_common::strip_generator::StripGenerator;
 
+use frust_gpu::TierCaps;
 use frust_scene::GlyphRun;
 
+use crate::cache::AtlasBudget;
 use crate::compile::clip::ClipStack;
 use crate::compile::{CompiledFrame, DepthCounter};
+use crate::config;
+
+use atlas_policy::AtlasPolicy;
 
 pub(crate) use backend::{GlyphRunOutcome, context_paint};
 
@@ -148,6 +164,30 @@ pub(crate) fn lower_glyph_run(
     }));
 
     sink.outcome()
+}
+
+/// The glyph-atlas policy `caps`' adapter gets.
+///
+/// The page geometry is [`AtlasBudget::for_caps`]' — mobile `(1024, 1024)` x4
+/// layers, desktop `(2048, 2048)` x8, `FRUST_ENGINE_ATLAS_SIZE` redistributing
+/// that tier's own allowance between extent and depth, then clamped to what the
+/// adapter can actually create. Shared with the image atlas because the tier
+/// question is the same question: the two arrays are separate textures sized by
+/// one budget, not one texture holding both.
+///
+/// `FRUST_ENGINE_NO_ATLAS` is read here, once per policy, rather than per run —
+/// it is a process-global kill switch ([`config::atlas_disabled`]), and a run
+/// that consulted it separately could not be told from one the size tracker
+/// refused.
+#[allow(
+    dead_code,
+    reason = "constructs the policy for the glyph-draw path that consults it; \
+              that path is what turns atlas caching on in `backend`"
+)]
+#[must_use]
+pub(crate) fn glyph_atlas_policy(caps: &TierCaps) -> AtlasPolicy {
+    let pages: AtlasConfig = AtlasBudget::for_caps(caps).config();
+    AtlasPolicy::new(pages, config::atlas_disabled())
 }
 
 /// The OpenType table directory's own fixed header length.
