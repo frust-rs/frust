@@ -3735,8 +3735,11 @@ explicit 64 MiB thread (`run_on_oversized_stack`), documented inline.
 documented reproducer sites and the measured numbers recorded there):
 `frust-engine`'s `SceneCompiler::compile` validates every lowered
 command's geometry up front (rect extents, corner radii, path points, stroke
-width, dash on/off/phase must be finite) and refuses the frame with
-`EngineError::InvalidGeometry` otherwise — required for totality: a `NaN`
+width, dash on/off/phase must be finite — and an effective dash cycle must
+also be *normalizable*: its derived period `on + off` finite and positive with
+the phase reducible into it, since two individually finite lengths can
+overflow the period to `+inf` and spin kurbo's dash iterator forever) and
+refuses the frame with `EngineError::InvalidGeometry` otherwise — required for totality: a `NaN`
 corner radius on an unbounded rect made `compile` never return, and a `NaN`
 stroke width cost ~420 ms/4.8 MB producing zero strips. The vello-classic tier
 has no such gate; notably a `NaN` dash pattern falls back to a solid stroke

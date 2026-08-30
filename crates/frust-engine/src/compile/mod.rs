@@ -541,7 +541,11 @@ fn style_is_finite(style: &PathStyle) -> bool {
 /// `on = off = f64::MAX`, `phase = -1.0` hangs this way. Refusing here, where
 /// `on`, `off` and `phase` already passed their own finiteness checks, is what
 /// keeps that unbounded loop out of the frame path.
-fn dash_cycle_is_normalizable(dash: &DashPattern) -> bool {
+///
+/// Public for the same reason [`dash_path`] and [`well_formed`] are: the CPU
+/// oracle carries an identical copy, and a cross-crate test pins the two
+/// against each other so they cannot drift apart silently.
+pub fn dash_cycle_is_normalizable(dash: &DashPattern) -> bool {
     if !dash.is_effective() {
         // A degenerate pattern never reaches `dash_path`: `is_effective` is
         // what routes it to a solid stroke instead, so its derived period is

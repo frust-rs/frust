@@ -1023,3 +1023,40 @@ fn dash_path_lowers_identically_across_both_copies() {
         }
     }
 }
+
+/// The refusal predicate itself is duplicated the same way the lowerings are,
+/// so it gets the same treatment: both copies must answer identically over a
+/// grid that includes every hostile shape the predicate exists to judge. The
+/// predicate never calls `kurbo::dash`, so even the non-normalizable triples
+/// are safe to feed to it directly.
+#[test]
+fn dash_cycle_normalizability_agrees_across_both_copies() {
+    let values = [
+        0.0,
+        -0.0,
+        0.05,
+        0.5,
+        8.0,
+        1e18,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        -1.0,
+        -f64::MAX,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+    for on in values {
+        for off in values {
+            for phase in values {
+                let dash = DashPattern::new(on, off).with_phase(phase);
+                assert_eq!(
+                    engine_compile::dash_cycle_is_normalizable(&dash),
+                    oracle_cpu::dash_cycle_is_normalizable(&dash),
+                    "dash_cycle_is_normalizable diverged between the engine's copy and the \
+                     oracle's for on={on:?} off={off:?} phase={phase:?}"
+                );
+            }
+        }
+    }
+}

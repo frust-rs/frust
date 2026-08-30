@@ -925,7 +925,10 @@ pub fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
 /// enough on its own: `on + off` can overflow to `+inf` for two individually
 /// finite lengths, and `phase.rem_euclid` on an infinite period overflows with
 /// it.
-fn dash_cycle_is_normalizable(dash: &frust_scene::DashPattern) -> bool {
+///
+/// Public so the cross-crate parity test can pin this copy against the
+/// engine's, exactly as `dash_path`/`well_formed` are pinned.
+pub fn dash_cycle_is_normalizable(dash: &frust_scene::DashPattern) -> bool {
     if !dash.is_effective() {
         return true;
     }
