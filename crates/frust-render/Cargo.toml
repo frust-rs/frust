@@ -17,21 +17,11 @@ log.workspace = true
 # optional, only pulled in by the `cpu-tier` feature below; NOT part of the
 # default GPU path. Exact-pinned per the workspace Version-Pin Policy.
 vello_cpu = { workspace = true, optional = true }
-# Measurement spike: vello_hybrid 0.2.0 render tier —
-# optional, only pulled in by the `hybrid-tier` feature below; NOT part of the
-# default GPU path. Exact-pinned per the workspace Version-Pin Policy.
-vello_hybrid = { workspace = true, optional = true }
-# Companions of the hybrid spike: vello_hybrid leaks these crates' types through
-# its public API (paint::ImageId, glifo::Glyph, geometry::RectU16) without
-# re-exporting them, so the sink must name them directly. Same pins, same gate.
-vello_common = { workspace = true, optional = true }
-glifo = { workspace = true, optional = true }
 # The frust-owned sparse-strip render engine — optional, only pulled in by the
 # `engine-tier` feature below; NOT part of the default GPU path. A
 # workspace-internal path dependency, so it carries no version pin of its own.
 frust-engine = { workspace = true, optional = true }
-# Companion of the engine tier, the same way `vello_common`/`glifo` are
-# companions of the hybrid one: `frust_engine::EngineRenderer::new` takes a
+# Companion of the engine tier: `frust_engine::EngineRenderer::new` takes a
 # `frust_gpu::TierCaps` and `frust-engine` re-exports neither that type nor its
 # `probe` constructor, so the tier's call site in `renderer.rs` must name
 # `frust-gpu` directly.
@@ -41,9 +31,6 @@ frust-gpu = { workspace = true, optional = true }
 # Experimental vello_cpu-backed CPU render tier.
 # NOT default — the GPU (vello) path is unaffected when this is off.
 cpu-tier = ["dep:vello_cpu"]
-# Measurement spike: vello_hybrid 0.2.0 render tier.
-# NOT default — the GPU (vello) path is unaffected when this is off.
-hybrid-tier = ["dep:vello_hybrid", "dep:vello_common", "dep:glifo"]
 # The frust-owned engine render tier (`frust-engine` over `frust-gpu`).
 # NOT default — the GPU (vello) path is unaffected when this is off, and a
 # build without this feature contains no `frust-engine` symbols at all

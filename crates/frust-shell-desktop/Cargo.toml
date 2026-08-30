@@ -63,9 +63,3 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
 # profile builds only).
 devtools = ["frust-shell-common/devtools"]
-# Opt-in experimental `vello_hybrid` render tier: re-exports
-# frust-render/hybrid-tier, the sole crate that owns the tier. Empty by
-# default, exactly like `perf-trace` above; this shell holds no hybrid code of
-# its own, it only forwards the feature so the facade can reach frust-render
-# through the same per-target shell edges the other two features use.
-hybrid-tier = ["frust-render/hybrid-tier"]

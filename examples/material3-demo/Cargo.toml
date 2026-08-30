@@ -83,13 +83,6 @@ frust-testing = { path = "../../crates/frust-testing" }
 # it (and enable `frust/perf-trace` instead). Mirrors
 # `examples/glyph-catalog/Cargo.toml`'s block verbatim.
 lean = ["log/release_max_level_warn"]
-# Opt-in experimental `vello_hybrid` render tier, forwarded to the facade's own
-# `hybrid-tier` feature (which fans it out to the three shells and on to
-# `frust-render`). Empty by default and selected by no build mode — a matrix
-# arm reaches it with an explicit `frust build|run --features hybrid-tier`,
-# paired with `--define FRUST_RENDER_TIER=hybrid` to actually select the tier
-# the feature compiled in.
-hybrid-tier = ["frust/hybrid-tier"]
 # The frust-owned engine render tier, forwarded to the facade's own
 # `engine-tier` feature. Empty by default and selected by no build mode — a matrix
 # arm reaches it with an explicit `frust build --features engine-tier`,

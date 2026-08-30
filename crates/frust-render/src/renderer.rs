@@ -18,19 +18,14 @@
 //!   `render_to_texture` (intermediate) → acquire → blit (intermediate → acquired
 //!   swapchain view) → present.
 //!
-//! The experimental `hybrid-tier` path takes the direct arm's shape with its
-//! own renderer: encode copies the frame's scene, then acquire → one
-//! `vello_hybrid` render into the acquired swapchain view (its own command
-//! encoder, submitted there) → present. No intermediate, no blit, no vello.
-//!
-//! The `engine-tier` path takes that same shape with `frust-engine`: encode
+//! The `engine-tier` path takes the direct arm's shape with `frust-engine`: encode
 //! copies the frame's scene, then acquire → one `EngineRenderer::encode` into
 //! the acquired swapchain view and its surface-owned depth attachment
 //! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
 //! `end_frame`. No intermediate, no blit, no vello, no shader pre-pass and no
 //! snapshot cache.
 //!
-//! The two arms remap the v3 present spans — see [`SurfaceRenderer::submit`].
+//! This arm remaps the v3 present spans — see [`SurfaceRenderer::submit`].
 //!
 //! On the Gpu tier every arm also runs [`crate::compositor`]'s quad pass after
 //! vello, drawing the snapshot cache's cached pages onto the frame; a frame
@@ -53,7 +48,7 @@ use kurbo::Affine;
 use peniko::ImageData;
 
 use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-#[cfg(any(feature = "hybrid-tier", feature = "engine-tier"))]
+#[cfg(feature = "engine-tier")]
 use crate::context::render_scaled;
 use crate::context::{
     AaMode, ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode,
@@ -140,7 +135,7 @@ struct ReadySurface {
 // (`SurfaceState::Ready`), so the size asymmetry costs nothing on the hot path
 // and boxing the GPU renderer would only add an indirection to every frame.
 #[cfg_attr(
-    any(feature = "cpu-tier", feature = "hybrid-tier", feature = "engine-tier"),
+    any(feature = "cpu-tier", feature = "engine-tier"),
     allow(clippy::large_enum_variant)
 )]
 enum TierBackend {
@@ -171,28 +166,16 @@ enum TierBackend {
     /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
     #[cfg(feature = "cpu-tier")]
     Cpu(Box<crate::cpu_tier::CpuTierRenderer>),
-    /// Experimental `vello_hybrid` path (`hybrid-tier` feature): CPU
-    /// sparse-strip rasterization composited into the acquired swapchain view
-    /// by its own renderer, which owns every intermediate it needs (depth
-    /// texture, strip/atlas buffers) and never submits — the frame's encoder
-    /// is created and submitted in [`SurfaceRenderer::submit`].
+    /// The frust-owned engine path (`engine-tier` feature): a
+    /// `frust_scene::Scene` compiled into sparse strips and recorded into the
+    /// frame's own `wgpu::CommandEncoder` by
+    /// [`frust_engine::EngineRenderer`], which never submits — the encoder is
+    /// created and submitted in [`SurfaceRenderer::submit`].
     ///
     /// Boxed for the CPU variant's reason. Carries no snapshot cache and no
     /// compositor: both are vello-path machinery living in
     /// [`TierBackend::Gpu`], and a tier being measured against vello is
     /// measured without them.
-    #[cfg(feature = "hybrid-tier")]
-    Hybrid(Box<crate::hybrid_tier::HybridTierRenderer>),
-    /// The frust-owned engine path (`engine-tier` feature): a
-    /// `frust_scene::Scene` compiled into sparse strips and recorded into the
-    /// frame's own `wgpu::CommandEncoder` by
-    /// [`frust_engine::EngineRenderer`], which never submits — the encoder is
-    /// created and submitted in [`SurfaceRenderer::submit`], like the hybrid
-    /// arm above.
-    ///
-    /// Boxed for the CPU variant's reason. Carries no snapshot cache and no
-    /// compositor, for the hybrid arm's reason: both are vello-path machinery,
-    /// and a tier being measured against vello is measured without them.
     #[cfg(feature = "engine-tier")]
     Engine {
         engine: Box<frust_engine::EngineRenderer>,
@@ -331,27 +314,9 @@ pub struct SurfaceRenderer {
     /// the next one; [`Self::on_surface_destroyed`] clears it outright, since
     /// those handles belong to the cache dying with the surface.
     pending_composite: Option<PendingComposite>,
-    /// The hybrid tier's owned copy of the frame's scene — its counterpart to
+    /// The engine tier's owned copy of the frame's scene — its counterpart to
     /// [`Self::scene`], and reused across frames for the same reason.
     ///
-    /// `vello_hybrid` does its whole command walk inside `render`, which needs
-    /// the GPU resources only [`Self::submit`] has (the acquired swapchain
-    /// view), so the borrowed `&Scene` [`Self::encode`] is handed cannot
-    /// simply be re-read there: the frame's display list has to survive the
-    /// gap between the two calls. `encode` therefore `clone_from`s it into
-    /// this buffer — capacity reused, so a steady-state frame allocates
-    /// nothing — and `submit` renders from it.
-    ///
-    /// **Measurement note.** This makes the tiers' spans differ in kind, not
-    /// just in cost: on the GPU tier `encode_us` holds the scene TRANSLATION
-    /// (`convert` → `vello::Scene`), whereas on this tier it holds only a
-    /// memcpy and the entire strip-building walk lands in `submit_us` beside
-    /// the GPU work. Compare whole frames across the two tiers, never
-    /// `encode_us` against `encode_us`.
-    #[cfg(feature = "hybrid-tier")]
-    hybrid_scene: frust_scene::Scene,
-    /// The engine tier's owned copy of the frame's scene — the exact
-    /// counterpart of [`Self::hybrid_scene`], for the identical reason:
     /// `frust_engine::EngineRenderer::encode` needs the GPU resources only
     /// [`Self::submit`] has (the acquired swapchain view), so the borrowed
     /// `&Scene` [`Self::encode`] is handed has to survive the gap between the
@@ -403,8 +368,6 @@ impl SurfaceRenderer {
             pending_present: None,
             pending_base_color: None,
             pending_composite: None,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene: frust_scene::Scene::default(),
             #[cfg(feature = "engine-tier")]
             engine_scene: frust_scene::Scene::default(),
         }
@@ -818,57 +781,6 @@ impl SurfaceRenderer {
                     "frust-render: Cpu tier selected without the `cpu-tier` feature compiled in"
                 ));
             }
-            #[cfg(feature = "hybrid-tier")]
-            crate::RenderTier::Hybrid => {
-                // Built for the format the swapchain was CONFIGURED with (the
-                // surface's own, `RENDER_ATTACHMENT` — see
-                // `context::choose_hybrid_render_path`), because
-                // `vello_hybrid` bakes the target format into its pipelines.
-                // A resize keeps that format (`RenderContext::resize_surface`
-                // rewrites only the dimensions), so `on_surface_changed` can
-                // resize this renderer in place; a format change arrives as a
-                // fresh surface, which lands back here.
-                //
-                // One line per process naming the tier, next to the
-                // `render-path`/`aa-mode` lines, so a capture proves which
-                // renderer produced the frames it is timing rather than
-                // leaving it to be inferred from the command line.
-                static HYBRID_LOGGED: OnceLock<()> = OnceLock::new();
-                HYBRID_LOGGED.get_or_init(|| {
-                    log::info!(
-                        "frust-render tier=hybrid (experimental vello_hybrid path, \
-                         format={:?} {}x{})",
-                        surface.config.format,
-                        surface.config.width,
-                        surface.config.height
-                    );
-                    // Both knobs instrument vello's own passes — the AA mode
-                    // is a `vello::AaConfig` and the scale sizes the blit
-                    // arm's intermediate — and this tier runs neither. Say so
-                    // once, so a matrix run that sets them does not read the
-                    // resulting numbers as an answer about them.
-                    if aa_mode() != AaMode::Area || render_scaled() {
-                        log::warn!(
-                            "frust-render: FRUST_AA_MODE/FRUST_RENDER_SCALE are vello-only \
-                             instruments; the hybrid tier ignores both and renders at full \
-                             surface resolution"
-                        );
-                    }
-                });
-                TierBackend::Hybrid(Box::new(crate::hybrid_tier::HybridTierRenderer::new(
-                    &ctx.device_handle().device,
-                    surface.config.format,
-                    surface.config.width,
-                    surface.config.height,
-                )))
-            }
-            #[cfg(not(feature = "hybrid-tier"))]
-            crate::RenderTier::Hybrid => {
-                return Err(anyhow!(
-                    "frust-render: Hybrid tier selected without the `hybrid-tier` feature \
-                     compiled in"
-                ));
-            }
             #[cfg(feature = "engine-tier")]
             crate::RenderTier::Engine => {
                 let device = &ctx.device_handle().device;
@@ -1008,15 +920,6 @@ impl SurfaceRenderer {
                     // `RenderContext`/`Pixmap` are sized.
                     cpu.resize(width, height);
                 }
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(hybrid) => {
-                    // Same shape as the CPU arm: the hybrid scene and the
-                    // renderer's own depth/config resources are sized, and it
-                    // re-derives them from the size given here. The pipelines
-                    // survive (only a FORMAT change would need a new
-                    // renderer, and a resize never changes one).
-                    hybrid.resize(width, height);
-                }
                 #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { engine, .. } => {
                     // The engine's own extent-sized resources (its intermediate
@@ -1073,12 +976,7 @@ impl SurfaceRenderer {
                 TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
                 #[cfg(feature = "cpu-tier")]
                 TierBackend::Cpu(_) => {}
-                // Nothing to release ahead of time: this backend's textures
-                // (image atlas, depth) are owned by the `vello_hybrid`
-                // renderer that dies with the state below, in one step.
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(_) => {}
-                // Nothing to release ahead of time either: every texture this
+                // Nothing to release ahead of time: every texture this
                 // backend holds (resource textures, the intermediate pool, its
                 // own depth attachment) dies with the renderer below, and the
                 // surface's depth attachment dies with the surface beside it.
@@ -1166,8 +1064,6 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             pending_composite,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene,
             #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
@@ -1541,32 +1437,6 @@ impl SurfaceRenderer {
                     },
                 );
             }
-            #[cfg(feature = "hybrid-tier")]
-            TierBackend::Hybrid(_) => {
-                // This tier renders in `submit`, into the acquired swapchain
-                // view — the direct arm's split, which is why its surface is
-                // configured `RenderPath::Direct`
-                // (`context::choose_hybrid_render_path`). Any other path here
-                // is a wiring bug, reported rather than rendered.
-                if !matches!(&ready.surface.path, RenderPath::Direct) {
-                    return Err(anyhow!(
-                        "frust-render: hybrid-tier requires the direct render path"
-                    ));
-                }
-                // The frame's whole CPU-side encode on this arm: copy the
-                // display list somewhere that outlives the borrow, since
-                // `HybridTierRenderer::render` does the command walk itself
-                // (it needs the renderer's own glyph/image atlases to do it).
-                // `clone_from` reuses the buffer's capacity, so a
-                // steady-state frame allocates nothing — see the field's
-                // measurement note.
-                hybrid_scene.clone_from(scene);
-                // Carried to `submit` for the direct arm's reason: the render
-                // that consumes it runs there. `pending_composite` stays
-                // `None` — the snapshot cache and compositor are GPU-tier
-                // machinery this tier bypasses entirely.
-                *pending_base_color = Some(base_color);
-            }
             #[cfg(feature = "engine-tier")]
             TierBackend::Engine { .. } => {
                 // This tier renders in `submit`, into the acquired swapchain
@@ -1826,8 +1696,6 @@ impl SurfaceRenderer {
             state,
             pending_base_color,
             pending_composite,
-            #[cfg(feature = "hybrid-tier")]
-            hybrid_scene,
             #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
@@ -1909,38 +1777,6 @@ impl SurfaceRenderer {
                     return Err(anyhow!(
                         "frust-render: direct render path requires the GPU tier"
                     ));
-                }
-                // The hybrid tier's whole frame: one encoder, one
-                // `vello_hybrid` render into the acquired swapchain view, one
-                // submit. The renderer records into the encoder and never
-                // submits, so image-atlas uploads, evictions and the render
-                // passes all land in this one command buffer, in order,
-                // against the texture about to be presented.
-                //
-                // No compositor pass follows: cached snapshot pages are
-                // GPU-tier machinery (`TierBackend::Gpu`), and
-                // `pending_composite` is never set on this arm.
-                #[cfg(feature = "hybrid-tier")]
-                TierBackend::Hybrid(hybrid) => {
-                    // Set in `encode`; a well-formed frame always encoded
-                    // first — the same fallback the vello arm above takes.
-                    let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
-                    let mut encoder = device_handle.device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render hybrid"),
-                        },
-                    );
-                    hybrid
-                        .render(
-                            &device_handle.device,
-                            &device_handle.queue,
-                            &mut encoder,
-                            hybrid_scene,
-                            base_color,
-                            &swapchain_view,
-                        )
-                        .map_err(|e| anyhow!("frust-render: vello_hybrid render failed: {e}"))?;
-                    device_handle.queue.submit([encoder.finish()]);
                 }
                 // Unreachable: the engine tier configures its own path
                 // (`context::choose_engine_render_path`), never this one.

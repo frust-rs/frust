@@ -7,9 +7,10 @@
 //! - `vello_common 0.0.9` / `glifo 0.1.1` arrive under `frust-render`'s
 //!   feature-gated legacy CPU fallback (`vello_cpu = "=0.0.9"`);
 //! - `vello_common 0.2.0` / `glifo 0.3.0` are the ENGINE's own core — reached
-//!   through `vello_hybrid 0.2.0` and through this crate's `vello_cpu_oracle`
-//!   (`vello_cpu = "=0.2.0"`) oracle pin, which is why the oracle rasterizes
-//!   with the same code the engine does (see `src/oracle_cpu.rs`).
+//!   through `frust-engine`'s own unconditional dependency on them and
+//!   through this crate's `vello_cpu_oracle` (`vello_cpu = "=0.2.0"`) oracle
+//!   pin, which is why the oracle rasterizes with the same code the engine
+//!   does (see `src/oracle_cpu.rs`).
 //!
 //! `docs/DEVELOPMENT.md`'s Version-Pin Policy asks for a `cargo tree -d` check
 //! after any manifest change; this test is that check, frozen into the gate so

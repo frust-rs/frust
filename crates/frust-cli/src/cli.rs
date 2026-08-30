@@ -116,13 +116,13 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Force the render tier (`gpu`/`cpu`/`hybrid`/`engine`)
+        /// Force the render tier (`gpu`/`cpu`/`engine`)
         /// `frust-render` probes for at startup, by setting
         /// `FRUST_RENDER_TIER` for the launched process (see
         /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `cpu`, `hybrid` and `engine` are
+        /// / `RENDER_TIER_ENV_VAR`). `cpu` and `engine` are
         /// non-default tiers the app must have been BUILT with
-        /// (`frust-render`'s `cpu-tier`/`hybrid-tier`/`engine-tier`
+        /// (`frust-render`'s `cpu-tier`/`engine-tier`
         /// features); otherwise the
         /// launched process refuses the override at startup and says so.
         /// **Desktop-preview only in v1**: the
@@ -352,11 +352,11 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
 /// `frust run --render-tier` value (see `Command::Run`'s doc comment).
 /// Deliberately independent of `frust_render::RenderTier` — `frust-cli`
 /// has no compile-time dependency on the rendering stack (see
-/// `docs/ARCHITECTURE.md`) — but its three variants and their lowercase env
+/// `docs/ARCHITECTURE.md`) — but its variants and their lowercase env
 /// string ([`RenderTierArg::env_value`]) must stay in sync with
 /// `frust_render::parse_render_tier_override`'s accepted values by hand.
 ///
-/// The three non-default tiers are listed here unconditionally, exactly
+/// The non-default tier is listed here unconditionally, exactly
 /// because this enum is hand-synced rather than derived: which of them a
 /// given app actually contains is a property of the app's own cargo features,
 /// which this CLI neither knows nor builds — it only sets an env var for the
@@ -366,7 +366,6 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
 pub enum RenderTierArg {
     Gpu,
     Cpu,
-    Hybrid,
     Engine,
 }
 
@@ -376,7 +375,6 @@ impl RenderTierArg {
         match self {
             RenderTierArg::Gpu => "gpu",
             RenderTierArg::Cpu => "cpu",
-            RenderTierArg::Hybrid => "hybrid",
             RenderTierArg::Engine => "engine",
         }
     }
@@ -585,13 +583,13 @@ mod tests {
         // The three spellings cargo itself accepts must be equivalent here,
         // since every downstream funnel joins the result back into one CSV.
         for argv in [
-            vec!["frust", "run", "--features", "hybrid-tier,perf-trace"],
-            vec!["frust", "run", "--features", "hybrid-tier perf-trace"],
+            vec!["frust", "run", "--features", "engine-tier,perf-trace"],
+            vec!["frust", "run", "--features", "engine-tier perf-trace"],
             vec![
                 "frust",
                 "run",
                 "--features",
-                "hybrid-tier",
+                "engine-tier",
                 "--features",
                 "perf-trace",
             ],
@@ -600,7 +598,7 @@ mod tests {
             match cli.command.unwrap() {
                 Command::Run { build, .. } => assert_eq!(
                     build.extra_features(),
-                    vec!["hybrid-tier".to_string(), "perf-trace".to_string()],
+                    vec!["engine-tier".to_string(), "perf-trace".to_string()],
                     "argv {argv:?}"
                 ),
                 other => panic!("expected Run, got {other:?}"),
@@ -646,17 +644,17 @@ mod tests {
             "apk",
             "--profile",
             "--features",
-            "hybrid-tier",
+            "engine-tier",
             "--define",
-            "FRUST_RENDER_TIER=hybrid",
+            "FRUST_RENDER_TIER=engine",
         ]);
         match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Apk { build, .. },
             } => {
                 assert!(build.build.profile);
-                assert_eq!(build.build.defines, vec!["FRUST_RENDER_TIER=hybrid"]);
-                assert_eq!(build.extra_features(), vec!["hybrid-tier".to_string()]);
+                assert_eq!(build.build.defines, vec!["FRUST_RENDER_TIER=engine"]);
+                assert_eq!(build.extra_features(), vec!["engine-tier".to_string()]);
             }
             other => panic!("expected Build/Apk, got {other:?}"),
         }
@@ -665,7 +663,7 @@ mod tests {
     #[test]
     fn feature_token_charset_ok_accepts_plain_and_pkg_qualified_names() {
         for token in [
-            "hybrid-tier",
+            "engine-tier",
             "perf_trace",
             "v1.2",
             "frust/devtools",
@@ -678,7 +676,7 @@ mod tests {
     #[test]
     fn feature_token_charset_ok_rejects_shell_metacharacters() {
         for token in [
-            "hybrid-tier;rm",
+            "engine-tier;rm",
             "$(rm -rf /)",
             "a b",
             "`whoami`",
@@ -694,13 +692,13 @@ mod tests {
 
     #[test]
     fn validate_feature_token_charset_passes_on_all_valid_tokens() {
-        let tokens = vec!["hybrid-tier".to_string(), "frust/devtools".to_string()];
+        let tokens = vec!["engine-tier".to_string(), "frust/devtools".to_string()];
         assert!(validate_feature_token_charset(&tokens).is_ok());
     }
 
     #[test]
     fn validate_feature_token_charset_names_the_first_bad_token() {
-        let tokens = vec!["hybrid-tier".to_string(), "evil;touch".to_string()];
+        let tokens = vec!["engine-tier".to_string(), "evil;touch".to_string()];
         let err = validate_feature_token_charset(&tokens).unwrap_err();
         assert_eq!(err, "evil;touch");
     }
@@ -756,17 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_with_render_tier_hybrid() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "hybrid"]);
-        match cli.command.unwrap() {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Hybrid));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_run_with_render_tier_engine() {
         let cli = Cli::parse_from(["frust", "run", "--render-tier", "engine"]);
         match cli.command.unwrap() {
@@ -788,9 +775,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_render_tier_value() {
-        // `hybrid` used to be this fixture's unknown value and is now an
-        // accepted tier — clap validates against the enum, so the fixture has
-        // to name something outside it. `vello` is the engine, never a tier
+        // clap validates against the enum, so the fixture has to name
+        // something outside it. `vello` is the engine, never a tier
         // name, and matches the unknown-value fixture in
         // `frust_render::tier`'s own parse test.
         let result = Cli::try_parse_from(["frust", "run", "--render-tier", "vello"]);
@@ -804,7 +790,6 @@ mod tests {
         // Hand-synced with `frust_render::parse_render_tier_override`'s
         // accepted strings — this crate depends on no render crate to check
         // it against.
-        assert_eq!(RenderTierArg::Hybrid.env_value(), "hybrid");
         assert_eq!(RenderTierArg::Engine.env_value(), "engine");
     }
 
