@@ -7,7 +7,7 @@
 //!
 //! - **Refusal, not panic.** Any command sequence, with geometry drawn from a
 //!   pool of the float values that break naive arithmetic, either compiles or
-//!   comes back as one of the two errors the frame path is allowed to report.
+//!   comes back as one of the three errors the frame path is allowed to report.
 //!   The commands the compiler does not lower yet are skipped, so a frame draws
 //!   less, never wrong — which is also why the generator emits them.
 //! - **Allocation bound.** A frame's allocation stays inside a bound linear in
@@ -26,15 +26,24 @@
 //!
 //! # Why some pools are bounded and others are not
 //!
-//! Rect corners, line endpoints and transform translations carry the whole
-//! hostile pool: the compiler either clamps them to the viewport, culls them, or
-//! refuses the frame. Stroke widths, corner radii, path points, dash periods and
-//! the linear part of a transform are bounded instead, because each of those
-//! scales the amount of geometry the *flattener and stroker* produce before any
-//! culling happens — a round cap of radius `1e18` or a dash period of `0.1` over
-//! a path `1e18` long is a generator that never returns, not a compiler defect.
-//! Those magnitudes reach the compiler through the unbounded pools above, where
-//! they cost nothing.
+//! Every pool carries the degenerate values — the zeros, the subnormals, `NaN`
+//! and the infinities. A non-finite one costs nothing wherever it appears: the
+//! compiler refuses such a frame from its up-front walk, before a single strip
+//! is generated, so the case is decided by a scan over the display list rather
+//! than by whatever the flattener would have made of the number.
+//!
+//! What separates the pools is MAGNITUDE, and only magnitude. Rect corners,
+//! line endpoints and transform translations carry the huge finite values too
+//! (`1e18`, `f64::MAX`): the compiler either clamps them to the viewport, culls
+//! them, or refuses the frame, and a line's own flattening is exact regardless
+//! of how far apart its ends are. Stroke widths, corner radii, path points and
+//! the linear part of a transform stop at `256`, because each of those scales
+//! the amount of geometry the *flattener and stroker* produce before any
+//! culling happens — a round cap of radius `1e18`, or a dash period of `0.1`
+//! over a path `1e18` long, is a generator that never returns, and no up-front
+//! finiteness check can refuse it because every number in it is finite. Those
+//! magnitudes still reach the compiler, through the unbounded pools above,
+//! where they cost nothing.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -44,10 +53,11 @@ use frust_engine::{CompiledFrame, EngineError, SceneCompiler};
 use frust_scene::{
     CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder, ShaderProgram,
 };
-use kurbo::{Affine, BezPath, PathEl, Point, Rect};
+use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
 use peniko::{Blob, Brush, Color, FontData, Gradient, ImageAlphaType, ImageData, ImageFormat};
 use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use vello_common::strip::Strip;
 use vello_common::tile::Tile;
 
@@ -90,26 +100,15 @@ static HOSTILE_COORDS: [f64; 13] = [
 /// The subset of [`HOSTILE_COORDS`] that costs the flattener and the stroker
 /// nothing — every degenerate shape, none of the magnitudes that would make
 /// either subdivide in proportion to the number.
-static CHEAP_HOSTILE_COORDS: [f64; 7] = [
-    0.0,
-    -0.0,
-    f64::NAN,
-    f64::MIN_POSITIVE,
-    -f64::MIN_POSITIVE,
-    SMALLEST_SUBNORMAL,
-    -SMALLEST_SUBNORMAL,
-];
-
-/// The hostile values a transform's LINEAR part is drawn from.
 ///
-/// [`CHEAP_HOSTILE_COORDS`] plus the two infinities, and pointedly without the
-/// huge finite magnitudes: a non-finite coefficient is refused by the frame path
-/// before a single strip is generated, so it is free, while a finite `1e18`
-/// passes that check and then multiplies every coordinate the flattener
-/// subdivides — the flattener's cost, not the compiler's contract. Those
-/// magnitudes still reach the compiler, through the geometry and translation
-/// pools where they cost nothing.
-static HOSTILE_LINEAR_COEFFS: [f64; 9] = [
+/// The two infinities are cheap for the same reason `NaN` is: non-finite input
+/// is refused by the frame path's up-front walk, so it never reaches either.
+/// Only the huge FINITE values are missing, and they are the whole difference
+/// between this pool and [`HOSTILE_COORDS`] (see the module docs).
+///
+/// This is the pool for everything measured against that walk: a transform's
+/// linear part, corner radii, stroke widths, path points.
+static CHEAP_HOSTILE_COORDS: [f64; 9] = [
     0.0,
     -0.0,
     f64::NAN,
@@ -406,69 +405,39 @@ fn bounded_point() -> impl Strategy<Value = Point> {
 }
 
 /// Corner radii: bounded, because a rounded rect lowers through
-/// `path_elements`, whose corner arcs subdivide in proportion to the radius —
-/// and finite, because of an open defect this suite found.
+/// `path_elements`, whose corner arcs subdivide in proportion to the radius.
 ///
-/// **A `NaN` corner radius on a rect of unbounded extent makes
-/// `SceneCompiler::compile` never return.** It is not a panic and not a
-/// refusal; the call simply does not terminate, which on a UI thread is a frozen
-/// application. The exact case, reproduced deterministically:
-///
-/// ```text
-/// rect  = Rect::new(f64::MAX, f64::INFINITY, 205.5012069531332, 209.20270810843607)
-/// radii = CornerRadii::new(-2.9228123760991815, -5e-324, f64::NAN, 85.76283149609571)
-/// root  = Affine::new([2.192344744008792, 0.0, 0.0, 2.192344744008792,
-///                      169.1676407022096, 142.6733979215257])
-/// ```
-///
-/// Neither half alone is enough: a `NaN` radius on an ordinary rect compiles,
-/// and an unbounded rect with finite radii compiles. There is deliberately NO
-/// runnable reproducer for this the way the dash defect has one
-/// ([`a_dashed_zero_length_closed_subpath_panics_the_dash_lowering`]) — a test
-/// that never returns cannot be `#[ignore]`d into safety, it would hang whoever
-/// ran the ignored set. Write one once the lowering bounds its own walk, and
-/// widen this pool back to [`bounded_coord`] in the same change.
+/// Non-finite radii are in the pool and cost nothing, because the compiler
+/// refuses a frame carrying one before the lowering runs. That refusal is what
+/// this pool waited on: a `NaN` radius on a rect of unbounded extent used to
+/// make `SceneCompiler::compile` never return — not a panic and not a refusal,
+/// simply a call that did not terminate, which on a UI thread is a frozen
+/// application. [`the_documented_non_terminating_rounded_rect_is_refused`]
+/// holds the exact case.
 fn radii() -> impl Strategy<Value = CornerRadii> {
-    let radius = prop_oneof![
-        7 => -256.0_f64..256.0,
-        3 => prop::sample::select(vec![
-            0.0_f64,
-            -0.0,
-            f64::MIN_POSITIVE,
-            -f64::MIN_POSITIVE,
-            SMALLEST_SUBNORMAL,
-            -SMALLEST_SUBNORMAL,
-        ]),
-    ];
-    (radius.clone(), radius.clone(), radius.clone(), radius)
+    (
+        bounded_coord(),
+        bounded_coord(),
+        bounded_coord(),
+        bounded_coord(),
+    )
         .prop_map(|(tl, tr, br, bl)| CornerRadii::new(tl, tr, br, bl))
 }
 
-/// Stroke width: bounded for the same reason as [`radii`] (round caps and joins
-/// are arcs of that width), and finite because of an open defect this suite
-/// found.
+/// Stroke width: bounded for the same reason as [`radii`] — round caps and
+/// joins are arcs of that width — and degenerate all the way to `NaN`, which
+/// the frame path refuses before the stroker sees it.
 ///
-/// **A `NaN` stroke width makes the stroker do unbounded work for nothing.**
-/// Measured on this rig, one dashed quadratic — `MoveTo (0, 0)`, `QuadTo
-/// (-82.5525294392934, 0), (0, 122.89384759607046)`, dash `on 1 / off 1` — at
-/// `width: NaN` costs 420 ms and 4.8 MB and emits ZERO strips, against 0.18 ms
-/// and 81 KB at `width: 2.0`; a solid stroke at `NaN` still costs 5 ms and
-/// 131 KB for no strips. Longer generated paths scale it into minutes, which is
-/// why the pool excludes it rather than the allocation property absorbing it
-/// into a bound nobody could read. Zero, negative and subnormal widths all stay
-/// — each is cheap, and each is a real degenerate a widget can record.
+/// That refusal is what this pool waited on too. Measured on this rig, one
+/// dashed quadratic — `MoveTo (0, 0)`, `QuadTo (-82.5525294392934, 0), (0,
+/// 122.89384759607046)`, dash `on 1 / off 1` — at `width: NaN` cost 420 ms and
+/// 4.8 MB and emitted ZERO strips, against 0.18 ms and 81 KB at `width: 2.0`;
+/// a solid stroke at `NaN` still cost 5 ms and 131 KB for no strips. Longer
+/// generated paths scaled that into minutes. Zero, negative and subnormal
+/// widths are in the pool on their own merit — each is cheap, each compiles,
+/// and each is a real degenerate a widget can record.
 fn stroke_width() -> impl Strategy<Value = f64> {
-    prop_oneof![
-        7 => -256.0_f64..256.0,
-        3 => prop::sample::select(vec![
-            0.0_f64,
-            -0.0,
-            f64::MIN_POSITIVE,
-            -f64::MIN_POSITIVE,
-            SMALLEST_SUBNORMAL,
-            -SMALLEST_SUBNORMAL,
-        ]),
-    ]
+    bounded_coord()
 }
 
 /// A transform: a bounded linear part (it multiplies every flattened
@@ -486,10 +455,10 @@ fn transform() -> impl Strategy<Value = Affine> {
         )
             .prop_map(|(a, b, c, d, e, f)| Affine::new([a, b, c, d, e, f])),
         3 => (
-            prop::sample::select(&HOSTILE_LINEAR_COEFFS[..]),
+            prop::sample::select(&CHEAP_HOSTILE_COORDS[..]),
             -4.0_f64..4.0,
             -4.0_f64..4.0,
-            prop::sample::select(&HOSTILE_LINEAR_COEFFS[..]),
+            prop::sample::select(&CHEAP_HOSTILE_COORDS[..]),
             coord(),
             coord(),
         )
@@ -527,36 +496,17 @@ fn dash() -> impl Strategy<Value = Option<DashPattern>> {
     ]
 }
 
-/// A point for a path that will be FILLED. Carries the whole cheap-hostile pool,
-/// `NaN` included: the flattener detects a non-finite path and drops it, at a
-/// cost of microseconds.
-fn fill_point() -> impl Strategy<Value = Point> {
-    bounded_point()
-}
-
-/// A point for a path that will be STROKED — finite, because of the same open
-/// defect [`stroke_width`] documents, seen from its other side.
+/// A point for a path, filled or stroked alike — one pool for both, now that
+/// neither rasterizing arm ever sees a non-finite one.
 ///
-/// The stroker does not bail on non-finite input either: measured on this rig, a
-/// single `NaN`-control-point quadratic costs about 6 ms and 130 KB to stroke
-/// and emits ZERO strips, against 0.3 ms and 26 KB for the same curve with a
-/// subnormal control point, while FILLING the same `NaN` path costs 14 us. Times
-/// a generated scene's commands and this suite's case count, that alone is tens
-/// of seconds of the workspace gate spent proving nothing. The `NaN` path still
-/// reaches the compiler on every filled arm above, where it is free.
-fn stroke_point() -> impl Strategy<Value = Point> {
-    let value = prop_oneof![
-        7 => -256.0_f64..256.0,
-        3 => prop::sample::select(vec![
-            0.0_f64,
-            -0.0,
-            f64::MIN_POSITIVE,
-            -f64::MIN_POSITIVE,
-            SMALLEST_SUBNORMAL,
-            -SMALLEST_SUBNORMAL,
-        ]),
-    ];
-    (value.clone(), value).prop_map(|(x, y)| Point::new(x, y))
+/// Filling and stroking used to need different pools. The flattener bails on a
+/// non-finite path cheaply, but the stroker does not: measured on this rig, a
+/// single `NaN`-control-point quadratic cost about 6 ms and 130 KB to stroke
+/// and emitted ZERO strips, against 0.3 ms and 26 KB for the same curve with a
+/// subnormal control point, while FILLING the same `NaN` path cost 14 us.
+/// Refusing the frame up front costs a scan of the display list either way.
+fn path_point() -> impl Strategy<Value = Point> {
+    bounded_point()
 }
 
 /// A path over `vertex`, always opened with a `MoveTo` — `BezPath::push` asserts
@@ -579,29 +529,6 @@ fn bez_path(vertex: BoxedStrategy<Point>) -> impl Strategy<Value = BezPath> {
         }
         path
     })
-}
-
-/// Drops every `ClosePath` that directly follows a `MoveTo`, i.e. every
-/// zero-length closed subpath.
-///
-/// Applied to a DASHED stroke's path only, and it is a deliberate hole in this
-/// suite's coverage rather than a tidy-up: such a path makes the compiler's dash
-/// lowering panic in a debug build today, which
-/// [`a_dashed_zero_length_closed_subpath_panics_the_dash_lowering`] reproduces
-/// in full. Sanitizing here keeps the four properties measuring everything else
-/// instead of re-finding that one defect on every run; remove this call when the
-/// lowering is fixed.
-fn without_empty_closed_subpaths(path: BezPath) -> BezPath {
-    let mut out = BezPath::new();
-    let mut after_move = false;
-    for element in path.elements() {
-        if after_move && matches!(element, PathEl::ClosePath) {
-            continue;
-        }
-        after_move = matches!(element, PathEl::MoveTo(_));
-        out.push(*element);
-    }
-    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -646,19 +573,16 @@ fn op() -> impl Strategy<Value = Op> {
             width,
             brush
         }),
-        (bez_path(fill_point().boxed()), brush())
+        (bez_path(path_point().boxed()), brush())
             .prop_map(|(path, brush)| Op::FillPath { path, brush }),
         (
-            bez_path(stroke_point().boxed()),
+            bez_path(path_point().boxed()),
             stroke_width(),
             dash(),
             brush()
         )
             .prop_map(|(path, width, dash, brush)| Op::StrokePath {
-                path: match dash {
-                    Some(_) => without_empty_closed_subpaths(path),
-                    None => path,
-                },
+                path,
                 width,
                 dash,
                 brush,
@@ -894,8 +818,8 @@ proptest! {
     })]
 
     /// Compiling any scene under any root transform either succeeds or reports
-    /// one of the two errors the frame path is allowed to raise — never a
-    /// panic, and never a third error nobody documented.
+    /// one of the three errors the frame path is allowed to raise — never a
+    /// panic, and never a fourth error nobody documented.
     #[test]
     fn compiling_any_scene_refuses_rather_than_panicking(ops in ops(), root in root()) {
         let scene = scene_of(&ops);
@@ -911,7 +835,11 @@ proptest! {
                 }
                 prop_assert!(frame.fast_rect_draws as usize <= frame.draws().len());
             }
-            Err(EngineError::InvalidTransform | EngineError::TargetTooLarge) => {}
+            Err(
+                EngineError::InvalidTransform
+                | EngineError::InvalidGeometry
+                | EngineError::TargetTooLarge,
+            ) => {}
             Err(other) => prop_assert!(
                 false,
                 "the frame path reported an error outside its documented set: {other:?}"
@@ -1030,26 +958,20 @@ fn an_empty_scene_compiles_to_an_empty_frame() {
     assert!(strip_packing_failures(&frame).is_empty());
 }
 
-/// An open refusal-contract gap, found by this suite and reproduced here in
-/// full: a DASHED stroke over a path whose first subpath is a zero-length closed
-/// one panics instead of compiling or being refused.
+/// The shape that used to break the compiler's dash lowering: a DASHED stroke
+/// over a path whose first subpath is a zero-length closed one.
 ///
 /// `kurbo::dash` emits that empty subpath's closing segment first, so its output
-/// begins with `ClosePath` rather than `MoveTo`; the compiler's dash lowering
-/// collects that straight into a `BezPath`, and `BezPath::from_vec`'s "must
-/// begin with `MoveTo`" debug assertion fires. A release build has the assertion
-/// compiled out and strokes a malformed path instead — neither outcome is the
-/// documented one, which is an `EngineError` on every frame path.
+/// begins with `ClosePath` rather than `MoveTo`; collecting that straight into a
+/// `BezPath` trips the "must begin with `MoveTo`" debug assertion, and a release
+/// build with the assertion compiled out strokes a malformed path instead —
+/// neither outcome is the documented one, which is a frame or an `EngineError`.
 ///
 /// Reachable from ordinary widget code: a dashed arc at zero sweep records
-/// exactly this path. The generator above sanitizes the shape away
-/// ([`without_empty_closed_subpaths`]) so the four properties can measure
-/// everything else; un-ignore this the moment the lowering handles it.
+/// exactly this path, which is why the generator above now emits the shape
+/// freely rather than sanitizing it away.
 #[test]
-#[ignore = "reproduces an open defect in the compiler's dash lowering (a dashed zero-length \
-            closed subpath panics rather than compiling or being refused) — run with `cargo test \
-            -p frust-engine --test proptest_strips -- --ignored` to confirm it is still open"]
-fn a_dashed_zero_length_closed_subpath_panics_the_dash_lowering() {
+fn a_dashed_zero_length_closed_subpath_compiles_rather_than_panicking() {
     let mut path = BezPath::new();
     path.move_to((0.0, 0.0));
     path.close_path();
@@ -1064,9 +986,322 @@ fn a_dashed_zero_length_closed_subpath_panics_the_dash_lowering() {
     let compiled =
         SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, Affine::IDENTITY, VIEWPORT);
     assert!(
-        compiled.is_ok() || matches!(compiled, Err(EngineError::InvalidTransform)),
-        "the frame path must compile this or refuse it, never panic"
+        compiled.is_ok(),
+        "the frame path must compile this or refuse it, never panic: {compiled:?}"
     );
+}
+
+/// The same shape wherever a path can carry it, dashed and solid alike: leading,
+/// trailing, doubled, and with nothing but closes.
+///
+/// The leading case is the one that panicked, but it is the *class* that has to
+/// be closed — a lowering that special-cased position alone would leave the
+/// next arrangement of the same degenerate open.
+#[test]
+fn zero_length_closed_subpaths_compile_wherever_they_sit_in_a_path() {
+    let point = Point::new(8.0, 8.0);
+    let elsewhere = Point::new(40.0, 24.0);
+
+    let shapes: Vec<(&str, Vec<PathElement>)> = vec![
+        ("close only", vec![PathElement::ClosePath]),
+        (
+            "doubled close",
+            vec![PathElement::ClosePath, PathElement::ClosePath],
+        ),
+        (
+            "leading, then a real subpath",
+            vec![
+                PathElement::ClosePath,
+                PathElement::MoveTo(elsewhere),
+                PathElement::LineTo(point),
+                PathElement::ClosePath,
+            ],
+        ),
+        (
+            "trailing, after a real subpath",
+            vec![
+                PathElement::LineTo(elsewhere),
+                PathElement::ClosePath,
+                PathElement::MoveTo(point),
+                PathElement::ClosePath,
+            ],
+        ),
+        (
+            "close following a closed subpath",
+            vec![
+                PathElement::LineTo(elsewhere),
+                PathElement::ClosePath,
+                PathElement::ClosePath,
+            ],
+        ),
+        (
+            "between two real subpaths",
+            vec![
+                PathElement::LineTo(elsewhere),
+                PathElement::MoveTo(point),
+                PathElement::ClosePath,
+                PathElement::MoveTo(elsewhere),
+                PathElement::QuadTo(point, elsewhere),
+            ],
+        ),
+    ];
+
+    for (name, elements) in shapes {
+        let mut path = BezPath::new();
+        path.move_to(point);
+        for element in elements {
+            element.push_onto(&mut path);
+        }
+
+        for dash in [
+            Some(DashPattern::new(13.0, 1.0)),
+            Some(DashPattern::new(0.5, 0.5).with_phase(0.25)),
+            None,
+        ] {
+            let scene = scene_of(&[Op::StrokePath {
+                path: path.clone(),
+                width: 2.0,
+                dash,
+                brush: Brush::Solid(RED),
+            }]);
+
+            let compiled = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(
+                &scene,
+                Affine::IDENTITY,
+                VIEWPORT,
+            );
+            assert!(
+                compiled.is_ok(),
+                "{name} with dash {dash:?} must compile or refuse, never panic: {compiled:?}"
+            );
+        }
+    }
+}
+
+/// The rounded rect that used to make `SceneCompiler::compile` never return,
+/// reproduced exactly: an unbounded extent and a `NaN` corner radius.
+///
+/// Neither half alone was enough — a `NaN` radius on an ordinary rect compiled,
+/// and an unbounded rect with finite radii compiled — which is why this pair is
+/// spelled out rather than left to the generator to rediscover. It is a runnable
+/// test only because the refusal is now decided before the lowering runs; while
+/// the walk was unbounded there was nothing to assert, since a test that never
+/// returns cannot be `#[ignore]`d into safety.
+#[test]
+fn the_documented_non_terminating_rounded_rect_is_refused() {
+    let scene = scene_of(&[Op::RoundedRect {
+        rect: Rect::new(
+            f64::MAX,
+            f64::INFINITY,
+            205.5012069531332,
+            209.20270810843607,
+        ),
+        radii: CornerRadii::new(-2.9228123760991815, -5e-324, f64::NAN, 85.76283149609571),
+        brush: Brush::Solid(RED),
+    }]);
+    let root = Affine::new([
+        2.192344744008792,
+        0.0,
+        0.0,
+        2.192344744008792,
+        169.1676407022096,
+        142.6733979215257,
+    ]);
+
+    assert!(matches!(
+        SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, root, VIEWPORT),
+        Err(EngineError::InvalidGeometry)
+    ));
+}
+
+/// Every geometry field the compiler lowers is refused when it is non-finite,
+/// and refused as geometry rather than as a transform — a caller chasing a
+/// blank frame is told which half of the input they recorded wrong.
+#[test]
+fn non_finite_geometry_is_refused_field_by_field() {
+    let ok = Rect::new(0.0, 0.0, 16.0, 16.0);
+
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut bad_path = BezPath::new();
+        bad_path.move_to((0.0, 0.0));
+        bad_path.quad_to((bad, 4.0), (8.0, 8.0));
+
+        let cases: Vec<(&str, Op)> = vec![
+            (
+                "rect extent",
+                Op::FillRect {
+                    rect: Rect::new(0.0, 0.0, bad, 16.0),
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "corner radius",
+                Op::RoundedRect {
+                    rect: ok,
+                    radii: CornerRadii::new(2.0, bad, 2.0, 2.0),
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "line endpoint",
+                Op::Line {
+                    p0: Point::new(0.0, bad),
+                    p1: Point::new(8.0, 8.0),
+                    width: 1.0,
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "line width",
+                Op::Line {
+                    p0: Point::new(0.0, 0.0),
+                    p1: Point::new(8.0, 8.0),
+                    width: bad,
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "stroke width",
+                Op::StrokePath {
+                    path: diamond(),
+                    width: bad,
+                    dash: None,
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "dash phase",
+                Op::StrokePath {
+                    path: diamond(),
+                    width: 2.0,
+                    dash: Some(DashPattern::new(4.0, 2.0).with_phase(bad)),
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "dash length",
+                Op::StrokePath {
+                    path: diamond(),
+                    width: 2.0,
+                    dash: Some(DashPattern::new(bad, 2.0)),
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "filled path point",
+                Op::FillPath {
+                    path: bad_path.clone(),
+                    brush: Brush::Solid(RED),
+                },
+            ),
+            (
+                "stroked path point",
+                Op::StrokePath {
+                    path: bad_path.clone(),
+                    width: 2.0,
+                    dash: None,
+                    brush: Brush::Solid(RED),
+                },
+            ),
+        ];
+
+        for (name, op) in cases {
+            let scene = scene_of(&[op]);
+            assert!(
+                matches!(
+                    SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(
+                        &scene,
+                        Affine::IDENTITY,
+                        VIEWPORT
+                    ),
+                    Err(EngineError::InvalidGeometry)
+                ),
+                "a {bad} {name} must be refused as geometry"
+            );
+        }
+    }
+}
+
+/// A command the compiler recognises but does not lower carries no geometry
+/// into the frame, so a non-finite number in one is skipped with the command
+/// rather than refusing the whole frame.
+///
+/// The distinction is the difference between drawing less and drawing nothing:
+/// a clip the compiler has not implemented yet must not be able to blank a
+/// frame the geometry beside it would have rendered.
+#[test]
+fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
+    let scene = scene_of(&[
+        Op::PushClip {
+            rect: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
+        },
+        Op::FillRect {
+            rect: Rect::new(0.0, 0.0, 16.0, 16.0),
+            brush: Brush::Solid(RED),
+        },
+        Op::PopClip,
+    ]);
+
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("a skipped command's geometry does not refuse the frame");
+    assert_eq!(frame.draws().len(), 1);
+}
+
+/// The generator still reaches the compiler often enough for the properties
+/// above to mean anything.
+///
+/// Three of the four return early on a refused frame — they are statements
+/// about a frame, and a refusal produced none — so a pool hostile enough to
+/// refuse nearly every case would leave them passing over nothing at all, with
+/// no test failing to say so. The floor sits far below the measured rate rather
+/// than pinned to it — 97 of 256 sampled scenes compile, against 216 of the
+/// same 256 with the geometry refusal taken back out, which is what hostile
+/// pools cost once the compiler refuses what is in them — so this guards
+/// against a collapse, not against ordinary drift in the pools.
+#[test]
+fn the_generator_still_produces_frames_that_compile() {
+    const SAMPLES: u32 = 256;
+
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: SAMPLES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    let compiled = Cell::new(0_u32);
+
+    runner
+        .run(&(ops(), root()), |(ops, root)| {
+            let scene = scene_of(&ops);
+            if SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+                .compile(&scene, root, VIEWPORT)
+                .is_ok()
+            {
+                compiled.set(compiled.get() + 1);
+            }
+            Ok(())
+        })
+        .expect("the generator itself never fails a case");
+
+    let compiled = compiled.get();
+    assert!(
+        compiled * 4 >= SAMPLES,
+        "only {compiled} of {SAMPLES} generated scenes compiled — the properties that return \
+         early on a refusal are close to vacuous"
+    );
+}
+
+/// A four-point closed diamond well inside the viewport — geometry that
+/// compiles on its own, so a case built from it fails only for the field it set
+/// out to test.
+fn diamond() -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((16.0, 4.0));
+    path.line_to((28.0, 16.0));
+    path.line_to((16.0, 28.0));
+    path.line_to((4.0, 16.0));
+    path.close_path();
+    path
 }
 
 /// A non-finite root transform is refused before any strip is generated, so a

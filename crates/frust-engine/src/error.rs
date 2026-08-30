@@ -22,8 +22,19 @@ pub enum EngineError {
     #[error("target exceeds u16 ceiling (65,535 pixels)")]
     TargetTooLarge,
 
-    #[error("non-finite transform or geometry refused")]
+    #[error("non-finite transform refused")]
     InvalidTransform,
+
+    /// A command's own geometry — a rectangle's extents, a corner radius, a
+    /// path point, a stroke width, a dash length or phase — is non-finite.
+    ///
+    /// Separate from [`InvalidTransform`](Self::InvalidTransform) because the
+    /// two name different halves of a frame's input: a transform maps geometry
+    /// onto the device grid, while this is the geometry itself, and a caller
+    /// chasing a blank frame needs to know which of the two it recorded wrong.
+    /// Both are refused by the same up-front walk, before any lowering runs.
+    #[error("non-finite geometry refused")]
+    InvalidGeometry,
 
     #[error("scheduler escalation")]
     SchedulerEscalation,

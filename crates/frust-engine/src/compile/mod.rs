@@ -24,7 +24,9 @@ pub mod draw;
 
 pub use draw::{DepthCounter, EngineDraw};
 
-use kurbo::{Affine, BezPath, Cap, Join, Line, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke};
+use kurbo::{
+    Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+};
 use peniko::{Brush, Fill};
 
 use frust_scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
@@ -128,10 +130,12 @@ impl SceneCompiler {
     /// # Errors
     ///
     /// [`EngineError::TargetTooLarge`] when `size` cannot be rounded up to
-    /// whole tiles inside `u16`, and [`EngineError::InvalidTransform`] when a
+    /// whole tiles inside `u16`; [`EngineError::InvalidTransform`] when a
     /// composed transform is non-finite and so maps geometry to coordinates no
-    /// `u16` pixel can hold. Both are refused before any strip is generated —
-    /// the frame path returns errors and never panics.
+    /// `u16` pixel can hold; and [`EngineError::InvalidGeometry`] when a
+    /// command the compiler lowers carries non-finite geometry of its own (see
+    /// [`check_geometry`]). All three are refused before any strip is
+    /// generated — the frame path returns errors and never panics.
     pub fn compile(
         &mut self,
         scene: &Scene,
@@ -148,6 +152,7 @@ impl SceneCompiler {
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
             }
+            check_geometry(command)?;
         }
 
         self.generator.reset(width, height);
@@ -432,6 +437,82 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
     }
 }
 
+/// Refuse a command whose own geometry is non-finite.
+///
+/// A finite transform is not enough on its own: a `NaN` corner radius, an
+/// infinite rectangle extent, a `NaN` control point or stroke width all reach
+/// the flattener and the stroker as they were recorded, and neither of those
+/// bails on a non-finite number. They subdivide against it — a rounded rect of
+/// unbounded extent with a `NaN` radius never finishes at all, and a `NaN`
+/// stroke width buys hundreds of milliseconds and megabytes of scratch to emit
+/// no coverage whatsoever. Refusing here, in the same up-front walk the
+/// transforms are checked in, is what bounds the frame path's work by the
+/// scene rather than by the arithmetic.
+///
+/// Only the commands the compiler actually lowers are checked. A command it
+/// recognises and skips contributes no geometry to the frame, so refusing the
+/// whole frame over one would draw *nothing* where skipping draws less — the
+/// weaker outcome. The match is exhaustive for the same reason
+/// [`SceneCompiler::compile_command`]'s is: a command that starts being lowered
+/// has to state its geometry here in the same change.
+fn check_geometry(command: &Command) -> Result<(), EngineError> {
+    let finite = match command {
+        Command::FillRect { rect, .. } => rect.is_finite(),
+        Command::RoundedRect { rect, radii, .. } => rect.is_finite() && radii_are_finite(*radii),
+        Command::Line { p0, p1, width, .. } => {
+            p0.is_finite() && p1.is_finite() && width.is_finite()
+        }
+        Command::Path { path, style, .. } => path.is_finite() && style_is_finite(style),
+        // Recognised but not lowered — see above.
+        Command::GlyphRun(_)
+        | Command::PushClip { .. }
+        | Command::PushClipRounded { .. }
+        | Command::PopClip
+        | Command::Image { .. }
+        | Command::BlurredRoundedRect { .. }
+        | Command::PushLayer { .. }
+        | Command::PopLayer
+        | Command::ClearRect { .. }
+        | Command::ShaderQuad { .. }
+        | Command::PushSnapshot { .. }
+        | Command::PopSnapshot => true,
+    };
+
+    if finite {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidGeometry)
+    }
+}
+
+/// Whether every corner radius is finite.
+fn radii_are_finite(radii: CornerRadii) -> bool {
+    radii.top_left.is_finite()
+        && radii.top_right.is_finite()
+        && radii.bottom_right.is_finite()
+        && radii.bottom_left.is_finite()
+}
+
+/// Whether a path style's own numbers are finite.
+///
+/// The dash lengths and phase are checked even though
+/// [`DashPattern::is_effective`] would strike a non-finite pattern out and
+/// stroke solid: a frame the compiler refuses for a `NaN` stroke width would
+/// otherwise be accepted for a `NaN` dash phase, and one contract over every
+/// number in the display list is the one a caller can hold in their head.
+fn style_is_finite(style: &PathStyle) -> bool {
+    match style {
+        PathStyle::Fill => true,
+        PathStyle::Stroke { width, dash } => {
+            let dash_finite = match dash {
+                Some(dash) => dash.on.is_finite() && dash.off.is_finite() && dash.phase.is_finite(),
+                None => true,
+            };
+            width.is_finite() && dash_finite
+        }
+    }
+}
+
 /// The device-space rectangle to hand the fast rectangle path, or `None` when
 /// this rectangle has to go through full path processing.
 ///
@@ -465,8 +546,61 @@ fn round_stroke(width: f64) -> Stroke {
 }
 
 /// `path` expanded into the sub-paths `dash` breaks it into.
+///
+/// Both ends of the expansion go through [`well_formed`]. The input needs it
+/// because `kurbo::dash` mishandles a subpath that closes without ever
+/// producing a segment: it emits that subpath's closing element ahead of the
+/// `MoveTo` meant to open the output, so a path whose *first* subpath is a
+/// zero-length closed one (a dashed arc at zero sweep records exactly that)
+/// dashes to a sequence beginning with `ClosePath`. Such a sequence is not a
+/// path any consumer can read — `BezPath`'s own "begins with `MoveTo`"
+/// invariant is asserted in a debug build and silently strokes malformed
+/// geometry in a release one. Normalizing those subpaths away first removes
+/// the input the iterator gets wrong; normalizing the result as well makes the
+/// well-formedness of what this returns a property of this function rather
+/// than of the dash iterator's internal states.
 fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
-    kurbo::dash(path.iter(), dash.phase, &[dash.on, dash.off]).collect()
+    let source = well_formed(path.iter());
+    well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
+}
+
+/// `elements` as a path every consumer can read: opened by a `MoveTo`, and
+/// carrying no `ClosePath` that closes a subpath with no segments in it.
+///
+/// Both rules drop elements that describe no geometry — an element before the
+/// first `MoveTo` has no start point to be drawn from, and closing a subpath
+/// that never left its start point adds no segment — so a well-formed path in
+/// yields itself back unchanged.
+fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+    let mut out = BezPath::new();
+    // Tracked rather than read back off `out`: `BezPath::is_empty` asks whether
+    // a path holds any SEGMENT, which a path holding only its opening `MoveTo`
+    // does not.
+    let mut opened = false;
+    let mut segments_in_subpath = 0_usize;
+
+    for element in elements {
+        match element {
+            PathEl::MoveTo(_) => {
+                opened = true;
+                segments_in_subpath = 0;
+                out.push(element);
+            }
+            PathEl::ClosePath => {
+                if segments_in_subpath > 0 {
+                    segments_in_subpath = 0;
+                    out.push(element);
+                }
+            }
+            PathEl::LineTo(_) | PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                if opened {
+                    segments_in_subpath += 1;
+                    out.push(element);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The display list's per-corner radii as kurbo's, in its clockwise-from-top-left

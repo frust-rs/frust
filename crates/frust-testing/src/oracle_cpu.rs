@@ -77,7 +77,9 @@
 //! `Pixmap::take_unpremultiplied`'s route.
 
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
-use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke};
+use kurbo::{
+    Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+};
 use peniko::{BlendMode, Brush, Color, Compose, Fill, ImageData, Mix};
 use vello_cpu_oracle::{
     Image, ImageSource, Level, PaintType, Pixmap, RenderContext, RenderSettings, Resources,
@@ -762,9 +764,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                             // does: `vello_cpu`'s `set_stroke` ignores a
                             // `Stroke`'s dash fields, so flattening at the
                             // decode site is what keeps the two comparable.
-                            let dashed: BezPath =
-                                kurbo::dash(path.iter(), dash.phase, &[dash.on, dash.off])
-                                    .collect();
+                            let dashed = dash_path(path, *dash);
                             painter.stroke_path(transform, brush, &dashed, *width);
                         }
                         // No pattern, or a degenerate one: a solid stroke.
@@ -857,6 +857,69 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     }
 
     routed
+}
+
+/// `path` expanded into the sub-paths `dash` breaks it into.
+///
+/// Element for element the engine compiler's own dash lowering, normalization
+/// included, because the differential compares the two rasterizers' *fill* and
+/// nothing else: a lowering that differed here would report geometry the two
+/// were never handed in common.
+///
+/// Both ends of the expansion go through [`well_formed`]. The input needs it
+/// because `kurbo::dash` mishandles a subpath that closes without ever
+/// producing a segment: it emits that subpath's closing element ahead of the
+/// `MoveTo` meant to open the output, so a path whose *first* subpath is a
+/// zero-length closed one (a dashed arc at zero sweep records exactly that)
+/// dashes to a sequence beginning with `ClosePath`. Such a sequence is not a
+/// path any consumer can read — `BezPath`'s own "begins with `MoveTo`"
+/// invariant is asserted in a debug build and silently strokes malformed
+/// geometry in a release one. Normalizing those subpaths away first removes
+/// the input the iterator gets wrong; normalizing the result as well makes the
+/// well-formedness of what this returns a property of this function rather
+/// than of the dash iterator's internal states.
+fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
+    let source = well_formed(path.iter());
+    well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
+}
+
+/// `elements` as a path every consumer can read: opened by a `MoveTo`, and
+/// carrying no `ClosePath` that closes a subpath with no segments in it.
+///
+/// Both rules drop elements that describe no geometry — an element before the
+/// first `MoveTo` has no start point to be drawn from, and closing a subpath
+/// that never left its start point adds no segment — so a well-formed path in
+/// yields itself back unchanged.
+fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+    let mut out = BezPath::new();
+    // Tracked rather than read back off `out`: `BezPath::is_empty` asks whether
+    // a path holds any SEGMENT, which a path holding only its opening `MoveTo`
+    // does not.
+    let mut opened = false;
+    let mut segments_in_subpath = 0_usize;
+
+    for element in elements {
+        match element {
+            PathEl::MoveTo(_) => {
+                opened = true;
+                segments_in_subpath = 0;
+                out.push(element);
+            }
+            PathEl::ClosePath => {
+                if segments_in_subpath > 0 {
+                    segments_in_subpath = 0;
+                    out.push(element);
+                }
+            }
+            PathEl::LineTo(_) | PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                if opened {
+                    segments_in_subpath += 1;
+                    out.push(element);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The scene's per-corner radii in the `kurbo` shape vocabulary — the one

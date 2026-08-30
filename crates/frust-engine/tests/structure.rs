@@ -15,12 +15,12 @@
 //!   renders through ordinary render passes, never compute
 //!   (`crates/frust-gpu/src/headless.rs`'s own module doc states the same
 //!   rule; this guard pins it against silent drift).
-//! - **E17**: every rendering path under `src/{compile,gpu,schedule,
+//! - **E17**: every rendering path under `src/{cache,compile,gpu,schedule,
 //!   renderer}.rs` returns an error rather than panicking — no bare
 //!   `unwrap()`/`expect(`/`panic!(` outside a `#[cfg(test)]` module. Only
-//!   `compile/` and `gpu/` exist on this base; `renderer.rs` lands in a
-//!   sibling wave this same phase and `schedule/` is later work, so both are
-//!   scanned conditionally — the guard stays green now and becomes
+//!   `cache/`, `compile/` and `gpu/` exist on this base; `renderer.rs` lands
+//!   in a sibling wave this same phase and `schedule/` is later work, so both
+//!   are scanned conditionally — the guard stays green now and becomes
 //!   load-bearing the moment either merges, with no edit needed here.
 
 use std::path::{Path, PathBuf};
@@ -165,7 +165,7 @@ fn g2_headless_target_usage_excludes_storage_binding() {
 
 // ---------------------------------------------------------------------
 // E17: no unwrap()/expect(/panic!( outside #[cfg(test)] under
-// src/{compile,gpu,schedule,renderer}.rs
+// src/{cache,compile,gpu,schedule,renderer}.rs
 // ---------------------------------------------------------------------
 
 /// Substrings that fail this guard wherever they appear in production code.
@@ -194,15 +194,20 @@ fn rust_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The E17 grep scope: `src/{compile,gpu,schedule,renderer}.rs` — `compile/`
-/// and `gpu/` are trees that exist on this base; `renderer.rs` (a sibling
-/// wave, same phase) and `schedule/` (later work) are grepped only when
-/// present, per this task's note on E17 scope.
+/// The E17 grep scope: `src/{cache,compile,gpu,schedule,renderer}.rs` —
+/// `cache/`, `compile/` and `gpu/` are trees that exist on this base;
+/// `renderer.rs` (a sibling wave, same phase) and `schedule/` (later work) are
+/// grepped only when present.
+///
+/// `cache/` belongs here for the same reason the others do: a gradient ramp is
+/// built, keyed and evicted on the frame path, so a panic in it is a panic in
+/// a frame. Every directory the compiler and the renderer call into on that
+/// path is in scope, not merely the two that hold the pipeline's own stages.
 fn e17_scanned_files() -> Vec<PathBuf> {
     let src = engine_root().join("src");
     let mut files = Vec::new();
 
-    for name in ["compile", "gpu"] {
+    for name in ["cache", "compile", "gpu"] {
         rust_files_recursive(&src.join(name), &mut files);
     }
 
@@ -268,14 +273,20 @@ fn e17_engine_render_paths_never_unwrap_expect_or_panic_outside_tests() {
 }
 
 #[test]
-fn e17_scan_currently_covers_at_least_compile_and_gpu() {
+fn e17_scan_currently_covers_at_least_cache_compile_and_gpu() {
     // Documents the scan's current floor so a future refactor that
     // accidentally empties `e17_scanned_files()` (e.g. a typo'd directory
     // name) fails loudly here rather than the main guard above silently
-    // passing over nothing.
+    // passing over nothing. Named per directory rather than merely counted:
+    // a scan that quietly stopped covering one of the three would otherwise
+    // still satisfy a non-empty assertion.
     let files = e17_scanned_files();
-    assert!(
-        !files.is_empty(),
-        "expected at least one .rs file under compile/ or gpu/"
-    );
+    for name in ["cache", "compile", "gpu"] {
+        assert!(
+            files
+                .iter()
+                .any(|path| path.components().any(|c| c.as_os_str() == name)),
+            "the E17 scan covers no .rs file under src/{name}/: {files:?}"
+        );
+    }
 }

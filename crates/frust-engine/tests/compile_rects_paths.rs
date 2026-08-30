@@ -200,6 +200,54 @@ fn a_dashed_stroke_differs_from_the_solid_stroke_of_the_same_path() {
 }
 
 #[test]
+fn a_zero_length_closed_subpath_changes_nothing_about_what_a_dashed_stroke_paints() {
+    // The dash lowering drops a subpath that closes without ever leaving its
+    // start point, because `kurbo::dash` emits such a subpath's closing element
+    // ahead of the `MoveTo` that should open its output. Dropping it must be
+    // exactly that — a removal of nothing — so the same path carrying one in
+    // front, behind, and in the middle of its real geometry paints the diamond
+    // and only the diamond.
+    let dash = DashPattern::new(8.0, 4.0);
+    let plain = scene_of(|b| b.stroke_path_dashed(diamond(), 3.0, dash, solid(RED)));
+    let expected = compiler()
+        .compile(&plain, Affine::IDENTITY, VIEWPORT)
+        .expect("compiles");
+    assert!(
+        !expected.alphas().is_empty(),
+        "the reference dashed stroke must itself paint something"
+    );
+
+    let mut leading = BezPath::new();
+    leading.move_to((10.0, 10.0));
+    leading.close_path();
+    leading.extend(diamond().iter());
+
+    let mut trailing = diamond();
+    trailing.move_to((10.0, 10.0));
+    trailing.close_path();
+
+    let mut doubled = diamond();
+    doubled.close_path();
+
+    for (name, path) in [
+        ("leading", leading),
+        ("trailing", trailing),
+        ("doubled close", doubled),
+    ] {
+        let scene = scene_of(|b| b.stroke_path_dashed(path, 3.0, dash, solid(RED)));
+        let frame = compiler()
+            .compile(&scene, Affine::IDENTITY, VIEWPORT)
+            .unwrap_or_else(|e| panic!("{name} should compile, got {e}"));
+
+        assert_eq!(
+            frame.alphas(),
+            expected.alphas(),
+            "a {name} zero-length closed subpath changed the dashed stroke's coverage"
+        );
+    }
+}
+
+#[test]
 fn a_degenerate_dash_pattern_strokes_solid() {
     // `DashPattern::is_effective` rejects a zero-length `on`; such a pattern
     // must fall back to the plain stroke rather than expanding into nothing.
