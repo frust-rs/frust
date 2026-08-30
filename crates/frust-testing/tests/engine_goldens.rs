@@ -317,7 +317,7 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
     (
         "adv-huge-image",
         Band {
-            mean: 3.0,
+            mean: 4.6,
             pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
         },
         "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
@@ -326,8 +326,13 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
          minified image's boundary legitimately differ while the uniform-colour interior probe \
          matches exactly. The engine agrees with `vello_cpu` on this case PIXEL FOR PIXEL (0 px \
          differing at channel 2), so its engine-vs-classic band reproduces that calibration row \
-         exactly (measured mean 2.988 / 2.3438% here) — the corpus-wide p95 failing to cover a \
-         disagreement it never included, not engine drift",
+         exactly (measured mean 2.988 / 2.3438% on the vulkan-nvidia-t400 rig, where the mean \
+         band was first set at 3). On the metal-macos rig (Apple M4) the same case measures \
+         mean 4.487 / 3.5156% while the engine STILL matches `vello_cpu` byte for byte (max \
+         delta [0,0,0,0]) — the classic arm's unspecified-filter minification simply lands \
+         differently on Metal than on the T400 — so the mean is widened to 4.6 to carry both \
+         rigs' measured numbers; the percentage stays at the corpus budget, inside which both \
+         rigs sit",
     ),
 ];
 

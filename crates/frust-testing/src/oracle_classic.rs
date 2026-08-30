@@ -72,7 +72,10 @@ pub const UNCLASSIFIED_CLASS: &str = "classic-unclassified";
 /// Adding a runner is a deliberate act: it declares that the machine's
 /// baselines are reviewed and owned (`docs/TESTING.md`'s Golden Classes —
 /// "never pretend one device represents every GPU").
-const KNOWN_CLASSES: &[(&str, &str, &str)] = &[("vulkan", "t400", "vulkan-nvidia-t400")];
+const KNOWN_CLASSES: &[(&str, &str, &str)] = &[
+    ("vulkan", "t400", "vulkan-nvidia-t400"),
+    ("metal", "apple", "metal-macos"),
+];
 
 /// The golden class for a resolved adapter, or [`UNCLASSIFIED_CLASS`].
 #[must_use]
@@ -220,6 +223,14 @@ mod tests {
         assert_eq!(
             golden_class(&headless_meta("vulkan", "NVIDIA T400 4GB")),
             "vulkan-nvidia-t400"
+        );
+    }
+
+    #[test]
+    fn the_mac_metal_runner_resolves_to_its_own_golden_class() {
+        assert_eq!(
+            golden_class(&headless_meta("metal", "Apple M4")),
+            "metal-macos"
         );
     }
 

@@ -1,0 +1,14 @@
+{
+  "backend": "engine-metal-macos",
+  "adapter": "Apple M4",
+  "driver": "",
+  "os": "macos",
+  "frust_commit": "e7981950d747ce0d7e2429d94d54085bf2a32841",
+  "case": "unit-clip-rect",
+  "tolerance": {
+    "channel": 2,
+    "alpha": 2,
+    "diff_pixels": 0
+  },
+  "timestamp": "2026-08-30T19:37:09Z"
+}

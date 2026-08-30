@@ -228,14 +228,18 @@ Store independent baselines for:
 - `vulkan-nvidia-t400/`: real Vello/wgpu output on the pinned T400 runner (the
   plan's single reference adapter for GPU goldens). Currently recording-only:
   the GPU arm renders and probes on every ignored run but a baseline is
-  promoted deliberately via `UPDATE_GOLDENS=1`. A Mac runner would record
-  `metal-macos/`; an unknown adapter lands in the non-promotable
-  `classic-unclassified` staging class
+  promoted deliberately via `UPDATE_GOLDENS=1`. The Mac Metal runner (Apple
+  M-series) routes to `metal-macos/`; an unknown adapter lands in the
+  non-promotable `classic-unclassified` staging class
   (`crates/frust-testing/src/oracle_classic.rs`'s `golden_class`). Engine
   classes reuse the classic class name under an `engine-` prefix
   (`engine-vulkan-nvidia-t400/`, recording-only, promoted the same way), so one
   adapter table routes both arms; an unreviewed adapter lands in
   `engine-unclassified`.
+- `engine-metal-macos/`: the Mac Metal runner's engine class (Apple M4,
+  recording-only, promoted via `UPDATE_GOLDENS=1` exactly like the T400
+  classes; its classic-side `metal-macos/` twin is routable but not yet
+  recorded).
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the

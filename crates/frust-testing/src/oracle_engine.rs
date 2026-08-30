@@ -85,7 +85,10 @@ pub const ENGINE_UNCLASSIFIED_CLASS: &str = "engine-unclassified";
 /// [`golden_class`] — so adding a runner is one edit there plus one row here,
 /// and the two class names for one machine can never disagree about which
 /// adapter they mean.
-const ENGINE_CLASSES: &[(&str, &str)] = &[("vulkan-nvidia-t400", "engine-vulkan-nvidia-t400")];
+const ENGINE_CLASSES: &[(&str, &str)] = &[
+    ("vulkan-nvidia-t400", "engine-vulkan-nvidia-t400"),
+    ("metal-macos", "engine-metal-macos"),
+];
 
 /// The target format every engine frame is rendered into.
 ///
@@ -491,6 +494,14 @@ mod tests {
             engine_golden_class("Vulkan", "nvidia t400"),
             "engine-vulkan-nvidia-t400",
             "adapter matching is case-insensitive, exactly as WGPU_ADAPTER_NAME selects"
+        );
+    }
+
+    #[test]
+    fn the_mac_metal_runner_resolves_to_its_own_engine_class() {
+        assert_eq!(
+            engine_golden_class("metal", "Apple M4"),
+            "engine-metal-macos"
         );
     }
 
