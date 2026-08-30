@@ -36,8 +36,18 @@ pub enum EngineError {
     #[error("non-finite geometry refused")]
     InvalidGeometry,
 
-    #[error("scheduler escalation")]
-    SchedulerEscalation,
+    /// A frame's layer shape is outside what the engine's scheduler serves, so
+    /// the frame is to be rendered by another route.
+    ///
+    /// `reason` names what was found — a branching layer graph, a chain deeper
+    /// than the two-page ping-pong serves, a filter layer, a non-default blend
+    /// mode — because the caller's own log is where a frame that stopped taking
+    /// the engine path has to be explainable from.
+    #[error("scheduler escalation: {reason}")]
+    SchedulerEscalation {
+        /// What the scheduler found that it does not serve.
+        reason: String,
+    },
 
     #[error("alpha capacity exhausted")]
     AlphaCapacity,

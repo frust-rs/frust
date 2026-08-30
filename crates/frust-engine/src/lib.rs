@@ -24,6 +24,7 @@ pub mod config;
 pub mod error;
 pub mod gpu;
 pub mod renderer;
+pub mod schedule;
 
 pub use cache::{CachedRamp, GradientCache, GradientTextureLayout};
 pub use compile::paint::{BrushEncoding, LutRequest, encode_brush};
@@ -34,6 +35,7 @@ pub use gpu::{
     GpuEncodedPaint, GpuStrip, IntermediateTargets, IntermediateTexture, StripDraw,
 };
 pub use renderer::EngineRenderer;
+pub use schedule::{Composite, PageParity, PageTarget, Round, RoundOp, RoundTarget, Schedule};
 
 /// Alpha output mode for the render target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
