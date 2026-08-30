@@ -3796,9 +3796,16 @@ renderer — a frame whose layer shape the two-page scheduler cannot serve
 deeper than four, a filter/blend/mask layer) returns
 `EngineError::SchedulerEscalation` and the surface presents nothing for that
 frame: the previously presented content persists, a refusal counter
-increments, and a rate-limited log names the reason. Two isolated siblings
-per parent are served (opposite page parities in one root round); wider
-simultaneous fans are the practical gap.
+increments, and a rate-limited log names the reason — and since the shape is
+a property of the layer tree, a shape that refuses once refuses every frame,
+freezing the surface on its last presented image while the app keeps running.
+Two isolated siblings directly under the frame's own surface are served
+(opposite page parities in one root round); the same pair nested inside
+another isolated layer, and wider simultaneous fans, are the practical gap.
+The served set is also recording-order sensitive at its boundary: the greedy
+page allocator can serve a nested subtree followed by a flat sibling yet
+refuse the same pair recorded flat-first, so a shape near the two-page bound
+may schedule or skip depending on paint order.
 
 **Accepted because**: the engine tier is an opt-in measurement tier this
 phase; skipping loudly beats rendering the shape wrong, and per-frame

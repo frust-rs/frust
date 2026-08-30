@@ -25,7 +25,7 @@
 //! `vello_common` 0.2.0's [`BlurredRoundedRectangle`] takes a single `f32`
 //! `radius` — the same arity vello 0.9's `Scene::draw_blurred_rounded_rect`
 //! and vello_cpu's `fill_blurred_rounded_rect` already carry, which is why
-//! `frust-render`'s CPU/hybrid tiers already collapse a per-corner shadow
+//! `frust-render`'s classic and CPU tiers already collapse a per-corner shadow
 //! through [`CornerRadii::largest`] (see `frust-render::convert` and
 //! `docs/RENDER_ARCHITECTURE.md` Data Flow; recorded as the accepted
 //! limitation `render-blurred-shadow-corner-collapse`). No vello 0.2 type in
@@ -36,7 +36,7 @@
 //! rounded *less* pushes a hard wedge out through a rounded corner's notch —
 //! collapsing to the largest radius is the direction that costs the least
 //! fidelity. There is no fidelity win to report here: this engine tier is
-//! bounded by the identical single-radius vocabulary the CPU/hybrid tiers
+//! bounded by the identical single-radius vocabulary those tiers
 //! already are, not by a choice made in this file.
 //!
 //! ## Invert

@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Engine render errors — returned on frame paths, never panicked.
 ///
-/// Mirrors [`vello_hybrid::RenderError`] cases plus engine-specific constraints.
+/// Mirrors the reference sparse-strips renderer's error cases plus engine-specific constraints.
 /// The engine always returns errors on invalid or oversized resources rather than
 /// panicking, per Frust's frame-path invariant (E17).
 #[derive(Debug, Clone, Error)]

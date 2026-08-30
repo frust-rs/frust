@@ -620,7 +620,7 @@ user content into golden artifacts or CI logs.
 
 Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
-`benchmarks/harness/ab_matrix.sh --tier classic,hybrid,hybrid_atlas` drives the render-tier A/B
+`benchmarks/harness/ab_matrix.sh --tier classic,engine` drives the render-tier A/B
 matrix (classic vello vs. the opt-in `engine` tier) across a caller-chosen
 `--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` for the tier's
 feature/env knobs and `benchmarks/RESULTS.md` for recorded numbers (its retired

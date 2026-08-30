@@ -115,9 +115,9 @@ use crate::error::EngineError;
 /// The deepest chain of nested isolated layers this scheduler serves.
 ///
 /// Four levels covers every layer shape frust's widget set records; a deeper
-/// one is escalated rather than served, because the cases past it are the ones
-/// whose cost is better paid by the reference renderer than by growing this
-/// module.
+/// one is escalated rather than served — the frame is skipped, and shapes past
+/// this bound are rare enough that skipping them beats the cost and complexity
+/// of growing this module to serve them.
 pub const MAX_CHAIN_DEPTH: usize = 4;
 
 /// The most intermediate pages this scheduler keeps live at one time.

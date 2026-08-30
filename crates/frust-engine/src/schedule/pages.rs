@@ -150,7 +150,7 @@ pub fn page_ceiling(config: &PageConfig, caps: &TierCaps) -> u32 {
 /// [`EngineError::IntermediateTextureTooLarge`] when either axis of `bounds`
 /// exceeds [`page_ceiling`]. Splitting such a layer into bands is later work,
 /// and shrinking it to the ceiling would drop its outer pixels without saying
-/// so, which is why the frame falls back instead.
+/// so, which is why the frame is refused (and skipped by the caller) instead.
 pub fn page_size(
     bounds: RectU16,
     config: &PageConfig,

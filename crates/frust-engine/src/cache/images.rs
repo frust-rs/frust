@@ -355,7 +355,9 @@ impl AtlasBudget {
     /// The bytes one fully populated layer costs at [`ATLAS_FORMAT_BYTES`].
     #[must_use]
     pub fn layer_bytes(self) -> u64 {
-        u64::from(self.atlas_size.0) * u64::from(self.atlas_size.1) * ATLAS_FORMAT_BYTES
+        u64::from(self.atlas_size.0)
+            .saturating_mul(u64::from(self.atlas_size.1))
+            .saturating_mul(ATLAS_FORMAT_BYTES)
     }
 
     /// The bytes every layer of this budget costs once fully grown.

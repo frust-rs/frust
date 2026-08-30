@@ -19,7 +19,7 @@
 # THE ON ARM DELIBERATELY DOES NOT TARGET `material3-demo`. Opting an app into
 # the tier means turning on `frust-render/engine-tier` through the `frust`
 # facade, and the facade forwards no such feature to its shells (unlike
-# `perf-trace`/`devtools`/`hybrid-tier` — see `crates/frust/Cargo.toml`), so no
+# `perf-trace`/`devtools`/`engine-tier` — see `crates/frust/Cargo.toml`), so no
 # app in this repo can reach the feature today. `frust-render` itself is the
 # nearest reachable ON target: it is the crate that owns the feature and the
 # dependency edge the OFF arm is checking for the absence of. Point this arm at

@@ -465,9 +465,10 @@ impl EngineRenderer {
     /// returned before anything is recorded, uploaded, allocated or submitted,
     /// so a refused frame leaves `encoder` exactly as it was found and the
     /// renderer's own resources — the atlas array included — exactly as they
-    /// were. That is what lets the caller route it to another renderer rather
-    /// than present it half-drawn, and what keeps a refused frame's image
-    /// uploads alive for the next frame that is not refused.
+    /// were. That is what lets the caller skip the frame cleanly (nothing is
+    /// presented and the previously presented content persists) rather than
+    /// present it half-drawn, and what keeps a refused frame's image uploads
+    /// alive for the next frame that is not refused.
     #[expect(
         clippy::too_many_arguments,
         reason = "the seam frust-render drives: device, queue, encoder, scene, \
@@ -491,7 +492,7 @@ impl EngineRenderer {
         // The frame's pass plan, settled before anything is allocated or
         // recorded: a layer shape this scheduler does not serve, or one larger
         // than a page can be sized to, refuses the whole frame here so the
-        // caller can route it elsewhere rather than present it half-drawn.
+        // caller can skip it cleanly rather than present it half-drawn.
         let rounds = Schedule::build(&frame.recorder, &self.caps, &self.pages)?;
         let ceiling = self.targets.max_texture_size();
         for round in &rounds {
@@ -544,9 +545,11 @@ impl EngineRenderer {
 
         // Everything that can fail does so here, ahead of the first
         // `begin_render_pass` AND ahead of the first thing this frame changes
-        // about the renderer: a frame refused below has still allocated
-        // nothing, replaced no texture and submitted nothing, which is what
-        // lets the caller route it to another renderer.
+        // about the renderer's frame-visible state: apart from the engine's
+        // own depth attachment (re-sized above, an internal resource no pass
+        // has read yet), a frame refused below has allocated nothing, replaced
+        // no texture and submitted nothing, which is what lets the caller
+        // skip it cleanly.
         let dim = self.caps.resource_texture_dim;
         let alphas_grown = gpu::grow_alpha_texture_height(
             self.resources.alphas.height,
