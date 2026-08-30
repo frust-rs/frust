@@ -239,11 +239,40 @@ fn a_zero_length_closed_subpath_changes_nothing_about_what_a_dashed_stroke_paint
             .compile(&scene, Affine::IDENTITY, VIEWPORT)
             .unwrap_or_else(|e| panic!("{name} should compile, got {e}"));
 
+        // Alpha coverage alone would miss a change that shifted strips without
+        // changing what they cover (a different draw count or a different
+        // paint on an otherwise-identical strip range would not touch a single
+        // alpha byte), so the draws and the strip buffer they index are pinned
+        // too.
         assert_eq!(
             frame.alphas(),
             expected.alphas(),
             "a {name} zero-length closed subpath changed the dashed stroke's coverage"
         );
+        assert_eq!(
+            frame.strip_buf(),
+            expected.strip_buf(),
+            "a {name} zero-length closed subpath changed the dashed stroke's strip metadata"
+        );
+        assert_eq!(
+            frame.draws().len(),
+            expected.draws().len(),
+            "a {name} zero-length closed subpath changed the dashed stroke's draw count"
+        );
+        for (index, (a, b)) in frame.draws().iter().zip(expected.draws()).enumerate() {
+            assert_eq!(
+                a.paint, b.paint,
+                "a {name} zero-length closed subpath changed draw {index}'s paint"
+            );
+            assert_eq!(
+                a.depth, b.depth,
+                "a {name} zero-length closed subpath changed draw {index}'s depth"
+            );
+            assert_eq!(
+                a.strip_range, b.strip_range,
+                "a {name} zero-length closed subpath changed draw {index}'s strip range"
+            );
+        }
     }
 }
 

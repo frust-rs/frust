@@ -75,10 +75,12 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestError, TestRunner};
 use serde::Serialize;
 
+use frust_engine::compile as engine_compile;
 use frust_scene::{DashPattern, Scene, SceneBuilder};
 use frust_testing::case::Tolerance;
 use frust_testing::diff::{DiffOutcome, DiffReport, diff_images};
 use frust_testing::golden::artifacts_root;
+use frust_testing::oracle_cpu;
 use frust_testing::oracle_cpu::CpuOracle;
 use frust_testing::oracle_engine::{EngineOracle, EngineOracleOptions};
 use frust_testing::render::{RenderSpec, RenderedImage, SceneRenderer};
@@ -395,15 +397,21 @@ fn dash() -> impl Strategy<Value = Option<[f64; 3]>> {
     ]
 }
 
-/// A path, opened with a `MoveTo` and carrying no zero-length closed subpath.
+/// A path, opened with a `MoveTo`.
 ///
-/// That exclusion is not cosmetic: `kurbo::dash` emits such a subpath's closing
-/// segment FIRST, so its output starts with `ClosePath` rather than `MoveTo`,
-/// and BOTH arms collect that straight into a `BezPath` — which trips
-/// `BezPath::from_vec`'s "must begin with `MoveTo`" debug assertion. The defect
-/// belongs to the dash lowering, not to this comparison, and
-/// `frust-engine`'s `proptest_strips` carries the reproducer for it; generating
-/// the shape here would only stop this differential from running at all.
+/// A zero-length closed subpath (a `MoveTo` immediately followed by a
+/// `ClosePath`, wherever it sits) is no longer excluded. It used to be: prior
+/// to `frust-engine`'s well-formed dash lowering, `kurbo::dash` emitted such a
+/// subpath's closing segment FIRST, so its output started with `ClosePath`
+/// rather than `MoveTo`, and both arms collected that straight into a
+/// `BezPath` — which trips `BezPath::from_vec`'s "must begin with `MoveTo`"
+/// debug assertion. Both this crate's `oracle_cpu::dash_path` and
+/// `frust-engine`'s own now normalize the shape away through `well_formed`
+/// before it ever reaches `kurbo::dash` (see `frust-engine`'s
+/// `proptest_strips` for the reproducer that fix closed, and the cross-copy
+/// equivalence test near the bottom of this file for the pinned proof), so
+/// generating the shape here now exercises that normalization instead of
+/// avoiding it.
 fn segments() -> impl Strategy<Value = Vec<Segment>> {
     let element = prop_oneof![
         pair().prop_map(Segment::MoveTo),
@@ -412,20 +420,11 @@ fn segments() -> impl Strategy<Value = Vec<Segment>> {
         (pair(), pair(), pair()).prop_map(|(p0, p1, p2)| Segment::CurveTo(p0, p1, p2)),
         Just(Segment::ClosePath),
     ];
-    (pair(), prop::collection::vec(element, 1..6))
-        .prop_map(|(start, rest)| drop_empty_closed_subpaths(start, rest))
-}
-
-fn drop_empty_closed_subpaths(start: [f64; 2], rest: Vec<Segment>) -> Vec<Segment> {
-    let mut path = vec![Segment::MoveTo(start)];
-    for segment in rest {
-        let after_move = matches!(path.last(), Some(Segment::MoveTo(_)));
-        if after_move && matches!(segment, Segment::ClosePath) {
-            continue;
-        }
-        path.push(segment);
-    }
-    path
+    (pair(), prop::collection::vec(element, 1..6)).prop_map(|(start, rest)| {
+        let mut path = vec![Segment::MoveTo(start)];
+        path.extend(rest);
+        path
+    })
 }
 
 /// A transform: a modest rotation/scale/skew about the frame, in the range a
@@ -887,23 +886,18 @@ fn failure_artifacts_stay_out_of_the_committed_corpus() {
     );
 }
 
-/// A zero-length closed subpath never survives generation — the shape both dash
-/// lowerings choke on (see [`segments`]).
+/// Every generated path opens with a `MoveTo` — the one shape invariant
+/// [`segments`] still enforces (`bez_path`'s `BezPath::move_to`/`line_to`/etc.
+/// calls assert it).
+///
+/// A zero-length closed subpath (`MoveTo` immediately followed by
+/// `ClosePath`) is deliberately NOT asserted absent here any more: both dash
+/// lowerings now normalize it away instead of choking on it (see
+/// [`segments`]'s docs), so the generator is free to produce it, and the
+/// cross-copy equivalence test below pins that normalization directly rather
+/// than this suite avoiding the shape.
 #[test]
-fn the_generator_drops_zero_length_closed_subpaths() {
-    let path = drop_empty_closed_subpaths(
-        [0.0, 0.0],
-        vec![
-            Segment::ClosePath,
-            Segment::LineTo([4.0, 4.0]),
-            Segment::ClosePath,
-        ],
-    );
-    assert!(matches!(
-        path.as_slice(),
-        [Segment::MoveTo(_), Segment::LineTo(_), Segment::ClosePath]
-    ));
-
+fn the_generator_always_opens_a_path_with_a_move_to() {
     for program in sample_programs(64) {
         for op in &program.ops {
             let path = match op {
@@ -914,15 +908,118 @@ fn the_generator_drops_zero_length_closed_subpaths() {
                 matches!(path.first(), Some(Segment::MoveTo(_))),
                 "a generated path must open with a MoveTo: {path:?}"
             );
-            for pair in path.windows(2) {
-                assert!(
-                    !matches!(
-                        (&pair[0], &pair[1]),
-                        (Segment::MoveTo(_), Segment::ClosePath)
-                    ),
-                    "a generated path carries a zero-length closed subpath: {path:?}"
-                );
-            }
+        }
+    }
+}
+
+/// Degenerate `BezPath`s worth pinning across the two dash-lowering copies:
+/// every position a zero-length closed subpath (`MoveTo` immediately followed
+/// by `ClosePath`) can occupy — the counterexample class this crate's
+/// `segments` strategy used to exclude (see its docs) — plus an ordinary path
+/// as the baseline every one of them is compared against.
+fn degenerate_dash_fixtures() -> Vec<(&'static str, BezPath)> {
+    let real = |path: &mut BezPath| {
+        path.line_to((40.0, 24.0));
+        path.close_path();
+    };
+
+    let mut plain = BezPath::new();
+    plain.move_to((8.0, 8.0));
+    real(&mut plain);
+
+    let mut close_only = BezPath::new();
+    close_only.move_to((0.0, 0.0));
+    close_only.close_path();
+
+    let mut doubled_close = BezPath::new();
+    doubled_close.move_to((0.0, 0.0));
+    doubled_close.close_path();
+    doubled_close.close_path();
+
+    let mut leading = BezPath::new();
+    leading.move_to((0.0, 0.0));
+    leading.close_path();
+    leading.move_to((8.0, 8.0));
+    real(&mut leading);
+
+    let mut trailing = BezPath::new();
+    trailing.move_to((8.0, 8.0));
+    real(&mut trailing);
+    trailing.move_to((0.0, 0.0));
+    trailing.close_path();
+
+    let mut close_following_a_closed_subpath = BezPath::new();
+    close_following_a_closed_subpath.move_to((8.0, 8.0));
+    real(&mut close_following_a_closed_subpath);
+    close_following_a_closed_subpath.close_path();
+
+    let mut between_two_real_subpaths = BezPath::new();
+    between_two_real_subpaths.move_to((8.0, 8.0));
+    real(&mut between_two_real_subpaths);
+    between_two_real_subpaths.move_to((0.0, 0.0));
+    between_two_real_subpaths.close_path();
+    between_two_real_subpaths.move_to((40.0, 24.0));
+    between_two_real_subpaths.quad_to((8.0, 8.0), (40.0, 24.0));
+
+    vec![
+        ("plain", plain),
+        ("close only", close_only),
+        ("doubled close", doubled_close),
+        ("leading", leading),
+        ("trailing", trailing),
+        (
+            "close following a closed subpath",
+            close_following_a_closed_subpath,
+        ),
+        ("between two real subpaths", between_two_real_subpaths),
+    ]
+}
+
+/// `frust-engine`'s `compile::well_formed` and this crate's
+/// `oracle_cpu::well_formed` are two independent copies of the identical
+/// normalization (see `oracle_cpu`'s module docs for why the duplication
+/// exists at all); this pins them element-for-element rather than trusting
+/// the module comment that says so.
+#[test]
+fn well_formed_normalizes_identically_across_both_copies() {
+    for (name, path) in degenerate_dash_fixtures() {
+        let engine = engine_compile::well_formed(path.iter());
+        let oracle = oracle_cpu::well_formed(path.iter());
+        assert_eq!(
+            engine, oracle,
+            "{name}: well_formed diverged between the engine's copy and the oracle's"
+        );
+    }
+}
+
+/// `frust-engine`'s `compile::dash_path` and this crate's `oracle_cpu::dash_path`
+/// are two independent copies of the identical dash lowering; this pins them
+/// element-for-element over the same degenerate-path fixtures
+/// [`well_formed_normalizes_identically_across_both_copies`] uses, dashed
+/// rather than merely normalized. The dash values are ordinary, effective
+/// ones — a non-normalizable derived period (`on = off = f64::MAX`, `phase =
+/// -1.0`) is deliberately never fed to either copy of `dash_path` here: it
+/// hangs `kurbo::dash`'s own catch-up loop by construction (see
+/// `frust-engine`'s `the_documented_non_terminating_dash_cycle_is_refused`),
+/// which is exactly why both lowerings' callers refuse it up front instead of
+/// ever reaching `dash_path` with it.
+#[test]
+fn dash_path_lowers_identically_across_both_copies() {
+    let dashes = [
+        DashPattern::new(8.0, 4.0),
+        DashPattern::new(0.5, 0.5).with_phase(0.25),
+        DashPattern::new(13.0, 1.0),
+    ];
+
+    for (name, path) in degenerate_dash_fixtures() {
+        for dash in dashes {
+            let engine = engine_compile::dash_path(&path, dash);
+            let oracle = oracle_cpu::dash_path(&path, dash);
+            assert_eq!(
+                engine, oracle,
+                "{name} dashed with {dash:?}: dash_path diverged between the engine's copy and \
+                 the oracle's"
+            );
         }
     }
 }

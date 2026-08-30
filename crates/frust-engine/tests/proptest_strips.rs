@@ -987,7 +987,7 @@ fn a_dashed_zero_length_closed_subpath_compiles_rather_than_panicking() {
         SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, Affine::IDENTITY, VIEWPORT);
     assert!(
         compiled.is_ok(),
-        "the frame path must compile this or refuse it, never panic: {compiled:?}"
+        "an effective dash pattern over this shape must compile, never panic: {compiled:?}"
     );
 }
 
@@ -1072,7 +1072,7 @@ fn zero_length_closed_subpaths_compile_wherever_they_sit_in_a_path() {
             );
             assert!(
                 compiled.is_ok(),
-                "{name} with dash {dash:?} must compile or refuse, never panic: {compiled:?}"
+                "{name} with dash {dash:?} must compile, never panic: {compiled:?}"
             );
         }
     }
@@ -1110,6 +1110,33 @@ fn the_documented_non_terminating_rounded_rect_is_refused() {
 
     assert!(matches!(
         SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, root, VIEWPORT),
+        Err(EngineError::InvalidGeometry)
+    ));
+}
+
+/// The dash pattern that used to make `kurbo::dash`'s own catch-up loop spin
+/// forever, reproduced exactly: `on = off = f64::MAX`, `phase = -1.0`.
+///
+/// Every field is individually finite, and [`DashPattern::is_effective`]
+/// reads it as effective — `on` and `off` are both positive and their sum,
+/// `+inf`, still compares `>=` the epsilon. The period only breaks once it is
+/// *derived*: `on + off` overflows to `+inf`, and `phase.rem_euclid(+inf)`
+/// overflows with it, so kurbo's setup loop (run before it ever pulls a
+/// `PathEl` from the source path) adds an infinite step to a value that never
+/// converges. This is a runnable test rather than a documented hang for the
+/// same reason as the rounded-rect one above: the refusal is decided before
+/// `kurbo::dash` ever runs.
+#[test]
+fn the_documented_non_terminating_dash_cycle_is_refused() {
+    let scene = scene_of(&[Op::StrokePath {
+        path: diamond(),
+        width: 2.0,
+        dash: Some(DashPattern::new(f64::MAX, f64::MAX).with_phase(-1.0)),
+        brush: Brush::Solid(RED),
+    }]);
+
+    assert!(matches!(
+        SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, Affine::IDENTITY, VIEWPORT),
         Err(EngineError::InvalidGeometry)
     ));
 }

@@ -452,9 +452,12 @@ fn check_finite(transform: Affine) -> Result<(), EngineError> {
 /// Only the commands the compiler actually lowers are checked. A command it
 /// recognises and skips contributes no geometry to the frame, so refusing the
 /// whole frame over one would draw *nothing* where skipping draws less — the
-/// weaker outcome. The match is exhaustive for the same reason
-/// [`SceneCompiler::compile_command`]'s is: a command that starts being lowered
-/// has to state its geometry here in the same change.
+/// weaker outcome. The match is exhaustive over every [`Command`] variant, the
+/// same as [`SceneCompiler::compile_command`]'s: a variant added to the enum
+/// fails to compile here until it is placed in the lowered group or the
+/// skipped one. Moving a variant *between* those two groups is not itself
+/// compiler-enforced — the match stays exhaustive either way — so that half of
+/// the discipline still has to be kept by hand alongside `compile_command`.
 fn check_geometry(command: &Command) -> Result<(), EngineError> {
     let finite = match command {
         Command::FillRect { rect, .. } => rect.is_finite(),
@@ -499,18 +502,54 @@ fn radii_are_finite(radii: CornerRadii) -> bool {
 /// [`DashPattern::is_effective`] would strike a non-finite pattern out and
 /// stroke solid: a frame the compiler refuses for a `NaN` stroke width would
 /// otherwise be accepted for a `NaN` dash phase, and one contract over every
-/// number in the display list is the one a caller can hold in their head.
+/// number a *lowered* command carries is the one a caller can hold in their
+/// head — not a claim about a command [`check_geometry`] skips rather than
+/// lowers, whose numbers this function never sees.
+///
+/// An effective dash pattern is checked further, past its own fields: see
+/// [`dash_cycle_is_normalizable`].
 fn style_is_finite(style: &PathStyle) -> bool {
     match style {
         PathStyle::Fill => true,
         PathStyle::Stroke { width, dash } => {
             let dash_finite = match dash {
-                Some(dash) => dash.on.is_finite() && dash.off.is_finite() && dash.phase.is_finite(),
+                Some(dash) => {
+                    dash.on.is_finite()
+                        && dash.off.is_finite()
+                        && dash.phase.is_finite()
+                        && dash_cycle_is_normalizable(dash)
+                }
                 None => true,
             };
             width.is_finite() && dash_finite
         }
     }
+}
+
+/// Whether a dash pattern's derived cycle survives kurbo's own normalization
+/// arithmetic, so `kurbo::dash` terminates instead of spinning forever.
+///
+/// [`DashPattern::is_effective`] already screens out a non-positive or
+/// sub-epsilon pattern in favour of a solid stroke, but its own period check —
+/// `on + off >= DASH_PERIOD_EPSILON` — can itself be fooled: two individually
+/// finite lengths can sum past `f64::MAX` into `+inf`, and `+inf >=
+/// DASH_PERIOD_EPSILON` still reads as effective. kurbo doubles this crate's
+/// on/off pair into its own length-2 dash array, so the period it derives is
+/// always `on + off`; once that overflows, `phase.rem_euclid(period)`
+/// overflows with it, and the catch-up loop `kurbo::dash` runs before it ever
+/// pulls a `PathEl` adds an infinite step to a value that never converges —
+/// `on = off = f64::MAX`, `phase = -1.0` hangs this way. Refusing here, where
+/// `on`, `off` and `phase` already passed their own finiteness checks, is what
+/// keeps that unbounded loop out of the frame path.
+fn dash_cycle_is_normalizable(dash: &DashPattern) -> bool {
+    if !dash.is_effective() {
+        // A degenerate pattern never reaches `dash_path`: `is_effective` is
+        // what routes it to a solid stroke instead, so its derived period is
+        // moot here.
+        return true;
+    }
+    let period = dash.on + dash.off;
+    period.is_finite() && period > 0.0 && dash.phase.rem_euclid(period).is_finite()
 }
 
 /// The device-space rectangle to hand the fast rectangle path, or `None` when
@@ -559,7 +598,16 @@ fn round_stroke(width: f64) -> Stroke {
 /// the input the iterator gets wrong; normalizing the result as well makes the
 /// well-formedness of what this returns a property of this function rather
 /// than of the dash iterator's internal states.
-fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
+///
+/// Callers inside this crate only ever reach `dash` here once
+/// [`dash_cycle_is_normalizable`] has passed it, since `kurbo::dash` itself
+/// does not bound its catch-up loop against a non-normalizable cycle; a caller
+/// outside the up-front walk carries that same obligation. Made `pub` (rather
+/// than `pub(crate)`) so `frust-testing`'s CPU oracle, which keeps its own
+/// independent copy of this lowering (see that crate's `oracle_cpu` module
+/// docs for why), can pin its output against this one directly rather than
+/// only through a rendered image.
+pub fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
     let source = well_formed(path.iter());
     well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
 }
@@ -571,7 +619,9 @@ fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
 /// first `MoveTo` has no start point to be drawn from, and closing a subpath
 /// that never left its start point adds no segment — so a well-formed path in
 /// yields itself back unchanged.
-fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+///
+/// `pub` for the same cross-crate-parity reason as [`dash_path`].
+pub fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
     let mut out = BezPath::new();
     // Tracked rather than read back off `out`: `BezPath::is_empty` asks whether
     // a path holds any SEGMENT, which a path holding only its opening `MoveTo`

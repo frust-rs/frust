@@ -301,6 +301,32 @@ impl SceneRenderer for CpuOracle {
             "RenderSpec scale must be finite and positive, got {}",
             spec.scale
         );
+        // The identical up-front refusal `frust-engine`'s `SceneCompiler`
+        // applies before it lowers a dash pattern (see that crate's
+        // `compile::dash_cycle_is_normalizable`): a scene the engine refuses
+        // for this reason must be refused here too, before this walk ever
+        // reaches `dash_path`, or the two arms of a differential would
+        // disagree about a scene one of them hangs on rather than one of them
+        // rejects.
+        for command in scene.commands() {
+            if let Command::Path {
+                style:
+                    PathStyle::Stroke {
+                        dash: Some(dash), ..
+                    },
+                ..
+            } = command
+            {
+                anyhow::ensure!(
+                    dash_cycle_is_normalizable(dash),
+                    "dash pattern (on={}, off={}, phase={}) has a derived period kurbo::dash \
+                     cannot normalize — its catch-up loop would spin rather than terminate",
+                    dash.on,
+                    dash.off,
+                    dash.phase
+                );
+            }
+        }
 
         self.resize(width, height);
         self.ctx.reset();
@@ -878,9 +904,33 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
 /// the input the iterator gets wrong; normalizing the result as well makes the
 /// well-formedness of what this returns a property of this function rather
 /// than of the dash iterator's internal states.
-fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
+///
+/// Only ever called here once [`dash_cycle_is_normalizable`] has passed
+/// `dash` — `kurbo::dash` itself does not bound its catch-up loop against a
+/// non-normalizable cycle. `pub` (rather than `pub(crate)`) so a differential
+/// test can pin this crate's copy of the lowering against `frust-engine`'s
+/// directly, rather than only through a rendered image.
+pub fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
     let source = well_formed(path.iter());
     well_formed(kurbo::dash(source.iter(), dash.phase, &[dash.on, dash.off]))
+}
+
+/// Whether a dash pattern's derived cycle survives kurbo's own normalization
+/// arithmetic, so `kurbo::dash` terminates instead of spinning forever.
+///
+/// The identical rule `frust-engine`'s `compile::dash_cycle_is_normalizable`
+/// enforces, kept in lockstep here so a scene the engine refuses is refused by
+/// this oracle too. See that function's docs for why
+/// [`frust_scene::DashPattern::is_effective`]'s own period check is not
+/// enough on its own: `on + off` can overflow to `+inf` for two individually
+/// finite lengths, and `phase.rem_euclid` on an infinite period overflows with
+/// it.
+fn dash_cycle_is_normalizable(dash: &frust_scene::DashPattern) -> bool {
+    if !dash.is_effective() {
+        return true;
+    }
+    let period = dash.on + dash.off;
+    period.is_finite() && period > 0.0 && dash.phase.rem_euclid(period).is_finite()
 }
 
 /// `elements` as a path every consumer can read: opened by a `MoveTo`, and
@@ -890,7 +940,9 @@ fn dash_path(path: &BezPath, dash: frust_scene::DashPattern) -> BezPath {
 /// first `MoveTo` has no start point to be drawn from, and closing a subpath
 /// that never left its start point adds no segment — so a well-formed path in
 /// yields itself back unchanged.
-fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
+///
+/// `pub` for the same cross-crate-parity reason as [`dash_path`].
+pub fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
     let mut out = BezPath::new();
     // Tracked rather than read back off `out`: `BezPath::is_empty` asks whether
     // a path holds any SEGMENT, which a path holding only its opening `MoveTo`
