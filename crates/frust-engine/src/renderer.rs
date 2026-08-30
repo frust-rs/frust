@@ -18,6 +18,16 @@
 //!   the command buffers submitted after them and so land before the passes
 //!   that read them.
 //!
+//! One thing the engine *does* submit, and it is worth naming precisely because
+//! the rule above is otherwise absolute: growing the image atlas array submits a
+//! command buffer of its own, holding one texture copy and nothing else, on the
+//! rare frame that grows it. That is **maintenance, not scene work** — it never
+//! touches the caller's encoder, records no pass and no draw, and exists because
+//! the queued writes it has to precede would otherwise be flushed ahead of it
+//! (see [`crate::gpu::atlas`]'s *Why growth submits a command buffer of its
+//! own*). The caller's encoder is still never submitted by the engine, and the
+//! frame's own passes still reach the queue only when the caller submits it.
+//!
 //! # The frame's passes
 //!
 //! A frame records into that encoder, in this order.
@@ -187,6 +197,11 @@ const PAGE_LABEL: &str = "frust-engine layer page";
 
 static INDEXED_PAINT_WARNING: Once = Once::new();
 
+/// Raised the first time an atlas region is declined, so a renderer whose
+/// budget and array have gone out of agreement says so once rather than every
+/// frame.
+static ATLAS_REFUSAL_WARNING: Once = Once::new();
+
 /// One surface's 2D render engine: a scene in, recorded passes out.
 ///
 /// Create one per surface and keep it across frames — the retained scene
@@ -248,9 +263,14 @@ impl EngineRenderer {
             format,
             shaders,
             pipelines,
-            // The viewport is re-asserted on every compile, so this is only an
-            // initial allocation hint.
-            compiler: SceneCompiler::new(1, 1),
+            // The viewport is re-asserted on every compile, so the extent is
+            // only an initial allocation hint. `caps` is not: it is what fixes
+            // the image atlas budget for this renderer's whole life (mobile or
+            // desktop tier, the adapter's own ceilings, and any
+            // `FRUST_ENGINE_ATLAS_SIZE` override), and the adapter is known
+            // exactly here — a compiler built without it would silently keep
+            // the mobile budget on every device.
+            compiler: SceneCompiler::for_caps(1, 1, caps),
             gradients,
             depth: DepthAttachment::new(),
             targets: IntermediateTargets::new(caps),
@@ -283,6 +303,42 @@ impl EngineRenderer {
     #[must_use]
     pub fn page_config(&self) -> PageConfig {
         self.pages
+    }
+
+    /// The atlas geometry image residency allocates within.
+    ///
+    /// Derived from the adapter in [`Self::new`], so this is the tier's budget
+    /// narrowed to what the adapter can create — not a constant.
+    #[must_use]
+    pub fn atlas_budget(&self) -> AtlasBudget {
+        self.compiler.images().budget()
+    }
+
+    /// Re-budget image residency, dropping every image currently resident and
+    /// the atlas array holding them.
+    ///
+    /// An atlas rectangle only means anything against the geometry it was
+    /// allocated in, so a new budget invalidates every one already handed out —
+    /// which is why the array, the registry of where each image lives and the
+    /// bind groups naming that array all go in the same step, and each image
+    /// re-uploads on the next frame that draws it. A start-up or adapter-change
+    /// operation, never a per-frame one.
+    pub fn set_atlas_budget(&mut self, budget: AtlasBudget) {
+        self.compiler.set_atlas_budget(budget);
+        self.resources.reset_atlas();
+    }
+
+    /// How many atlas regions this renderer has declined to write or clear.
+    ///
+    /// Zero on every sound frame: residency allocates inside the budget the
+    /// array is created at, and the array is grown to the depth the frame
+    /// reports before its regions are written, so a refusal means those two
+    /// went out of agreement. The count exists so that disagreement is
+    /// measurable rather than silent — a refused write is a region the frame
+    /// believed it had filled.
+    #[must_use]
+    pub fn refused_atlas_regions(&self) -> u64 {
+        self.resources.refused_regions
     }
 
     /// Finishes pipeline warm-up on the calling thread, returning only once
@@ -406,9 +462,12 @@ impl EngineRenderer {
     /// sized to, [`EngineError::AlphaCapacity`] when a frame's coverage
     /// outgrows the alpha texture, and [`EngineError::PaintCapacity`] when its
     /// encoded paints or colour ramps outgrow theirs. Every one of them is
-    /// returned before anything is recorded, so a refused frame leaves
-    /// `encoder` exactly as it was found — which is what lets the caller route
-    /// it to another renderer rather than present it half-drawn.
+    /// returned before anything is recorded, uploaded, allocated or submitted,
+    /// so a refused frame leaves `encoder` exactly as it was found and the
+    /// renderer's own resources — the atlas array included — exactly as they
+    /// were. That is what lets the caller route it to another renderer rather
+    /// than present it half-drawn, and what keeps a refused frame's image
+    /// uploads alive for the next frame that is not refused.
     #[expect(
         clippy::too_many_arguments,
         reason = "the seam frust-render drives: device, queue, encoder, scene, \
@@ -472,7 +531,9 @@ impl EngineRenderer {
         // Paints are resolved before instances are built: an instance names
         // its paint by the texel its record starts at, which only exists once
         // the frame's ramps are resident and its records are laid out.
-        self.resources.resolve_paints(&frame, &mut self.gradients);
+        let atlas_budget = self.compiler.images().budget();
+        self.resources
+            .resolve_paints(&frame, &mut self.gradients, atlas_budget);
         self.scratch.build(
             &frame,
             &rounds,
@@ -481,16 +542,11 @@ impl EngineRenderer {
             &self.resources.paint_slots,
         );
 
-        // Grown or created ahead of this frame's own atlas evictions/uploads
-        // (recorded into `queue` below) and ahead of any pass that samples
-        // the array — a layer copy on growth is recorded into `encoder`, so it
-        // has to land in the command buffer before `record_passes`' own.
-        let atlas_budget = self.compiler.images().budget();
-        self.resources
-            .ensure_atlas(device, encoder, atlas_budget, frame.atlas_layers);
-
         // Everything that can fail does so here, ahead of the first
-        // `begin_render_pass`.
+        // `begin_render_pass` AND ahead of the first thing this frame changes
+        // about the renderer: a frame refused below has still allocated
+        // nothing, replaced no texture and submitted nothing, which is what
+        // lets the caller route it to another renderer.
         let dim = self.caps.resource_texture_dim;
         let alphas_grown = gpu::grow_alpha_texture_height(
             self.resources.alphas.height,
@@ -504,13 +560,30 @@ impl EngineRenderer {
         )?;
         let gradients_grown = self.resources.grown_gradient_height(&self.gradients)?;
 
+        // Past the last fallible step. The atlas is created or grown first, so
+        // the growth copy's own submit precedes the frame's atlas writes below
+        // (see `gpu::atlas`) and the array is deep enough for every region they
+        // name.
+        self.resources
+            .ensure_atlas(device, queue, atlas_budget, frame.atlas_layers);
+
         self.resources.resize_alphas(device, alphas_grown);
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
-        self.resources
-            .upload(queue, &mut frame, &mut self.gradients, size, dim);
+        let atlas_serviced =
+            self.resources
+                .upload(queue, &mut frame, &mut self.gradients, size, dim);
         self.resources
             .upload_instances(device, queue, &self.scratch);
+
+        // Residency is committed exactly here: the frame passed every fallible
+        // step and its evictions and uploads have reached the array, so the
+        // compiler may stop re-offering them. A frame that returned early above
+        // never gets here, and its plan is re-offered on the next frame that
+        // does (see `cache::images`).
+        if atlas_serviced {
+            self.compiler.acknowledge_image_plan();
+        }
 
         let format = target.format;
         let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
@@ -1537,6 +1610,11 @@ struct FrameResources {
     /// kept in step with residency across frames without reaching into the
     /// compiler's own cache.
     image_registry: HashMap<ImageId, ResidentImage>,
+    /// How many atlas regions have been declined — a write or clear the array
+    /// refused, or one the budget says the array could not hold. Counted rather
+    /// than dropped silently, because each one is a region the frame believed
+    /// it had filled.
+    refused_regions: u64,
 }
 
 impl FrameResources {
@@ -1562,7 +1640,36 @@ impl FrameResources {
             bind_group_format: None,
             atlas: None,
             image_registry: HashMap::new(),
+            refused_regions: 0,
         }
+    }
+
+    /// Drops the atlas array, everything recorded about what lives in it, and
+    /// the bind groups naming it.
+    ///
+    /// What a re-budget needs: the rectangles the registry holds were allocated
+    /// in a geometry that no longer exists, so keeping any of them would point
+    /// a paint at a rectangle of a texture that is gone.
+    fn reset_atlas(&mut self) {
+        self.atlas = None;
+        self.image_registry.clear();
+        self.bind_groups.clear();
+    }
+
+    /// Count `regions` atlas regions as declined, saying so once.
+    ///
+    /// Once, not per region: a budget and an array that disagree disagree about
+    /// every region, and a per-frame line would bury the fact under itself. The
+    /// count on [`EngineRenderer::refused_atlas_regions`] is the measure.
+    fn note_refused_regions(&mut self, regions: u64) {
+        self.refused_regions = self.refused_regions.saturating_add(regions);
+        ATLAS_REFUSAL_WARNING.call_once(|| {
+            log::warn!(
+                "an atlas region was refused by the image atlas array; those images are skipped \
+                 and their uploads re-offered on a later frame (logged once — see \
+                 EngineRenderer::refused_atlas_regions for the count)"
+            );
+        });
     }
 
     /// Services `frame`'s LUT and image residency, then lowers its encoded
@@ -1577,7 +1684,12 @@ impl FrameResources {
     /// wired up. Image residency is still serviced even then, since an image
     /// can be evicted on a frame that draws nothing at all (see
     /// [`Self::update_image_registry`]).
-    fn resolve_paints(&mut self, frame: &CompiledFrame, cache: &mut GradientCache) {
+    fn resolve_paints(
+        &mut self,
+        frame: &CompiledFrame,
+        cache: &mut GradientCache,
+        budget: AtlasBudget,
+    ) {
         self.paints_data.clear();
         self.paint_slots.clear();
 
@@ -1585,7 +1697,7 @@ impl FrameResources {
         // need it: an image reaped by the compiler's age-based eviction while
         // nothing draws it must still be forgotten here, or a later draw that
         // reuses its freed rectangle's `ImageId` would read the stale entry.
-        self.update_image_registry(frame);
+        self.update_image_registry(frame, budget);
 
         if frame.encoded_paints.is_empty() {
             return;
@@ -1638,58 +1750,52 @@ impl FrameResources {
     /// doc for why), so this reconstructs the same information from what a
     /// compiled frame already reports.
     ///
-    /// Two passes. First, every region this frame's residency reaped is
-    /// forgotten — `frame.image_evictions` names it by rectangle, and a
-    /// rectangle uniquely identifies the one image that held it (padding is
-    /// always zero in this engine, so the reported and the stored rectangle
-    /// are the same value; see [`crate::cache::images`]'s module doc). Second,
-    /// `frame.encoded_paints` is walked in the compiler's own draw order,
-    /// pairing every id this registry has not already forgotten-or-learned
-    /// with the next unclaimed entry of `frame.image_uploads`, in order. That
-    /// pairing is sound rather than a guess: both sequences come from the
-    /// same per-draw walk inside [`crate::compile::SceneCompiler::compile`],
-    /// and an id this registry has not seen before is — because the eviction
-    /// pass above kept the two in agreement — exactly an id the residency has
-    /// not seen before either, which is precisely when the residency pushes
-    /// an upload. A same-frame evict-then-reallocate that happens to reuse a
-    /// freed `ImageId` is still handled correctly: the eviction pass above
-    /// has already dropped that id from the registry by rectangle, before the
-    /// walk below ever runs, so the reused id is treated as unseen and paired
-    /// with its own fresh upload rather than the evicted one's stale entry.
-    fn update_image_registry(&mut self, frame: &CompiledFrame) {
+    /// Two passes, and each reads the frame's plan directly rather than
+    /// inferring anything from draw order. First, every region this frame's
+    /// residency reaped is forgotten — `frame.image_evictions` names it by
+    /// rectangle, and a rectangle uniquely identifies the one image that held it
+    /// (padding is always zero in this engine, so the reported and the stored
+    /// rectangle are the same value; see [`crate::cache::images`]'s module doc).
+    /// Second, every entry of `frame.image_uploads` is registered under the
+    /// [`ImageId`] it carries.
+    ///
+    /// The order matters and the id does. Evictions run first so a same-frame
+    /// evict-then-reallocate that reuses a rectangle registers the new tenant
+    /// rather than having it removed again. And the upload naming its own id is
+    /// what makes this sound under a *re-offered* plan: an upload the previous
+    /// frame did not service is reported again alongside no new draw of its own,
+    /// so a walk pairing uploads positionally against this frame's encoded
+    /// paints would hand a fresh image the stale upload's rectangle.
+    ///
+    /// A region the atlas array could not hold at `budget`'s geometry and this
+    /// frame's depth is counted and left unregistered instead. Its draws are
+    /// then skipped, which is the whole point: a registered rectangle nothing
+    /// wrote would be sampled as whatever the texture happened to contain.
+    fn update_image_registry(&mut self, frame: &CompiledFrame, budget: AtlasBudget) {
         if !frame.image_evictions.is_empty() {
             self.image_registry
                 .retain(|_, resident| !frame.image_evictions.contains(&resident.region));
         }
 
-        let mut next_upload = 0_usize;
-        for paint in &frame.encoded_paints {
-            let EncodedPaint::Image(image) = paint else {
-                continue;
-            };
-            let Some(id) = image_id(image) else {
-                continue;
-            };
-            if self.image_registry.contains_key(&id) {
+        let mut refused = 0_u64;
+        for upload in &frame.image_uploads {
+            if !budget.contains(upload.region, frame.atlas_layers) {
+                refused = refused.saturating_add(1);
                 continue;
             }
-            // Fewer uploads than not-yet-registered ids would mean a
-            // compiler/residency invariant broke; leaving the id unregistered
-            // here drops its draws rather than lowering a guessed rectangle.
-            let Some(upload) = frame.image_uploads.get(next_upload) else {
-                continue;
-            };
-            next_upload += 1;
             self.image_registry.insert(
-                id,
+                upload.id,
                 ResidentImage {
-                    id,
+                    id: upload.id,
                     region: upload.region,
                     natural: upload.natural,
                     padding: u32::from(ATLAS_PADDING),
-                    may_have_transparency: image.may_have_transparency,
+                    may_have_transparency: upload.may_have_transparency,
                 },
             );
+        }
+        if refused > 0 {
+            self.note_refused_regions(refused);
         }
     }
 
@@ -1701,10 +1807,16 @@ impl FrameResources {
     /// A frame that has never made an image resident (`layers == 0`) leaves
     /// the atlas unset, so the strip shader's binding stays on
     /// [`Placeholders::atlas_array`] until the first one is.
+    ///
+    /// Growth submits a maintenance command buffer of its own rather than
+    /// recording into the frame's encoder — see [`crate::gpu::atlas`]. So this
+    /// must be called after the frame's last fallible step (a refused frame
+    /// must submit nothing) and before its atlas writes are issued (the copy has
+    /// to precede them, and a submit flushes whatever is already queued).
     fn ensure_atlas(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
         budget: AtlasBudget,
         layers: u32,
     ) -> bool {
@@ -1719,7 +1831,7 @@ impl FrameResources {
                 ));
                 true
             }
-            Some(atlas) => atlas.ensure_layers(device, encoder, layers),
+            Some(atlas) => atlas.ensure_layers(device, queue, layers),
         };
         if grew {
             self.bind_groups.clear();
@@ -1733,19 +1845,39 @@ impl FrameResources {
     /// [`crate::cache::images`]'s module doc), so clearing after writing
     /// would erase the image that just moved in.
     ///
-    /// A no-op until [`Self::ensure_atlas`] has created the array: both are
-    /// driven by the same `frame.atlas_layers`, so an empty plan and an
-    /// absent atlas always agree.
-    fn upload_atlas(&self, queue: &wgpu::Queue, frame: &CompiledFrame) {
-        let Some(atlas) = self.atlas.as_ref() else {
-            return;
+    /// Answers whether the whole plan reached the array — which is what tells
+    /// the compiler it may stop re-offering it. A region the array declined is
+    /// counted (see [`Self::note_refused_regions`]) and the plan stays pending,
+    /// so a later frame that has grown the array writes it rather than the
+    /// image being lost.
+    ///
+    /// An absent array with a plan to service is that same disagreement rather
+    /// than a quiet no-op: both are driven by the same `frame.atlas_layers`, so
+    /// an empty plan and an absent atlas normally agree.
+    fn upload_atlas(&mut self, queue: &wgpu::Queue, frame: &CompiledFrame) -> bool {
+        let refused = match self.atlas.as_ref() {
+            None => (frame.image_evictions.len() + frame.image_uploads.len()) as u64,
+            Some(atlas) => {
+                let mut refused = 0_u64;
+                for region in &frame.image_evictions {
+                    if !atlas.clear_region(queue, *region) {
+                        refused = refused.saturating_add(1);
+                    }
+                }
+                for upload in &frame.image_uploads {
+                    if !atlas.write_region(queue, upload.region, upload.pixels.data_as_u8_slice()) {
+                        refused = refused.saturating_add(1);
+                    }
+                }
+                refused
+            }
         };
-        for region in &frame.image_evictions {
-            atlas.clear_region(queue, *region);
+
+        if refused == 0 {
+            return true;
         }
-        for upload in &frame.image_uploads {
-            atlas.write_region(queue, upload.region, upload.pixels.data_as_u8_slice());
-        }
+        self.note_refused_regions(refused);
+        false
     }
 
     /// Makes sure there is one viewport uniform per page round of this frame.
@@ -1817,7 +1949,8 @@ impl FrameResources {
     }
 
     /// Uploads the frame's coverage, paint records, colour ramps, atlas
-    /// evictions/uploads and config.
+    /// evictions/uploads and config, answering whether the atlas plan was
+    /// serviced in full (see [`Self::upload_atlas`]).
     fn upload(
         &mut self,
         queue: &wgpu::Queue,
@@ -1825,8 +1958,8 @@ impl FrameResources {
         cache: &mut GradientCache,
         size: (u16, u16),
         dim: u32,
-    ) {
-        self.upload_atlas(queue, frame);
+    ) -> bool {
+        let atlas_serviced = self.upload_atlas(queue, frame);
 
         let alphas = &self.alphas;
         gpu::with_padded_alphas(
@@ -1883,6 +2016,8 @@ impl FrameResources {
 
         let config = GpuConfig::new(u32::from(size.0), u32::from(size.1), dim, dim);
         queue.write_buffer(&self.config, 0, bytemuck::bytes_of(&config));
+
+        atlas_serviced
     }
 
     /// Grows the instance buffer if this frame outgrew it, then uploads the

@@ -29,6 +29,24 @@
 //! Growth is rare (a layer holds a whole mobile budget's worth of images) and
 //! never shrinks: an atlas that grew to four layers under load keeps them.
 //!
+//! ### Why growth submits a command buffer of its own
+//!
+//! That copy is the one piece of engine work that cannot ride the frame's
+//! encoder. `wgpu` flushes the queued writes pending at a submit *before* the
+//! command buffers of that same submit, so a copy recorded into the frame's
+//! encoder would execute after the frame's own `write_texture` uploads and
+//! clears — restoring the pre-growth contents of every layer they had just
+//! written, permanently (residency schedules an upload on a miss, and the image
+//! is not a miss any more). Ordering is therefore established by submitting the
+//! copy on its own, ahead of the frame's writes being issued at all.
+//!
+//! That is a **maintenance** submit, not scene work: it carries one texture
+//! copy, no pass and no draw, and it happens only on the rare frame that grows
+//! the array. [`crate::renderer::EngineRenderer::encode`]'s contract that the
+//! engine never submits *the caller's* encoder, and records no scene work
+//! anywhere else, is untouched — the caller's encoder is neither read nor
+//! finished here.
+//!
 //! Clearing an evicted region writes transparent texels through the queue
 //! rather than drawing a scissored pass. Both reach the same result; the queue
 //! write needs no pipeline, no render pass and no bind group, and eviction is
@@ -189,10 +207,17 @@ impl AtlasArray {
     /// past [`MAX_ATLAS_INDEX`], is a no-op: the encoded-image record cannot
     /// name a layer the shader could not address, so refusing here is what
     /// keeps an unaddressable layer from being created at all.
+    ///
+    /// The old-to-new copy is recorded into a command encoder of this method's
+    /// own and submitted before returning, rather than into the frame's. That is
+    /// an ordering requirement rather than a convenience — see the module doc's
+    /// *Why growth submits a command buffer of its own*. Call it before the
+    /// frame's atlas writes are issued; anything already queued is flushed by
+    /// this submit and so lands in the *old* texture.
     pub fn ensure_layers(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
         layers: u32,
     ) -> bool {
         if layers <= self.layers || layers > MAX_ATLAS_INDEX + 1 {
@@ -200,6 +225,9 @@ impl AtlasArray {
         }
 
         let grown = Self::with_layers(device, self.width, self.height, layers);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine image atlas growth"),
+        });
         encoder.copy_texture_to_texture(
             self.texture.as_image_copy(),
             grown.texture.as_image_copy(),
@@ -209,6 +237,7 @@ impl AtlasArray {
                 depth_or_array_layers: self.layers,
             },
         );
+        queue.submit(std::iter::once(encoder.finish()));
 
         let generation = self.generation.saturating_add(1);
         *self = grown;

@@ -235,6 +235,21 @@ impl SceneCompiler {
         &self.images
     }
 
+    /// Record that a compiled frame's
+    /// [`image_evictions`](CompiledFrame::image_evictions) and
+    /// [`image_uploads`](CompiledFrame::image_uploads) have been serviced
+    /// against a live atlas array.
+    ///
+    /// The other half of the plan seam: [`compile`](Self::compile) reports the
+    /// plan without consuming it, and it goes on being reported — identically,
+    /// never duplicated — until this is called. Call it only once the regions
+    /// have really been written, so a frame refused after compiling keeps its
+    /// uploads for the next frame that is not (see [`crate::cache::images`]'s
+    /// module doc).
+    pub fn acknowledge_image_plan(&mut self) {
+        self.images.acknowledge_plan();
+    }
+
     /// Re-budget image residency, dropping every image currently resident.
     ///
     /// The atlas geometry is what an allocation's coordinates mean, so a change
@@ -327,7 +342,13 @@ impl SceneCompiler {
         frame.scissor_clips = self.clips.scissor_clips();
         frame.mask_clips = self.clips.mask_clips();
         frame.clip_mask_strips = self.clips.mask_strips();
-        let (evictions, uploads) = self.images.take_plan();
+        // Copied rather than drained. Compiling is not the moment residency
+        // becomes true — this frame can still be refused by the caller after it
+        // returns, and a refused frame never reaches the atlas. The plan stays
+        // pending in the residency, re-offered on every later frame, until the
+        // consumer that actually wrote the regions acknowledges it through
+        // [`acknowledge_image_plan`](SceneCompiler::acknowledge_image_plan).
+        let (evictions, uploads) = self.images.plan();
         frame.image_evictions = evictions;
         frame.image_uploads = uploads;
         frame.atlas_layers = self.images.layers();

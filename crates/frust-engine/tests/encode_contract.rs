@@ -22,11 +22,20 @@
 //! The whole file runs under a validation error scope, so a wrong bind group,
 //! a mismatched attachment or an out-of-range draw surfaces as a named error
 //! rather than as a plausible-looking image.
+//!
+//! One case here checks something subtler than the contract and equally
+//! device-bound: **queue-write ordering against atlas growth**. `wgpu` flushes
+//! the writes queued at a submit *before* that submit's command buffers, so a
+//! growth copy sharing the frame's encoder would execute after the frame's own
+//! atlas uploads and undo them. Only a real queue orders those two, which is
+//! why [`a_frame_that_grows_the_atlas_keeps_the_uploads_it_made_into_layer_zero`]
+//! lives with the GPU suite rather than with the host residency tests.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use frust_engine::cache::images::{AtlasBudget, is_mobile_tier};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
@@ -855,6 +864,212 @@ fn an_image_survives_a_second_frame_with_no_new_upload() {
     assert_eq!(pixel(&pixels, 64, 64), [0, 255, 0, 255]);
 
     warm_up_ran(&renderer);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_renderer_takes_the_atlas_budget_its_own_adapter_calls_for() {
+    // The adapter is known exactly once, when the renderer is built, and that
+    // is the only place the image atlas budget can be derived from it. Built
+    // without it, every renderer on every device silently kept the mobile
+    // tier's 1024-square layer — the desktop tier, the adapter's own ceilings
+    // and `FRUST_ENGINE_ATLAS_SIZE` all unreachable.
+    let _serialized = render_lock();
+    let (device, _queue, caps) = gpu();
+
+    let renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+
+    assert_eq!(
+        renderer.atlas_budget(),
+        AtlasBudget::for_caps(&caps),
+        "the renderer's budget must be the one its adapter calls for"
+    );
+    if !is_mobile_tier(&caps) {
+        assert_eq!(
+            renderer.atlas_budget().atlas_size,
+            AtlasBudget::DESKTOP.atlas_size,
+            "an immediate-mode adapter takes the desktop layer extent"
+        );
+    }
+    assert!(renderer.atlas_budget().total_bytes() <= AtlasBudget::DESKTOP.total_bytes());
+}
+
+/// The atlas the growth case allocates in: one layer holds a single 64x48
+/// image plus a strip, so a second such image forces the array to grow while
+/// there is still room in layer 0 for a small one.
+const GROWTH_BUDGET: AtlasBudget = AtlasBudget {
+    atlas_size: (64, 64),
+    max_atlases: 4,
+};
+
+/// Where the growth case draws its three images, each at its own natural size
+/// on whole pixels so the atlas is sampled at nearest and the read-back matches
+/// the source exactly.
+const RESIDENT_RECT: Rect = Rect::new(0.0, 0.0, 64.0, 48.0);
+const LAYER_ZERO_RECT: Rect = Rect::new(0.0, 64.0, 32.0, 80.0);
+const GROWTH_RECT: Rect = Rect::new(0.0, 100.0, 64.0, 148.0);
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_frame_that_grows_the_atlas_keeps_the_uploads_it_made_into_layer_zero() {
+    // One frame that does both: a new image lands in the space left in layer 0
+    // while another forces the array from one layer to two. Growth copies every
+    // existing layer across, and that copy must be ordered BEFORE this frame's
+    // own queued writes — recorded into the frame's encoder it lands after them
+    // (wgpu flushes queued writes first) and puts pre-growth layer 0 back over
+    // the image just written into it. The loss is permanent: residency reports
+    // the image resident from then on, so no later frame re-uploads it.
+    let _serialized = render_lock();
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    renderer.set_atlas_budget(GROWTH_BUDGET);
+
+    let resident = solid_image(64, 48, [0, 255, 0, 255]);
+    let into_layer_zero = solid_image(32, 16, [0, 0, 255, 255]);
+    let forces_growth = solid_image(64, 48, [255, 0, 0, 255]);
+
+    // Frame one makes only `resident` resident, so the array is created with
+    // exactly one layer and the growth below is a real growth.
+    let first = {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_image(&resident, RESIDENT_RECT);
+        scene
+    };
+    // Frame two redraws it (a residency hit, no upload), allocates a small
+    // image into what is left of layer 0, and a second full-height one that
+    // only fits in a layer the array does not have yet.
+    let second = {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_image(&resident, RESIDENT_RECT);
+        builder.draw_image(&into_layer_zero, LAYER_ZERO_RECT);
+        builder.draw_image(&forces_growth, GROWTH_RECT);
+        scene
+    };
+
+    let mut last = None;
+    for scene in [&first, &second] {
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine atlas growth frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                Color::TRANSPARENT,
+                Affine::IDENTITY,
+            )
+            .expect("both image frames encode");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        last = Some(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the growth frame raised {error:?}");
+
+    let pixels = last.expect("two frames ran");
+    // The whole point: written into layer 0 on the very frame that grew the
+    // array past it, and still there afterwards.
+    assert_eq!(
+        pixel(&pixels, 16, 72),
+        [0, 0, 255, 255],
+        "the image uploaded into layer 0 was overwritten by the growth copy"
+    );
+    // The image that forced the growth, in the new layer.
+    assert_eq!(pixel(&pixels, 32, 124), [255, 0, 0, 255]);
+    // And the image growth had to carry across from the old layer 0.
+    assert_eq!(pixel(&pixels, 32, 24), [0, 255, 0, 255]);
+
+    assert_eq!(
+        renderer.refused_atlas_regions(),
+        0,
+        "no region of a sound frame is ever declined"
+    );
+    assert!(
+        renderer.atlas_budget().max_atlases >= 2,
+        "the budget under test must admit the second layer"
+    );
+
+    warm_up_ran(&renderer);
+}
+
+/// The half of the frame the punch erases, and the rectangle the translucent
+/// layer covers — overlapping, so one probe sits inside both.
+const PUNCH_HALF: Rect = Rect::new(0.0, 0.0, 128.0, 256.0);
+const TRANSLUCENT_LAYER: Rect = Rect::new(64.0, 64.0, 192.0, 192.0);
+
+/// An opaque red backdrop, a hole punched through its left half, and a
+/// half-opacity white layer recorded *after* the punch and straddling its edge.
+fn punch_under_translucent_layer_scene() -> Scene {
+    let edge = f64::from(SIZE);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(Rect::new(0.0, 0.0, edge, edge), Brush::Solid(RED));
+    builder.clear_rect(PUNCH_HALF);
+    builder.push_layer(TRANSLUCENT_LAYER, 0.5);
+    builder.fill_rect(TRANSLUCENT_LAYER, Brush::Solid(WHITE));
+    builder.pop_layer();
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_translucent_composite_recorded_after_a_clear_rect_is_erased_by_the_trailing_punch() {
+    // Pins today's behaviour rather than arguing for it. `ClearRect` is hoisted
+    // to the frame root and issued as ONE destination-out pass after every
+    // draw, layer composites included — so a layer recorded after the clear is
+    // erased inside the cleared rectangle even though the display list draws it
+    // on top. Outside that rectangle the same composite lands normally, which
+    // is what distinguishes "the punch runs last" from "the layer was dropped".
+    let _serialized = render_lock();
+    let pixels = rendered(&punch_under_translucent_layer_scene(), Color::TRANSPARENT);
+
+    assert_eq!(
+        pixel(&pixels, 96, 128),
+        [0, 0, 0, 0],
+        "inside both the layer and the punch, the trailing punch wins outright"
+    );
+    assert_eq!(
+        pixel(&pixels, 32, 32),
+        [0, 0, 0, 0],
+        "and the rest of the punched half is erased as it always was"
+    );
+
+    // The same composite, one probe to the right of the punch edge: half-white
+    // over opaque red, so the layer plainly did reach the target.
+    let composited = pixel(&pixels, 160, 128);
+    assert_eq!(composited[3], 255, "the backdrop keeps the surface opaque");
+    assert!(
+        composited[0] > 200,
+        "red survives under a half-opacity white: {composited:?}"
+    );
+    for channel in 1..3 {
+        let value = i32::from(composited[channel]);
+        assert!(
+            (value - 128).abs() <= 2,
+            "a 0.5 white layer over red must composite to about 128, got {composited:?}"
+        );
+    }
+
+    // Outside the layer and outside the punch, the backdrop is untouched.
+    assert_eq!(pixel(&pixels, 200, 32), [255, 0, 0, 255]);
 }
 
 /// The destination [`Rect`] a blurred rounded rectangle shadow is cast from —

@@ -19,6 +19,27 @@
 //! re-allocated in the same frame, so clearing after uploading would erase the
 //! image that just moved in.
 //!
+//! ## Residency is committed only once the plan is serviced
+//!
+//! The cache decides residency long before anything reaches a queue: a
+//! compiled frame can still be refused afterwards (a layer shape the scheduler
+//! will not serve, a page past the pool's ceiling, coverage or paints outgrowing
+//! their textures), and a frame refused after compiling is never drawn and never
+//! uploaded. So the plan is *pending* rather than taken: [`ImageResidency::plan`]
+//! hands out a copy, [`begin_frame`](ImageResidency::begin_frame) leaves it
+//! alone, and only [`acknowledge_plan`](ImageResidency::acknowledge_plan) —
+//! called by a consumer that has actually written the regions into a live atlas
+//! — clears it.
+//!
+//! That is what makes the entry map and the atlas's real contents agree. Without
+//! it, a refused frame leaves an image *recorded as resident* whose texels were
+//! never written: every later frame resolves the entry, schedules no upload
+//! (residency is a hit), and either drops the draw for the life of the process
+//! or samples a rectangle nothing ever wrote. Re-emitting the same plan until it
+//! is acknowledged costs a vector copy per frame in the steady state — where the
+//! plan is empty — and is what makes "an image drawn on a thousand frames
+//! uploads once" true of the *atlas* rather than only of the cache.
+//!
 //! ## An image larger than the atlas is minified, not dropped
 //!
 //! A source whose own extent will not fit one atlas layer is downsampled to fit
@@ -206,9 +227,16 @@ impl AtlasBudget {
     /// The tier choice is [`is_mobile_tier`]; the clamps that follow are the
     /// adapter's own texture-edge and array-layer ceilings plus the eight-bit
     /// [`MAX_ATLAS_LAYERS`] the encoded-image record can address.
-    /// `FRUST_ENGINE_ATLAS_SIZE` overrides the tier's extent before those
-    /// clamps, never after — an override is a request, and a request the
-    /// adapter cannot honour is still narrowed to what it can.
+    ///
+    /// `FRUST_ENGINE_ATLAS_SIZE` overrides the tier's extent, and the override
+    /// is **budgeted, not unbudgeted**: it passes through
+    /// [`within_total_bytes`](Self::within_total_bytes) against the tier's own
+    /// [`total_bytes`](Self::total_bytes) before the adapter clamps. So the knob
+    /// redistributes a tier's memory between extent and depth — one large layer
+    /// instead of eight small ones — and cannot spend more of it than the tier
+    /// itself would. Clamped to the adapter last, because an override is a
+    /// request and a request the adapter cannot honour is still narrowed to what
+    /// it can.
     #[must_use]
     pub fn for_caps(caps: &TierCaps) -> Self {
         let tier = if is_mobile_tier(caps) {
@@ -216,13 +244,80 @@ impl AtlasBudget {
         } else {
             Self::DESKTOP
         };
-        let atlas_size = config::atlas_size().unwrap_or(tier.atlas_size);
+        let Some(atlas_size) = config::atlas_size() else {
+            return tier.clamped(caps);
+        };
 
         Self {
             atlas_size,
             max_atlases: tier.max_atlases,
         }
+        .within_total_bytes(tier.total_bytes())
         .clamped(caps)
+    }
+
+    /// This budget narrowed so a fully grown array costs at most `total_bytes`.
+    ///
+    /// The extent goes first, scaled uniformly until one layer fits inside the
+    /// whole allowance; the layer count then takes whatever multiple of that
+    /// layer is left, never below one. Scaling the extent rather than only the
+    /// depth is what makes the ceiling hold at all: a single 16384-square layer
+    /// is a gigabyte on its own, so a clamp that could only reduce the layer
+    /// *count* would have nothing left to reduce.
+    ///
+    /// Both axes are floored after the uniform scale, which can only take the
+    /// product below the allowance — except where an extreme aspect ratio floors
+    /// one axis to nothing and it is raised back to a texel, so each axis is
+    /// then held against what the other leaves.
+    #[must_use]
+    pub fn within_total_bytes(self, total_bytes: u64) -> Self {
+        // A single texel is the smallest atlas that exists, so an allowance
+        // below one is treated as one rather than producing a zero extent the
+        // packer could not address.
+        let allowance = total_bytes.max(ATLAS_FORMAT_BYTES);
+        let max_texels = allowance / ATLAS_FORMAT_BYTES;
+
+        let (width, height) = self.atlas_size;
+        let texels = u64::from(width).saturating_mul(u64::from(height));
+        let atlas_size = if texels <= max_texels {
+            (width, height)
+        } else {
+            // `as` on a float saturates rather than wrapping, and both factors
+            // are finite and positive, so the narrowing is a plain floor.
+            let scale = (max_texels as f64 / texels.max(1) as f64).sqrt();
+            let scaled_w = ((f64::from(width) * scale) as u32).max(1);
+            let scaled_h = ((f64::from(height) * scale) as u32).max(1);
+            let fitted_w = fit_axis(scaled_w, max_texels / u64::from(scaled_h));
+            let fitted_h = fit_axis(scaled_h, max_texels / u64::from(fitted_w));
+            (fitted_w, fitted_h)
+        };
+
+        let layer_bytes = u64::from(atlas_size.0)
+            .saturating_mul(u64::from(atlas_size.1))
+            .saturating_mul(ATLAS_FORMAT_BYTES)
+            .max(1);
+        let layers = usize::try_from(allowance / layer_bytes).unwrap_or(MAX_ATLAS_LAYERS);
+
+        Self {
+            atlas_size,
+            max_atlases: self.max_atlases.min(layers).max(1),
+        }
+    }
+
+    /// Whether `region` lies inside an atlas array of `layers` layers at this
+    /// budget's per-layer extent.
+    ///
+    /// The pure counterpart of [`crate::gpu::atlas::AtlasArray::contains`],
+    /// answerable with no device: a consumer that records where an image lives
+    /// before the array exists checks the rectangle here, so it can never come
+    /// to name a region the array will refuse to write and then sample it as
+    /// whatever the texture happened to hold.
+    #[must_use]
+    pub fn contains(self, region: AtlasRegion, layers: u32) -> bool {
+        !region.is_empty()
+            && region.layer < layers
+            && region.offset[0].saturating_add(region.size[0]) <= self.atlas_size.0
+            && region.offset[1].saturating_add(region.size[1]) <= self.atlas_size.1
     }
 
     /// This budget narrowed to what `caps`' adapter can create.
@@ -385,6 +480,15 @@ impl ResidentImage {
 /// 1..1000 is converted exactly once.
 #[derive(Debug, Clone)]
 pub struct ImageUpload {
+    /// The handle the paint naming these pixels carries.
+    ///
+    /// Carried so a consumer rebuilding its own view of residency can key this
+    /// upload directly rather than pairing the frame's uploads positionally
+    /// against its encoded paints. A plan re-emitted until it is acknowledged
+    /// breaks that pairing (an upload can outlive the frame whose draw order
+    /// produced it), and an upload that names itself needs no ordering to be
+    /// read correctly.
+    pub id: ImageId,
     /// Where the texels go.
     pub region: AtlasRegion,
     /// The source's own declared extent, before any minification — see
@@ -396,6 +500,10 @@ pub struct ImageUpload {
     pub natural: [u32; 2],
     /// The premultiplied pixels, row-major and exactly `region`'s extent.
     pub pixels: Arc<Pixmap>,
+    /// Whether those pixels include any non-opaque texel — the same hint
+    /// [`ResidentImage::may_have_transparency`] carries, so a consumer can
+    /// rebuild the whole residency record from this upload alone.
+    pub may_have_transparency: bool,
 }
 
 /// One cache entry: the handle, its rectangle, and when it was last drawn.
@@ -539,38 +647,64 @@ impl ImageResidency {
         self.minified
     }
 
-    /// The regions whose texels must be cleared before this frame's uploads.
+    /// The regions whose texels must be cleared before the pending uploads.
+    ///
+    /// Pending rather than per-frame: an entry reaped on a frame nobody
+    /// serviced is still waiting to be cleared on the next one.
     #[must_use]
     pub fn evictions(&self) -> &[AtlasRegion] {
         &self.evictions
     }
 
-    /// The regions whose texels must be written after this frame's evictions.
+    /// The regions whose texels must be written after the pending evictions.
+    ///
+    /// Pending rather than per-frame: an image made resident on a frame that was
+    /// refused is still waiting to be written on the next one.
     #[must_use]
     pub fn uploads(&self) -> &[ImageUpload] {
         &self.uploads
     }
 
-    /// Takes this frame's clear-then-write plan, leaving the residency's own
-    /// buffers empty and reusable.
+    /// A copy of the pending clear-then-write plan, evictions first.
+    ///
+    /// A *copy*, not a drain: the plan stays pending until
+    /// [`acknowledge_plan`](Self::acknowledge_plan) says it was serviced against
+    /// a live atlas, so a frame refused after compiling re-emits the same plan
+    /// on the next frame rather than losing it (see the module doc). The upload
+    /// pixels are behind an `Arc`, so a re-emitted plan copies handles rather
+    /// than texels, and the steady-state plan is empty on both counts.
     #[must_use]
-    pub fn take_plan(&mut self) -> (Vec<AtlasRegion>, Vec<ImageUpload>) {
-        (
-            std::mem::take(&mut self.evictions),
-            std::mem::take(&mut self.uploads),
-        )
+    pub fn plan(&self) -> (Vec<AtlasRegion>, Vec<ImageUpload>) {
+        (self.evictions.clone(), self.uploads.clone())
+    }
+
+    /// Whether any part of the pending plan is still unserviced.
+    #[must_use]
+    pub fn has_pending_plan(&self) -> bool {
+        !self.evictions.is_empty() || !self.uploads.is_empty()
+    }
+
+    /// Record that the pending plan reached the atlas array, clearing it.
+    ///
+    /// Call this only once every region it names has actually been written or
+    /// cleared. Calling it on a frame that was refused, or whose writes the
+    /// array declined, is exactly the defect the pending plan exists to prevent:
+    /// the entry map would go on claiming an image is resident whose texels are
+    /// whatever the atlas texture happened to hold.
+    pub fn acknowledge_plan(&mut self) {
+        self.evictions.clear();
+        self.uploads.clear();
     }
 
     /// Advance the frame clock and reclaim everything unseen for
     /// [`MAX_UNSEEN_FRAMES`].
     ///
     /// Call once at the head of a frame, before any [`resolve`](Self::resolve).
-    /// The previous frame's upload and eviction lists are dropped here, so a
-    /// caller that did not service them does not service them twice.
+    /// An unacknowledged plan deliberately survives this: the frame that was to
+    /// service it may have been refused, and dropping it here is what would turn
+    /// a refused frame into a permanently unwritten atlas region.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.saturating_add(1);
-        self.uploads.clear();
-        self.evictions.clear();
         self.reap();
     }
 
@@ -679,9 +813,11 @@ impl ImageResidency {
             },
         );
         self.uploads.push(ImageUpload {
+            id,
             region,
             natural,
             pixels,
+            may_have_transparency,
         });
 
         Ok(ResidentImage {
@@ -737,6 +873,11 @@ impl ImageResidency {
     /// The padded rectangle is what is cleared: an allocation reserves its
     /// padding too, so leaving the border behind would leave stale texels a
     /// later allocation could sample through.
+    ///
+    /// An upload still pending for that rectangle goes with the entry. It
+    /// describes pixels no live entry claims any more, and writing them after
+    /// the clear would put an evicted image back into a rectangle the packer has
+    /// already handed to something else.
     fn release(&mut self, key: u64) {
         let Some(entry) = self.entries.remove(&key) else {
             return;
@@ -744,7 +885,15 @@ impl ImageResidency {
         // The handle came from this cache's own `allocate`, so the atlas it
         // names exists and the deallocation cannot fail.
         self.cache.deallocate(entry.id);
-        self.evictions.push(padded(entry.region, ATLAS_PADDING));
+        self.uploads.retain(|upload| upload.id != entry.id);
+
+        // The plan survives an unacknowledged frame, so the same rectangle can
+        // reach here twice before a single clear has been issued for it; one
+        // clear is what the second one would write anyway.
+        let region = padded(entry.region, ATLAS_PADDING);
+        if !self.evictions.contains(&region) {
+            self.evictions.push(region);
+        }
     }
 }
 
@@ -861,6 +1010,12 @@ pub fn minify(source: &Pixmap, width: u32, height: u32) -> Pixmap {
         height.min(u32::from(u16::MAX)) as u16,
         may_have_transparency,
     )
+}
+
+/// `axis` held at or below `ceiling`, and never below the one texel an
+/// addressable rectangle needs.
+fn fit_axis(axis: u32, ceiling: u64) -> u32 {
+    axis.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1)
 }
 
 /// `region` grown by `padding` on every side, clamped at the layer origin.
@@ -1005,6 +1160,8 @@ mod tests {
             residency.begin_frame();
             residency.resolve(&data).expect("8x8 fits a 64x64 atlas");
             uploads += residency.uploads().len();
+            // Every frame here is a frame that reached the atlas.
+            residency.acknowledge_plan();
         }
 
         assert_eq!(uploads, 1, "residency survives every frame that draws it");
@@ -1019,6 +1176,7 @@ mod tests {
 
         residency.begin_frame();
         let resident = residency.resolve(&data).expect("fits");
+        residency.acknowledge_plan();
 
         for _ in 0..MAX_UNSEEN_FRAMES {
             residency.begin_frame();
@@ -1094,6 +1252,7 @@ mod tests {
             residency.begin_frame();
             let resident = residency.resolve(&data).expect("minified to fit");
             assert_eq!(resident.natural, [128, 8]);
+            residency.acknowledge_plan();
         }
 
         assert_eq!(residency.entry_count(), 1);
@@ -1298,15 +1457,141 @@ mod tests {
     }
 
     #[test]
-    fn taking_the_plan_leaves_the_residency_ready_for_the_next_frame() {
+    fn reading_the_plan_leaves_it_pending_and_acknowledging_it_clears_it() {
         let mut residency = residency();
         residency.begin_frame();
         residency.resolve(&image(8, 8)).expect("fits");
 
-        let (evictions, uploads) = residency.take_plan();
+        let (evictions, uploads) = residency.plan();
         assert!(evictions.is_empty());
         assert_eq!(uploads.len(), 1);
+        assert!(
+            residency.has_pending_plan(),
+            "reading the plan is not servicing it"
+        );
+
+        residency.acknowledge_plan();
+        assert!(!residency.has_pending_plan());
         assert!(residency.uploads().is_empty());
         assert!(residency.evictions().is_empty());
+    }
+
+    #[test]
+    fn an_unacknowledged_upload_is_re_emitted_until_it_is_serviced() {
+        // The invariant the whole pending plan exists for: a frame refused
+        // after compiling never wrote these texels, so the entry map claiming
+        // the image is resident has to stay answerable by a later frame's plan.
+        let mut residency = residency();
+        let data = image(8, 8);
+
+        residency.begin_frame();
+        let first = residency.resolve(&data).expect("fits");
+        let region = residency.uploads()[0].region;
+
+        for _ in 0..4 {
+            residency.begin_frame();
+            let again = residency.resolve(&data).expect("still resident");
+            assert_eq!(again.region, first.region, "residency does not move");
+            assert_eq!(
+                residency.uploads().len(),
+                1,
+                "the same upload is re-offered, never duplicated"
+            );
+            assert_eq!(residency.uploads()[0].region, region);
+        }
+
+        residency.acknowledge_plan();
+        residency.begin_frame();
+        residency.resolve(&data).expect("still resident");
+        assert!(
+            residency.uploads().is_empty(),
+            "a serviced upload is never offered again"
+        );
+    }
+
+    #[test]
+    fn reaping_an_unacknowledged_entry_withdraws_its_upload_with_it() {
+        // Otherwise the plan would clear the rectangle and then write the
+        // evicted image straight back into it, over whatever the packer handed
+        // that space to next.
+        let mut residency = residency();
+        let data = image(8, 8);
+
+        residency.begin_frame();
+        let resident = residency.resolve(&data).expect("fits");
+        assert_eq!(residency.uploads().len(), 1);
+
+        for _ in 0..=MAX_UNSEEN_FRAMES {
+            residency.begin_frame();
+        }
+
+        assert_eq!(residency.entry_count(), 0);
+        assert!(
+            residency.uploads().is_empty(),
+            "the reaped entry's unserviced upload goes with it"
+        );
+        assert_eq!(
+            residency.evictions(),
+            &[padded(resident.region, ATLAS_PADDING)]
+        );
+    }
+
+    #[test]
+    fn every_pending_upload_lies_inside_the_atlas_its_layer_count_asks_for() {
+        // What keeps a consumer from recording where an image lives and then
+        // sampling a rectangle the array refused to write: the plan can only
+        // ever name regions the budget and the reported depth already admit.
+        let mut residency = residency();
+        residency.begin_frame();
+        residency.resolve(&image(64, 48)).expect("fills a layer");
+        residency.resolve(&image(64, 48)).expect("takes the next");
+
+        let budget = residency.budget();
+        let layers = residency.layers();
+        assert_eq!(layers, 2);
+        for upload in residency.uploads() {
+            assert!(
+                budget.contains(upload.region, layers),
+                "{:?} is outside a {layers}-layer {budget:?}",
+                upload.region
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_redistributes_a_tiers_memory_but_never_exceeds_it() {
+        let tier = AtlasBudget::DESKTOP;
+
+        // The pathological override the adapter alone would admit: a
+        // 16384-square layer is a gibibyte on its own, so clamping the layer
+        // count could not have brought it inside the tier's 128 MiB.
+        let huge = AtlasBudget {
+            atlas_size: (16_384, 16_384),
+            max_atlases: tier.max_atlases,
+        }
+        .within_total_bytes(tier.total_bytes());
+        assert!(huge.total_bytes() <= tier.total_bytes());
+        assert_eq!(huge.atlas_size.0, huge.atlas_size.1, "aspect preserved");
+        assert!(huge.max_atlases >= 1);
+
+        // A modest override is left exactly as asked for.
+        let modest = AtlasBudget {
+            atlas_size: (1024, 1024),
+            max_atlases: tier.max_atlases,
+        }
+        .within_total_bytes(tier.total_bytes());
+        assert_eq!(modest.atlas_size, (1024, 1024));
+        assert_eq!(modest.max_atlases, tier.max_atlases);
+
+        // An extreme aspect ratio floors one axis to nothing; it is raised back
+        // to a texel and the other axis gives the room up, so the pair still
+        // fits and neither axis is zero.
+        let sliver = AtlasBudget {
+            atlas_size: (65_535, 4),
+            max_atlases: 1,
+        }
+        .within_total_bytes(64);
+        assert!(sliver.atlas_size.0 >= 1 && sliver.atlas_size.1 >= 1);
+        assert!(sliver.total_bytes() <= 64);
     }
 }

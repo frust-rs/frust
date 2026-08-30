@@ -17,6 +17,14 @@
 //! depend on. What is host-testable about eviction — that the freed rectangle
 //! is reported, ordered ahead of the frame's uploads, and describes exactly the
 //! texels a clear has to write — is pinned below.
+//!
+//! One thing here is *not* about lowering: the plan's own lifetime. A compiled
+//! frame can still be refused before it reaches a queue, so residency is only
+//! committed when a consumer acknowledges having serviced the plan, and the
+//! cases below hold both halves of that — an unacknowledged plan is re-offered
+//! identically rather than lost or duplicated, and every region it names lies
+//! inside the atlas the same frame asks to be grown to, so a consumer recording
+//! where an image lives can never come to sample a rectangle nothing wrote.
 
 use std::sync::Arc;
 
@@ -25,7 +33,8 @@ use frust_engine::cache::images::{
 };
 use frust_engine::compile::CompiledFrame;
 use frust_engine::gpu::atlas::{MAX_ATLAS_INDEX, atlas_texture_descriptor, lower_encoded_image};
-use frust_engine::{GpuEncodedPaint, SceneCompiler};
+use frust_engine::schedule::{PageConfig, Schedule};
+use frust_engine::{EngineError, GpuEncodedPaint, SceneCompiler};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -146,10 +155,217 @@ fn sixty_frames_of_one_image_upload_it_exactly_once() {
 
         assert_eq!(frame.image_draws, 1, "every frame still draws it");
         uploads += frame.image_uploads.len();
+        // Every frame here stands for one that reached the atlas; the case
+        // below is what happens when one does not.
+        compiler.acknowledge_image_plan();
     }
 
     assert_eq!(uploads, 1, "residency survives every frame that draws it");
     assert_eq!(compiler.images().entry_count(), 1);
+}
+
+/// The engine's own scheduler capabilities, as the escalation case below needs
+/// them.
+fn caps() -> TierCaps {
+    TierCaps::fake(DownlevelProfile::Full)
+}
+
+/// Two sibling half-opacity layers over a scene that also draws `data` — the
+/// shape `Schedule::build` refuses (isolated layers branch rather than nest),
+/// recorded around a real image draw so the refusal lands on a frame that made
+/// an image resident.
+fn branching_layers_with_an_image(data: &ImageData) -> Scene {
+    scene_of(|b| {
+        b.draw_image(data, DEST);
+        b.push_layer(Rect::new(0.0, 0.0, 24.0, 24.0), 0.5);
+        b.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), Brush::Solid(RED));
+        b.pop_layer();
+        b.push_layer(Rect::new(28.0, 0.0, 52.0, 24.0), 0.5);
+        b.fill_rect(Rect::new(30.0, 2.0, 48.0, 20.0), Brush::Solid(RED));
+        b.pop_layer();
+    })
+}
+
+#[test]
+fn a_frame_refused_after_compiling_keeps_its_uploads_for_the_next_frame() {
+    // The defect this pins: residency used to be committed at compile time, so
+    // a frame refused afterwards dropped its uploads while the entry map went
+    // on reporting the image resident. Every later frame then resolved a hit,
+    // scheduled no upload, and the draw was lost for the life of the process.
+    let mut compiler = compiler();
+    let data = image(16, 16);
+
+    let refused = compile(&mut compiler, &branching_layers_with_an_image(&data));
+    assert_eq!(refused.image_uploads.len(), 1, "the image became resident");
+    let region = refused.image_uploads[0].region;
+
+    // The refusal itself: this frame never reaches an atlas, so nothing may
+    // acknowledge its plan.
+    assert!(
+        matches!(
+            Schedule::build(&refused.recorder, &caps(), &PageConfig::default()),
+            Err(EngineError::SchedulerEscalation { .. })
+        ),
+        "the counterexample must really be a refused frame"
+    );
+    drop(refused);
+
+    // The next frame draws the same image and is scheduled without complaint.
+    let retry = compile(&mut compiler, &scene_of(|b| b.draw_image(&data, DEST)));
+    assert!(Schedule::build(&retry.recorder, &caps(), &PageConfig::default()).is_ok());
+    assert_eq!(
+        retry.image_uploads.len(),
+        1,
+        "the unserviced upload is offered again rather than lost"
+    );
+    assert_eq!(
+        retry.image_uploads[0].region, region,
+        "and to the same place"
+    );
+    assert_eq!(retry.image_draws, 1, "the draw is not dropped");
+
+    // Serviced. From here the steady state resumes: exactly one upload has been
+    // handed over for this image, and no further frame offers another.
+    compiler.acknowledge_image_plan();
+    for _ in 0..4 {
+        let frame = compile(&mut compiler, &scene_of(|b| b.draw_image(&data, DEST)));
+        assert_eq!(frame.image_draws, 1);
+        assert!(
+            frame.image_uploads.is_empty(),
+            "a serviced upload is never offered twice"
+        );
+        compiler.acknowledge_image_plan();
+    }
+}
+
+#[test]
+fn a_refused_frames_evictions_survive_it_too() {
+    // The eviction half of the same invariant: a clear that never ran must not
+    // be forgotten, or the reaped rectangle keeps its old tenant's texels for a
+    // later, smaller allocation to sample past the edge of.
+    let mut compiler = compiler();
+    let data = image(16, 8);
+
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&data, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let empty = scene_of(|_| {});
+    let mut evicted = None;
+    for _ in 0..=MAX_UNSEEN_FRAMES {
+        let frame = compile(&mut compiler, &empty);
+        if let Some(first) = frame.image_evictions.first() {
+            evicted = Some(*first);
+        }
+    }
+    let evicted = evicted.expect("the image is reaped inside the window plus one");
+    assert_eq!(evicted.layer, region.layer);
+
+    // Nothing acknowledged any of those frames, so the clear is still owed.
+    let next = compile(&mut compiler, &empty);
+    assert_eq!(
+        next.image_evictions,
+        vec![evicted],
+        "an unserviced clear is offered again, and only once"
+    );
+
+    compiler.acknowledge_image_plan();
+    let after = compile(&mut compiler, &empty);
+    assert!(after.image_evictions.is_empty());
+}
+
+#[test]
+fn a_capacity_refusal_leaves_no_region_recorded_for_an_image_it_refused() {
+    // The second face of the same defect: a consumer records where each upload
+    // lives so a later frame's paint can name it. A region outside the atlas
+    // the frame asks to be grown to could never be written, so recording it
+    // would point the shader at texels nothing ever set. The plan is what that
+    // consumer reads, and it can only ever name regions the budget admits.
+    let full = AtlasBudget {
+        atlas_size: (64, 64),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, full);
+
+    let fills = image(64, 64);
+    let refused = image_of(32, 32, [0, 0, 255, 255]);
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            b.draw_image(&fills, DEST);
+            b.draw_image(&refused, Rect::new(0.0, 0.0, 8.0, 8.0));
+        }),
+    );
+
+    assert_eq!(frame.skipped_images, 1, "the second image finds no room");
+    assert_eq!(frame.image_draws, 1);
+    assert_eq!(
+        frame.encoded_paints.len(),
+        1,
+        "a refused image leaves no paint entry to resolve"
+    );
+    assert_eq!(
+        frame.image_uploads.len(),
+        1,
+        "and no upload to record a region from"
+    );
+
+    for upload in &frame.image_uploads {
+        assert!(
+            full.contains(upload.region, frame.atlas_layers),
+            "{:?} lies outside the {}-layer atlas this frame asks for",
+            upload.region,
+            frame.atlas_layers
+        );
+    }
+}
+
+#[test]
+fn every_uploads_region_fits_the_atlas_the_same_frame_asks_to_be_grown_to() {
+    // Stated over a frame that genuinely spans layers, since `atlas_layers` is
+    // the depth the array is grown to before these regions are written: an
+    // upload naming a layer past it would be refused by the array and its image
+    // sampled from whatever the texture held.
+    let mut compiler = compiler();
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            b.draw_image(&image_of(64, 48, [255, 0, 0, 255]), DEST);
+            b.draw_image(
+                &image_of(64, 48, [0, 0, 255, 255]),
+                Rect::new(0.0, 0.0, 16.0, 16.0),
+            );
+        }),
+    );
+
+    assert_eq!(frame.image_uploads.len(), 2);
+    assert_eq!(frame.atlas_layers, 2, "the two images need a layer each");
+    for upload in &frame.image_uploads {
+        assert!(TEST_BUDGET.contains(upload.region, frame.atlas_layers));
+    }
+    for region in &frame.image_evictions {
+        assert!(TEST_BUDGET.contains(*region, frame.atlas_layers));
+    }
+}
+
+#[test]
+fn an_upload_names_the_handle_its_own_paint_carries() {
+    // What lets a consumer register an upload without pairing it positionally
+    // against the frame's draws — a pairing a re-offered plan breaks, since an
+    // unserviced upload is reported again on a frame with no draw of its own to
+    // pair it with.
+    let mut compiler = compiler();
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| b.draw_image(&image(16, 8), DEST)),
+    );
+
+    let vello_common::paint::ImageSource::OpaqueId { id, .. } = only_image_entry(&frame).source
+    else {
+        panic!("an engine-encoded image names a residency handle");
+    };
+    assert_eq!(frame.image_uploads[0].id, id);
+    assert!(!frame.image_uploads[0].may_have_transparency);
 }
 
 #[test]
@@ -364,12 +580,14 @@ fn an_unseen_image_is_reaped_and_its_rectangle_reported_for_clearing() {
 
     let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&data, DEST)));
     let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
 
     // Inside the window nothing is reclaimed, however many frames draw nothing.
     let empty = scene_of(|_| {});
     for _ in 0..MAX_UNSEEN_FRAMES {
         let frame = compile(&mut compiler, &empty);
         assert!(frame.image_evictions.is_empty());
+        compiler.acknowledge_image_plan();
     }
 
     let reaped = compile(&mut compiler, &empty);
@@ -379,6 +597,7 @@ fn an_unseen_image_is_reaped_and_its_rectangle_reported_for_clearing() {
         "the padded rectangle the image held is handed back for clearing"
     );
     assert_eq!(compiler.images().entry_count(), 0);
+    compiler.acknowledge_image_plan();
 
     // Drawing it again re-allocates and re-uploads: residency is genuinely
     // gone, not merely unreferenced.
