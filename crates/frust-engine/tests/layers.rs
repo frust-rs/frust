@@ -13,7 +13,8 @@
 //! opacity is a clip and nothing more, a translucent one is a page of its own,
 //! a snapshot bracket paints its body exactly as the equivalent
 //! transform-and-layer pair would, and a clear is hoisted out of every bracket
-//! around it and lowered to coverage that is exact at a tile-unaligned edge.
+//! around it, lowered to coverage that is exact at a tile-unaligned edge, and
+//! carries a depth that orders it against opaque coverage and nothing else.
 //!
 //! Pixel comparison against the CPU reference renderer is a separate, GPU-bound
 //! concern and lives with the phase's golden corpus, not here.
@@ -549,7 +550,114 @@ fn a_punch_sits_behind_every_draw_recorded_after_it() {
     assert_eq!(punch, 1);
     assert!(
         depths[0] < punch && punch < depths[1],
-        "the punch erases what was painted beneath it and nothing painted over it"
+        "the punch sits behind what was painted before it and in front of nothing"
+    );
+}
+
+#[test]
+fn a_translucent_composite_recorded_after_a_clear_is_not_ordered_ahead_of_the_punch() {
+    // The shape the narrowed ordering contract is about: an opaque backdrop, a
+    // hole punched through it, and a translucent layer recorded over the hole
+    // afterwards. Painter order puts the layer in front of the punch, and the
+    // depth data below says so — but a composite writes no depth, so the
+    // trailing punch pass is not held off it the way opaque chrome would be.
+    let backdrop = Rect::new(0.0, 0.0, 64.0, 48.0);
+    let fading = Rect::new(8.0, 8.0, 24.0, 20.0);
+
+    let frame = compile(&scene_of(|builder| {
+        builder.fill_rect(backdrop, red());
+        builder.clear_rect(TILE_UNALIGNED);
+        builder.push_layer(fading, HALF);
+        builder.fill_rect(fading, red());
+        builder.pop_layer();
+    }));
+
+    assert_eq!(frame.clears.len(), 1);
+    let punch = &frame.clears[0];
+
+    // The recorded ordering: backdrop, punch, then the layer's own contents.
+    let depths: Vec<u32> = frame.draws().iter().map(|draw| draw.depth).collect();
+    assert_eq!(depths.len(), 2, "the punch paints nothing of its own");
+    assert!(
+        depths[0] < punch.depth && punch.depth < depths[1],
+        "the punch takes a depth between the backdrop and the fading layer: {depths:?}"
+    );
+
+    // The layer reaches the surface as a composite in the root round, and the
+    // punch pass runs after every round — so the depth attachment is all that
+    // could order the two, and a composite never writes it.
+    let rounds = rounds(&frame);
+    let root = rounds
+        .last()
+        .expect("a schedule always ends at the surface");
+    assert!(root.is_root());
+    assert_eq!(
+        root.composites().count(),
+        1,
+        "the fading layer arrives at the surface as a composite: {rounds:?}"
+    );
+
+    // The punch's coverage is generated past every draw's, which is what puts
+    // its pass last in the frame.
+    let last_draw_end = draw_ranges(&frame)
+        .iter()
+        .map(|range| range.end)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        punch.strip_range.start >= last_draw_end,
+        "the punch's strips sit past every draw's: {:?} against {last_draw_end}",
+        punch.strip_range
+    );
+
+    // And the two genuinely overlap, so none of the above is vacuous.
+    let composite = root
+        .composites()
+        .next()
+        .expect("the root round composites the layer");
+    let bounds = composite.bounds;
+    assert!(
+        f64::from(bounds.x0) < TILE_UNALIGNED.x1
+            && TILE_UNALIGNED.x0 < f64::from(bounds.x1)
+            && f64::from(bounds.y0) < TILE_UNALIGNED.y1
+            && TILE_UNALIGNED.y0 < f64::from(bounds.y1),
+        "the punch and the composite cover common pixels: {bounds:?}"
+    );
+}
+
+#[test]
+fn opaque_coverage_recorded_after_a_clear_is_the_only_paint_the_depth_test_saves() {
+    // The other half of the same contract, and the reason the depth is carried
+    // at all: coverage recorded after the clear takes a strictly nearer depth,
+    // which is what the punch pass's `LessEqual` test rejects it on. Everything
+    // the punch is ordered against has to reach the depth-writing pass, so this
+    // pins the ordering data rather than the blend state (the GPU-side pin
+    // lives with the encode contract).
+    let frame = compile(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 32.0, 32.0), red());
+        builder.clear_rect(TILE_UNALIGNED);
+        builder.fill_rect(Rect::new(0.0, 0.0, 8.0, 8.0), red());
+        builder.clear_rect(Rect::new(20.0, 20.0, 28.0, 28.0));
+    }));
+
+    assert_eq!(frame.clears.len(), 2);
+    let depths: Vec<u32> = frame.draws().iter().map(|draw| draw.depth).collect();
+    let punches: Vec<u32> = frame.clears.iter().map(|punch| punch.depth).collect();
+
+    assert_eq!(
+        depths,
+        vec![0, 2],
+        "each clear consumes a depth of its own from the same painter-order run"
+    );
+    assert_eq!(punches, vec![1, 3]);
+    assert!(
+        punches.windows(2).all(|pair| pair[0] < pair[1]),
+        "two punches keep their recorded order: {punches:?}"
+    );
+    assert!(
+        punches[1] > depths[1],
+        "the second punch is recorded after every draw, so nothing in the frame's own paint \
+         survives its depth test: {punches:?} against {depths:?}"
     );
 }
 

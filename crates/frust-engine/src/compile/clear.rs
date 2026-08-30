@@ -52,14 +52,28 @@
 //!    `textureLoad`, and the frame's own target is not readable inside the
 //!    pass that writes it. `shaders/blend.wgsl` remains the route for a
 //!    composite *between* intermediate textures.
-//! 3. **Depth-tested, not depth-writing.** A punch carries the depth it was
-//!    hoisted from, so the ordinary `LessEqual` test against the frame's depth
-//!    attachment erases only what was painted beneath it and leaves chrome
-//!    painted over the slot composited on top — the paint order the display
-//!    list recorded, restored for free by a pass that runs last. Without a
-//!    depth attachment the pass erases everything under the punch rectangle
-//!    instead, the same correctness/ordering trade the frame's two draw passes
-//!    already make when they collapse into one.
+//! 3. **Depth-tested against opaque coverage, and against nothing else.** A
+//!    punch carries the depth it was hoisted from, and the ordinary `LessEqual`
+//!    test against the frame's depth attachment is what keeps content painted
+//!    over the slot from being erased along with what is under it. That test
+//!    can only order the punch against paint that *wrote* the depth
+//!    attachment, and one pass writes it: the root round's opaque pass, fed the
+//!    fully covered spans of opaque draws. So the contract is narrower than the
+//!    recorded paint order restored — it is:
+//!
+//!    - opaque root-round coverage recorded *before* the clear is erased;
+//!    - opaque root-round coverage recorded *after* it survives, because it
+//!      wrote a nearer depth the punch fails against;
+//!    - everything else recorded after it is erased anyway. A layer's composite,
+//!      an anti-aliased edge, any span of a translucent paint, the punch of
+//!      another `ClearRect` — none of them write depth, so the depth under them
+//!      is whatever the opaque pass left, and the punch passes over it.
+//!
+//!    A translucent widget drawn over a platform-view slot is therefore punched
+//!    through, not composited over the hole. Without a depth attachment at all
+//!    the pass erases everything under the punch rectangle, the same
+//!    correctness/ordering trade the frame's two draw passes already make when
+//!    they collapse into one.
 //! 4. **Skipped whole on a target that disregards alpha.** Destination-out
 //!    darkens colour as well as erasing alpha, so on an opaque presentation —
 //!    where the erased alpha is disregarded — issuing the pass would leave a
@@ -92,8 +106,10 @@ pub struct ClearPunch {
     /// The painter-order depth the punch was hoisted from.
     ///
     /// A depth of its own rather than the depth of a neighbouring draw, so
-    /// every draw recorded after the clear sits strictly in front of it and
-    /// survives the punch's depth test.
+    /// every draw recorded after the clear sits strictly in front of it. Which
+    /// of those draws the depth test then actually saves is narrower than that
+    /// ordering suggests — only depth-writing opaque coverage — for the reason
+    /// the module header's wiring contract gives.
     pub depth: u32,
 }
 
