@@ -85,7 +85,7 @@ and everything downstream of them is a plain-value decision.
 | `frust-engine::gpu::depth` | `DepthAttachment` is `Depth24Plus`, either caller-supplied (paired with `set_depth_pre_cleared` so the frame loads rather than clears a populated buffer) or engine-owned and lazily allocated, reallocated only when the target extent changes |
 | `frust-engine::gpu::targets` | A per-renderer `IntermediateTargets` pool for off-screen layers/scratch copies, capping any request at `min(adapter max, 8192)` and answering an over-ceiling request with `IntermediateTexture::TooLarge` rather than a device error |
 
-`tests/structure.rs` is a host-only structural guard, no GPU device or adapter created: G1 runs `frust-gpu`'s WGSL-directory lint against `frust-engine`'s shipped shaders, G2 checks the engine's downlevel limits profile against the WebGL2 ceiling, and E17 greps `compile/`, `gpu/` and `renderer.rs` for a bare `unwrap`/`expect`/`panic!` outside test code.
+`tests/structure.rs` is a host-only structural guard, no GPU device or adapter created: G1 runs `frust-gpu`'s WGSL-directory lint against `frust-engine`'s shipped shaders, G2 checks the engine's downlevel limits profile against the WebGL2 ceiling, and E17 greps `cache/`, `compile/`, `gpu/` and `renderer.rs` for a bare `unwrap`/`expect`/`panic!` outside test code.
 
 ## Layer Dependencies
 

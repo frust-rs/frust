@@ -3731,7 +3731,9 @@ explicit 64 MiB thread (`run_on_oversized_stack`), documented inline.
 
 ### `engine-invalid-geometry-refusal-diverges-from-classic` — the engine refuses non-finite geometry the classic tier still draws through fallbacks
 
-**Observed**: `frust-engine`'s `SceneCompiler::compile` validates every lowered
+**Observed** (evidence: `crates/frust-engine/tests/proptest_strips.rs`'s
+documented reproducer sites and the measured numbers recorded there):
+`frust-engine`'s `SceneCompiler::compile` validates every lowered
 command's geometry up front (rect extents, corner radii, path points, stroke
 width, dash on/off/phase must be finite) and refuses the frame with
 `EngineError::InvalidGeometry` otherwise — required for totality: a `NaN`
