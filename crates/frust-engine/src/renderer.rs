@@ -315,7 +315,9 @@ impl EngineRenderer {
     ///
     /// [`EngineError::TargetTooLarge`] for a target outside the `u16` device
     /// grid the strip pipeline addresses, [`EngineError::InvalidTransform`] for
-    /// a non-finite transform, [`EngineError::AlphaCapacity`] when a frame's
+    /// a non-finite transform, [`EngineError::InvalidGeometry`] for non-finite
+    /// command geometry (rect extents, radii, path points, stroke or dash
+    /// values), [`EngineError::AlphaCapacity`] when a frame's
     /// coverage outgrows the alpha texture, and [`EngineError::PaintCapacity`]
     /// when its encoded paints or colour ramps outgrow theirs. Every one of
     /// them is returned before anything is recorded, so a refused frame leaves
