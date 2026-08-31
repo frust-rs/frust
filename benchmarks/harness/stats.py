@@ -24,11 +24,20 @@ no guaranteed `pip` access. Runnable in two ways:
 # Field-format contract
 
 - Frust:   `frust-perf raw n=<n> total_us=<> rebuild_us=<> layout_us=<> \\
-            paint_us=<> encode_us=<> acquire_us=<> submit_us=<> skipped=<0|1>`
-  (raw format v3, Phase 11.A 2026-07-22: the single `present_us` field was
+            paint_us=<> encode_us=<> acquire_us=<> submit_us=<> skipped=<0|1> \\
+            gpu_q=<0|1> [gpu_total_us=<> gpu_prepass_us=<> gpu_main_us=<> \\
+            gpu_composite_us=<> gpu_blit_us=<>]`
+  (raw format v4, 2026-09-01: real GPU time per pass, appended after
+  `skipped`. `gpu_q` says whether the frame carries a GPU reading at all;
+  the five `gpu_*_us` fields are present ONLY when it is `1` — a frame with
+  no GPU timing writes no zeros, so a series without it never grows a column
+  of zeros that reads like a measurement. Every v3 field keeps its name,
+  meaning and position, so a v3 log and a v4 log are directly comparable and
+  every v3 series under `benchmarks/raw` still parses here unchanged.
+  Raw format v3, 2026-07-22: the single `present_us` field was
   split into separate `acquire_us` (blocking swapchain-acquire/vsync wait) +
   `submit_us` (blit + queue-submit + present); `acquire_us + submit_us`
-  equals the old v2 `present_us`. Phase 10.A 2026-07-21 (v2) had earlier
+  equals the old v2 `present_us`. 2026-07-21 (v2) had earlier
   split the v1 `encode_present_us` into `encode_us` + `present_us`. Parsing
   is key=value and forward-compatible, so only this contract note changed.)
 - Flutter: `flutter-perf raw n=<n> build_us=<> raster_us=<> total_us=<>`
@@ -41,7 +50,18 @@ Only `n`/`total_us`/`skipped` are used for the cross-app percentile/budget
 table below (the field the two apps' pass breakdowns don't share a
 vocabulary for); every parsed key=value pair is still kept per-frame
 (`FrameRecord.fields`) for a caller that wants the framework-specific
-pass breakdown (e.g. Frust's `rebuild_us`).
+pass breakdown (e.g. Frust's `rebuild_us`). The v4 GPU fields ride that
+same generic dict, with `gpu_spans` reading them back out in a shape that
+tells "measured zero" apart from "not measured".
+
+# Graphics memory (`extract_graphics_kb`)
+
+`run.sh` snapshots `dumpsys meminfo <pkg>` before and after every run
+(`run-NN.pss_before.txt` / `run-NN.pss_after.txt`). `extract_graphics_kb`
+reads the App Summary block's `Graphics:` PSS row out of one of those
+snapshots and `graphics_kb_series`/`mean_graphics_mb` average it across a
+run set — the arithmetic behind RESULTS.md's `Graphics avg (MB)` column,
+which was previously done by hand outside this script.
 
 - `bench-scenario-start <name>` / `bench-scenario-end <name>` — identical
   marker strings on both sides (see `perf::mark_scenario_start`/
@@ -141,6 +161,23 @@ DCLASS_WARMUP_EXCLUDE_OPS: dict[str, frozenset[str]] = {
 # convention — declared as OUR convention, not a framework fact; see
 # `benchmarks/PROTOCOL.md`).
 DEFAULT_DISCARD_FIRST = 2
+
+# Raw-format v4's per-pass GPU-time fields, in the order the frame line
+# writes them (PROTOCOL §7). `gpu_q` is the marker that gates the rest: it is
+# always present, and the five below appear only when it is "1".
+GPU_QUERY_MARKER = "gpu_q"
+GPU_SPAN_FIELDS = (
+    "gpu_total_us",
+    "gpu_prepass_us",
+    "gpu_main_us",
+    "gpu_composite_us",
+    "gpu_blit_us",
+)
+
+# The `dumpsys meminfo` App Summary row `extract_graphics_kb` reads, and the
+# column it takes (`Pss(KB)`, the first number on the row — the second is
+# `Rss(KB)`). PSS is what RESULTS.md's Graphics figures have always quoted.
+GRAPHICS_SUMMARY_ROW = "Graphics:"
 
 
 @dataclass
@@ -283,6 +320,36 @@ def parse_raw_line(line: str) -> FrameRecord | None:
     return FrameRecord(source=source, n=n, total_us=total_us, skipped=skipped, fields=fields)
 
 
+def gpu_spans(record: FrameRecord) -> dict[str, int] | None:
+    """The v4 per-pass GPU times carried by `record`, or `None` when the
+    frame carries no GPU reading at all.
+
+    `None` (the `gpu_q=0`/`gpu_q` absent case) and an all-zero dict are
+    deliberately different answers: the first means the renderer measured
+    nothing — no engine tier, no `TIMESTAMP_QUERY` device, or the first
+    frames of a surface before the ring's first readback landed — while the
+    second means it measured a frame that really did no GPU work in those
+    passes. Collapsing the two is exactly how a zero column starts reading
+    like a result.
+
+    A malformed field (non-integer, or a `gpu_q=1` line missing one of the
+    five) drops that key rather than failing the whole frame — the same
+    skip-what-you-don't-understand posture `parse_raw_line` takes.
+    """
+    if record.fields.get(GPU_QUERY_MARKER) != "1":
+        return None
+    spans: dict[str, int] = {}
+    for key in GPU_SPAN_FIELDS:
+        raw = record.fields.get(key)
+        if raw is None:
+            continue
+        try:
+            spans[key] = int(raw)
+        except ValueError:
+            continue
+    return spans
+
+
 def parse_marker_line(line: str) -> tuple[str, str] | None:
     """Parses a `bench-scenario-start/end <name>` line into `(edge, name)`
     (`edge` is `"start"`/`"end"`), or `None` if `line` isn't a marker line or
@@ -352,6 +419,73 @@ def discard_first_runs(runs: list[list[_T]], discard_first: int) -> list[_T]:
     for run in kept:
         combined.extend(run)
     return combined
+
+
+# ---------------------------------------------------------------------
+# Graphics memory, from run.sh's dumpsys snapshots — see module docs
+# ---------------------------------------------------------------------
+
+
+def extract_graphics_kb(text: str) -> int | None:
+    """The App Summary `Graphics:` PSS figure (KB) in one `dumpsys meminfo`
+    snapshot, or `None` when the snapshot has no such row.
+
+    `run.sh` captures these best-effort (`|| echo "note: could not capture
+    ..."`), so a missing or truncated snapshot is an ordinary outcome, not an
+    error — a caller averages over whatever it got and says how many samples
+    that was.
+
+    The row's shape is `Graphics:   <Pss(KB)>   [<Rss(KB)>]`; the first
+    number is taken, which is the PSS column every published Graphics figure
+    has quoted. The `Graphics:` label also appears nowhere else in a meminfo
+    dump, so no section tracking is needed to find it."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(GRAPHICS_SUMMARY_ROW):
+            continue
+        for token in stripped[len(GRAPHICS_SUMMARY_ROW) :].split():
+            try:
+                return int(token)
+            except ValueError:
+                return None
+    return None
+
+
+def graphics_kb_series(paths: list[Path]) -> list[int]:
+    """The `Graphics:` PSS figure from each readable snapshot in `paths`, in
+    the given order — snapshots that are missing, unreadable, or carry no
+    such row are skipped rather than counted as zero."""
+    series: list[int] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        value = extract_graphics_kb(text)
+        if value is not None:
+            series.append(value)
+    return series
+
+
+def mean_graphics_mb(paths: list[Path]) -> tuple[float, int]:
+    """`(mean MB, sample count)` over `paths`' Graphics PSS figures —
+    RESULTS.md's `Graphics avg (MB)` column, computed here rather than by
+    hand. `(0.0, 0)` when nothing parsed.
+
+    MB is KB/1024 (binary), matching what every published Graphics figure
+    already divided by, and the count is returned alongside so a cell backed
+    by two snapshots is never presented as one backed by ten.
+
+    Which snapshots to hand it is the caller's decision, and RESULTS.md's own
+    convention is the *kept* runs' `pss_after` files — the post-run capture
+    only, since `run.sh` force-stops the app immediately before each run and
+    the pre-run snapshot is therefore empty. Passing a pre-run snapshot is
+    harmless (it carries no `Graphics:` row and is skipped), but it is not
+    what the published figures average."""
+    series = graphics_kb_series(paths)
+    if not series:
+        return 0.0, 0
+    return sum(series) / len(series) / 1024.0, len(series)
 
 
 # ---------------------------------------------------------------------
@@ -626,12 +760,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(per-frame) path is entirely unaffected when this flag is omitted.",
     )
     parser.add_argument(
+        "--graphics",
+        action="store_true",
+        help="treat the positional files as `dumpsys meminfo` snapshots "
+        "(run.sh's run-NN.pss_after.txt) and print their mean Graphics PSS in "
+        "MB — RESULTS.md's `Graphics avg (MB)` column, instead of computed by "
+        "hand. Neither the s-class nor the d-class path runs in this mode.",
+    )
+    parser.add_argument(
         "logfiles",
         nargs="*",
         type=Path,
-        help="one raw log file per run, in chronological order",
+        help="one raw log file per run, in chronological order (or, with "
+        "--graphics, one dumpsys meminfo snapshot per run)",
     )
     return parser
+
+
+def _main_graphics(args: argparse.Namespace) -> int:
+    mean_mb, samples = mean_graphics_mb(args.logfiles)
+    label = args.label or ", ".join(str(p) for p in args.logfiles)
+    print(f"== {label} (graphics) ==")
+    if samples == 0:
+        # Every snapshot run.sh takes is best-effort, so "none parsed" is a
+        # reportable outcome rather than an error exit.
+        print("(no Graphics rows parsed)")
+        return 0
+    print(f"graphics_mean_mb={mean_mb:.2f}  snapshots={samples}")
+    return 0
 
 
 def _main_dclass(args: argparse.Namespace) -> int:
@@ -655,6 +811,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.logfiles:
         parser.error("at least one logfile is required unless --self-test is given")
+
+    if args.graphics:
+        if args.dclass:
+            raise SystemExit("error: --graphics and --dclass are mutually exclusive")
+        return _main_graphics(args)
 
     if args.dclass:
         return _main_dclass(args)

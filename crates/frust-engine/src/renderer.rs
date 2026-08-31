@@ -161,6 +161,7 @@ use crate::cache::{
 use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
+use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
 use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
 use crate::filters::drop_shadow::GpuDropShadow;
@@ -574,6 +575,50 @@ impl EngineRenderer {
         base_color: Color,
         root: Affine,
     ) -> Result<(), EngineError> {
+        self.encode_traced(
+            device,
+            queue,
+            encoder,
+            scene,
+            target,
+            base_color,
+            root,
+            FrameTimestamps::inert(),
+        )
+    }
+
+    /// [`Self::encode`], with each pass's GPU time stamped into `timestamps`.
+    ///
+    /// The one difference is the sink: every pass this records asks
+    /// `timestamps` for its own `timestamp_writes` and takes `None` for an
+    /// answer, so a frame encoded with [`FrameTimestamps::inert`] — which is
+    /// exactly what [`Self::encode`] passes — records byte-identical work.
+    /// Which pass is charged to which span is [`EngineSpan`]'s own
+    /// documentation; the host owns the ring behind the sink and reads the
+    /// frame's spans back out of it some frames later (see
+    /// [`frust_gpu::diag::TimestampRing`]).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::encode`]'s, on exactly its terms — a refused frame has
+    /// recorded no pass, so it has taken no timestamp either and the host
+    /// abandons the ring's slot rather than mapping it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "[`Self::encode`]'s argument list plus the timestamp sink, \
+                  each still supplied by a different owner"
+    )]
+    pub fn encode_traced(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &Scene,
+        target: EngineTarget<'_>,
+        base_color: Color,
+        root: Affine,
+        timestamps: FrameTimestamps<'_>,
+    ) -> Result<(), EngineError> {
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
 
@@ -734,7 +779,7 @@ impl EngineRenderer {
         }
 
         self.record_frame(
-            device, queue, encoder, &target, depth_view, base_color, &pipelines,
+            device, queue, encoder, &target, depth_view, base_color, &pipelines, timestamps,
         );
 
         Ok(())
@@ -982,6 +1027,11 @@ impl EngineRenderer {
     ///
     /// Every pass opened here is ended before the method returns, which is the
     /// half of the encode contract a caller cannot check for itself.
+    ///
+    /// Each pass names the [`EngineSpan`] it is charged to: the frame's own
+    /// surface passes are [`EngineSpan::Main`], a layer page round and a
+    /// filter pass are [`EngineSpan::Composite`]. Several passes per span is
+    /// the ordinary case and they sum.
     #[expect(
         clippy::too_many_arguments,
         reason = "one frame's full recording state, each piece owned by a \
@@ -997,11 +1047,16 @@ impl EngineRenderer {
         depth_view: Option<&wgpu::TextureView>,
         base_color: Color,
         pipelines: &FramePipelines,
+        timestamps: FrameTimestamps<'_>,
     ) {
         let depth_load = self.depth.load_op(target.depth.is_some());
 
         // Drawing nothing is the point: this pass exists so a frame with no
-        // instances at all still resolves to a clean surface.
+        // instances at all still resolves to a clean surface. It is timed
+        // alongside the frame's other surface passes even though a backend
+        // that samples its counters at the vertex/fragment stage boundaries
+        // may write nothing for it — an untimed pass is a measurement gap, not
+        // a wrong measurement (see `frust_gpu::diag`).
         drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("frust-engine clear"),
             color_attachments: &[Some(color_attachment(
@@ -1009,7 +1064,7 @@ impl EngineRenderer {
                 wgpu::LoadOp::Clear(clear_color(base_color, target.output)),
             ))],
             depth_stencil_attachment: depth_view.map(|view| depth_attachment(view, depth_load)),
-            timestamp_writes: None,
+            timestamp_writes: timestamps.writes(EngineSpan::Main),
             occlusion_query_set: None,
             multiview_mask: None,
         }));
@@ -1058,6 +1113,7 @@ impl EngineRenderer {
                     instances,
                     base: 0,
                     segments: &[Segment::Strips(0, opaque_count)],
+                    timestamps: timestamps.writes(EngineSpan::Main),
                 },
             );
         }
@@ -1133,7 +1189,7 @@ impl EngineRenderer {
                         &self.resources.placeholders.layer_input,
                         PooledTexture::view,
                     );
-                    filters.record_pass(
+                    filters.record_pass_timed(
                         device,
                         encoder,
                         &FilterPassPlan {
@@ -1143,6 +1199,7 @@ impl EngineRenderer {
                             source,
                             instance: filter.instance,
                         },
+                        timestamps.writes(EngineSpan::Composite),
                     );
                 }
 
@@ -1223,6 +1280,14 @@ impl EngineRenderer {
                 }
             }
 
+            // A page round draws into an off-screen layer page, the frame's own
+            // rounds into the surface — the split the two spans name.
+            let span = if own.is_some() {
+                EngineSpan::Composite
+            } else {
+                EngineSpan::Main
+            };
+
             let (view, label, load, depth) = match &own {
                 Some((_, pooled)) => (
                     pooled.view(),
@@ -1260,6 +1325,7 @@ impl EngineRenderer {
                     instances,
                     base,
                     segments,
+                    timestamps: timestamps.writes(span),
                 },
             );
 
@@ -1285,6 +1351,7 @@ impl EngineRenderer {
                     instances,
                     base,
                     segments: &[Segment::Strips(punch_first, punch_count)],
+                    timestamps: timestamps.writes(EngineSpan::Main),
                 },
             );
         }
@@ -1337,6 +1404,10 @@ struct PassPlan<'a> {
     /// The instance index every segment's own index is relative to.
     base: u32,
     segments: &'a [Segment],
+    /// The query pair this pass's GPU time is stamped into, `None` for an
+    /// untimed pass — which is every pass of every frame encoded without a
+    /// timestamp sink (see [`crate::diag`]).
+    timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
 }
 
 /// Records one pass: load the colour target, then draw each segment in order.
@@ -1352,7 +1423,7 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
         depth_stencil_attachment: plan
             .depth
             .map(|view| depth_attachment(view, wgpu::LoadOp::Load)),
-        timestamp_writes: None,
+        timestamp_writes: plan.timestamps.clone(),
         occlusion_query_set: None,
         multiview_mask: None,
     });
@@ -1602,6 +1673,22 @@ impl FilterResources {
         encoder: &mut wgpu::CommandEncoder,
         plan: &FilterPassPlan<'_>,
     ) {
+        self.record_pass_timed(device, encoder, plan, None);
+    }
+
+    /// [`Self::record_pass`], stamping the pass's GPU time into `timestamps`.
+    ///
+    /// A separate method rather than a field on [`FilterPassPlan`]: the plan is
+    /// public and built by struct literal outside this crate, so a new required
+    /// field would break every one of those call sites to serve a diagnostic
+    /// they do not use. `None` records exactly what [`Self::record_pass`] does.
+    pub fn record_pass_timed(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FilterPassPlan<'_>,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(plan.label),
             color_attachments: &[Some(color_attachment(
@@ -1611,7 +1698,7 @@ impl FilterResources {
             // A pooled page carries no depth attachment, which is also why the
             // filter pipeline declares no depth state.
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: timestamps,
             occlusion_query_set: None,
             multiview_mask: None,
         });

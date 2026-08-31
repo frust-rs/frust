@@ -46,6 +46,7 @@ use anyhow::{Result, anyhow};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use frust_scene::Command;
 use kurbo::Affine;
@@ -194,7 +195,52 @@ enum TierBackend {
         /// once, and the running total keeps surfacing on the periodic debug
         /// bump afterwards.
         refused_frames: u32,
+        /// This surface's GPU timestamp ring — real per-pass GPU time, rather
+        /// than the CPU wall-clock spans around `encode`/`submit`.
+        ///
+        /// Created for every engine surface and *inert* unless the device was
+        /// created with `wgpu::Features::TIMESTAMP_QUERY`, which is the only
+        /// thing that decides whether a frame line reports `gpu_q=1`. Inert
+        /// costs one empty `Vec` and a branch per pass — no query set, no
+        /// buffers, no map — so there is nothing to feature-gate at this
+        /// level.
+        timestamps: frust_gpu::diag::TimestampRing,
     },
+}
+
+/// One frame's real GPU time, split by the spans `frust-engine` names
+/// ([`frust_engine::EngineSpan`]).
+///
+/// The value [`SurfaceRenderer::gpu_pass_timings`] hands a shell so it can put
+/// GPU cost on the frame line beside the CPU spans it measured itself. Plain
+/// `Duration`s — no `wgpu` type crosses this crate's boundary
+/// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
+///
+/// [`Self::total`] is the sum of the four, which is the frame's *attributed*
+/// GPU pass time: the queue and driver gaps between passes belong to no pass
+/// and are deliberately not folded in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuPassTimings {
+    /// Work recorded ahead of the frame's own passes — the glyph-atlas replay.
+    pub prepass: Duration,
+    /// The frame's own surface passes: clear, opaque strips, alpha strips and
+    /// the hole punch.
+    pub main: Duration,
+    /// Off-screen layer pages and filter passes.
+    pub composite: Duration,
+    /// The present-side conversion pass a straight-alpha swapchain needs.
+    pub blit: Duration,
+}
+
+impl GpuPassTimings {
+    /// The sum of every span.
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        self.prepass
+            .saturating_add(self.main)
+            .saturating_add(self.composite)
+            .saturating_add(self.blit)
+    }
 }
 
 /// The surface half of the lifecycle machine, parallel to [`SurfacePhase`].
@@ -474,6 +520,45 @@ impl SurfaceRenderer {
         match &self.state {
             SurfaceState::Ready(ready) => ready.surface.resolved_translucent,
             SurfaceState::NoSurface | SurfaceState::Lost => false,
+        }
+    }
+
+    /// The most recent frame's real GPU time per pass, or `None` when this
+    /// surface produces no such measurement.
+    ///
+    /// `None` — the `gpu_q=0` case a shell reports — for every reason there is:
+    /// a tier other than the engine one, a build without the `engine-tier`
+    /// feature, a device created without `wgpu::Features::TIMESTAMP_QUERY`
+    /// (which a build that did not compile `perf-trace` in never asks for), and
+    /// the first few frames of a surface, before the ring's first readback has
+    /// landed.
+    ///
+    /// The reading lags the calling frame: a frame's queries are mapped
+    /// without ever blocking the frame path, so what comes back is a recent
+    /// frame's GPU cost rather than the one being recorded. In steady state one
+    /// fresh reading lands per frame, so the series is complete and offset,
+    /// not sparse — see [`frust_gpu::diag::TimestampRing`].
+    pub fn gpu_pass_timings(&self) -> Option<GpuPassTimings> {
+        #[cfg(feature = "engine-tier")]
+        {
+            let SurfaceState::Ready(ready) = &self.state else {
+                return None;
+            };
+            let TierBackend::Engine { timestamps, .. } = &ready.backend else {
+                return None;
+            };
+            let reading = timestamps.latest()?;
+            let span = |which: frust_engine::EngineSpan| reading.span(which.index());
+            Some(GpuPassTimings {
+                prepass: span(frust_engine::EngineSpan::Prepass),
+                main: span(frust_engine::EngineSpan::Main),
+                composite: span(frust_engine::EngineSpan::Composite),
+                blit: span(frust_engine::EngineSpan::Blit),
+            })
+        }
+        #[cfg(not(feature = "engine-tier"))]
+        {
+            None
         }
     }
 
@@ -840,9 +925,22 @@ impl SurfaceRenderer {
                         );
                     }
                 });
+                // Built from the LIVE device rather than from `caps`: the
+                // adapter offering `TIMESTAMP_QUERY` is not the same statement
+                // as the device having been created with it, and creating a
+                // query set the device never enabled is a validation error
+                // rather than a missing measurement. The ring asks the device
+                // itself and goes inert when the answer is no.
+                let timestamps = frust_gpu::diag::TimestampRing::new(
+                    device,
+                    &ctx.device_handle().queue,
+                    frust_engine::EngineSpan::COUNT,
+                    frust_engine::diag::TIMESTAMP_RING_LABEL,
+                );
                 TierBackend::Engine {
                     engine: Box::new(engine),
                     refused_frames: 0,
+                    timestamps,
                 }
             }
             #[cfg(not(feature = "engine-tier"))]
@@ -1828,6 +1926,7 @@ impl SurfaceRenderer {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
+                    timestamps,
                 } = backend
                 else {
                     return Err(anyhow!(
@@ -1843,7 +1942,11 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine"),
                         });
-                let result = engine.encode(
+                // Opens this frame's ring slot and harvests whatever an earlier
+                // frame left mapped in it — the one place a reading becomes
+                // visible to `gpu_pass_timings`. A no-op on an inert ring.
+                timestamps.begin_frame(&device_handle.device);
+                let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
                     &mut encoder,
@@ -1871,10 +1974,17 @@ impl SurfaceRenderer {
                     // `FRUST_RENDER_SCALE` is a vello instrument that sizes
                     // the blit arm's intermediate, and this arm has none.
                     Affine::IDENTITY,
+                    frust_engine::FrameTimestamps::new(timestamps),
                 );
                 match result {
                     Ok(()) => {
+                        // Recorded into the frame's own encoder, after every
+                        // pass that wrote a query and before the one submit —
+                        // a resolve in a second command buffer would race the
+                        // passes it reads.
+                        timestamps.resolve(&mut encoder);
                         device_handle.queue.submit([encoder.finish()]);
+                        timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
                     }
                     Err(error) => {
@@ -1884,6 +1994,10 @@ impl SurfaceRenderer {
                         // would show undefined content. The frame is dropped
                         // instead (the texture goes with this `None`), and the
                         // refusal is counted rather than logged per vsync.
+                        // The ring's slot is abandoned for the same reason
+                        // nothing is presented: no pass ran, so there is no
+                        // measurement to map.
+                        timestamps.abandon_frame();
                         *refused_frames = refused_frames.saturating_add(1);
                         log_engine_refusal(*refused_frames, &error);
                         engine.end_frame(&device_handle.queue);
@@ -1912,6 +2026,7 @@ impl SurfaceRenderer {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
+                    timestamps,
                 } = backend
                 else {
                     return Err(anyhow!(
@@ -1925,7 +2040,8 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine unpremultiply"),
                         });
-                let result = engine.encode(
+                timestamps.begin_frame(&device_handle.device);
+                let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
                     &mut encoder,
@@ -1951,16 +2067,23 @@ impl SurfaceRenderer {
                     },
                     base_color,
                     Affine::IDENTITY,
+                    frust_engine::FrameTimestamps::new(timestamps),
                 );
                 match result {
                     Ok(()) => {
+                        // The conversion pass itself is not timed: it is
+                        // recorded inside `UnpremultiplyPass::record`, which
+                        // takes no timestamp sink, so this arm's `blit` span
+                        // reads zero until that pass gains one.
                         present.record(
                             &device_handle.device,
                             &mut encoder,
                             intermediate_view,
                             &swapchain_view,
                         );
+                        timestamps.resolve(&mut encoder);
                         device_handle.queue.submit([encoder.finish()]);
+                        timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
                     }
                     Err(error) => {
@@ -1971,6 +2094,7 @@ impl SurfaceRenderer {
                         // converted onto the acquired texture. Nothing is
                         // submitted, the frame is dropped, and the previously
                         // presented content persists.
+                        timestamps.abandon_frame();
                         *refused_frames = refused_frames.saturating_add(1);
                         log_engine_refusal(*refused_frames, &error);
                         engine.end_frame(&device_handle.queue);
