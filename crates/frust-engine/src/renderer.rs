@@ -37,32 +37,42 @@
 //!    populated (see [`crate::gpu::depth`]). It draws nothing; separating it
 //!    from the strip passes is what lets a frame with no draws at all still
 //!    resolve to a clean surface.
-//! 2. **One pass per [layer round](crate::schedule), innermost first.** Each
-//!    renders one isolated layer into a pooled intermediate
+//! 2. **Opaque strips**, depth-tested and depth-writing, unblended. Once per
+//!    frame, ahead of every round: only the fully-covered interior spans of
+//!    opaque draws *targeting the surface* reach it — an anti-aliased edge is by
+//!    definition not opaque, and a page carries no depth attachment for the
+//!    split to be sound against. The depth it establishes is what lets the alpha
+//!    passes reject fragments an opaque draw in front of them already covered.
+//!
+//!    Once, not once per surface round, and that is a correctness requirement:
+//!    the surface can take several rounds (a [cut](crate::schedule::cut_at)
+//!    round is how a wide sibling fan is served), and re-recording this pass
+//!    ahead of each would re-draw opaque coverage at equal stored depth over
+//!    composites the round before it had already blended. Running it ahead of
+//!    the layer rounds rather than after them changes nothing they do: a layer
+//!    round writes a pooled page and reads neither the surface nor the depth
+//!    attachment.
+//! 3. **One pass per [round](crate::schedule).** A page round renders one
+//!    isolated layer into a pooled intermediate
 //!    [page](crate::schedule::pages) it clears to transparent, at the page's
 //!    own origin — so every instance is shifted by the layer's tile-aligned
-//!    bounds — and through the page's own viewport uniform. A round's ops run
-//!    in the order [`Schedule::build`] listed them, so a finished child page
-//!    composites into its parent exactly where the recording entered it.
-//! 3. **Opaque strips**, depth-tested and depth-writing, unblended. Only the
-//!    fully-covered interior spans of opaque draws *in the root round* reach it
-//!    — an anti-aliased edge is by definition not opaque, and a page carries no
-//!    depth attachment for the split to be sound against. The depth it
-//!    establishes is what lets the alpha pass reject fragments an opaque draw
-//!    in front of them already covered.
-//! 4. **Alpha strips**, premultiplied-blended, in painter order. Depth-tested
-//!    but not depth-writing when a depth attachment is in play; a plain
-//!    painter's-algorithm pass when it is not.
-//! 5. **The hole punch**, destination-out, when the frame recorded a
+//!    bounds — and through the page's own viewport uniform; a round continuing a
+//!    page an earlier round of the same layer opened loads it instead. A surface
+//!    round draws **alpha strips**, premultiplied-blended, in painter order:
+//!    depth-tested but not depth-writing when a depth attachment is in play, a
+//!    plain painter's-algorithm pass when it is not. A round's ops run in the
+//!    order [`Schedule::build`] listed them, so a finished child page composites
+//!    into its parent exactly where the recording entered it.
+//! 4. **The hole punch**, destination-out, when the frame recorded a
 //!    `ClearRect` — see [`crate::compile::clear`] for the whole contract this
 //!    pass implements.
 //!
 //! With depth unavailable — no attachment, or `FRUST_ENGINE_NO_DEPTH` set —
-//! passes 3 and 4 collapse into one blended pass carrying *every* instance in
-//! painter order. That is a correctness requirement rather than a fallback
-//! detail: routing the opaque spans into a separate, earlier pass is only sound
-//! because the depth buffer re-establishes their ordering against the blended
-//! ones.
+//! pass 2 disappears and every instance travels through the surface rounds,
+//! blended in painter order. That is a correctness requirement rather than a
+//! fallback detail: routing the opaque spans into a separate, earlier pass is
+//! only sound because the depth buffer re-establishes their ordering against the
+//! blended ones.
 //!
 //! # Compositing a layer
 //!
@@ -947,6 +957,40 @@ impl EngineRenderer {
         // own index is relative to that.
         let base = opaque_count;
 
+        // The opaque pass, once for the whole frame and ahead of every round:
+        // the depth it writes is what every blended instance the frame draws
+        // onto its own target, composites included, is then tested against.
+        //
+        // Hoisted out of the round walk rather than recorded ahead of each
+        // surface round, because a frame can take several of those (the
+        // scheduler cuts one short to hand a page group back) and a second
+        // recording of this pass would re-draw opaque coverage at equal stored
+        // depth over composites the round before it had already blended. Ahead
+        // of the layer rounds costs them nothing: a layer round writes a pooled
+        // page and reads neither this target nor the depth attachment.
+        if opaque_count > 0
+            && let Some(opaque) = pipelines.opaque.as_ref()
+            && let Some(opaque_groups) =
+                self.resources.bind_groups.get(&EnginePipeline::StripOpaque)
+        {
+            record_pass(
+                encoder,
+                &PassPlan {
+                    label: "frust-engine opaque strips",
+                    view: target.view,
+                    load: wgpu::LoadOp::Load,
+                    depth: depth_view,
+                    pipeline: opaque,
+                    groups: opaque_groups,
+                    resources: &opaque_groups.resources,
+                    composites: &[],
+                    instances,
+                    base: 0,
+                    segments: &[Segment::Strips(0, opaque_count)],
+                },
+            );
+        }
+
         // The two ping-pong groups, each holding the finished page a later
         // round composites (see [`crate::schedule`]).
         let mut live: [Option<PooledTexture>; 2] = [None, None];
@@ -955,6 +999,16 @@ impl EngineRenderer {
         for plan in &self.scratch.rounds {
             let own = match plan.page {
                 None => None,
+                // A round continuing a page an earlier round of the same layer
+                // opened takes that very texture back out of its group: a fresh
+                // one from the pool would hold the previous holder's pixels
+                // instead of the half already drawn.
+                Some(page) if page.continued => match live[page.parity.index()].take() {
+                    Some(pooled) => Some((page.parity, pooled)),
+                    // Unreachable: the round that opened the page put it in
+                    // this group, and no round between the two releases it.
+                    None => continue,
+                },
                 Some(page) => match self.targets.acquire(
                     device,
                     page.size.width,
@@ -1043,40 +1097,19 @@ impl EngineRenderer {
                 }
             }
 
-            // The opaque pass belongs to the root round and runs ahead of it:
-            // the depth it writes is what the round's own blended instances,
-            // composites included, are then tested against.
-            if own.is_none()
-                && opaque_count > 0
-                && let Some(opaque) = pipelines.opaque.as_ref()
-                && let Some(opaque_groups) =
-                    self.resources.bind_groups.get(&EnginePipeline::StripOpaque)
-            {
-                record_pass(
-                    encoder,
-                    &PassPlan {
-                        label: "frust-engine opaque strips",
-                        view: target.view,
-                        load: wgpu::LoadOp::Load,
-                        depth: depth_view,
-                        pipeline: opaque,
-                        groups: opaque_groups,
-                        resources: &opaque_groups.resources,
-                        composites: &[],
-                        instances,
-                        base: 0,
-                        segments: &[Segment::Strips(0, opaque_count)],
-                    },
-                );
-            }
-
             let (view, label, load, depth) = match &own {
                 Some((_, pooled)) => (
                     pooled.view(),
                     PAGE_LABEL,
                     // A pooled texture holds whatever its last holder left
-                    // there, so a page is always cleared rather than loaded.
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    // there, so a layer's first round into a page clears it —
+                    // and a round continuing that same page loads it, because
+                    // clearing again would wipe the half already drawn.
+                    if plan.page.is_some_and(|page| page.continued) {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    },
                     None,
                 ),
                 None => (
@@ -1344,6 +1377,10 @@ struct RoundPlan {
 struct PagePlan {
     parity: PageParity,
     size: PageSize,
+    /// Whether an earlier round of the same layer already rendered into this
+    /// page, so this round takes that texture back rather than acquiring a
+    /// fresh one, and loads it rather than clearing it.
+    continued: bool,
 }
 
 /// The frame's instance buffers and pass plan, retained so a steady-state frame
@@ -1354,15 +1391,17 @@ struct PagePlan {
 /// grown these buffers.
 #[derive(Debug, Default)]
 struct Scratch {
-    /// Fully-covered spans of the root round's opaque draws, drawn unblended
-    /// with depth write.
+    /// Fully-covered spans of the opaque draws targeting the frame's own
+    /// surface, drawn unblended with depth write in one pass ahead of every
+    /// round — including the surface's own, of which a frame may have several.
     opaque: Vec<GpuStrip>,
     /// Everything else, drawn premultiplied-blended in painter order and laid
     /// out round by round in execution order.
     alpha: Vec<GpuStrip>,
     /// Every round's segments, back to back; [`RoundPlan::segments`] slices it.
     segments: Vec<Segment>,
-    /// The frame's rounds, innermost layer first and the surface last.
+    /// The frame's rounds, each layer's before the round that composites it and
+    /// the surface's last round last.
     rounds: Vec<RoundPlan>,
     /// The hole punch's own instances, as `(first, count)` into the alpha
     /// region — past every round's segments, so dropping the punch pass leaves
@@ -1383,8 +1422,8 @@ impl Scratch {
     /// coverage is not opaque however opaque the paint is. Its fully-covered
     /// spans land in the opaque buffer only when the paint is opaque, depth is
     /// available to re-establish their ordering against the blended ones, *and*
-    /// the draw belongs to the root round — a page has no depth attachment, so
-    /// its own round is a plain painter's-algorithm walk.
+    /// the draw targets the frame's own surface — a page has no depth
+    /// attachment, so a page round is a plain painter's-algorithm walk.
     fn build(
         &mut self,
         frame: &CompiledFrame,
@@ -1472,10 +1511,13 @@ impl Scratch {
                     .push(Segment::Strips(run_start, end - run_start));
             }
 
+            // Accumulated rather than assigned: a layer whose round was cut
+            // renders in several rounds, and the depth its composite carries is
+            // the deepest index across all of them.
             if let Some(page) = page
                 && let Some(slot) = self.layer_depth.get_mut(page.layer as usize)
             {
-                *slot = deepest;
+                *slot = (*slot).max(deepest);
             }
 
             let mut released = [false; 2];
@@ -1487,6 +1529,7 @@ impl Scratch {
                 page: page.map(|page| PagePlan {
                     parity: page.parity,
                     size: page.size,
+                    continued: page.continued,
                 }),
                 segments: first_segment..self.segments.len(),
                 released,

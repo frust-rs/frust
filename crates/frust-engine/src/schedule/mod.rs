@@ -16,6 +16,11 @@
 //! round's target, then more draws, and so on, exactly as the recording
 //! interleaved them.
 //!
+//! One target can take several rounds. The surface, and a layer's page, are
+//! written by as many passes as the frame needs; each after the first loads what
+//! the one before it left rather than clearing (see [`PageTarget::continued`]),
+//! so the sequence reads as one painter's-order walk however it was cut up.
+//!
 //! ## What this scheduler serves, and what it refuses
 //!
 //! Frust's layer needs are narrow. Clips lower to a scissor rectangle or a
@@ -27,23 +32,24 @@
 //! The scheduler serves every layer tree two pooled pages are enough for:
 //!
 //! - isolated layers nested at most [`MAX_CHAIN_DEPTH`] deep;
-//! - isolated layers *beside* each other under one parent, for as long as no
-//!   single round needs more than [`MAX_LIVE_PAGES`] pages at once — which is
-//!   what two widgets fading at the same time, the commonest sibling shape a
-//!   frust screen records, costs;
-//! - any mixture of the two that stays inside that bound.
+//! - isolated layers *beside* each other under one parent, a fan of any width —
+//!   two widgets fading at once is the commonest sibling shape a frust screen
+//!   records, and a staggered list entrance fading five rows at once is served
+//!   on the same two pages;
+//! - any mixture of the two that stays inside [`MAX_LIVE_PAGES`] live pages.
 //!
-//! The bound is per round, not per frame, because a parent composites *all* of
-//! its isolated children in the one pass that renders it: their pages are live
-//! together, whether they were finished one after another or not. The frame's
-//! own surface occupies no page, which is why a sibling pair directly under it
-//! fits — the two groups are both free — while the same pair inside a layer does
-//! not: that layer's own page is one of the two.
+//! A fan of any width fits because a parent does not have to composite *all* of
+//! its isolated children in one pass. When both groups are taken, the parent's
+//! round is [cut](cut_at): the ops accumulated so far are emitted as a round of
+//! their own, the pages that batch composites go back to the pool, and the next
+//! sibling is rendered into one of them. What the two-page bound really limits
+//! is a single layer needing two groups *of its own* — a chain — beside a page
+//! an isolated ancestor is already holding.
 //!
-//! Everything else — a round needing a third live page, a deeper chain, a filter
-//! layer, a non-default blend mode, a layer mask or layer clip path — is refused
-//! with [`EngineError::SchedulerEscalation`] carrying a reason that names what
-//! was found.
+//! Everything else — a layer that finds no group even after a cut, a deeper
+//! chain, a filter layer, a non-default blend mode, a layer mask or layer clip
+//! path — is refused with [`EngineError::SchedulerEscalation`] carrying a reason
+//! that names what was found.
 //!
 //! ## A refusal is a skipped frame, not a fallback
 //!
@@ -65,10 +71,11 @@
 //!
 //! ## Bottom-up traversal and the two-page ping-pong
 //!
-//! Rounds are emitted innermost-first: a layer's contents must exist before the
-//! pass that composites them can run, so the deepest layer is rendered first and
-//! the surface last. A layer takes the group its depth's parity names when that
-//! group is free, and the other group when it is not (see [`PageParity`]).
+//! Rounds are emitted contents-before-composite: a layer's contents must exist
+//! before the pass that composites them can run, so the deepest layer is
+//! rendered first and the surface's last round is last. A layer takes the group
+//! its depth's parity names when that group is free, and the other group when it
+//! is not (see [`PageParity`]).
 //!
 //! Parity alone is what bounds a *chain* to two live pages however deep it runs:
 //! while a parent renders into its own page it samples the child's, and the
@@ -76,13 +83,20 @@
 //! grandchild reuses it. Siblings are what makes the fallback to the other group
 //! necessary — two layers at one depth share a parity, and a second page in one
 //! group would overwrite the first before the parent ever sampled it. So the
-//! second sibling takes the group the first left free, and a third sibling, with
-//! no group left to take, is refused.
+//! second sibling takes the group the first left free, and a third finds both
+//! taken. That is what [`cut_at`] answers: the parent's round is closed early,
+//! its two composites are done, both pages come back, and the third sibling
+//! takes the group the first one had. A fan of any width costs one extra pass
+//! per pair rather than a refused frame.
 //!
 //! Pages are named lazily, by the round that renders into them, rather than
 //! reserved on the way down. An outer layer that reserved its page before the
 //! descent would hold one group for the whole traversal and defeat the
-//! ping-pong.
+//! ping-pong. The one exception is a layer whose round has to be cut: a cut
+//! renders into the layer's own page, so that layer takes its group at its first
+//! cut and keeps it until its last round. This is why an isolated parent's
+//! *second* isolated child is served while a chain hanging off it is not — the
+//! parent's page is one of the two groups from its first cut onwards.
 //!
 //! ## Inlined and dropped layers
 //!
@@ -92,7 +106,9 @@
 //! contents into the parent does, so its stream is spliced into the parent's
 //! round and it costs no page and no pass. At the other end, a layer at zero
 //! opacity contributes nothing at all and is dropped along with everything
-//! nested inside it.
+//! nested inside it, and so does a layer whose contents cover no pixel at all —
+//! neither its own round nor any round its descendants would have rendered is
+//! emitted, because nothing would ever sample the pages they wrote.
 //!
 //! Depth is therefore counted over *isolated* layers only. Counting recorded
 //! depth instead would let an inlined layer push its isolated descendant onto
@@ -123,7 +139,8 @@ pub const MAX_CHAIN_DEPTH: usize = 4;
 /// The most intermediate pages this scheduler keeps live at one time.
 ///
 /// Two is what the even/odd ping-pong guarantees for a chain. A shape needing a
-/// third is a shape this scheduler does not serve.
+/// third — after cutting an open round has been tried and could not hand one
+/// back — is a shape this scheduler does not serve.
 pub const MAX_LIVE_PAGES: usize = 2;
 
 /// Where the reference renderer's general scheduler is ported.
@@ -155,6 +172,15 @@ pub struct PageTarget {
     /// The layer is rendered at the page's origin, so every strip drawn into
     /// this round is offset by `-(bounds.x0, bounds.y0)`.
     pub bounds: RectU16,
+    /// Whether an earlier round of this same layer already rendered into this
+    /// page, so this one loads its contents instead of clearing them.
+    ///
+    /// A pooled page holds whatever its last holder left there, which is why a
+    /// layer's *first* round always clears it. A layer whose round was
+    /// [cut](cut_at) keeps the page across the cut — clearing again would wipe
+    /// the half already drawn — and no other layer can have taken the group in
+    /// between, because the cut is what made this layer the group's holder.
+    pub continued: bool,
 }
 
 /// What a round renders into.
@@ -210,6 +236,10 @@ pub enum RoundOp {
 }
 
 /// One render pass over one target.
+///
+/// A target is not a round: the surface, and a layer's page, can each take
+/// several, and the rounds of one target run in the order they are listed with
+/// every one after the first loading what the one before it left.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Round {
     /// What this pass renders into.
@@ -263,8 +293,8 @@ impl Round {
 pub struct Schedule;
 
 impl Schedule {
-    /// The rounds `recorder` renders as: every layer before the round that
-    /// composites it, innermost first, and the surface last.
+    /// The rounds `recorder` renders as: every layer's rounds before the round
+    /// that composites it, and the surface's last round last.
     ///
     /// Always at least one round: a recording with no layers, and one whose
     /// layers all inline or drop away, both schedule to the single root round
@@ -319,7 +349,8 @@ impl Schedule {
                 Step::Next => {}
                 Step::Done => {
                     if let Some(stream) = stack.pop() {
-                        let carry = finish(stream, &mut rounds, &mut pages, caps, config)?;
+                        let carry =
+                            finish(stream, &mut stack, &mut rounds, &mut pages, caps, config)?;
                         if let Some(parent) = stack.last_mut() {
                             parent.ops.extend(carry);
                         }
@@ -343,12 +374,17 @@ impl Schedule {
                     }
                     *seen = true;
 
+                    // Suppression is inherited rather than re-derived: a layer
+                    // inside one covering no pixels covers none either, however
+                    // its own bounds read.
+                    let inherited = stack.last().is_some_and(|stream| stream.suppressed);
+
                     // Nothing nested inside a dropped layer is rendered, so
                     // nothing inside one is validated either — the walk does
                     // not enter it.
                     match layer_role(id, layer)? {
                         LayerRole::Dropped => {}
-                        LayerRole::Inline => stack.push(Stream::inline(layer, depth)),
+                        LayerRole::Inline => stack.push(Stream::inline(layer, depth, inherited)),
                         LayerRole::Isolated => {
                             let depth = depth.saturating_add(1);
                             if depth > MAX_CHAIN_DEPTH {
@@ -357,7 +393,14 @@ impl Schedule {
                                      {MAX_CHAIN_DEPTH}-deep chain the simple scheduler serves"
                                 )));
                             }
-                            stack.push(Stream::isolated(id, layer, depth));
+                            // A layer whose contents cover nothing composites
+                            // nothing, so it renders no round — and neither do
+                            // its descendants, whose pages nothing would ever
+                            // sample. The walk still enters it, so a shape this
+                            // scheduler refuses is refused wherever it is
+                            // recorded rather than only where it is visible.
+                            let suppressed = inherited || layer.bbox.is_empty();
+                            stack.push(Stream::isolated(id, layer, depth, suppressed));
                         }
                     }
                 }
@@ -368,47 +411,88 @@ impl Schedule {
     }
 }
 
-/// Emits the round a finished stream renders as, and returns what its parent
-/// splices in at the node that entered it: one composite for an isolated layer,
-/// the layer's own ops for an inlined one, nothing for a layer that composites
-/// nothing. The frame root pushes the last round and carries nothing.
-fn finish(
-    stream: Stream<'_>,
+/// Emits the last round a finished stream renders as, and returns what its
+/// parent splices in at the node that entered it: one composite for an isolated
+/// layer, the layer's own ops for an inlined one, nothing for a layer that
+/// composites nothing. The frame root pushes the last round and carries nothing.
+///
+/// `stack` is the walk's remaining streams — this stream's ancestors — because
+/// a layer short of a page makes room by [cutting](cut_at) one of their rounds.
+fn finish<'a>(
+    stream: Stream<'a>,
+    stack: &mut [Stream<'a>],
     rounds: &mut Vec<Round>,
     pages: &mut LivePages,
     caps: &TierCaps,
     config: &PageConfig,
 ) -> Result<Vec<RoundOp>, EngineError> {
-    let released = released_pages(&stream.ops);
-
     let (id, layer) = match stream.owner {
         StreamOwner::Inline => return Ok(stream.ops),
         StreamOwner::Root => {
+            let released = released_pages(&stream.ops);
             for parity in &released {
                 pages.release(*parity);
             }
-            rounds.push(Round {
-                target: RoundTarget::Root,
-                ops: stream.ops,
-                released,
-            });
+            // An empty trailing round is worth a pass only when it is the
+            // frame's only one: `build` always returns at least one round, but
+            // a surface already written by an earlier cut needs no empty pass
+            // behind it.
+            if !stream.ops.is_empty() || !stream.emitted {
+                rounds.push(Round {
+                    target: RoundTarget::Root,
+                    ops: stream.ops,
+                    released,
+                });
+            }
             return Ok(Vec::new());
         }
         StreamOwner::Isolated { id, layer } => (id, layer),
     };
 
-    // A layer whose contents cover nothing composites nothing: it needs no page
-    // and no pass of its own. The pages its own children finished into are
-    // freed here, because no round of this layer's will ever sample them.
-    let bounds = layer.bbox;
-    if bounds.is_empty() {
-        for parity in &released {
-            pages.release(*parity);
-        }
+    // A layer covering no pixels, or one nested inside such a layer, renders
+    // nothing: no round of its own was cut, none of its descendants' was
+    // emitted, and no page was ever taken for any of them, so there is nothing
+    // to release and nothing for the parent to composite.
+    if stream.suppressed {
         return Ok(Vec::new());
     }
 
+    let bounds = layer.bbox;
+    let composite = |parity| {
+        vec![RoundOp::Composite(Composite {
+            layer: id,
+            parity,
+            bounds,
+            opacity: layer.props.opacity,
+        })]
+    };
+
+    // The layer's round was cut earlier this frame, so its page is already this
+    // stream's and this round loads what the cut left in it.
+    if let Some(parity) = stream.page {
+        if !stream.ops.is_empty() {
+            let released = released_pages(&stream.ops);
+            for parity in &released {
+                pages.release(*parity);
+            }
+            rounds.push(Round {
+                target: RoundTarget::Page(PageTarget {
+                    layer: id,
+                    depth: stream.depth,
+                    parity,
+                    size: page_size(bounds, config, caps)?,
+                    bounds,
+                    continued: true,
+                }),
+                ops: stream.ops,
+                released,
+            });
+        }
+        return Ok(composite(parity));
+    }
+
     let size = page_size(bounds, config, caps)?;
+    make_room(stack, rounds, pages, caps, config)?;
     // Acquired before the children's pages are freed, never after: a child's
     // page is live for the whole of the pass that samples it, so the group this
     // round renders into can never be one of theirs.
@@ -418,10 +502,13 @@ fn finish(
             escalate(format!(
                 "layer {id} would need a third live intermediate page: both of the \
                  {MAX_LIVE_PAGES} groups the simple scheduler ping-pongs between are already \
-                 holding a page a later round composites. A nested chain of any depth fits; a \
-                 fan of siblings stops fitting once their pages outnumber the groups"
+                 holding a page a later round composites, and no open round could be cut to hand \
+                 one back. A nested chain of any depth fits, and so does a fan of siblings of any \
+                 width; what does not is a layer needing two groups of its own beside a page an \
+                 isolated ancestor is already holding"
             ))
         })?;
+    let released = released_pages(&stream.ops);
     for parity in &released {
         pages.release(*parity);
     }
@@ -433,17 +520,158 @@ fn finish(
             parity,
             size,
             bounds,
+            continued: false,
         }),
         ops: stream.ops,
         released,
     });
 
-    Ok(vec![RoundOp::Composite(Composite {
-        layer: id,
-        parity,
-        bounds,
-        opacity: layer.props.opacity,
-    })])
+    Ok(composite(parity))
+}
+
+/// Frees a page group for a layer about to take one, by cutting an ancestor's
+/// round short, when the walk is running out of groups.
+///
+/// Two moves, in this order.
+///
+/// - **Ahead of the shortage.** An isolated ancestor that has not taken a page
+///   yet is going to need one, and a layer taking the last free group would
+///   leave it none — which is what used to limit a parent to two isolated
+///   children. Cutting such an ancestor now gives it its page *and* hands back
+///   every page that cut composites, so the group this layer is about to take
+///   comes straight back and the count is no worse than it started. Outermost
+///   first: an outer ancestor's cut is what frees the group an inner one takes.
+/// - **At the shortage.** With both groups gone, the innermost open round that
+///   composites anything is cut, releasing its pages a pass early. This is what
+///   serves a fan of any width under the surface: the siblings already
+///   composited go back to the pool before the next one is rendered.
+///
+/// A cut that cannot help is skipped rather than forced, and running out of
+/// ancestors to cut is not itself an error — the acquire this precedes
+/// escalates if it still finds no group, which keeps one refusal site and one
+/// reason.
+fn make_room(
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<(), EngineError> {
+    if pages.free() > 1 {
+        return Ok(());
+    }
+
+    for index in 0..stack.len() {
+        if pages.free() == 0 {
+            break;
+        }
+        if stack[index].wants_a_page() {
+            cut_at(stack, index, rounds, pages, caps, config)?;
+        }
+    }
+
+    if pages.free() == 0 {
+        for index in (0..stack.len()).rev() {
+            if cut_at(stack, index, rounds, pages, caps, config)? {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Emits what `stack[index]` has accumulated as a round of its own, so the pages
+/// that batch composites return to the pool before the walk renders anything
+/// else. Answers whether a round was emitted.
+///
+/// The round carries that stream's ops followed by those of every inlined stream
+/// open above it: an inlined layer draws into its host's round, so its ops
+/// belong to this cut, in exactly the painter order the recording laid them in.
+/// Whatever any of them records after the cut becomes the host's next round,
+/// which loads rather than clears (see [`PageTarget::continued`]) — so a cut
+/// changes when a target's pixels are written, never which ones or in what
+/// order.
+///
+/// `false` when there is nothing to gain or no way to emit: a batch holding no
+/// composite frees no page by being cut, a suppressed stream renders nothing at
+/// all, an inlined one has no target of its own, and an isolated one that has
+/// not taken a page cannot take one with both groups held.
+fn cut_at(
+    stack: &mut [Stream<'_>],
+    index: usize,
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<bool, EngineError> {
+    let Some(stream) = stack.get(index) else {
+        return Ok(false);
+    };
+    if stream.suppressed || matches!(stream.owner, StreamOwner::Inline) {
+        return Ok(false);
+    }
+
+    // Every stream above this one up to the next stream with a target of its own
+    // is inlined into this round.
+    let end = stack
+        .iter()
+        .enumerate()
+        .skip(index.saturating_add(1))
+        .find(|(_, stream)| !matches!(stream.owner, StreamOwner::Inline))
+        .map_or(stack.len(), |(at, _)| at);
+    let batch = stack.get(index..end).unwrap_or(&[]);
+    if !batch.iter().any(|stream| holds_composite(&stream.ops)) {
+        return Ok(false);
+    }
+
+    let continued = stack[index].emitted;
+    let target = match stack[index].owner {
+        // Both refused above; repeated here because the target is what the
+        // round is built from.
+        StreamOwner::Inline => return Ok(false),
+        StreamOwner::Root => RoundTarget::Root,
+        StreamOwner::Isolated { id, layer } => {
+            let bounds = layer.bbox;
+            let size = page_size(bounds, config, caps)?;
+            let parity = match stack[index].page {
+                Some(parity) => parity,
+                None => {
+                    let Some(parity) = pages.acquire(PageParity::from_depth(stack[index].depth))
+                    else {
+                        return Ok(false);
+                    };
+                    stack[index].page = Some(parity);
+                    parity
+                }
+            };
+            RoundTarget::Page(PageTarget {
+                layer: id,
+                depth: stack[index].depth,
+                parity,
+                size,
+                bounds,
+                continued,
+            })
+        }
+    };
+
+    let mut ops: Vec<RoundOp> = Vec::new();
+    for stream in stack.get_mut(index..end).unwrap_or(&mut []) {
+        ops.append(&mut stream.ops);
+    }
+    let released = released_pages(&ops);
+    for parity in &released {
+        pages.release(*parity);
+    }
+    stack[index].emitted = true;
+    rounds.push(Round {
+        target,
+        ops,
+        released,
+    });
+
+    Ok(true)
 }
 
 /// How a recorded layer is served.
@@ -494,8 +722,19 @@ struct Stream<'a> {
     /// The isolated nesting depth of this stream's contents, one-based; zero at
     /// the frame root.
     depth: usize,
-    /// The ops accumulated so far, in execution order.
+    /// The ops accumulated since this stream's last round, in execution order.
     ops: Vec<RoundOp>,
+    /// Whether a round of this stream's has been emitted already, which is what
+    /// makes the next one a continuation of the same target.
+    emitted: bool,
+    /// The group this stream's page came from, taken at its first
+    /// [cut](cut_at) and held until its last round. `None` while the stream is
+    /// still free to have its page named by the round that finishes it, which
+    /// is the common case — only a cut stream reserves ahead.
+    page: Option<PageParity>,
+    /// Whether this stream renders nothing at all: it is a layer covering no
+    /// pixels, or nested inside one.
+    suppressed: bool,
 }
 
 impl<'a> Stream<'a> {
@@ -507,31 +746,50 @@ impl<'a> Stream<'a> {
             index: 0,
             depth: 0,
             ops: Vec::new(),
+            emitted: false,
+            page: None,
+            suppressed: false,
         }
     }
 
     /// An inlined layer's stream, spliced into its parent's round at the depth
     /// its parent already occupies — an inlined layer takes no page, so it
     /// consumes no level (see the module header).
-    fn inline(layer: &'a RecordedLayer, depth: usize) -> Self {
+    fn inline(layer: &'a RecordedLayer, depth: usize, suppressed: bool) -> Self {
         Self {
             owner: StreamOwner::Inline,
             nodes: &layer.nodes,
             index: 0,
             depth,
             ops: Vec::new(),
+            emitted: false,
+            page: None,
+            suppressed,
         }
     }
 
     /// An isolated layer's stream, one level deeper than its parent.
-    fn isolated(id: u32, layer: &'a RecordedLayer, depth: usize) -> Self {
+    fn isolated(id: u32, layer: &'a RecordedLayer, depth: usize, suppressed: bool) -> Self {
         Self {
             owner: StreamOwner::Isolated { id, layer },
             nodes: &layer.nodes,
             index: 0,
             depth,
             ops: Vec::new(),
+            emitted: false,
+            page: None,
+            suppressed,
         }
+    }
+
+    /// Whether this stream is one a page group is still owed to.
+    ///
+    /// True only for an isolated layer that will really render — a suppressed
+    /// one renders nothing — and only until its first cut names its group.
+    fn wants_a_page(&self) -> bool {
+        matches!(self.owner, StreamOwner::Isolated { .. })
+            && !self.suppressed
+            && self.page.is_none()
     }
 }
 
@@ -590,6 +848,11 @@ impl LivePages {
         self.set(parity, false);
     }
 
+    /// How many groups are holding no page.
+    fn free(&self) -> usize {
+        self.held.iter().filter(|held| !**held).count()
+    }
+
     /// Whether `parity`'s group is holding a page.
     fn holds(&self, parity: PageParity) -> bool {
         self.held.get(parity.index()).copied().unwrap_or(false)
@@ -642,6 +905,12 @@ fn layer_role(id: u32, layer: &RecordedLayer) -> Result<LayerRole, EngineError> 
     } else {
         LayerRole::Isolated
     })
+}
+
+/// Whether `ops` composites anything, and so whether emitting them as a round
+/// would hand a page back to the pool.
+fn holds_composite(ops: &[RoundOp]) -> bool {
+    ops.iter().any(|op| matches!(op, RoundOp::Composite(_)))
 }
 
 /// The pages `ops` samples, each listed once.
