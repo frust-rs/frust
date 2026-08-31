@@ -249,6 +249,19 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
 /// the widened channel/alpha already brings every measured pixel back inside
 /// tolerance (each case's own gate line reports 0 px differing once its row
 /// here applies).
+///
+/// # The metal-macos rig's own answer (p6-d1)
+///
+/// The Apple M4 answers MOBILE tier (`transient_saves_memory` is true on
+/// Apple silicon's TBDR hardware — `frust_engine::cache::images::
+/// is_mobile_tier` reads the capability, not the adapter name), so the
+/// engine hints OFF on that rig and the hint-policy rows above are slack
+/// there: every hint-policy case measured its M4 delta at or under
+/// [55,55,54,1] (`widget-text-field-rest`/`-caret`, the widest) with most at
+/// [1,1,1,0], and `unit-glyph-run` measures [0,0,0,0] under
+/// `FRUST_ENGINE_NO_ATLAS=1`. What that rig DOES measure is the atlas route
+/// itself — `adv-10k-glyphs`' row below is the one row of the M4's own, and
+/// it is an atlas subpixel-bucket row rather than a hint-policy one.
 const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
     (
         "widget-button-disabled",
@@ -275,6 +288,25 @@ const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
         "hint-policy row (see this table's module docs): measured max delta [104,104,104,0], 231 \
          px (5.6396%) of this 64x64 frame's own glyph ink, all inside the text block's bounding \
          box — a hinted vs. unhinted `H`/`e`/`l`/`l`/`o` outline, not a rasterizer disagreement",
+    ),
+    (
+        "adv-10k-glyphs",
+        Tolerance {
+            channel: 57,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "atlas subpixel-bucket row, measured on the metal-macos rig (Apple M4) — see this \
+         table's module docs, and NOT a hint-policy row (that rig hints OFF): the atlas renders \
+         the pack's one repeated 8px `l` at glifo's quarter-pixel horizontal buckets while \
+         `vello_cpu` rasterizes every exact fraction of the pack's 0.55px grid, and the worst \
+         phase reads as 5 px (0.1221%) at delta [57,57,57,0] on the eroded interior — x = 2, 13, \
+         24, 35, 46 on row y=59, the 11px period the 0.55px step's fractional phase repeats at, \
+         on the sparse bottom row where overlap no longer saturates the difference away (the \
+         whole-image max [126,126,126,0] sits on the eroded border). `FRUST_ENGINE_NO_ATLAS=1` \
+         drops the case to [3,3,3,0] / 0 px differing, isolating the bucketing; the T400 rig \
+         passes this case at the corpus default, so this row carries the metal rig's own \
+         measured number rather than a copied one",
     ),
     (
         "widget-text-field-rest",
@@ -1482,14 +1514,16 @@ fn no_scoped_case_shapes_against_a_host_font() {
 //
 // # Golden classes
 //
-// `cpu` is committable from this task after visual inspection of the
-// promoted PNGs (a plain CPU render, no GPU involved). The engine class this
-// rig routes to (`engine-vulkan-nvidia-t400` when pinned) is
-// RECORDING-ONLY here: `update_engine` below is hard-coded `false` regardless
-// of `UPDATE_GOLDENS`, so this test can never promote a baseline into that
-// class — promoting a T400 baseline is a separate, reviewed step this task
-// does not take (and correspondingly, `testing/goldens/engine-vulkan-nvidia-
-// t400/filter-*` is outside this task's own write scope).
+// `cpu` is committable after visual inspection of the promoted PNGs (a plain
+// CPU render, no GPU involved). The engine class this rig routes to promotes
+// under the SAME convention as the corpus gate above — `UPDATE_GOLDENS=1`,
+// and only on an adapter whose engine class is reviewed (`classified`) —
+// since p6-d1, the Mac verification round that took the reviewed promotion
+// step for `engine-metal-macos`'s filter baselines. p6-03b itself (the task
+// that authored this family on the T400) never promoted: its write scope
+// excluded `testing/goldens/engine-vulkan-nvidia-t400`, whose `filter-*`
+// baselines therefore remain unpromoted, recording artifacts, until a
+// reviewed T400 round deliberately takes the same step.
 
 use frust_engine::EngineDraw;
 use frust_engine::error::EngineError as FilterFamilyEngineError;
@@ -2055,21 +2089,24 @@ fn filter_family_matches_vello_cpu_and_its_goldens() {
         "filter family: engine arm on {}",
         class_probe.adapter_meta()
     );
-    println!("filter family: golden class `{class}` (recording-only in this task)");
+    println!("filter family: golden class `{class}`");
     drop(class_probe);
 
     let (device, queue, caps) = filter_gpu_device();
     let mut harness = FilterEngineHarness::new(device, queue, caps);
 
     let update_cpu = update_goldens_enabled();
-    // Hard-coded, never the `UPDATE_GOLDENS` env var: this task's own write
-    // scope does not include `testing/goldens/engine-vulkan-nvidia-t400`, and
-    // the class is recording-only by convention regardless (see this
-    // section's own module doc).
-    let update_engine = false;
+    // Since p6-d1 (the Mac verification round, which took the reviewed
+    // promotion step this comment used to reserve), the engine class follows
+    // the same convention as the corpus gate above: `UPDATE_GOLDENS=1`, and
+    // only on an adapter whose engine class is reviewed. The T400's own
+    // filter baselines remain unpromoted until a reviewed T400 round
+    // deliberately sets `UPDATE_GOLDENS=1` and inspects what it writes.
+    let update_engine = update_goldens_enabled() && classified;
 
     let mut failures: Vec<String> = Vec::new();
     let mut cpu_promoted = 0_usize;
+    let mut engine_promoted = 0_usize;
     let mut engine_recorded = 0_usize;
 
     for case in filter_cases() {
@@ -2158,10 +2195,10 @@ fn filter_family_matches_vello_cpu_and_its_goldens() {
             Err(err) => failures.push(format!("[{name}] cpu class: {err:#}")),
         }
 
-        // The engine class: recording-only (see this section's own module
-        // doc) — `spec.no_ref` records a review artifact rather than
-        // comparing against a baseline that does not exist in this task's
-        // write scope, and `update_engine` never promotes one either way.
+        // The engine class (see this section's own module doc): `spec.no_ref`
+        // records a review artifact when the class has no baseline yet, and
+        // `update_engine` promotes one only under `UPDATE_GOLDENS=1` on a
+        // reviewed (classified) class.
         let mut engine_spec = CaseSpec::new(name)
             .with_size(width, height)
             .with_tolerance(case.tolerance);
@@ -2177,7 +2214,9 @@ fn filter_family_matches_vello_cpu_and_its_goldens() {
             update_engine,
         ) {
             Ok(golden) => {
-                if !golden.updated && engine_spec.no_ref {
+                if golden.updated {
+                    engine_promoted += 1;
+                } else if engine_spec.no_ref {
                     engine_recorded += 1;
                 }
                 if !golden.passed {
@@ -2197,8 +2236,8 @@ fn filter_family_matches_vello_cpu_and_its_goldens() {
 
     println!(
         "filter family: class `{class}` (classified={classified}) — {cpu_promoted} cpu \
-         baseline(s) promoted, {engine_recorded} engine artifact(s) recorded (never promoted \
-         by this test)"
+         baseline(s) promoted, {engine_promoted} engine baseline(s) promoted, \
+         {engine_recorded} engine artifact(s) recorded"
     );
 
     assert!(
