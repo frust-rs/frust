@@ -29,11 +29,49 @@
 //! keeping intermediate textures small matters more than saving render passes,
 //! so the floor stays at 512 square rather than being raised to batch layers
 //! together.
+//!
+//! ## A third decision: filter-layer sizing
+//!
+//! [`filter_page_size`] answers the same question [`page_size`] does — the
+//! extent to acquire a page at — for a filter layer specifically, and differs
+//! in two ways a regular layer's page never has to.
+//!
+//! - **Padded, not just coverage-sized.** A filter pass's bilinear kernel taps
+//!   can reach [`FILTER_ATLAS_PADDING`] texels past the region it writes (see
+//!   that constant's own doc), and while the fragment stage bounds that
+//!   overdraw at the layer's own extent, a page whose real allocation lands
+//!   *exactly* on that extent — which the pool's quantization can and does
+//!   produce, whenever a layer's own size already sits on the quantum grid —
+//!   would put the overdraw's edge at the very last texel rather than inside
+//!   a transparent margin. [`filter_page_size`] reserves that margin by
+//!   growing the request by [`FILTER_ATLAS_PADDING`] on every side *before*
+//!   flooring, quantizing (E13) and capping, so the page's real extent always
+//!   has the margin regardless of where the quantum grid happens to land.
+//! - **Two ceilings, not one.** [`page_size`] folds [`page_ceiling`]'s two
+//!   inputs into one refusal ([`EngineError::IntermediateTextureTooLarge`]
+//!   either way). A filter layer's padded request is checked against them
+//!   separately instead, mirroring the reference sparse-strips renderer's own
+//!   filter-layer sizing (`vello_hybrid`'s
+//!   `LayersConfig::required_intermediate_texture_size`,
+//!   `render/common.rs:139-191`): [`max_texture_size`] is what the adapter
+//!   can allocate at all, refused as [`EngineError::IntermediateTextureTooLarge`]
+//!   exactly as an over-ceiling regular layer is; [`PageConfig::max_page_size`]
+//!   is this pool's own configured budget, which the adapter could serve but
+//!   this engine has chosen not to ask for, refused as
+//!   [`EngineError::IntermediateTextureLimitReached`] — the same two-error
+//!   shape the reference's own `IntermediateTextureError::TooLarge`/
+//!   `LimitReached` pair draws, adapted from its one-texture-for-the-whole-
+//!   scene budget to this scheduler's per-layer pages.
+//!
+//! Both errors, like [`page_size`]'s own, are values rather than panics
+//! (E17), and the padded width/height are computed in `u32` so a `bounds`
+//! near the `u16` ceiling grows into headroom instead of wrapping.
 
 use frust_gpu::TierCaps;
 use vello_common::geometry::RectU16;
 
 use crate::error::EngineError;
+use crate::filters::blur::FILTER_ATLAS_PADDING;
 use crate::gpu::targets::max_texture_size;
 
 /// Smallest page the scheduler asks for, per axis.
@@ -174,6 +212,59 @@ pub fn page_size(
     Ok(PageSize { width, height })
 }
 
+/// The extent to acquire a filter layer's page at.
+///
+/// `bounds` is the layer's own tile-aligned device-space rectangle — already
+/// grown by the filter's own visual spread (a blur's 3σ, a drop shadow's
+/// offset plus its own blur), the same `bounds` [`page_size`] would take for
+/// a regular layer. This function grows it by [`FILTER_ATLAS_PADDING`] on
+/// every side before flooring, quantizing (E13) and capping, and checks the
+/// padded request against two ceilings rather than one — see the module
+/// header's *A third decision* section for why both differences exist.
+///
+/// # Errors
+///
+/// [`EngineError::IntermediateTextureTooLarge`] when the padded extent
+/// exceeds [`max_texture_size`] on either axis — this adapter will never
+/// allocate a page that large, the same refusal an over-ceiling regular layer
+/// gets from [`page_size`]. [`EngineError::IntermediateTextureLimitReached`]
+/// when the padded extent stays inside that hard ceiling but still exceeds
+/// [`PageConfig::max_page_size`] — the adapter could serve it, but this
+/// pool's own configured budget does not. Neither is a panic (E17).
+pub fn filter_page_size(
+    bounds: RectU16,
+    config: &PageConfig,
+    caps: &TierCaps,
+) -> Result<PageSize, EngineError> {
+    let device_ceiling = max_texture_size(caps);
+    let budget_ceiling = config.max_page_size;
+
+    // `u32` throughout: `bounds`' axes are `u16`, so even a `bounds` at the
+    // `u16` ceiling grows into `u32` headroom under the padding below rather
+    // than wrapping.
+    let padding = u32::from(FILTER_ATLAS_PADDING).saturating_mul(2);
+    let width = u32::from(bounds.width()).saturating_add(padding);
+    let height = u32::from(bounds.height()).saturating_add(padding);
+
+    if width > device_ceiling || height > device_ceiling {
+        return Err(EngineError::IntermediateTextureTooLarge);
+    }
+    if width > budget_ceiling || height > budget_ceiling {
+        return Err(EngineError::IntermediateTextureLimitReached);
+    }
+
+    // The floor is clamped to the tighter of the two ceilings first, exactly
+    // as `page_size` clamps it to `page_ceiling`: a configuration whose floor
+    // sits above what either ceiling allows must not turn every filter layer
+    // into a refused request.
+    let ceiling = budget_ceiling.min(device_ceiling);
+    let floor = config.min_page_size.min(ceiling);
+    let (width, height) =
+        frust_gpu::pool::quantize_extent(width.max(floor), height.max(floor), ceiling);
+
+    Ok(PageSize { width, height })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +365,107 @@ mod tests {
 
         caps.max_texture_dimension_2d = 16384;
         assert_eq!(page_ceiling(&config, &caps), DEFAULT_MAX_PAGE_SIZE);
+    }
+
+    #[test]
+    fn a_small_filter_layer_is_padded_then_still_floored_at_the_minimum_page_size() {
+        // 12x8 plus padding on every side (24x20) is still far inside the
+        // floor, exactly as the unpadded case is for `page_size`.
+        let size = filter_page_size(RectU16::new(0, 0, 12, 8), &PageConfig::default(), &caps())
+            .expect("a padded 24x20 request is far inside the ceiling");
+        assert_eq!(
+            size,
+            PageSize {
+                width: DEFAULT_MIN_PAGE_SIZE,
+                height: DEFAULT_MIN_PAGE_SIZE
+            }
+        );
+    }
+
+    #[test]
+    fn filter_padding_can_push_a_borderline_layer_into_the_next_quantum() {
+        // Unpadded, 1013 rounds up to 1024 and 700 to 768 (`page_size`'s own
+        // grid); the extra 12 texels of padding on each axis is what carries
+        // the request past 1024 into the next 256-wide bucket.
+        let size = filter_page_size(
+            RectU16::new(0, 0, 1013, 700),
+            &PageConfig::default(),
+            &caps(),
+        )
+        .expect("1025x712 padded is inside the default ceiling");
+        assert_eq!(
+            size,
+            PageSize {
+                width: 1280,
+                height: 768
+            }
+        );
+    }
+
+    #[test]
+    fn a_filter_layer_whose_padding_carries_it_past_the_device_ceiling_is_too_large() {
+        // A budget at least as large as the device ceiling isolates the
+        // device-capability refusal from the pool-budget one below.
+        let config = PageConfig {
+            min_page_size: DEFAULT_MIN_PAGE_SIZE,
+            max_page_size: 8192,
+        };
+        let caps = caps();
+        let device_ceiling = max_texture_size(&caps);
+        assert_eq!(device_ceiling, 8192);
+
+        // Exactly at the ceiling once padded: still served.
+        let at_ceiling = device_ceiling - u32::from(FILTER_ATLAS_PADDING) * 2;
+        assert!(
+            filter_page_size(RectU16::new(0, 0, at_ceiling as u16, 16), &config, &caps).is_ok()
+        );
+
+        // One texel past it once padded — the padding is what pushes this
+        // request over, not the bounds alone.
+        let over_ceiling = at_ceiling + 1;
+        assert!(matches!(
+            filter_page_size(RectU16::new(0, 0, over_ceiling as u16, 16), &config, &caps),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
+        assert!(matches!(
+            filter_page_size(RectU16::new(0, 0, 16, over_ceiling as u16), &config, &caps),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
+    }
+
+    #[test]
+    fn a_filter_layer_inside_the_device_ceiling_but_past_the_pool_budget_is_limit_reached() {
+        // The default budget (4096) sits well under the default caps' device
+        // ceiling (8192), so a request that overflows only the former is
+        // distinguishable from one that overflows the latter.
+        let config = PageConfig::default();
+        let caps = caps();
+        assert!(config.max_page_size < max_texture_size(&caps));
+
+        let over_budget = config.max_page_size - u32::from(FILTER_ATLAS_PADDING) * 2 + 1;
+        assert!(matches!(
+            filter_page_size(RectU16::new(0, 0, over_budget as u16, 16), &config, &caps),
+            Err(EngineError::IntermediateTextureLimitReached)
+        ));
+        assert!(matches!(
+            filter_page_size(RectU16::new(0, 0, 16, over_budget as u16), &config, &caps),
+            Err(EngineError::IntermediateTextureLimitReached)
+        ));
+    }
+
+    #[test]
+    fn filter_page_size_never_overflows_padding_a_bounds_near_the_u16_ceiling() {
+        // `bounds` is `u16`-addressed, so its axes can sit right at 65535;
+        // the padded width/height are computed in `u32`, so this refuses as
+        // an ordinary over-ceiling request rather than wrapping or panicking.
+        let size = filter_page_size(
+            RectU16::new(0, 0, u16::MAX, u16::MAX),
+            &PageConfig::default(),
+            &caps(),
+        );
+        assert!(matches!(
+            size,
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
     }
 }
