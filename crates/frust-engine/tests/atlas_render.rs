@@ -222,6 +222,7 @@ impl Harness {
             &self.pipeline,
             &self.atlas,
             glyphs,
+            frust_engine::FrameTimestamps::inert(),
             lower_page,
         )
     }

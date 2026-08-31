@@ -2071,15 +2071,18 @@ impl SurfaceRenderer {
                 );
                 match result {
                     Ok(()) => {
-                        // The conversion pass itself is not timed: it is
-                        // recorded inside `UnpremultiplyPass::record`, which
-                        // takes no timestamp sink, so this arm's `blit` span
-                        // reads zero until that pass gains one.
+                        // The conversion pass itself: charged to `blit` with a
+                        // fresh pair from the same ring `encode_traced` just
+                        // recorded the frame's other spans into — `None` on an
+                        // inert ring (no `perf-trace`, or the device never got
+                        // `TIMESTAMP_QUERY`), exactly like every other pass.
                         present.record(
                             &device_handle.device,
                             &mut encoder,
                             intermediate_view,
                             &swapchain_view,
+                            frust_engine::FrameTimestamps::new(timestamps)
+                                .writes(frust_engine::EngineSpan::Blit),
                         );
                         timestamps.resolve(&mut encoder);
                         device_handle.queue.submit([encoder.finish()]);

@@ -247,7 +247,7 @@ fn through_the_present_pass() -> Vec<u8> {
         .expect("a well-formed frame encodes");
     // Into the SAME encoder, after the frame: one command buffer carries the
     // frame's passes and the conversion, in order.
-    present.record(&device, &mut encoder, &source, target.view());
+    present.record(&device, &mut encoder, &source, target.view(), None);
     queue.submit([encoder.finish()]);
     renderer.end_frame(&queue);
 

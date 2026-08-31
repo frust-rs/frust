@@ -55,7 +55,7 @@ use frust_render::{
 };
 use frust_scene::Scene;
 use frust_shell_common::perf::{
-    FramePasses, FrameStats, RenderSpans, SPAN_ADAPTER_READY, SPAN_DEVICE_READY,
+    FramePasses, FrameStats, GpuPasses, RenderSpans, SPAN_ADAPTER_READY, SPAN_DEVICE_READY,
     SPAN_FIRST_ENCODE_DONE, SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
     SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans, UiSpans,
 };
@@ -769,6 +769,20 @@ fn install_detached(
     Ok(())
 }
 
+/// This surface's most recent real GPU pass timing, folded into the
+/// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
+/// surface produces no such measurement (every tier but the engine one, an
+/// `engine-tier` build whose device never got `TIMESTAMP_QUERY`, or simply no
+/// reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
+    renderer.gpu_pass_timings().map(|timings| GpuPasses {
+        prepass: timings.prepass,
+        main: timings.main,
+        composite: timings.composite,
+        blit: timings.blit,
+    })
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// with its own `Instant`, recording the folded [`FramePasses`] through the
 /// single emitter, and stamping the first-encode/first-frame startup milestones.
@@ -826,15 +840,21 @@ fn render_frame(
     let submit_dur = submit_start.elapsed();
 
     // One folded frame record through the single emitter:
-    // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit.
-    frame_stats.record(FramePasses::from_split(
+    // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit,
+    // with this surface's real GPU pass timing attached when it produces one
+    // (engine tier, `perf-trace`, a device that offered `TIMESTAMP_QUERY`).
+    let mut passes = FramePasses::from_split(
         ui_spans,
         RenderSpans {
             encode: encode_dur,
             acquire: acquire_dur,
             submit: submit_dur,
         },
-    ));
+    );
+    if let Some(gpu) = gpu_passes(renderer) {
+        passes = passes.with_gpu(gpu);
+    }
+    frame_stats.record(passes);
     if frame_stats.should_emit() {
         frame_stats.emit_log();
     }

@@ -13,7 +13,9 @@ use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::Scene;
-use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
+use frust_shell_common::perf::{
+    self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
+};
 use frust_shell_common::{
     FrameMeta, RenderCommand, RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize,
 };
@@ -124,11 +126,20 @@ impl InlineExecutor {
 
     /// Record a gate-skipped frame (all-zero pass durations) so the skip counter
     /// accumulates in the perf line, mirroring the pre-split inline behavior.
+    ///
+    /// Still asks for this surface's real GPU pass timing: the reading lags
+    /// the calling frame by design (see [`SurfaceRenderer::gpu_pass_timings`]),
+    /// so a run of gate-skipped ticks would otherwise show `gpu_q=0` gaps in
+    /// the log even while the ring keeps a perfectly good recent reading.
     fn record_skip(&mut self) {
-        self.frame_stats.record(FramePasses {
+        let mut passes = FramePasses {
             skipped: true,
             ..FramePasses::default()
-        });
+        };
+        if let Some(gpu) = gpu_passes(&self.renderer) {
+            passes = passes.with_gpu(gpu);
+        }
+        self.frame_stats.record(passes);
         if self.frame_stats.should_emit() {
             self.frame_stats.emit_log();
         }
@@ -482,6 +493,23 @@ impl FrameExecutor {
     }
 }
 
+/// This surface's most recent real GPU pass timing, folded into the
+/// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
+/// surface produces no such measurement (every tier but the engine one, an
+/// `engine-tier` build whose device never got `TIMESTAMP_QUERY`, or simply no
+/// reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+///
+/// Shared by [`render_scene`] and [`InlineExecutor::record_skip`] below, the
+/// two frame-record sites in this module.
+fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
+    renderer.gpu_pass_timings().map(|timings| GpuPasses {
+        prepass: timings.prepass,
+        main: timings.main,
+        composite: timings.composite,
+        blit: timings.blit,
+    })
+}
+
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
 /// behind `perf_on` (the FFI-path perf convention: zero clock reads when
 /// disabled), recording the folded [`FramePasses`] through the single emitter
@@ -603,15 +631,21 @@ pub(crate) fn render_scene(
             Err(err) => log::error!("frust-shell-ios: render error: {err:#}"),
         }
 
-        // One folded frame record through the single emitter.
-        frame_stats.record(FramePasses::from_split(
+        // One folded frame record through the single emitter, with this
+        // surface's real GPU pass timing attached when it produces one
+        // (engine tier, `perf-trace`, a device that offered `TIMESTAMP_QUERY`).
+        let mut passes = FramePasses::from_split(
             ui,
             RenderSpans {
                 encode: encode_time,
                 acquire: acquire_time,
                 submit: submit_time,
             },
-        ));
+        );
+        if let Some(gpu) = gpu_passes(renderer) {
+            passes = passes.with_gpu(gpu);
+        }
+        frame_stats.record(passes);
         if frame_stats.should_emit() {
             frame_stats.emit_log();
         }

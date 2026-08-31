@@ -112,6 +112,7 @@ use glifo::{AtlasCommandRecorder, GlyphAtlas, PendingClearRect};
 
 use crate::EngineError;
 use crate::cache::images::{ATLAS_FORMAT_BYTES, AtlasRegion, ResidentImage};
+use crate::diag::{EngineSpan, FrameTimestamps};
 
 use super::GpuEncodedPaint;
 use super::config::GpuConfig;
@@ -935,12 +936,25 @@ impl AtlasRenderer {
     /// Returns how many instances were drawn — zero for an empty page, which
     /// costs no submit at all.
     ///
+    /// `timestamps` charges this pass to [`EngineSpan::Prepass`] — the atlas
+    /// replay's own recording site, one own-encoder submit per dirty page (see
+    /// this module's header), so several pages in one frame are several passes
+    /// summed into the one span. The fresh pair is asked for only once the
+    /// empty-page early return is behind us, so a page with nothing to draw
+    /// never spends a query pair on a pass that was never opened.
+    ///
     /// # Errors
     ///
     /// [`EngineError::AtlasError`] when the array has no layer `layer`;
     /// [`EngineError::AlphaCapacity`] when the page's coverage is past what a
     /// resource texture of this adapter's dimension can hold. Both leave the
     /// atlas exactly as it was — nothing is recorded before either is checked.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one page's whole draw call: device/queue, the pipeline, the \
+                  array it draws into, which layer, the page's own instances, \
+                  and the timestamp sink, each owned by a different caller"
+    )]
     pub fn render_page(
         &mut self,
         device: &wgpu::Device,
@@ -949,6 +963,7 @@ impl AtlasRenderer {
         atlas: &AtlasArray,
         layer: u32,
         page: &mut AtlasPageBuffers,
+        timestamps: FrameTimestamps<'_>,
     ) -> Result<u32, EngineError> {
         if page.is_empty() {
             return Ok(0);
@@ -1012,7 +1027,7 @@ impl AtlasRenderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: timestamps.writes(EngineSpan::Prepass),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1042,6 +1057,17 @@ impl AtlasRenderer {
     /// [`super::pipelines::atlas_strip_desc`]: a bind group is built against
     /// the pipeline's own derived layout, so another variant's is rejected even
     /// where the two layouts are structurally identical.
+    ///
+    /// `timestamps` is passed straight through to [`Self::render_page`] for
+    /// each dirty page replayed — see that method's docs for the [`EngineSpan`]
+    /// it charges to and why an empty page spends no query pair on it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the whole replay pass's inputs: device/queue, the pipeline, \
+                  the array and the glyph source it drains, the timestamp \
+                  sink, and the caller's own lowering closure, each owned by \
+                  a different part of the renderer"
+    )]
     pub fn render_pending<L>(
         &mut self,
         device: &wgpu::Device,
@@ -1049,6 +1075,7 @@ impl AtlasRenderer {
         pipeline: &wgpu::RenderPipeline,
         atlas: &AtlasArray,
         glyphs: &mut GlyphAtlas,
+        timestamps: FrameTimestamps<'_>,
         mut lower: L,
     ) -> AtlasRenderReport
     where
@@ -1087,6 +1114,7 @@ impl AtlasRenderer {
                 atlas,
                 recorder.page_index,
                 &mut buffers,
+                timestamps,
             ) {
                 Ok(0) => {}
                 Ok(instances) => {

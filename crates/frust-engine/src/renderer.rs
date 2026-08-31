@@ -753,7 +753,9 @@ impl EngineRenderer {
         // above are: acknowledging is what lifts the eviction deferral, so an
         // acknowledgement for a replay that returned early would let `glifo`
         // free and re-let the very rectangles those commands still name.
-        if self.compiler.glyph_replay_pending() && self.replay_glyph_pages(device, queue) {
+        if self.compiler.glyph_replay_pending()
+            && self.replay_glyph_pages(device, queue, timestamps)
+        {
             self.compiler.acknowledge_glyph_replay();
         }
 
@@ -860,8 +862,18 @@ impl EngineRenderer {
     /// offering them. A page the lowering *declined* is not a `false` — it was
     /// offered to the array and counted refused, and no later frame could lower
     /// it either.
+    ///
+    /// `timestamps` is passed straight through to
+    /// [`gpu::atlas::AtlasRenderer::render_pending`], which charges each dirty
+    /// page's own pass to [`EngineSpan::Prepass`] — this is the frame's own
+    /// Prepass recording site.
     #[must_use]
-    fn replay_glyph_pages(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+    fn replay_glyph_pages(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        timestamps: FrameTimestamps<'_>,
+    ) -> bool {
         if self.resources.atlas.is_none() {
             return false;
         }
@@ -897,6 +909,7 @@ impl EngineRenderer {
                 &pipeline,
                 atlas,
                 compiler.glyph_atlas_mut(),
+                timestamps,
                 |recorder, buffers| lower_atlas_page(recorder, buffers, lowering, page),
             )
         };

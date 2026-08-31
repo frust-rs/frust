@@ -157,12 +157,21 @@ impl UnpremultiplyPass {
     /// `frust-render`'s own premultiply pass: it names the source view, which a
     /// resize replaces, so caching it would need an invalidation seam to buy one
     /// allocation a frame.
+    ///
+    /// `timestamp_writes` is the pass's own `timestamp_writes`, verbatim — the
+    /// host asks its `frust_gpu::diag::TimestampRing` (via
+    /// `frust_engine::FrameTimestamps`) for one fresh pair charged to
+    /// [`crate::diag::EngineSpan::Blit`] and hands it straight through, `None`
+    /// on every arm that does not time this pass (an inert ring, a tier build
+    /// with no `perf-trace`, or the `EngineDirect` arm this pass never runs on
+    /// at all).
     pub fn record(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         source_view: &wgpu::TextureView,
         target_view: &wgpu::TextureView,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frust-engine unpremultiply bind group"),
@@ -184,7 +193,7 @@ impl UnpremultiplyPass {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });

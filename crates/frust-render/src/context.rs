@@ -34,6 +34,29 @@ pub(crate) fn vello_optional_features() -> wgpu::Features {
     wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
 }
 
+/// The `wgpu::Features` a `perf-trace` build should additionally ask for,
+/// given what `adapter_features` the live adapter actually offers and
+/// whether this build compiled the `perf-trace` feature in.
+///
+/// Mirrors `frust_gpu::context`'s own `required_features` — the identical
+/// policy, applied to this crate's own hand-rolled device request rather than
+/// `frust-gpu`'s: **empty** by default, and even under `perf_trace`,
+/// `TIMESTAMP_QUERY` only when the adapter offers it. A required feature is a
+/// hard device-creation failure on an adapter lacking it, so this can never
+/// turn a working adapter into no adapter at all — the engine tier's
+/// GPU-timestamp ring (`frust_gpu::diag::TimestampRing`) simply stays inert
+/// (`gpu_q=0`) on a device that did not get the feature, exactly as it does
+/// in a build that did not compile `perf-trace` in. A plain `bool` parameter
+/// rather than reading `cfg!` internally, so both branches are unit-testable
+/// regardless of which features this crate was compiled with.
+fn perf_trace_features(adapter_features: wgpu::Features, perf_trace: bool) -> wgpu::Features {
+    if perf_trace && adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        wgpu::Features::TIMESTAMP_QUERY
+    } else {
+        wgpu::Features::empty()
+    }
+}
+
 /// Whether a `FRUST_*` boolean env flag is set to a non-zero value, checking
 /// both the compile-time (`option_env!`) and runtime (`std::env::var`) halves —
 /// the compile-time-or-runtime parsing every shipping flag (`FRUST_TRACE`,
@@ -1851,7 +1874,8 @@ impl RenderContext {
         }
         self.selected_tier = tier;
 
-        let required_features = adapter.features() & vello_optional_features();
+        let required_features = (adapter.features() & vello_optional_features())
+            | perf_trace_features(adapter.features(), cfg!(feature = "perf-trace"));
         let required_limits = effective_limits(adapter.limits(), is_ios_simulator());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -2328,6 +2352,33 @@ mod tests {
         // honours a baked-in compile-time value, and vice versa.
         assert!(env_flag_enabled(Some("1"), Some("0".to_string())));
         assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
+    }
+
+    #[test]
+    fn perf_trace_features_off_asks_for_nothing() {
+        assert_eq!(
+            perf_trace_features(wgpu::Features::TIMESTAMP_QUERY, false),
+            wgpu::Features::empty()
+        );
+    }
+
+    #[test]
+    fn perf_trace_features_on_with_the_adapter_offering_it_asks_for_timestamp_query() {
+        assert_eq!(
+            perf_trace_features(wgpu::Features::TIMESTAMP_QUERY, true),
+            wgpu::Features::TIMESTAMP_QUERY
+        );
+    }
+
+    #[test]
+    fn perf_trace_features_on_without_the_adapter_offering_it_asks_for_nothing() {
+        // Never asks for a feature the adapter does not have, even under
+        // `perf_trace` — a required feature the adapter lacks is a hard
+        // device-creation failure.
+        assert_eq!(
+            perf_trace_features(wgpu::Features::empty(), true),
+            wgpu::Features::empty()
+        );
     }
 
     #[test]
