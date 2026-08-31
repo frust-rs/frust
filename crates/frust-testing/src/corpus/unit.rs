@@ -85,6 +85,8 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         blur_rrect(),
         layer_alpha(),
         layer_balance(),
+        layer_sibling_fan(),
+        layer_nested_pair(),
         clear_rect(),
         path_fill(),
         path_stroke(),
@@ -609,6 +611,162 @@ fn layer_balance() -> CorpusCase {
         ],
         eroded_interior: false,
         about: "a balanced opacity layer plus one extra pop, documented as ignored",
+    }
+}
+
+/// Sibling ISOLATED layers: four `Command::PushLayer`/`Command::PopLayer`
+/// pairs opened and fully closed one after another — the SAME nesting depth,
+/// never nested inside each other — each over its own non-overlapping band.
+///
+/// `frust_engine::schedule::mod`'s own module docs name this exact shape:
+/// "isolated layers *beside* each other under one parent, a fan of any
+/// width... a staggered list entrance fading five rows at once is served on
+/// the same two pages". A fan wider than two forces the scheduler's
+/// two-page ping-pong to [cut](frust_engine::schedule) the parent's round
+/// early so the third and fourth siblings can each take a freed page in
+/// turn — a path the scheduler's own unit tests already exercise, but which
+/// no `Scene` a `SceneBuilder` could actually produce had pinned pixels for
+/// before this case, despite being reachable from ordinary widget code (any
+/// screen that fades in more than two rows/cards at once).
+fn layer_sibling_fan() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        // Four half-opacity siblings, each opened and closed before the next
+        // starts — one non-overlapping band each, so every probe reads a
+        // single layer's own composite with no risk of a second sibling's
+        // paint bleeding into it.
+        let bands: [(f64, f64); 4] = [(4.0, 16.0), (18.0, 30.0), (32.0, 44.0), (46.0, 58.0)];
+        for (top, bottom) in bands {
+            let rect = Rect::new(4.0, top, 60.0, bottom);
+            builder.push_layer(rect, 0.5);
+            builder.fill_rect(rect, Brush::Solid(WHITE));
+            builder.pop_layer();
+        }
+    }
+    CorpusCase {
+        spec: case("unit-layer-sibling-fan").with_base_color(BLACK),
+        record,
+        probes: &[
+            Probe {
+                x: 32,
+                y: 10,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 128,
+                    tolerance: 2,
+                },
+                why: "the first sibling's half-opacity white over black composites to 255 * 0.5",
+            },
+            Probe {
+                x: 32,
+                y: 24,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 128,
+                    tolerance: 2,
+                },
+                why: "the second sibling composites identically to the first — same depth, \
+                      not compounding",
+            },
+            Probe {
+                x: 32,
+                y: 38,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 128,
+                    tolerance: 2,
+                },
+                why: "the third sibling — the one a two-page ping-pong must cut the parent's \
+                      round to serve",
+            },
+            Probe {
+                x: 32,
+                y: 52,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 128,
+                    tolerance: 2,
+                },
+                why: "the fourth sibling composites identically to every other one",
+            },
+            Probe {
+                x: 2,
+                y: 2,
+                expect: Expect::Exact([0, 0, 0, 255]),
+                why: "outside every band the opaque black backdrop is untouched",
+            },
+        ],
+        eroded_interior: false,
+        about: "four half-opacity sibling layers at the same nesting depth, never nested — the \
+                staggered list-entrance shape a fan wider than two forces the scheduler to cut \
+                a round to serve",
+    }
+}
+
+/// A nested isolated PAIR: one isolated `PushLayer` (the parent) holding two
+/// more isolated `PushLayer`s at the depth below it, siblings of EACH OTHER,
+/// non-overlapping bands inside the parent's own rect.
+///
+/// `frust_engine::schedule::mod`'s own module docs name this exact
+/// combination: "an isolated parent's *second* isolated child is served
+/// while a chain hanging off it is not — the parent's page is one of the two
+/// groups from its first cut onwards". [`layer_alpha`] already pins a pure
+/// CHAIN three deep and [`layer_sibling_fan`] a pure fan with no isolated
+/// ancestor; this case is the one that combines the two — nesting AND a
+/// sibling fan under one isolated parent — the exact combination the
+/// hoist+cutting diff newly serves with zero pixel verification before this
+/// case.
+fn layer_nested_pair() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        builder.push_layer(Rect::new(4.0, 4.0, 60.0, 60.0), 0.5);
+        builder.push_layer(Rect::new(4.0, 4.0, 60.0, 30.0), 0.5);
+        builder.fill_rect(Rect::new(4.0, 4.0, 60.0, 30.0), Brush::Solid(WHITE));
+        builder.pop_layer();
+        builder.push_layer(Rect::new(4.0, 32.0, 60.0, 60.0), 0.5);
+        builder.fill_rect(Rect::new(4.0, 32.0, 60.0, 60.0), Brush::Solid(WHITE));
+        builder.pop_layer();
+        builder.pop_layer();
+    }
+    CorpusCase {
+        spec: case("unit-layer-nested-pair").with_base_color(BLACK),
+        record,
+        probes: &[
+            Probe {
+                x: 32,
+                y: 16,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 64,
+                    tolerance: 2,
+                },
+                why: "the first isolated child composes its own 0.5 with the isolated parent's \
+                      0.5: 255 * 0.5 * 0.5 over black",
+            },
+            Probe {
+                x: 32,
+                y: 46,
+                expect: Expect::Channel {
+                    channel: 0,
+                    value: 64,
+                    tolerance: 2,
+                },
+                why: "the second isolated child — the parent's page reused for its sibling — \
+                      composites identically to the first",
+            },
+            Probe {
+                x: 2,
+                y: 2,
+                expect: Expect::Exact([0, 0, 0, 255]),
+                why: "outside the isolated parent's own rect the opaque black backdrop is \
+                      untouched",
+            },
+        ],
+        eroded_interior: false,
+        about: "an isolated parent holding two isolated children as siblings of each other — \
+                nesting combined with a sibling fan under one isolated ancestor",
     }
 }
 

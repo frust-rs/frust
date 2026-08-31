@@ -120,6 +120,8 @@ const PHASE_CASES: &[&str] = &[
     "unit-blur-rrect",
     "unit-layer-alpha",
     "unit-layer-balance",
+    "unit-layer-sibling-fan",
+    "unit-layer-nested-pair",
     "unit-clear-rect",
     "unit-path-fill",
     "unit-path-stroke",

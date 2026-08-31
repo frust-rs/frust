@@ -145,6 +145,8 @@ fn family_of(name: &str) -> &'static str {
         // per-stack `clip_balance`/`layer_balance` cases).
         "unit-layer-alpha"
         | "unit-layer-balance"
+        | "unit-layer-sibling-fan"
+        | "unit-layer-nested-pair"
         | "unit-clear-rect"
         | "unit-snapshot-bracket"
         | "unit-snapshot-balance"
