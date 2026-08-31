@@ -53,6 +53,7 @@ pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
+use std::collections::HashSet;
 use std::sync::Once;
 
 use kurbo::{
@@ -296,6 +297,13 @@ pub struct SceneCompiler {
     run_routes: Vec<RunRoute>,
     /// How many of [`Self::run_routes`] the draw walk has consumed.
     next_run: usize,
+    /// Scratch for the collect walk's distinct-glyph count, retained across
+    /// runs and frames for its allocation alone. A run's admission is charged
+    /// against the atlas budget at that count (see
+    /// [`crate::text::RunKey::distinct_glyphs`]), and counting it needs a set;
+    /// one owned here is one not allocated per run. It carries nothing between
+    /// calls — `RunKey::for_run` clears it before it counts.
+    run_glyph_ids: HashSet<u32>,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -370,6 +378,7 @@ impl SceneCompiler {
             glyphs: GlyphPrepCache::default(),
             run_routes: Vec::new(),
             next_run: 0,
+            run_glyph_ids: HashSet::new(),
             hint_text: false,
         }
     }
@@ -1110,6 +1119,7 @@ impl SceneCompiler {
                         self.hint_text,
                         font_has_color_glyphs(run.font.font()),
                         context_color,
+                        &mut self.run_glyph_ids,
                     );
                     let route = self.glyph_atlas.classify_run(&key);
                     self.run_routes.push(route);
@@ -1130,12 +1140,13 @@ impl SceneCompiler {
     /// (see [`crate::text::atlas_policy::AtlasPolicy::admit_run`]). The collect
     /// walk answered every run of this frame from the population the frame
     /// opened with, because `glifo` inserts nothing until the draw walk reaches
-    /// the run; without this second test a frame one entry below the ceiling
+    /// the run; without this second test a frame one entry below the budget
     /// would admit every run it carries and overshoot by as much as one frame's
-    /// whole text. Here the count is the real one — every earlier run of this
-    /// same frame has already inserted — so the bound holds within a frame and
-    /// not merely across frames. It can only ever *narrow* an answer, which is
-    /// the outline path: correct pixels, and the only direction that is safe to
+    /// whole text. Here the population is the real one — every earlier run of
+    /// this same frame has already inserted, and the re-test charges those
+    /// insertions before it answers — so the bound holds within a frame and not
+    /// merely across frames. It can only ever *narrow* an answer, which is the
+    /// outline path: correct pixels, and the only direction that is safe to
     /// decide late.
     fn take_run_route(&mut self) -> Option<RunRoute> {
         let route = self.run_routes.get(self.next_run).copied();

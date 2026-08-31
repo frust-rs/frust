@@ -112,19 +112,45 @@
 //! population is an image *outage*: every rectangle a glyph holds is one an
 //! image cannot have, and a full atlas answers `ImageSkip::NoAtlasSpace`
 //! rather than making room. `glifo`'s LRU bounds residency only over its own 64-frame
-//! horizon, which a fast enough churn outruns. So the policy carries a ceiling
-//! of its own — [`glyph_entry_ceiling`], a fraction of the array's texels
-//! divided by what a typical glyph occupies — and stops *offering* the atlas
-//! route once it is reached ([`OutlineReason::ResidencyFull`]). Text keeps
+//! horizon, which a fast enough churn outruns. So the policy rations the
+//! quantity the two classes actually compete for — *texels* — and stops
+//! offering the atlas route once glyph residency would spend more than
+//! [`glyph_texel_budget`] of them ([`OutlineReason::ResidencyFull`]). Text keeps
 //! drawing; it draws as outlines until the LRU gives space back.
 //!
-//! A count of entries is only a count of texels while the entries are typical,
-//! so the ceiling is restated in the size class being asked about
-//! ([`entry_ceiling_at`]): a glyph at [`MAX_CACHED_FONT_SIZE`] occupies some
-//! sixty-four times a typical one and is admitted in proportionally smaller
-//! numbers. Otherwise a few hundred large glyphs fill the whole shared array
-//! with the entry count still far below its bound, and the images they
-//! displaced are refused `ImageSkip::NoAtlasSpace` by a guard that never fired.
+//! The bound has to be *additive*, and that is the whole design constraint. A
+//! rule comparing the population's size to a per-size-class allowance is not:
+//! ration a 44 px run against "how many 44 px glyphs fit" and a screen of body
+//! text locks a title out of the atlas permanently, while two size classes
+//! that each stay under their own allowance together spend the share twice
+//! over. So there is one running total, [`AtlasPolicy::resident_texels`] —
+//! every resident entry charged at what a glyph of *its* size occupies
+//! ([`glyph_texels_at`]) — and one question asked of it: does this run's own
+//! demand still fit under the budget. One class's refusal then depends on the
+//! others only through the texels they really hold, which is the coupling that
+//! is true.
+//!
+//! Charged rather than measured, because `glifo` 0.3.0 will not say. Its
+//! `GlyphAtlas::all_keys` and `stats` — the two entries that could price the
+//! resident population from the outside, once per frame — are both behind
+//! `#[cfg(all(debug_assertions, feature = "std"))]` and simply do not exist in
+//! a release build. What is observable is the entry *count*, so the total is
+//! maintained incrementally instead: entries appearing between two run
+//! boundaries are charged at the size of the run that was admitted
+//! ([`AtlasPolicy::charge_admissions`]), and an eviction pass discharges the
+//! total in proportion to the entries it reaped
+//! ([`AtlasPolicy::discharge_evictions`]) — which holds the *mean* charge per
+//! entry across a reap, and takes the total to exactly zero when the map
+//! empties, so the estimate cannot drift upward for good.
+//!
+//! [`glyph_texels_at`] is deliberately an over-estimate: it prices a glyph at
+//! its em square plus `glifo`'s padding, where a Latin lowercase letter is
+//! nearer six tenths of that wide. Over-estimating is the safe direction — the
+//! images' half of the array is protected by construction, and glyph residency
+//! simply stops a little short of the half it is entitled to. Under-estimating
+//! would hand the images' share away silently, which is why the model is the
+//! square (a CJK or full-width glyph, the widest thing routinely cached) rather
+//! than the average Latin extent.
 //!
 //! And the bound is tested twice: once per run in the collect phase, and again
 //! as each route is *consumed* ([`AtlasPolicy::admit_run`]). The second test is
@@ -132,6 +158,18 @@
 //! `glifo` inserts nothing until a run is drawn, so every run of one frame is
 //! classified from the population that frame opened with, and one screen of new
 //! text would otherwise overshoot the share by its whole self.
+//!
+//! A run is asked about at its own *demand* rather than one entry's, for the
+//! same reason. `glifo` owns the per-glyph loop once a run is admitted — it
+//! keys, allocates and inserts every glyph of the run itself — so the policy
+//! gets no say between the first glyph and the last, and a single run of ten
+//! thousand distinct glyphs would spend the whole share inside one admission
+//! that tested as fitting. [`RunKey::distinct_glyphs`] is what bounds it: the
+//! count of distinct glyph ids the run carries, which is what its entries can
+//! at worst grow to, charged up front. Distinct ids rather than draws, because
+//! a paragraph repeating a letter two hundred times is two hundred draws and
+//! one entry, and charging it its draws would refuse steady-state text that is
+//! already entirely resident.
 //!
 //! # A page this tier cannot replay must never have been cached
 //!
@@ -176,7 +214,10 @@
               caller; the per-glyph half — `collect_glyph`, `slot`, \
               `GlyphUpload` and `AtlasPass::uploads` — is host-tested but \
               unreachable while `glifo` owns the allocation, since it keys and \
-              rasterizes every cached glyph itself (see `atlas_mut`)"
+              rasterizes every cached glyph itself (see `atlas_mut`); and the \
+              readings of the budget — `entry_ceiling_at`, `max_entries`, \
+              `texel_budget`, `resident_texels` — are reporting rather than \
+              routing, so only the cases read them"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -253,99 +294,167 @@ const NEARLY_ZERO: f64 = 1.0 / 4096.0;
 /// no per-application answer: a text-heavy screen and an image-heavy one are
 /// both ordinary, and a bound exists to stop a *runaway*, not to ration a
 /// steady state (a steady state never reaches it — see
-/// [`glyph_entry_ceiling`]).
+/// [`glyph_texel_budget`]).
 const GLYPH_ATLAS_SHARE: u64 = 2;
 
-/// Texels a typical padded glyph slot occupies, for sizing the entry ceiling.
+/// Texels one glyph slot occupies at [`TYPICAL_GLYPH_SIZE`].
 ///
-/// 32x32. A 16 px Latin glyph rasterizes to roughly 10x16 plus `glifo`'s one
-/// texel of padding on each side; 32 square is comfortably above that and
-/// still below what a 64 px glyph takes, so the ceiling it implies is an
-/// *estimate* of how many glyphs fit rather than a promise. It does not need to
-/// be exact: the packer refuses an allocation it genuinely has no room for
-/// regardless, and this ceiling exists to stop the population growing to that
-/// point in the first place.
-const TYPICAL_GLYPH_TEXELS: u64 = 32 * 32;
+/// 18x18: the em square at 16 px plus `glifo`'s one texel of padding on each
+/// side. It is the price list's anchor, and the whole population is charged
+/// against it by [`glyph_texels_at`].
+///
+/// Modelled as a *square* rather than as the extent a Latin letter actually
+/// rasterizes to (nearer 10x16 at this size), because the estimate has to be an
+/// over-estimate in the class it will really meet: a CJK or full-width glyph
+/// fills its em box, and pricing every entry at the widest thing routinely
+/// cached is what keeps glyph residency from quietly spending the images' half
+/// of the array. Over-estimating costs glyphs a little of the share they were
+/// entitled to; under-estimating costs the images theirs.
+///
+/// It does not need to be exact: the packer refuses an allocation it genuinely
+/// has no room for regardless, and this budget exists to stop the population
+/// growing to that point in the first place.
+const TYPICAL_GLYPH_TEXELS: u64 = 18 * 18;
 
-/// The device font size [`TYPICAL_GLYPH_TEXELS`] was measured at, in pixels.
+/// The device font size [`TYPICAL_GLYPH_TEXELS`] is stated at, in pixels.
 ///
 /// The other half of that estimate, and the reason it can be scaled rather than
-/// only asserted: 32x32 is what a *16 px* glyph is worth, so a glyph drawn at
+/// only asserted: 18x18 is what a *16 px* glyph is worth, so a glyph drawn at
 /// some other device size is worth that figure scaled by the square of the
 /// ratio — a glyph's bitmap grows with the square of its size, which is the
 /// same relation [`MAX_CACHED_FONT_SIZE`] is argued from.
 ///
-/// Without it the ceiling counts every entry as a typical one, and the entry
+/// Without it the accounting counts every entry as a typical one, and an entry
 /// count stops being a proxy for texels at all: at [`MAX_CACHED_FONT_SIZE`] a
-/// slot is some sixteen times a typical one, so a few hundred large glyphs fill
-/// the whole shared array while the entry count is still an order of magnitude
-/// below its bound — text starving images out of the allocator with the guard
-/// that exists to prevent exactly that never firing. See [`entry_ceiling_at`].
+/// slot is sixty-four times a typical one (eight times the size, squared), so a
+/// few hundred large glyphs fill the whole shared array while the entry count is
+/// still an order of magnitude below any bound — text starving images out of
+/// the allocator with the guard that exists to prevent exactly that never
+/// firing. See [`glyph_texels_at`].
 const TYPICAL_GLYPH_SIZE: f32 = 16.0;
 
-/// The fewest entries the ceiling ever admits.
+/// The fewest typical glyphs the budget is ever sized for.
 ///
 /// A deliberately tiny atlas — a test constraining the packer, a downlevel
 /// adapter clamped to a small texture — must still cache *something*, or the
-/// ceiling would turn the atlas off on exactly the devices it was budgeted for.
+/// budget would turn the atlas off on exactly the devices it was budgeted for.
+/// The floor is deliberately allowed to exceed the array's own texel count on
+/// such a device: the packer still refuses what it has no room for, and the
+/// alternative is a cache that is off rather than bounded.
 const MIN_GLYPH_ENTRIES: usize = 256;
 
-/// The most entries the ceiling ever admits.
+/// The most typical glyphs the budget is ever sized for.
 ///
 /// The entry map's own bookkeeping is not free, and a population past this is
 /// past what any one surface's text can be reusing; a larger array should widen
 /// the *images*' share, not keep growing a glyph population nothing looks up.
+///
+/// It bounds the entry *count* as well as the texels, without a second rule:
+/// [`glyph_texels_at`] never charges less than [`TYPICAL_GLYPH_TEXELS`], so a
+/// budget of `n` typical glyphs' texels cannot hold more than `n` entries
+/// whatever sizes they are drawn at.
 const MAX_GLYPH_ENTRIES: usize = 65_536;
 
-/// How many glyph entries `pages`' geometry admits at once.
+/// How many texels glyph residency may hold at once in `pages`' geometry.
 ///
-/// [`GLYPH_ATLAS_SHARE`] of the array's whole texel count, divided by
-/// [`TYPICAL_GLYPH_TEXELS`] and clamped into
-/// `MIN_GLYPH_ENTRIES..=MAX_GLYPH_ENTRIES`. Derived from the geometry rather
-/// than fixed, because the mobile and desktop budgets differ by eight times
-/// their area and a constant sized for one would either strand the other's
-/// atlas or fail to bound it.
+/// [`GLYPH_ATLAS_SHARE`] of the array's whole texel count, clamped to what
+/// `MIN_GLYPH_ENTRIES..=MAX_GLYPH_ENTRIES` typical glyphs are worth. Derived
+/// from the geometry rather than fixed, because the mobile and desktop budgets
+/// differ by eight times their area and a constant sized for one would either
+/// strand the other's atlas or fail to bound it.
+///
+/// This is the one bound the policy enforces. It is additive by construction —
+/// a total against a total — which is what an entry count compared to a
+/// per-size allowance is not (see this module's doc).
 #[must_use]
-pub(crate) fn glyph_entry_ceiling(pages: AtlasConfig) -> usize {
+pub(crate) fn glyph_texel_budget(pages: AtlasConfig) -> u64 {
     let (width, height) = pages.atlas_size;
     let layers = u64::try_from(pages.max_atlases).unwrap_or(u64::MAX).max(1);
     let texels = u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(layers);
 
-    let entries = texels / GLYPH_ATLAS_SHARE / TYPICAL_GLYPH_TEXELS;
+    (texels / GLYPH_ATLAS_SHARE).clamp(
+        MIN_GLYPH_ENTRIES as u64 * TYPICAL_GLYPH_TEXELS,
+        MAX_GLYPH_ENTRIES as u64 * TYPICAL_GLYPH_TEXELS,
+    )
+}
+
+/// How many *typical* glyphs `pages`' geometry admits at once.
+///
+/// [`glyph_texel_budget`] read as a population rather than as an area, for
+/// reporting and for the cases that reason in entries. Nothing routes on it —
+/// the route is decided against the texel budget itself — so it cannot drift
+/// from what is enforced: it is that same number divided by the price of one
+/// typical glyph, and the clamp it lands inside is the budget's own.
+#[must_use]
+pub(crate) fn glyph_entry_ceiling(pages: AtlasConfig) -> usize {
+    let entries = glyph_texel_budget(pages) / TYPICAL_GLYPH_TEXELS;
     usize::try_from(entries)
         .unwrap_or(MAX_GLYPH_ENTRIES)
         .clamp(MIN_GLYPH_ENTRIES, MAX_GLYPH_ENTRIES)
 }
 
-/// How many entries of device size `size` a ceiling of `entries` typical glyphs
-/// admits.
+/// What one resident glyph of device size `size` is charged against the budget.
 ///
-/// [`glyph_entry_ceiling`] counts *typical* glyphs — [`TYPICAL_GLYPH_TEXELS`]
-/// apiece, measured at [`TYPICAL_GLYPH_SIZE`] — so a population of larger ones
-/// spends the share it bounds several times over before the count is reached.
-/// This is that ceiling restated in the size class actually being asked about:
-/// the same texel share divided by what a glyph of *this* size occupies, which
-/// is the typical figure scaled by the square of the size ratio. At
-/// [`MAX_CACHED_FONT_SIZE`] that is a sixty-fourth of the entries, which is the
-/// point — sixty-four times the texels apiece.
+/// [`TYPICAL_GLYPH_TEXELS`] scaled by the square of the size ratio: a glyph's
+/// bitmap grows with the square of its size, so a glyph at
+/// [`MAX_CACHED_FONT_SIZE`] costs sixty-four typical ones. Pricing each entry
+/// at its own size is what makes the running total additive across size
+/// classes — a hundred small entries and one large one cost exactly what they
+/// occupy, rather than counting against a ceiling stated in somebody else's
+/// units.
 ///
-/// A size at or below [`TYPICAL_GLYPH_SIZE`] gets `entries` unchanged rather
-/// than more. The entry map's own bookkeeping is what bounds the small end (see
-/// [`MAX_GLYPH_ENTRIES`]), and widening it for small text would be a second
-/// change hiding inside a correction to the large end.
+/// A size at or below [`TYPICAL_GLYPH_SIZE`] is charged the typical price
+/// rather than less. The entry map's own bookkeeping is what bounds the small
+/// end (see [`MAX_GLYPH_ENTRIES`]), and pricing 6 px text at a ninth of a
+/// typical glyph would let the map grow nine times as large for the same
+/// texels.
+#[must_use]
+pub(crate) fn glyph_texels_at(size: f32) -> u64 {
+    debug_assert!(
+        size.is_finite(),
+        "a non-finite size never reaches a charge: `quantize_font_size` refuses \
+         it and `absorbed_scale` refuses the transforms that could produce it"
+    );
+    // `f32::max` answers the operand that is not NaN, so a NaN that reached a
+    // release build is priced as typical rather than poisoning the total.
+    let scale = f64::from(size.max(TYPICAL_GLYPH_SIZE)) / f64::from(TYPICAL_GLYPH_SIZE);
+    let texels = TYPICAL_GLYPH_TEXELS as f64 * scale * scale;
+    // Finite by construction: `scale` is at least one, and `size` is a
+    // quantized font size at or under `MAX_CACHED_FONT_SIZE` by the time any
+    // caller charges it.
+    texels as u64
+}
+
+/// How many entries of device size `size` fit in the texels `entries` typical
+/// glyphs occupy.
 ///
-/// Never zero: an atlas that admits no glyph at all at some size is the cache
-/// turned off rather than bounded, and [`MIN_GLYPH_ENTRIES`] exists to say that
-/// is never the answer.
+/// The budget restated as a homogeneous population at one size — what a screen
+/// drawn entirely at `size` could hold. It is a *reading* of the bound, not the
+/// bound: nothing routes on it, because a real population is mixed and the rule
+/// that decides a route is the additive total (see [`glyph_texels_at`]). An
+/// earlier revision did route on it, comparing the whole population's count
+/// against one size class's allowance, and that is precisely the non-additive
+/// shape this file no longer has.
+///
+/// A size at or below [`TYPICAL_GLYPH_SIZE`] reads `entries` unchanged, on the
+/// same terms [`glyph_texels_at`] charges it.
+///
+/// Never zero: a reading of "no glyph of this size fits at all" is the cache
+/// switched off rather than bounded, so one entry is the floor here.
+/// [`MIN_GLYPH_ENTRIES`] is a different floor and lives on the budget itself —
+/// it says how small a *budget* may get, not how small this restatement of an
+/// arbitrary `entries` may read.
 #[must_use]
 pub(crate) fn entry_ceiling_at(entries: usize, size: f32) -> usize {
-    let scale = f64::from(size.max(TYPICAL_GLYPH_SIZE)) / f64::from(TYPICAL_GLYPH_SIZE);
-    let admitted = entries as f64 / (scale * scale);
-    // Finite by construction: `scale` is at least one and `size` is a quantized,
-    // in-range font size, so the quotient is between one and `entries`.
-    (admitted as usize).max(1)
+    let cost = glyph_texels_at(size);
+    let texels = u64::try_from(entries)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(TYPICAL_GLYPH_TEXELS);
+    usize::try_from(texels / cost.max(1))
+        .unwrap_or(MAX_GLYPH_ENTRIES)
+        .max(1)
 }
 
 /// The scale `glifo` will absorb out of `transform` into the font size, or
@@ -457,8 +566,9 @@ pub(crate) enum OutlineReason {
     /// would take the page's ordinary glyphs down with it (see this module's
     /// doc).
     ColorFont,
-    /// Glyph residency is at [`glyph_entry_ceiling`], so a further entry would
-    /// be taken out of the images' share of the shared allocator.
+    /// Admitting this run would take glyph residency past
+    /// [`glyph_texel_budget`], so its entries would be taken out of the images'
+    /// share of the shared allocator.
     ResidencyFull,
     /// Asked outside the frame's collect phase, so there was nothing to collect
     /// into (see this module's doc).
@@ -479,6 +589,11 @@ pub(crate) struct AtlasRun {
     font_index: u32,
     /// The run's font size, snapped to [`SIZE_QUANTUM`].
     size: f32,
+    /// The most entries this run can add, carried through from
+    /// [`RunKey::distinct_glyphs`] so [`AtlasPolicy::admit_run`] can ask the
+    /// same question the collect phase asked. A *routing* quantity, not part of
+    /// the identity: [`AtlasRun::key`] never reads it.
+    distinct_glyphs: u32,
     /// Whether the run's outlines are hinted.
     hinted: bool,
     /// The context colour a COLR glyph resolves against.
@@ -493,6 +608,12 @@ impl AtlasRun {
     #[must_use]
     pub(crate) fn size(&self) -> f32 {
         self.size
+    }
+
+    /// The most entries drawing this run can add to the atlas.
+    #[must_use]
+    pub(crate) fn distinct_glyphs(&self) -> u32 {
+        self.distinct_glyphs
     }
 
     /// The cache key for `glyph_id` drawn at horizontal fraction
@@ -606,11 +727,12 @@ impl AtlasPass {
 /// The run identity a caller hands [`AtlasPolicy::classify_run`], before
 /// quantization.
 ///
-/// Two of its fields are *routing* inputs rather than parts of the identity —
-/// [`transform`](Self::transform) and [`color_font`](Self::color_font). They
-/// live here because the route is decided in one call from one value, and
-/// neither reaches a cache key: an [`AtlasRun`] carries only what
-/// [`AtlasRun::key`] hashes.
+/// Three of its fields are *routing* inputs rather than parts of the identity —
+/// [`transform`](Self::transform), [`color_font`](Self::color_font) and
+/// [`distinct_glyphs`](Self::distinct_glyphs). They live here because the route
+/// is decided in one call from one value, and none of them reaches a cache key:
+/// an [`AtlasRun`] carries only what [`AtlasRun::key`] hashes, plus the demand
+/// [`AtlasPolicy::admit_run`] has to re-ask with.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RunKey {
     /// The font blob's process-unique id (`peniko::Blob::id`).
@@ -619,6 +741,21 @@ pub(crate) struct RunKey {
     pub(crate) font_index: u32,
     /// The run's font size as the display list stated it.
     pub(crate) font_size: f32,
+    /// How many *distinct* glyph ids the run carries — the most entries
+    /// admitting it can add, and so what its admission is charged against the
+    /// budget (see this module's doc).
+    ///
+    /// Distinct ids rather than glyphs drawn: a paragraph repeating a letter
+    /// two hundred times is two hundred draws and one entry, and charging it
+    /// its draws would refuse steady-state text that is already resident. It is
+    /// still an over-estimate — a glyph landing in two subpixel buckets is two
+    /// entries, and one already resident is none — but it is an over-estimate
+    /// of the right quantity, and the only one available before `glifo` has
+    /// keyed anything.
+    ///
+    /// A *routing* input, like [`transform`](Self::transform) and
+    /// [`color_font`](Self::color_font): it reaches no cache key.
+    pub(crate) distinct_glyphs: u32,
     /// The run's own transform composed with the frame root — the full
     /// device-space mapping `glifo` absorbs a scale out of (see
     /// [`device_font_size`]).
@@ -659,6 +796,10 @@ impl RunKey {
     /// reading the face's table directory, which is `super`'s job (see
     /// `crate::text::font_has_color_glyphs`) and would tie this module to a
     /// font parser it otherwise has no need of.
+    ///
+    /// `seen` is scratch for the distinct-glyph count — a caller-owned set,
+    /// cleared here and reused across the runs of a walk, so counting a
+    /// ten-thousand-glyph run costs no allocation of its own.
     #[must_use]
     pub(crate) fn for_run(
         run: &frust_scene::GlyphRun,
@@ -666,12 +807,16 @@ impl RunKey {
         hinted: bool,
         color_font: bool,
         context_color: AlphaColor<Srgb>,
+        seen: &mut HashSet<u32>,
     ) -> Self {
         let font = run.font.font();
+        seen.clear();
+        seen.extend(run.glyphs.iter().map(|glyph| glyph.id));
         Self {
             font_id: font.data.id(),
             font_index: font.index,
             font_size: run.font_size,
+            distinct_glyphs: u32::try_from(seen.len()).unwrap_or(u32::MAX),
             transform,
             hinted,
             color_font,
@@ -720,9 +865,30 @@ pub(crate) struct AtlasPolicy {
     /// kept for reporting. Fixed for a cache's lifetime, so the copy cannot
     /// drift from the allocator it was taken from.
     pages: AtlasConfig,
-    /// How many entries may be resident before the atlas route stops being
-    /// offered — [`glyph_entry_ceiling`] over [`Self::pages`].
+    /// How many texels glyph residency may hold before the atlas route stops
+    /// being offered — [`glyph_texel_budget`] over [`Self::pages`]. The bound
+    /// everything routes on.
+    texel_budget: u64,
+    /// The same budget read as a population of typical glyphs
+    /// ([`glyph_entry_ceiling`]), for reporting only.
     max_entries: usize,
+    /// What the resident population is estimated to occupy, in texels: every
+    /// entry charged at [`glyph_texels_at`] of the size it was admitted under.
+    ///
+    /// Maintained incrementally, because `glifo` 0.3.0 will not price the
+    /// population from outside — see this module's doc. Charged by
+    /// [`charge_admissions`](Self::charge_admissions), discharged by
+    /// [`discharge_evictions`](Self::discharge_evictions), and exactly zero
+    /// whenever the entry map is empty.
+    resident_texels: u64,
+    /// How many entries [`resident_texels`](Self::resident_texels) has been
+    /// charged for, so an entry-count change can be read as a delta.
+    charged_entries: usize,
+    /// The device size the next admission delta is charged at: the size of the
+    /// last run [`admit_run`](Self::admit_run) let through, since `glifo`
+    /// inserts a run's glyphs as it draws them and every entry appearing before
+    /// the next run's boundary belongs to that run.
+    admitting_size: f32,
     /// Whether `FRUST_ENGINE_NO_ATLAS` took the atlas out of the frame.
     disabled: bool,
     /// Frames begun, which is what the size tracker ages against. Distinct from
@@ -754,32 +920,29 @@ pub(crate) struct AtlasPolicy {
     /// `glifo`'s cumulative miss count as this frame opened, so the frame's own
     /// misses can be read as a difference.
     misses_at_frame_start: u64,
-    /// Whether page commands recorded by this or an earlier frame are still
-    /// waiting to be replayed into the atlas.
+    /// The LRU serial at which the oldest still-unreplayed page recording was
+    /// made, or `None` when nothing is outstanding.
     ///
-    /// Set by [`end_frame`](Self::end_frame) on any frame that missed, cleared
-    /// by [`acknowledge_replay`](Self::acknowledge_replay). It is what the
-    /// caller drives its replay pass from: driving it from *surviving draws*
-    /// instead misses a run whose coverage was entirely culled, which still
-    /// inserted entries and still dirtied a page.
-    replay_pending: bool,
-    /// Whether [`replay_pending`](Self::replay_pending) was already set when
-    /// this frame opened — that is, whether commands from a *previous* frame
-    /// are still unreplayed.
+    /// Two questions in one field, because they have one answer. It is
+    /// [`replay_pending`](Self::replay_pending) — set by
+    /// [`end_frame`](Self::end_frame) on any frame that missed, cleared by
+    /// [`acknowledge_replay`](Self::acknowledge_replay) — and it is what
+    /// [`eviction_deferred`](Self::eviction_deferred) measures the deferral
+    /// window from.
     ///
-    /// It is one of the two reasons [`end_frame`](Self::end_frame) skips
-    /// `glifo`'s eviction pass — the other being this frame's own fresh
-    /// recording, which is unreplayed at that point by construction. Eviction
-    /// frees an entry's `ImageId` back to the shared packer and queues its
-    /// rectangle for clearing, and a recorded command naming that rectangle
-    /// would then replay old ink into whichever glyph was let it next. Ageing
-    /// resumes as soon as the replay lands.
+    /// The caller drives its replay pass from the `is_some` half: driving it
+    /// from *surviving draws* instead misses a run whose coverage was entirely
+    /// culled, which still inserted entries and still dirtied a page.
+    unreplayed_since: Option<u64>,
+    /// `glifo`'s LRU serial, mirrored.
     ///
-    /// Kept distinct from [`replay_pending`](Self::replay_pending) rather than
-    /// folded into it because it answers a different question — *whose*
-    /// commands are outstanding — which is what makes the deferral legible as
-    /// covering both.
-    replay_stale: bool,
+    /// `GlyphAtlas` does not expose it, and `maintain` ticks it exactly once per
+    /// call, so counting the calls this policy makes reproduces it — the policy
+    /// is the only thing that calls `maintain` on the map it owns. Needed
+    /// because the eviction deferral is a statement about *ages*, and an age is
+    /// a difference of serials rather than of frames: a deferred frame does not
+    /// tick.
+    serial: u64,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
 }
@@ -803,7 +966,11 @@ impl AtlasPolicy {
         Self {
             atlas: GlyphAtlas::with_config(glyph_cache_config()),
             pages,
+            texel_budget: glyph_texel_budget(pages),
             max_entries: glyph_entry_ceiling(pages),
+            resident_texels: 0,
+            charged_entries: 0,
+            admitting_size: TYPICAL_GLYPH_SIZE,
             disabled,
             frame: 0,
             fonts: HashMap::new(),
@@ -812,8 +979,8 @@ impl AtlasPolicy {
             clears: Vec::new(),
             offered_clears: 0,
             misses_at_frame_start: 0,
-            replay_pending: false,
-            replay_stale: false,
+            unreplayed_since: None,
+            serial: 0,
             phase: Phase::Idle,
         }
     }
@@ -876,10 +1043,31 @@ impl AtlasPolicy {
         self.fonts.values().map(|font| font.sizes.len()).sum()
     }
 
-    /// How many entries may be resident before the atlas route closes.
+    /// How many *typical* glyphs the budget is worth, for reporting.
+    ///
+    /// Not a bound anything is tested against — that is
+    /// [`texel_budget`](Self::texel_budget). A population of larger glyphs
+    /// reaches the budget with fewer entries than this, and one of smaller ones
+    /// cannot exceed it (see [`MAX_GLYPH_ENTRIES`]).
     #[must_use]
     pub(crate) fn max_entries(&self) -> usize {
         self.max_entries
+    }
+
+    /// The texels glyph residency may hold at once — the bound routes are
+    /// decided against.
+    #[must_use]
+    pub(crate) fn texel_budget(&self) -> u64 {
+        self.texel_budget
+    }
+
+    /// What the resident population is estimated to occupy, in texels.
+    ///
+    /// The running total the budget is spent against; see this type's field doc
+    /// for how it is maintained and why it is charged rather than measured.
+    #[must_use]
+    pub(crate) fn resident_texels(&self) -> u64 {
+        self.resident_texels
     }
 
     /// Whether page commands are still waiting to be replayed into the atlas.
@@ -892,17 +1080,18 @@ impl AtlasPolicy {
     /// — by which time the slots they name may belong to other glyphs.
     #[must_use]
     pub(crate) fn replay_pending(&self) -> bool {
-        self.replay_pending
+        self.unreplayed_since.is_some()
     }
 
     /// Record that the recorded page commands reached the atlas array.
     ///
     /// The counterpart of [`replay_pending`](Self::replay_pending), and the
     /// same shape as the image residency's `acknowledge_plan`: call it only
-    /// once the replay really ran, because it is also what lets eviction resume
-    /// (see [`replay_stale`](Self::replay_stale)).
+    /// once the replay really ran, because it also closes the eviction
+    /// deferral's window (see
+    /// [`eviction_deferred`](Self::eviction_deferred)).
     pub(crate) fn acknowledge_replay(&mut self) {
-        self.replay_pending = false;
+        self.unreplayed_since = None;
     }
 
     /// Whether any evicted rectangle is still waiting to be zeroed.
@@ -936,10 +1125,6 @@ impl AtlasPolicy {
         // Read before anything this frame can miss, so `frame_misses` below is
         // this frame's own count rather than the process's.
         self.misses_at_frame_start = self.atlas.cache_misses();
-        // Whether the *previous* frame's commands are still outstanding, latched
-        // here so `end_frame` can tell them from the ones this frame is about to
-        // record.
-        self.replay_stale = self.replay_pending;
         self.phase = Phase::Collect;
     }
 
@@ -1008,8 +1193,8 @@ impl AtlasPolicy {
         // have already been admitted rather than on this one alone — and the
         // only one this walk cannot answer conclusively, since nothing is
         // inserted until the run is drawn. [`admit_run`](Self::admit_run) asks
-        // it again against the live count.
-        if self.residency_full(size) {
+        // it again against the population as it really stands.
+        if self.would_overspend(size, run.distinct_glyphs) {
             return RunRoute::Outline(OutlineReason::ResidencyFull);
         }
 
@@ -1017,6 +1202,7 @@ impl AtlasPolicy {
             font_id: run.font_id,
             font_index: run.font_index,
             size,
+            distinct_glyphs: run.distinct_glyphs,
             hinted: run.hinted,
             context_color: run.context_color,
             context_color_packed: pack_context_color(run.context_color),
@@ -1024,49 +1210,124 @@ impl AtlasPolicy {
     }
 
     /// Re-test a route decided in the collect phase against residency as it
-    /// stands *now*, narrowing it to outlines if the ceiling has been reached
+    /// stands *now*, narrowing it to outlines if the budget has been spent
     /// since.
     ///
     /// The collect walk classifies every run of a frame before any of them is
     /// drawn, and `glifo` inserts nothing until a run is drawn — so every run
     /// of one frame is answered from the population the frame *opened* with. A
-    /// frame beginning one entry below the ceiling would therefore admit all of
+    /// frame beginning one run below the budget would therefore admit all of
     /// its runs, and a frame is not a bounded amount of text: one screen of new
     /// glyphs can overshoot the share by as much as it likes, which is the
     /// outage the bound exists to prevent.
     ///
-    /// Called as each run's route is consumed by the draw walk, where the count
-    /// is exact — every earlier run of the same frame has already inserted
-    /// whatever it inserted — rather than estimated from glyph counts, which
-    /// would charge a paragraph its *draws* instead of its entries and refuse
-    /// steady-state text that is entirely resident.
+    /// Called as each run's route is consumed by the draw walk, where the
+    /// population is the real one — every earlier run of the same frame has
+    /// already inserted whatever it inserted, and this call charges those
+    /// insertions before it answers. The run's own demand is its distinct glyph
+    /// count, not its draws, so a paragraph repeating a letter is charged the
+    /// one entry it will really claim (see [`RunKey::distinct_glyphs`]).
     ///
     /// Narrowing only. `Atlas` never comes back out of this, because a route
     /// widened after the fact would name a slot the collect phase never
     /// reserved; outlines are correct pixels on the path the engine has always
     /// used.
+    ///
+    /// Takes `&mut self` for the charging, which is also what makes it the
+    /// single point where the last admitted run's size is latched: `glifo`
+    /// inserts a run's glyphs as it draws them, so every entry appearing
+    /// between two of these calls belongs to the run the previous one let
+    /// through.
     #[must_use]
-    pub(crate) fn admit_run(&self, route: RunRoute) -> RunRoute {
+    pub(crate) fn admit_run(&mut self, route: RunRoute) -> RunRoute {
+        self.charge_admissions();
         match route {
-            RunRoute::Atlas(run) if self.residency_full(run.size()) => {
+            RunRoute::Atlas(run) if self.would_overspend(run.size(), run.distinct_glyphs()) => {
                 RunRoute::Outline(OutlineReason::ResidencyFull)
+            }
+            RunRoute::Atlas(run) => {
+                self.admitting_size = run.size();
+                RunRoute::Atlas(run)
             }
             route => route,
         }
     }
 
-    /// Whether glyph residency is at the ceiling for a run of device size
-    /// `size`.
+    /// Whether admitting `entries` further glyphs of device size `size` would
+    /// take glyph residency past its share of the array.
     ///
     /// The one place the bound is spelled, asked by both
-    /// [`classify_run`](Self::classify_run) and
-    /// [`admit_run`](Self::admit_run) so the collect answer and the draw answer
-    /// cannot be two different rules. The ceiling is the size class's own — see
-    /// [`entry_ceiling_at`] — because a resident entry's cost in texels is what
-    /// the images' share is actually spent on, not its cost in map keys.
+    /// [`classify_run`](Self::classify_run) and [`admit_run`](Self::admit_run)
+    /// so the collect answer and the draw answer cannot be two different rules.
+    ///
+    /// A total against a total: what is already charged plus what this run can
+    /// add, against [`texel_budget`](Self::texel_budget). That is what makes it
+    /// additive — every size class spends the same pool in the same units, so
+    /// one class's refusal turns on the texels the others really hold and never
+    /// on their *count*, and no combination of classes can each stay under an
+    /// allowance of its own while together spending the share twice.
     #[must_use]
-    fn residency_full(&self, size: f32) -> bool {
-        self.atlas.len() >= entry_ceiling_at(self.max_entries, size)
+    fn would_overspend(&self, size: f32, entries: u32) -> bool {
+        // At least one entry: a run with no glyphs still asks for the route,
+        // and charging it nothing would let an unbounded number of them
+        // through at a full budget.
+        let demand = glyph_texels_at(size).saturating_mul(u64::from(entries.max(1)));
+        self.resident_texels.saturating_add(demand) > self.texel_budget
+    }
+
+    /// Charge whatever `glifo` has inserted since the last time the accounting
+    /// looked.
+    ///
+    /// The admission half of the running total. `GlyphAtlas` reports its entry
+    /// *count* and nothing else in a release build (see this module's doc), so
+    /// the delta since the last charge is what there is to work with, priced at
+    /// the size of the run that was admitted to produce it.
+    fn charge_admissions(&mut self) {
+        let live = self.atlas.len();
+        let Some(added) = live.checked_sub(self.charged_entries) else {
+            // Fewer entries than were charged: an eviction the accounting has
+            // not been told about. `discharge_evictions` is what reconciles it,
+            // in the same proportional terms, rather than this one guessing.
+            self.discharge_evictions();
+            return;
+        };
+        if added == 0 {
+            return;
+        }
+        let cost = glyph_texels_at(self.admitting_size);
+        let added = u64::try_from(added).unwrap_or(u64::MAX);
+        self.resident_texels = self
+            .resident_texels
+            .saturating_add(cost.saturating_mul(added));
+        self.charged_entries = live;
+    }
+
+    /// Give back what an eviction pass reaped, in proportion to the entries it
+    /// took.
+    ///
+    /// The discharge half, and the reason the estimate cannot ratchet upward.
+    /// `glifo`'s eviction reports the padded *rectangle* of each entry it
+    /// freed, which is a true texel count but not one in this accounting's
+    /// units — the charges were the model's price, not the rasterizer's extent,
+    /// and subtracting one from the other would leave a residue per entry that
+    /// never comes back. Scaling by the surviving fraction keeps the *mean*
+    /// charge per entry unchanged across a reap, which is exact for a
+    /// homogeneous population, unbiased for a mixed one, and — the property
+    /// that matters — takes the total to precisely zero when the last entry
+    /// goes.
+    fn discharge_evictions(&mut self) {
+        let live = self.atlas.len();
+        if live >= self.charged_entries {
+            return;
+        }
+        self.resident_texels = if self.charged_entries == 0 {
+            0
+        } else {
+            let scaled =
+                u128::from(self.resident_texels) * live as u128 / self.charged_entries as u128;
+            u64::try_from(scaled).unwrap_or(u64::MAX)
+        };
+        self.charged_entries = live;
     }
 
     /// Record one glyph of a cached run, and say what it costs.
@@ -1133,7 +1394,17 @@ impl AtlasPolicy {
                 continue;
             };
             match self.atlas.insert_entry(images, key.clone(), metrics) {
-                Some(slot) => pass.uploads.push(GlyphUpload { key, slot }),
+                Some(slot) => {
+                    // Charged here rather than left to `charge_admissions`'
+                    // delta: this path knows each key's own size, so it prices
+                    // a mixed batch entry by entry instead of at whichever run
+                    // was last admitted.
+                    let size = f32::from_bits(key.size_bits);
+                    self.resident_texels =
+                        self.resident_texels.saturating_add(glyph_texels_at(size));
+                    self.charged_entries = self.charged_entries.saturating_add(1);
+                    pass.uploads.push(GlyphUpload { key, slot });
+                }
                 None => pass.refused = pass.refused.saturating_add(1),
             }
         }
@@ -1173,35 +1444,69 @@ impl AtlasPolicy {
     /// handles from the entry map below are freed — a resident image's handle
     /// is not `glifo`'s to reach.
     ///
-    /// The ageing pass is *skipped* while any page command is unreplayed —
-    /// this frame's as much as an earlier frame's. Eviction hands an entry's
-    /// rectangle back to the packer and queues it for clearing, so a recorded
-    /// command still naming it would be replayed into whatever was let that
-    /// rectangle next — old ink in another glyph's slot. Deferring costs a
-    /// delayed reap; not deferring costs a wrong pixel.
-    ///
-    /// This frame's own commands count because the replay pass runs *after*
-    /// compiling: `end_frame` closes the compile, and the caller replays only
-    /// once the frame reaches the encoder (see `EngineRenderer::encode`). A
-    /// deferral gated on the latched previous state alone would let every frame
-    /// whose predecessor was acknowledged evict against its own fresh
-    /// recording — the one ordering the guard was added for.
+    /// The ageing pass is *deferred* while an unreplayed page command could
+    /// name a rectangle the pass would free — see
+    /// [`eviction_deferred`](Self::eviction_deferred) for exactly when that is.
+    /// Eviction hands an entry's rectangle back to the packer and queues it for
+    /// clearing, so a recorded command still naming it would be replayed into
+    /// whatever was let that rectangle next — old ink in another glyph's slot.
+    /// Deferring costs a delayed reap; not deferring costs a wrong pixel.
     pub(crate) fn end_frame(&mut self, images: &mut ImageCache) {
-        if self.frame_misses() > 0 {
-            self.replay_pending = true;
+        // The last run of the frame inserted after its own `admit_run`, so the
+        // total is one run behind until this settles it.
+        self.charge_admissions();
+
+        if self.frame_misses() > 0 && self.unreplayed_since.is_none() {
+            // This frame's own recording opens the window: the replay pass runs
+            // *after* compiling — `end_frame` closes the compile and the caller
+            // replays only once the frame reaches the encoder (see
+            // `EngineRenderer::encode`) — so what was just recorded is
+            // unreplayed at this instant by construction.
+            self.unreplayed_since = Some(self.serial);
         }
 
-        if self.replay_stale || self.replay_pending {
+        if self.eviction_deferred() {
             self.prune_sizes();
             self.phase = Phase::Idle;
             return;
         }
 
         self.atlas.maintain(images);
+        // `maintain` ticks the LRU serial exactly once per call, and this is its
+        // only caller for this map (see [`serial`](Self::serial)).
+        self.serial = self.serial.saturating_add(1);
+        self.discharge_evictions();
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
         self.clears.extend(evicted);
         self.prune_sizes();
         self.phase = Phase::Idle;
+    }
+
+    /// Whether `glifo`'s ageing pass has to wait for a replay.
+    ///
+    /// Deferring on *any* outstanding replay is the safe answer and was the
+    /// first one, but it is far wider than the hazard: under sustained churn
+    /// every frame misses, so every frame defers, and the LRU never ages at all
+    /// — a cache that only ever grows until the budget closes the route.
+    ///
+    /// The hazard is narrower than that, and its bound is arithmetic. `glifo`
+    /// records page commands in exactly one place — `GlyphAtlas::insert`, which
+    /// creates the entry in the same call, stamped with the current LRU serial
+    /// — so every unreplayed command belongs to an entry whose serial is at
+    /// least the serial the recording was made at. Eviction reaps an entry only
+    /// once `serial - entry.serial` exceeds [`MAX_ENTRY_AGE`], and a hit only
+    /// pushes an entry's serial *up*. So while the oldest unreplayed recording
+    /// is no more than [`MAX_ENTRY_AGE`] serials old, no entry a recording names
+    /// is old enough to be reaped, and ageing is safe to run.
+    ///
+    /// Past that window the deferral bites exactly as before, and holds: a
+    /// deferred frame does not call `maintain`, so the serial does not advance
+    /// and the window cannot widen its way back out. Only
+    /// [`acknowledge_replay`](Self::acknowledge_replay) reopens it.
+    #[must_use]
+    fn eviction_deferred(&self) -> bool {
+        self.unreplayed_since
+            .is_some_and(|since| self.serial.saturating_sub(since) > MAX_ENTRY_AGE)
     }
 
     /// Record `size` against `font` and answer whether that font is currently

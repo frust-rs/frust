@@ -70,7 +70,7 @@ mod atlas_policy;
 use atlas_policy::{
     AtlasPass, AtlasPolicy, EVICTION_FREQUENCY, GlyphRoute, MAX_CACHED_FONT_SIZE, MAX_ENTRY_AGE,
     OutlineReason, RunKey, RunRoute, SETTLE_FRAMES, SIZE_QUANTUM, absorbed_scale, device_font_size,
-    entry_ceiling_at, glyph_cache_config, glyph_entry_ceiling, quantize_font_size,
+    entry_ceiling_at, glyph_cache_config, glyph_entry_ceiling, glyph_texels_at, quantize_font_size,
 };
 
 /// Noto Sans, subsetted to Latin plus combining marks — the same bundled face
@@ -107,8 +107,25 @@ fn next_font() -> u64 {
 ///
 /// The identity transform is the ordinary case and keeps the device size equal
 /// to the asked-for one; [`scaled_run_key`] is what the transform cases use.
+///
+/// Declares [`HELLO`]'s glyph count as its distinct-glyph demand, which is what
+/// [`collect_hello`] goes on to collect. A case sizing that demand deliberately
+/// — the budget is charged against it — asks for it by name through
+/// [`run_key_demanding`].
 fn run_key(font_id: u64, size: f32) -> RunKey {
     scaled_run_key(font_id, size, Affine::IDENTITY)
+}
+
+/// A run identity at `size` declaring `distinct_glyphs` distinct glyph ids.
+///
+/// The quantity a run's admission is charged at: `glifo` owns the per-glyph
+/// loop once a run is admitted, so the policy prices the whole run up front
+/// against what its entries can grow to.
+fn run_key_demanding(font_id: u64, size: f32, distinct_glyphs: u32) -> RunKey {
+    RunKey {
+        distinct_glyphs,
+        ..run_key(font_id, size)
+    }
 }
 
 /// A run identity at `size` drawn under `transform`, on its own private font.
@@ -117,6 +134,7 @@ fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey {
         font_id,
         font_index: 0,
         font_size: size,
+        distinct_glyphs: HELLO.len() as u32,
         transform,
         hinted: false,
         color_font: false,
@@ -394,6 +412,13 @@ fn a_scale_that_moves_reads_as_an_animation_though_the_font_size_never_does() {
 
 /// Glyph residency is bounded independently of the LRU, so it cannot spend the
 /// allocator the images are packed into.
+///
+/// What the bound *is* changed once the accounting became additive: the policy
+/// rations texels, not entries, so `glyph_entry_ceiling` is now a reading of the
+/// texel budget rather than the thing anything routes on. The geometry
+/// assertions below therefore pin the reading's shape (it scales with the array
+/// and clamps at both ends) and the fill pins the budget itself closing the
+/// route.
 #[test]
 fn the_atlas_route_closes_once_glyph_residency_reaches_its_ceiling() {
     // The ceiling scales with the array and is clamped at both ends.
@@ -463,6 +488,13 @@ fn the_atlas_route_closes_once_glyph_residency_reaches_its_ceiling() {
         "fixture precondition: residency reaches the ceiling (got {})",
         engine.entry_count()
     );
+    assert!(
+        engine.resident_texels() >= engine.texel_budget(),
+        "fixture precondition: a population of typical glyphs reaching the \
+         entry reading has spent the budget it reads (got {} of {})",
+        engine.resident_texels(),
+        engine.texel_budget()
+    );
     engine.begin_frame();
     assert_eq!(
         engine.classify_run(&run_key(font, 16.0)).outline_reason(),
@@ -472,17 +504,26 @@ fn the_atlas_route_closes_once_glyph_residency_reaches_its_ceiling() {
     );
 }
 
-/// The ceiling is stated in *typical* glyphs, so it has to be restated in the
-/// size class actually being asked about — otherwise it counts map keys while
-/// the thing it is rationing is texels.
+/// The price list scales with the square of the size, so a population of one
+/// size can be read back as a population of another.
+///
+/// `entry_ceiling_at` is a *reading* of the budget — how many glyphs of one
+/// size would fill it — and nothing routes on it. It used to: `residency_full`
+/// compared the whole population's entry count against this restatement in one
+/// run's size class, which is not an additive bound at all (a screen of body
+/// text locked a title out of the atlas for good, and two size classes each
+/// under their own reading together spent the share twice). What the route is
+/// decided on now is the additive total, pinned by
+/// `mixed_sizes_spend_one_shared_texel_budget_in_either_order`; this case pins
+/// only that the prices themselves are quadratic and never round to nothing.
 #[test]
-fn the_residency_ceiling_is_read_in_the_size_class_it_is_asked_about() {
+fn the_size_price_list_is_quadratic_and_never_reads_as_nothing() {
     let typical = glyph_entry_ceiling(AtlasBudget::MOBILE.config());
 
     assert_eq!(
         entry_ceiling_at(typical, 16.0),
         typical,
-        "the ceiling is stated in 16 px glyphs, so 16 px reads it unchanged"
+        "the budget is stated in 16 px glyphs, so 16 px reads it unchanged"
     );
     assert_eq!(
         entry_ceiling_at(typical, 8.0),
@@ -503,7 +544,281 @@ fn the_residency_ceiling_is_read_in_the_size_class_it_is_asked_about() {
     assert_eq!(
         entry_ceiling_at(1, MAX_CACHED_FONT_SIZE),
         1,
-        "never zero: a ceiling that admits nothing is the cache switched off"
+        "never zero: a reading that admits nothing is the cache switched off"
+    );
+
+    // The charges the reading is derived from, in the same relation.
+    assert_eq!(glyph_texels_at(8.0), glyph_texels_at(16.0));
+    assert_eq!(glyph_texels_at(32.0), glyph_texels_at(16.0) * 4);
+    assert_eq!(
+        glyph_texels_at(MAX_CACHED_FONT_SIZE),
+        glyph_texels_at(16.0) * 64
+    );
+}
+
+/// Device px a 16 dp body run is drawn at on a shipped mobile DPR of 2.75 —
+/// the size class the residency bound has to be sane at above all others.
+const BODY_PX: f32 = 44.0;
+
+/// A heading class twice that: the size the old bound locked out of the atlas
+/// permanently once a screen of body text was resident.
+const HEADING_PX: f32 = 88.0;
+
+/// Distinct glyph entries a full screen of body text is worth.
+///
+/// A phone screen of Latin body text runs to some sixty or seventy distinct
+/// letters, marks and punctuation, each of which `glifo` may key into any of
+/// its subpixel buckets — so a few hundred entries is the honest figure, and
+/// four hundred is comfortably above a screenful rather than an average of one.
+const SCREEN_OF_BODY_TEXT: u32 = 400;
+
+/// Admit one run of `glyphs` fresh glyphs at `size` in a frame of its own, and
+/// answer the route the run took.
+///
+/// One run per frame, and every glyph of it in that same frame: `glifo`'s LRU
+/// reaps anything unseen for `MAX_ENTRY_AGE` frames, so a population built a
+/// few glyphs per frame ages its own head off before it reaches any bound.
+fn admit_frame(
+    engine: &mut AtlasPolicy,
+    images: &mut ImageCache,
+    font: u64,
+    size: f32,
+    glyphs: u32,
+    next_glyph: &mut u32,
+) -> RunRoute {
+    engine.begin_frame();
+    let classified = engine.classify_run(&run_key_demanding(font, size, glyphs));
+    let route = engine.admit_run(classified);
+    if let Some(run) = route.atlas().copied() {
+        for _ in 0..glyphs {
+            engine.collect_glyph(&run, *next_glyph, 0.0);
+            *next_glyph += 1;
+        }
+    }
+    engine.build(images, raster);
+    engine.acknowledge_clears();
+    engine.end_frame(images);
+    engine.acknowledge_replay();
+    route
+}
+
+/// The budget is one pool every size class spends in the same units, so the
+/// order the classes arrive in cannot change what fits.
+///
+/// The defect this replaced: `residency_full(size)` tested the *global* entry
+/// count against a ceiling rescaled into one run's size class, which refused
+/// both ways at once. Over-refusal — a screen of 44 px body text is a few
+/// hundred entries, already past what the 88 px class's own reading admits, so
+/// the heading beside it was routed to outlines for as long as the body text
+/// stayed resident, though between them they occupied a fraction of the array.
+/// Under-refusal — two classes each measured against a reading of its own can
+/// both sit under it while together spending the share twice.
+///
+/// Both are order-dependence, which is what this case measures: the same mixed
+/// population admitted body-first and heading-first has to end in the same
+/// place — both classes on the atlas, and the total inside one budget.
+#[test]
+fn mixed_sizes_spend_one_shared_texel_budget_in_either_order() {
+    // A heading run is a line, not a screen; sized so the two classes together
+    // are a realistic mixed page rather than a fill.
+    let heading_glyphs = 40_u32;
+
+    for heading_first in [true, false] {
+        let mut images = ImageCache::new_with_config(AtlasBudget::MOBILE.config());
+        let mut engine = policy(&images, false);
+        // A font apiece: two sizes on one font is a size *animation* to the
+        // settle guard, which is a different refusal from the one under test.
+        let (body_font, heading_font) = (next_font(), next_font());
+        let mut next_glyph = 0_u32;
+
+        let order = if heading_first {
+            [
+                (heading_font, HEADING_PX, heading_glyphs),
+                (body_font, BODY_PX, SCREEN_OF_BODY_TEXT),
+            ]
+        } else {
+            [
+                (body_font, BODY_PX, SCREEN_OF_BODY_TEXT),
+                (heading_font, HEADING_PX, heading_glyphs),
+            ]
+        };
+
+        for (font, size, glyphs) in order {
+            let route = admit_frame(
+                &mut engine,
+                &mut images,
+                font,
+                size,
+                glyphs,
+                &mut next_glyph,
+            );
+            assert!(
+                route.atlas().is_some(),
+                "a {size} px run of {glyphs} glyphs was refused ({:?}) with \
+                 {} of {} texels charged — one class's refusal must turn on the \
+                 texels the others hold, never on their count",
+                route.outline_reason(),
+                engine.resident_texels(),
+                engine.texel_budget(),
+            );
+        }
+
+        // And the population that fit really is one additive total: what the two
+        // classes cost apiece, summed, is what is charged.
+        let expected = u64::from(SCREEN_OF_BODY_TEXT) * glyph_texels_at(BODY_PX)
+            + u64::from(heading_glyphs) * glyph_texels_at(HEADING_PX);
+        assert_eq!(
+            engine.resident_texels(),
+            expected,
+            "a mixed population is charged the sum of its entries' own costs"
+        );
+        assert!(
+            engine.resident_texels() <= engine.texel_budget(),
+            "and stays inside the one budget both classes spend"
+        );
+    }
+}
+
+/// Body text at a shipped mobile DPR caches a whole screen and has room left.
+///
+/// The concrete over-refusal the old bound produced: a 16 dp run at DPR 2.75 is
+/// keyed at 44 device px, whose rescaled ceiling on the mobile geometry was 270
+/// entries — under a screenful — so ordinary body text fell off the atlas onto
+/// the outline path at a size the on-device perf runs had measured under a flat
+/// 2048-entry budget. A screen of it must cache comfortably, not barely.
+#[test]
+fn body_text_at_a_mobile_dpr_caches_a_whole_screen_with_room_to_spare() {
+    let mut images = ImageCache::new_with_config(AtlasBudget::MOBILE.config());
+    let mut engine = policy(&images, false);
+    let font = next_font();
+    let mut next_glyph = 0_u32;
+
+    let route = admit_frame(
+        &mut engine,
+        &mut images,
+        font,
+        BODY_PX,
+        SCREEN_OF_BODY_TEXT,
+        &mut next_glyph,
+    );
+    assert!(
+        route.atlas().is_some(),
+        "a screen of body text at a shipped DPR is refused the atlas: {:?}",
+        route.outline_reason()
+    );
+    assert_eq!(
+        engine.entry_count(),
+        SCREEN_OF_BODY_TEXT as usize,
+        "and every one of its glyphs found a slot"
+    );
+
+    // Room to spare, not room exactly: a second screenful — a scroll, a page
+    // turn — has to cache too, or the bound is a cliff one screen wide.
+    assert!(
+        engine.resident_texels() * 2 <= engine.texel_budget(),
+        "a screen of 44 px body text charges {} of a {} texel budget — over half \
+         of it, so the next screen has nowhere to go",
+        engine.resident_texels(),
+        engine.texel_budget()
+    );
+    let second = admit_frame(
+        &mut engine,
+        &mut images,
+        font,
+        BODY_PX,
+        SCREEN_OF_BODY_TEXT,
+        &mut next_glyph,
+    );
+    assert!(
+        second.atlas().is_some(),
+        "a second screenful is refused: {:?}",
+        second.outline_reason()
+    );
+}
+
+/// One admitted run cannot spend the share by its whole self.
+///
+/// `glifo` owns the per-glyph loop once a run is admitted — it keys, allocates
+/// and inserts every glyph of the run itself — so the policy has no say between
+/// the first glyph and the last, and a run tested as "one more entry fits"
+/// could insert ten thousand of them. The run is therefore charged its whole
+/// distinct-glyph demand up front, which is what bounds the overshoot to what
+/// a run that genuinely fits can do.
+#[test]
+fn one_admitted_run_cannot_overshoot_the_budget_by_its_whole_self() {
+    let mut images = ImageCache::new_with_config(AtlasBudget::MOBILE.config());
+    let mut engine = policy(&images, false);
+    let mut next_glyph = 0_u32;
+
+    // The adversarial corpus's stress input, on an empty residency: nothing is
+    // resident, so a bound asking only "does one more entry fit" says yes.
+    let corpus = 10_000_u32;
+    assert!(
+        u64::from(corpus) * glyph_texels_at(BODY_PX) > engine.texel_budget(),
+        "fixture precondition: the corpus run cannot fit in the share"
+    );
+    let route = admit_frame(
+        &mut engine,
+        &mut images,
+        next_font(),
+        BODY_PX,
+        corpus,
+        &mut next_glyph,
+    );
+    assert_eq!(
+        route.outline_reason(),
+        Some(OutlineReason::ResidencyFull),
+        "a run whose own demand exceeds the whole share is refused before it can \
+         insert any of it"
+    );
+    assert_eq!(
+        engine.entry_count(),
+        0,
+        "and nothing of it reached the allocator the images share"
+    );
+
+    // The refusal is of the demand, not of the size: an ordinary run at the
+    // same size on the same empty residency is admitted.
+    let ordinary = admit_frame(
+        &mut engine,
+        &mut images,
+        next_font(),
+        BODY_PX,
+        SCREEN_OF_BODY_TEXT,
+        &mut next_glyph,
+    );
+    assert!(ordinary.atlas().is_some());
+}
+
+/// A run is charged its distinct glyph ids, not the glyphs it draws.
+///
+/// The line between bounding an overshoot and refusing steady-state text: a
+/// paragraph repeating a letter two hundred times is two hundred draws and one
+/// entry, and charging it its draws would route text that is already entirely
+/// resident to outlines.
+#[test]
+fn a_runs_demand_is_its_distinct_glyph_ids_rather_than_its_draws() {
+    let font = latin_font();
+    let repeated: Vec<Glyph> = (0..10_000)
+        .map(|index| Glyph {
+            id: HELLO[index % HELLO.len()],
+            x: index as f32,
+            y: 0.0,
+        })
+        .collect();
+    let run = GlyphRun {
+        font: font.clone(),
+        font_size: BODY_PX,
+        glyphs: repeated,
+        brush: Brush::Solid(BLACK),
+        transform: Affine::IDENTITY,
+    };
+
+    let mut seen = HashSet::new();
+    let key = RunKey::for_run(&run, Affine::IDENTITY, false, false, BLACK, &mut seen);
+    assert_eq!(
+        key.distinct_glyphs, 4,
+        "`Hello` is ten thousand draws of four distinct glyph ids"
     );
 }
 
@@ -548,12 +863,76 @@ fn sustained_large_text_leaves_the_images_their_share_of_the_allocator() {
         "large text left {worst_entries} entries resident against a size-class \
          ceiling of {ceiling} (plus the one run in flight when it was reached)"
     );
+    assert!(
+        engine.resident_texels()
+            <= engine.texel_budget() + 4 * glyph_texels_at(MAX_CACHED_FONT_SIZE),
+        "and never charged more than the share plus the run in flight: {} of {}",
+        engine.resident_texels(),
+        engine.texel_budget()
+    );
 
     // And the image, asking last, still finds room.
     residency.begin_frame();
     assert!(
         residency.resolve(&image(256, 256, 0x11)).is_ok(),
         "an image arriving after sustained large text is refused the allocator \
+         the text was only ever entitled to half of"
+    );
+    assert_eq!(residency.skipped(), 0);
+}
+
+/// Images keep their share under *mixed* sustained text, not merely under one
+/// size class of it.
+///
+/// The under-refusal half of the same defect. A bound that rationed each size
+/// class against a ceiling restated in its own units let several classes each
+/// sit under their own while together spending the whole array — and every
+/// texel text holds is one an image is refused with `ImageSkip::NoAtlasSpace`
+/// by a guard that never fired. The mix is the point: one class alone was
+/// already bounded before this change.
+#[test]
+fn images_stay_resident_under_sustained_mixed_size_text() {
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (512, 512),
+        max_atlases: 2,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    // Four classes spanning the cacheable range, a font apiece so a change of
+    // class is not read as a size animation.
+    let classes = [16.0_f32, 32.0, 64.0, MAX_CACHED_FONT_SIZE].map(|size| (next_font(), size));
+
+    let mut next_glyph = 0_u32;
+    let mut worst_texels = 0_u64;
+    for _ in 0..20 {
+        for (font, size) in classes {
+            residency.begin_frame();
+            admit_frame(
+                &mut engine,
+                residency.allocator_mut(),
+                font,
+                size,
+                4,
+                &mut next_glyph,
+            );
+            worst_texels = worst_texels.max(engine.resident_texels());
+        }
+    }
+
+    // One run of the largest class is the most any single admission can add
+    // past the bound, whichever class was in flight when it was reached.
+    let overshoot = 4 * glyph_texels_at(MAX_CACHED_FONT_SIZE);
+    assert!(
+        worst_texels <= engine.texel_budget() + overshoot,
+        "a mixed population charged {worst_texels} texels against a {} texel \
+         share — classes must add up rather than each measure against a reading \
+         of its own",
+        engine.texel_budget()
+    );
+
+    residency.begin_frame();
+    assert!(
+        residency.resolve(&image(256, 256, 0x21)).is_ok(),
+        "an image arriving after sustained mixed text is refused the allocator \
          the text was only ever entitled to half of"
     );
     assert_eq!(residency.skipped(), 0);
@@ -1374,7 +1753,8 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
             .collect(),
     };
 
-    let key = RunKey::for_run(&run, Affine::IDENTITY, false, false, BLACK);
+    let mut seen = HashSet::new();
+    let key = RunKey::for_run(&run, Affine::IDENTITY, false, false, BLACK, &mut seen);
     assert_eq!(key.font_id, font.font().data.id());
     assert_eq!(key.font_index, 0);
     assert_eq!(key.font_size, 18.0);
@@ -1391,7 +1771,7 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
         glyphs: Vec::new(),
     };
     assert_eq!(
-        RunKey::for_run(&second, Affine::IDENTITY, false, false, BLACK).font_id,
+        RunKey::for_run(&second, Affine::IDENTITY, false, false, BLACK, &mut seen).font_id,
         key.font_id
     );
 
@@ -1405,8 +1785,16 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
         false,
         false,
         BLACK,
+        &mut seen,
     ));
-    let hinted = engine.classify_run(&RunKey::for_run(&run, Affine::IDENTITY, true, false, BLACK));
+    let hinted = engine.classify_run(&RunKey::for_run(
+        &run,
+        Affine::IDENTITY,
+        true,
+        false,
+        BLACK,
+        &mut seen,
+    ));
     let plain = plain.atlas().expect("a first appearance is cached");
     let hinted = hinted.atlas().expect("hinting does not change the size");
     assert_ne!(
@@ -1969,59 +2357,68 @@ fn a_run_whose_draws_are_all_culled_still_leaves_a_page_to_replay() {
     );
 }
 
-/// The frame's *own* recording counts as unreplayed too, because the replay
-/// pass runs after the compile that records it.
+/// A recording defers eviction only once it has outlived the entry-age window
+/// — sustained churn must not switch the LRU off.
 ///
-/// The residual of the same defect: a deferral gated only on the *latched*
-/// previous state lets every frame whose predecessor was acknowledged run
-/// `glifo`'s eviction pass against its own fresh page commands — freeing and
-/// re-letting the very rectangles those commands still name, which is the
-/// ordering the deferral exists to make impossible.
+/// The deferral guards one ordering: `glifo` clears a recorder's commands only
+/// when they are replayed, so an unreplayed page keeps naming its slots, and an
+/// entry reaped in the meantime hands its rectangle to another glyph for that
+/// ink to land in. Deferring on *any* outstanding replay closes it, and was the
+/// first answer — but it closes far more than the hazard. `glifo` records page
+/// commands in exactly one place, `GlyphAtlas::insert`, which creates the entry
+/// in the same call stamped with the current LRU serial; eviction reaps an
+/// entry only once its serial is more than `MAX_ENTRY_AGE` behind, and a hit
+/// only pushes that serial up. So a recording younger than the entry-age window
+/// names nothing reapable, and while every frame misses — the ordinary case for
+/// scrolling text — the wide rule ages nothing at all and the cache only grows.
+///
+/// This case is that arithmetic: churn with the replay acknowledged each frame
+/// keeps ageing running and the population bounded; the deferral's own
+/// guarantee is `eviction_waits_for_a_replay_that_has_not_happened_yet`, where
+/// the acknowledgement never comes.
 #[test]
-fn a_frames_own_recording_defers_its_own_eviction_pass() {
+fn churn_with_a_replay_acknowledged_each_frame_keeps_ageing_running() {
     let mut images = cache();
     let mut engine = policy(&images, false);
     let font = next_font();
 
-    // Every frame mints a fresh key, and every frame acknowledges the previous
-    // frame's replay — so the latched flag is clear at each `end_frame` and the
-    // only thing outstanding is what this frame itself just recorded.
+    // Every frame mints a fresh key, so every frame misses and closes with page
+    // commands of its own outstanding; every frame then acknowledges them, as
+    // `EngineRenderer::encode` does on every frame it does not refuse.
     let frames = MAX_ENTRY_AGE + EVICTION_FREQUENCY + 8;
+    let mut clears = 0;
     for index in 0..frames {
         engine.begin_frame();
         let run = *engine
             .classify_run(&run_key(font, 16.0))
             .atlas()
-            .expect("residency is nowhere near its ceiling");
-        // A fresh glyph id per frame, so every frame misses and every frame
-        // therefore closes with page commands of its own outstanding.
+            .expect("residency is nowhere near its budget");
         engine.collect_glyph(&run, index as u32, 0.0);
-        let pass = engine.build(&mut images, raster);
-        assert!(
-            pass.clears.is_empty(),
-            "a rectangle freed while this frame's own commands are unreplayed is \
-             a rectangle those commands can be replayed into"
-        );
+        clears += engine.build(&mut images, raster).clears.len();
         engine.acknowledge_clears();
         engine.end_frame(&mut images);
         engine.acknowledge_replay();
     }
 
-    assert_eq!(
-        engine.entry_count(),
-        frames as usize,
-        "nothing may be reaped on a frame whose own recording is still \
-         outstanding, however long ago the previous replay landed"
-    );
-
-    // And ageing resumes the moment a frame records nothing of its own.
-    let mut clears = 0;
-    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
-        clears += frame(&mut engine, &mut images, &[]).clears.len();
-    }
     assert!(
         clears > 0,
-        "an idle frame leaves nothing outstanding, so the LRU runs again"
+        "a frame's own fresh recording names only entries the LRU cannot reach, \
+         so ageing must keep running under churn rather than stopping on the \
+         first miss"
+    );
+    assert!(
+        engine.entry_count() < frames as usize,
+        "and something was actually reaped: {} entries after {frames} frames of \
+         one fresh glyph each",
+        engine.entry_count()
+    );
+    // The reap is the LRU's own, not a collapse: everything drawn inside the
+    // age window is still resident.
+    assert!(
+        engine.entry_count() >= MAX_ENTRY_AGE as usize,
+        "the last {MAX_ENTRY_AGE} frames' glyphs are younger than the age \
+         window and may not be reaped (got {})",
+        engine.entry_count()
     );
 }
 
