@@ -17,15 +17,41 @@
 //!
 //! # What a glyph becomes
 //!
-//! With the atlas cacher disabled — the only mode this backend offers — an
-//! outline glyph reaches the sink as a `save_state` / `set_transform` /
-//! `set_paint_transform` / `fill_path` / `restore_state` sequence, and the sink
-//! answers it by generating that path's coverage through the compiler's own
-//! [`StripGenerator`] under the run's active clip and recording one
-//! [`EngineDraw`]. Every glyph in a run is one draw at its own painter-order
-//! depth, exactly as one small filled path per glyph would be, so nothing
-//! downstream — scheduling, clipping, depth testing — has to learn that text
-//! exists.
+//! With the atlas cacher disabled, an outline glyph reaches the sink as a
+//! `save_state` / `set_transform` / `set_paint_transform` / `fill_path` /
+//! `restore_state` sequence, and the sink answers it by generating that path's
+//! coverage through the compiler's own [`StripGenerator`] under the run's
+//! active clip and recording one [`EngineDraw`]. Every glyph in a run is one
+//! draw at its own painter-order depth, exactly as one small filled path per
+//! glyph would be, so nothing downstream — scheduling, clipping, depth testing
+//! — has to learn that text exists.
+//!
+//! # A cached glyph is an image draw
+//!
+//! With the cacher *enabled* — which is what [`crate::text::atlas_policy`]
+//! routes a settled run to — the same glyph arrives as a `set_tint` /
+//! `set_transform` / `set_paint_image` / `set_paint_transform` / `fill_rect`
+//! sequence instead: `glifo` has resolved (or just allocated) an atlas slot for
+//! it, and asks the sink to draw that slot's rectangle. The sink answers it the
+//! way the compiler answers a `Command::Image` — one [`EncodedPaint::Image`]
+//! naming the slot's [`ImageId`](vello_common::paint::ImageId), the same
+//! rectangle coverage every other draw produces, and one [`EngineDraw`]. The
+//! slot travels alongside in [`CompiledFrame::glyph_slots`] because only the
+//! sink is ever handed it, and the renderer needs the atlas rectangle it names
+//! to lower the paint.
+//!
+//! The **tint** is the whole of the colour-glyph split, and it is `glifo`'s to
+//! decide rather than this sink's: an outline glyph is a coverage mask, so it
+//! arrives with [`TintMode::AlphaMask`](vello_common::paint::TintMode) and the
+//! run's own colour, and the shader fills the covered texels with that colour;
+//! a COLR or bitmap glyph carries its own pixels and arrives with *no* tint,
+//! which the paint records as the identity multiply, so nothing multiplies a
+//! colour emoji by the text colour. Passing the tint through unexamined is what
+//! keeps those two cases one code path here.
+//!
+//! Only `fill_rect` draws from the atlas. `glifo` never issues an atlas paint
+//! under `fill_path`, and a sink that honoured one there would be inventing a
+//! mapping from an arbitrary path into a slot rectangle.
 //!
 //! # The run's paint, encoded once
 //!
@@ -51,23 +77,25 @@
 //!
 //! # What is not drawn
 //!
-//! A bitmap-strike glyph reaches the sink as an image paint the engine has no
-//! encoding for on this path. It is not drawn: the sink records nothing for it
-//! and counts it, which keeps a bitmap-emoji run to missing glyphs rather than
-//! wrongly-coloured ones. `glifo`'s `png` feature is deliberately left off —
-//! the workspace decodes PNG in one place already — so a PNG strike is refused
-//! by `glifo` before it ever reaches here, and the other two strike encodings
-//! it never decodes at all.
+//! An *uncached* bitmap-strike glyph reaches the sink as a pixmap image paint,
+//! which is pixels travelling with the draw rather than a handle into the
+//! atlas, and the engine has no encoding for one: the sink records nothing for
+//! it and counts it, which keeps a bitmap-emoji run to missing glyphs rather
+//! than wrongly-coloured ones. `glifo`'s `png` feature is deliberately left off
+//! — the workspace decodes PNG in one place already — so a PNG strike is
+//! refused by `glifo` before it ever reaches here, and the other two strike
+//! encodings it never decodes at all.
 //!
 //! Stroked glyphs are refused on the same terms: the display list has no
 //! stroked-glyph command, so the sink carries no stroke state to widen an
 //! outline with and will not invent one.
 
+use core::cell::Cell;
 use core::ops::RangeInclusive;
 
 use glifo::{
-    AtlasCacher, AtlasPaint, AtlasSlot, DrawSink, Glyph, GlyphPrepCache, GlyphRenderer, GlyphRun,
-    GlyphRunBackend,
+    AtlasCacher, AtlasPaint, AtlasSlot, DrawSink, GLYPH_PADDING, Glyph, GlyphPrepCache,
+    GlyphRenderer, GlyphRun, GlyphRunBackend,
 };
 use kurbo::{Affine, BezPath, Rect, Shape};
 use peniko::BlendMode;
@@ -75,12 +103,15 @@ use peniko::color::palette::css::BLACK;
 use peniko::color::{AlphaColor, Srgb};
 use peniko::{Brush, Fill};
 use vello_common::clip::PathDataRef;
-use vello_common::paint::{Image, ImageSource, Paint, PaintType};
+use vello_common::encode::{EncodedImage, EncodedPaint};
+use vello_common::paint::{Image, ImageSource, IndexedPaint, Paint, PaintType, Tint};
 use vello_common::strip_generator::{StripGenerator, StripStorage};
 
+use crate::cache::images::AtlasRegion;
 use crate::compile::clip::ClipStack;
 use crate::compile::paint::encode_brush;
-use crate::compile::{CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE};
+use crate::compile::{CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphSlot};
+use crate::gpu::atlas::x_y_advances;
 use crate::text::color::{ColorGlyph, ColorLayer, LayerShape};
 
 /// What one glyph run cost the frame.
@@ -103,15 +134,19 @@ pub(crate) struct GlyphRunOutcome {
 }
 
 /// The paint a drawing command arriving at the sink is painted with.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum SinkPaint {
     /// The run's own brush, as encoded once by the compiler.
     Run,
     /// A COLR layer's own palette colour or gradient, which the layer it
     /// paints is encoded from when the glyph closes.
     Layer(Brush),
-    /// A paint set by `glifo` that this backend has no encoding for — a
-    /// bitmap glyph's image.
+    /// A glyph resolved out of the atlas: the image `glifo` built from the
+    /// slot, whose source is the handle [`EngineGlyphSink::atlas_image_source`]
+    /// answered with.
+    Atlas(Image),
+    /// A paint set by `glifo` that this backend has no encoding for — an
+    /// uncached bitmap glyph's pixmap.
     Unsupported,
 }
 
@@ -131,6 +166,13 @@ pub(crate) struct GlyphSinkState {
     paint_transform: Affine,
     /// Which paint the next drawing command is painted with.
     paint: SinkPaint,
+    /// The tint an atlas-sampled glyph is drawn through, as `glifo` set it.
+    ///
+    /// Part of the saved state rather than a bare field because `glifo` sets it
+    /// *inside* the save/restore bracket it draws a cached glyph in, so a
+    /// restore has to take it back with everything else — the same rule the
+    /// transform and the paint follow.
+    tint: Option<Tint>,
 }
 
 /// The [`DrawSink`]/[`GlyphRenderer`] `glifo` draws a run's glyphs into.
@@ -158,6 +200,16 @@ pub(crate) struct EngineGlyphSink<'a> {
     context_paint: PaintType,
     /// The current, save/restore-scoped drawing state.
     state: GlyphSinkState,
+    /// The slot the atlas paint about to be set names.
+    ///
+    /// `glifo` hands the slot to [`Self::atlas_image_source`] and then throws
+    /// it away, keeping only the [`ImageSource`](vello_common::paint::ImageSource)
+    /// that answer returned — but the engine's paint record needs the slot's
+    /// *rectangle* as well, and nothing downstream carries it. So the one call
+    /// that is given it stashes it here for the `fill_rect` two commands later.
+    /// A [`Cell`] because that call takes `&self`: the trait asks a question,
+    /// and the answer is what the drawing command that follows is built from.
+    atlas_slot: Cell<Option<AtlasSlot>>,
     /// The colour glyph currently being replayed into layers, if any.
     color: ColorGlyph,
     /// What the run cost so far.
@@ -192,7 +244,9 @@ impl<'a> EngineGlyphSink<'a> {
                 transform: Affine::IDENTITY,
                 paint_transform: Affine::IDENTITY,
                 paint: SinkPaint::Run,
+                tint: None,
             },
+            atlas_slot: Cell::new(None),
             color: ColorGlyph::default(),
             outcome: GlyphRunOutcome::default(),
         }
@@ -226,7 +280,7 @@ impl<'a> EngineGlyphSink<'a> {
     where
         F: FnOnce(&mut StripGenerator, &mut StripStorage, Option<PathDataRef<'_>>),
     {
-        if self.state.paint != SinkPaint::Run {
+        if !matches!(self.state.paint, SinkPaint::Run) {
             self.outcome.skipped = self.outcome.skipped.saturating_add(1);
             return;
         }
@@ -269,6 +323,97 @@ impl<'a> EngineGlyphSink<'a> {
             .recorder
             .push_draw(draw, &self.frame.strips.strips[strip_range]);
         true
+    }
+
+    /// Draw one glyph out of the atlas: `area`, the slot's own rectangle,
+    /// painted by an image paint naming the slot.
+    ///
+    /// The two transforms are the ones every image draw in this crate is built
+    /// from, and they are *not* the same value. The coverage is `area` under
+    /// the sink's current transform — where the glyph lands on the surface.
+    /// The paint is placed by that transform composed with `glifo`'s relative
+    /// paint transform, which is the absolute mapping this backend is
+    /// documented to reconstruct that way; the encoded entry stores its
+    /// inverse, because device-to-image is the direction the shader applies.
+    ///
+    /// The slot is reported into [`CompiledFrame::glyph_slots`] on every draw
+    /// rather than once per allocation. That is what makes a recycled handle
+    /// safe: `glifo` frees a slot's [`ImageId`](vello_common::paint::ImageId)
+    /// back to the shared allocator when it evicts, and the next occupant of
+    /// that id — a glyph or an image — may hold a different rectangle, so the
+    /// rectangle a draw *names* is the one that has to travel with it.
+    fn draw_atlas_glyph(&mut self, image: &Image, area: Rect) {
+        let Some(slot) = self.atlas_slot.get() else {
+            // `glifo` sets an atlas image paint only after asking this sink for
+            // the slot's source, so this is unreachable on its own path; a
+            // stream that reached it would be one this backend cannot place.
+            self.outcome.skipped = self.outcome.skipped.saturating_add(1);
+            return;
+        };
+        if slot.width == 0 || slot.height == 0 {
+            // A glyph with no ink — a space, whose outline bounds are empty and
+            // whose slot is therefore a degenerate rectangle. Counted as
+            // neither drawn nor skipped, exactly as the outline path counts one
+            // whose fill produced no strips: it is not a glyph the engine
+            // failed to paint, it is a glyph with nothing to paint.
+            return;
+        }
+
+        let transform = self.state.transform;
+        let paint_transform = transform * self.state.paint_transform;
+        let inverse = paint_transform.inverse();
+        if !inverse.as_coeffs().iter().all(|coeff| coeff.is_finite()) {
+            self.outcome.skipped = self.outcome.skipped.saturating_add(1);
+            return;
+        }
+
+        let (x_advance, y_advance) = x_y_advances(inverse);
+        let paint_index = self.frame.encoded_paints.len();
+        self.frame
+            .encoded_paints
+            .push(EncodedPaint::Image(EncodedImage {
+                // A glyph slot is an anti-aliased coverage mask (an outline) or a
+                // colour glyph with its own alpha; neither is opaque, and claiming
+                // otherwise would route it into the depth-writing opaque pass.
+                may_have_transparency: true,
+                source: image.image.clone(),
+                sampler: image.sampler,
+                transform: inverse,
+                x_advance,
+                y_advance,
+                tint: self.state.tint,
+            }));
+
+        let paint = Paint::Indexed(IndexedPaint::new(paint_index));
+        let drawn = self.record_draw(paint, |generator, storage, clip| {
+            generator.generate_filled_path(
+                area.path_elements(FLATTEN_TOLERANCE),
+                Fill::NonZero,
+                transform,
+                None,
+                storage,
+                clip,
+            );
+        });
+
+        if drawn {
+            self.frame.glyph_slots.push(GlyphSlot {
+                id: slot.image_id,
+                region: AtlasRegion {
+                    layer: slot.page_index,
+                    offset: [u32::from(slot.x), u32::from(slot.y)],
+                    size: [u32::from(slot.width), u32::from(slot.height)],
+                },
+                padding: u32::from(GLYPH_PADDING),
+            });
+            self.frame.atlas_glyph_draws = self.frame.atlas_glyph_draws.saturating_add(1);
+            self.outcome.drawn = self.outcome.drawn.saturating_add(1);
+        } else {
+            // The same roll-back the compiler's own `record` keeps: a glyph
+            // clipped away leaves no orphan entry in the frame's paint table.
+            // The entry just pushed is the last one, so this is exact.
+            self.frame.encoded_paints.truncate(paint_index);
+        }
     }
 
     /// Draw the colour glyph whose last bracket just closed, or count it
@@ -397,8 +542,18 @@ impl DrawSink for EngineGlyphSink<'_> {
                 }
                 // A colour layer always sets its own paint before filling, so
                 // a fill without one is a stream this sink does not recognise.
-                SinkPaint::Run | SinkPaint::Unsupported => self.color.refuse(),
+                SinkPaint::Run | SinkPaint::Atlas(_) | SinkPaint::Unsupported => {
+                    self.color.refuse();
+                }
             }
+            return;
+        }
+
+        // A cached glyph is a rectangle of the atlas, and this is the only
+        // command `glifo` draws one with.
+        if let SinkPaint::Atlas(image) = &self.state.paint {
+            let image = image.clone();
+            self.draw_atlas_glyph(&image, rect);
             return;
         }
 
@@ -476,15 +631,24 @@ impl GlyphRenderer for EngineGlyphSink<'_> {
         self.outcome.skipped = self.outcome.skipped.saturating_add(1);
     }
 
-    fn set_paint_image(&mut self, _image: Image) {
-        // A bitmap-strike glyph, or a glyph replayed out of the glyph atlas.
-        // Neither is served on this path.
-        self.state.paint = SinkPaint::Unsupported;
+    fn set_paint_image(&mut self, image: Image) {
+        // The source is what tells the two apart, and it is this sink's own
+        // answer coming back: a glyph resolved out of the atlas carries the
+        // handle `atlas_image_source` returned, while an uncached bitmap strike
+        // carries its pixmap inline — pixels the engine has nowhere to put on
+        // this path.
+        self.state.paint = match &image.image {
+            ImageSource::OpaqueId { .. } => SinkPaint::Atlas(image),
+            ImageSource::Pixmap(_) => SinkPaint::Unsupported,
+        };
     }
 
-    fn set_tint(&mut self, _tint: Option<vello_common::paint::Tint>) {
-        // Tinting only ever applies to an atlas-sampled glyph image, which
-        // this backend never draws.
+    fn set_tint(&mut self, tint: Option<vello_common::paint::Tint>) {
+        // Carried, not interpreted: `glifo` sets the alpha-mask tint that
+        // colours an outline glyph and leaves it unset for a COLR or bitmap
+        // one, which is exactly the split the encoded paint has to record (see
+        // this module's doc).
+        self.state.tint = tint;
     }
 
     fn get_context_color(&self) -> AlphaColor<Srgb> {
@@ -499,14 +663,20 @@ impl GlyphRenderer for EngineGlyphSink<'_> {
     }
 
     fn atlas_image_source(&self, atlas_slot: &AtlasSlot) -> ImageSource {
-        // Unreached while the atlas cacher is disabled, and answered honestly
-        // rather than stubbed so the seam is already correct for the frust
-        // atlas policy that turns caching on.
+        // The one call handed the slot, so it is where the slot is kept for
+        // the draw that follows (see [`EngineGlyphSink::atlas_slot`]).
+        self.atlas_slot.set(Some(*atlas_slot));
         ImageSource::opaque_id(atlas_slot.image_id)
     }
 
-    fn atlas_paint_transform(&self, atlas_slot: &AtlasSlot) -> Affine {
-        Affine::translate((-f64::from(atlas_slot.x), -f64::from(atlas_slot.y)))
+    fn atlas_paint_transform(&self, _atlas_slot: &AtlasSlot) -> Affine {
+        // The identity, because this engine addresses an atlas paint by its
+        // own *region* — the layer, offset and extent travel in the lowered
+        // record — rather than by sampling the whole page and shifting into
+        // the slot. A renderer that bound the page would need the slot's
+        // negative offset here; one whose record already carries the offset
+        // would be applying it twice.
+        Affine::IDENTITY
     }
 }
 
@@ -523,25 +693,39 @@ pub(crate) struct EngineTextBackend<'a, 's> {
     sink: &'a mut EngineGlyphSink<'s>,
     /// The compiler's retained outline/hinting caches.
     prep: &'a mut GlyphPrepCache,
+    /// The glyph atlas this run's glyphs may be cached in, or
+    /// [`AtlasCacher::Disabled`] for a run the policy routed to outlines.
+    cacher: AtlasCacher<'a>,
 }
 
 impl<'a, 's> EngineTextBackend<'a, 's> {
-    /// A backend drawing into `sink`, preparing glyphs against `prep`.
-    pub(crate) fn new(sink: &'a mut EngineGlyphSink<'s>, prep: &'a mut GlyphPrepCache) -> Self {
-        Self { sink, prep }
+    /// A backend drawing into `sink`, preparing glyphs against `prep`, caching
+    /// through `cacher`.
+    ///
+    /// `cacher` is the policy's answer for this run already made: the caller
+    /// classified the run before building this, so nothing here re-decides it.
+    pub(crate) fn new(
+        sink: &'a mut EngineGlyphSink<'s>,
+        prep: &'a mut GlyphPrepCache,
+        cacher: AtlasCacher<'a>,
+    ) -> Self {
+        Self { sink, prep, cacher }
     }
 }
 
 impl<'a> GlyphRunBackend<'a> for EngineTextBackend<'a, '_> {
-    /// Atlas-backed glyph caching, which this backend does not offer.
+    /// Turn atlas-backed glyph caching off for this run.
     ///
-    /// The engine owns no `GlyphAtlas` on this path: every glyph is drawn as
-    /// strips, so there is nothing for a cache to hold and
-    /// [`AtlasCacher::Disabled`] is what reaches `glifo` whichever way this is
-    /// called. Accepting the request and ignoring it — rather than refusing it
-    /// — is what keeps the trait's contract intact for a caller that asks; the
-    /// engine's own lowering never does.
-    fn atlas_cache(self, _enabled: bool) -> Self {
+    /// One-way on purpose. The cacher this backend was built with is already
+    /// the policy's answer for the run — the *only* place that decides whether
+    /// a run may be cached (see [`crate::text::atlas_policy`]) — so a caller
+    /// asking for caching cannot conjure a cache the policy withheld, while a
+    /// caller asking to go without is always honoured. The engine's own
+    /// lowering asks for neither.
+    fn atlas_cache(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.cacher = AtlasCacher::Disabled;
+        }
         self
     }
 
@@ -549,8 +733,8 @@ impl<'a> GlyphRunBackend<'a> for EngineTextBackend<'a, '_> {
     where
         Glyphs: Iterator<Item = Glyph> + Clone,
     {
-        let Self { sink, prep } = self;
-        let mut renderer = run.build(glyphs, prep.as_mut(), AtlasCacher::Disabled);
+        let Self { sink, prep, cacher } = self;
+        let mut renderer = run.build(glyphs, prep.as_mut(), cacher);
         renderer.fill_glyphs(sink);
     }
 
@@ -558,8 +742,8 @@ impl<'a> GlyphRunBackend<'a> for EngineTextBackend<'a, '_> {
     where
         Glyphs: Iterator<Item = Glyph> + Clone,
     {
-        let Self { sink, prep } = self;
-        let mut renderer = run.build(glyphs, prep.as_mut(), AtlasCacher::Disabled);
+        let Self { sink, prep, cacher } = self;
+        let mut renderer = run.build(glyphs, prep.as_mut(), cacher);
         // No stroke width is scaled by `stroke_adjustment` on the way in, the
         // way a renderer holding stroke state would: the sink has none, and
         // refuses the stroked outline when it arrives (see
@@ -579,8 +763,8 @@ impl<'a> GlyphRunBackend<'a> for EngineTextBackend<'a, '_> {
     ) where
         Glyphs: Iterator<Item = Glyph> + Clone,
     {
-        let Self { sink, prep } = self;
-        let mut renderer = run.build(glyphs, prep.as_mut(), AtlasCacher::Disabled);
+        let Self { sink, prep, cacher } = self;
+        let mut renderer = run.build(glyphs, prep.as_mut(), cacher);
         renderer.render_decoration(x_range, baseline_y, offset, size, buffer, sink);
     }
 }

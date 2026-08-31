@@ -22,8 +22,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use frust_engine::cache::images::ImageResidency;
 use frust_engine::compile::CompiledFrame;
-use frust_engine::{EngineError, SceneCompiler};
+use frust_engine::{AtlasBudget, EngineError, SceneCompiler};
 use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
 use peniko::color::palette::css::{BLUE, RED};
@@ -109,8 +110,20 @@ fn scene_of(record: impl FnOnce(&mut SceneBuilder<'_>)) -> Scene {
     scene
 }
 
+/// A compiler drawing every glyph as outline strips.
+///
+/// The glyph atlas is off on purpose: what this file pins is the *outline*
+/// lowering — one draw per inked glyph, the run's brush inline, dense
+/// painter-order depths — which is a live path in its own right (an animating
+/// size, a size past the cache ceiling, a transform `glifo` will not cache, a
+/// full atlas, and `FRUST_ENGINE_NO_ATLAS` all take it) and the fallback every
+/// atlas refusal lands on. Turning the atlas on would make every one of these
+/// runs an image draw sampling a slot, which is a different contract and is
+/// pinned as one in `atlas_churn.rs`.
 fn compiler() -> SceneCompiler {
-    SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
+    compiler
 }
 
 fn compile(scene: &Scene) -> CompiledFrame {

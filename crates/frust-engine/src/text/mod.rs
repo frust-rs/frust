@@ -59,19 +59,31 @@
 //!
 //! The outline and hinting caches are retained across frames by the compiler
 //! (they are the reason a steady-state frame of text costs no font-table work
-//! at all), and maintained once per compiled frame. Every glyph is drawn as
-//! strips, so a run costs one draw per glyph and no texture residency at all:
-//! [`backend`]'s [`GlyphRunBackend`](glifo::GlyphRunBackend) hands `glifo`
-//! [`AtlasCacher::Disabled`](glifo::AtlasCacher::Disabled) whichever way it is
-//! called.
+//! at all), and maintained once per compiled frame. What a *glyph* costs on top
+//! of that is [`atlas_policy`]'s decision, made once per run before the run is
+//! lowered and carried into `glifo` as the
+//! [`AtlasCacher`](glifo::AtlasCacher) [`lower_glyph_run`] is handed:
 //!
-//! [`atlas_policy`] is the decision half of turning that around — which glyphs
-//! would earn a slot, keyed so an animated size cannot shred the cache, and in
-//! what order a frame's one atlas pass services them. It is complete and
-//! host-tested on its own; what it is still waiting for is the draw path that
-//! consults it, since a cached glyph reaches the sink as an image paint and
-//! [`backend`] has no encoding for one yet. Until then the two agree: no glyph
-//! is cached, and the pixels are the outline path's.
+//! - **Routed to the atlas.** `glifo` resolves each glyph against the policy's
+//!   [`GlyphAtlas`](glifo::GlyphAtlas), and a hit is one image draw sampling
+//!   the slot — no outline fetched, no path flattened, no coverage generated.
+//!   A miss allocates a slot out of the *shared* atlas allocator, records the
+//!   fills that rasterize it into that page's command recorder, and draws the
+//!   slot anyway; the recorded pages are replayed into the atlas by
+//!   [`crate::gpu::atlas::AtlasRenderer`] before the frame's scene pass, which
+//!   is the ordering that makes sampling a just-filled slot sound. So a page of
+//!   static text pays its rasterization on one frame and nothing on the next
+//!   thousand.
+//! - **Routed to outlines.** Every glyph is fetched, scaled and rasterized as
+//!   strips, exactly as before — one draw per glyph, no texture residency at
+//!   all. This is what an animating size, an oversized run, an unusable size
+//!   and `FRUST_ENGINE_NO_ATLAS` all get, and it is also where a glyph the
+//!   atlas had no room for (or whose transform `glifo` will not cache) lands
+//!   on its own. Correct pixels, slower — never wrong ones.
+//!
+//! The two paths are not pixel-identical by construction and are not claimed to
+//! be: an atlas glyph is rasterized once at its quantized size and sampled,
+//! an outline glyph is rasterized per frame at its exact transform.
 //!
 //! # The font gate
 //!
@@ -92,7 +104,7 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 
-use glifo::{FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
+use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
 use kurbo::Affine;
 use peniko::FontData;
 use vello_common::paint::Paint;
@@ -105,7 +117,8 @@ use crate::compile::clip::ClipStack;
 use crate::compile::{CompiledFrame, DepthCounter};
 use crate::config;
 
-use atlas_policy::AtlasPolicy;
+pub(crate) use atlas_policy::AtlasPolicy;
+pub(crate) use atlas_policy::{RunKey, RunRoute};
 
 pub(crate) use backend::{GlyphRunOutcome, context_paint};
 
@@ -144,6 +157,13 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// through unchanged; `glifo` still applies its transform-shape half on top
 /// (see the module doc).
 ///
+/// `cacher` is [`atlas_policy`]'s answer for this run, already decided:
+/// [`AtlasCacher::Enabled`] over the policy's own entry map and the shared
+/// atlas allocator for a run it routed to the atlas, [`AtlasCacher::Disabled`]
+/// for one it routed to outlines. Nothing here re-decides it — the
+/// classification happens once, before the brush is even encoded, so a run
+/// cannot be routed one way by the policy and drawn the other.
+///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
 pub(crate) fn lower_glyph_run(
@@ -152,6 +172,7 @@ pub(crate) fn lower_glyph_run(
     paint: Paint,
     context_brush: &peniko::Brush,
     hint: bool,
+    cacher: AtlasCacher<'_>,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
     let GlyphRunTargets {
@@ -178,7 +199,7 @@ pub(crate) fn lower_glyph_run(
         // no per-run paint transform, so a run's paint is placed by the run's
         // transform alone.
         Affine::IDENTITY,
-        EngineTextBackend::new(&mut sink, prep),
+        EngineTextBackend::new(&mut sink, prep, cacher),
     )
     .font_size(run.font_size)
     .font_embolden(FontEmbolden::default())
@@ -214,16 +235,16 @@ pub(crate) fn lower_glyph_run(
 /// `FRUST_ENGINE_NO_ATLAS` is read here, once per policy, rather than per run —
 /// it is a process-global kill switch ([`config::atlas_disabled`]), and a run
 /// that consulted it separately could not be told from one the size tracker
-/// refused. The residency reads the same switch for itself, so a killed atlas
-/// takes both classes out of the frame.
-#[allow(
-    dead_code,
-    reason = "constructs the policy for the glyph-draw path that consults it; \
-              that path is what turns atlas caching on in `backend`"
-)]
+/// refused. A residency that is disabled for any other reason takes the glyphs
+/// with it: the two classes share one array, and caching glyphs into an atlas
+/// the images were denied would be one class living in a texture the other was
+/// told does not exist.
 #[must_use]
 pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
-    AtlasPolicy::new(images.allocator(), config::atlas_disabled())
+    AtlasPolicy::new(
+        images.allocator(),
+        images.is_disabled() || config::atlas_disabled(),
+    )
 }
 
 /// The OpenType table directory's own fixed header length.

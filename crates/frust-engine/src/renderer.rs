@@ -125,9 +125,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 use frust_gpu::{PipelineCache, PooledTexture, ShaderLibrary, TextureId, TierCaps};
-use frust_scene::Scene;
+use frust_scene::{Scene, SceneBuilder};
+use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
 use kurbo::Affine;
-use peniko::Color;
+use peniko::{Brush, Color};
 use vello_common::encode::{EncodedImage, EncodedPaint};
 use vello_common::fearless_simd::Level;
 use vello_common::paint::{ImageId, ImageSource, Paint};
@@ -141,10 +142,12 @@ use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
-use crate::gpu::atlas::lower_encoded_image;
+use crate::gpu::atlas::{
+    AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
+};
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
-use crate::gpu::pipelines::{EnginePipeline, EngineShaders, warm_up_descs};
+use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs};
 use crate::gpu::strips::{PaintType, pack_paint_descriptor};
 use crate::gpu::targets::{IntermediateTargets, IntermediateTexture};
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
@@ -223,6 +226,26 @@ pub struct EngineRenderer {
     textures: HashMap<TextureId, wgpu::TextureView>,
     resources: FrameResources,
     scratch: Scratch,
+    /// The render-to-atlas pass, created by the first frame that caches a
+    /// glyph.
+    ///
+    /// Lazy because it owns a coverage texture, an instance buffer and five
+    /// stand-in bindings of its own, and a renderer that never draws text —
+    /// or one running with `FRUST_ENGINE_NO_ATLAS` — should pay for none of
+    /// them.
+    atlas_glyphs: Option<AtlasRenderer>,
+    /// The compiler the atlas replay lowers a page's recorded commands
+    /// through, sized to the atlas page rather than to the surface.
+    ///
+    /// A second compiler rather than this renderer's own: the frame's compiler
+    /// is mid-frame (its glyph entry map is exactly what the replay is
+    /// draining) and its viewport is the surface's, while a page's commands are
+    /// in page space. Created on the first replay and kept, so a steady stream
+    /// of first-seen glyphs allocates a strip generator once.
+    atlas_lowering: Option<SceneCompiler>,
+    /// What the last frame's replay serviced, for
+    /// [`Self::atlas_render_report`].
+    atlas_report: AtlasRenderReport,
 }
 
 impl EngineRenderer {
@@ -278,6 +301,9 @@ impl EngineRenderer {
             textures: HashMap::new(),
             resources: FrameResources::new(device, dim),
             scratch: Scratch::default(),
+            atlas_glyphs: None,
+            atlas_lowering: None,
+            atlas_report: AtlasRenderReport::default(),
         })
     }
 
@@ -325,6 +351,19 @@ impl EngineRenderer {
     /// operation, never a per-frame one.
     pub fn set_atlas_budget(&mut self, budget: AtlasBudget) {
         self.compiler.set_atlas_budget(budget);
+        self.resources.reset_atlas();
+    }
+
+    /// Replace image residency wholesale, on the same invalidation terms as
+    /// [`Self::set_atlas_budget`].
+    ///
+    /// The programmatic counterpart to `FRUST_ENGINE_NO_ATLAS`: an
+    /// [`ImageResidency::disabled`] residency takes both atlas classes out of
+    /// the frame — images are skipped and every glyph is drawn as outline
+    /// strips — without a process-global environment variable, which is what a
+    /// caller comparing the two paths on one device needs.
+    pub fn set_image_residency(&mut self, images: crate::cache::images::ImageResidency) {
+        self.compiler.set_image_residency(images);
         self.resources.reset_atlas();
     }
 
@@ -570,6 +609,12 @@ impl EngineRenderer {
         self.resources
             .ensure_atlas(device, queue, atlas_budget, frame.atlas_layers);
 
+        // The glyph atlas, in the order [`crate::gpu::atlas`] documents: the
+        // rectangles last frame's eviction freed are zeroed first, ahead of
+        // every write this frame issues, so a rectangle handed straight back
+        // out cannot be erased after its new occupant landed in it.
+        self.clear_glyph_rects(device, queue, &frame);
+
         self.resources.resize_alphas(device, alphas_grown);
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
@@ -588,6 +633,17 @@ impl EngineRenderer {
             self.compiler.acknowledge_image_plan();
         }
 
+        // The glyph pixels themselves, last of the atlas work and strictly
+        // before the scene pass: every page `glifo` dirtied this frame is
+        // lowered to strips and drawn into its own array layer, on an encoder
+        // this call owns and submits (the sanctioned exception to the encode
+        // contract — see this module's header and `gpu::atlas`). The queue
+        // writes issued above are flushed ahead of that submit, so the pass
+        // composites onto a layer whose clears and image uploads have landed.
+        if frame.atlas_glyph_draws > 0 {
+            self.replay_glyph_pages(device, queue);
+        }
+
         let format = target.format;
         let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
         self.record_frame(
@@ -595,6 +651,118 @@ impl EngineRenderer {
         );
 
         Ok(())
+    }
+
+    /// Creates the render-to-atlas pass on first use.
+    fn ensure_atlas_renderer(&mut self, device: &wgpu::Device) {
+        if self.atlas_glyphs.is_none() {
+            self.atlas_glyphs = Some(AtlasRenderer::new(device, &self.caps));
+        }
+    }
+
+    /// Zero every atlas rectangle the previous frame's glyph eviction freed.
+    ///
+    /// Queue writes, issued before this frame's image uploads and before the
+    /// replay pass's submit — the first of the three orderings
+    /// [`crate::gpu::atlas`] states. A rectangle the array will not take is
+    /// counted rather than dropped silently, on the same terms an image region
+    /// it refuses is.
+    fn clear_glyph_rects(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &CompiledFrame,
+    ) {
+        if frame.glyph_clears.is_empty() || self.resources.atlas.is_none() {
+            return;
+        }
+        self.ensure_atlas_renderer(device);
+
+        let refused = {
+            let Self {
+                atlas_glyphs,
+                resources,
+                ..
+            } = self;
+            let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_ref(), resources.atlas.as_ref())
+            else {
+                return;
+            };
+            frame
+                .glyph_clears
+                .iter()
+                .filter(|rect| !glyphs.clear_rect(queue, atlas, **rect))
+                .count()
+        };
+
+        if refused > 0 {
+            self.resources.note_refused_regions(refused as u64);
+        }
+    }
+
+    /// Draw every atlas page `glifo` dirtied this frame into its own array
+    /// layer.
+    ///
+    /// The pixels of a newly cached glyph, and the last atlas work before the
+    /// scene pass. Each page's recorded commands are lowered to strips by
+    /// [`lower_atlas_page`] and drawn through the pipeline
+    /// [`atlas_strip_desc`] describes; a page the lowering declines is left
+    /// undrawn and counted, so a glyph whose shape this tier cannot express
+    /// goes *missing* rather than landing half-painted.
+    fn replay_glyph_pages(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.resources.atlas.is_none() {
+            return;
+        }
+        self.ensure_atlas_renderer(device);
+        let pipeline = self
+            .pipelines
+            .get_or_create(device, &atlas_strip_desc(&self.shaders))
+            .clone();
+
+        let report = {
+            let Self {
+                atlas_glyphs,
+                atlas_lowering,
+                resources,
+                compiler,
+                ..
+            } = self;
+            let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_mut(), resources.atlas.as_ref())
+            else {
+                return;
+            };
+
+            let (width, height) = atlas.size();
+            let page = (
+                u16::try_from(width).unwrap_or(u16::MAX),
+                u16::try_from(height).unwrap_or(u16::MAX),
+            );
+            let lowering = atlas_lowering.get_or_insert_with(|| SceneCompiler::new(page.0, page.1));
+
+            glyphs.render_pending(
+                device,
+                queue,
+                &pipeline,
+                atlas,
+                compiler.glyph_atlas_mut(),
+                |recorder, buffers| lower_atlas_page(recorder, buffers, lowering, page),
+            )
+        };
+
+        if report.refused > 0 {
+            self.resources
+                .note_refused_regions(u64::from(report.refused));
+        }
+        self.atlas_report = report;
+    }
+
+    /// What the last frame's render-to-atlas pass serviced.
+    ///
+    /// Zero across the board on a steady-state frame: text that hit the cache
+    /// on every glyph frees no rectangle, queues no pixmap and dirties no page.
+    #[must_use]
+    pub fn atlas_render_report(&self) -> AtlasRenderReport {
+        self.atlas_report
     }
 
     /// Builds (or takes from the cache) every pipeline this frame's passes
@@ -1797,6 +1965,33 @@ impl FrameResources {
                 },
             );
         }
+        // The glyph half of the same registry, and the reason it is a second
+        // loop rather than a branch inside the first: a glyph slot carries no
+        // pixels and is *not* re-offered across frames, because the pixels are
+        // produced by the replay pass rather than uploaded from here. Its
+        // rectangle is reported by every draw that names it (see
+        // [`crate::compile::GlyphSlot`]), so registering it here is what makes
+        // a handle `glifo` recycled resolve against its current occupant.
+        for slot in &frame.glyph_slots {
+            if !budget.contains(slot.region, frame.atlas_layers) {
+                refused = refused.saturating_add(1);
+                continue;
+            }
+            self.image_registry.insert(
+                slot.id,
+                ResidentImage {
+                    id: slot.id,
+                    region: slot.region,
+                    // Never minified: a glyph is rasterized straight into the
+                    // rectangle it was allocated, so the natural extent and the
+                    // resident one are the same value by construction.
+                    natural: slot.region.size,
+                    padding: slot.padding,
+                    may_have_transparency: true,
+                },
+            );
+        }
+
         if refused > 0 {
             self.note_refused_regions(refused);
         }
@@ -2093,6 +2288,78 @@ impl FrameResources {
 }
 
 /// The [`ImageId`] an encoded image paint names, or `None` for the one
+/// Lower one atlas page's recorded commands into the strips that draw it,
+/// answering whether the whole page could be expressed.
+///
+/// The caller-supplied half of the render-to-atlas seam: `gpu::atlas` owns the
+/// pass, the orderings and the submit, while turning a command stream into
+/// strips is compiler work and stays on this side of the edge — `compile`
+/// already depends on `gpu::atlas`, so taking the reverse dependency would make
+/// the two mutually recursive.
+///
+/// The stream is replayed as a scene in *page* space and compiled by
+/// `lowering`, which is why that compiler is sized to the page rather than to
+/// the surface. Only the four commands an outline glyph produces are lowered;
+/// anything else — a clip path, a blend layer, a gradient paint, which is to
+/// say every COLR shape — refuses the page whole rather than drawing part of
+/// it, so a colour glyph the tier cannot express is a glyph that goes missing
+/// rather than one that lands wrong. An indexed paint coming back out of the
+/// compile means the same thing: the atlas pass binds no paint texture, so a
+/// record it would have to sample cannot be drawn.
+fn lower_atlas_page(
+    recorder: &AtlasCommandRecorder,
+    buffers: &mut AtlasPageBuffers,
+    lowering: &mut SceneCompiler,
+    page: (u16, u16),
+) -> bool {
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        let mut transform = Affine::IDENTITY;
+        let mut brush = Brush::Solid(Color::BLACK);
+
+        for command in &recorder.commands {
+            match command {
+                AtlasCommand::SetTransform(next) => transform = *next,
+                AtlasCommand::SetPaint(AtlasPaint::Solid(color)) => brush = Brush::Solid(*color),
+                AtlasCommand::FillPath(path) => {
+                    builder.push_transform(transform);
+                    builder.fill_path((**path).clone(), brush.clone());
+                    builder.pop_transform();
+                }
+                AtlasCommand::FillRect(rect) => {
+                    builder.push_transform(transform);
+                    builder.fill_rect(*rect, brush.clone());
+                    builder.pop_transform();
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    let Ok(frame) = lowering.compile(&scene, Affine::IDENTITY, page) else {
+        return false;
+    };
+
+    let strips = frame.strip_buf();
+    for draw in frame.draws() {
+        let Paint::Solid(color) = &draw.paint else {
+            return false;
+        };
+        let Some(run) = strips.get(draw.strip_range.clone()) else {
+            continue;
+        };
+        push_solid_strips(
+            run,
+            color.as_premul_rgba8().to_u32(),
+            draw.depth,
+            &mut buffers.instances,
+        );
+    }
+    buffers.alphas.extend_from_slice(frame.alphas());
+    true
+}
+
 /// [`ImageSource`] variant no residency ever mints — the paint carrying its
 /// pixels inline as a [`vello_common::pixmap::Pixmap`] rather than through a
 /// handle. The compiler's own image encoding always produces the handle form

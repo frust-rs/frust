@@ -30,31 +30,45 @@
 //! It is also the point of the cross-class cases below, which pair the real
 //! residency with a policy over its allocator.
 //!
-//! No GPU, device or surface is involved anywhere here. Both structures a frame
-//! touches — `glifo`'s entry map and `vello_common`'s rectangle packer — are
-//! plain host-side bookkeeping, so a slot is allocated, aged and reclaimed in
-//! these cases exactly as it would be behind a real texture; what a real
-//! texture adds is the pixels, which the policy neither produces nor inspects.
+//! # Two halves
+//!
+//! The first half drives the policy directly, a frame at a time, which is what
+//! lets a ten-thousand-frame sweep run in milliseconds. The second half drives
+//! the *wired* path — a `frust_scene::Scene` compiled by a real
+//! `SceneCompiler` — and pins what those decisions do once `glifo` is holding
+//! the cache: which glyphs became atlas draws, the slot each one names, the
+//! tint its paint applies, and the rectangles an eviction gave back.
+//!
+//! No GPU, device or surface is involved anywhere here, in either half. Both
+//! structures a frame touches — `glifo`'s entry map and `vello_common`'s
+//! rectangle packer — are plain host-side bookkeeping, so a slot is allocated,
+//! aged and reclaimed in these cases exactly as it would be behind a real
+//! texture; what a real texture adds is the pixels, which are produced by the
+//! render-to-atlas pass and belong with the GPU cases in `atlas_render.rs`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use frust_engine::AtlasBudget;
 use frust_engine::cache::images::{ImageResidency, MAX_UNSEEN_FRAMES};
-use frust_gpu::{DownlevelProfile, TierCaps};
-use frust_scene::{FontHandle, Glyph, GlyphRun};
+use frust_engine::compile::CompiledFrame;
+use frust_engine::{AtlasBudget, EngineRenderer, EngineTarget, OutputAlpha, SceneCompiler};
+use frust_gpu::{DownlevelProfile, HeadlessTarget, TierCaps};
+use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use glifo::{AtlasConfig, GlyphCacheKey, ImageCache, RasterMetrics};
 use kurbo::Affine;
 use peniko::color::palette::css::{BLACK, WHITE};
 use peniko::{Blob, Brush, FontData, ImageAlphaType, ImageData, ImageFormat};
+use vello_common::encode::EncodedPaint;
 use vello_common::multi_atlas::AllocationStrategy;
+use vello_common::paint::TintMode;
 
 #[path = "../src/text/atlas_policy.rs"]
 mod atlas_policy;
 
 use atlas_policy::{
-    AtlasPass, AtlasPolicy, GlyphRoute, MAX_CACHED_FONT_SIZE, OutlineReason, RunKey, RunRoute,
-    SETTLE_FRAMES, SIZE_QUANTUM, glyph_cache_config, quantize_font_size,
+    AtlasPass, AtlasPolicy, EVICTION_FREQUENCY, GlyphRoute, MAX_CACHED_FONT_SIZE, MAX_ENTRY_AGE,
+    OutlineReason, RunKey, RunRoute, SETTLE_FRAMES, SIZE_QUANTUM, glyph_cache_config,
+    quantize_font_size,
 };
 
 /// Noto Sans, subsetted to Latin plus combining marks — the same bundled face
@@ -1010,4 +1024,544 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
         "a hinted glyph must not reuse the unhinted entry"
     );
     engine.end_frame(&mut images);
+}
+
+// ---------------------------------------------------------------------------
+// The wired path: the same policy driven by the real `SceneCompiler`.
+//
+// Everything above pins the policy's *decisions* against a hand-driven frame.
+// The cases below pin what those decisions do once a `frust_scene::Scene` is
+// compiled through them — that a settled run reaches the atlas at all, that its
+// second frame costs nothing, that a colour glyph is not tinted by the text
+// colour, and that the kill switch really does put the outline path back.
+//
+// Still device-free. A cached glyph's *pixels* are produced by the render-to-
+// atlas pass (`crate::gpu::atlas`), which needs a queue and lives with the GPU
+// cases; what a compiled frame carries — which glyphs were routed to the
+// atlas, the slot each draw names, the tint its paint applies and the
+// rectangles an eviction freed — is the plan that pass executes, and is pinned
+// here.
+// ---------------------------------------------------------------------------
+
+/// Viewport the wired cases compile against.
+const VIEWPORT: (u16, u16) = (128, 64);
+
+/// Font size the wired cases draw at: a whole number, so quantization is the
+/// identity and the size a glyph is cached at is the size it was asked for.
+const WIRED_SIZE: f32 = 24.0;
+
+/// Noto Emoji, subsetted to one COLRv1 colour glyph — the same fixture
+/// `text_color_hint.rs` names its colour cases against.
+const EMOJI_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoEmoji-COLRv1-Subset.ttf");
+
+/// [`EMOJI_FONT`]'s U+1F600, a COLRv1 base glyph with no outline of its own.
+const EMOJI: u32 = 4;
+
+/// A compiler with hinting off, so a run's route depends only on the policy.
+fn wired_compiler() -> SceneCompiler {
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    compiler.set_hint_text(false);
+    compiler
+}
+
+/// The bundled Latin face, as one process-wide handle.
+///
+/// One handle rather than one per scene, because a `peniko::Blob`'s id is what
+/// the policy keys a font's *size history* on: two handles over the same bytes
+/// are two fonts, and a sweep drawn through fresh handles would read as a
+/// first appearance on every frame rather than as an animation.
+fn latin_font() -> FontHandle {
+    static FONT: std::sync::OnceLock<FontHandle> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| FontHandle::new(FontData::new(Blob::new(Arc::new(LATIN_FONT)), 0)))
+        .clone()
+}
+
+/// The bundled COLRv1 emoji face, on the same terms as [`latin_font`].
+fn emoji_font() -> FontHandle {
+    static FONT: std::sync::OnceLock<FontHandle> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| FontHandle::new(FontData::new(Blob::new(Arc::new(EMOJI_FONT)), 0)))
+        .clone()
+}
+
+/// A scene drawing `ids` from `font` at `size`, in `brush`.
+fn text_scene(font: FontHandle, ids: &[u32], size: f32, brush: Brush) -> Scene {
+    let run = GlyphRun {
+        font,
+        font_size: size,
+        brush,
+        transform: Affine::translate((8.0, 44.0)),
+        glyphs: ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Glyph {
+                id: *id,
+                x: index as f32 * 18.0,
+                y: 0.0,
+            })
+            .collect(),
+    };
+
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.draw_glyph_run(run);
+    scene
+}
+
+/// `Hello` in black at [`WIRED_SIZE`].
+fn hello_scene() -> Scene {
+    text_scene(latin_font(), &HELLO, WIRED_SIZE, Brush::Solid(BLACK))
+}
+
+/// Compile `scene` through `compiler`, expecting it to be in range.
+fn compile(compiler: &mut SceneCompiler, scene: &Scene) -> CompiledFrame {
+    compiler
+        .compile(scene, Affine::IDENTITY, VIEWPORT)
+        .expect("an in-range scene compiles")
+}
+
+/// How many atlas pages `compiler` has recorded rasterization commands for,
+/// draining them the way the render-to-atlas pass would.
+fn drain_dirty_pages(compiler: &mut SceneCompiler) -> usize {
+    let mut pages = 0;
+    compiler
+        .glyph_atlas_mut()
+        .replay_pending_atlas_commands(|_| pages += 1);
+    pages
+}
+
+/// The tint `frame`'s one image paint applies, and whether there was exactly
+/// one.
+fn only_image_tint(frame: &CompiledFrame) -> Option<Option<vello_common::paint::Tint>> {
+    let mut tints = frame.encoded_paints.iter().filter_map(|paint| match paint {
+        EncodedPaint::Image(image) => Some(image.tint),
+        _ => None,
+    });
+    let first = tints.next()?;
+    tints.next().is_none().then_some(first)
+}
+
+#[test]
+fn a_settled_run_draws_every_glyph_out_of_the_atlas() {
+    let mut compiler = wired_compiler();
+    let frame = compile(&mut compiler, &hello_scene());
+
+    assert_eq!(frame.glyph_draws, 5, "every glyph of `Hello` is inked");
+    assert_eq!(
+        frame.atlas_glyph_draws, frame.glyph_draws,
+        "a font drawn at a size nothing preceded is cached on its first frame, \
+         so every glyph of it is an atlas draw"
+    );
+    assert_eq!(
+        frame.glyph_slots.len(),
+        frame.atlas_glyph_draws as usize,
+        "every atlas draw reports the slot it names, so a recycled handle can \
+         never be resolved against a previous occupant"
+    );
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        4,
+        "one entry per distinct glyph; `Hello`'s two `l`s share a key"
+    );
+    assert!(
+        frame.atlas_layers >= 1,
+        "the array has to be deep enough for the page text created"
+    );
+
+    // Every atlas draw is an image paint over the slot, not the run's solid.
+    let images = frame
+        .encoded_paints
+        .iter()
+        .filter(|paint| matches!(paint, EncodedPaint::Image(_)))
+        .count();
+    assert_eq!(images, frame.atlas_glyph_draws as usize);
+}
+
+#[test]
+fn a_static_page_rasterizes_on_its_first_frame_and_nothing_on_its_second() {
+    let mut compiler = wired_compiler();
+    let scene = hello_scene();
+
+    let first = compile(&mut compiler, &scene);
+    assert!(first.atlas_glyph_draws > 0);
+    assert_eq!(
+        drain_dirty_pages(&mut compiler),
+        1,
+        "the first frame misses every glyph, so exactly one page is dirtied"
+    );
+    let entries = compiler.glyph_atlas_entries();
+
+    // The whole point of the cache: the second frame of an unchanged page
+    // rasterizes nothing at all, and every glyph is still drawn.
+    for frame_index in 0..200 {
+        let frame = compile(&mut compiler, &scene);
+        assert_eq!(
+            frame.atlas_glyph_draws, 5,
+            "frame {frame_index} lost a glyph out of the atlas"
+        );
+        assert_eq!(
+            drain_dirty_pages(&mut compiler),
+            0,
+            "frame {frame_index} re-rasterized a page that never changed"
+        );
+        assert!(
+            frame.glyph_clears.is_empty(),
+            "frame {frame_index} evicted a glyph it is still drawing"
+        );
+        assert_eq!(compiler.glyph_atlas_entries(), entries);
+    }
+}
+
+#[test]
+fn the_kill_switch_puts_the_outline_path_back() {
+    let mut compiler = wired_compiler();
+    // The same thing `FRUST_ENGINE_NO_ATLAS` selects, reached without a process
+    // -global environment variable a test cannot un-set for its siblings.
+    compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
+    assert!(!compiler.glyph_atlas_enabled());
+
+    let frame = compile(&mut compiler, &hello_scene());
+
+    assert_eq!(
+        frame.glyph_draws, 5,
+        "a killed atlas costs pixels nothing: every glyph is still drawn"
+    );
+    assert_eq!(frame.atlas_glyph_draws, 0, "…as outline strips, not slots");
+    assert!(frame.glyph_slots.is_empty());
+    assert_eq!(compiler.glyph_atlas_entries(), 0);
+    assert!(
+        frame.encoded_paints.is_empty(),
+        "a solid run drawn as outlines encodes no side-table paint at all"
+    );
+    assert!(
+        frame
+            .draws()
+            .iter()
+            .all(|draw| matches!(draw.paint, vello_common::paint::Paint::Solid(_))),
+        "every glyph paints with the run's own inline colour"
+    );
+}
+
+#[test]
+fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
+    let mut compiler = wired_compiler();
+
+    // The first frame is a first appearance, not a change, so it caches.
+    let first = compile(&mut compiler, &hello_scene());
+    assert!(first.atlas_glyph_draws > 0);
+    let settled = compiler.glyph_atlas_entries();
+
+    // Then the size moves, and every frame of the sweep is outlines.
+    for index in 0..SETTLE_FRAMES {
+        let size = WIRED_SIZE + 0.5 * (index as f32 + 1.0);
+        let scene = text_scene(latin_font(), &HELLO, size, Brush::Solid(BLACK));
+        let frame = compile(&mut compiler, &scene);
+        assert_eq!(
+            frame.atlas_glyph_draws, 0,
+            "a size that moved on frame {index} must not mint a fresh entry"
+        );
+        assert_eq!(frame.glyph_draws, 5, "…and must still draw every glyph");
+    }
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        settled,
+        "the sweep added nothing to the cache"
+    );
+}
+
+#[test]
+fn a_colour_glyph_draws_from_the_atlas_untinted_while_an_outline_carries_the_text_colour() {
+    // An outline glyph is a coverage mask: the shader fills it with the run's
+    // own colour, which is what an alpha-mask tint means.
+    let mut compiler = wired_compiler();
+    let frame = compile(
+        &mut compiler,
+        &text_scene(latin_font(), &HELLO[..1], WIRED_SIZE, Brush::Solid(WHITE)),
+    );
+    let tint = only_image_tint(&frame)
+        .expect("one glyph, one atlas draw, one image paint")
+        .expect("an outline glyph is tinted with the run's colour");
+    assert_eq!(tint.mode, TintMode::AlphaMask);
+    assert_eq!(tint.color, WHITE);
+
+    // A COLR glyph brings its own pixels. Multiplying them by the text colour
+    // would repaint a colour emoji in the paragraph's ink.
+    let mut compiler = wired_compiler();
+    let frame = compile(
+        &mut compiler,
+        &text_scene(emoji_font(), &[EMOJI], WIRED_SIZE, Brush::Solid(WHITE)),
+    );
+    assert_eq!(
+        frame.atlas_glyph_draws, 1,
+        "a colour glyph is one atlas draw, not one per layer"
+    );
+    assert_eq!(
+        only_image_tint(&frame).expect("one colour glyph, one image paint"),
+        None,
+        "a colour glyph must not be multiplied by the run's own colour"
+    );
+    assert_eq!(compiler.glyph_atlas_entries(), 1);
+}
+
+#[test]
+fn an_idle_glyph_is_evicted_and_its_rectangle_carried_into_the_next_frames_clears() {
+    let mut compiler = wired_compiler();
+    let first = compile(&mut compiler, &hello_scene());
+    assert!(first.atlas_glyph_draws > 0);
+    assert_eq!(compiler.glyph_atlas_entries(), 4);
+
+    // Nothing draws for long enough that `glifo`'s own LRU reaps the page.
+    let empty = Scene::new();
+    let mut clears = 0;
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+        let frame = compile(&mut compiler, &empty);
+        clears += frame.glyph_clears.len();
+    }
+
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        0,
+        "an idle page must be given back to the shared allocator"
+    );
+    assert_eq!(
+        clears, 4,
+        "every evicted rectangle is carried into a later frame's clears, so it \
+         is zeroed before whatever is handed it next composites onto it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The wired path on real hardware.
+//
+// One case, and it is the one a device-free assertion cannot make: that a
+// glyph the atlas holds is *drawn* — rasterized by the replay pass into an
+// array layer, then sampled back out by the scene pass through a paint the
+// renderer resolved from the slot the frame reported. Every step of that is a
+// value no host test observes: a page replayed into the wrong layer, a paint
+// resolved against a stale rectangle, a tint applied in the wrong mode and a
+// slot never registered at all are all blank or wrong *pixels* and nothing
+// else.
+//
+// It is also where the atlas path is measured against the outline one. The two
+// are not byte-identical by construction — a cached glyph is rasterized once at
+// its quantized size into a pixel-aligned slot and sampled at nearest, while an
+// outline glyph is rasterized per frame at its exact subpixel position — so the
+// bar is a band, and the band is the measurement.
+// ---------------------------------------------------------------------------
+
+/// Serializes every case in this binary that creates a GPU device, for the
+/// reason `encode_contract.rs` documents at length: a driver that serializes
+/// device teardown on a process-global mutex deadlocks when two of them tear
+/// down at once. Poison is ignored deliberately — one case's failure must not
+/// cascade into its siblings.
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn render_lock() -> std::sync::MutexGuard<'static, ()> {
+    RENDER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The target extent the GPU case renders at.
+const GPU_SIZE: u32 = 128;
+
+/// The target format the GPU case renders to.
+const GPU_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Blocks on `future` by polling it to completion — this crate has no async
+/// runtime, and wgpu's native requests resolve without one.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// Pops a validation error scope, pumping the device until the pop resolves.
+fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = std::pin::pin!(scope.pop());
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(error) => return error,
+            Poll::Pending => {
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
+    }
+}
+
+/// A device plus the capabilities probed off the adapter it came from.
+fn gpu() -> (wgpu::Device, wgpu::Queue, TierCaps) {
+    block_on(async {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+            .await
+            .expect("no compatible GPU adapter");
+        println!("atlas churn adapter: {:?}", adapter.get_info());
+        let caps = TierCaps::probe(&adapter);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("frust-engine atlas churn device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to create the device");
+        (device, queue, caps)
+    })
+}
+
+/// Renders `frames` frames of `scene` on one renderer and returns each frame's
+/// pixels, with the glyph atlas on or off.
+///
+/// One renderer across the frames on purpose: the second frame of a page is
+/// the one the whole cache exists for, and it is only meaningful against a
+/// renderer that kept the first frame's atlas.
+fn render_frames(scene: &Scene, atlas: bool, frames: usize) -> Vec<Vec<u8>> {
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let target = HeadlessTarget::new(&device, GPU_SIZE, GPU_SIZE, GPU_FORMAT);
+    let mut renderer = EngineRenderer::new(&device, &caps, GPU_FORMAT, None)
+        .expect("the engine builds on this device");
+    if !atlas {
+        renderer.set_image_residency(ImageResidency::disabled(renderer.atlas_budget()));
+    }
+
+    let mut captured = Vec::with_capacity(frames);
+    for index in 0..frames {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine atlas churn frame"),
+        });
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: GPU_FORMAT,
+                    width: GPU_SIZE,
+                    height: GPU_SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                WHITE,
+                Affine::IDENTITY,
+            )
+            .unwrap_or_else(|error| panic!("frame {index} was refused: {error:?}"));
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        captured.push(target.read_back(&device, &queue));
+    }
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "the frame raised {error:?}");
+    captured
+}
+
+/// How many pixels of `pixels` are not the untouched white backdrop.
+fn inked(pixels: &[u8]) -> usize {
+    pixels.chunks_exact(4).filter(|p| *p != [255; 4]).count()
+}
+
+/// The largest per-channel difference between two frames, and how many pixels
+/// differ at all.
+fn divergence(left: &[u8], right: &[u8]) -> (u8, usize) {
+    let mut worst = 0_u8;
+    let mut differing = 0_usize;
+    for (a, b) in left.chunks_exact(4).zip(right.chunks_exact(4)) {
+        if a != b {
+            differing += 1;
+        }
+        for (x, y) in a.iter().zip(b.iter()) {
+            worst = worst.max(x.abs_diff(*y));
+        }
+    }
+    (worst, differing)
+}
+
+/// The most a cached glyph's pixels may differ from the outline path's, per
+/// channel: the corpus's own P1 bar.
+///
+/// Measured at **zero** on the NVIDIA T400 (Vulkan) rig — this fixture draws at
+/// a whole font size on a whole-pixel baseline, so every glyph lands in subpixel
+/// bucket zero and the slot the atlas rasterized carries the same coverage the
+/// outline path produces, texel for texel. Stated as a band rather than as
+/// byte-identity because that agreement is a property of *this* fixture: a
+/// fractional baseline resolves through one of four subpixel buckets and would
+/// round differently. Two units is what the golden corpus calls P1, and is
+/// narrow enough that a glyph landing a whole pixel out, sampled from the wrong
+/// slot, or tinted in the wrong mode fails it outright.
+const GLYPH_DIVERGENCE_CHANNEL: u8 = 2;
+
+/// The most of the frame a cached glyph's pixels may differ from the outline
+/// path's, as a fraction of the whole target.
+///
+/// Also measured at zero. Half a percent of a 128-square frame is 82 pixels,
+/// well under the run's own 431 inked ones, so a glyph shifted or missing on one
+/// path fails this even where every individual channel stayed inside the bar
+/// above.
+const GLYPH_DIVERGENCE_PIXELS: f64 = 0.005;
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test atlas_churn -- --ignored`"]
+fn a_cached_glyph_is_drawn_from_the_atlas_and_stays_put_on_the_next_frame() {
+    let _serialized = render_lock();
+    let scene = hello_scene();
+
+    let atlas = render_frames(&scene, true, 2);
+    let outline = render_frames(&scene, false, 2);
+    let total = (GPU_SIZE * GPU_SIZE) as usize;
+
+    // The claim nothing device-free can make: the replay pass really produced
+    // pixels, and the scene pass really sampled them.
+    let atlas_ink = inked(&atlas[0]);
+    assert!(
+        atlas_ink > 0,
+        "an atlas-routed run drew no ink at all — the slot was never filled, \
+         never registered, or never sampled"
+    );
+    assert!(
+        inked(&outline[0]) > 0,
+        "fixture precondition: the outline path draws this run"
+    );
+
+    // The steady state, end to end: the second frame re-samples the slots the
+    // first frame filled and lands on exactly the same pixels.
+    assert_eq!(
+        atlas[0], atlas[1],
+        "a page held still must render identically on its second frame"
+    );
+
+    let (worst, differing) = divergence(&atlas[0], &outline[0]);
+    let fraction = differing as f64 / total as f64;
+    println!(
+        "atlas vs outline: max |delta| {worst}, {differing} of {total} pixels differ \
+         ({:.4}%), atlas ink {atlas_ink}",
+        fraction * 100.0
+    );
+    assert!(
+        worst <= GLYPH_DIVERGENCE_CHANNEL,
+        "a cached glyph diverged from the outline path by {worst} per channel"
+    );
+    assert!(
+        fraction <= GLYPH_DIVERGENCE_PIXELS,
+        "a cached glyph moved {:.4}% of the frame — that is ink somewhere the \
+         outline path put none, not resampling",
+        fraction * 100.0
+    );
 }

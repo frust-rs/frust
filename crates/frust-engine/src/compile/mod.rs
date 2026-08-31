@@ -26,9 +26,13 @@
 //! (see [`paint`] and [`crate::cache::images`]), and blurred rounded
 //! rectangles, whose padded bounding rectangle is rasterized the same way and
 //! painted by a gaussian-falloff paint the fragment shader evaluates per pixel
-//! (see [`blur_rrect`]), and glyph runs, whose outlines are fetched and scaled
-//! by `glifo` and then rasterized as any other filled path would be, painted
-//! by the run's own brush (see [`crate::text`]). Shader quads are recognised
+//! (see [`blur_rrect`]), and glyph runs, which take one of two routes decided
+//! per run by [`crate::text::atlas_policy`] before the walk begins: a settled
+//! run is resolved through the glyph atlas and each glyph drawn as one image
+//! paint over its slot, while an animating, oversized or refused one has its
+//! outlines fetched and scaled by `glifo` and rasterized as any other filled
+//! path would be, painted by the run's own brush (see [`crate::text`]).
+//! Shader quads are recognised
 //! and skipped — the engine grows them in a later pass, and skipping is the
 //! conservative behaviour (a frame draws less, never wrong).
 
@@ -59,11 +63,12 @@ use peniko::{Brush, Color, Fill, ImageData};
 use frust_gpu::TierCaps;
 use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
 
-use glifo::GlyphPrepCache;
+use glifo::{AtlasCacher, GlyphAtlas, GlyphPrepCache, PendingClearRect};
 
 use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
+use vello_common::paint::ImageId;
 use vello_common::record::CommandRecorder;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
 use vello_common::tile::Tile;
@@ -76,7 +81,10 @@ use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
-use crate::text::{GlyphRunTargets, font_is_readable, lower_glyph_run};
+use crate::text::{
+    AtlasPolicy, GlyphRunTargets, RunKey, RunRoute, context_paint, font_is_readable,
+    glyph_atlas_policy, lower_glyph_run,
+};
 
 /// Curve-flattening tolerance, in device pixels.
 ///
@@ -92,6 +100,28 @@ static IMAGE_SKIP_WARNING: Once = Once::new();
 /// Raised the first time a glyph run is refused for an unreadable font, on the
 /// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
 static FONT_SKIP_WARNING: Once = Once::new();
+
+/// Where one glyph an atlas-routed draw sampled lives in the atlas array.
+///
+/// The image half of residency travels as an [`ImageUpload`], carrying pixels;
+/// a glyph's pixels are produced *on the GPU* by the replay pass, so nothing
+/// travels here but the rectangle — which the renderer still needs, because a
+/// glyph paint names its slot by [`ImageId`] and only the sink that drew it was
+/// ever handed the slot itself.
+///
+/// Reported per draw rather than per allocation, so a recycled handle can never
+/// be resolved against a previous occupant's rectangle: `glifo` returns an
+/// evicted slot's id to the shared allocator, and whatever takes it next — a
+/// glyph or an image — reports its own rectangle on the frame it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlyphSlot {
+    /// The handle the draw's image paint names this slot by.
+    pub id: ImageId,
+    /// The slot's own rectangle, padding excluded.
+    pub region: AtlasRegion,
+    /// Transparent padding texels `glifo` keeps around `region`.
+    pub padding: u32,
+}
 
 /// Everything one compiled frame produced.
 ///
@@ -188,6 +218,25 @@ pub struct CompiledFrame {
     /// asserted, the same way [`skipped_images`](Self::skipped_images) does
     /// for images.
     pub skipped_glyphs: u32,
+    /// How many of [`glyph_draws`](Self::glyph_draws) sampled the glyph atlas
+    /// rather than rasterizing an outline.
+    ///
+    /// The measure of what the policy is actually buying: a page of settled
+    /// text reads all-atlas, an animating size reads zero, and the difference
+    /// between them is the frame's rasterization work.
+    pub atlas_glyph_draws: u32,
+    /// Where each of this frame's atlas-sampled glyphs lives, one entry per
+    /// atlas draw (see [`GlyphSlot`]).
+    pub glyph_slots: Vec<GlyphSlot>,
+    /// Atlas rectangles freed by the *previous* frame's glyph eviction, to be
+    /// zeroed before this frame writes anything into the array.
+    ///
+    /// Carried a frame late deliberately: `glifo` evicts at the end of a frame,
+    /// and a rectangle it frees can be handed straight back out on the next
+    /// one, so clearing it after that frame's uploads and replay would erase
+    /// whatever just moved in. Same ordering, same reason, as
+    /// [`image_evictions`](Self::image_evictions).
+    pub glyph_clears: Vec<PendingClearRect>,
 }
 
 impl CompiledFrame {
@@ -220,6 +269,22 @@ pub struct SceneCompiler {
     punches: Vec<StagedPunch>,
     images: ImageResidency,
     glyphs: GlyphPrepCache,
+    /// Which glyphs earn an atlas slot, and the entry map they live in.
+    ///
+    /// A sibling field of [`Self::images`] rather than a member of it: the two
+    /// share one allocator but decide different things, and every call that
+    /// needs both takes them as disjoint borrows of this struct (see
+    /// [`crate::text::atlas_policy`] for why the allocator is the residency's).
+    glyph_atlas: AtlasPolicy,
+    /// This frame's per-run routing decisions, in the order the scene records
+    /// its glyph runs.
+    ///
+    /// Filled by the collect walk at the head of [`Self::compile`] and consumed
+    /// by the draw walk one run at a time. Retained across frames only for its
+    /// allocation.
+    run_routes: Vec<RunRoute>,
+    /// How many of [`Self::run_routes`] the draw walk has consumed.
+    next_run: usize,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -279,16 +344,52 @@ impl SceneCompiler {
     /// residency budgeted explicitly.
     pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
         let level = Level::try_detect().unwrap_or(Level::baseline());
+        let images = ImageResidency::new(budget);
         Self {
             generator: StripGenerator::new(width, height, level),
             clips: ClipStack::new(),
             groups: GroupStack::new(),
             snapshots: SnapshotStack::new(),
             punches: Vec::new(),
-            images: ImageResidency::new(budget),
+            // Built from the residency, so the policy's page geometry is read
+            // off the allocator it will pack into rather than derived a second
+            // time from the same budget.
+            glyph_atlas: glyph_atlas_policy(&images),
+            images,
             glyphs: GlyphPrepCache::default(),
+            run_routes: Vec::new(),
+            next_run: 0,
             hint_text: false,
         }
+    }
+
+    /// The glyph entry map, for the caller that has to drain the pages this
+    /// compiler's last frame dirtied.
+    ///
+    /// The engine produces no glyph pixels itself: `glifo` records the fills
+    /// that rasterize a newly cached glyph into a per-page recorder, and
+    /// [`crate::gpu::atlas::AtlasRenderer::render_pending`] replays them into
+    /// the atlas array before the frame's scene pass. That replay needs the map
+    /// itself, which is what this hands over.
+    pub fn glyph_atlas_mut(&mut self) -> &mut GlyphAtlas {
+        self.glyph_atlas.atlas_mut()
+    }
+
+    /// How many glyphs this compiler currently holds resident in the atlas.
+    ///
+    /// Observational, and the counter the policy's whole claim rests on: a page
+    /// of static text reaches a fixed number here and stays there, while an
+    /// animating size never contributes at all.
+    #[must_use]
+    pub fn glyph_atlas_entries(&self) -> usize {
+        self.glyph_atlas.entry_count()
+    }
+
+    /// Whether any glyph may be cached at all — `false` under
+    /// `FRUST_ENGINE_NO_ATLAS`.
+    #[must_use]
+    pub fn glyph_atlas_enabled(&self) -> bool {
+        self.glyph_atlas.is_enabled()
     }
 
     /// The images this compiler currently holds resident.
@@ -330,8 +431,14 @@ impl SceneCompiler {
     /// carries, exposed for the residencies a budget alone cannot express — a
     /// deliberately [disabled](ImageResidency::disabled) one, or one a caller
     /// built against an adapter's own capabilities.
+    ///
+    /// The glyph policy is rebuilt alongside it, and for the same reason: its
+    /// slots came out of the allocator being replaced, so every one of them
+    /// names a rectangle of a geometry that no longer exists. Text re-caches on
+    /// the next frame that draws it, exactly as an image re-uploads.
     pub fn set_image_residency(&mut self, images: ImageResidency) {
         self.images = images;
+        self.glyph_atlas = glyph_atlas_policy(&self.images);
     }
 
     /// Compile `scene` for a `size` viewport, with `root` applied ahead of
@@ -381,6 +488,29 @@ impl SceneCompiler {
         // it.
         self.glyphs.maintain();
 
+        // Phase one of the frame: every glyph run is *routed* before any of
+        // them is drawn. Opened here, beside the residency's own frame, because
+        // the two age against the same clock.
+        // Nothing is rasterized in that phase and no slot is allocated — the
+        // walk only asks the policy which runs may be cached, which is what
+        // records their sizes against the animation guard before a single glyph
+        // reaches `glifo`. Closing the phase hands back the rectangles last
+        // frame's eviction freed, to be zeroed ahead of anything this frame
+        // writes (see [`CompiledFrame::glyph_clears`]).
+        self.glyph_atlas.begin_frame();
+        self.classify_runs(scene);
+        let glyph_clears = self
+            .glyph_atlas
+            .build(self.images.allocator_mut(), |_| {
+                // Unreachable: the collect walk claims no glyph, because the
+                // allocation and the rasterization of a cached glyph are
+                // `glifo`'s own — it keys, packs and records every one of them
+                // itself once a run reaches it with the cacher enabled. So the
+                // pass this closes carries clears and nothing else.
+                None
+            })
+            .clears;
+
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
             recorder: CommandRecorder::new(width, height),
@@ -398,6 +528,9 @@ impl SceneCompiler {
             skipped_images: 0,
             glyph_draws: 0,
             skipped_glyphs: 0,
+            atlas_glyph_draws: 0,
+            glyph_slots: Vec::new(),
+            glyph_clears,
         };
         let mut depth = DepthCounter::new();
 
@@ -407,6 +540,12 @@ impl SceneCompiler {
 
         self.close_open_groups(&mut frame);
         self.generate_punches(&mut frame);
+
+        // Closes the frame the policy opened: ages `glifo`'s entry map, frees
+        // whatever aged out back to the shared allocator, and takes the clear
+        // rects that eviction produced — which belong to the *next* frame's
+        // pass, not this one's.
+        self.glyph_atlas.end_frame(self.images.allocator_mut());
 
         frame.scissor_clips = self.clips.scissor_clips();
         frame.mask_clips = self.clips.mask_clips();
@@ -437,6 +576,16 @@ impl SceneCompiler {
         // bracket, so this is the plain frame root for every frame that
         // records none.
         let combined = root * self.snapshots.correction();
+
+        // Taken here rather than inside the glyph arm, and taken for every
+        // glyph run whether or not it goes on to be drawn: the collect walk
+        // classified one run per `Command::GlyphRun` in this same order, so
+        // consuming one per `Command::GlyphRun` is what keeps the two walks in
+        // step through every early return below.
+        let route = match command {
+            Command::GlyphRun(_) => self.take_run_route(),
+            _ => None,
+        };
 
         // A correction composes a transform the up-front walk never saw, and
         // the product can leave the finite device grid even though both
@@ -808,7 +957,7 @@ impl SceneCompiler {
                 }
             }
             Command::GlyphRun(run) => {
-                self.compile_glyph_run(run, combined * run.transform, frame, depth);
+                self.compile_glyph_run(run, combined * run.transform, route, frame, depth);
             }
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
@@ -837,10 +986,56 @@ impl SceneCompiler {
     /// A run whose font cannot be read is refused the same way and for a
     /// harder reason: the text backend's font gate is what keeps a blob that
     /// is not a font off the frame path at all (see [`crate::text`]).
+    /// Route every glyph run the scene records, in recording order.
+    ///
+    /// The whole of the frame's collect phase. It is a walk of its own rather
+    /// than a question asked inside the draw walk because the answer for one
+    /// run depends on what the *font* has been drawn at recently, and a policy
+    /// that learned a size only as it drew it would route the first run of a
+    /// changing frame as settled and the second as animating — the two halves
+    /// of one line of text taking different paths.
+    ///
+    /// Every run is classified, including ones the draw walk will refuse: the
+    /// refusals it makes (an empty run, a blocked clip, an unreadable face)
+    /// are not size observations, and a size drawn on a frame is a size drawn
+    /// on that frame whatever else happens to it.
+    fn classify_runs(&mut self, scene: &Scene) {
+        self.run_routes.clear();
+        self.next_run = 0;
+        for command in scene.commands() {
+            let Command::GlyphRun(run) = command else {
+                continue;
+            };
+            // The context colour `glifo` would resolve a COLR layer against —
+            // the run's own brush when it is solid, black otherwise, which is
+            // the same answer `EngineGlyphSink::get_context_color` gives it.
+            let context_color = match context_paint(&run.brush) {
+                vello_common::paint::PaintType::Solid(color) => color,
+                _ => peniko::color::palette::css::BLACK,
+            };
+            let key = RunKey::for_run(run, self.hint_text, context_color);
+            let route = self.glyph_atlas.classify_run(&key);
+            self.run_routes.push(route);
+        }
+    }
+
+    /// The next run's route, or `None` once the collect walk's answers are
+    /// exhausted.
+    ///
+    /// `None` is the conservative answer rather than an error: a run with no
+    /// recorded route is drawn as outlines, which is correct pixels by the path
+    /// the engine has always used.
+    fn take_run_route(&mut self) -> Option<RunRoute> {
+        let route = self.run_routes.get(self.next_run).copied();
+        self.next_run = self.next_run.saturating_add(1);
+        route
+    }
+
     fn compile_glyph_run(
         &mut self,
         run: &GlyphRun,
         transform: Affine,
+        route: Option<RunRoute>,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
     ) {
@@ -868,20 +1063,34 @@ impl SceneCompiler {
         // fields would fight the borrow checker for no reason.
         let hint_text = self.hint_text;
         // Destructured rather than passed as `self`, because the sink borrows
-        // the generator and the clip stack mutably while the glyph caches are
-        // borrowed mutably alongside them.
+        // the generator and the clip stack mutably while the glyph caches, the
+        // entry map and the shared allocator are borrowed mutably alongside
+        // them — five disjoint fields of one struct.
         let Self {
             generator,
             clips,
             glyphs,
+            images,
+            glyph_atlas,
             ..
         } = self;
+        // The policy's decision, turned into the borrow `glifo` caches
+        // through. A run it refused reaches `glifo` with no cache at all, which
+        // is the outline path unchanged rather than a cache that declines every
+        // lookup — those are the same pixels but not the same work.
+        let cacher = match route {
+            Some(RunRoute::Atlas(_)) => {
+                AtlasCacher::Enabled(glyph_atlas.atlas_mut(), images.allocator_mut())
+            }
+            Some(RunRoute::Outline(_)) | None => AtlasCacher::Disabled,
+        };
         let outcome = lower_glyph_run(
             run,
             transform,
             paint,
             &run.brush,
             hint_text,
+            cacher,
             GlyphRunTargets {
                 generator,
                 clips,

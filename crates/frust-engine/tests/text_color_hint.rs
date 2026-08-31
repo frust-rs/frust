@@ -34,8 +34,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use frust_engine::SceneCompiler;
+use frust_engine::cache::images::ImageResidency;
 use frust_engine::compile::CompiledFrame;
+use frust_engine::{AtlasBudget, SceneCompiler};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -138,8 +139,25 @@ fn scene_of(record: impl FnOnce(&mut SceneBuilder<'_>)) -> Scene {
     scene
 }
 
+/// `compiler` with the glyph atlas off, so every glyph is drawn as outline
+/// strips.
+///
+/// Every case in this file is about that path: a COLR glyph recombined into one
+/// draw per layer, and a hinted outline's own pixels. An atlas-routed glyph is
+/// a single image draw sampling a slot instead — the layers are rasterized once
+/// into the atlas and never reach the frame's draws, and the hinting question
+/// is answered inside the cache key rather than in the strips — so pinning
+/// either contract means choosing the path deliberately. The atlas one is
+/// pinned in `atlas_churn.rs`; this file pins the fallback, which is what an
+/// animating size, an oversized run, a transform `glifo` will not cache, a full
+/// atlas and `FRUST_ENGINE_NO_ATLAS` all take.
+fn outline_only(mut compiler: SceneCompiler) -> SceneCompiler {
+    compiler.set_image_residency(ImageResidency::disabled(AtlasBudget::MOBILE));
+    compiler
+}
+
 fn compiler() -> SceneCompiler {
-    SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+    outline_only(SceneCompiler::new(VIEWPORT.0, VIEWPORT.1))
 }
 
 fn compile(scene: &Scene) -> CompiledFrame {
@@ -517,11 +535,11 @@ fn a_hinted_runs_output_is_byte_stable_across_two_frames() {
 #[test]
 fn a_mobile_tier_compiler_draws_unhinted_output_byte_identical_to_hint_text_false() {
     let mobile = compile_with(
-        SceneCompiler::for_caps(
+        outline_only(SceneCompiler::for_caps(
             VIEWPORT.0,
             VIEWPORT.1,
             &TierCaps::fake(DownlevelProfile::WebGl2),
-        ),
+        )),
         small_latin_run(),
     );
     let explicit_unhinted = compile_with(compiler_hinted(false), small_latin_run());
@@ -539,11 +557,11 @@ fn a_mobile_tier_compiler_draws_unhinted_output_byte_identical_to_hint_text_fals
 #[test]
 fn a_desktop_tier_compiler_draws_hinted_output_byte_identical_to_hint_text_true() {
     let desktop = compile_with(
-        SceneCompiler::for_caps(
+        outline_only(SceneCompiler::for_caps(
             VIEWPORT.0,
             VIEWPORT.1,
             &TierCaps::fake(DownlevelProfile::Full),
-        ),
+        )),
         small_latin_run(),
     );
     let explicit_hinted = compile_with(compiler_hinted(true), small_latin_run());

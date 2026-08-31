@@ -93,9 +93,11 @@
 
 #![allow(
     dead_code,
-    reason = "the policy is complete and host-tested ahead of the glyph-draw \
-              path that consults it; that path is what turns `AtlasCacher` on \
-              in the text backend, which still offers only the disabled mode"
+    reason = "the run-routing half is consumed by `super::glyph_atlas_policy`'s \
+              caller; the per-glyph half — `collect_glyph`, `slot`, \
+              `GlyphUpload` and `AtlasPass::uploads` — is host-tested but \
+              unreachable while `glifo` owns the allocation, since it keys and \
+              rasterizes every cached glyph itself (see `atlas_mut`)"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -501,6 +503,25 @@ impl AtlasPolicy {
     #[must_use]
     pub(crate) fn frame(&self) -> u64 {
         self.frame
+    }
+
+    /// The entry map itself, for the caller that hands it to `glifo`.
+    ///
+    /// `glifo` does not take a *decision* from an integrator — it takes the
+    /// cache: [`AtlasCacher::Enabled`](glifo::AtlasCacher::Enabled) borrows a
+    /// [`GlyphAtlas`] and the shared allocator, and from there `glifo` builds
+    /// every key, resolves every hit, allocates every miss and records the
+    /// fills that rasterize it. So a run this policy routes to the atlas
+    /// reaches `glifo` by handing over this map, and the frame's dirty pages
+    /// are drained back off it afterwards.
+    ///
+    /// Handed out rather than mirrored, for the reason this type's own doc
+    /// gives: "which glyphs are resident" has to stay one structure. What the
+    /// policy still decides on its own is *which runs are offered* — the kill
+    /// switch, the size quantization, the animation guard and the size
+    /// ceiling — and that decision is made before this borrow is taken.
+    pub(crate) fn atlas_mut(&mut self) -> &mut GlyphAtlas {
+        &mut self.atlas
     }
 
     /// How many glyphs are currently resident.
