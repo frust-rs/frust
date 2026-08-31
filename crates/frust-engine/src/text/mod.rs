@@ -281,10 +281,14 @@ const HEAD_TAG: [u8; 4] = *b"head";
 const COLR_TAG: [u8; 4] = *b"COLR";
 /// A font collection's own file tag.
 const TTC_TAG: [u8; 4] = *b"ttcf";
+/// Byte offset of a collection header's major version. Only versions 1 and 2
+/// are defined; anything else is a collection this backend does not
+/// understand and refuses rather than guesses at.
+const TTC_MAJOR_VERSION: usize = 4;
 /// Byte offset of a collection header's font count.
-const TTC_NUM_FONTS: usize = 12;
+const TTC_NUM_FONTS: usize = 8;
 /// Byte offset of a collection header's first table-directory offset.
-const TTC_OFFSETS: usize = 16;
+const TTC_OFFSETS: usize = 12;
 /// The three single-font file tags: TrueType outlines, CFF outlines, and the
 /// legacy Apple TrueType tag.
 const SFNT_TAGS: [[u8; 4]; 3] = [[0x00, 0x01, 0x00, 0x00], *b"OTTO", *b"true"];
@@ -317,12 +321,25 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
     let tag: [u8; 4] = data.get(0..4)?.try_into().ok()?;
 
     let start = if tag == TTC_TAG {
+        let major_version = read_u16(data, TTC_MAJOR_VERSION)?;
+        if major_version != 1 && major_version != 2 {
+            return None;
+        }
         let count = read_u32(data, TTC_NUM_FONTS)?;
         if index >= count {
             return None;
         }
         let entry = TTC_OFFSETS.checked_add(usize::try_from(index).ok()?.checked_mul(4)?)?;
-        usize::try_from(read_u32(data, entry)?).ok()?
+        let inner = usize::try_from(read_u32(data, entry)?).ok()?;
+        // The inner table directory is itself a single-font header, so it
+        // must carry the same known sfnt tag the single-font branch checks
+        // at offset 0 — otherwise the bound check above validates a
+        // directory `glifo` would refuse to parse.
+        let inner_tag: [u8; 4] = data.get(inner..inner.checked_add(4)?)?.try_into().ok()?;
+        if !SFNT_TAGS.contains(&inner_tag) {
+            return None;
+        }
+        inner
     } else {
         // A single font file holds exactly one face, so any other index names
         // nothing in it.

@@ -515,6 +515,115 @@ fn the_font_gate_still_admits_the_bundled_faces() {
     assert!(compile_run(run_against(LATIN_FONT.to_vec(), 0)).glyph_draws > 0);
 }
 
+/// Wraps `font` — a standalone single-face sfnt file — as the sole member of
+/// a spec-correct synthetic `ttcf` collection: header (major version 1, one
+/// font) followed by `font`'s own table directory and table data, with every
+/// record's offset shifted by the header's length so it still resolves at
+/// the same table bytes now that they sit further into the blob.
+///
+/// The shift is what makes this a real collection rather than a relabelled
+/// single font: a TTC's table-record offsets are absolute to the whole file
+/// (that is what lets fonts in a real collection share table data), so
+/// copying `font`'s directory unshifted behind a header would point every
+/// record at the wrong bytes.
+fn wrap_as_collection(font: &[u8]) -> Vec<u8> {
+    const HEADER_LEN: u32 = 16;
+    let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let data_start = 12 + num_tables * 16;
+
+    let mut out = Vec::with_capacity(HEADER_LEN as usize + font.len());
+    out.extend_from_slice(b"ttcf");
+    out.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+    out.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+    out.extend_from_slice(&1u32.to_be_bytes()); // numFonts
+    out.extend_from_slice(&HEADER_LEN.to_be_bytes()); // offsetTable[0]
+
+    // The wrapped font's own directory header: sfntVersion, numTables,
+    // searchRange, entrySelector, rangeShift — none of these are offsets, so
+    // none of them need shifting.
+    out.extend_from_slice(&font[0..12]);
+    for index in 0..num_tables {
+        let record = 12 + index * 16;
+        out.extend_from_slice(&font[record..record + 8]); // tag + checksum
+        let offset = u32::from_be_bytes(font[record + 8..record + 12].try_into().unwrap());
+        out.extend_from_slice(&(offset + HEADER_LEN).to_be_bytes());
+        out.extend_from_slice(&font[record + 12..record + 16]); // length
+    }
+    // The table data itself, copied as one block starting right where the
+    // shifted records now expect it.
+    out.extend_from_slice(&font[data_start..]);
+
+    out
+}
+
+#[test]
+fn a_spec_correct_ttcf_collection_is_admitted() {
+    let frame = compile_run(run_against(wrap_as_collection(LATIN_FONT), 0));
+    assert!(
+        frame.glyph_draws > 0,
+        "a collection wrapping a real face at the spec's own offsets is not refused"
+    );
+}
+
+#[test]
+fn a_malformed_ttcf_collection_fails_closed_instead_of_admitting_a_bypass() {
+    let base = wrap_as_collection(LATIN_FONT);
+
+    let mut undefined_major_version = base.clone();
+    // majorVersion lives at byte 4; only 1 and 2 are defined.
+    undefined_major_version[4..6].copy_from_slice(&3u16.to_be_bytes());
+
+    let mut bogus_inner_sfnt_tag = base.clone();
+    // The inner table directory starts right after the 16-byte header; its
+    // first four bytes are the sfnt tag the single-font branch would also
+    // check at offset 0.
+    bogus_inner_sfnt_tag[16..20].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+    let mut directory_offset_past_the_blob = base.clone();
+    let past_the_blob = base.len() as u32 + 4096;
+    // offsetTable[0] lives at byte 12 (TTC_OFFSETS).
+    directory_offset_past_the_blob[12..16].copy_from_slice(&past_the_blob.to_be_bytes());
+
+    for (label, bytes, index) in [
+        (
+            "a TTC major version outside the defined 1/2",
+            undefined_major_version,
+            0,
+        ),
+        (
+            "an inner table directory with no known sfnt tag",
+            bogus_inner_sfnt_tag,
+            0,
+        ),
+        (
+            "a table-directory offset past the end of the blob",
+            directory_offset_past_the_blob,
+            0,
+        ),
+        (
+            "an index past the collection's own numFonts bound, read from \
+             the spec's offset rather than the neighbouring offset table",
+            base.clone(),
+            1,
+        ),
+    ] {
+        let glyph_run = run_against(bytes, index);
+        let glyphs = glyph_run.glyphs.len() as u32;
+        let frame = compile_run(glyph_run);
+
+        assert_eq!(frame.glyph_draws, 0, "{label} paints nothing");
+        assert_eq!(
+            frame.skipped_glyphs, glyphs,
+            "{label} counts its whole run as skipped"
+        );
+        assert!(
+            frame.encoded_paints.is_empty(),
+            "{label} is refused before its brush is encoded"
+        );
+        assert!(frame.draws().is_empty(), "{label} records no draw");
+    }
+}
+
 // ---------------------------------------------------------------------
 // The retained caches
 // ---------------------------------------------------------------------
