@@ -2471,6 +2471,71 @@ fn eviction_waits_for_a_replay_that_has_not_happened_yet() {
     assert_eq!(clears, entries);
 }
 
+/// The exact boundary: eviction is deferred at serial-since == MAX_ENTRY_AGE,
+/// and proceeds at serial-since == MAX_ENTRY_AGE - 1.
+///
+/// The off-by-one case that was fixed: when serial-since == MAX_ENTRY_AGE, the
+/// post-tick serial (after glifo's `maintain` advances it) becomes serial+1,
+/// making (serial+1)-since == MAX_ENTRY_AGE + 1, which exceeds the threshold.
+/// At that boundary, eviction must be deferred to avoid reaping an entry whose
+/// replayed commands have not yet been issued. One frame earlier,
+/// serial-since == MAX_ENTRY_AGE - 1 means (serial+1)-since == MAX_ENTRY_AGE,
+/// so eviction can proceed.
+#[test]
+fn eviction_boundary_defers_at_exact_max_entry_age_and_proceeds_before() {
+    let mut compiler = wired_compiler();
+
+    // A frame that missed every glyph and was then refused before its replay.
+    compile(&mut compiler, &hello_scene());
+    let entries = compiler.glyph_atlas_entries();
+    assert_eq!(entries, 4, "fixture precondition: the page was cached");
+    assert!(compiler.glyph_replay_pending());
+
+    // Advance exactly MAX_ENTRY_AGE - 1 frames with empty scenes and no
+    // acknowledgements. At this point, serial-since == MAX_ENTRY_AGE - 1, so
+    // (serial+1)-since == MAX_ENTRY_AGE and eviction may proceed.
+    let empty = Scene::new();
+    for _ in 0..(MAX_ENTRY_AGE - 1) {
+        let frame = compile(&mut compiler, &empty);
+        assert!(
+            frame.glyph_clears.is_empty(),
+            "at serial-since < MAX_ENTRY_AGE, entries must not be reaped"
+        );
+    }
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        entries,
+        "no entry reaped before the boundary"
+    );
+
+    // One more frame: now serial-since == MAX_ENTRY_AGE, so (serial+1)-since ==
+    // MAX_ENTRY_AGE + 1 > MAX_ENTRY_AGE. Eviction must defer, keeping the entry
+    // safe until the replay is acknowledged.
+    let at_boundary = compile(&mut compiler, &empty);
+    assert!(
+        at_boundary.glyph_clears.is_empty(),
+        "at serial-since == MAX_ENTRY_AGE, eviction must defer"
+    );
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        entries,
+        "eviction deferred at the exact boundary"
+    );
+
+    // After acknowledgement, ageing resumes and the entry is reaped.
+    assert_eq!(drain_dirty_pages(&mut compiler), 1);
+    let mut clears = 0;
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+        clears += compile_serviced(&mut compiler, &empty).glyph_clears.len();
+    }
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        0,
+        "entry reaped after deferral is lifted"
+    );
+    assert_eq!(clears, entries);
+}
+
 /// A compiled frame the caller never encodes must not consume the eviction
 /// clears.
 ///

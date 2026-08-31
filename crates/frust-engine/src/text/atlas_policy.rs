@@ -1499,6 +1499,12 @@ impl AtlasPolicy {
     /// is no more than [`MAX_ENTRY_AGE`] serials old, no entry a recording names
     /// is old enough to be reaped, and ageing is safe to run.
     ///
+    /// Since `glifo`'s `maintain` advances the serial *before* evaluating ages
+    /// for eviction, the check must account for the post-tick serial: defer
+    /// whenever `(serial + 1) - since` would exceed [`MAX_ENTRY_AGE`], i.e.,
+    /// defer when `serial - since >= MAX_ENTRY_AGE`, proceeding only while
+    /// `serial - since < MAX_ENTRY_AGE`.
+    ///
     /// Past that window the deferral bites exactly as before, and holds: a
     /// deferred frame does not call `maintain`, so the serial does not advance
     /// and the window cannot widen its way back out. Only
@@ -1506,7 +1512,7 @@ impl AtlasPolicy {
     #[must_use]
     fn eviction_deferred(&self) -> bool {
         self.unreplayed_since
-            .is_some_and(|since| self.serial.saturating_sub(since) > MAX_ENTRY_AGE)
+            .is_some_and(|since| self.serial.saturating_sub(since) >= MAX_ENTRY_AGE)
     }
 
     /// Record `size` against `font` and answer whether that font is currently
