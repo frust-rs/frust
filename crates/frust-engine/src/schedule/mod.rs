@@ -36,7 +36,10 @@
 //!   two widgets fading at once is the commonest sibling shape a frust screen
 //!   records, and a staggered list entrance fading five rows at once is served
 //!   on the same two pages;
-//! - any mixture of the two that stays inside [`MAX_LIVE_PAGES`] live pages.
+//! - any mixture of the two that stays inside [`MAX_LIVE_PAGES`] live pages;
+//! - a Gaussian-blur [filter](crate::filters) layer recorded directly under the
+//!   frame's own surface, which takes *both* groups for the length of its pass
+//!   sequence (see *Filter rounds* below).
 //!
 //! A fan of any width fits because a parent does not have to composite *all* of
 //! its isolated children in one pass. When both groups are taken, the parent's
@@ -47,7 +50,8 @@
 //! an isolated ancestor is already holding.
 //!
 //! Everything else — a layer that finds no group even after a cut, a deeper
-//! chain, a filter layer, a non-default blend mode, a layer mask or layer clip
+//! chain, a filter this engine does not render, a filter layer nested inside
+//! another recorded layer, a non-default blend mode, a layer mask or layer clip
 //! path — is refused with [`EngineError::SchedulerEscalation`] carrying a reason
 //! that names what was found.
 //!
@@ -113,6 +117,35 @@
 //! Depth is therefore counted over *isolated* layers only. Counting recorded
 //! depth instead would let an inlined layer push its isolated descendant onto
 //! the same parity as an isolated ancestor, putting two live pages in one group.
+//!
+//! ## Filter rounds
+//!
+//! A [filter](crate::filters) layer is an isolated layer whose page is not
+//! composited straight away: a sequence of filter passes runs over it first,
+//! and the parent composites what the last of them wrote. A pass reads a whole
+//! image and writes a whole image, and one render pass cannot do both to one
+//! texture, so each pass is a round of its own writing the group it did not
+//! read — the same ping-pong the chain uses, run between two pages of one
+//! layer instead of two layers. The sequence is arranged to be even in length
+//! (see [`crate::filters::blur::blur_passes`]), so the result lands back in the
+//! page the layer's own contents were rendered into and the composite is the
+//! ordinary one.
+//!
+//! Every filter round clears its destination rather than loading it. A pass
+//! writes only the region its step names — a decimated one writes a quarter of
+//! the texels the pass before it did — and the kernels sample bilinearly with
+//! no bounds checks, so whatever surrounds the written region has to be
+//! transparent rather than a previous holder's pixels.
+//!
+//! Two consequences bound what filter shapes are served. The layer holds *both*
+//! groups from its first filter round to its last, so a filter layer is refused
+//! whenever the second group cannot be handed back to it; and it is refused
+//! outright when it is recorded inside another layer, because `vello_common`
+//! places a filter layer in its parent by undoing a source shift the reference
+//! renderer applies to a filter layer's contents and frust's compiler does not,
+//! which would size the parent's page from bounds short of the filter's own
+//! spread on two sides. Neither is a shape frust records: a backdrop blur is a
+//! layer under the surface.
 
 pub mod pages;
 
@@ -121,12 +154,13 @@ pub use pages::{PageConfig, PageParity, PageSize, page_ceiling, page_size};
 use core::ops::Range;
 
 use frust_gpu::TierCaps;
-use vello_common::geometry::RectU16;
+use vello_common::geometry::{RectU16, SizeU16};
 use vello_common::peniko::BlendMode;
 use vello_common::record::{CommandRecorder, Node, RecordedLayer, RecordedLayerKind};
 
 use crate::compile::EngineDraw;
 use crate::error::EngineError;
+use crate::filters::{FilterStep, blur, served_blur};
 
 /// The deepest chain of nested isolated layers this scheduler serves.
 ///
@@ -223,6 +257,24 @@ impl Composite {
     }
 }
 
+/// One pass of a filter layer's sequence, reading one page and writing the
+/// other.
+///
+/// One instanced quad through the filter pipeline. The page it writes is the
+/// round's own target, so only the page it reads is named here; the extents it
+/// reads and writes are [`step`](Self::step)'s, both taken at their page's
+/// origin because a layer is always rendered there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterPass {
+    /// The layer being filtered, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    pub layer: u32,
+    /// Which pass of the filter's sequence this is, and at what extents.
+    pub step: FilterStep,
+    /// The group holding the page this pass reads.
+    pub source: PageParity,
+}
+
 /// One unit of work inside a round, executed in list order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoundOp {
@@ -244,11 +296,20 @@ pub enum RoundOp {
 pub struct Round {
     /// What this pass renders into.
     pub target: RoundTarget,
-    /// The pass's work, in execution order.
+    /// The pass's work, in execution order. Empty on a filter round, which
+    /// issues no draw and composites nothing.
     pub ops: Vec<RoundOp>,
     /// Pages whose contents this round consumed; they return to the pool once
     /// it completes.
     pub released: Vec<PageParity>,
+    /// The filter pass this round runs, on a filter round.
+    ///
+    /// A separate field rather than a [`RoundOp`]: a filter round is *only* a
+    /// filter pass — it draws nothing and composites nothing — and a caller
+    /// that cannot run one has to be able to tell that from a round it can run,
+    /// rather than discovering an op it does not understand halfway through a
+    /// list it has already started issuing.
+    pub filter: Option<FilterPass>,
 }
 
 impl Round {
@@ -259,6 +320,12 @@ impl Round {
             RoundTarget::Root => None,
             RoundTarget::Page(page) => Some(page),
         }
+    }
+
+    /// The filter pass this round runs, or `None` on an ordinary round.
+    #[must_use]
+    pub fn filter_pass(&self) -> Option<&FilterPass> {
+        self.filter.as_ref()
     }
 
     /// Whether this round renders into the frame's own surface.
@@ -308,10 +375,54 @@ impl Schedule {
     /// larger than a page can be sized to. Neither is a panic, and neither
     /// routes the frame anywhere: both hand the caller a frame it is expected
     /// to skip.
+    ///
+    /// Every filter layer is refused here, [`build_with_filters`] being where
+    /// one is planned instead. The two are separate because *planning* a filter
+    /// round and *executing* one are separate pieces of work: the rounds a
+    /// blurred layer costs are settled (and tested) below, and the renderer has
+    /// no filter pipeline to run them through yet. Refusing on this entry point
+    /// is what keeps the frame path from reaching a round nothing can execute —
+    /// a filter round draws nothing and composites nothing, so a caller that
+    /// ignored it would clear the page and composite the hole. The two collapse
+    /// into one call the moment the renderer grows the pass.
+    ///
+    /// [`build_with_filters`]: Self::build_with_filters
     pub fn build(
         recorder: &CommandRecorder<EngineDraw>,
         caps: &TierCaps,
         config: &PageConfig,
+    ) -> Result<Vec<Round>, EngineError> {
+        Self::plan(recorder, caps, config, Filters::Refused)
+    }
+
+    /// [`build`](Self::build), with a Gaussian-blur filter layer planned rather
+    /// than refused: its contents' round, then one round per pass of its
+    /// filter's sequence, then the composite of whichever page the last pass
+    /// wrote.
+    ///
+    /// Only a caller that can execute a [filter round](Round::filter) may use
+    /// this — see [`build`](Self::build) for why the frame path does not yet.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`build`](Self::build) refuses, minus the blur filter itself,
+    /// plus the two shapes a served filter layer still cannot take: one
+    /// recorded inside another layer, and one that cannot be handed the second
+    /// page group its passes ping-pong into.
+    pub fn build_with_filters(
+        recorder: &CommandRecorder<EngineDraw>,
+        caps: &TierCaps,
+        config: &PageConfig,
+    ) -> Result<Vec<Round>, EngineError> {
+        Self::plan(recorder, caps, config, Filters::Planned)
+    }
+
+    /// The walk both entry points share.
+    fn plan(
+        recorder: &CommandRecorder<EngineDraw>,
+        caps: &TierCaps,
+        config: &PageConfig,
+        filters: Filters,
     ) -> Result<Vec<Round>, EngineError> {
         let mut rounds: Vec<Round> = Vec::new();
         let mut pages = LivePages::default();
@@ -382,10 +493,28 @@ impl Schedule {
                     // Nothing nested inside a dropped layer is rendered, so
                     // nothing inside one is validated either — the walk does
                     // not enter it.
-                    match layer_role(id, layer)? {
+                    let role = layer_role(id, layer, filters)?;
+                    // A filter layer's placement in its parent is computed by
+                    // undoing a shift the reference renderer applies to a
+                    // filter layer's contents and frust's compiler does not, so
+                    // the bounds it hands its parent fall short of the filter's
+                    // own spread on two sides. Refused rather than rendered
+                    // from bounds that would clip it; a backdrop blur is
+                    // recorded under the surface, where nothing reads that
+                    // placement.
+                    if matches!(role, LayerRole::Filtered) && stack.len() > 1 {
+                        return Err(escalate(format!(
+                            "filter layer {id} is recorded inside another layer, whose own bounds \
+                             would be taken from a placement that undoes a source shift this \
+                             engine's compiler never applied; a filter layer is served directly \
+                             under the frame's own surface"
+                        )));
+                    }
+
+                    match role {
                         LayerRole::Dropped => {}
                         LayerRole::Inline => stack.push(Stream::inline(layer, depth, inherited)),
-                        LayerRole::Isolated => {
+                        LayerRole::Isolated | LayerRole::Filtered => {
                             let depth = depth.saturating_add(1);
                             if depth > MAX_CHAIN_DEPTH {
                                 return Err(escalate(format!(
@@ -442,6 +571,7 @@ fn finish<'a>(
                     target: RoundTarget::Root,
                     ops: stream.ops,
                     released,
+                    filter: None,
                 });
             }
             return Ok(Vec::new());
@@ -458,75 +588,207 @@ fn finish<'a>(
     }
 
     let bounds = layer.bbox;
-    let composite = |parity| {
-        vec![RoundOp::Composite(Composite {
+    let depth = stream.depth;
+    let size = page_size(bounds, config, caps)?;
+    let page = |parity, continued| {
+        RoundTarget::Page(PageTarget {
             layer: id,
+            depth,
             parity,
+            size,
             bounds,
-            opacity: layer.props.opacity,
-        })]
+            continued,
+        })
     };
 
-    // The layer's round was cut earlier this frame, so its page is already this
-    // stream's and this round loads what the cut left in it.
-    if let Some(parity) = stream.page {
-        if !stream.ops.is_empty() {
+    // The group holding the layer's own contents once its last content round
+    // has been emitted.
+    let contents = match stream.page {
+        // The layer's round was cut earlier this frame, so its page is already
+        // this stream's and this round loads what the cut left in it.
+        Some(parity) => {
+            if !stream.ops.is_empty() {
+                let released = released_pages(&stream.ops);
+                for parity in &released {
+                    pages.release(*parity);
+                }
+                rounds.push(Round {
+                    target: page(parity, true),
+                    ops: stream.ops,
+                    released,
+                    filter: None,
+                });
+            }
+            parity
+        }
+        None => {
+            make_room(stack, rounds, pages, caps, config)?;
+            // Acquired before the children's pages are freed, never after: a
+            // child's page is live for the whole of the pass that samples it,
+            // so the group this round renders into can never be one of theirs.
+            let parity = pages
+                .acquire(PageParity::from_depth(depth))
+                .ok_or_else(|| {
+                    escalate(format!(
+                        "layer {id} would need a third live intermediate page: both of the \
+                     {MAX_LIVE_PAGES} groups the simple scheduler ping-pongs between are already \
+                     holding a page a later round composites, and no open round could be cut to \
+                     hand one back. A nested chain of any depth fits, and so does a fan of \
+                     siblings of any width; what does not is a layer needing two groups of its \
+                     own beside a page an isolated ancestor is already holding"
+                    ))
+                })?;
             let released = released_pages(&stream.ops);
             for parity in &released {
                 pages.release(*parity);
             }
             rounds.push(Round {
-                target: RoundTarget::Page(PageTarget {
-                    layer: id,
-                    depth: stream.depth,
-                    parity,
-                    size: page_size(bounds, config, caps)?,
-                    bounds,
-                    continued: true,
-                }),
+                target: page(parity, false),
                 ops: stream.ops,
                 released,
+                filter: None,
             });
+            parity
         }
-        return Ok(composite(parity));
+    };
+
+    // A filter layer's contents are not what the parent composites: the filter
+    // passes run over them first, and the parent samples whatever the last of
+    // them wrote.
+    let composited = match &layer.kind {
+        RecordedLayerKind::Regular => contents,
+        kind => filter_rounds(
+            &FilterLayer {
+                id,
+                kind,
+                depth,
+                bounds,
+                size,
+                contents,
+            },
+            stack,
+            rounds,
+            pages,
+            caps,
+            config,
+        )?,
+    };
+
+    Ok(vec![RoundOp::Composite(Composite {
+        layer: id,
+        parity: composited,
+        bounds,
+        opacity: layer.props.opacity,
+    })])
+}
+
+/// A filter layer whose contents are rendered, ready for its passes to be
+/// planned.
+struct FilterLayer<'a> {
+    /// The layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    id: u32,
+    /// The recorded filter, re-read here rather than carried down from
+    /// [`layer_role`]: preparing a blur's kernel is a handful of arithmetic
+    /// over a fixed-size array, and threading it through the walk's stack would
+    /// put a filter's state in every stream that has none.
+    kind: &'a RecordedLayerKind,
+    /// The layer's depth counted over isolated layers only, one-based.
+    depth: usize,
+    /// The layer's tile-aligned device-space bounds, already grown by the
+    /// filter's own spread (see [`crate::filters::LayerFilter::filter_data`]).
+    bounds: RectU16,
+    /// The extent both of the layer's pages are acquired at.
+    size: PageSize,
+    /// The group the layer's own contents were rendered into.
+    contents: PageParity,
+}
+
+/// Emits the rounds a filter layer's pass sequence renders as, and answers the
+/// group holding the filtered result for its parent to composite.
+///
+/// One round per pass, each writing the group it did not read. The sequence is
+/// even in length, so the result lands back in the page the contents were
+/// rendered into; [`blur::blur_passes`] is what keeps that true.
+fn filter_rounds(
+    filtered: &FilterLayer<'_>,
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<PageParity, EngineError> {
+    let id = filtered.id;
+    let blur = served_blur(id, filtered.kind).map_err(escalate)?;
+    let steps = blur::blur_passes(&blur, SizeU16::from(filtered.bounds));
+    let Some(last) = steps.len().checked_sub(1) else {
+        return Ok(filtered.contents);
+    };
+
+    // A filter layer holds both groups from its first pass to its last, so an
+    // open round still holding the other one is cut to hand it back — innermost
+    // first, and only until it comes back. A cut cannot take the group instead:
+    // with both held there is none for it to acquire.
+    let scratch = filtered.contents.opposite();
+    for index in (0..stack.len()).rev() {
+        if !pages.holds(scratch) {
+            break;
+        }
+        cut_at(stack, index, rounds, pages, caps, config)?;
+    }
+    let scratch = pages.acquire(scratch).ok_or_else(|| {
+        escalate(format!(
+            "filter layer {id} would need both of the {MAX_LIVE_PAGES} page groups at once — one \
+             for its contents and one for its passes to write — and the second is holding a page \
+             a later round composites that no open round could be cut to hand back"
+        ))
+    })?;
+
+    let mut source = filtered.contents;
+    let mut dest = scratch;
+    for (index, step) in steps.iter().enumerate() {
+        // The page a pass reads is the page the pass before it wrote, so both
+        // stay live for the whole sequence. The scratch one goes back to the
+        // pool as the last pass ends; the one holding the result goes back when
+        // the parent's composite has sampled it.
+        let released = if index == last {
+            vec![source]
+        } else {
+            Vec::new()
+        };
+        for parity in &released {
+            pages.release(*parity);
+        }
+
+        rounds.push(Round {
+            // Cleared, never continued: a pass writes only the region its step
+            // names — a decimated one a quarter of the texels the pass before
+            // it did — and the kernels sample past that region without bounds
+            // checks, so what surrounds it has to be transparent rather than a
+            // previous holder's pixels.
+            target: RoundTarget::Page(PageTarget {
+                layer: id,
+                depth: filtered.depth,
+                parity: dest,
+                size: filtered.size,
+                bounds: filtered.bounds,
+                continued: false,
+            }),
+            ops: Vec::new(),
+            released,
+            filter: Some(FilterPass {
+                layer: id,
+                step: *step,
+                source,
+            }),
+        });
+
+        if index < last {
+            core::mem::swap(&mut source, &mut dest);
+        }
     }
 
-    let size = page_size(bounds, config, caps)?;
-    make_room(stack, rounds, pages, caps, config)?;
-    // Acquired before the children's pages are freed, never after: a child's
-    // page is live for the whole of the pass that samples it, so the group this
-    // round renders into can never be one of theirs.
-    let parity = pages
-        .acquire(PageParity::from_depth(stream.depth))
-        .ok_or_else(|| {
-            escalate(format!(
-                "layer {id} would need a third live intermediate page: both of the \
-                 {MAX_LIVE_PAGES} groups the simple scheduler ping-pongs between are already \
-                 holding a page a later round composites, and no open round could be cut to hand \
-                 one back. A nested chain of any depth fits, and so does a fan of siblings of any \
-                 width; what does not is a layer needing two groups of its own beside a page an \
-                 isolated ancestor is already holding"
-            ))
-        })?;
-    let released = released_pages(&stream.ops);
-    for parity in &released {
-        pages.release(*parity);
-    }
-
-    rounds.push(Round {
-        target: RoundTarget::Page(PageTarget {
-            layer: id,
-            depth: stream.depth,
-            parity,
-            size,
-            bounds,
-            continued: false,
-        }),
-        ops: stream.ops,
-        released,
-    });
-
-    Ok(composite(parity))
+    Ok(dest)
 }
 
 /// Frees a page group for a layer about to take one, by cutting an ancestor's
@@ -669,6 +931,7 @@ fn cut_at(
         target,
         ops,
         released,
+        filter: None,
     });
 
     Ok(true)
@@ -682,6 +945,12 @@ enum LayerRole {
     Inline,
     /// Needs a page and a pass of its own.
     Isolated,
+    /// Needs a page and a pass of its own, plus a second page and a pass per
+    /// step of its filter's sequence.
+    ///
+    /// Never inlined however it composites: filtering a layer's contents is not
+    /// what drawing them into the parent does.
+    Filtered,
     /// Contributes nothing, along with everything nested inside it.
     Dropped,
 }
@@ -865,13 +1134,21 @@ impl LivePages {
     }
 }
 
+/// Whether a walk plans a filter layer's rounds or refuses it.
+///
+/// Not a property of the recording but of the caller: the rounds are the same
+/// either way, and what differs is whether the caller can execute one (see
+/// [`Schedule::build`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filters {
+    /// Plan a served filter layer's rounds.
+    Planned,
+    /// Refuse every filter layer, served or not.
+    Refused,
+}
+
 /// How `layer` is served, refusing every property this scheduler cannot honour.
-fn layer_role(id: u32, layer: &RecordedLayer) -> Result<LayerRole, EngineError> {
-    if !matches!(layer.kind, RecordedLayerKind::Regular) {
-        return Err(escalate(format!(
-            "layer {id} is a filter layer; the simple scheduler serves opacity layers only"
-        )));
-    }
+fn layer_role(id: u32, layer: &RecordedLayer, filters: Filters) -> Result<LayerRole, EngineError> {
     if layer.props.blend_mode != BlendMode::default() {
         return Err(escalate(format!(
             "layer {id} composites with a non-default blend mode ({:?}), which has to read the \
@@ -898,13 +1175,34 @@ fn layer_role(id: u32, layer: &RecordedLayer) -> Result<LayerRole, EngineError> 
         )));
     }
 
-    Ok(if opacity >= 1.0 {
-        LayerRole::Inline
-    } else if opacity <= 0.0 {
-        LayerRole::Dropped
-    } else {
-        LayerRole::Isolated
-    })
+    if opacity <= 0.0 {
+        return Ok(LayerRole::Dropped);
+    }
+
+    match &layer.kind {
+        RecordedLayerKind::Regular => Ok(if opacity >= 1.0 {
+            LayerRole::Inline
+        } else {
+            LayerRole::Isolated
+        }),
+        // The one filter the engine renders is a Gaussian blur; every other
+        // filter a recording can carry is refused here, by name, and the frame
+        // is skipped. A filtered layer is never inlined, whatever its opacity.
+        kind => {
+            // Recognised even on a walk that refuses every filter, so the
+            // reason names what was found: a filter this engine renders nothing
+            // of reads differently from a blur it can plan but not yet run.
+            served_blur(id, kind).map_err(escalate)?;
+            if filters == Filters::Refused {
+                return Err(escalate(format!(
+                    "layer {id} carries a Gaussian blur, which this scheduler plans but the \
+                     renderer has no filter pipeline to execute yet; see \
+                     `Schedule::build_with_filters`"
+                )));
+            }
+            Ok(LayerRole::Filtered)
+        }
+    }
 }
 
 /// Whether `ops` composites anything, and so whether emitting them as a round
