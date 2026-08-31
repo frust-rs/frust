@@ -1870,6 +1870,95 @@ and `benchmarks/raw/xiaomi12/tier/{classic-area-1.0,engine}/s6/`
 
 ---
 
+## Desktop stress (macOS Metal) — engine design rules E12-E18
+
+Not a `PROTOCOL.md` scenario pass and not comparable to the device tables
+above: this is the engine's own desktop gate, an `#[ignore]`d suite driving
+`EngineRenderer` headlessly rather than an app through `ab_matrix.sh`. It
+exists because the pressures a laptop or a 5K display applies — an
+intermediate wider than any texture the engine allocates, a window edge
+dragged through hundreds of extents, two windows on one device, a GPU that
+goes away, a fractional display scale, a surface whose alpha the compositor
+reads — appear on no phone in the matrix.
+
+```
+cargo test -p frust-engine --test desktop_stress -- --ignored
+```
+
+- Rig: Apple M4 (integrated, Metal), macOS, wgpu 29.0.4, headless
+  `frust_gpu::HeadlessTarget` at `Rgba8Unorm`, `transient_saves_memory = true`.
+- Timings are from a `--release` run; the allocation counters are build
+  independent (pure pool logic) and read identically under `cargo test`'s
+  default debug profile.
+- Expected pixels are computed analytically (solid, pixel-aligned rectangles
+  sampled well inside their interiors), not taken from `vello_cpu`:
+  `frust-engine` does not depend on the oracle crate, and the pixel-level
+  corpus in `frust-testing` is where engine-vs-`vello_cpu` comparison lives.
+
+### Resize storm — 400 extents through `EngineRenderer::resize` (E13)
+
+Four hundred pseudo-random surface extents between 800x800 and 5120x2880
+(deterministic xorshift, seed `0x5eed1234`), one frame rendered at each, with
+a **fixed-size** half-opacity layer in the scene — the shape a fading card or
+a dismissing sheet records, whose page extent does not change when the window
+does. Frame time is measured around encode → submit → wait, with the step's
+own target allocation excluded (a real surface hands its swapchain texture
+over rather than creating one).
+
+| Arm | Pool `created` | `reused` | `evicted` | Peak parked keys | Frame p50 (ms) | p95 (ms) | max (ms) |
+|---|---|---|---|---|---|---|---|
+| Before (`drop_parked` emptied the pool per resize) | 400 | 0 | 399 | 1 | 5.17 | 9.78 | 18.12 |
+| After (`RESIZE_KEEP_ALIVE_FRAMES = 2`) | **1** | **399** | 0 | 1 | **3.08** | **3.44** | 12.15 |
+
+The gate found a real E13 violation. `EngineRenderer::resize` called
+`IntermediateTargets::drop_parked`, which emptied the whole intermediate pool;
+a drag produces a resize *per frame*, so the fixed-size layer's page was
+evicted between every pair of frames that wanted it and the pool degenerated
+into a plain allocator — one allocation per resize, zero reuse, exactly the
+failure `frust_gpu::pool`'s aging slack exists to prevent. `drop_parked` now
+collapses the keep-alive window to the last two frames instead of emptying the
+pool: entries the frames immediately behind the resize used survive (they are
+what the next frame asks for), everything older goes at once as before. The
+storm's own p50 falls 40% and its p95 65% — allocation, not rendering, was the
+cost.
+
+### The rest of the automated suite
+
+| Case | Rule | Result |
+|---|---|---|
+| 5120x2880 target, root layer inside the page ceiling, 4x4 sample grid | E18 | **pass** |
+| 5120x2880 target, **root opacity layer over the whole frame** | E14 | **pass** — banded into two 2560x3072 pages |
+| Two headless targets on one device, 100 alternating frames | E12 | **pass** — each renderer's own pool `created=1`, `reused=49`, `in_use=0` |
+| `Device::destroy()` mid-session, then a fresh renderer | E17 / R8 | **pass** — see the note below |
+| DPR 1.5 and 2.25, scale in the root `Affine`, whole-pixel target | E15 | **pass** |
+| Translucent destination (base colour alpha 0.5) | E16 | **pass** |
+| Manual macOS window session — `material3-demo` fullscreen on the 5K display, drag-resize storm, no validation errors, no black frame | — | **pending (Ed at the desk)** |
+
+The 5K root-layer cell, previously the suite's one open engineering item, is
+now closed: `Schedule::build` reaches for `schedule::pages::page_bands` itself
+for a *regular* layer wider than the page ceiling (a cut ancestor already
+holding its page, or a nested isolated child of its own, are the two shapes
+this still refuses rather than bands — neither is a shape this case records),
+emitting one page round and one composite per band instead of the single
+oversized request `page_size` used to refuse. The 5120-wide root layer here
+splits into the same two 2560x3072-page bands the host-only plan
+(`a_5k_root_layer_plans_column_bands_that_tile_it_exactly`) already predicted,
+and the sample grid reads the reference colour at every cell. Confirmed on
+the same M4 rig the rest of this section runs on: `cargo test -p frust-engine
+--test desktop_stress -- --ignored` reports 7/7, this case included.
+
+Two findings ride along on the device-loss case. First, a destroyed device is
+**silent**: the engine returned `Ok(())`, the validation scope caught nothing,
+the poll answered `QueueEmpty` and `DeviceHandle::first_uncaptured_error`
+latched nothing. That is WebGPU behaving to specification — operations on a
+lost device are no-ops that raise no error — so a host must recover on the
+*surface's* signal (a `Lost` acquire driving `frust_gpu::lifecycle` to
+`SurfacePhase::SurfaceLost`), never on the engine's return value. Second,
+recovery is clean: a renderer built on a fresh device renders the same scene
+to the same pixels, the pool having gone with the renderer that owned it.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB

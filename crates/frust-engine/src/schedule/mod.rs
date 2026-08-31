@@ -563,6 +563,38 @@ fn finish<'a>(
 
     let bounds = layer.bbox;
     let depth = stream.depth;
+
+    // A regular layer wider than any single page is banded into column
+    // pages (E14) rather than refused — but only while nothing has claimed
+    // its page ahead of time (a cut ancestor reserves one this way, see
+    // `cut_at`) and its own accumulated ops hold no composite of a nested
+    // isolated child: a band's ops are replayed once per band, and
+    // replaying a child's composite would read a page a later band has
+    // already reused. Both are shapes banding does not reach, and a layer
+    // whose height alone exceeds the ceiling is still refused by `page_size`
+    // below exactly as it always was — bands are columns, so height has no
+    // split to be served by.
+    if matches!(layer.kind, RecordedLayerKind::Regular)
+        && stream.page.is_none()
+        && u32::from(bounds.width()) > page_ceiling(config, caps)
+        && !holds_composite(&stream.ops)
+    {
+        return band_rounds(
+            BandedLayer {
+                id,
+                layer,
+                bounds,
+                depth,
+            },
+            stream.ops,
+            stack,
+            rounds,
+            pages,
+            caps,
+            config,
+        );
+    }
+
     // A filter layer's page is sized with the extra atlas margin
     // (`filter_page_size`) its kernel taps can reach past: both this
     // contents round and every filter-pass round the layer costs share this
@@ -783,6 +815,114 @@ fn filter_rounds(
     }
 
     Ok(dest)
+}
+
+/// A regular layer wider than [`page_ceiling`] can size a single page to,
+/// ready for its column bands to be planned.
+struct BandedLayer<'a> {
+    /// The layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    id: u32,
+    /// The recorded layer, for its opacity.
+    layer: &'a RecordedLayer,
+    /// The layer's tile-aligned device-space bounds — wider than
+    /// [`page_ceiling`], which is why it is here rather than sized by
+    /// [`page_size`] like every other regular layer.
+    bounds: RectU16,
+    /// The layer's depth counted over isolated layers only, one-based.
+    depth: usize,
+}
+
+/// Emits the rounds a banded layer's column pages render as: one page and
+/// one composite per [band](pages::page_bands), the layer's own draws
+/// replayed into each.
+///
+/// A band is rendered and composited one at a time rather than the whole
+/// split acquired up front, because [`MAX_LIVE_PAGES`] bounds this scheduler
+/// to two live pages: each band's composite is spliced straight onto
+/// `stack`'s own innermost accumulator (exactly where an ordinary single-page
+/// layer's composite would land), `make_room` is asked again before the next
+/// band's page is acquired, and the same cutting it already does for a wide
+/// sibling fan is what hands a finished band's page back — a banded layer is,
+/// from the pool's point of view, a fan of same-depth siblings that happen to
+/// share one layer id. See the [`pages`] module header's *A fourth decision*
+/// section for why this is a page decision rather than a new kind of target.
+///
+/// `ops` is `banded`'s stream's own accumulated ops — verified by the caller
+/// to hold no [`RoundOp::Composite`] — replayed unchanged into every band's
+/// content round; only the page each round targets and the rectangle its
+/// composite lands at differ band to band.
+///
+/// # Errors
+///
+/// Whatever [`pages::page_bands`] itself refuses `banded.bounds` with: taller
+/// than [`page_ceiling`] (bands are columns, so height has no split to be
+/// served by), or wider than [`pages::MAX_PAGE_BANDS`] bands can cover. Both
+/// are the refusal a single page gives an over-ceiling layer, unchanged by
+/// banding. [`EngineError::SchedulerEscalation`] when a band's own page
+/// cannot be found even one at a time, carrying the same reason a
+/// single-page layer's acquisition would.
+fn band_rounds(
+    banded: BandedLayer<'_>,
+    ops: Vec<RoundOp>,
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<Vec<RoundOp>, EngineError> {
+    let bands = pages::page_bands(banded.bounds, config, caps)?;
+
+    for band in bands {
+        make_room(stack, rounds, pages, caps, config)?;
+        // Acquired before anything of this band is released, never after —
+        // the same ordering a single-page layer's own acquisition keeps.
+        let parity = pages
+            .acquire(PageParity::from_depth(banded.depth))
+            .ok_or_else(|| {
+                escalate(format!(
+                    "layer {} would need a third live intermediate page to render one of its own \
+                     column bands: both of the {MAX_LIVE_PAGES} groups the simple scheduler \
+                     ping-pongs between are already holding a page a later round composites, and \
+                     no open round could be cut to hand one back",
+                    banded.id
+                ))
+            })?;
+
+        rounds.push(Round {
+            target: RoundTarget::Page(PageTarget {
+                layer: banded.id,
+                depth: banded.depth,
+                parity,
+                size: band.size,
+                bounds: band.bounds,
+                // Every band is a page of its own rather than a continuation
+                // of the one before it: two bands never share a texture at
+                // once, so there is nothing here for a later band to load.
+                continued: false,
+            }),
+            ops: ops.clone(),
+            released: Vec::new(),
+            filter: None,
+        });
+
+        // Spliced onto the enclosing stream's own accumulator directly,
+        // rather than returned for the caller to append: a later band still
+        // has to acquire a group, and `make_room`'s own cutting is what finds
+        // this composite and hands the group back — exactly the mechanism a
+        // page-hungry sibling already relies on, so nothing here needs to
+        // wait for this function to return before a round can use it.
+        if let Some(parent) = stack.last_mut() {
+            parent.ops.push(RoundOp::Composite(Composite {
+                layer: banded.id,
+                parity,
+                bounds: band.bounds,
+                opacity: banded.layer.props.opacity,
+            }));
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 /// Frees a page group for a layer about to take one, by cutting an ancestor's

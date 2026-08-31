@@ -922,10 +922,16 @@ fn a_non_finite_opacity_escalates_rather_than_sizing_a_page_against_it() {
 }
 
 #[test]
-fn a_layer_larger_than_a_page_is_refused_rather_than_clipped_to_the_ceiling() {
+fn a_layer_taller_than_the_ceiling_is_refused_rather_than_clipped_to_it() {
+    // Bands are columns (E14): they split width, never height, so a layer
+    // taller than the ceiling is still refused exactly as it always was,
+    // whatever its width. Two draws far apart in `y`, so the layer's bbox
+    // spans well past a 64-texel ceiling even though each draw is only one
+    // tile row tall.
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
-    draw(&mut recorder, 0, 0, 128);
+    draw(&mut recorder, 0, 0, 16);
+    draw(&mut recorder, 0, 64, 16);
     recorder.pop_layer();
 
     let config = PageConfig {
@@ -939,12 +945,138 @@ fn a_layer_larger_than_a_page_is_refused_rather_than_clipped_to_the_ceiling() {
             Schedule::build(&recorder, &caps(), &config),
             Err(EngineError::IntermediateTextureTooLarge)
         ),
-        "a layer wider than the ceiling is refused, not shrunk onto it"
+        "a layer taller than the ceiling is refused, not shrunk onto it"
     );
 
     // The same recording schedules under the default bounds, so the refusal is
     // the ceiling's doing and not the recording's.
     assert_eq!(schedule(&recorder).len(), 2);
+}
+
+// ---------------------------------------------------------------------
+// A layer wider than the ceiling is banded into column pages (E14)
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_layer_wider_than_the_ceiling_is_banded_into_column_pages_rather_than_refused() {
+    // GRADUATED: this shape used to escalate. A layer wider than any single
+    // page splits into full-height column bands under a 64-texel ceiling:
+    // 200 needs `div_ceil(200, 64) == 4` of them.
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 0, 200);
+    recorder.pop_layer();
+
+    let config = PageConfig {
+        min_page_size: 64,
+        max_page_size: 64,
+    };
+    let rounds = Schedule::build(&recorder, &caps(), &config).expect("a wide layer bands");
+    assert_pages_survive_until_composited(&rounds);
+
+    let bands: Vec<RectU16> = rounds
+        .iter()
+        .filter_map(|round| round.page().map(|page| page.bounds))
+        .collect();
+    assert_eq!(
+        bands.len(),
+        4,
+        "one page round per band, however the surface's own rounds are split: {rounds:?}"
+    );
+
+    // The bands tile the layer's own bounds exactly: they abut, none
+    // overlaps, and every one spans the same (one-tile-row) height.
+    let mut x = 0_u16;
+    for bounds in &bands {
+        assert_eq!(bounds.x0, x, "bands abut with no gap or overlap");
+        assert_eq!(bounds.y0, 0);
+        assert_eq!(bounds.y1, 4, "every band spans the layer's own height");
+        x = bounds.x1;
+    }
+    assert_eq!(x, 200, "the bands cover the layer's width exactly");
+
+    // Every page round replays the very same draw the layer recorded: a band
+    // is a difference in which page and rectangle the content lands at, never
+    // in the content itself.
+    for round in rounds.iter().filter(|round| round.page().is_some()) {
+        assert_eq!(draw_ranges(round), vec![(0, 1)]);
+    }
+
+    // Every band is composited at its own rectangle, in band order, each
+    // still carrying the layer's own opacity.
+    let composited: Vec<(RectU16, f32)> = rounds
+        .iter()
+        .flat_map(Round::composites)
+        .map(|c| {
+            assert_eq!(c.layer, 0);
+            (c.bounds, c.opacity)
+        })
+        .collect();
+    assert_eq!(
+        composited,
+        bands
+            .iter()
+            .map(|bounds| (*bounds, HALF))
+            .collect::<Vec<_>>(),
+        "the composites land in band order, at each band's own rectangle: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_width_needing_more_bands_than_the_scheduler_allows_is_still_refused() {
+    let config = PageConfig {
+        min_page_size: 64,
+        max_page_size: 64,
+    };
+    let ceiling = pages::page_ceiling(&config, &caps());
+    // One tile-width past the largest width the band bound serves: a strip's
+    // own width has to be tile-aligned, so `+1` is not a legal draw here.
+    let width = ceiling * pages::MAX_PAGE_BANDS as u32 + u32::from(Tile::WIDTH);
+
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    draw(
+        &mut recorder,
+        0,
+        0,
+        u16::try_from(width).expect("stays inside the device grid in this test"),
+    );
+    recorder.pop_layer();
+
+    assert!(
+        matches!(
+            Schedule::build(&recorder, &caps(), &config),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ),
+        "a width past the band bound is refused rather than split further"
+    );
+}
+
+#[test]
+fn a_wide_layer_holding_a_nested_isolated_child_is_still_refused_rather_than_banded() {
+    // A band's ops are replayed once per band, and replaying a nested
+    // child's own composite would read a page a later band has already
+    // reused — banding is scoped to a layer with no isolated child of its
+    // own, and a wide layer that has one is refused exactly as before.
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 0, 200);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 16, 16, 32);
+    recorder.pop_layer();
+    recorder.pop_layer();
+
+    let config = PageConfig {
+        min_page_size: 64,
+        max_page_size: 64,
+    };
+    assert!(
+        matches!(
+            Schedule::build(&recorder, &caps(), &config),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ),
+        "a wide layer with a nested child is refused rather than banded"
+    );
 }
 
 #[test]
