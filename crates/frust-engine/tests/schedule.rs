@@ -13,11 +13,14 @@
 //! nested chain ping-pongs between two texture groups however deep it runs,
 //! sibling layers beside each other take the two groups one apiece and a fan
 //! wider than that is served by cutting its parent's round short rather than by
-//! a third group, and a shape that still finds no group after a cut is refused
-//! with a reason a log can be read from rather than rendered incorrectly.
+//! a third group, a layer whose own round samples a live page while an isolated
+//! ancestor holds another is served on the one spill page beside the pair, and a
+//! shape that still finds no page after a cut and the spill is refused with a
+//! reason a log can be read from rather than rendered incorrectly.
 
 use frust_engine::schedule::{
-    MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PageConfig, PageParity, Round, RoundOp, Schedule, pages,
+    MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PING_PONG_GROUPS, PageConfig, PageParity, Round, RoundOp,
+    Schedule, pages,
 };
 use frust_engine::{EngineDraw, EngineError};
 use frust_gpu::{DownlevelProfile, TierCaps};
@@ -116,10 +119,16 @@ fn sibling_fan(count: u16) -> CommandRecorder<EngineDraw> {
 }
 
 /// A recording of one isolated parent holding a flat isolated child and then a
-/// nesting one — the smallest shape two pooled pages cannot serve.
+/// nesting one — the smallest shape the two ping-pong groups cannot serve, and
+/// the shape the spill page exists for.
 ///
 /// The parent takes a group of its own once its round is cut after the first
-/// child, and the second child then needs two more for the chain below it.
+/// child, the grandchild takes the other, and the second child — whose own
+/// round has to sample the grandchild's page — finds neither free.
+///
+/// This is the transition shape in miniature: `parent` is the page being
+/// scrubbed, the first child a chip beside the one that carries a translucent
+/// chip of its own.
 fn branching_chain() -> CommandRecorder<EngineDraw> {
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
@@ -135,13 +144,61 @@ fn branching_chain() -> CommandRecorder<EngineDraw> {
     recorder
 }
 
+/// [`branching_chain`]'s own layers recorded at the root instead of inside a
+/// parent: a flat isolated layer, then one that nests.
+///
+/// The contents are the same and the nesting is the same; what is gone is the
+/// ancestor holding a page across the whole walk. It is the control for the
+/// spill cases — the shape a transition records at rest, which the two groups
+/// have always served.
+fn branching_chain_at_the_root() -> CommandRecorder<EngineDraw> {
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 16, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 64, 16, 32);
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder
+}
+
+/// A recording of a sibling pair nested inside a sibling pair — the smallest
+/// shape three live pages cannot serve either.
+///
+/// The outer parent takes a group at the cut its first child forces, the inner
+/// parent's own two children take the other group and the spill page between
+/// them, and the inner parent — whose round composites *both* of them — would
+/// need a fourth live page to render into.
+fn nested_fan_inside_a_fan() -> CommandRecorder<EngineDraw> {
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 48, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 96, 16, 32);
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder
+}
+
 /// Walks `rounds` the way the renderer executes them and fails if any round
 /// would sample a page an earlier round had already overwritten.
 ///
-/// One slot per ping-pong group, which is the bound itself: the scheduler hands
-/// out a parity, and a parity *is* a page identity for the shapes it serves, so
-/// a schedule that put two live pages in one group shows up here as a round
-/// rendering over a page still owed to a later composite. A continuation round
+/// One slot per live page — the two ping-pong groups and the spill page — which
+/// is the bound itself: the scheduler hands out a group, and a group *is* a page
+/// identity for the shapes it serves, so a schedule that put two live pages in
+/// one group shows up here as a round rendering over a page still owed to a
+/// later composite. The spill page is checked by exactly the same rules as the
+/// pair, which is the claim that it is released like any other page rather than
+/// held for the frame. A continuation round
 /// is the one round allowed to render into an occupied group, and only into its
 /// own layer's page — the whole point of the `continued` flag is that the
 /// renderer loads that page instead of clearing it.
@@ -351,8 +408,15 @@ fn a_chain_never_holds_more_than_two_pages_live_at_once() {
         for round in schedule(&nested_chain(depth)) {
             let live = usize::from(round.page().is_some()) + round.released.len();
             assert!(
-                live <= MAX_LIVE_PAGES,
+                live <= PING_PONG_GROUPS,
                 "depth {depth} holds {live} pages live in {round:?}"
+            );
+            assert!(
+                !round
+                    .page()
+                    .is_some_and(|page| page.parity == PageParity::Spill),
+                "a chain alternates between the pair and never reaches for the spill page: \
+                 {round:?}"
             );
             if let Some(page) = round.page() {
                 assert!(
@@ -681,8 +745,15 @@ fn a_sibling_fan_of_any_width_costs_one_page_round_each_and_a_root_round_per_pai
         let root_rounds = rounds.iter().filter(|round| round.is_root()).count();
         assert_eq!(
             root_rounds,
-            count.div_ceil(MAX_LIVE_PAGES).max(1),
+            count.div_ceil(PING_PONG_GROUPS).max(1),
             "a {count}-wide fan cuts the surface once per pair of groups: {rounds:?}"
+        );
+        assert!(
+            rounds
+                .iter()
+                .filter_map(Round::page)
+                .all(|page| page.parity != PageParity::Spill),
+            "a fan is served by cutting the surface round, never by spilling: {rounds:?}"
         );
         assert_eq!(
             rounds.iter().filter_map(Round::page).count(),
@@ -814,60 +885,179 @@ fn a_cut_round_still_draws_every_range_once_and_in_recording_order() {
 }
 
 // ---------------------------------------------------------------------
-// Shapes the scheduler refuses
+// The one spill page beside the pair
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_branch_whose_second_subtree_nests_escalates() {
-    // A parent with two children, the second of which has a child of its own.
-    // Cutting the parent after the first child is what serves a plain sibling
-    // pair, and it happens here too — but it costs the parent a group for the
-    // rest of the frame, so the second child, needing two of its own for the
-    // chain below it, finds none. Three pages really are live at that point:
-    // the parent's, the grandchild's, and the child's own.
-    let reason = escalation(&branching_chain());
+fn a_branch_whose_second_subtree_nests_is_served_on_the_spill_page() {
+    // GRADUATED: this shape used to escalate, and it is the shape a navigation
+    // transition holds for the whole of a scrub — a full-screen page layer
+    // holding a chip beside a chip that carries a translucent chip of its own.
+    // The parent takes a group at the cut its first child forces and keeps it,
+    // the grandchild takes the other, and the child hosting the grandchild has
+    // to sample that page while rendering its own: three pages really are live
+    // there, and the spill page is the third.
+    let rounds = schedule(&branching_chain());
+    assert_pages_survive_until_composited(&rounds);
 
-    assert!(
-        reason.contains("layer 2"),
-        "the reason names the layer that found no group: {reason}"
+    let pages: Vec<(u32, usize, PageParity, bool)> = rounds
+        .iter()
+        .filter_map(|round| {
+            round
+                .page()
+                .map(|page| (page.layer, page.depth, page.parity, page.continued))
+        })
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            (1, 2, PageParity::Even, false),
+            (0, 1, PageParity::Odd, false),
+            (3, 3, PageParity::Even, false),
+            (2, 2, PageParity::Spill, false),
+            (0, 1, PageParity::Odd, true),
+        ],
+        "the parent opens its page at the cut and continues it after the spilled child: {rounds:?}"
     );
-    assert!(
-        reason.contains("third live intermediate page"),
-        "the reason says what ran out: {reason}"
+    assert_eq!(
+        rounds.len(),
+        6,
+        "five page rounds and the surface: {rounds:?}"
+    );
+
+    // Every layer reaches its parent exactly once, in recording order, and the
+    // spill page goes back to the pool in the very round that samples it.
+    assert_eq!(
+        composite_order(&rounds),
+        vec![(1, 1), (3, 3), (4, 2), (5, 0)]
+    );
+    assert_eq!(rounds[4].released, vec![PageParity::Spill]);
+    assert_eq!(
+        rounds
+            .iter()
+            .filter(|round| round
+                .page()
+                .is_some_and(|page| page.parity == PageParity::Spill))
+            .count(),
+        1,
+        "one layer needed the third page, so one round writes it: {rounds:?}"
     );
 }
 
 #[test]
-fn a_sibling_pair_nested_inside_a_sibling_pair_escalates() {
-    // A fan inside a layer costs that layer its group for the rest of the
-    // frame, and a fan two levels deep wants the same of its own parent: three
-    // groups, one of them for a page still owed upwards. A cut cannot pay for
-    // this one — there is no free group for the inner parent to open its page
-    // with — so the frame is refused rather than rendered wrong.
+fn the_same_branch_recorded_at_the_root_still_needs_no_spill_page() {
+    // The contrast that makes the case above a transition defect rather than a
+    // content one: the identical children recorded at the root — the screen at
+    // rest, before a transition wraps it in a page layer — have always been
+    // served by cutting the surface round, because no ancestor is holding a
+    // page across the walk. Nothing about that changes.
+    let rounds = schedule(&branching_chain_at_the_root());
+    assert_pages_survive_until_composited(&rounds);
+
+    assert!(
+        rounds
+            .iter()
+            .filter_map(Round::page)
+            .all(|page| page.parity != PageParity::Spill),
+        "the root-level shape is served on the pair alone: {rounds:?}"
+    );
+    let composited: Vec<u32> = rounds
+        .iter()
+        .flat_map(Round::composites)
+        .map(|c| c.layer)
+        .collect();
+    assert_eq!(
+        composited,
+        vec![0, 2, 1],
+        "every layer is composited once, innermost before the layer that holds it"
+    );
+}
+
+#[test]
+fn a_fan_of_nesting_siblings_reuses_the_one_spill_page_rather_than_stacking_them() {
+    // The spill is one page, and this is what that costs and buys: a parent
+    // holding a flat child and then three nesting ones needs the third page
+    // once per nesting child, and gets it every time — because the previous
+    // spilled child's composite is sitting in the parent's open round, which
+    // `make_room`'s cut hands back before the next one asks.
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
     recorder.push_layer(layer(HALF), None);
     draw(&mut recorder, 0, 16, 32);
     recorder.pop_layer();
-    recorder.push_layer(layer(HALF), None);
-    recorder.push_layer(layer(HALF), None);
-    draw(&mut recorder, 48, 16, 32);
-    recorder.pop_layer();
-    recorder.push_layer(layer(HALF), None);
-    draw(&mut recorder, 96, 16, 32);
-    recorder.pop_layer();
-    recorder.pop_layer();
+    for index in 1..4_u16 {
+        recorder.push_layer(layer(HALF), None);
+        recorder.push_layer(layer(HALF), None);
+        draw(&mut recorder, index.saturating_mul(48), 16, 32);
+        recorder.pop_layer();
+        recorder.pop_layer();
+    }
     recorder.pop_layer();
 
-    let reason = escalation(&recorder);
+    let rounds = schedule(&recorder);
+    assert_pages_survive_until_composited(&rounds);
+
+    let spilled = rounds
+        .iter()
+        .filter(|round| {
+            round
+                .page()
+                .is_some_and(|page| page.parity == PageParity::Spill)
+        })
+        .count();
+    assert_eq!(
+        spilled, 3,
+        "each nesting sibling takes the one spill page in turn: {rounds:?}"
+    );
+    for round in &rounds {
+        let live = usize::from(round.page().is_some()) + round.released.len();
+        assert!(
+            live <= MAX_LIVE_PAGES,
+            "no round holds more than the bound live: {round:?}"
+        );
+    }
+
+    // Every layer still reaches exactly one composite, and the recording's own
+    // order survives being cut across that many rounds.
+    let composited: Vec<u32> = rounds
+        .iter()
+        .flat_map(Round::composites)
+        .map(|c| c.layer)
+        .collect();
+    assert_eq!(composited, vec![1, 3, 2, 5, 4, 7, 6, 0]);
+    assert_eq!(
+        composited.len(),
+        recorder.layers.len(),
+        "no layer is composited twice and none is dropped"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Shapes the scheduler refuses
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_sibling_pair_nested_inside_a_sibling_pair_escalates() {
+    // A fan inside a layer costs that layer its group for the rest of the
+    // frame, and a fan two levels deep wants the same of its own parent. The
+    // spill page carries the inner fan's second child — but the inner parent's
+    // own round then has to composite *both* of its children, so it needs a
+    // page while three are already live: its parent's, and one per child. A
+    // cut cannot pay for this one either, so the frame is refused rather than
+    // rendered wrong.
+    let reason = escalation(&nested_fan_inside_a_fan());
 
     assert!(
-        reason.contains("layer 4"),
-        "the reason names the layer that found no group: {reason}"
+        reason.contains("layer 2"),
+        "the reason names the layer that found no page: {reason}"
     );
     assert!(
-        reason.contains("third live intermediate page"),
+        reason.contains("fourth live intermediate page"),
         "the reason says what ran out: {reason}"
+    );
+    assert!(
+        reason.contains("spill page"),
+        "the reason says the spill page was tried too: {reason}"
     );
 }
 
@@ -1085,8 +1275,9 @@ fn a_refused_frame_never_reports_a_target_it_would_have_rendered() {
     // a caller that took a `Vec<Round>` from a refused frame would render a
     // layer graph it had already been told the scheduler cannot serve. The
     // second recorder is the one that matters here — its escalation happens
-    // after several rounds have already been pushed, cut rounds among them.
-    let recorders = [nested_chain(MAX_CHAIN_DEPTH + 1), branching_chain()];
+    // after several rounds have already been pushed, cut rounds and a spill
+    // page among them.
+    let recorders = [nested_chain(MAX_CHAIN_DEPTH + 1), nested_fan_inside_a_fan()];
 
     for recorder in &recorders {
         assert!(Schedule::build(recorder, &caps(), &PageConfig::default()).is_err());

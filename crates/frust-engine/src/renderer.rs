@@ -179,7 +179,7 @@ use crate::gpu::targets::{
 };
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::schedule::pages::{PageConfig, PageSize};
-use crate::schedule::{Composite, PageParity, Round, RoundOp, Schedule};
+use crate::schedule::{Composite, MAX_LIVE_PAGES, PageParity, Round, RoundOp, Schedule};
 use crate::{EngineTarget, OutputAlpha};
 use vello_common::geometry::SizeU16;
 use vello_common::record::RecordedLayerKind;
@@ -1131,9 +1131,10 @@ impl EngineRenderer {
             );
         }
 
-        // The two ping-pong groups, each holding the finished page a later
-        // round composites (see [`crate::schedule`]).
-        let mut live: [Option<PooledTexture>; 2] = [None, None];
+        // The frame's live pages — the two ping-pong groups and the one spill
+        // page beside them — each holding the finished page a later round
+        // composites (see [`crate::schedule`]).
+        let mut live: [Option<PooledTexture>; MAX_LIVE_PAGES] = [const { None }; MAX_LIVE_PAGES];
         let mut page_slot = 0_usize;
 
         for plan in &self.scratch.rounds {
@@ -1476,7 +1477,8 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
 ///
 /// The same bookkeeping after every round, strip and filter alike: a page is
 /// free the moment the pass that sampled it ends, which is what bounds a chain
-/// of any depth — and a filter layer's own pair of pages — to
+/// of any depth — and a filter layer's own pair of pages — to the two ping-pong
+/// groups, and every shape this scheduler serves to
 /// [`MAX_LIVE_PAGES`](crate::schedule::MAX_LIVE_PAGES) live intermediates.
 ///
 /// A round that is not continuing a page of its own takes a *fresh* texture out
@@ -1487,8 +1489,8 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
 /// texture from the one the pass before it wrote and this pass reads.
 fn settle_pages(
     targets: &mut IntermediateTargets,
-    live: &mut [Option<PooledTexture>; 2],
-    released: [bool; 2],
+    live: &mut [Option<PooledTexture>; MAX_LIVE_PAGES],
+    released: [bool; MAX_LIVE_PAGES],
     own: Option<(PageParity, PooledTexture)>,
 ) {
     for (index, slot) in live.iter_mut().enumerate() {
@@ -1864,7 +1866,7 @@ struct RoundPlan {
     segments: Range<usize>,
     /// Page groups this round consumed, indexed by
     /// [`PageParity::index`]; each returns to the pool once the pass ends.
-    released: [bool; 2],
+    released: [bool; MAX_LIVE_PAGES],
     /// The filter pass this round runs, on a filter round — which draws no
     /// strip and composites nothing, so its `segments` range is empty.
     filter: Option<FilterPlan>,
@@ -2051,9 +2053,11 @@ impl Scratch {
                 *slot = (*slot).max(deepest);
             }
 
-            let mut released = [false; 2];
+            let mut released = [false; MAX_LIVE_PAGES];
             for parity in &round.released {
-                released[parity.index()] = true;
+                if let Some(slot) = released.get_mut(parity.index()) {
+                    *slot = true;
+                }
             }
 
             self.rounds.push(RoundPlan {

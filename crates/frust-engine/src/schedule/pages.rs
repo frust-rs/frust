@@ -15,7 +15,11 @@
 //!   the parent's pass and freed the moment that pass ends, and the grandchild
 //!   reuses it. Depth here is counted over *isolated* layers only, because an
 //!   inlined layer never occupies a page and so never consumes a level (see the
-//!   [`schedule`](super) module header).
+//!   [`schedule`](super) module header). [`PageParity::Spill`] is the one group
+//!   this rule does not name: it is the single bounded page a regular layer
+//!   falls back on when both parity groups are held and no round could be cut
+//!   to hand one back, and the [`schedule`](super) header's *The spill page*
+//!   section is where the shapes that need it live.
 //! - **Coverage-sized, quantized, capped.** A page is sized to the layer's own
 //!   tile-aligned bounds rather than to the viewport, floored at
 //!   [`PageConfig::min_page_size`] and quantized to the substrate pool's key
@@ -149,17 +153,36 @@ pub const DEFAULT_MAX_PAGE_SIZE: u32 = 4096;
 /// replaced.
 pub const MAX_PAGE_BANDS: usize = 8;
 
-/// Which of the two ping-pong texture groups a page comes from.
+/// Which texture group a page comes from: one of the two ping-pong groups, or
+/// the single spill page beside them.
 ///
-/// The scheduler keeps at most one page live per group, so a parity *is* a page
+/// The scheduler keeps at most one page live per group, so a group *is* a page
 /// identity for the shapes it serves; a schedule that would need two pages of
-/// the same parity is escalated rather than given a second index.
+/// the same group is escalated rather than given a second index.
+///
+/// The name is the pair's: [`Even`](Self::Even) and [`Odd`](Self::Odd) are what
+/// a layer's own depth parity names, and they carry every page of every chain
+/// and every fan. [`Spill`](Self::Spill) is not a parity and is never derived
+/// from a depth — it is the bounded third page the scheduler falls back on for
+/// the one shape the pair cannot hold, kept in this enum rather than beside it
+/// because what the renderer needs from all three is the same thing: an index
+/// naming which live page a round writes, samples and hands back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageParity {
     /// The group even-depth layers render into.
     Even,
     /// The group odd-depth layers render into.
     Odd,
+    /// The one spill page, taken only when both parity groups are held and no
+    /// open round could be cut to hand one back.
+    ///
+    /// One page, never a group of its own: a second layer wanting it while it
+    /// is held is refused, which is what keeps a frame's live intermediates at
+    /// [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES). It is released exactly as a
+    /// parity page is — by the round whose composite sampled it — and only a
+    /// regular layer is ever handed one (see [`schedule`](super)'s *The spill
+    /// page*).
+    Spill,
 }
 
 impl PageParity {
@@ -167,7 +190,9 @@ impl PageParity {
     ///
     /// Depths are one-based (the outermost isolated layer is depth 1), matching
     /// the recorder's own numbering, so the outermost layer takes the odd group
-    /// and the surface it composites onto is not a page at all.
+    /// and the surface it composites onto is not a page at all. Never answers
+    /// [`Spill`](Self::Spill): the spill page is a fallback the scheduler
+    /// reaches for explicitly, not a group any depth prefers.
     #[must_use]
     pub const fn from_depth(depth: usize) -> Self {
         if depth.is_multiple_of(2) {
@@ -177,21 +202,32 @@ impl PageParity {
         }
     }
 
-    /// The other group.
+    /// The other of the ping-pong pair.
+    ///
+    /// [`Spill`](Self::Spill) is not one of the pair and so has no other: it
+    /// answers itself, which keeps this total without inventing a third
+    /// ping-pong partner. Nothing asks: the one caller that ping-pongs between
+    /// two groups of its own is a filter layer's pass sequence, and a filter
+    /// layer is never handed the spill page.
     #[must_use]
     pub const fn opposite(self) -> Self {
         match self {
             Self::Even => Self::Odd,
             Self::Odd => Self::Even,
+            Self::Spill => Self::Spill,
         }
     }
 
-    /// The group's index, `0` for even and `1` for odd.
+    /// The group's index: `0` for even, `1` for odd, `2` for the spill page.
+    ///
+    /// This is what indexes the renderer's live-page slots, so the values are
+    /// dense and stay inside [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES).
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Even => 0,
             Self::Odd => 1,
+            Self::Spill => 2,
         }
     }
 }
@@ -453,6 +489,23 @@ mod tests {
         assert_eq!(PageParity::Odd.opposite(), PageParity::Even);
         assert_eq!(PageParity::Even.index(), 0);
         assert_eq!(PageParity::Odd.index(), 1);
+    }
+
+    #[test]
+    fn the_spill_page_is_no_depths_group_and_indexes_past_the_ping_pong_pair() {
+        // A depth never names it — it is reached by falling back, not by
+        // preferring — and its index is the third live-page slot, which is
+        // what keeps the renderer's own array indexable by this value alone.
+        for depth in 0..=16 {
+            assert_ne!(PageParity::from_depth(depth), PageParity::Spill);
+        }
+        assert_eq!(PageParity::Spill.index(), 2);
+        assert!(PageParity::Spill.index() < crate::schedule::MAX_LIVE_PAGES);
+        assert_eq!(
+            PageParity::Spill.opposite(),
+            PageParity::Spill,
+            "the spill page is not one of the ping-pong pair, so it has no other"
+        );
     }
 
     #[test]

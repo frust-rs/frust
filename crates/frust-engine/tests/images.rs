@@ -170,15 +170,19 @@ fn caps() -> TierCaps {
     TierCaps::fake(DownlevelProfile::Full)
 }
 
-/// A half-opacity layer holding a flat isolated child and then a nesting one,
-/// over a scene that also draws `data`.
+/// A half-opacity layer holding a flat isolated child and then a nesting one
+/// that holds an isolated *pair*, over a scene that also draws `data`.
 ///
-/// The smallest shape two pooled pages cannot serve — the parent takes a group
-/// of its own once its round is cut after the first child, and the second child
-/// then needs two more for the chain below it — so `Schedule::build` refuses it.
-/// Recorded around a real image draw, so the refusal lands on a frame that made
-/// an image resident. (A plain sibling fan is *not* a counterexample any more:
-/// the scheduler serves one of any width by cutting the parent's round.)
+/// The smallest shape three live pages cannot serve — the outer parent takes a
+/// group of its own once its round is cut after the first child, the inner
+/// parent's two children take the other group and the spill page between them,
+/// and the inner parent's own round, which composites both of them, would need
+/// a fourth live page — so `Schedule::build` refuses it. Recorded around a real
+/// image draw, so the refusal lands on a frame that made an image resident.
+///
+/// Neither a plain sibling fan nor a single nesting child is a counterexample
+/// any more: the scheduler serves a fan of any width by cutting the parent's
+/// round, and a chain hanging off a later child on its one spill page.
 fn branching_layers_with_an_image(data: &ImageData) -> Scene {
     scene_of(|b| {
         b.draw_image(data, DEST);
@@ -187,8 +191,11 @@ fn branching_layers_with_an_image(data: &ImageData) -> Scene {
         b.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
         b.push_layer(Rect::new(28.0, 0.0, 52.0, 24.0), 0.5);
-        b.push_layer(Rect::new(30.0, 2.0, 50.0, 22.0), 0.5);
-        b.fill_rect(Rect::new(32.0, 4.0, 48.0, 20.0), Brush::Solid(RED));
+        b.push_layer(Rect::new(30.0, 2.0, 38.0, 22.0), 0.5);
+        b.fill_rect(Rect::new(31.0, 4.0, 37.0, 20.0), Brush::Solid(RED));
+        b.pop_layer();
+        b.push_layer(Rect::new(40.0, 2.0, 50.0, 22.0), 0.5);
+        b.fill_rect(Rect::new(41.0, 4.0, 49.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
         b.pop_layer();
         b.pop_layer();
