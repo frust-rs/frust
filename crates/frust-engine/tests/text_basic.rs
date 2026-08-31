@@ -584,6 +584,20 @@ fn a_malformed_ttcf_collection_fails_closed_instead_of_admitting_a_bypass() {
     // offsetTable[0] lives at byte 12 (TTC_OFFSETS).
     directory_offset_past_the_blob[12..16].copy_from_slice(&past_the_blob.to_be_bytes());
 
+    let mut inflated_num_fonts = base.clone();
+    // numFonts lives at byte 8 (TTC_NUM_FONTS). Inflating it past what the
+    // blob can hold for a *full* offsets array (TTC_OFFSETS + numFonts * 4)
+    // must fail closed even though index 0's own entry — offsetTable[0],
+    // still spec-correct — resolves to a real face: read-fonts 0.41.0's
+    // `TTCHeader::table_directory_offsets()` silently yields an *empty*
+    // array on this overrun rather than erring, so `CollectionRef::get`
+    // answers `InvalidCollectionIndex` and `glifo`'s
+    // `FontRef::from_index(..).unwrap()` aborts the process (panic=abort).
+    // The gate has to check the array's own fit, not just the one entry an
+    // accepted index would read.
+    let inflated: u32 = (base.len() as u32 - 12) / 4 + 1000;
+    inflated_num_fonts[8..12].copy_from_slice(&inflated.to_be_bytes());
+
     for (label, bytes, index) in [
         (
             "a TTC major version outside the defined 1/2",
@@ -605,6 +619,13 @@ fn a_malformed_ttcf_collection_fails_closed_instead_of_admitting_a_bypass() {
              the spec's offset rather than the neighbouring offset table",
             base.clone(),
             1,
+        ),
+        (
+            "an inflated numFonts whose implied offsets array does not fit \
+             the blob, even though the requested index's own entry still \
+             resolves to a real face",
+            inflated_num_fonts,
+            0,
         ),
     ] {
         let glyph_run = run_against(bytes, index);

@@ -326,6 +326,20 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
             return None;
         }
         let count = read_u32(data, TTC_NUM_FONTS)?;
+        // The full offsets array `count` implies — not just the one entry this
+        // index names — must fit inside the blob before any entry in it is
+        // trusted. `read-fonts`' own `TTCHeader::table_directory_offsets()`
+        // makes the same check, but fails open on a miss: a `numFonts` too
+        // large for the blob does not error, it silently yields an *empty*
+        // array, so `CollectionRef::get` returns `InvalidCollectionIndex` and
+        // `glifo`'s `FontRef::from_index(..).unwrap()` aborts the process
+        // (panic=abort) rather than returning an `EngineError`. Checking the
+        // array's own fit here — before `index >= count` even runs — is what
+        // keeps this gate from accepting a blob whose one requested entry
+        // happens to lie inside a header `read-fonts` itself would refuse.
+        if TTC_OFFSETS.checked_add(usize::try_from(count).ok()?.checked_mul(4)?)? > data.len() {
+            return None;
+        }
         if index >= count {
             return None;
         }
