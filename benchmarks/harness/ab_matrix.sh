@@ -88,8 +88,19 @@
 # `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
 # via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
 # exact committed files backing each cell (PROTOCOL §10's "raw series
-# committed alongside the computed table" rule). Each cell's artifacts are
-# first assembled in a staging directory under --out
+# committed alongside the computed table" rule).
+#
+# A `--tier` run's scenario cells ALSO copy each captured run's
+# `run-NN.pss_before.txt`/`run-NN.pss_after.txt` (run.sh's own `dumpsys
+# meminfo` snapshots, benchmarks/.gitignore's documented `*.pss_*.txt`
+# raw-artifact class) alongside `run-NN.log` — best-effort, whichever
+# exist, never required (run.sh's own capture already is: a missing
+# snapshot is the ordinary "not yet running"/"capture failed" outcome, not
+# an error) — the source `gpu_graphics_stats`'s `Graphics (MB)` figure is
+# computed from. A fine-floor run (no --tier) copies neither, unchanged
+# from before this axis existed.
+#
+# Each cell's artifacts are first assembled in a staging directory under --out
 # (`<out>/stage/<cell>/<sub>`, cleared per copy), every `cp` is
 # checked (a failed copy is a hard, loud failure — never a silently-short
 # raw series), the sanitization self-check `benchmarks/.gitignore`
@@ -133,13 +144,27 @@
 # --dry-run.
 #
 # Emits a Markdown table — columns `aa`, `scale` (preceded by `tier` when
-# --tier was passed), one p50/p95 column pair per `--scenarios` entry,
-# `nav total_p50`, `nav submit_p95` — to stdout and to
+# --tier was passed), one p50/p95 column pair per `--scenarios` entry (a
+# `--tier` run additionally carries that scenario's `gpu_total p50`/
+# `gpu_total p95`/`Graphics (MB)` columns — the v4 raw-format GPU-pass
+# percentiles and the post-run `dumpsys meminfo` Graphics-PSS mean,
+# `n/a` when no kept frame carries a `gpu_q=1` reading or no kept run's
+# snapshot parsed a Graphics row; see `gpu_graphics_stats` below — a
+# fine-floor run, no --tier, grows neither, unchanged from before this
+# axis existed), `nav total_p50`, `nav submit_p95` — to stdout and to
 # `<out>/ab_matrix.md`; each finished cell's row is ALSO appended to
 # `<out>/ab_matrix.rows.md` the moment it is measured, so a run that ends
 # early (a hard failure in a later cell, Ctrl-C) never loses the cells
 # already measured — on such an exit the EXIT trap prints the rows so far
-# as a PARTIAL table (also written to `<out>/ab_matrix.partial.md`).
+# as a PARTIAL table (also written to `<out>/ab_matrix.partial.md`). The
+# table carries a "methodology deviation" note whenever the effective kept
+# run count is below 10 or the duration below 30s (see --quick below), and
+# its footer ALWAYS restates the encode_us/submit_us arm-remap caveat
+# (PROTOCOL §7's v4 note; RENDER_ARCHITECTURE.md's Data Flow "Render-path
+# A/B caveat") and recommends either `--define FRUST_NO_DIRECT_SURFACE=1`
+# (pins every arm onto the identical blit path) or comparing arms on the
+# columns immune to the remap: this table's own p50/p95 (total_us, the
+# summed column) and, when present, gpu_total.
 # Ctrl-C/SIGTERM STOPS the matrix — no further cell is built, installed or
 # run — and exits 130/143. Transient build/install/command output
 # (including a nav run's `*.monkey.txt` launch capture — kept for
@@ -152,8 +177,8 @@
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
 #                      [--tier classic,engine]
 #                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
-#                      [--scenarios s1,s2,s4] [--runs 5] [--duration 20]
-#                      [--frust <path>] [--raw-root <dir>]
+#                      [--scenarios s1,s2,s4] [--runs 12] [--duration 30]
+#                      [--quick] [--frust <path>] [--raw-root <dir>]
 #                      [--taps 540,472,540,734,540,996] [--out <dir>]
 #                      [--dry-run]
 #
@@ -231,18 +256,35 @@
 #                      passed through to run.sh (default: s1,s2,s4). Each
 #                      value must be one of s1..s8, d1, d2, validated up
 #                      front (same posture as --aa).
-#   --runs <n>         runs per scenario, passed to run.sh (default: 5).
-#                      Must be > DISCARD_FIRST (derived at startup from
-#                      stats.py's own `DEFAULT_DISCARD_FIRST`, normally 2 —
-#                      see below) — stats.py always discards the first
+#   --runs <n>         runs per scenario, passed to run.sh (default: 12 —
+#                      PROTOCOL §4's own >=10-kept-run convention at the
+#                      stock DISCARD_FIRST=2, i.e. 10 kept; see --quick
+#                      below for the old quick-pass default). Must be >
+#                      DISCARD_FIRST (derived at startup from stats.py's
+#                      own `DEFAULT_DISCARD_FIRST`, normally 2 — see
+#                      below) — stats.py always discards the first
 #                      DISCARD_FIRST runs as warm-up (PROTOCOL §4), so
-#                      anything at or below it would keep zero runs; the
-#                      default of 5 (3 kept at the stock DISCARD_FIRST=2)
-#                      is a quick pass, below PROTOCOL §4's >=10-run
-#                      convention — see the RESULTS.md deviations note it
-#                      produces.
+#                      anything at or below it would keep zero runs. An
+#                      explicit --runs always wins over --quick's own
+#                      default, whichever order the two flags are given in.
 #   --duration <secs>  capture window per run, passed to run.sh (default:
-#                      20 — below PROTOCOL §4's 30s convention; quick pass).
+#                      30 — PROTOCOL §4's own convention; see --quick).
+#                      An explicit --duration always wins over --quick's
+#                      own default, the same way --runs does.
+#   --quick            use the pre-PROTOCOL-§4 quick pass instead of the
+#                      new default: 5 runs x 20s (3 kept at the stock
+#                      DISCARD_FIRST=2) — the convention every quick-pass
+#                      row already published in RESULTS.md used. Sets
+#                      --runs'/--duration's OWN defaults only; an explicit
+#                      --runs or --duration on the same command line still
+#                      wins (see above). Whenever the EFFECTIVE kept-run
+#                      count is below 10 or the effective duration is below
+#                      30s — via --quick, or via a caller's own --runs/
+#                      --duration below the convention — the emitted
+#                      table's header carries a "methodology deviation:
+#                      below PROTOCOL §4" note, and the dry-run preview
+#                      prints the same disclosure, so a reader is told
+#                      up front rather than left to notice the run count.
 #   --frust <path>     path to the frust CLI binary (default:
 #                      <repo-root>/target/debug/frust).
 #   --raw-root <dir>   root of the committed sanitized raw-series tree
@@ -300,14 +342,25 @@ DEVICE_NAME=""
 AA_LIST="area,msaa8,msaa16"
 SCALE_LIST="1.0,0.75,0.5"
 # The tier axis is OFF unless --tier is passed: TIER_AXIS gates the extra
-# table column, the `tier` raw-series group and the cell-label shape, so a
-# run without --tier is byte-identical to the pre-tier script (see the
-# header's --tier note).
+# table column, the `tier` raw-series group, the cell-label shape, the
+# gpu_total/Graphics columns and their pss_*.txt raw-series copy, so a
+# run without --tier is byte-identical to the pre-tier script on all of
+# those (see the header's --tier note). --quick and the PROTOCOL §4
+# default below, and the emitted table's deviation note and arm-remap
+# footer, are NOT gated by TIER_AXIS — they apply to every run (see the
+# --runs/--duration/--quick docs above).
 TIER_LIST="classic"
 TIER_AXIS=0
 SCENARIOS_LIST="s1,s2,s4"
-RUNS=5
-DURATION=20
+# RUNS/DURATION are resolved below (after DISCARD_FIRST is derived) from
+# either PROTOCOL §4's own convention or --quick's — left unset here so
+# that resolution can tell "not given on the command line" apart from "the
+# user passed today's default explicitly" (RUNS_EXPLICIT/DURATION_EXPLICIT).
+RUNS=""
+DURATION=""
+RUNS_EXPLICIT=0
+DURATION_EXPLICIT=0
+QUICK=0
 FRUST_BIN="${REPO_ROOT}/target/debug/frust"
 RAW_ROOT="${REPO_ROOT}/benchmarks/raw"
 TAPS="540,472,540,734,540,996"
@@ -415,19 +468,27 @@ while [ $# -gt 0 ]; do
     --runs)
       [ $# -ge 2 ] || { echo "error: --runs requires a value" >&2; exit 2; }
       RUNS="$2"
+      RUNS_EXPLICIT=1
       shift 2
       ;;
     --runs=*)
       RUNS="${1#--runs=}"
+      RUNS_EXPLICIT=1
       shift
       ;;
     --duration)
       [ $# -ge 2 ] || { echo "error: --duration requires a value" >&2; exit 2; }
       DURATION="$2"
+      DURATION_EXPLICIT=1
       shift 2
       ;;
     --duration=*)
       DURATION="${1#--duration=}"
+      DURATION_EXPLICIT=1
+      shift
+      ;;
+    --quick)
+      QUICK=1
       shift
       ;;
     --frust)
@@ -513,6 +574,37 @@ if ! [[ "${DISCARD_FIRST}" =~ ^[0-9]+$ ]]; then
 fi
 echo "DISCARD_FIRST=${DISCARD_FIRST} (derived from stats.py's DEFAULT_DISCARD_FIRST)"
 
+# --- Resolve --runs/--duration defaults (PROTOCOL §4, or --quick) -------
+#
+# The canonical default is now PROTOCOL §4's own convention — >=10 kept
+# runs (DISCARD_FIRST + 10 total runs, 12 at the stock DISCARD_FIRST=2) x
+# 30s — rather than the old quick pass, so the bare command this script's
+# own header now advertises as "the canonical A/B" is protocol-compliant
+# with no extra flags. --quick restores the old 3-kept x 20s pass (5 runs
+# x 20s) for a fast local check. Either default applies ONLY when the
+# caller did not pass the corresponding flag explicitly
+# (RUNS_EXPLICIT/DURATION_EXPLICIT, set by arg parsing above) — an
+# explicit --runs/--duration always wins over --quick's own default,
+# whichever order the two flags are given in.
+PROTOCOL_RUNS=$((DISCARD_FIRST + 10))
+PROTOCOL_DURATION=30
+QUICK_RUNS=5
+QUICK_DURATION=20
+if [ "${RUNS_EXPLICIT}" -eq 0 ]; then
+  if [ "${QUICK}" -eq 1 ]; then
+    RUNS="${QUICK_RUNS}"
+  else
+    RUNS="${PROTOCOL_RUNS}"
+  fi
+fi
+if [ "${DURATION_EXPLICIT}" -eq 0 ]; then
+  if [ "${QUICK}" -eq 1 ]; then
+    DURATION="${QUICK_DURATION}"
+  else
+    DURATION="${PROTOCOL_DURATION}"
+  fi
+fi
+
 # Minimum parsed frust-perf/flutter-perf raw frame lines a KEPT scenario run
 # must carry (see the header's "Frame sanity" note) — a ~20s capture window
 # at even a poor >=5fps still yields ~100 frames, so fewer than this means a
@@ -530,6 +622,18 @@ KEPT=$((RUNS - DISCARD_FIRST))
 if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || [ "${DURATION}" -lt 1 ]; then
   echo "error: --duration must be a positive integer (seconds), got '${DURATION}'" >&2
   exit 2
+fi
+
+# Whether THIS run's runs/duration actually meet PROTOCOL §4's own
+# convention (>=10 kept runs x >=30s) — independent of how RUNS/DURATION
+# got their values (today's default, --quick, or a caller's own
+# --runs/--duration), so a caller who dials below the convention by hand
+# gets the identical disclosure --quick does. Read by the emitted table's
+# deviation note and the --dry-run preview, below.
+if [ "${KEPT}" -ge 10 ] && [ "${DURATION}" -ge 30 ]; then
+  PROTOCOL_COMPLIANT=1
+else
+  PROTOCOL_COMPLIANT=0
 fi
 
 # --- Split CSV inputs into arrays --------------------------------------
@@ -900,6 +1004,15 @@ publish_cell() {
 #     produce), AND run-01.log..run-<runs>.log plus stats.txt are all
 #     present;
 #   - kind=nav: logcat-frust-perf.log is present.
+# A --tier run's copy_scenario_raw ALSO stages each captured run's
+# run-NN.pss_before.txt/run-NN.pss_after.txt (see that function) — NOT
+# checked here: their `.txt` name never matches the `*.log` glob above
+# (dumpsys meminfo output is not a perf/marker line, so no whitelist for
+# it exists in this function), and they are copied best-effort, so their
+# presence is never required the way run-NN.log's is.
+# benchmarks/.gitignore's own pss content check ("scan *.pss_*.txt for any
+# package identifier other than it.f0x.*bench") is a separate, conductor-run
+# pre-commit check, not part of this function.
 # Only ever called after a non-SKIPPED copy (see the run loop below) — a
 # SKIPPED cell is never staged, so this never runs against one.
 self_check_raw_dir() {
@@ -945,12 +1058,24 @@ self_check_raw_dir() {
 # publish_cell). Only ever called for a non-SKIPPED scenario result (see
 # the run loop) — every cp is checked, and a missing expected artifact
 # fails the self-check before anything is published.
+#
+# A --tier run (TIER_AXIS=1) ALSO stages each captured run's
+# run-NN.pss_before.txt/run-NN.pss_after.txt (run.sh's own `dumpsys
+# meminfo` snapshots, benchmarks/.gitignore's documented `*.pss_*.txt`
+# raw-artifact class) — best-effort, whichever exist, never required (see
+# self_check_raw_dir's own note): gpu_graphics_stats' Graphics (MB) figure
+# is computed from the published run-NN.pss_after.txt files. A fine-floor
+# run (no --tier) copies neither, unchanged from before this axis existed.
 copy_scenario_raw() {
   local scenario="$1" cell="$2" scen_out="$3" runsh_log="$4" cell_dir stage_dir
   cell_dir="$(raw_cell_dir "${cell}" "${scenario}")"
   stage_dir="$(stage_cell_dir "${cell}" "${scenario}")"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
+    if [ "${TIER_AXIS}" -eq 1 ]; then
+      print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && cp ${scen_out}/run-*.pss_before.txt ${scen_out}/run-*.pss_after.txt ${stage_dir}/ (best-effort, whichever exist) && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
+    else
+      print_cmd "" "rm -rf ${stage_dir} && mkdir -p ${stage_dir} && cp ${scen_out}/run-*.log ${stage_dir}/ && sed -n '/^-- stats.py/,\$p' ${runsh_log} > ${stage_dir}/stats.txt && self-check ${stage_dir} && rm -rf ${cell_dir} && mv ${stage_dir} ${cell_dir}" >&2
+    fi
     return 0
   fi
   rm -rf "${stage_dir}"
@@ -963,6 +1088,12 @@ copy_scenario_raw() {
   done
   if [ "${copied}" -eq 0 ]; then
     echo "note: no sanitized run-NN.log files found under ${scen_out} — nothing staged for ${cell_dir}" >&2
+  fi
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    for f in "${scen_out}"/run-*.pss_before.txt "${scen_out}"/run-*.pss_after.txt; do
+      [ -e "${f}" ] || continue
+      cp "${f}" "${stage_dir}/" || die "cp ${f} -> ${stage_dir}/ failed"
+    done
   fi
   if [ -f "${runsh_log}" ]; then
     sed -n '/^-- stats.py/,$p' "${runsh_log}" >"${stage_dir}/stats.txt" || die "writing ${stage_dir}/stats.txt failed"
@@ -1001,6 +1132,85 @@ copy_nav_raw() {
   publish_cell "${stage_dir}" "${cell_dir}"
 }
 
+# gpu_graphics_stats <scenario> <scen_out> — echoes
+# "<gpu_p50_ms> <gpu_p95_ms> <gpu_n> <graphics_mb> <graphics_n>" for one
+# scenario's KEPT runs under <scen_out> — the v4 gpu_total_us percentiles
+# (stats.py's own gpu_spans, PROTOCOL §7's v4 note) and the Graphics-PSS
+# mean (stats.py's own mean_graphics_mb) behind the emitted table's
+# "<SCEN> gpu_total p50/p95"/"<SCEN> Graphics (MB)" columns. ONLY ever
+# called under --tier (TIER_AXIS=1, see the header's Raw-series output
+# note) — a fine-floor run never calls this.
+#
+# gpu_p50_ms/gpu_p95_ms read "n/a" (gpu_n "0") when no kept frame carries a
+# gpu_q=1 reading — the ordinary case for a build with no GPU timer
+# (classic/CPU tier, a non-perf-trace build, or an adapter without
+# TIMESTAMP_QUERY; see PROTOCOL.md's v4 note), never treated as a failure.
+# graphics_mb/graphics_n read "n/a"/"0" the same way when no kept run's
+# POST-run dumpsys meminfo snapshot (run-NN.pss_after.txt) parsed a
+# Graphics row (run.sh's own capture is best-effort).
+#
+# Computed via stats.py's OWN functions — load_run_frames/
+# discard_first_runs/gpu_spans/_nearest_rank_percentile/mean_graphics_mb,
+# imported and reused, exactly the convention RESULTS.md's classic-baseline
+# section already established for its by-hand encode+submit p50/
+# Graphics (MB) figures — never reimplemented here. Never fails the matrix
+# (see header): python3 itself is already a hard startup requirement (Tool
+# checks above), so any other error here degrades to the same "n/a" this
+# function reports for "nothing parsed" rather than aborting the run — the
+# scenario's own p50/p95 already succeeded (run_scenario) by the time this
+# is called. Same stdout/stderr split as run_scenario/run_nav: progress
+# goes to stderr, ONLY the result line goes to stdout.
+gpu_graphics_stats() {
+  local scenario="$1" scen_out="$2"
+  print_cmd "" "python3 -c '<gpu_total_us + Graphics-PSS percentile computation over ${scen_out}, discard-first ${DISCARD_FIRST}, via stats.py load_run_frames/discard_first_runs/gpu_spans/_nearest_rank_percentile/mean_graphics_mb>'" >&2
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "n/a n/a 0 n/a 0"
+    return 0
+  fi
+  python3 - "${scenario}" "${scen_out}" "${DISCARD_FIRST}" "${HARNESS_DIR}" <<'PYEOF' 2>/dev/null || echo "n/a n/a 0 n/a 0"
+import sys
+from pathlib import Path
+
+scenario, scen_out, discard_first, harness_dir = sys.argv[1:5]
+discard_first = int(discard_first)
+sys.path.insert(0, harness_dir)
+import stats
+
+scen_out_path = Path(scen_out)
+logs = sorted(scen_out_path.glob("run-*.log"))
+runs = [stats.load_run_frames(p, scenario) for p in logs]
+frames = stats.discard_first_runs(runs, discard_first)
+
+gpu_vals = []
+for f in frames:
+    if f.skipped:
+        continue
+    spans = stats.gpu_spans(f)
+    if spans is None:
+        continue
+    v = spans.get("gpu_total_us")
+    if v is not None:
+        gpu_vals.append(v)
+gpu_vals.sort()
+if gpu_vals:
+    p50 = stats._nearest_rank_percentile(gpu_vals, 50) / 1000
+    p95 = stats._nearest_rank_percentile(gpu_vals, 95) / 1000
+    gpu_out = f"{p50:.2f} {p95:.2f} {len(gpu_vals)}"
+else:
+    gpu_out = "n/a n/a 0"
+
+pss_files = sorted(scen_out_path.glob("run-*.pss_after.txt"))
+kept_pss = pss_files[discard_first:] if len(pss_files) > discard_first else pss_files
+mean_mb, samples = stats.mean_graphics_mb(kept_pss)
+if samples:
+    gfx_out = f"{mean_mb:.2f} {samples}"
+else:
+    gfx_out = "n/a 0"
+
+print(f"{gpu_out} {gfx_out}")
+PYEOF
+}
+
 # emit_table <status-line> — the Markdown table over whatever TABLE_ROWS
 # holds so far, to stdout: called once at the end of a completed matrix
 # (empty status line) and, with a PARTIAL status line, by the EXIT trap
@@ -1018,6 +1228,10 @@ emit_table() {
     upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
     header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
     sep="${sep}---|---|"
+    if [ "${TIER_AXIS}" -eq 1 ]; then
+      header="${header} ${upper} gpu_total p50 (ms) | ${upper} gpu_total p95 (ms) | ${upper} Graphics (MB) |"
+      sep="${sep}---|---|---|"
+    fi
   done
   header="${header} nav total_p50 (ms) | nav submit_p95 (ms) |"
   sep="${sep}---|---|"
@@ -1034,6 +1248,14 @@ emit_table() {
     echo
   fi
   echo "Kept ${KEPT} of ${RUNS} runs per scenario (the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4); percentiles below are computed over the kept runs only. The nav columns (nav total_p50, nav submit_p95) are NOT part of this kept-run accounting — see the note below."
+  if [ "${PROTOCOL_COMPLIANT}" -eq 0 ]; then
+    echo
+    if [ "${QUICK}" -eq 1 ] && [ "${RUNS_EXPLICIT}" -eq 0 ] && [ "${DURATION_EXPLICIT}" -eq 0 ]; then
+      echo "**Methodology deviation:** --quick was passed — ${KEPT} kept run(s) x ${DURATION}s, below PROTOCOL §4's >=10-kept-run x 30s convention. Restate this (or an equivalent) in RESULTS.md's own 'Methodology deviations' subsection for any row this table's numbers feed, per that file's existing discipline."
+    else
+      echo "**Methodology deviation:** ${KEPT} kept run(s) x ${DURATION}s — below PROTOCOL §4's >=10-kept-run x 30s convention (--runs/--duration set below it). Restate this (or an equivalent) in RESULTS.md's own 'Methodology deviations' subsection for any row this table's numbers feed, per that file's existing discipline."
+    fi
+  fi
   echo
   echo "${header}"
   echo "${sep}"
@@ -1051,6 +1273,17 @@ emit_table() {
     echo "are not passed on its build and its AA/scale cells read n/a. Each"
     echo "such arm is ONE cell per run, whatever --aa/--scale hold."
     echo
+    echo "GPU/Graphics note: <SCEN> gpu_total p50/p95 are computed from each"
+    echo "kept run's gpu_total_us field (stats.py's gpu_spans, the v4 raw"
+    echo "format) and read n/a when no kept frame carries a gpu_q=1 reading —"
+    echo "the ordinary case off a build with no GPU timer (classic/CPU tiers,"
+    echo "a non-perf-trace build, or an adapter without TIMESTAMP_QUERY; see"
+    echo "PROTOCOL.md's v4 note), not a failure. <SCEN> Graphics (MB) averages"
+    echo "the Graphics PSS row of each kept run's POST-run dumpsys meminfo"
+    echo "snapshot (run.sh's own pss_after capture; pss_before is always"
+    echo "empty — the app is force-stopped ahead of every run) and reads n/a"
+    echo "the same way when no snapshot parsed."
+    echo
   fi
   echo "Nav-basis note: the nav columns come from ONE push/pop pass per cell"
   echo "(no repeated runs, nothing discarded as warm-up) — they report"
@@ -1059,7 +1292,27 @@ emit_table() {
   echo "sample like the scenario columns above."
   echo
   echo "Percentiles are computed over the KEPT runs (${KEPT} of ${RUNS}; the first ${DISCARD_FIRST} are discarded as warm-up per PROTOCOL §4) — scenario columns only; see the nav-basis note above for the nav columns."
-  echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    echo "Raw series (sanitized run-NN.log/stats.txt/run-NN.pss_before.txt/run-NN.pss_after.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
+  else
+    echo "Raw series (sanitized run-NN.log/stats.txt per scenario, sanitized nav logcat) copied under ${RAW_ROOT}/${DEVICE_NAME}/${RAW_GROUP}/."
+  fi
+  echo
+  echo "Encode/submit arm-remap caveat (always stated here — PROTOCOL §7's v4"
+  echo "note; RENDER_ARCHITECTURE.md's Data Flow \"Render-path A/B caveat\"):"
+  echo "encode_us and submit_us are NOT the same instrument on every arm — on"
+  echo "the blit arm the GPU render lands in encode_us and acquire_us follows"
+  echo "it; on the direct-to-surface arm (every engine-tier arm, and any"
+  echo "classic arm not forced onto blit) it lands in submit_us instead and"
+  echo "acquire_us precedes it. Do not compare encode_us or submit_us alone"
+  echo "across arms. Either build every arm with"
+  echo "--define FRUST_NO_DIRECT_SURFACE=1 so all of them take the identical"
+  echo "blit path (the same knob RENDER_DEVELOPMENT.md documents as the A/B"
+  echo "kill switch), or compare arms on the columns already immune to the"
+  echo "remap: this table's own p50/p95 (total_us, the summed column — every"
+  echo "CPU pass plus acquire/submit) and, when present, the gpu_total"
+  echo "columns above (measured on the GPU's own clock, untouched by which"
+  echo "CPU call the recording happened inside)."
 }
 
 # tier_build_args <tier> <aa> <scale> — echoes the tier-specific tail of
@@ -1421,10 +1674,21 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     echo "tier: ${TIER_LIST}  (raw-series group: ${RAW_GROUP}; a non-classic tier ignores --aa/--scale — one cell per arm)"
   fi
   echo "aa: ${AA_LIST}  scale: ${SCALE_LIST}  scenarios: ${SCENARIOS_LIST}"
-  echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}"
+  echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}$( [ "${QUICK}" -eq 1 ] && echo '  (--quick)' )"
   echo "kept ${KEPT} of ${RUNS} runs per scenario (first ${DISCARD_FIRST} discarded as warm-up per PROTOCOL §4)"
+  if [ "${PROTOCOL_COMPLIANT}" -eq 0 ]; then
+    if [ "${QUICK}" -eq 1 ] && [ "${RUNS_EXPLICIT}" -eq 0 ] && [ "${DURATION_EXPLICIT}" -eq 0 ]; then
+      echo "methodology deviation: below PROTOCOL §4's >=10-kept-run x 30s convention (--quick) — restated in the emitted table's own header"
+    else
+      echo "methodology deviation: below PROTOCOL §4's >=10-kept-run x 30s convention (--runs/--duration below the convention) — restated in the emitted table's own header"
+    fi
+  fi
   echo "nav basis: ONE push/pop pass per cell (no repeated runs, nothing discarded) — nav total_p50/nav submit_p95 come from the last frust-perf frame summary's own n=<frames> window, not the kept-run accounting above"
   echo "taps: ${TAPS}"
+  if [ "${TIER_AXIS}" -eq 1 ]; then
+    echo "gpu_total/Graphics columns: computed per scenario from stats.py's gpu_spans/mean_graphics_mb over each cell's kept runs (n/a when no gpu_q=1 reading or no Graphics PSS snapshot parsed)"
+  fi
+  echo "arm-remap caveat (always in the emitted table's footer): encode_us/submit_us swap meaning between the blit and direct-to-surface arms (PROTOCOL §7's v4 note; RENDER_ARCHITECTURE.md's Render-path A/B caveat) — compare arms via --define FRUST_NO_DIRECT_SURFACE=1 or via the p50/p95 (total_us) / gpu_total columns instead"
   echo
   wake_and_unlock_device
   echo
@@ -1439,6 +1703,9 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     for scenario in "${SCENARIO_ARR[@]}"; do
       run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
       copy_scenario_raw "${scenario}" "${label}" "/dev/null" "/dev/null"
+      if [ "${TIER_AXIS}" -eq 1 ]; then
+        gpu_graphics_stats "${scenario}" "/dev/null" >/dev/null
+      fi
     done
     build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "${aa}" "${scale}" "/dev/null"
     install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
@@ -1478,11 +1745,24 @@ for spec in "${CELL_SPECS[@]}"; do
       echo "${scenario}: ${result}"
       echo "raw: not copied (SKIPPED)"
       row="${row} SKIPPED | SKIPPED |"
+      if [ "${TIER_AXIS}" -eq 1 ]; then
+        row="${row} n/a | n/a | n/a |"
+      fi
     else
       copy_scenario_raw "${scenario}" "${label}" "${scen_out}" "${runsh_log}"
       p50="$(printf '%s' "${result}" | cut -d' ' -f1)"
       p95="$(printf '%s' "${result}" | cut -d' ' -f2)"
       row="${row} ${p50} | ${p95} |"
+      if [ "${TIER_AXIS}" -eq 1 ]; then
+        gpu_gfx="$(gpu_graphics_stats "${scenario}" "${scen_out}")"
+        gpu_p50="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f1)"
+        gpu_p95="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f2)"
+        gpu_n="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f3)"
+        gfx_mb="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f4)"
+        gfx_n="$(printf '%s' "${gpu_gfx}" | cut -d' ' -f5)"
+        echo "${scenario}: gpu_total p50=${gpu_p50}ms p95=${gpu_p95}ms (n=${gpu_n} readings)  Graphics=${gfx_mb}MB (n=${gfx_n} snapshots)"
+        row="${row} ${gpu_p50} | ${gpu_p95} | ${gfx_mb} |"
+      fi
     fi
   done
 

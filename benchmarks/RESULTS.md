@@ -1959,6 +1959,75 @@ to the same pixels, the pool having gone with the renderer that owned it.
 
 ---
 
+## Engine vs classic A/B — Phase 7 (GPU-timed, `--tier classic,engine`)
+
+Skeleton for the canonical classic-vs-engine A/B this phase's GPU
+pass-timestamp work (`gpu_q`/`gpu_total_us` et al., PROTOCOL §7's v4 raw
+format) and `benchmarks/harness/ab_matrix.sh`'s `--tier` axis exist to
+answer — not a re-statement of the "Engine vs classic — Phase 4" section's
+own CPU-only comparison above, but its GPU-timed successor, backed by
+`gpu_total_us` (immune to the encode/submit arm-remap below) rather than
+`encode_us`/`submit_us` read raw. **No device has run this matrix pass
+yet.** Per this file's own discipline (see the top of this file): a
+scenario or device with no completed runs is omitted here, not filled with
+placeholder numbers — so the table below carries its header only, no rows,
+until a device gate captures one.
+
+Driven by `ab_matrix.sh`'s own canonical invocation — no `--runs`/
+`--duration` override needed now that the script's own default IS
+PROTOCOL §4's convention (`--quick` restores the old quick pass for a fast
+local check; see the script's own `--quick`/`--runs`/`--duration` docs):
+
+```
+bash benchmarks/harness/ab_matrix.sh --device <serial> --device-name <slug> \
+    --tier classic,engine --scenarios s1,s2,s5,s6
+```
+
+| Backend | Scenario | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | (encode+submit) p50 (ms) | gpu_total p50 (ms) | gpu_total p95 (ms) | Graphics avg (MB) | Note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+Column basis, matching PROTOCOL §7's v4 note and `ab_matrix.sh`'s own
+`gpu_graphics_stats`: `p50`/`p95`/`p99`/`worst`/`missed @*` are `stats.py`'s
+ordinary `total_us`-based `format_table` output (the "summed column" the
+arm-remap caveat below points at — unaffected by which CPU call the GPU
+render happens inside); `(encode+submit) p50` sums each kept frame's
+`encode_us`+`submit_us` before the percentile step (`stats.py`'s own
+`load_run_frames`/`discard_first_runs`/`_nearest_rank_percentile`,
+imported and reused — the same derivation the "Pixel 5 — classic baseline
+for the engine plan" section above already established by hand);
+`gpu_total p50`/`gpu_total p95` are `stats.py`'s `gpu_spans` percentiles
+over each kept run's `gpu_total_us` field, `n/a` when no kept frame
+carries a `gpu_q=1` reading (the ordinary case for a build with no GPU
+timer — classic/CPU tier, a non-`perf-trace` build, or an adapter without
+`TIMESTAMP_QUERY`; never a failure); `Graphics avg (MB)` averages the kept
+runs' post-run `dumpsys meminfo` Graphics PSS (`stats.py`'s own
+`mean_graphics_mb`, over `run-NN.pss_after.txt`).
+
+**Encode/submit arm-remap caveat, restated (PROTOCOL §7's v4 note;
+`docs/RENDER_ARCHITECTURE.md`'s Data Flow "Render-path A/B caveat"):**
+`encode_us` and `submit_us` are not the same instrument on
+the blit arm and the direct-to-surface arm (every engine-tier arm, and any
+classic arm not forced onto blit) — the GPU render lands in `encode_us` on
+the former and `submit_us` on the latter, with `acquire_us` following it
+on the former and preceding it on the latter. Compare arms only on `p50`/
+`p95` (`total_us`, the summed column) or `gpu_total`, or force every arm
+onto the identical blit path with `--define FRUST_NO_DIRECT_SURFACE=1`.
+
+Once a pass is captured, this section gains:
+
+- One row per backend x scenario cell actually run (never a placeholder
+  row for a cell not run).
+- A "Methodology deviations" subsection, same discipline as every device
+  block above — naming the run/duration convention used (PROTOCOL §4's own
+  ≥10x30s, or `--quick`'s 3x20s, with `ab_matrix.sh`'s own emitted
+  deviation note quoted) and anything else that departs from PROTOCOL.md.
+- The raw-series path backing every row:
+  `benchmarks/raw/<device>/tier/<cell>/<scenario>/` (`run-NN.log` +
+  `stats.txt` + `run-NN.pss_before.txt`/`run-NN.pss_after.txt`, sanitized
+  by `run.sh`/`ab_matrix.sh` at capture time).
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB
