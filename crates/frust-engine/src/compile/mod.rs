@@ -661,8 +661,7 @@ impl SceneCompiler {
         // opens a bracket still has to open one, or its pop would close the
         // bracket around it instead. So a bracket lands blocked rather than
         // absent, which draws nothing inside it and balances its own pop.
-        let on_grid = command_transform(command)
-            .is_none_or(|transform| check_finite(combined * transform).is_ok());
+        let on_grid = command_on_grid(command, combined);
         if !on_grid {
             match command {
                 Command::PushClip { .. }
@@ -670,9 +669,18 @@ impl SceneCompiler {
                 | Command::PushLayer { .. } => self.open_blocked_group(),
                 // The correction is the outermost bracket's, so a bracket
                 // reaching here is a nested one, whose presentation is ignored
-                // anyway; only its depth has to be counted.
-                Command::PushSnapshot { rect, .. } => {
-                    self.snapshots.enter(*rect, 1.0, Affine::IDENTITY);
+                // anyway; only its depth has to be counted. The substitution is
+                // still made through [`snapshot_entry`] rather than inline,
+                // because it is the collect walk's to make identically (see
+                // [`Self::classify_runs`]).
+                Command::PushSnapshot {
+                    rect,
+                    scale,
+                    transform,
+                    ..
+                } => {
+                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
+                    self.snapshots.enter(*rect, scale, transform);
                 }
                 _ => {}
             }
@@ -1050,6 +1058,11 @@ impl SceneCompiler {
     /// a size the run is not drawn at. Only the correction is tracked here —
     /// the bracket's *layers* are the draw walk's to open, and this walk opens
     /// nothing.
+    ///
+    /// A bracket is entered on the draw walk's exact terms, through the same
+    /// [`command_on_grid`] check and the same [`snapshot_entry`] substitution
+    /// it uses, so the correction the two walks carry is one decision made
+    /// twice rather than two decisions that happen to agree.
     fn classify_runs(&mut self, scene: &Scene, root: Affine) {
         self.run_routes.clear();
         self.next_run = 0;
@@ -1063,7 +1076,18 @@ impl SceneCompiler {
                     transform,
                     ..
                 } => {
-                    snapshots.enter(*rect, *scale, *transform);
+                    // The draw walk's own entry, made here on exactly its
+                    // terms: [`command_on_grid`] is the check it asks and
+                    // [`snapshot_entry`] is the substitution it makes. A
+                    // bracket it enters neutrally installs no correction, so a
+                    // walk that entered it with the recorded pair would
+                    // classify every run inside against a device transform
+                    // nothing is ever drawn through — a route decided for one
+                    // magnitude and a draw made at another.
+                    let combined = root * snapshots.correction();
+                    let on_grid = command_on_grid(command, combined);
+                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
+                    snapshots.enter(*rect, scale, transform);
                 }
                 Command::PopSnapshot => {
                     // The group depth a real close would be tested against is
@@ -1101,10 +1125,22 @@ impl SceneCompiler {
     /// `None` is the conservative answer rather than an error: a run with no
     /// recorded route is drawn as outlines, which is correct pixels by the path
     /// the engine has always used.
+    ///
+    /// The route is re-tested against *live* glyph residency on the way out
+    /// (see [`crate::text::atlas_policy::AtlasPolicy::admit_run`]). The collect
+    /// walk answered every run of this frame from the population the frame
+    /// opened with, because `glifo` inserts nothing until the draw walk reaches
+    /// the run; without this second test a frame one entry below the ceiling
+    /// would admit every run it carries and overshoot by as much as one frame's
+    /// whole text. Here the count is the real one — every earlier run of this
+    /// same frame has already inserted — so the bound holds within a frame and
+    /// not merely across frames. It can only ever *narrow* an answer, which is
+    /// the outline path: correct pixels, and the only direction that is safe to
+    /// decide late.
     fn take_run_route(&mut self) -> Option<RunRoute> {
         let route = self.run_routes.get(self.next_run).copied();
         self.next_run = self.next_run.saturating_add(1);
-        route
+        route.map(|route| self.glyph_atlas.admit_run(route))
     }
 
     /// Draw one glyph run: its brush encoded once, then every glyph's outline
@@ -1509,6 +1545,40 @@ fn command_transform(command: &Command) -> Option<Affine> {
     }
 }
 
+/// Whether `command`'s own transform still lands on the finite device grid once
+/// `combined` — the frame root with any open snapshot bracket's correction — is
+/// composed ahead of it.
+///
+/// Asked by both of the frame's walks, from one place, because they have to ask
+/// it the same way. The draw walk draws nothing for a command that answers
+/// `false` and enters a `PushSnapshot` neutrally instead (see
+/// [`snapshot_entry`]); the collect walk classifies against the transform that
+/// entry implies. Two copies of this expression could drift a coefficient
+/// apart and route a run for a device size it is never drawn at.
+///
+/// A command carrying no transform of its own is on the grid trivially: there
+/// is nothing to compose.
+fn command_on_grid(command: &Command, combined: Affine) -> bool {
+    command_transform(command).is_none_or(|transform| check_finite(combined * transform).is_ok())
+}
+
+/// The presentation scale and transform a `PushSnapshot` bracket is entered
+/// with: the recorded pair on the grid, and the neutral pair off it.
+///
+/// The neutral pair is what makes an off-grid bracket *inert* rather than
+/// absent — it still has a depth to count and a pop to balance, but it installs
+/// no correction, so nothing inside it is drawn through a transform the frame
+/// refused. Both walks substitute through this one function so that the route
+/// a run is given and the transform it is drawn through can never be decided
+/// from different magnitudes.
+fn snapshot_entry(on_grid: bool, scale: f64, transform: Affine) -> (f64, Affine) {
+    if on_grid {
+        (scale, transform)
+    } else {
+        (1.0, Affine::IDENTITY)
+    }
+}
+
 /// Refuse a viewport whose tile-snapped extent would not fit in `u16`.
 ///
 /// The recorder snaps the scene size up to whole tiles, and that rounding is
@@ -1849,6 +1919,60 @@ mod tests {
             check_tile_addressable(16, u16::MAX),
             Err(EngineError::TargetTooLarge)
         ));
+    }
+
+    /// The substitution both walks make for an off-grid `PushSnapshot`, and why
+    /// making it in only one of them would matter.
+    ///
+    /// A bracket entered with the recorded presentation installs a correction;
+    /// one entered neutrally installs none. That correction is precisely the
+    /// affine a run inside the bracket is *classified* against, so a walk that
+    /// substituted and a walk that did not would decide a run's route from one
+    /// magnitude and draw it at another — which is the atlas route handed to a
+    /// transform `glifo` will not absorb.
+    #[test]
+    fn an_off_grid_snapshot_bracket_is_entered_neutrally() {
+        // A frame root already carrying an outer bracket's correction, and an
+        // inner bracket whose own transform overflows against it. Both factors
+        // are finite; only the composition is not.
+        let combined = Affine::scale(1e200);
+        let transform = Affine::scale(1e200);
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let command = Command::PushSnapshot {
+            key: 0,
+            rect,
+            alpha: 1.0,
+            scale: 2.0,
+            transform,
+        };
+
+        assert!(!command_on_grid(&command, combined));
+        assert!(command_on_grid(&command, Affine::IDENTITY));
+
+        let (scale, entered) = snapshot_entry(false, 2.0, transform);
+        assert_eq!(scale, 1.0);
+        assert_eq!(entered.as_coeffs(), Affine::IDENTITY.as_coeffs());
+        let (scale, entered) = snapshot_entry(true, 2.0, transform);
+        assert_eq!(scale, 2.0);
+        assert_eq!(entered.as_coeffs(), transform.as_coeffs());
+
+        // And the difference reaches the quantity that is classified: an
+        // outermost bracket entered with the recorded pair corrects, one
+        // entered neutrally does not.
+        let mut recorded = SnapshotStack::new();
+        recorded.enter(rect, 2.0, transform);
+        assert_ne!(
+            recorded.correction().as_coeffs(),
+            Affine::IDENTITY.as_coeffs()
+        );
+
+        let mut neutral = SnapshotStack::new();
+        let (scale, entered) = snapshot_entry(false, 2.0, transform);
+        neutral.enter(rect, scale, entered);
+        assert_eq!(
+            neutral.correction().as_coeffs(),
+            Affine::IDENTITY.as_coeffs()
+        );
     }
 
     #[test]

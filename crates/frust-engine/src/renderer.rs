@@ -654,8 +654,12 @@ impl EngineRenderer {
         // nothing, and a draw-gated replay would leave those commands recorded
         // until some later frame happened to run one — by which time eviction
         // may have re-let the rectangles they name.
-        if self.compiler.glyph_replay_pending() {
-            self.replay_glyph_pages(device, queue);
+        //
+        // Acknowledged only when the pass really ran, the same way the clears
+        // above are: acknowledging is what lifts the eviction deferral, so an
+        // acknowledgement for a replay that returned early would let `glifo`
+        // free and re-let the very rectangles those commands still name.
+        if self.compiler.glyph_replay_pending() && self.replay_glyph_pages(device, queue) {
             self.compiler.acknowledge_glyph_replay();
         }
 
@@ -735,9 +739,18 @@ impl EngineRenderer {
     /// [`atlas_strip_desc`] describes; a page the lowering declines is left
     /// undrawn and counted, so a glyph whose shape this tier cannot express
     /// goes *missing* rather than landing half-painted.
-    fn replay_glyph_pages(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    ///
+    /// Answers whether the pass really ran, on the same terms
+    /// [`clear_glyph_rects`](Self::clear_glyph_rects) does and for the same
+    /// reason: `false` means there was no atlas array to draw into at all, so
+    /// the recorded commands are still recorded and the caller must go on
+    /// offering them. A page the lowering *declined* is not a `false` — it was
+    /// offered to the array and counted refused, and no later frame could lower
+    /// it either.
+    #[must_use]
+    fn replay_glyph_pages(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         if self.resources.atlas.is_none() {
-            return;
+            return false;
         }
         self.ensure_atlas_renderer(device);
         let pipeline = self
@@ -755,7 +768,7 @@ impl EngineRenderer {
             } = self;
             let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_mut(), resources.atlas.as_ref())
             else {
-                return;
+                return false;
             };
 
             let (width, height) = atlas.size();
@@ -780,6 +793,7 @@ impl EngineRenderer {
                 .note_refused_regions(u64::from(report.refused));
         }
         self.atlas_report = report;
+        true
     }
 
     /// What the last frame's render-to-atlas pass serviced.

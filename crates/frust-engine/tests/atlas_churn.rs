@@ -57,7 +57,7 @@ use frust_engine::{AtlasBudget, EngineRenderer, EngineTarget, OutputAlpha, Scene
 use frust_gpu::{DownlevelProfile, HeadlessTarget, TierCaps};
 use frust_scene::{FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use glifo::{AtlasConfig, GlyphCacheKey, ImageCache, RasterMetrics};
-use kurbo::Affine;
+use kurbo::{Affine, Rect};
 use peniko::color::palette::css::{BLACK, WHITE};
 use peniko::{Blob, Brush, FontData, ImageAlphaType, ImageData, ImageFormat};
 use vello_common::encode::EncodedPaint;
@@ -70,7 +70,7 @@ mod atlas_policy;
 use atlas_policy::{
     AtlasPass, AtlasPolicy, EVICTION_FREQUENCY, GlyphRoute, MAX_CACHED_FONT_SIZE, MAX_ENTRY_AGE,
     OutlineReason, RunKey, RunRoute, SETTLE_FRAMES, SIZE_QUANTUM, absorbed_scale, device_font_size,
-    glyph_cache_config, glyph_entry_ceiling, quantize_font_size,
+    entry_ceiling_at, glyph_cache_config, glyph_entry_ceiling, quantize_font_size,
 };
 
 /// Noto Sans, subsetted to Latin plus combining marks — the same bundled face
@@ -472,6 +472,146 @@ fn the_atlas_route_closes_once_glyph_residency_reaches_its_ceiling() {
     );
 }
 
+/// The ceiling is stated in *typical* glyphs, so it has to be restated in the
+/// size class actually being asked about — otherwise it counts map keys while
+/// the thing it is rationing is texels.
+#[test]
+fn the_residency_ceiling_is_read_in_the_size_class_it_is_asked_about() {
+    let typical = glyph_entry_ceiling(AtlasBudget::MOBILE.config());
+
+    assert_eq!(
+        entry_ceiling_at(typical, 16.0),
+        typical,
+        "the ceiling is stated in 16 px glyphs, so 16 px reads it unchanged"
+    );
+    assert_eq!(
+        entry_ceiling_at(typical, 8.0),
+        typical,
+        "a smaller glyph does not earn a bigger population — the entry map's own \
+         bookkeeping is what bounds the small end"
+    );
+    assert_eq!(
+        entry_ceiling_at(typical, 32.0),
+        typical / 4,
+        "twice the size is four times the texels apiece"
+    );
+    assert_eq!(
+        entry_ceiling_at(typical, MAX_CACHED_FONT_SIZE),
+        typical / 64,
+        "and the largest cacheable glyph is worth sixty-four typical ones"
+    );
+    assert_eq!(
+        entry_ceiling_at(1, MAX_CACHED_FONT_SIZE),
+        1,
+        "never zero: a ceiling that admits nothing is the cache switched off"
+    );
+}
+
+/// Large text may not spend the whole shared array before an entry count
+/// notices, because the images are packed into the same one.
+#[test]
+fn sustained_large_text_leaves_the_images_their_share_of_the_allocator() {
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (512, 512),
+        max_atlases: 2,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    let font = next_font();
+
+    // A page of the largest cacheable text, minting fresh glyphs every frame,
+    // and no image asking for anything yet: text has every chance to take the
+    // whole array before the image arrives.
+    let mut next_glyph = 0_u32;
+    let mut worst_entries = 0_usize;
+    for _ in 0..40 {
+        residency.begin_frame();
+        engine.begin_frame();
+        let classified = engine.classify_run(&run_key(font, MAX_CACHED_FONT_SIZE));
+        let route = engine.admit_run(classified);
+        if let Some(run) = route.atlas() {
+            let run = *run;
+            for _ in 0..4 {
+                engine.collect_glyph(&run, next_glyph, 0.0);
+                next_glyph += 1;
+            }
+        }
+        engine.build(residency.allocator_mut(), raster);
+        engine.acknowledge_clears();
+        engine.end_frame(residency.allocator_mut());
+        engine.acknowledge_replay();
+        worst_entries = worst_entries.max(engine.entry_count());
+    }
+
+    let ceiling = entry_ceiling_at(engine.max_entries(), MAX_CACHED_FONT_SIZE);
+    assert!(
+        worst_entries <= ceiling + 4,
+        "large text left {worst_entries} entries resident against a size-class \
+         ceiling of {ceiling} (plus the one run in flight when it was reached)"
+    );
+
+    // And the image, asking last, still finds room.
+    residency.begin_frame();
+    assert!(
+        residency.resolve(&image(256, 256, 0x11)).is_ok(),
+        "an image arriving after sustained large text is refused the allocator \
+         the text was only ever entitled to half of"
+    );
+    assert_eq!(residency.skipped(), 0);
+}
+
+/// A route decided before this frame's own insertions is re-tested against
+/// them, so one frame cannot overshoot the ceiling by its whole self.
+#[test]
+fn a_route_is_re_tested_against_the_residency_the_frame_itself_created() {
+    let mut small = pages();
+    small.atlas_size = (256, 256);
+    small.max_atlases = 1;
+    let mut images = ImageCache::new_with_config(small);
+    let mut engine = policy(&images, false);
+    let ceiling = engine.max_entries();
+    let font = next_font();
+
+    engine.begin_frame();
+    // `glifo` inserts nothing until a run is *drawn*, so every run of a frame is
+    // classified against the population the frame opened with — here, empty.
+    let first = engine.classify_run(&run_key(font, 16.0));
+    let run = *first
+        .atlas()
+        .expect("an empty residency admits the first run");
+    let later = engine.classify_run(&run_key(font, 16.0));
+    assert!(
+        later.atlas().is_some(),
+        "fixture precondition: the collect walk answers both runs from the \
+         frame-open count"
+    );
+
+    // The frame's own text, which in the engine is what `glifo` inserts as each
+    // of those runs is drawn.
+    for glyph in 0..(ceiling as u32 + 8) {
+        engine.collect_glyph(&run, glyph, 0.0);
+    }
+    engine.build(&mut images, |_| {
+        Some(RasterMetrics {
+            width: 1,
+            height: 1,
+            bearing_x: 0,
+            bearing_y: 1,
+        })
+    });
+    assert!(
+        engine.entry_count() >= ceiling,
+        "fixture precondition: the frame's own text reached the ceiling (got {})",
+        engine.entry_count()
+    );
+
+    assert_eq!(
+        engine.admit_run(later).outline_reason(),
+        Some(OutlineReason::ResidencyFull),
+        "a route consumed after the ceiling was reached is narrowed to outlines \
+         rather than honoured because the frame happened to start below it"
+    );
+}
+
 /// A colour face is refused the atlas route outright, whatever it is drawn at.
 #[test]
 fn a_face_carrying_colour_glyphs_is_never_offered_the_atlas() {
@@ -787,7 +927,11 @@ fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
         assert!(rect.width > 0 && rect.height > 0);
     }
 
-    // And a clear is never re-reported: the queue is drained, not read.
+    // And a clear is not re-reported *once it has been acknowledged*: the queue
+    // is offered rather than drained, and `frame` acknowledges every frame, so
+    // the rects the previous pass carried were dropped when it said the writes
+    // had really been issued. An unacknowledged frame keeps being offered the
+    // same rects — that is the contract's whole point, and its own case below.
     let next = frame(&mut engine, &mut images, &[(font, 16.0)]);
     assert!(next.clears.is_empty());
 }
@@ -1548,6 +1692,95 @@ fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
     );
 }
 
+/// A run inside a snapshot bracket is routed against the transform it is drawn
+/// through, so a genuinely skewed one cannot reach the atlas by way of the
+/// bracket's presentation scale.
+///
+/// The bracket is where the frame's two walks could disagree: the draw walk
+/// enters a `PushSnapshot` whose composed transform leaves the device grid with
+/// a neutral presentation instead of the recorded one, and a collect walk that
+/// entered with the recorded one would classify every run inside against a
+/// different affine. `absorbed_scale`'s skew tolerance is absolute, so the two
+/// magnitudes can land on opposite sides of it — and an `Atlas` answer for a
+/// skewed run is not a slower draw but a wrong one: `glifo` falls back to the
+/// full transform while still probing its cache with the unabsorbed size, and a
+/// hit there paints an unrotated bitmap.
+#[test]
+fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
+    let bracket = Rect::new(0.0, 0.0, 128.0, 64.0);
+    // A skew well past the 1/4096 tolerance at either magnitude, so the answer
+    // is "uncacheable" and not a rounding accident.
+    let skewed = Affine::translate((8.0, 44.0)) * Affine::skew(0.4, 0.0);
+
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    // A presentation scale, so the bracket really does install a correction —
+    // without one `snapshot_correction` is the identity and the case would pass
+    // for the wrong reason.
+    builder.push_snapshot(1, bracket, 1.0, 1.5);
+    builder.draw_glyph_run(GlyphRun {
+        font: latin_font(),
+        font_size: WIRED_SIZE,
+        brush: Brush::Solid(BLACK),
+        transform: skewed,
+        glyphs: HELLO
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Glyph {
+                id: *id,
+                x: index as f32 * 18.0,
+                y: 0.0,
+            })
+            .collect(),
+    });
+    builder.pop_snapshot();
+
+    let mut compiler = wired_compiler();
+    let frame = compile_serviced(&mut compiler, &scene);
+
+    assert_eq!(
+        frame.atlas_glyph_draws, 0,
+        "a skewed run is refused the atlas route whatever the bracket around it \
+         presents at"
+    );
+    assert!(frame.glyph_draws > 0, "…and still draws, as outlines");
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        0,
+        "a refused run mints no entry either — the route is refused before \
+         `glifo` is ever handed the cache"
+    );
+
+    // Negative control: the same bracket, the same size, an unskewed run. If
+    // this did not cache, the case above would be proving nothing.
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.push_snapshot(1, bracket, 1.0, 1.5);
+    builder.draw_glyph_run(GlyphRun {
+        font: latin_font(),
+        font_size: WIRED_SIZE,
+        brush: Brush::Solid(BLACK),
+        transform: Affine::translate((8.0, 44.0)),
+        glyphs: HELLO
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Glyph {
+                id: *id,
+                x: index as f32 * 18.0,
+                y: 0.0,
+            })
+            .collect(),
+    });
+    builder.pop_snapshot();
+
+    let mut compiler = wired_compiler();
+    let frame = compile_serviced(&mut compiler, &scene);
+    assert!(
+        frame.atlas_glyph_draws > 0,
+        "fixture precondition: the bracket itself does not close the atlas route"
+    );
+}
+
 #[test]
 fn an_atlas_glyph_carries_the_text_colour_as_an_alpha_mask_tint() {
     // An outline glyph is a coverage mask: the shader fills it with the run's
@@ -1733,6 +1966,62 @@ fn a_run_whose_draws_are_all_culled_still_leaves_a_page_to_replay() {
         drain_dirty_pages(&mut compiler),
         1,
         "the culled run recorded exactly one page's worth of fills"
+    );
+}
+
+/// The frame's *own* recording counts as unreplayed too, because the replay
+/// pass runs after the compile that records it.
+///
+/// The residual of the same defect: a deferral gated only on the *latched*
+/// previous state lets every frame whose predecessor was acknowledged run
+/// `glifo`'s eviction pass against its own fresh page commands — freeing and
+/// re-letting the very rectangles those commands still name, which is the
+/// ordering the deferral exists to make impossible.
+#[test]
+fn a_frames_own_recording_defers_its_own_eviction_pass() {
+    let mut images = cache();
+    let mut engine = policy(&images, false);
+    let font = next_font();
+
+    // Every frame mints a fresh key, and every frame acknowledges the previous
+    // frame's replay — so the latched flag is clear at each `end_frame` and the
+    // only thing outstanding is what this frame itself just recorded.
+    let frames = MAX_ENTRY_AGE + EVICTION_FREQUENCY + 8;
+    for index in 0..frames {
+        engine.begin_frame();
+        let run = *engine
+            .classify_run(&run_key(font, 16.0))
+            .atlas()
+            .expect("residency is nowhere near its ceiling");
+        // A fresh glyph id per frame, so every frame misses and every frame
+        // therefore closes with page commands of its own outstanding.
+        engine.collect_glyph(&run, index as u32, 0.0);
+        let pass = engine.build(&mut images, raster);
+        assert!(
+            pass.clears.is_empty(),
+            "a rectangle freed while this frame's own commands are unreplayed is \
+             a rectangle those commands can be replayed into"
+        );
+        engine.acknowledge_clears();
+        engine.end_frame(&mut images);
+        engine.acknowledge_replay();
+    }
+
+    assert_eq!(
+        engine.entry_count(),
+        frames as usize,
+        "nothing may be reaped on a frame whose own recording is still \
+         outstanding, however long ago the previous replay landed"
+    );
+
+    // And ageing resumes the moment a frame records nothing of its own.
+    let mut clears = 0;
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+        clears += frame(&mut engine, &mut images, &[]).clears.len();
+    }
+    assert!(
+        clears > 0,
+        "an idle frame leaves nothing outstanding, so the LRU runs again"
     );
 }
 

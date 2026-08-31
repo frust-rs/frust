@@ -118,6 +118,21 @@
 //! route once it is reached ([`OutlineReason::ResidencyFull`]). Text keeps
 //! drawing; it draws as outlines until the LRU gives space back.
 //!
+//! A count of entries is only a count of texels while the entries are typical,
+//! so the ceiling is restated in the size class being asked about
+//! ([`entry_ceiling_at`]): a glyph at [`MAX_CACHED_FONT_SIZE`] occupies some
+//! sixty-four times a typical one and is admitted in proportionally smaller
+//! numbers. Otherwise a few hundred large glyphs fill the whole shared array
+//! with the entry count still far below its bound, and the images they
+//! displaced are refused `ImageSkip::NoAtlasSpace` by a guard that never fired.
+//!
+//! And the bound is tested twice: once per run in the collect phase, and again
+//! as each route is *consumed* ([`AtlasPolicy::admit_run`]). The second test is
+//! what makes it a bound within a frame rather than only across frames —
+//! `glifo` inserts nothing until a run is drawn, so every run of one frame is
+//! classified from the population that frame opened with, and one screen of new
+//! text would otherwise overshoot the share by its whole self.
+//!
 //! # A page this tier cannot replay must never have been cached
 //!
 //! `glifo` records a cached COLR glyph as a clip bracket around a colour-layer
@@ -252,6 +267,22 @@ const GLYPH_ATLAS_SHARE: u64 = 2;
 /// point in the first place.
 const TYPICAL_GLYPH_TEXELS: u64 = 32 * 32;
 
+/// The device font size [`TYPICAL_GLYPH_TEXELS`] was measured at, in pixels.
+///
+/// The other half of that estimate, and the reason it can be scaled rather than
+/// only asserted: 32x32 is what a *16 px* glyph is worth, so a glyph drawn at
+/// some other device size is worth that figure scaled by the square of the
+/// ratio — a glyph's bitmap grows with the square of its size, which is the
+/// same relation [`MAX_CACHED_FONT_SIZE`] is argued from.
+///
+/// Without it the ceiling counts every entry as a typical one, and the entry
+/// count stops being a proxy for texels at all: at [`MAX_CACHED_FONT_SIZE`] a
+/// slot is some sixteen times a typical one, so a few hundred large glyphs fill
+/// the whole shared array while the entry count is still an order of magnitude
+/// below its bound — text starving images out of the allocator with the guard
+/// that exists to prevent exactly that never firing. See [`entry_ceiling_at`].
+const TYPICAL_GLYPH_SIZE: f32 = 16.0;
+
 /// The fewest entries the ceiling ever admits.
 ///
 /// A deliberately tiny atlas — a test constraining the packer, a downlevel
@@ -286,6 +317,35 @@ pub(crate) fn glyph_entry_ceiling(pages: AtlasConfig) -> usize {
     usize::try_from(entries)
         .unwrap_or(MAX_GLYPH_ENTRIES)
         .clamp(MIN_GLYPH_ENTRIES, MAX_GLYPH_ENTRIES)
+}
+
+/// How many entries of device size `size` a ceiling of `entries` typical glyphs
+/// admits.
+///
+/// [`glyph_entry_ceiling`] counts *typical* glyphs — [`TYPICAL_GLYPH_TEXELS`]
+/// apiece, measured at [`TYPICAL_GLYPH_SIZE`] — so a population of larger ones
+/// spends the share it bounds several times over before the count is reached.
+/// This is that ceiling restated in the size class actually being asked about:
+/// the same texel share divided by what a glyph of *this* size occupies, which
+/// is the typical figure scaled by the square of the size ratio. At
+/// [`MAX_CACHED_FONT_SIZE`] that is a sixty-fourth of the entries, which is the
+/// point — sixty-four times the texels apiece.
+///
+/// A size at or below [`TYPICAL_GLYPH_SIZE`] gets `entries` unchanged rather
+/// than more. The entry map's own bookkeeping is what bounds the small end (see
+/// [`MAX_GLYPH_ENTRIES`]), and widening it for small text would be a second
+/// change hiding inside a correction to the large end.
+///
+/// Never zero: an atlas that admits no glyph at all at some size is the cache
+/// turned off rather than bounded, and [`MIN_GLYPH_ENTRIES`] exists to say that
+/// is never the answer.
+#[must_use]
+pub(crate) fn entry_ceiling_at(entries: usize, size: f32) -> usize {
+    let scale = f64::from(size.max(TYPICAL_GLYPH_SIZE)) / f64::from(TYPICAL_GLYPH_SIZE);
+    let admitted = entries as f64 / (scale * scale);
+    // Finite by construction: `scale` is at least one and `size` is a quantized,
+    // in-range font size, so the quotient is between one and `entries`.
+    (admitted as usize).max(1)
 }
 
 /// The scale `glifo` will absorb out of `transform` into the font size, or
@@ -707,11 +767,18 @@ pub(crate) struct AtlasPolicy {
     /// this frame opened — that is, whether commands from a *previous* frame
     /// are still unreplayed.
     ///
-    /// While it is set, [`end_frame`](Self::end_frame) skips `glifo`'s eviction
-    /// pass: eviction frees an entry's `ImageId` back to the shared packer and
-    /// queues its rectangle for clearing, and a recorded command naming that
-    /// rectangle would then replay old ink into whichever glyph was let it
-    /// next. Ageing resumes as soon as the replay lands.
+    /// It is one of the two reasons [`end_frame`](Self::end_frame) skips
+    /// `glifo`'s eviction pass — the other being this frame's own fresh
+    /// recording, which is unreplayed at that point by construction. Eviction
+    /// frees an entry's `ImageId` back to the shared packer and queues its
+    /// rectangle for clearing, and a recorded command naming that rectangle
+    /// would then replay old ink into whichever glyph was let it next. Ageing
+    /// resumes as soon as the replay lands.
+    ///
+    /// Kept distinct from [`replay_pending`](Self::replay_pending) rather than
+    /// folded into it because it answers a different question — *whose*
+    /// commands are outstanding — which is what makes the deferral legible as
+    /// covering both.
     replay_stale: bool,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
@@ -938,8 +1005,11 @@ impl AtlasPolicy {
             return RunRoute::Outline(OutlineReason::SizeAnimating);
         }
         // Last, because it is the only answer that depends on what other runs
-        // have already been admitted this frame rather than on this one alone.
-        if self.atlas.len() >= self.max_entries {
+        // have already been admitted rather than on this one alone — and the
+        // only one this walk cannot answer conclusively, since nothing is
+        // inserted until the run is drawn. [`admit_run`](Self::admit_run) asks
+        // it again against the live count.
+        if self.residency_full(size) {
             return RunRoute::Outline(OutlineReason::ResidencyFull);
         }
 
@@ -951,6 +1021,52 @@ impl AtlasPolicy {
             context_color: run.context_color,
             context_color_packed: pack_context_color(run.context_color),
         })
+    }
+
+    /// Re-test a route decided in the collect phase against residency as it
+    /// stands *now*, narrowing it to outlines if the ceiling has been reached
+    /// since.
+    ///
+    /// The collect walk classifies every run of a frame before any of them is
+    /// drawn, and `glifo` inserts nothing until a run is drawn — so every run
+    /// of one frame is answered from the population the frame *opened* with. A
+    /// frame beginning one entry below the ceiling would therefore admit all of
+    /// its runs, and a frame is not a bounded amount of text: one screen of new
+    /// glyphs can overshoot the share by as much as it likes, which is the
+    /// outage the bound exists to prevent.
+    ///
+    /// Called as each run's route is consumed by the draw walk, where the count
+    /// is exact — every earlier run of the same frame has already inserted
+    /// whatever it inserted — rather than estimated from glyph counts, which
+    /// would charge a paragraph its *draws* instead of its entries and refuse
+    /// steady-state text that is entirely resident.
+    ///
+    /// Narrowing only. `Atlas` never comes back out of this, because a route
+    /// widened after the fact would name a slot the collect phase never
+    /// reserved; outlines are correct pixels on the path the engine has always
+    /// used.
+    #[must_use]
+    pub(crate) fn admit_run(&self, route: RunRoute) -> RunRoute {
+        match route {
+            RunRoute::Atlas(run) if self.residency_full(run.size()) => {
+                RunRoute::Outline(OutlineReason::ResidencyFull)
+            }
+            route => route,
+        }
+    }
+
+    /// Whether glyph residency is at the ceiling for a run of device size
+    /// `size`.
+    ///
+    /// The one place the bound is spelled, asked by both
+    /// [`classify_run`](Self::classify_run) and
+    /// [`admit_run`](Self::admit_run) so the collect answer and the draw answer
+    /// cannot be two different rules. The ceiling is the size class's own — see
+    /// [`entry_ceiling_at`] — because a resident entry's cost in texels is what
+    /// the images' share is actually spent on, not its cost in map keys.
+    #[must_use]
+    fn residency_full(&self, size: f32) -> bool {
+        self.atlas.len() >= entry_ceiling_at(self.max_entries, size)
     }
 
     /// Record one glyph of a cached run, and say what it costs.
@@ -1057,18 +1173,25 @@ impl AtlasPolicy {
     /// handles from the entry map below are freed — a resident image's handle
     /// is not `glifo`'s to reach.
     ///
-    /// The ageing pass is *skipped* while an earlier frame's page commands are
-    /// still unreplayed. Eviction hands an entry's rectangle back to the packer
-    /// and queues it for clearing, so a recorded command still naming it would
-    /// be replayed into whatever was let that rectangle next — old ink in
-    /// another glyph's slot. Deferring costs a delayed reap; not deferring
-    /// costs a wrong pixel.
+    /// The ageing pass is *skipped* while any page command is unreplayed —
+    /// this frame's as much as an earlier frame's. Eviction hands an entry's
+    /// rectangle back to the packer and queues it for clearing, so a recorded
+    /// command still naming it would be replayed into whatever was let that
+    /// rectangle next — old ink in another glyph's slot. Deferring costs a
+    /// delayed reap; not deferring costs a wrong pixel.
+    ///
+    /// This frame's own commands count because the replay pass runs *after*
+    /// compiling: `end_frame` closes the compile, and the caller replays only
+    /// once the frame reaches the encoder (see `EngineRenderer::encode`). A
+    /// deferral gated on the latched previous state alone would let every frame
+    /// whose predecessor was acknowledged evict against its own fresh
+    /// recording — the one ordering the guard was added for.
     pub(crate) fn end_frame(&mut self, images: &mut ImageCache) {
         if self.frame_misses() > 0 {
             self.replay_pending = true;
         }
 
-        if self.replay_stale {
+        if self.replay_stale || self.replay_pending {
             self.prune_sizes();
             self.phase = Phase::Idle;
             return;
