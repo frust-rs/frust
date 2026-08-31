@@ -138,6 +138,17 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
 (cd examples/material3-demo && cargo test --test page_goldens)
 ```
 
+The filter golden family (`crates/frust-testing/src/corpus/filters.rs`'s `FilterCase`s, exercised
+by `crates/frust-testing/tests/engine_goldens.rs`) is engine-only: `frust_scene` carries no filter
+command, so a case is not a `CorpusCase` and is rendered directly on each arm rather than through
+`EngineOracle`. The engine arm drives `push_filter_layer`/`Schedule`/`FilterResources` the same way
+`frust-engine`'s own `tests/filters.rs` does; the CPU arm is a REAL `vello_cpu` 0.2.0 render through
+`RenderContext::push_layer`'s own `filter` parameter, cropped to the layer's own device-space
+bounds so the two arms compare pixel-for-pixel. `cpu`-class baselines are committed after visual
+inspection; the pinned T400 rig's engine class is recording-only until a reviewed baseline is
+promoted. Each case's measured engine-vs-`vello_cpu` tolerance is documented in
+`engine_goldens.rs`.
+
 `docs/TESTING.md` is the canonical golden-image/oracle/class runbook; the commands above are the
 render-stack-specific reproduction recipes for the pins and knobs this spoke owns.
 

@@ -3791,32 +3791,39 @@ either removes the ceiling rather than softening it.
 **Observed** (evidence: `crates/frust-engine/src/schedule/mod.rs`'s module
 contract and the `RenderPath::EngineDirect` submit arm in
 `crates/frust-render/src/renderer.rs`): the engine tier carries no second
-renderer — a frame whose layer shape the two-page scheduler cannot serve
-(a fan of three or more simultaneously isolated sibling layers, a chain
-deeper than four, a filter/blend/mask layer) returns
+renderer — a frame whose layer shape the scheduler cannot serve returns
 `EngineError::SchedulerEscalation` and the surface presents nothing for that
 frame: the previously presented content persists, a refusal counter
 increments, and a rate-limited log names the reason — and since the shape is
 a property of the layer tree, a shape that refuses once refuses every frame,
 freezing the surface on its last presented image while the app keeps running.
-Two isolated siblings directly under the frame's own surface are served
-(opposite page parities in one root round); the same pair nested inside
-another isolated layer, and wider simultaneous fans, are the practical gap.
-The served set is also recording-order sensitive at its boundary: the greedy
-page allocator can serve a nested subtree followed by a flat sibling yet
-refuse the same pair recorded flat-first, so a shape near the two-page bound
-may schedule or skip depending on paint order.
+
+The served set is much wider than it was when this entry was written: the
+opaque pass now runs once per frame ahead of every round and a stream can be
+cut into several rounds (with a LOAD continuation), so isolated sibling fans
+of any width, a nested isolated pair, and same-parity sequential page reuse
+are all served within two live pages — and a single-primitive Gaussian blur
+or a shadow-only drop shadow is planned and executed as a filter-round
+sequence, sized by `filter_page_size` (coverage plus the filter padding,
+quantized, refusing with `IntermediateTextureTooLarge` past the adapter
+ceiling and `IntermediateTextureLimitReached` past the pool's own budget).
+What still refuses: a chain deeper than the chain bound; a layer needing two
+page groups of its own beside a page an isolated ancestor already holds
+(concretely, a chain hanging off an isolated parent's second child, and a
+sibling pair nested inside a sibling pair); a filter that is not one of the
+two served kinds (flood and the composite-original drop shadow are reserved
+— the latter needs a third live page); a filter layer recorded inside
+another layer; and non-default blend or mask layers.
 
 **Accepted because**: the engine tier is an opt-in measurement tier this
 phase; skipping loudly beats rendering the shape wrong, and per-frame
 fallback to the classic renderer would require carrying both backends on one
 surface — machinery the measured tier deliberately omits.
 
-**Trigger for removal**: hoisting the renderer's depth-writing opaque pass
-out of the root-round loop, which lets the scheduler serve same-parity
-sequential page reuse and sibling fans of any width within two live pages —
-tracked as an open action item; or the swap phase making the engine the only
-tier, at which point the served set must cover the widget tree's real shapes.
+**Trigger for removal**: the swap phase making the engine the only tier, at
+which point the served set must cover the widget tree's real shapes — the
+opaque-pass hoist this entry previously named as its trigger has landed and
+narrowed the class rather than closing it.
 
 ### `engine-glifo-atlas-experimental` — the engine's glyph atlas is built on a cache upstream labels experimental, wrapped in frust-owned policy
 
@@ -3832,12 +3839,22 @@ glifo keys — and routes to outline strips any run whose device size changed
 inside an 8-frame window, any run above the size ceiling, any COLR-carrying
 face (the tier cannot replay glifo's recorded COLR command stream and glifo
 offers no way to withdraw entries afterwards), any transform glifo will not
-absorb as a positive uniform scale, and everything once glyph residency hits
-its ceiling (half the shared array's texels — glyphs cannot starve image
-residency). glifo's `PendingClearRect`s and recorded page replays are
-re-offered every frame until the renderer acknowledges they were serviced,
-and glifo's eviction pass is deferred while a replay is outstanding, so a
-dropped frame loses nothing and a recorded command cannot outlive its slot.
+absorb as a positive uniform scale, and any run whose demand would push the
+resident population past the glyph texel budget. That budget is one running
+total — every resident entry charged a per-entry texel cost at its own size,
+rationed against the glyph share of the array (so no size class's refusal
+depends on another's counts, and mixed sizes bound additively) — and it is a
+deliberate **over-estimate maintained incrementally** from admit/evict
+deltas, not a texel guarantee: glifo exposes no release-build way to price
+the resident population, a glyph wider than its em is under-charged (the
+packer still refuses independently), and a run is charged its distinct glyph
+ids at admission, so subpixel-bucket variants can overshoot by that factor.
+glifo's `PendingClearRect`s and recorded page replays are re-offered every
+frame until the renderer acknowledges they were serviced, and glifo's
+eviction pass is deferred only while an unreplayed recording has outlived
+the entry-age window (a serial-based check — younger recordings name nothing
+reapable), so a dropped frame loses nothing and a recorded command cannot
+outlive its slot.
 Glyphs share one `ImageCache` allocator with images so slot ids and
 rectangles cannot collide. `FRUST_ENGINE_NO_ATLAS` routes every glyph to the
 outline path — a correct, slower, tested fallback. A 200-frame scale-animated

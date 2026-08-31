@@ -280,6 +280,18 @@ text cases carry per-case `ESCALATIONS`/`BAND_ESCALATIONS` rows whose measured
 numbers document a hinted-vs-unhinted edge shift, not a rasterizer
 disagreement (see `engine-text-hinting-policy` in `docs/LIMITATIONS.md`).
 
+Filters have their own family too, in a deliberately different shape
+(`crates/frust-testing/src/corpus/filters.rs`): `frust-scene` carries no
+filter command (the scene seam is a later plan), so `filter-blur-{2,8,32}`,
+`filter-drop-shadow` and `filter-blur-clipped` are **engine-only**
+`FilterCase`s — the engine arm drives `push_filter_layer` and the filter
+pipeline directly, and the reference arm is a real `vello_cpu` 0.2.0 render
+through its own filter-capable `push_layer`, committed to the `cpu` class
+after visual inspection. Per-case tolerances are measured and documented in
+`engine_goldens.rs` (decimation-pyramid rounding at large sigma; AA at
+rounded corners under `filter-blur-clipped`); `filter-blur-oversized` is a
+host refusal test, not a rendered case.
+
 Native offscreen and Android screenshots are never cross-compared:
 Android adds density, platform fonts, surface composition, system bars, color
 management, and potentially a different Vulkan implementation.
