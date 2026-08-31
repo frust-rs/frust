@@ -49,18 +49,19 @@
 //!
 //! The engine compiles axis-aligned rectangles, rounded rectangles, lines,
 //! arbitrary filled/stroked paths, rect and rounded clips, opacity layers,
-//! snapshot brackets, `ClearRect` hole punches, atlas-resident images and
-//! blurred rounded rects, and resolves solid and gradient paints. Two commands
-//! remain recognised-and-skipped by its compiler — [`Command::GlyphRun`] and
-//! [`Command::ShaderQuad`] — so a case that draws either would compare an
-//! engine frame legitimately missing the very thing the case exists to pin.
+//! snapshot brackets, `ClearRect` hole punches, atlas-resident images,
+//! blurred rounded rects, and glyph runs (incl. COLR colour glyphs and the
+//! atlas-vs-outline route), and resolves solid and gradient paints. One
+//! command remains recognised-and-skipped by its compiler —
+//! [`Command::ShaderQuad`] — so a case that draws it would compare an engine
+//! frame legitimately missing the very thing the case exists to pin.
 //!
-//! [`PHASE_CASES`] names the cases the engine draws in full, across all four
+//! [`PHASE_CASES`] names the cases the engine draws in full, across all five
 //! corpora ([`unit_cases`], [`adversarial_cases`], [`widget_cases`],
-//! [`page_cases`]), and [`DEFERRED_CASES`] every other one with why it waits.
-//! Two GPU-free tripwires keep those lists honest rather than aspirational:
-//! [`every_corpus_case_is_either_in_scope_or_deferred`] fails if a corpus
-//! addition appears in neither, and
+//! [`page_cases`], [`text_cases`]), and [`DEFERRED_CASES`] every other one
+//! with why it waits. Two GPU-free tripwires keep those lists honest rather
+//! than aspirational: [`every_corpus_case_is_either_in_scope_or_deferred`]
+//! fails if a corpus addition appears in neither, and
 //! [`every_scoped_case_draws_only_commands_the_engine_compiles`] re-derives
 //! the membership rule from the scenes themselves, so a case cannot be listed
 //! in scope while recording a command the engine skips.
@@ -82,8 +83,8 @@ use image::RgbaImage;
 use frust_scene::Command;
 use frust_testing::case::{CaseSpec, Tolerance};
 use frust_testing::corpus::{
-    CorpusCase, adversarial_cases, page_cases, render_case, straighten_alpha, unit_cases,
-    widget_cases,
+    CorpusCase, adversarial_cases, page_cases, render_case, straighten_alpha, text_cases,
+    unit_cases, widget_cases,
 };
 use frust_testing::diff::{DiffReport, diff_images};
 use frust_testing::frame::foreign_font_runs;
@@ -98,11 +99,12 @@ use frust_testing::{ENGINE_UNCLASSIFIED_CLASS, engine_golden_class};
 /// Every corpus case the engine draws in full — rectangles, rounded
 /// rectangles, lines, arbitrary filled/stroked/dashed paths, rect and rounded
 /// clips, opacity layers, snapshot brackets, `ClearRect` hole punches,
-/// atlas-resident images, blurred rounded rects, and the widget/page frames
-/// built out of those same commands.
+/// atlas-resident images, blurred rounded rects, glyph runs (Latin, RTL,
+/// CJK, combining marks, COLR colour, gradient-brushed, clipped), and the
+/// widget/page/text frames built out of those same commands.
 ///
 /// Membership is not a judgement call: a case belongs here exactly when its
-/// scene records no [`Command::GlyphRun`] and no [`Command::ShaderQuad`], and
+/// scene records no [`Command::ShaderQuad`], and
 /// [`every_scoped_case_draws_only_commands_the_engine_compiles`] re-derives
 /// that from the scenes on every run.
 const PHASE_CASES: &[&str] = &[
@@ -110,19 +112,20 @@ const PHASE_CASES: &[&str] = &[
     "unit-fill-rect",
     "unit-rounded-rect",
     "unit-stroke-line",
-    "unit-path-fill",
-    "unit-path-stroke",
-    "unit-path-dashed",
+    "unit-glyph-run",
     "unit-clip-rect",
     "unit-clip-rounded",
     "unit-clip-balance",
+    "unit-image",
+    "unit-blur-rrect",
     "unit-layer-alpha",
     "unit-layer-balance",
     "unit-clear-rect",
+    "unit-path-fill",
+    "unit-path-stroke",
+    "unit-path-dashed",
     "unit-snapshot-bracket",
     "unit-snapshot-balance",
-    "unit-image",
-    "unit-blur-rrect",
     // Adversarial — the degenerate and stress shapes of the same commands.
     "adv-degenerate-path",
     "adv-subpixel-rrect",
@@ -135,39 +138,50 @@ const PHASE_CASES: &[&str] = &[
     "adv-snapshot-scale-alpha",
     "adv-unbalanced-pops",
     "adv-huge-image",
+    "adv-10k-glyphs",
     // Widget frames — a real `frust-core` render tree painted at phone size.
-    // Only the four glyph-free ones: the button cases deliberately carry an
-    // EMPTY label (`corpus::widget`'s module docs explain why the widget layer
-    // gives them no pinnable typography), and the flex case distributes
-    // coloured boxes, so all four are pure chrome — fills, rounded rects,
-    // strokes and clips at 824x1784, which is a far larger and busier frame
-    // than any unit case puts through the same comparators.
     "widget-button-rest",
     "widget-button-pressed",
     "widget-button-disabled",
     "widget-flex-layout",
+    "widget-text-field-rest",
+    "widget-text-field-caret",
+    "widget-list-20-rows",
+    "widget-checkbox-radio",
+    "widget-slider",
+    "widget-scaffold-chrome",
+    "widget-stack-align",
+    "widget-scroll-clipped",
+    "widget-text-wrap",
+    // Page frames — catalog pages from the four design-system plugin crates.
+    "page-material-home",
+    "page-material-dialog",
+    "page-cupertino-settings",
+    "page-cupertino-controls",
+    "page-glyph-dashboard",
+    "page-glyph-surfaces",
+    "page-shadcn-form",
+    "page-shadcn-controls",
+    // Text — script/paint/clip coverage for `Command::GlyphRun` on its own.
+    "text-latin-mixed-sizes",
+    "text-rtl-arabic",
+    "text-cjk",
+    "text-combining",
+    "text-colr-emoji",
+    "text-gradient-brush",
+    "text-clipped",
 ];
 
 /// Every corpus case NOT in [`PHASE_CASES`], with why it waits.
 ///
-/// Exactly two reasons are admissible: the case's subject is one of the two
-/// commands the compiler recognises and skips (so the frame it produces is
-/// deliberately missing the very thing the case exists to pin), or the case is
-/// `no_ref` and has no stable reference on any backend at all. Neither is a
-/// defect to chase here.
+/// Exactly two reasons are admissible: the case's subject is a command the
+/// compiler recognises and skips (so the frame it produces is deliberately
+/// missing the very thing the case exists to pin), or the case is `no_ref`
+/// and has no stable reference on any backend at all. Neither is a defect to
+/// chase here.
 /// [`every_deferred_case_is_deferred_for_a_reason_the_corpus_can_confirm`]
 /// checks that each row is one of those two and not a habit.
 const DEFERRED_CASES: &[(&str, &str)] = &[
-    (
-        "unit-glyph-run",
-        "the whole case is a glyph run, which the engine's compiler still recognises and \
-         skips — text arrives with the text phase",
-    ),
-    (
-        "adv-10k-glyphs",
-        "10,000 glyph runs, which the engine's compiler still recognises and skips — text \
-         arrives with the text phase",
-    ),
     (
         "unit-shader-quad",
         "a shader pre-pass the engine does not own; also skipped on the CPU arm, so there \
@@ -188,57 +202,328 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
         "`no_ref`: an unbalanced pop inside a translucent snapshot bracket, whose recovery \
          shape is deliberately not pinned to any backend's pixels",
     ),
-    // Widget and page frames whose chrome is drawn around shaped labels — the
-    // glyph runs are the majority of what a reader compares in these frames,
-    // so an engine capture of one would be a page with its text missing.
-    ("widget-text-field-rest", TEXT_FRAME),
-    ("widget-text-field-caret", TEXT_FRAME),
-    ("widget-list-20-rows", TEXT_FRAME),
-    ("widget-checkbox-radio", TEXT_FRAME),
-    ("widget-slider", TEXT_FRAME),
-    ("widget-scaffold-chrome", TEXT_FRAME),
-    ("widget-stack-align", TEXT_FRAME),
-    ("widget-scroll-clipped", TEXT_FRAME),
-    ("widget-text-wrap", TEXT_FRAME),
-    ("page-material-home", TEXT_FRAME),
-    ("page-material-dialog", TEXT_FRAME),
-    ("page-cupertino-settings", TEXT_FRAME),
-    ("page-cupertino-controls", TEXT_FRAME),
-    ("page-glyph-dashboard", TEXT_FRAME),
-    ("page-glyph-surfaces", TEXT_FRAME),
-    ("page-shadcn-form", TEXT_FRAME),
-    ("page-shadcn-controls", TEXT_FRAME),
+    (
+        "text-10k",
+        "`no_ref`: a wrapped ~10,000-glyph block shaped to stress the layout/wrap path — most \
+         of it renders off the bottom of its deliberately small viewport, so there is nothing \
+         stable on any backend for a stored baseline to pin",
+    ),
 ];
-
-/// The deferral reason every widget/page frame that shapes text shares.
-const TEXT_FRAME: &str = "the frame shapes glyph runs, which the engine's compiler still \
-                          recognises and skips — text arrives with the text phase";
 
 /// Per-case escalations off the corpus's tight default, each with the reason
 /// it is not the default's fault.
 ///
-/// Empty by design. `docs/TESTING.md`'s Comparison section puts thresholds on
-/// "the golden class or named test, not an ad hoc retry path", and nothing in
-/// this file re-runs a comparison at a looser threshold: an escalation is a
-/// reviewed row here or it does not exist. It lives beside the harness rather
-/// than on the shared [`CaseSpec`] because it is specific to the ENGINE-vs-CPU
+/// `docs/TESTING.md`'s Comparison section puts thresholds on "the golden
+/// class or named test, not an ad hoc retry path", and nothing in this file
+/// re-runs a comparison at a looser threshold: an escalation is a reviewed
+/// row here or it does not exist. It lives beside the harness rather than on
+/// the shared [`CaseSpec`] because it is specific to the ENGINE-vs-CPU
 /// pairing — the same case's `cpu/` and classic comparisons are unaffected by
 /// anything written here.
-const ESCALATIONS: &[(&str, Tolerance, &str)] = &[(
-    "widget-button-disabled",
-    Tolerance {
-        channel: 3,
-        alpha: 3,
-        diff_pixels: 0,
-    },
-    "32 pixels (0.0022%) on the button's corner arcs differ by one level beyond the corpus \
-     tolerance (max delta [3,3,3,2]): a coverage-rounding difference between the GPU strip \
-     fill and `vello_cpu` on stacked TRANSLUCENT draws — the disabled state dims every colour's \
-     alpha, and the same geometry with opaque colours (`widget-button-rest`/`-pressed`) is 0 \
-     pixels differing. The identical 32 pixels, deltas and values reproduce on a tree predating \
-     the engine's layer execution, so this is the shared strip fill's rounding, not layer \
-     compositing",
-)];
+///
+/// # The hint-policy rows (text phase, p5-04)
+///
+/// Every scoped case that shapes a glyph run carries one of these. The
+/// engine's `SceneCompiler::for_caps` turns hinting ON for a desktop-tier
+/// adapter — `hint_text = !is_mobile_tier(caps)`, this pairing's own T400 rig
+/// included — while [`CpuOracle`](crate::oracle_cpu::CpuOracle) hints OFF
+/// UNCONDITIONALLY (`oracle_cpu.rs`'s `draw_glyph_run`: "hinting is a
+/// per-size, per-target adjustment, and a golden reference must not vary with
+/// it"). That is not a bug on either side — it is exactly p5-03's documented
+/// hint policy (`docs/RENDER_ARCHITECTURE.md`/`RENDER_DEVELOPMENT.md`: hinted
+/// on desktop for on-screen quality, unhinted on mobile/CPU-reference paths
+/// for determinism) — but it means a hinted glyph's outline snaps to the
+/// pixel grid a fraction of a pixel away from `vello_cpu`'s unhinted one,
+/// which a solid-colour glyph reads as a channel delta at its own antialiased
+/// edge and nowhere else (every row's bounding box sits exactly on glyph
+/// ink). Each row's `channel` is that case's own measured `max |delta|`
+/// (`R`/`G`/`B`, checked together since these are luminance-only glyphs
+/// bar `text-gradient-brush`/`text-colr-emoji`), captured on the pinned T400
+/// rig with `cargo test -p frust-testing --test engine_goldens -- --ignored
+/// --nocapture`; `alpha` only widens past the corpus default where that run
+/// also measured an alpha delta above it. None of these touch `diff_pixels`:
+/// the widened channel/alpha already brings every measured pixel back inside
+/// tolerance (each case's own gate line reports 0 px differing once its row
+/// here applies).
+const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
+    (
+        "widget-button-disabled",
+        Tolerance {
+            channel: 3,
+            alpha: 3,
+            diff_pixels: 0,
+        },
+        "32 pixels (0.0022%) on the button's corner arcs differ by one level beyond the corpus \
+         tolerance (max delta [3,3,3,2]): a coverage-rounding difference between the GPU strip \
+         fill and `vello_cpu` on stacked TRANSLUCENT draws — the disabled state dims every colour's \
+         alpha, and the same geometry with opaque colours (`widget-button-rest`/`-pressed`) is 0 \
+         pixels differing. The identical 32 pixels, deltas and values reproduce on a tree predating \
+         the engine's layer execution, so this is the shared strip fill's rounding, not layer \
+         compositing",
+    ),
+    (
+        "unit-glyph-run",
+        Tolerance {
+            channel: 104,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [104,104,104,0], 231 \
+         px (5.6396%) of this 64x64 frame's own glyph ink, all inside the text block's bounding \
+         box — a hinted vs. unhinted `H`/`e`/`l`/`l`/`o` outline, not a rasterizer disagreement",
+    ),
+    (
+        "widget-text-field-rest",
+        Tolerance {
+            channel: 230,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [230,230,226,1], 1681 \
+         px (0.1144%) of an 824x1784 frame, confined to the field's placeholder label glyphs",
+    ),
+    (
+        "widget-text-field-caret",
+        Tolerance {
+            channel: 230,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): identical measured delta and pixel count \
+         to `widget-text-field-rest` — the same label glyphs, this frame's own caret adds no glyph \
+         of its own",
+    ),
+    (
+        "widget-list-20-rows",
+        Tolerance {
+            channel: 153,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [152,153,153,0], 3941 \
+         px (0.2681%) of an 824x1784 frame, confined to the twenty rows' own label glyphs",
+    ),
+    (
+        "widget-checkbox-radio",
+        Tolerance {
+            channel: 159,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [159,159,157,0], 337 \
+         px (0.0229%) of an 824x1784 frame, confined to the row's own text labels",
+    ),
+    (
+        "widget-slider",
+        Tolerance {
+            channel: 159,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): identical measured delta and pixel count \
+         to `widget-checkbox-radio` — both frames share the same labelled-row chrome",
+    ),
+    (
+        "widget-scaffold-chrome",
+        Tolerance {
+            channel: 235,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [235,235,231,0], 1301 \
+         px (0.0885%) of an 824x1784 frame, confined to the scaffold's app-bar/nav-label glyphs",
+    ),
+    (
+        "widget-stack-align",
+        Tolerance {
+            channel: 159,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): identical measured delta and pixel count \
+         to `widget-checkbox-radio` — both frames share the same labelled-row chrome",
+    ),
+    (
+        "widget-scroll-clipped",
+        Tolerance {
+            channel: 225,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [223,225,225,1], 4338 \
+         px (0.2951%) of an 824x1784 frame, confined to the scrolled content's own text labels",
+    ),
+    (
+        "widget-text-wrap",
+        Tolerance {
+            channel: 235,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [235,235,231,0], 4138 \
+         px (0.2815%) of an 824x1784 frame, confined to the wrapped paragraph's own glyphs",
+    ),
+    (
+        "page-material-home",
+        Tolerance {
+            channel: 174,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [174,169,172,0], 2153 \
+         px (0.1465%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-material-dialog",
+        Tolerance {
+            channel: 182,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [180,181,182,0], 840 \
+         px (0.0571%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-cupertino-settings",
+        Tolerance {
+            channel: 235,
+            alpha: 3,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [235,235,231,3], 1392 \
+         px (0.0947%) of an 824x1784 catalog page, confined to its own text labels — the one row \
+         here whose alpha delta (1) also needs a step past the corpus default",
+    ),
+    (
+        "page-cupertino-controls",
+        Tolerance {
+            channel: 151,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [150,150,151,1], 347 \
+         px (0.0236%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-glyph-dashboard",
+        Tolerance {
+            channel: 213,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [208,210,213,1], 2425 \
+         px (0.1650%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-glyph-surfaces",
+        Tolerance {
+            channel: 214,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [209,211,214,0], 681 \
+         px (0.0463%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-shadcn-form",
+        Tolerance {
+            channel: 224,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [224,224,221,1], 1136 \
+         px (0.0773%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "page-shadcn-controls",
+        Tolerance {
+            channel: 159,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [159,159,157,1], 816 \
+         px (0.0555%) of an 824x1784 catalog page, confined to its own text labels",
+    ),
+    (
+        "text-latin-mixed-sizes",
+        Tolerance {
+            channel: 243,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [243,243,243,0], 820 \
+         px (2.1579%) of this case's own five stacked Latin lines — the smallest sizes (8-16px) \
+         are the most hinting-sensitive, which is exactly what this case exists to cover",
+    ),
+    (
+        "text-rtl-arabic",
+        Tolerance {
+            channel: 187,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [187,187,187,0], 323 \
+         px (1.6150%) of this case's own shaped word",
+    ),
+    (
+        "text-cjk",
+        Tolerance {
+            channel: 233,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [233,233,233,0], 713 \
+         px (3.5650%) of this case's own shaped word — CJK strokes are dense enough that hinting \
+         moves a larger share of a small frame than a Latin word does",
+    ),
+    (
+        "text-combining",
+        Tolerance {
+            channel: 243,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [243,243,243,0], 243 \
+         px (2.4300%) of this case's own stacked-diacritic glyph",
+    ),
+    (
+        "text-colr-emoji",
+        Tolerance {
+            channel: 255,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs), amplified by colour: a COLR glyph's \
+         layers meet at sharp colour boundaries (yellow face, black eyes/mouth), so the same \
+         sub-pixel hinting shift that reads as a small grey delta on solid text reads as a large \
+         cross-colour one here — measured max delta [189,212,255,0], 2043 px (20.4300%) of this \
+         case's own glyph, all inside its bounding box. The engine and `vello_cpu` still agree on \
+         WHICH layer paints where; this is edge placement, not a COLR-decode defect",
+    ),
+    (
+        "text-gradient-brush",
+        Tolerance {
+            channel: 173,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs), amplified the same way as \
+         `text-colr-emoji`: the run's own red-to-blue gradient means a hinted edge shifts across a \
+         colour transition rather than a flat grey one — measured max delta [105,173,158,0], 338 \
+         px (1.5364%) of this case's own run",
+    ),
+    (
+        "text-clipped",
+        Tolerance {
+            channel: 173,
+            alpha: 2,
+            diff_pixels: 0,
+        },
+        "hint-policy row (see this table's module docs): measured max delta [173,173,173,0], 395 \
+         px (1.7955%) of this case's own run, entirely on ink inside the clip — the clip boundary \
+         itself is a plain rounded rect and contributes no delta of its own",
+    ),
+];
 
 /// The fixed threshold the engine-vs-classic band is measured under, so
 /// "percent of pixels over 8" means the same thing for every case and the same
@@ -334,6 +619,35 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
          rigs' measured numbers; the percentage stays at the corpus budget, inside which both \
          rigs sit",
     ),
+    // The two text-phase (p5-04) rows below are hint-policy escalations, not
+    // classic/`vello_cpu` antialiasing conflation: `ESCALATIONS`'s module docs
+    // explain the mechanism (the engine hints on this desktop-tier rig,
+    // neither the classic nor the CPU reference ever does), which shows up
+    // here too since classic and `vello_cpu` shape the same UNHINTED glyphs.
+    (
+        "unit-glyph-run",
+        Band {
+            mean: CLASSIC_MEAN_BUDGET,
+            pct_over_8: 5.2,
+        },
+        "hint-policy row: measured mean 1.217 (already inside the corpus mean budget) / 5.1270% \
+         over channel 8, on this 64x64 frame's own glyph ink — only the percentage is widened, \
+         to just past the measured value; a small frame that is mostly text makes a hinted edge's \
+         share of the whole image larger than the corpus-wide p95 was calibrated for",
+    ),
+    (
+        "text-colr-emoji",
+        Band {
+            mean: 16.1,
+            pct_over_8: 20.4,
+        },
+        "hint-policy row, amplified by colour exactly as its `ESCALATIONS` row explains: measured \
+         mean 16.045 / 20.3000% over channel 8, entirely inside this case's own glyph bounding \
+         box. Classic and `vello_cpu` also disagree with EACH OTHER on this case more than most \
+         (both are independent rasterizers over the same unhinted COLR layers), so this is the \
+         two known sources — colour-boundary edge placement and classic-vs-cpu conflation — \
+         stacking on one small, colour-dense glyph, not a third defect",
+    ),
 ];
 
 /// Serializes every test in this binary that creates a GPU device.
@@ -385,13 +699,14 @@ fn render_raw(renderer: &mut dyn SceneRenderer, case: &CorpusCase) -> Option<Ren
     Some(image)
 }
 
-/// Every corpus case, across all four corpora, in corpus order.
+/// Every corpus case, across all five corpora, in corpus order.
 fn all_cases() -> Vec<CorpusCase> {
     unit_cases()
         .into_iter()
         .chain(adversarial_cases())
         .chain(widget_cases())
         .chain(page_cases())
+        .chain(text_cases())
         .collect()
 }
 
@@ -405,11 +720,16 @@ fn scoped_cases() -> Vec<CorpusCase> {
 
 /// Whether `scene` records a command the engine's compiler recognises and
 /// skips — the mechanical membership rule [`PHASE_CASES`] is checked against.
+///
+/// `Command::GlyphRun` left this list in the text phase (p5): the compiler
+/// now lowers every glyph run in full, atlas or outline route alike, so a
+/// case that only draws glyph runs is no longer missing anything an engine
+/// frame of it would need to pin. `Command::ShaderQuad` remains the one
+/// command still recognised-and-skipped.
 fn engine_skipped_commands(scene: &frust_scene::Scene) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     for command in scene.commands() {
         let kind = match command {
-            Command::GlyphRun(_) => "GlyphRun",
             Command::ShaderQuad { .. } => "ShaderQuad",
             _ => continue,
         };

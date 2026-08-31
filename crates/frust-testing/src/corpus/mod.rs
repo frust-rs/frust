@@ -37,6 +37,7 @@
 
 pub mod adversarial;
 pub mod page;
+pub mod text;
 pub mod unit;
 pub mod widget;
 
@@ -48,6 +49,7 @@ use crate::render::{AlphaKind, RenderSpec, RenderedImage, SceneRenderer};
 
 pub use adversarial::adversarial_cases;
 pub use page::page_cases;
+pub use text::text_cases;
 pub use unit::unit_cases;
 pub use widget::widget_cases;
 
