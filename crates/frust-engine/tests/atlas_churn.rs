@@ -23,22 +23,30 @@
 //! geometry an adapter gets — *is* reachable publicly, through
 //! `frust_engine::AtlasBudget`, and is pinned that way below.
 //!
-//! No GPU, device or surface is involved anywhere here. Both structures the
-//! policy owns — `glifo`'s entry map and `vello_common`'s rectangle packer —
-//! are plain host-side bookkeeping, so a slot is allocated, aged and reclaimed
-//! in these cases exactly as it would be behind a real texture; what a real
+//! That the policy allocates through a *borrowed* `glifo::ImageCache` rather
+//! than one of its own is what keeps it nameable here at all: the shared
+//! allocator's owner is `frust_engine::cache::images::ImageResidency`, and a
+//! policy that referred to it by type could not be compiled into this target.
+//! It is also the point of the cross-class cases below, which pair the real
+//! residency with a policy over its allocator.
+//!
+//! No GPU, device or surface is involved anywhere here. Both structures a frame
+//! touches — `glifo`'s entry map and `vello_common`'s rectangle packer — are
+//! plain host-side bookkeeping, so a slot is allocated, aged and reclaimed in
+//! these cases exactly as it would be behind a real texture; what a real
 //! texture adds is the pixels, which the policy neither produces nor inspects.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use frust_engine::AtlasBudget;
+use frust_engine::cache::images::{ImageResidency, MAX_UNSEEN_FRAMES};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{FontHandle, Glyph, GlyphRun};
-use glifo::{AtlasConfig, GlyphCacheKey, RasterMetrics};
+use glifo::{AtlasConfig, GlyphCacheKey, ImageCache, RasterMetrics};
 use kurbo::Affine;
 use peniko::color::palette::css::{BLACK, WHITE};
-use peniko::{Blob, Brush, FontData};
+use peniko::{Blob, Brush, FontData, ImageAlphaType, ImageData, ImageFormat};
 use vello_common::multi_atlas::AllocationStrategy;
 
 #[path = "../src/text/atlas_policy.rs"]
@@ -102,9 +110,29 @@ fn pages() -> AtlasConfig {
     }
 }
 
-/// A policy over [`pages`], enabled or killed by `disabled`.
-fn policy(disabled: bool) -> AtlasPolicy {
-    AtlasPolicy::new(pages(), disabled)
+/// The shared allocator every case packs into: a cache over [`pages`], which
+/// in the engine is the image residency's own.
+fn cache() -> ImageCache {
+    ImageCache::new_with_config(pages())
+}
+
+/// A policy over `images`, enabled or killed by `disabled`.
+fn policy(images: &ImageCache, disabled: bool) -> AtlasPolicy {
+    AtlasPolicy::new(images, disabled)
+}
+
+/// An opaque `width` x `height` image, distinct from every other one this
+/// module makes: the blob is filled with `tag`, so its `Blob::id` — which is
+/// what residency keys on — is its own.
+fn image(width: u32, height: u32, tag: u8) -> ImageData {
+    let len = (width as usize) * (height as usize) * 4;
+    ImageData {
+        data: Blob::new(Arc::new(vec![tag; len])),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width,
+        height,
+    }
 }
 
 /// A plausible bitmap extent for `key`'s glyph: a little narrower than the em
@@ -139,13 +167,17 @@ fn collect_hello(engine: &mut AtlasPolicy, font_id: u64, size: f32) -> RunRoute 
 
 /// One whole frame drawing `runs` (a font id and a size each), returning the
 /// atlas pass it produced.
-fn frame(engine: &mut AtlasPolicy, runs: &[(u64, f32)]) -> AtlasPass {
+///
+/// `images` is the shared allocator, handed to the two calls that allocate and
+/// evict — the same pairing the engine makes between the policy and the image
+/// residency's cache.
+fn frame(engine: &mut AtlasPolicy, images: &mut ImageCache, runs: &[(u64, f32)]) -> AtlasPass {
     engine.begin_frame();
     for (font_id, size) in runs {
         collect_hello(engine, *font_id, *size);
     }
-    let pass = engine.build(raster);
-    engine.end_frame();
+    let pass = engine.build(images, raster);
+    engine.end_frame(images);
     pass
 }
 
@@ -205,7 +237,8 @@ fn a_size_that_cannot_be_rasterized_is_refused_rather_than_keyed() {
         );
     }
 
-    let mut engine = policy(false);
+    let images = cache();
+    let mut engine = policy(&images, false);
     engine.begin_frame();
     let route = engine.classify_run(&run_key(next_font(), f32::NAN));
     assert_eq!(route.outline_reason(), Some(OutlineReason::UnusableSize));
@@ -218,7 +251,8 @@ fn a_size_that_cannot_be_rasterized_is_refused_rather_than_keyed() {
 
 #[test]
 fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
     engine.begin_frame();
@@ -227,7 +261,7 @@ fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
         route.atlas().is_some(),
         "a font drawn at a size nothing preceded is a first appearance, not a change"
     );
-    let first = engine.build(raster);
+    let first = engine.build(&mut images, raster);
     assert_eq!(
         first.uploads.len(),
         4,
@@ -235,7 +269,7 @@ fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
     );
     assert!(first.clears.is_empty(), "nothing has been evicted yet");
     assert_eq!(first.refused, 0);
-    engine.end_frame();
+    engine.end_frame(&mut images);
 
     // The whole point of the cache: the second frame of an unchanged page is
     // free.
@@ -249,25 +283,26 @@ fn a_static_page_uploads_on_its_first_frame_and_does_nothing_on_its_second() {
             "every glyph of an unchanged page is already resident"
         );
     }
-    let second = engine.build(raster);
+    let second = engine.build(&mut images, raster);
     assert!(
         second.is_empty(),
         "an unchanged page's atlas pass has nothing to do and can be skipped whole"
     );
-    engine.end_frame();
+    engine.end_frame(&mut images);
 
     // And it stays free.
     for _ in 0..200 {
-        let pass = frame(&mut engine, &[(font, 16.0)]);
+        let pass = frame(&mut engine, &mut images, &[(font, 16.0)]);
         assert!(pass.is_empty(), "a page that never changes never uploads");
     }
     assert_eq!(engine.entry_count(), 4);
-    assert_eq!(engine.page_count(), 1);
+    assert_eq!(images.atlas_count(), 1);
 }
 
 #[test]
 fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let animated = next_font();
     let static_font = next_font();
 
@@ -283,10 +318,10 @@ fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
             animating_frames += 1;
         }
         collect_hello(&mut engine, static_font, 16.0);
-        let pass = engine.build(raster);
+        let pass = engine.build(&mut images, raster);
         uploads += pass.uploads.len();
         assert_eq!(pass.refused, 0, "a 2048-square page is not under pressure");
-        engine.end_frame();
+        engine.end_frame(&mut images);
 
         worst_entries = worst_entries.max(engine.entry_count());
         worst_tracked = worst_tracked.max(engine.tracked_sizes());
@@ -304,7 +339,7 @@ fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
         "the animation tracker grew to {worst_tracked} recorded sizes"
     );
     assert_eq!(
-        engine.page_count(),
+        images.atlas_count(),
         1,
         "nothing here should ever need a second page"
     );
@@ -355,7 +390,8 @@ fn ten_thousand_frames_of_an_animated_size_keep_the_cache_bounded() {
 
 #[test]
 fn a_glyph_repeated_across_a_frame_is_rasterized_once() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
     engine.begin_frame();
@@ -369,13 +405,13 @@ fn a_glyph_repeated_across_a_frame_is_rasterized_once() {
             GlyphRoute::Pending
         );
     }
-    let pass = engine.build(raster);
+    let pass = engine.build(&mut images, raster);
     assert_eq!(
         pass.uploads.len(),
         1,
         "a key collected many times is allocated once"
     );
-    engine.end_frame();
+    engine.end_frame(&mut images);
 }
 
 #[test]
@@ -383,14 +419,15 @@ fn two_concurrent_sizes_of_one_font_settle_instead_of_reading_as_an_animation() 
     // A heading and its body text share a face and never move. Nothing here may
     // be mistaken for an animation, or the most ordinary screen in the
     // framework would never cache a glyph.
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
     // The frame a second size first appears *is* a change, and is treated as
     // one — there is no way to tell it from the first frame of a size sweep.
     // What matters is that it settles.
     for _ in 0..(SETTLE_FRAMES + 4) {
-        frame(&mut engine, &[(font, 32.0), (font, 16.0)]);
+        frame(&mut engine, &mut images, &[(font, 32.0), (font, 16.0)]);
     }
 
     let mut uploads = 0_usize;
@@ -403,9 +440,9 @@ fn two_concurrent_sizes_of_one_font_settle_instead_of_reading_as_an_animation() 
                 "two sizes held still are two settled sizes, not an animation"
             );
         }
-        let pass = engine.build(raster);
+        let pass = engine.build(&mut images, raster);
         uploads += pass.uploads.len();
-        engine.end_frame();
+        engine.end_frame(&mut images);
     }
 
     assert_eq!(uploads, 0, "a settled two-size page uploads nothing");
@@ -418,7 +455,8 @@ fn two_concurrent_sizes_of_one_font_settle_instead_of_reading_as_an_animation() 
 
 #[test]
 fn a_size_past_the_cache_ceiling_is_drawn_as_outlines() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
 
     engine.begin_frame();
     // At the ceiling, not past it: the comparison must not be off by one.
@@ -441,20 +479,21 @@ fn a_size_past_the_cache_ceiling_is_drawn_as_outlines() {
             .outline_reason(),
         Some(OutlineReason::SizeTooLarge)
     );
-    let pass = engine.build(raster);
+    let pass = engine.build(&mut images, raster);
     assert!(
         pass.uploads.is_empty(),
         "an oversized run collects nothing to upload"
     );
-    engine.end_frame();
+    engine.end_frame(&mut images);
 }
 
 #[test]
 fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
-    frame(&mut engine, &[(font, 16.0)]);
+    frame(&mut engine, &mut images, &[(font, 16.0)]);
     assert_eq!(engine.entry_count(), 4);
 
     // The screen navigates away. `glifo` sweeps on its own schedule, so the
@@ -462,7 +501,7 @@ fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
     // there is nothing to clear.
     let mut idle = 0;
     loop {
-        let pass = frame(&mut engine, &[]);
+        let pass = frame(&mut engine, &mut images, &[]);
         assert!(
             pass.clears.is_empty(),
             "a clear rect can only exist once something has been evicted"
@@ -478,7 +517,7 @@ fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
     // reallocated in the same pass that zeroes them — which is exactly the
     // ordering the pass exists to fix: clears first, then the uploads that may
     // land on top of them.
-    let pass = frame(&mut engine, &[(font, 16.0)]);
+    let pass = frame(&mut engine, &mut images, &[(font, 16.0)]);
     assert_eq!(
         pass.clears.len(),
         4,
@@ -497,7 +536,7 @@ fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
     }
 
     // And a clear is never re-reported: the queue is drained, not read.
-    let next = frame(&mut engine, &[(font, 16.0)]);
+    let next = frame(&mut engine, &mut images, &[(font, 16.0)]);
     assert!(next.clears.is_empty());
 }
 
@@ -505,16 +544,14 @@ fn an_evicted_slot_is_cleared_before_its_rectangle_can_be_reused() {
 fn a_full_atlas_falls_back_to_outlines_rather_than_dropping_a_glyph() {
     // One tiny page, no growth: the smallest atlas that can hold a glyph or two
     // and then must refuse.
-    let mut engine = AtlasPolicy::new(
-        AtlasConfig {
-            initial_atlas_count: 0,
-            max_atlases: 1,
-            atlas_size: (64, 64),
-            auto_grow: false,
-            allocation_strategy: AllocationStrategy::FirstFit,
-        },
-        false,
-    );
+    let mut images = ImageCache::new_with_config(AtlasConfig {
+        initial_atlas_count: 0,
+        max_atlases: 1,
+        atlas_size: (64, 64),
+        auto_grow: false,
+        allocation_strategy: AllocationStrategy::FirstFit,
+    });
+    let mut engine = AtlasPolicy::new(&images, false);
     let font = next_font();
 
     engine.begin_frame();
@@ -529,7 +566,7 @@ fn a_full_atlas_falls_back_to_outlines_rather_than_dropping_a_glyph() {
         );
         keys.push(run.key(glyph, 0.0));
     }
-    let pass = engine.build(raster);
+    let pass = engine.build(&mut images, raster);
 
     assert!(
         pass.refused > 0,
@@ -544,12 +581,13 @@ fn a_full_atlas_falls_back_to_outlines_rather_than_dropping_a_glyph() {
     // uncollected one gives, and is what routes it back to outline strips.
     let unresolved = keys.iter().filter(|key| engine.slot(key).is_none()).count();
     assert_eq!(unresolved, pass.refused as usize);
-    engine.end_frame();
+    engine.end_frame(&mut images);
 }
 
 #[test]
 fn nothing_resolves_to_a_slot_before_the_frame_has_been_built() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
     engine.begin_frame();
@@ -562,13 +600,13 @@ fn nothing_resolves_to_a_slot_before_the_frame_has_been_built() {
         "a key collected this frame has no slot until the atlas pass has run"
     );
 
-    engine.build(raster);
+    engine.build(&mut images, raster);
     assert!(
         engine.slot(&key).is_some(),
         "and has one immediately afterwards"
     );
 
-    engine.end_frame();
+    engine.end_frame(&mut images);
     assert!(
         engine.slot(&key).is_none(),
         "and cannot be resolved outside a frame at all"
@@ -577,7 +615,8 @@ fn nothing_resolves_to_a_slot_before_the_frame_has_been_built() {
 
 #[test]
 fn collecting_outside_the_collect_phase_routes_to_outlines_rather_than_silently_failing() {
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     let font = next_font();
 
     // Before any frame is opened.
@@ -589,18 +628,19 @@ fn collecting_outside_the_collect_phase_routes_to_outlines_rather_than_silently_
     engine.begin_frame();
     let route = engine.classify_run(&run_key(font, 16.0));
     let run = *route.atlas().expect("a first appearance is cached");
-    engine.build(raster);
+    engine.build(&mut images, raster);
     // And after the collect phase has closed.
     assert_eq!(
         engine.collect_glyph(&run, HELLO[0], 0.0),
         GlyphRoute::Outline(OutlineReason::NotCollecting)
     );
-    engine.end_frame();
+    engine.end_frame(&mut images);
 }
 
 #[test]
 fn no_atlas_routes_every_glyph_to_outlines_and_allocates_nothing() {
-    let mut engine = policy(true);
+    let mut images = cache();
+    let mut engine = policy(&images, true);
     assert!(!engine.is_enabled());
 
     let animated = next_font();
@@ -621,16 +661,17 @@ fn no_atlas_routes_every_glyph_to_outlines_and_allocates_nothing() {
                  is always the switch itself"
             );
         }
-        let pass = engine.build(raster);
+        let pass = engine.build(&mut images, raster);
         assert!(pass.is_empty(), "a killed atlas has no pass to run");
-        engine.end_frame();
+        engine.end_frame(&mut images);
     }
 
     assert_eq!(engine.entry_count(), 0);
     assert_eq!(
-        engine.page_count(),
+        images.atlas_count(),
         0,
-        "a killed atlas allocates no texture memory at all"
+        "a killed atlas allocates no texture memory at all, and takes none out \
+         of the shared allocator either"
     );
     assert_eq!(
         engine.tracked_sizes(),
@@ -647,7 +688,8 @@ fn caching_a_glyph_never_moves_it_off_the_size_the_display_list_asked_for() {
     // the rasterizer is the font size, and only by quantization. So the
     // strongest statement testable without a device is the bound on that one
     // parameter — exact for a whole size, an eighth of a pixel otherwise.
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
 
     let mut worst = 0.0_f32;
     let mut sizes = 0;
@@ -674,8 +716,8 @@ fn caching_a_glyph_never_moves_it_off_the_size_the_display_list_asked_for() {
         worst = worst.max((cached - size).abs());
         sizes += 1;
 
-        engine.build(raster);
-        engine.end_frame();
+        engine.build(&mut images, raster);
+        engine.end_frame(&mut images);
         size += 0.13;
     }
 
@@ -699,8 +741,9 @@ fn the_cache_runs_on_the_documented_numbers() {
 fn page_geometry_is_the_adapters_own_tier_budget() {
     // The one half of the policy reachable through the crate's public API, and
     // the half a device actually pays for. `AtlasBudget::for_caps` is what
-    // `text::glyph_atlas_policy` hands the policy, so pinning it here pins the
-    // geometry the policy runs on.
+    // sizes the residency's allocator, and `text::glyph_atlas_policy` hands
+    // that same allocator to the policy — so pinning it here pins the geometry
+    // the policy runs on.
     let mobile = AtlasBudget::for_caps(&TierCaps::fake(DownlevelProfile::WebGl2)).config();
     assert_eq!(mobile.atlas_size, (1024, 1024));
     assert_eq!(mobile.max_atlases, 4);
@@ -709,13 +752,212 @@ fn page_geometry_is_the_adapters_own_tier_budget() {
     assert_eq!(desktop.atlas_size, (2048, 2048));
     assert_eq!(desktop.max_atlases, 8);
 
-    // Nothing is allocated until a glyph needs it, on either tier.
+    // Nothing is allocated until a glyph or an image needs it, on either tier,
+    // and the policy reports the allocator's geometry rather than a second copy
+    // of the tier decision it could disagree with.
     for geometry in [mobile, desktop] {
         assert_eq!(geometry.initial_atlas_count, 0);
-        let engine = AtlasPolicy::new(geometry, false);
-        assert_eq!(engine.page_count(), 0);
+        let images = ImageCache::new_with_config(geometry);
+        let engine = AtlasPolicy::new(&images, false);
+        assert_eq!(images.atlas_count(), 0);
         assert_eq!(engine.pages().atlas_size, geometry.atlas_size);
+        assert_eq!(engine.pages().max_atlases, geometry.max_atlases);
     }
+}
+
+#[test]
+fn a_glyph_slot_and_an_image_slot_can_never_be_handed_the_same_image_id() {
+    // The defect the shared allocator exists to make unrepresentable. An
+    // `ImageId` is a slot index into one `ImageCache`, and the strip shader has
+    // exactly one atlas texture array to resolve it against; two caches over
+    // one geometry would mint `ImageId(0)` for a glyph and `ImageId(0)` for an
+    // image and pack both into the same corner of layer 0.
+    let mut residency = ImageResidency::new(AtlasBudget::DESKTOP);
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    let font = next_font();
+
+    let mut ids: HashSet<u32> = HashSet::new();
+    for round in 0..8_u8 {
+        residency.begin_frame();
+        // Distinct blobs, so each round makes a genuinely new image rather than
+        // hitting the previous round's residency.
+        for tag in 0..4_u8 {
+            let resident = residency
+                .resolve(&image(24, 24, round * 4 + tag))
+                .expect("a 24-square image fits a desktop layer");
+            assert!(
+                ids.insert(resident.id.as_u32()),
+                "image slot {:?} was already handed out",
+                resident.id
+            );
+        }
+        residency.acknowledge_plan();
+
+        engine.begin_frame();
+        collect_hello(&mut engine, font, 16.0 + f32::from(round));
+        let pass = engine.build(residency.allocator_mut(), raster);
+        for upload in &pass.uploads {
+            assert!(
+                ids.insert(upload.slot.image_id.as_u32()),
+                "glyph slot {:?} collides with a slot already in use",
+                upload.slot.image_id
+            );
+        }
+        engine.end_frame(residency.allocator_mut());
+    }
+
+    assert!(
+        ids.len() > 32,
+        "fixture precondition: both classes really allocated ({} slots)",
+        ids.len()
+    );
+}
+
+#[test]
+fn glyphs_and_images_are_held_against_one_shared_layer_budget() {
+    // Two allocators over one geometry would each believe the whole budget was
+    // theirs, so the array would need twice the layers the budget names — and
+    // the shader addresses `atlas_index` in eight bits over one array. Sharing
+    // makes the ceiling mean what it says: whichever class asks last is the one
+    // refused.
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (64, 64),
+        max_atlases: 1,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+
+    residency.begin_frame();
+    residency
+        .resolve(&image(64, 64, 1))
+        .expect("one image fills the only layer");
+    assert_eq!(residency.layers(), 1);
+
+    engine.begin_frame();
+    let route = engine.classify_run(&run_key(next_font(), 16.0));
+    let run = *route.atlas().expect("a first appearance is cached");
+    for glyph in HELLO {
+        engine.collect_glyph(&run, glyph, 0.0);
+    }
+    let pass = engine.build(residency.allocator_mut(), raster);
+
+    assert!(pass.uploads.is_empty(), "the image took the whole budget");
+    assert_eq!(
+        pass.refused, 4,
+        "every collected glyph is refused against the shared ceiling rather \
+         than allocated out of a private one"
+    );
+    assert_eq!(
+        residency.layers(),
+        1,
+        "and no second layer appeared behind the budget's back"
+    );
+    engine.end_frame(residency.allocator_mut());
+
+    // The converse: glyph pages are the residency's pages, so a layer text
+    // created is one the image array has to be deep enough for.
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (64, 64),
+        max_atlases: 4,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    assert_eq!(residency.layers(), 0, "text has drawn nothing yet");
+
+    engine.begin_frame();
+    let route = engine.classify_run(&run_key(next_font(), 48.0));
+    let run = *route.atlas().expect("a first appearance is cached");
+    for glyph in 0..8_u32 {
+        engine.collect_glyph(&run, glyph, 0.0);
+    }
+    let pass = engine.build(residency.allocator_mut(), raster);
+    assert!(!pass.uploads.is_empty());
+    assert!(
+        residency.layers() >= 2,
+        "fixture precondition: 48 px glyphs outgrow one 64-square layer"
+    );
+    engine.end_frame(residency.allocator_mut());
+}
+
+#[test]
+fn evicting_one_class_leaves_the_others_slots_exactly_where_they_were() {
+    // The two evictions are on separate clocks — `glifo`'s LRU serial and the
+    // residency's frame age — and each frees only handles from its own entry
+    // map. If either reached the other's, a live occupant's rectangle would be
+    // handed to the next allocation while it was still being sampled.
+    let mut residency = ImageResidency::new(AtlasBudget::DESKTOP);
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    let font = next_font();
+    let picture = image(32, 32, 7);
+
+    residency.begin_frame();
+    let reaped = residency
+        .resolve(&picture)
+        .expect("fits a desktop layer")
+        .region;
+    residency.acknowledge_plan();
+    let glyph_slots = frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)])
+        .uploads
+        .iter()
+        .map(|upload| (upload.key.clone(), upload.slot))
+        .collect::<Vec<_>>();
+    assert_eq!(glyph_slots.len(), 4, "fixture precondition: `Hello` cached");
+
+    // The image goes unseen long enough to be reaped, while the text keeps
+    // drawing.
+    for _ in 0..=MAX_UNSEEN_FRAMES {
+        residency.begin_frame();
+        frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)]);
+    }
+    assert_eq!(residency.entry_count(), 0, "the image aged out");
+    assert_eq!(
+        residency.evictions(),
+        &[reaped],
+        "the image class freed exactly its own rectangle"
+    );
+    // Resolved inside a frame, since a slot is only answerable in the draw
+    // phase — and this frame must find every glyph already resident.
+    engine.begin_frame();
+    collect_hello(&mut engine, font, 16.0);
+    let pass = engine.build(residency.allocator_mut(), raster);
+    assert!(
+        pass.uploads.is_empty(),
+        "an image eviction re-rasterized text that never left the screen"
+    );
+    for (key, slot) in &glyph_slots {
+        assert_eq!(
+            engine
+                .slot(key)
+                .map(|live| (live.page_index, live.x, live.y)),
+            Some((slot.page_index, slot.x, slot.y)),
+            "an image eviction moved a glyph that was still on screen"
+        );
+    }
+    engine.end_frame(residency.allocator_mut());
+
+    // And the other way: the screen stops drawing text but keeps the image, so
+    // `glifo`'s own sweep runs while the image is resident.
+    residency.begin_frame();
+    let resident = residency.resolve(&picture).expect("still fits");
+    residency.acknowledge_plan();
+    let mut idle = 0;
+    while engine.entry_count() > 0 {
+        residency.begin_frame();
+        residency.resolve(&picture).expect("drawn every frame");
+        frame(&mut engine, residency.allocator_mut(), &[]);
+        idle += 1;
+        assert!(idle < 500, "fixture precondition: eviction runs eventually");
+    }
+
+    let live = residency
+        .allocator()
+        .get(resident.id)
+        .expect("a glyph eviction must not free an image's slot");
+    assert_eq!(live.offsets(), resident.region.offset);
+    assert_eq!(live.size(), resident.region.size);
+    assert_eq!(
+        residency.resolve(&picture).map(|again| again.region),
+        Ok(resident.region),
+        "and the image is still resident at the rectangle it was given"
+    );
 }
 
 #[test]
@@ -755,7 +997,8 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
     assert_eq!(RunKey::for_run(&second, false, BLACK).font_id, key.font_id);
 
     // Hinting is part of the key: a hinted outline is a different bitmap.
-    let mut engine = policy(false);
+    let mut images = cache();
+    let mut engine = policy(&images, false);
     engine.begin_frame();
     let plain = engine.classify_run(&RunKey::for_run(&run, false, BLACK));
     let hinted = engine.classify_run(&RunKey::for_run(&run, true, BLACK));
@@ -766,5 +1009,5 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
         hinted.key(HELLO[0], 0.0),
         "a hinted glyph must not reuse the unhinted entry"
     );
-    engine.end_frame();
+    engine.end_frame(&mut images);
 }

@@ -11,12 +11,33 @@
 //! caching, keys them so a size that moves cannot shred the cache, and hands
 //! the frame one ordered atlas pass to service before it draws anything.
 //!
-//! Deliberately pure. It owns a [`GlyphAtlas`] and its [`ImageCache`] — both of
-//! which are plain rectangle bookkeeping with no device in the loop — and never
-//! touches `wgpu`, so every decision below is host-testable exactly as
-//! `crate::cache::images`'s residency decisions are. The pixels themselves are
-//! somebody else's problem: this module says *what* to rasterize and *where* it
-//! goes, and the caller rasterizes.
+//! Deliberately pure. It owns a [`GlyphAtlas`] — an entry map and an LRU, plain
+//! bookkeeping with no device in the loop — and never touches `wgpu`, so every
+//! decision below is host-testable exactly as `crate::cache::images`'s
+//! residency decisions are. The pixels themselves are somebody else's problem:
+//! this module says *what* to rasterize and *where* it goes, and the caller
+//! rasterizes.
+//!
+//! # The packer is shared, not owned
+//!
+//! What it deliberately does *not* own is the [`ImageCache`] its slots come out
+//! of. That cache is handed in at [`AtlasPolicy::new`] (for its geometry) and at
+//! [`build`](AtlasPolicy::build) / [`end_frame`](AtlasPolicy::end_frame) (to
+//! allocate and to evict through), and the one that reaches it is the image
+//! residency's — the process's single atlas allocator.
+//!
+//! One allocator is a correctness requirement, not a saving. An `ImageId` is a
+//! slot index into one cache, and the strip shader samples exactly one atlas
+//! texture array; a second cache over the same page geometry would hand the
+//! same small integers to unrelated occupants and pack them into overlapping
+//! rectangles of the same layers, so glyphs and images would address each
+//! other's texels by construction. `vello_hybrid` shares one `image_cache`
+//! between its glyph atlas and its image path for the same reason, and its
+//! glyph-side type owns no cache either.
+//!
+//! The borrow runs one way only: this policy allocates through the cache and
+//! deallocates strictly what `glifo`'s own eviction holds in the entry map
+//! below, never a handle the residency allocated.
 //!
 //! # A frame is two phases, not one
 //!
@@ -348,11 +369,14 @@ impl RunKey {
     /// between and no identity of the engine's own invention, which is what
     /// makes a key built here and a key built inside `glifo` the same key.
     ///
-    /// `hinted` is passed rather than assumed: the lowering hints nothing today
-    /// (`super::lower_glyph_run` sets it off, since the classic tier does not
-    /// hint and a hinted outline lands on different pixels), but a hinted glyph
-    /// and an unhinted one are different bitmaps, so a device-class policy that
-    /// turns hinting on must not be able to reuse the unhinted entry.
+    /// `hinted` is passed rather than assumed: it is the same device-class
+    /// choice `super::lower_glyph_run` hands `glifo` — on for a desktop-class
+    /// adapter, off for a mobile one — and a hinted glyph and an unhinted one
+    /// are different bitmaps, so neither may reuse the other's entry. Passing
+    /// it also keeps this key honest about the half of the hinting policy
+    /// `glifo` decides for itself: a run whose transform it refuses to hint is
+    /// keyed as the caller asked, which is conservative in the safe direction
+    /// (a redundant entry) rather than the unsafe one.
     #[must_use]
     pub(crate) fn for_run(
         run: &frust_scene::GlyphRun,
@@ -398,16 +422,17 @@ enum Phase {
 
 /// The engine's glyph-atlas policy: one per renderer, retained across frames.
 ///
-/// Owns the cache it decides for — a [`GlyphAtlas`] and the [`ImageCache`] it
-/// packs into — so "which glyphs are resident" and "which glyphs *should* be
-/// resident" can never drift apart into two structures that disagree.
+/// Owns the entry map it decides for — a [`GlyphAtlas`] — so "which glyphs are
+/// resident" and "which glyphs *should* be resident" can never drift apart into
+/// two structures that disagree. The packer those entries live in is shared
+/// rather than owned; see this module's doc.
 #[derive(Debug)]
 pub(crate) struct AtlasPolicy {
     /// `glifo`'s entry map and LRU.
     atlas: GlyphAtlas,
-    /// The rectangle packer behind it.
-    images: ImageCache,
-    /// The page geometry `images` was built on, kept for reporting.
+    /// The shared packer's page geometry, read off it once at construction and
+    /// kept for reporting. Fixed for a cache's lifetime, so the copy cannot
+    /// drift from the allocator it was taken from.
     pages: AtlasConfig,
     /// Whether `FRUST_ENGINE_NO_ATLAS` took the atlas out of the frame.
     disabled: bool,
@@ -428,20 +453,23 @@ pub(crate) struct AtlasPolicy {
 }
 
 impl AtlasPolicy {
-    /// A policy packing into `pages`, disabled outright when `disabled`.
+    /// A policy packing into `images`, disabled outright when `disabled`.
     ///
-    /// `pages` is the caller's tier decision — see
-    /// `super::glyph_atlas_policy`, which derives it from the adapter the same
-    /// way the image atlas derives its own. Nothing is allocated here: with
-    /// `initial_atlas_count` at zero the first page is created by the first
-    /// glyph that needs one, so an application drawing no text pays for no
-    /// atlas.
+    /// `images` is the shared allocator every later call must be handed — see
+    /// `super::glyph_atlas_policy`, which takes it from the image residency.
+    /// The page geometry is read off it here rather than passed separately,
+    /// which is what makes it impossible for the policy to report one geometry
+    /// while allocating into another.
+    ///
+    /// Nothing is allocated here, and nothing is even borrowed onward: the
+    /// cache is read and released. With `initial_atlas_count` at zero the first
+    /// page is created by the first glyph or image that needs one, so an
+    /// application drawing neither pays for no atlas.
     #[must_use]
-    pub(crate) fn new(pages: AtlasConfig, disabled: bool) -> Self {
+    pub(crate) fn new(images: &ImageCache, disabled: bool) -> Self {
         Self {
             atlas: GlyphAtlas::with_config(glyph_cache_config()),
-            images: ImageCache::new_with_config(pages),
-            pages,
+            pages: *images.atlas_manager().config(),
             disabled,
             frame: 0,
             fonts: HashMap::new(),
@@ -459,6 +487,11 @@ impl AtlasPolicy {
     }
 
     /// The page geometry this policy packs into.
+    ///
+    /// The shared allocator's own, taken at construction. How many of those
+    /// pages exist is *not* answerable here and deliberately so: pages are
+    /// created by whichever class needs one, so the count belongs to the cache
+    /// (`ImageCache::atlas_count`) rather than to either occupant of it.
     #[must_use]
     pub(crate) fn pages(&self) -> AtlasConfig {
         self.pages
@@ -474,12 +507,6 @@ impl AtlasPolicy {
     #[must_use]
     pub(crate) fn entry_count(&self) -> usize {
         self.atlas.len()
-    }
-
-    /// How many atlas pages have been created.
-    #[must_use]
-    pub(crate) fn page_count(&self) -> usize {
-        self.images.atlas_count()
     }
 
     /// How many (font, size) pairs the animation tracker is holding.
@@ -566,13 +593,18 @@ impl AtlasPolicy {
     /// Close the collect phase: allocate every collected miss and hand back the
     /// frame's whole atlas pass.
     ///
+    /// `images` is the shared allocator — the same one [`new`](Self::new) was
+    /// built from. Every slot this frame claims is taken out of it, so a glyph
+    /// competes for space with the resident images rather than with a private
+    /// copy of the same budget, and a full atlas refuses both classes alike.
+    ///
     /// `raster` measures one glyph — it is called once per newly collected key
     /// and answers the bitmap extent and bearings the packer needs, or `None`
     /// for a glyph with nothing to rasterize (a space, an outline that produced
     /// no coverage). Measuring is separated from *rendering* deliberately: the
     /// caller renders into the returned slots afterwards, in one pass, which is
     /// the whole point of collecting first.
-    pub(crate) fn build<F>(&mut self, mut raster: F) -> AtlasPass
+    pub(crate) fn build<F>(&mut self, images: &mut ImageCache, mut raster: F) -> AtlasPass
     where
         F: FnMut(&GlyphCacheKey) -> Option<RasterMetrics>,
     {
@@ -582,18 +614,15 @@ impl AtlasPolicy {
             refused: 0,
         };
 
-        // Taken out of `self` so the loop can hold the atlas and the packer
-        // mutably; the emptied allocation goes back at the end for reuse.
+        // Taken out of `self` so the loop can hold the atlas mutably while
+        // draining; the emptied allocation goes back at the end for reuse.
         let mut pending = std::mem::take(&mut self.pending);
         for key in pending.drain(..) {
             let Some(metrics) = raster(&key) else {
                 pass.refused = pass.refused.saturating_add(1);
                 continue;
             };
-            match self
-                .atlas
-                .insert_entry(&mut self.images, key.clone(), metrics)
-            {
+            match self.atlas.insert_entry(images, key.clone(), metrics) {
                 Some(slot) => pass.uploads.push(GlyphUpload { key, slot }),
                 None => pass.refused = pass.refused.saturating_add(1),
             }
@@ -627,8 +656,14 @@ impl AtlasPolicy {
     /// after `maintain`, is what makes that carry-over unconditional: they
     /// cannot be left in `glifo`'s queue to be rediscovered several frames late,
     /// by which point the freed rectangle may already hold a different glyph.
-    pub(crate) fn end_frame(&mut self) {
-        self.atlas.maintain(&mut self.images);
+    ///
+    /// `images` is the shared allocator again: eviction gives glyph rectangles
+    /// back to the same packer the images draw from, so text that leaves the
+    /// screen returns its space to whichever class asks for it next. Only
+    /// handles from the entry map below are freed — a resident image's handle
+    /// is not `glifo`'s to reach.
+    pub(crate) fn end_frame(&mut self, images: &mut ImageCache) {
+        self.atlas.maintain(images);
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
         self.clears.extend(evicted);
         self.prune_sizes();

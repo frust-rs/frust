@@ -92,16 +92,15 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 
-use glifo::{AtlasConfig, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
+use glifo::{FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
 use kurbo::Affine;
 use peniko::FontData;
 use vello_common::paint::Paint;
 use vello_common::strip_generator::StripGenerator;
 
-use frust_gpu::TierCaps;
 use frust_scene::GlyphRun;
 
-use crate::cache::AtlasBudget;
+use crate::cache::ImageResidency;
 use crate::compile::clip::ClipStack;
 use crate::compile::{CompiledFrame, DepthCounter};
 use crate::config;
@@ -194,28 +193,37 @@ pub(crate) fn lower_glyph_run(
     sink.outcome()
 }
 
-/// The glyph-atlas policy `caps`' adapter gets.
+/// The glyph-atlas policy for `images`' allocator.
 ///
-/// The page geometry is [`AtlasBudget::for_caps`]' — mobile `(1024, 1024)` x4
-/// layers, desktop `(2048, 2048)` x8, `FRUST_ENGINE_ATLAS_SIZE` redistributing
-/// that tier's own allowance between extent and depth, then clamped to what the
-/// adapter can actually create. Shared with the image atlas because the tier
-/// question is the same question: the two arrays are separate textures sized by
-/// one budget, not one texture holding both.
+/// The policy packs into the residency's own
+/// [`ImageCache`](vello_common::image_cache::ImageCache) — the process's single
+/// atlas allocator — rather than one of its own, so a glyph slot and an image
+/// slot can never be handed the same `ImageId` or overlapping texels of the
+/// same layer. [`crate::cache::images`] states why that has to be one cache;
+/// here it is simply where the policy's pages come from.
+///
+/// The tier decision therefore arrives already made. That geometry is
+/// [`AtlasBudget::for_caps`](crate::cache::AtlasBudget::for_caps)' — mobile
+/// `(1024, 1024)` x4 layers, desktop `(2048, 2048)` x8,
+/// `FRUST_ENGINE_ATLAS_SIZE` redistributing that tier's own allowance between
+/// extent and depth, then clamped to what the adapter can actually create —
+/// applied when the residency was built, and read back off the allocator rather
+/// than derived a second time from the same `TierCaps`. Deriving it twice is
+/// exactly the shape that let the two halves disagree.
 ///
 /// `FRUST_ENGINE_NO_ATLAS` is read here, once per policy, rather than per run —
 /// it is a process-global kill switch ([`config::atlas_disabled`]), and a run
 /// that consulted it separately could not be told from one the size tracker
-/// refused.
+/// refused. The residency reads the same switch for itself, so a killed atlas
+/// takes both classes out of the frame.
 #[allow(
     dead_code,
     reason = "constructs the policy for the glyph-draw path that consults it; \
               that path is what turns atlas caching on in `backend`"
 )]
 #[must_use]
-pub(crate) fn glyph_atlas_policy(caps: &TierCaps) -> AtlasPolicy {
-    let pages: AtlasConfig = AtlasBudget::for_caps(caps).config();
-    AtlasPolicy::new(pages, config::atlas_disabled())
+pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
+    AtlasPolicy::new(images.allocator(), config::atlas_disabled())
 }
 
 /// The OpenType table directory's own fixed header length.

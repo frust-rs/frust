@@ -83,6 +83,33 @@
 //! `frust-render`'s shader-effect cache uses, and for the same reason: a screen
 //! that stops drawing an image should give its texels back promptly, while an
 //! image drawn every other frame must never be mistaken for gone.
+//!
+//! ## One allocator for images *and* glyphs
+//!
+//! The [`ImageCache`] this module holds is the process's only atlas allocator:
+//! the glyph policy (`crate::text::atlas_policy`) owns no cache of its own and
+//! allocates its slots through [`ImageResidency::allocator_mut`].
+//!
+//! That is a correctness requirement, not tidiness. An [`ImageId`] is a *slot
+//! index into one cache* — `ImageCache::allocate` hands out the next free index
+//! of its own `slots` vector — and the strip shader has exactly one atlas
+//! texture array to sample from. Two caches over the same page geometry would
+//! therefore mint the same small integers for unrelated occupants and pack them
+//! into overlapping rectangles of the same layers, so a glyph and an image would
+//! address each other's texels by construction. Sharing one cache makes both
+//! collisions unrepresentable: one id space, one packer, one set of live
+//! rectangles.
+//!
+//! It is also what upstream does — `vello_hybrid`'s `Resources` holds a single
+//! `image_cache` and hands it to its glyph atlas at every call — and it is what
+//! keeps the budget honest: a glyph page and an image page come out of the same
+//! [`AtlasBudget::max_atlases`] allowance, and [`ImageResidency::layers`] counts
+//! whichever of the two created a layer.
+//!
+//! The one rule a borrower must keep is ownership of its own handles: each side
+//! deallocates only the ids it allocated. Nothing enforces that beyond the two
+//! call sites, and it is the reason [`ImageResidency::allocator_mut`] is
+//! documented as a contract rather than a plain accessor.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -528,13 +555,15 @@ struct Entry {
 /// runs — before any of the frame's own resolutions, so a rectangle freed this
 /// frame is available to this frame's allocations and its clear is ordered
 /// ahead of their uploads.
+///
+/// It also owns the atlas allocator the *glyph* policy packs into — see this
+/// module's doc and [`allocator_mut`](Self::allocator_mut).
 #[derive(Debug)]
 pub struct ImageResidency {
     cache: ImageCache,
     budget: AtlasBudget,
     entries: HashMap<u64, Entry>,
     frame: u64,
-    layers: u32,
     disabled: bool,
     uploads: Vec<ImageUpload>,
     evictions: Vec<AtlasRegion>,
@@ -578,7 +607,6 @@ impl ImageResidency {
             budget,
             entries: HashMap::new(),
             frame: 0,
-            layers: 0,
             disabled: !enabled,
             uploads: Vec::new(),
             evictions: Vec::new(),
@@ -599,6 +627,39 @@ impl ImageResidency {
     #[must_use]
     pub fn budget(&self) -> AtlasBudget {
         self.budget
+    }
+
+    /// The single atlas allocator, for reading.
+    ///
+    /// Enough to resolve a handle either side allocated
+    /// ([`ImageCache::get`]) or to count the layers created so far, without
+    /// the mutable borrow allocation needs.
+    #[must_use]
+    pub fn allocator(&self) -> &ImageCache {
+        &self.cache
+    }
+
+    /// The single atlas allocator, for allocating through.
+    ///
+    /// This is the seam the glyph policy takes its slots from — see this
+    /// module's doc for why one cache rather than two is a correctness
+    /// requirement. `ImageId`s and rectangles handed out through here and
+    /// through [`resolve`](Self::resolve) come from the same packer and the
+    /// same id space, so a glyph and an image can never be given the same
+    /// handle or overlapping texels.
+    ///
+    /// **The contract a borrower keeps:** allocate what you like, and
+    /// deallocate *only handles you allocated yourself*. This residency's entry
+    /// map records the rectangles it allocated and nothing re-checks them;
+    /// freeing one of them from outside would leave an entry claiming a
+    /// rectangle the packer has since handed to someone else. Nothing here
+    /// enforces that, because the type the two sides must share is
+    /// `vello_common`'s own and cannot carry an ownership tag — the glyph
+    /// policy deallocates strictly inside `glifo`'s eviction, over the handles
+    /// in its own entry map.
+    #[must_use]
+    pub fn allocator_mut(&mut self) -> &mut ImageCache {
+        &mut self.cache
     }
 
     /// Whether this residency refuses every image.
@@ -623,9 +684,16 @@ impl ImageResidency {
     ///
     /// The array texture must be at least this deep before the frame's uploads
     /// are written.
+    ///
+    /// Read off the shared allocator rather than accumulated from this
+    /// residency's own allocations, so a layer the *glyph* policy created
+    /// counts too: the two classes pack into one array, and an array sized to
+    /// the image half alone would refuse to hold the glyph half's pages. The
+    /// count only ever grows — `MultiAtlasManager` appends layers and never
+    /// drops one — so a depth reported on an earlier frame stays valid.
     #[must_use]
     pub fn layers(&self) -> u32 {
-        self.layers
+        u32::try_from(self.cache.atlas_count()).unwrap_or(u32::MAX)
     }
 
     /// How many resolutions have been refused over this residency's lifetime.
@@ -802,7 +870,6 @@ impl ImageResidency {
             size: resource.size(),
         };
         let may_have_transparency = pixels.may_have_transparency();
-        self.layers = self.layers.max(region.layer.saturating_add(1));
 
         self.entries.insert(
             key,
@@ -1430,6 +1497,42 @@ mod tests {
         assert_eq!(first.region.layer, 0);
         assert_eq!(second.region.layer, 1);
         assert_eq!(residency.layers(), 2);
+    }
+
+    #[test]
+    fn a_slot_taken_through_the_shared_allocator_is_a_distinct_id_on_the_same_budget() {
+        // The allocator half of the glyph/image seam, stated without the glyph
+        // policy: whatever else packs into this cache draws from the same id
+        // space and the same layer allowance, and its pages are visible in the
+        // depth the array is built to.
+        let mut residency = residency();
+        residency.begin_frame();
+        let resident = residency.resolve(&image(64, 48)).expect("fills a layer");
+
+        // Big enough that it cannot share the layer the image took, so it must
+        // create the second one rather than report the first.
+        let borrowed = residency
+            .allocator_mut()
+            .allocate(64, 48, ATLAS_PADDING)
+            .expect("the second layer is free");
+
+        assert_ne!(
+            resident.id, borrowed,
+            "one cache never hands the same slot index to two live occupants"
+        );
+        assert_eq!(
+            residency.layers(),
+            2,
+            "a layer created by the other class still has to be in the array"
+        );
+        assert_eq!(
+            residency
+                .allocator()
+                .get(resident.id)
+                .map(|resource| resource.size()),
+            Some(resident.region.size),
+            "and neither allocation disturbed the other's rectangle"
+        );
     }
 
     #[test]
