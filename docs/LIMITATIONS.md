@@ -3825,15 +3825,23 @@ experimental and not recommended for external use" — and
 `crates/frust-engine/src/text/atlas_policy.rs`): the engine caches settled
 glyph runs in a GPU atlas driven by glifo's cacher, which keys font size by
 exact `f32` bits and leaves eviction/layout policy to the integrator. frust
-wraps it in its own policy rather than trusting the defaults: font size is
-quantized to a 1/4-px grid before keying, a run whose size changed inside an
-8-frame window draws as outline strips instead of minting per-frame entries,
-the frame is two-phase (collect, then one atlas build strictly before the
-scene pass), glifo's `PendingClearRect`s are drained into real atlas clears
-after `maintain()`, and glyphs share one `ImageCache` allocator with images so
-their slot ids and rectangles cannot collide. `FRUST_ENGINE_NO_ATLAS` routes
-every glyph to the outline path — a correct, slower, tested fallback — and a
-10,000-frame animated-size churn test bounds resident entries. The
+wraps it in its own routing policy rather than trusting the defaults: the
+policy decides *which runs are offered* — keyed on the quantized (1/4-px)
+**device-space** size, the same `font_size × absorbed-uniform-scale` quantity
+glifo keys — and routes to outline strips any run whose device size changed
+inside an 8-frame window, any run above the size ceiling, any COLR-carrying
+face (the tier cannot replay glifo's recorded COLR command stream and glifo
+offers no way to withdraw entries afterwards), any transform glifo will not
+absorb as a positive uniform scale, and everything once glyph residency hits
+its ceiling (half the shared array's texels — glyphs cannot starve image
+residency). glifo's `PendingClearRect`s and recorded page replays are
+re-offered every frame until the renderer acknowledges they were serviced,
+and glifo's eviction pass is deferred while a replay is outstanding, so a
+dropped frame loses nothing and a recorded command cannot outlive its slot.
+Glyphs share one `ImageCache` allocator with images so slot ids and
+rectangles cannot collide. `FRUST_ENGINE_NO_ATLAS` routes every glyph to the
+outline path — a correct, slower, tested fallback. A 200-frame scale-animated
+wired-path test bounds resident entries and keeps images resident, and the
 atlas-drawn and outline paths are byte-identical for a whole-pixel-placed run
 on the T400 reference adapter.
 
