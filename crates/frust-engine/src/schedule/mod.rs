@@ -161,7 +161,7 @@ use vello_common::record::{CommandRecorder, Node, RecordedLayer, RecordedLayerKi
 
 use crate::compile::EngineDraw;
 use crate::error::EngineError;
-use crate::filters::{FilterStep, blur, drop_shadow, served_blur, served_drop_shadow};
+use crate::filters::{FilterStep, ServedFilter, blur, drop_shadow, served_filter};
 
 /// The deepest chain of nested isolated layers this scheduler serves.
 ///
@@ -383,10 +383,10 @@ impl Schedule {
     /// here: its contents' round, then one round per pass of its filter's
     /// sequence, then the composite of whichever page the last pass wrote.
     /// Every other filter is refused by name (see
-    /// [`crate::filters::served_blur`]/[`crate::filters::served_drop_shadow`]),
-    /// and so are the two shapes a served filter layer still cannot take — one
-    /// recorded inside another layer, and one that cannot be handed the second
-    /// page group its passes ping-pong into.
+    /// [`crate::filters::served_filter`]), and so are the two shapes a served
+    /// filter layer still cannot take — one recorded inside another layer, and
+    /// one that cannot be handed the second page group its passes ping-pong
+    /// into.
     ///
     /// One entry point, not two. While the renderer had no filter pipeline,
     /// this call refused every filter and a second one planned them, so the
@@ -705,15 +705,13 @@ fn filter_rounds(
     config: &PageConfig,
 ) -> Result<PageParity, EngineError> {
     let id = filtered.id;
-    // Tried in the same order every filter-recognising site in this crate
-    // tries them (`renderer::filter_block`, `layer_role` below): a blur first,
-    // and only a drop shadow's own refusal reason surfaces when neither
-    // serves this layer's recorded kind.
-    let steps = match served_blur(id, filtered.kind) {
-        Ok(blur) => blur::blur_passes(&blur, SizeU16::from(filtered.bounds)),
-        Err(blur_reason) => {
-            let shadow =
-                served_drop_shadow(id, filtered.kind).map_err(|_| escalate(blur_reason))?;
+    // The one dispatch every filter-recognising site in this crate shares
+    // (`renderer::filter_block`, `layer_role` below): the recorded primitive
+    // names which filter it is, and the reason a refusal carries is that
+    // primitive's own.
+    let steps = match served_filter(id, filtered.kind).map_err(escalate)? {
+        ServedFilter::Blur(blur) => blur::blur_passes(&blur, SizeU16::from(filtered.bounds)),
+        ServedFilter::DropShadow(shadow) => {
             drop_shadow::drop_shadow_passes(&shadow, SizeU16::from(filtered.bounds))
         }
     };
@@ -1186,11 +1184,7 @@ fn layer_role(id: u32, layer: &RecordedLayer) -> Result<LayerRole, EngineError> 
             // names what was found before any round has been emitted and a
             // filter shape this engine cannot render is refused wherever it is
             // recorded — including inside a layer whose contents cover nothing.
-            // A blur is tried first; only a drop shadow's own reason surfaces
-            // when neither serves this layer's recorded kind.
-            if served_blur(id, kind).is_err() {
-                served_drop_shadow(id, kind).map_err(escalate)?;
-            }
+            served_filter(id, kind).map_err(escalate)?;
             Ok(LayerRole::Filtered)
         }
     }

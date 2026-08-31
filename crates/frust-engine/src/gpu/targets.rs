@@ -193,12 +193,16 @@ pub fn filter_data_texture_height(blocks: usize) -> Option<u32> {
 /// [`crate::filters::blur`]'s bilinear kernel).
 ///
 /// Clamped rather than bordered on every axis: `wgpu`'s transparent-black
-/// border address mode needs an adapter feature this tier never requests. What
-/// makes the clamp harmless is the same fact the kernels' bounds-check-free
-/// sampling already rests on — a filter round clears its whole destination
-/// page, and a filter layer's bounds are grown by the blur's own 3σ spread, so
-/// the texels a tap can reach past the region are transparent either way.
-/// No mip chain, because a pooled page has exactly one level.
+/// border address mode needs an adapter feature this tier never requests. The
+/// address mode is not what makes a tap past the region transparent, and could
+/// not be — a filter layer's region sits at its page's own *origin*, so on the
+/// near side a clamp replicates the region's own edge texel instead of leaving
+/// the texture at all. Every kernel therefore bounds its own taps against the
+/// source region (`sample_region_bilinear` in `shaders/filters_blur.wgsl`,
+/// `drop_shadow_load_checked` in `shaders/filters_drop_shadow.wgsl`), which is
+/// what makes this sampler's behaviour outside that region unobservable rather
+/// than merely harmless. No mip chain, because a pooled page has exactly one
+/// level.
 #[must_use]
 pub fn filter_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {

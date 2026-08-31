@@ -36,17 +36,23 @@
 //! extent to acquire a page at — for a filter layer specifically, and differs
 //! in two ways a regular layer's page never has to.
 //!
-//! - **Padded, not just coverage-sized.** A filter pass's bilinear kernel taps
-//!   can reach [`FILTER_ATLAS_PADDING`] texels past the region it writes (see
-//!   that constant's own doc), and while the fragment stage bounds that
-//!   overdraw at the layer's own extent, a page whose real allocation lands
-//!   *exactly* on that extent — which the pool's quantization can and does
-//!   produce, whenever a layer's own size already sits on the quantum grid —
-//!   would put the overdraw's edge at the very last texel rather than inside
-//!   a transparent margin. [`filter_page_size`] reserves that margin by
-//!   growing the request by [`FILTER_ATLAS_PADDING`] on every side *before*
-//!   flooring, quantizing (E13) and capping, so the page's real extent always
-//!   has the margin regardless of where the quantum grid happens to land.
+//! - **Padded, not just coverage-sized.** A decimated filter pass overdraws a
+//!   [`FILTER_ATLAS_PADDING`]-wide transparent border around the region it
+//!   writes (see that constant's own doc), and a page whose real allocation
+//!   landed *exactly* on the layer's extent — which the pool's quantization can
+//!   and does produce, whenever a layer's own size already sits on the quantum
+//!   grid — would have nowhere to put it. [`filter_page_size`] reserves the
+//!   room by growing the request by [`FILTER_ATLAS_PADDING`] twice per axis
+//!   *before* flooring, quantizing (E13) and capping, so the page's real extent
+//!   always has it regardless of where the quantum grid happens to land.
+//!
+//!   Twice per axis, not "on every side": a layer is rendered into its page at
+//!   the page's own origin, so the whole of the growth lands on the far side
+//!   and the near side has no margin at all. That asymmetry is exactly why the
+//!   kernels bound their taps against the source region themselves rather than
+//!   trusting a margin to exist (`sample_region_bilinear` in
+//!   `shaders/filters_blur.wgsl`); the room reserved here is what the far-side
+//!   overdraw needs, not a guarantee about what a tap reads.
 //! - **Two ceilings, not one.** [`page_size`] folds [`page_ceiling`]'s two
 //!   inputs into one refusal ([`EngineError::IntermediateTextureTooLarge`]
 //!   either way). A filter layer's padded request is checked against them
@@ -217,10 +223,11 @@ pub fn page_size(
 /// `bounds` is the layer's own tile-aligned device-space rectangle — already
 /// grown by the filter's own visual spread (a blur's 3σ, a drop shadow's
 /// offset plus its own blur), the same `bounds` [`page_size`] would take for
-/// a regular layer. This function grows it by [`FILTER_ATLAS_PADDING`] on
-/// every side before flooring, quantizing (E13) and capping, and checks the
+/// a regular layer. This function grows it by [`FILTER_ATLAS_PADDING`] twice
+/// per axis before flooring, quantizing (E13) and capping, and checks the
 /// padded request against two ceilings rather than one — see the module
-/// header's *A third decision* section for why both differences exist.
+/// header's *A third decision* section for why both differences exist, and for
+/// why the growth is not a margin "on every side".
 ///
 /// # Errors
 ///

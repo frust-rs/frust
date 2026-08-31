@@ -59,10 +59,14 @@ const PASS_COLORIZE: u32 = 8u;
 // Transparent border a decimated pass overdraws around the region it writes.
 //
 // Half a kernel is as far as a bilinear tap can reach past the region it is
-// filtering, so a border of transparent black that wide is what lets the
-// kernels skip their bounds checks. The scheduler already clears a filter
-// round's destination page, which guarantees it for a page holding one layer;
-// the overdraw is what would still guarantee it were a page ever shared.
+// filtering, so a border of transparent black that wide is what surrounds a
+// decimated region with the transparency the next pass's kernel expects there.
+// It is a second line rather than the first one: the kernels bound their own
+// taps against the source region (`sample_region_bilinear` in
+// `filters_blur.wgsl`, `drop_shadow_load_checked` in
+// `filters_drop_shadow.wgsl`), so what a tap would have read past the region
+// no longer decides the result. The scheduler clears a filter round's whole
+// destination page besides.
 //
 // Keep in sync with `FILTER_ATLAS_PADDING` in `crate::filters::blur`.
 const FILTER_ATLAS_PADDING: u32 = 6u;
@@ -111,7 +115,9 @@ struct FilterInstanceData {
     // Origin of this pass's source region in the source page, packed as u16s.
     @location(0)
     source_origin: u32,
-    // Extent of this pass's source region, packed as u16s.
+    // Extent of this pass's source region, packed as u16s — the bound every
+    // kernel holds its taps inside (`sample_region_bilinear`,
+    // `drop_shadow_load_checked`).
     @location(1)
     source_size: u32,
     // Origin of this pass's destination region in the destination page, packed
@@ -143,10 +149,12 @@ struct FilterVertexOutput {
     @location(1) @interpolate(flat)
     source_origin: vec2<u32>,
     @location(2) @interpolate(flat)
-    dest_origin: vec2<u32>,
+    source_size: vec2<u32>,
     @location(3) @interpolate(flat)
-    dest_size: vec2<u32>,
+    dest_origin: vec2<u32>,
     @location(4) @interpolate(flat)
+    dest_size: vec2<u32>,
+    @location(5) @interpolate(flat)
     filter_pass_kind: u32,
 }
 
@@ -156,6 +164,7 @@ fn vs_main(
     instance: FilterInstanceData,
 ) -> FilterVertexOutput {
     let source_origin = unpack_u16_pair(instance.source_origin);
+    let source_size = unpack_u16_pair(instance.source_size);
     let dest_origin = unpack_u16_pair(instance.dest_origin);
     let dest_size = unpack_u16_pair(instance.dest_size);
     let dest_texture_size = vec2<f32>(unpack_u16_pair(instance.dest_texture_size));
@@ -173,6 +182,7 @@ fn vs_main(
     out.position = vec4<f32>(pixel_to_ndc(dest_xy, dest_texture_size), 0.0, 1.0);
     out.filter_data_offset = instance.filter_data_offset;
     out.source_origin = source_origin;
+    out.source_size = source_size;
     out.dest_origin = dest_origin;
     out.dest_size = dest_size;
     out.filter_pass_kind = instance.filter_pass_kind;
@@ -195,9 +205,10 @@ const VERTICAL: vec2<f32> = vec2<f32>(0.0, 1.0);
 fn fs_main(
     @location(0) @interpolate(flat) filter_data_offset: u32,
     @location(1) @interpolate(flat) source_origin: vec2<u32>,
-    @location(2) @interpolate(flat) dest_origin: vec2<u32>,
-    @location(3) @interpolate(flat) dest_size: vec2<u32>,
-    @location(4) @interpolate(flat) filter_pass_kind: u32,
+    @location(2) @interpolate(flat) source_size: vec2<u32>,
+    @location(3) @interpolate(flat) dest_origin: vec2<u32>,
+    @location(4) @interpolate(flat) dest_size: vec2<u32>,
+    @location(5) @interpolate(flat) filter_pass_kind: u32,
     @builtin(position) position: vec4<f32>,
 ) -> @location(0) vec4<f32> {
     let frag_coord = vec2<u32>(position.xy);
@@ -214,10 +225,10 @@ fn fs_main(
         case PASS_OFFSET: {
             let filter_texel2 = load_filter_texel(filter_data_offset, 2u);
             let dxdy = get_drop_shadow_offset(filter_texel2);
-            return offset_drop_shadow(source_texture, source_origin, dest_size, rel_coord, dxdy);
+            return offset_drop_shadow(source_texture, source_origin, source_size, rel_coord, dxdy);
         }
         case PASS_DOWNSCALE: {
-            return filter_downscale(source_texture, linear_sampler, position, source_origin, dest_origin);
+            return filter_downscale(source_texture, linear_sampler, position, source_origin, source_size, dest_origin);
         }
         case PASS_BLUR_H: {
             let filter_texel0 = load_filter_texel(filter_data_offset, 0u);
@@ -226,6 +237,7 @@ fn fs_main(
                 source_texture,
                 linear_sampler,
                 source_origin,
+                source_size,
                 rel_coord,
                 HORIZONTAL,
                 get_filter_header_n_linear_taps(filter_texel0),
@@ -241,6 +253,7 @@ fn fs_main(
                 source_texture,
                 linear_sampler,
                 source_origin,
+                source_size,
                 rel_coord,
                 VERTICAL,
                 get_filter_header_n_linear_taps(filter_texel0),
@@ -250,7 +263,7 @@ fn fs_main(
             );
         }
         case PASS_UPSCALE: {
-            return filter_upscale(source_texture, linear_sampler, position, source_origin, dest_origin);
+            return filter_upscale(source_texture, linear_sampler, position, source_origin, source_size, dest_origin);
         }
         case PASS_COLORIZE: {
             let filter_texel2 = load_filter_texel(filter_data_offset, 2u);

@@ -52,7 +52,8 @@ use frust_engine::filters::blur::{
 };
 use frust_engine::filters::drop_shadow::{GpuDropShadow, drop_shadow_passes};
 use frust_engine::filters::{
-    FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, push_filter_layer, served_drop_shadow,
+    FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, SERVED_EDGE_MODE, ServedFilter, device_blur_sigma,
+    push_filter_layer, served_blur, served_drop_shadow, served_filter,
 };
 use frust_engine::gpu::pipelines::{
     EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, warm_up_descs,
@@ -543,6 +544,58 @@ fn the_filter_module_is_its_preludes_followed_by_its_own_source() {
             declaration.is_none(),
             "{name} is prepended to every module that uses it, so a binding of its own would \
              change their derived bind-group layouts: {declaration:?}"
+        );
+    }
+}
+
+/// Every bilinear sample the blur kernels take goes through the one helper
+/// that bounds a tap against the region it is filtering.
+///
+/// The origin invariant — *every tap outside the filtered region reads
+/// transparent* — is a property of `sample_region_bilinear` alone, so a kernel
+/// that sampled the source texture directly would escape it silently: it would
+/// look right everywhere but at a region flush against its page's origin, which
+/// is the one place a host test cannot reach and the one place a full-screen
+/// backdrop blur puts it. Counting the call sites is what keeps the invariant
+/// a property of the module rather than of the three kernels that happen to
+/// hold it today.
+#[test]
+fn every_bilinear_sample_goes_through_the_region_bounded_helper() {
+    let kernels = include_str!("../shaders/filters_blur.wgsl");
+
+    let code: Vec<&str> = kernels
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+    let samples = code
+        .iter()
+        .filter(|line| line.contains("textureSampleLevel("))
+        .count();
+    assert_eq!(
+        samples, 1,
+        "the blur kernels take exactly one bilinear sample, inside \
+         `sample_region_bilinear`; every other kernel calls that helper"
+    );
+
+    assert!(
+        kernels.contains("fn sample_region_bilinear("),
+        "the helper the count above is about has to be the one this module declares"
+    );
+
+    // And no other prelude of the filter module samples at all: the drop
+    // shadow's own passes read whole texels through `textureLoad`, bounds-
+    // checked the same way.
+    for (name, source) in [
+        ("helpers", include_str!("../shaders/helpers.wgsl")),
+        (
+            "filters_drop_shadow",
+            include_str!("../shaders/filters_drop_shadow.wgsl"),
+        ),
+        ("filter", include_str!("../shaders/filter.wgsl")),
+    ] {
+        assert!(
+            !source.contains("textureSampleLevel("),
+            "{name} samples bilinearly outside `sample_region_bilinear`"
         );
     }
 }
@@ -1330,6 +1383,339 @@ fn a_drop_shadow_that_composites_the_original_is_refused_by_name() {
     );
 }
 
+/// The one dispatch three sites share answers with the filter the recording
+/// actually carries, rather than each site trying a blur and then a drop
+/// shadow in a pair of its own.
+#[test]
+fn the_shared_kind_dispatch_names_the_filter_the_recording_carries() {
+    let blurred = blurred_layer(8.0, 0.5);
+    assert!(
+        matches!(
+            served_filter(0, &blurred.layers[0].kind),
+            Ok(ServedFilter::Blur(_))
+        ),
+        "a recorded Gaussian blur is dispatched as one"
+    );
+
+    let shadowed = drop_shadow_layer((3.0, -4.0), 8.0, RED, 0.5);
+    assert!(
+        matches!(
+            served_filter(0, &shadowed.layers[0].kind),
+            Ok(ServedFilter::DropShadow(_))
+        ),
+        "a recorded shadow-only drop shadow is dispatched as one"
+    );
+
+    // And a layer that carries no filter at all is refused rather than
+    // dispatched to either arm.
+    let mut plain = recorder();
+    plain.push_layer(layer(0.5), None);
+    draw(&mut plain, 64, 64, 32);
+    plain.pop_layer();
+    assert!(served_filter(0, &plain.layers[0].kind).is_err());
+}
+
+/// A refusal names the recorded primitive's *own* fault.
+///
+/// The three sites used to try a blur and then a drop shadow, so a blur with a
+/// σ the engine does not serve was reported as "not a shadow-only drop shadow"
+/// — the second attempt's complaint about the first attempt's filter. The
+/// shared dispatch keys on the primitive first, so the reason names the σ.
+#[test]
+fn a_served_filters_own_fault_is_what_the_refusal_names() {
+    let mut recorder = recorder();
+    let hostile = Filter::from_primitive(FilterPrimitive::GaussianBlur {
+        std_deviation: MAX_BLUR_SIGMA * 2.0,
+        edge_mode: EdgeMode::None,
+    });
+    recorder.push_layer(
+        layer(0.5),
+        Some(vello_common::filter::FilterData::new(
+            hostile,
+            Affine::IDENTITY,
+        )),
+    );
+    draw(&mut recorder, 64, 64, 32);
+    recorder.pop_layer();
+
+    let reason = escalation(&recorder);
+    assert!(
+        reason.contains('σ') && reason.contains("Gaussian blur"),
+        "the reason has to name the blur's own σ, not the drop shadow it also is not: {reason}"
+    );
+}
+
+/// Every edge mode but the one the kernels implement is refused by name.
+///
+/// `Wrap` and `Mirror` would have to address the region's opposite or
+/// reflected texels and `Duplicate` its edge ones, while every kernel here
+/// reads transparent black outside the region unconditionally — which is
+/// `EdgeMode::None` and nothing else. Rendering one of the other three as
+/// `None` and calling it that filter is the silent-wrong-pixels answer this
+/// tier does not give.
+#[test]
+fn an_edge_mode_the_kernels_do_not_implement_is_refused_by_name() {
+    for mode in [EdgeMode::Duplicate, EdgeMode::Wrap, EdgeMode::Mirror] {
+        for (what, filter) in [
+            (
+                "blur",
+                Filter::from_primitive(FilterPrimitive::GaussianBlur {
+                    std_deviation: 8.0,
+                    edge_mode: mode,
+                }),
+            ),
+            (
+                "drop shadow",
+                Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+                    dx: 3.0,
+                    dy: -4.0,
+                    std_deviation: 8.0,
+                    color: RED,
+                    edge_mode: mode,
+                }),
+            ),
+        ] {
+            let mut recorder = recorder();
+            recorder.push_layer(
+                layer(0.5),
+                Some(vello_common::filter::FilterData::new(
+                    filter,
+                    Affine::IDENTITY,
+                )),
+            );
+            draw(&mut recorder, 64, 64, 32);
+            recorder.pop_layer();
+
+            let reason = escalation(&recorder);
+            assert!(
+                reason.contains(&format!("{mode:?}")),
+                "a {what} with edge mode {mode:?} has to be refused by that mode's own name: \
+                 {reason}"
+            );
+        }
+    }
+
+    // And the mode the engine does serve is not caught by the same gate.
+    assert_eq!(
+        SERVED_EDGE_MODE,
+        EdgeMode::None,
+        "the kernels read transparent black outside the region, which is `EdgeMode::None`"
+    );
+    assert!(served_filter(0, &blurred_layer(8.0, 0.5).layers[0].kind).is_ok());
+}
+
+// -----------------------------------------------------------------------------
+// The device-space σ gate
+// -----------------------------------------------------------------------------
+
+/// A hand-built recording carrying `filter` under `transform`, the shape a
+/// recording the engine's own recorder never produced can still take (E17).
+///
+/// Two things are deliberate about how the hostile transform gets in.
+///
+/// It is written onto a `FilterData` built under the identity rather than
+/// passed to `FilterData::new`, because that constructor snaps the filter's own
+/// expansion under the transform and `debug_assert!`s that the result contains
+/// the origin — a NaN coefficient trips the assertion there, upstream of any
+/// gate this engine owns. And the layer is left empty, because `pop_layer`
+/// expands a *non-empty* filter layer's bbox and snaps it, where
+/// `vello_common`'s `RectU16::snap_to_tile_coordinates` unwraps a
+/// `checked_next_multiple_of` that a saturated expansion overflows.
+///
+/// Neither is what this gate is about, and neither is reachable through
+/// [`push_filter_layer`], which refuses both shapes before recording anything.
+/// What is left is exactly the E17 case: a recorded `kind` the engine's own
+/// recorder never produced, which is all [`served_filter`] reads.
+fn recorded_filter(filter: Filter, transform: Affine) -> CommandRecorder<EngineDraw> {
+    let mut filter_data = vello_common::filter::FilterData::new(filter, Affine::IDENTITY);
+    filter_data.transform = transform;
+
+    let mut recorder = recorder();
+    recorder.push_layer(layer(0.5), Some(filter_data));
+    recorder.pop_layer();
+    recorder
+}
+
+/// A blur of `sigma` recorded under `transform`, with nothing else in the way.
+fn recorded_blur(sigma: f32, transform: Affine) -> CommandRecorder<EngineDraw> {
+    recorded_filter(
+        Filter::from_primitive(FilterPrimitive::GaussianBlur {
+            std_deviation: sigma,
+            edge_mode: SERVED_EDGE_MODE,
+        }),
+        transform,
+    )
+}
+
+/// The σ this engine bounds is the *device-space* one, and it is computed the
+/// way `vello_common` computes it.
+///
+/// The gate would be worthless if the two drifted: `PreparedFilter::new` scales
+/// σ by `transform_blur_params` before handing it to the planner, so a bound
+/// taken over any other quantity would bound something the planner never sees.
+/// That function is `pub(crate)` upstream, so this pins the recomputation
+/// against the prepared blur's own `std_deviation` rather than against a
+/// second copy of the formula.
+#[test]
+fn the_device_space_sigma_is_the_one_the_reference_prepares_with() {
+    for (sigma, transform) in [
+        (8.0_f32, Affine::IDENTITY),
+        (8.0, Affine::scale(2.0)),
+        (8.0, Affine::scale(0.25)),
+        (32.0, Affine::scale_non_uniform(3.0, 1.0)),
+        (2.0, Affine::rotate(0.7) * Affine::scale(5.0)),
+        (8.0, Affine::translate((40.0, -12.0))),
+    ] {
+        let recording = recorded_blur(sigma, transform);
+        let served = served_blur(0, &recording.layers[0].kind)
+            .expect("a σ and a transform inside the ceiling serve");
+
+        assert_eq!(
+            served.std_deviation,
+            device_blur_sigma(sigma, transform),
+            "σ {sigma} under {transform:?}: the engine's own device-space σ must be the one \
+             `PreparedFilter::new` prepared with"
+        );
+    }
+}
+
+/// A transform coefficient that is not finite is refused before the planner
+/// ever sees the σ it would scale.
+///
+/// This is the hang, stated as a refusal: `transform_blur_params` would carry
+/// an infinite coefficient into `plan_decimated_blur`, whose
+/// `while remaining_variance > 4.0 { (v - 1.5) * 0.25 }` never leaves an
+/// infinite variance. The case is deliberately written so the planner is never
+/// invoked with the hostile value at all — a test that reproduced the hang by
+/// calling it would not complete.
+#[test]
+fn a_non_finite_transform_coefficient_is_refused_before_the_planner_sees_it() {
+    for coeffs in [
+        [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0],
+        [1.0, f64::INFINITY, 0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, f64::NEG_INFINITY, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, f64::NAN, 0.0, 0.0],
+    ] {
+        let transform = Affine::new(coeffs);
+        // A σ well inside the recorded bound, so the *transform* is the only
+        // thing this case can be refused for.
+        let recording = recorded_blur(8.0, transform);
+
+        let refusal = served_filter(0, &recording.layers[0].kind)
+            .expect_err("a non-finite transform coefficient is refused");
+        assert!(
+            refusal.contains("non-finite transform"),
+            "the reason has to name the transform: {refusal}"
+        );
+
+        // And the whole frame is skipped rather than scheduled — the refusal
+        // reaches the frame path, not just the gate.
+        assert!(escalation(&recording).contains("non-finite transform"));
+    }
+}
+
+/// A finite transform that scales a served σ past the ceiling is refused too.
+///
+/// The recorded σ alone is not the quantity that reaches the planner: a σ of 8
+/// under a 10⁶ scale is a device-space σ of 8×10⁶, which plans tens of
+/// decimations rather than the four the bound leaves room for.
+#[test]
+fn a_finite_transform_that_scales_sigma_past_the_ceiling_is_refused() {
+    let transform = Affine::scale(1.0e6);
+    let recording = recorded_blur(8.0, transform);
+
+    let refusal = served_filter(0, &recording.layers[0].kind)
+        .expect_err("a device-space σ past the ceiling is refused");
+    assert!(
+        refusal.contains("device-space σ"),
+        "the reason has to name the scaled σ rather than the recorded one: {refusal}"
+    );
+    assert!(escalation(&recording).contains("device-space σ"));
+
+    // The recorder refuses it on the same terms, so a caller going through the
+    // engine's own entry point never records it in the first place.
+    let mut recorder = recorder();
+    assert!(matches!(
+        push_filter_layer(
+            &mut recorder,
+            layer(0.5),
+            LayerFilter::Blur { sigma: 8.0 },
+            transform,
+        ),
+        Err(EngineError::InvalidGeometry)
+    ));
+    assert!(recorder.layers.is_empty());
+}
+
+/// The bound is inclusive, and it is taken at the exact boundary rather than
+/// near it.
+///
+/// A device-space σ of exactly [`MAX_BLUR_SIGMA`] serves; the next σ the same
+/// transform scales past it does not. Both halves matter: a gate that refused
+/// the boundary would shrink the served set, and one that admitted anything
+/// past it would leave the planner reachable.
+#[test]
+fn the_device_space_sigma_bound_is_inclusive_and_exact_at_its_boundary() {
+    let transform = Affine::scale(2.0);
+    let at_boundary = MAX_BLUR_SIGMA / 2.0;
+    assert_eq!(
+        device_blur_sigma(at_boundary, transform),
+        MAX_BLUR_SIGMA,
+        "the case has to sit on the boundary exactly, not near it"
+    );
+
+    let served = served_blur(0, &recorded_blur(at_boundary, transform).layers[0].kind)
+        .expect("a device-space σ of exactly the ceiling is served");
+    assert_eq!(served.std_deviation, MAX_BLUR_SIGMA);
+
+    let past = f32::from_bits(at_boundary.to_bits() + 1);
+    assert!(
+        device_blur_sigma(past, transform) > MAX_BLUR_SIGMA,
+        "the next representable σ has to cross the boundary"
+    );
+    assert!(
+        served_filter(0, &recorded_blur(past, transform).layers[0].kind).is_err(),
+        "one ulp past the boundary is refused"
+    );
+
+    // The recorded-σ half of the same bound, unchanged: an identity transform
+    // leaves the two spaces equal, so `MAX_BLUR_SIGMA` itself still serves.
+    assert!(
+        served_filter(
+            0,
+            &recorded_blur(MAX_BLUR_SIGMA, Affine::IDENTITY).layers[0].kind
+        )
+        .is_ok()
+    );
+}
+
+/// A drop shadow's own blur is held to the same device-space bound.
+#[test]
+fn a_drop_shadows_sigma_is_bounded_in_device_space_too() {
+    let hostile = |transform| {
+        recorded_filter(
+            Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+                dx: 3.0,
+                dy: -4.0,
+                std_deviation: 8.0,
+                color: RED,
+                edge_mode: SERVED_EDGE_MODE,
+            }),
+            transform,
+        )
+    };
+
+    assert!(served_filter(0, &hostile(Affine::IDENTITY).layers[0].kind).is_ok());
+    assert!(served_filter(0, &hostile(Affine::scale(1.0e6)).layers[0].kind).is_err());
+    assert!(
+        served_filter(
+            0,
+            &hostile(Affine::new([f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0])).layers[0].kind
+        )
+        .is_err()
+    );
+}
+
 /// A filter layer inside another layer is refused rather than rendered from
 /// bounds that would clip it: `vello_common` places one in its parent by
 /// undoing a source shift the reference renderer applies to a filter layer's
@@ -1486,8 +1872,8 @@ fn a_blurred_layer_with_a_blend_mode_is_refused_on_the_blend() {
 /// A power of two so a page read-back's `bytes_per_row` needs no padding, and
 /// larger than [`FILTER_REGION`] on both axes, exactly as a pooled page is — the
 /// pool quantizes a request up to its own 256-texel keys and never sizes a page
-/// to the layer. The slack is not cosmetic: it is what makes a tap that reaches
-/// *past* the region read a texel the round's own clear already zeroed.
+/// to the layer. The slack is not cosmetic: it is the room a decimated pass's
+/// own `FILTER_ATLAS_PADDING`-wide overdraw is written into.
 const FILTER_PAGE: u32 = 512;
 
 /// The filter layer's own extent inside those pages, at the page origin exactly
@@ -1500,21 +1886,30 @@ const FILTER_REGION: (u32, u32) = (448, 384);
 /// The opaque rectangle the blur is measured on, inset inside
 /// [`FILTER_REGION`] on every side.
 ///
-/// The inset is what lets the comparison be exact rather than approximate, and
-/// it is sized rather than picked. The one place the two tiers can disagree is
-/// a tap that reaches past the region's *low* edge: the page extends past the
-/// high edges, so a tap there reads a cleared texel exactly as the reference
-/// reads transparent black, but a negative coordinate is clamped to the region's
-/// own edge texel instead. That is harmless as long as the edge texel is itself
-/// transparent — at every level of the pyramid.
+/// The 160-texel margin is what lets the deepest plan σ 32 produces spread
+/// without reaching either low edge: each halving takes it to roughly half
+/// (160 → 79 → 39 → 19 → 9), the coarsest convolution's widest tap is
+/// `MAX_KERNEL_SIZE / 2` = 6, and each doubling back restores it faster than
+/// the reconstruction spreads ink into it. That keeps this case an
+/// interior-only comparison, which is what makes the tolerances below a
+/// rounding budget rather than an edge-behaviour one.
 ///
-/// A 160-texel transparent margin survives the deepest plan σ 32 produces with
-/// room to spare: each halving takes it to roughly half (160 → 79 → 39 → 19 →
-/// 9), the coarsest convolution's widest tap is `MAX_KERNEL_SIZE / 2` = 6, and
-/// each doubling back restores it faster than the reconstruction spreads ink
-/// into it. So the low edges stay transparent throughout and no border has to be
-/// excluded from the comparison.
+/// It is no longer what makes the comparison *sound*. A tap past the region's
+/// low edge used to be clamped to the region's own edge texel, so the case
+/// depended on that texel being transparent at every level of the pyramid; the
+/// kernels now bound their taps against the region and read transparent black
+/// outside it either way. [`FILTER_RECT_AT_ORIGIN`] is the case that measures
+/// that directly, with no margin at all.
 const FILTER_RECT: (u32, u32, u32, u32) = (160, 160, 128, 64);
+
+/// The opaque rectangle the *origin* case is measured on: flush against the
+/// region's own low edges, with no transparent margin on either.
+///
+/// The shape a full-screen backdrop blur takes — a filter layer whose expanded
+/// bounds were cut off at device zero, so the 3σ margin the expansion would
+/// have added on the near side is simply not there and the region's first row
+/// and column are the layer's own opaque content.
+const FILTER_RECT_AT_ORIGIN: (u32, u32, u32, u32) = (0, 0, 128, 64);
 
 /// Bytes one page texel occupies at `INTERMEDIATE_FORMAT`.
 const PAGE_TEXEL_BYTES: u32 = 4;
@@ -2358,8 +2753,7 @@ fn a_zero_sigma_blur_returns_the_layer_unchanged_on_the_gpu() {
 /// plausible image at σ 2 (two passes, both of them the ones that matter), so
 /// the decimated plan is the one to check: after the two halvings of σ 8 the
 /// region really is a quarter of the texels on each axis, and the padding
-/// border around it really is transparent — which is the invariant the kernels'
-/// bounds-check-free sampling rests on.
+/// border the quad overdraws around it really is transparent.
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
 fn a_decimated_pass_writes_its_own_extent_and_clears_the_border_around_it() {
@@ -2520,9 +2914,8 @@ fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver(
 ///
 /// Small enough that even σ 32's own 3σ ≈ 96px spread, plus this shift, stays
 /// inside [`FILTER_RECT`]'s ~160px margin from [`FILTER_REGION`]'s edge on
-/// every side (see those constants' own docs) — the same margin the plain
-/// blur cases rely on to keep every tap reading transparent padding rather
-/// than a stale texel.
+/// every side (see those constants' own docs) — the same margin that keeps the
+/// plain blur cases an interior-only comparison.
 const DROP_SHADOW_OFFSET: (f32, f32) = (16.0, -12.0);
 
 /// The shadow's own colour: opaque blue, deliberately not [`FILTER_RECT`]'s
@@ -2681,4 +3074,122 @@ fn a_zero_sigma_zero_offset_drop_shadow_recolors_the_sources_own_shape_on_the_gp
 
     let error = drain_error_scope(&harness.device, scope);
     assert!(error.is_none(), "the drop-shadow passes raised {error:?}");
+}
+
+// -----------------------------------------------------------------------------
+// On real hardware: the origin invariant
+// -----------------------------------------------------------------------------
+
+/// The Major this card exists for, measured at the origin: a filter layer whose
+/// region is flush against its page's own low edges still reads transparent
+/// past its near edge.
+///
+/// Every other hardware case in this file leaves [`FILTER_RECT`]'s 160-texel
+/// margin between the ink and the region's low edges, so the sampler's
+/// `ClampToEdge` behaviour there replicates a *transparent* texel and no
+/// disagreement can show. That is not the shape a full-screen backdrop blur
+/// takes: the layer's expanded bounds are cut off at device zero, the 3σ margin
+/// on the near side is simply absent, and the region's first row and column are
+/// the layer's own opaque content ([`FILTER_RECT_AT_ORIGIN`]). Replicating
+/// those into the taps that reach past them smears the blur along both low
+/// edges, brightening them towards the unblurred source instead of fading them
+/// out.
+///
+/// Two independent claims, because the reference could in principle be wrong
+/// in the same direction:
+///
+/// - the whole region matches [`cpu_blur`] — whose [`Image::sample`] is
+///   `EdgeMode::None`, transparent past every edge — inside the same
+///   eight-bit-rounding budget the inset cases are measured at; and
+/// - the region's own edge column is *substantially dimmer* than its interior,
+///   which is what losing half the kernel's neighbourhood means and what edge
+///   replication would have hidden. No reference is consulted for that half.
+///
+/// Measured on the pinned T400 runner (NVIDIA 610.43.03, Vulkan): worst
+/// per-channel diff 1 at σ 2, 2 at σ 8 and 3 at σ 32, means 0.00003 / 0.020 /
+/// 0.046 — the same order as the inset cases' own, inside the same budget.
+/// Edge-column alpha against the interior's runs 153 vs 255, 82 vs 255 and 30
+/// vs 161. With the region bound removed from `sample_region_bilinear` the same
+/// case fails at σ 2 by 163 at (0, 0) while every inset case above stays at its
+/// recorded numbers to the digit — which is both the negative control for this
+/// case and the evidence that the bound changes nothing in the interior.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_blur_at_the_regions_own_origin_still_reads_transparent_past_its_near_edge() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT_AT_ORIGIN,
+        [255.0, 0.0, 0.0, 255.0],
+    );
+
+    for sigma in SIGMAS {
+        let blur = GaussianBlur::new(sigma, SERVED_EDGE_MODE);
+        let steps = blur_passes(
+            &blur,
+            SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+        );
+
+        harness.upload_source(&source);
+        let result = harness.run(&blur, &steps);
+        let gpu = harness.read_region(result);
+        let cpu = cpu_blur(&source, &blur);
+
+        let (worst, x, y) = gpu.worst_diff(&cpu, 0);
+        let mean = gpu.mean_diff(&cpu, 0);
+        println!(
+            "origin σ {sigma}: {} passes, worst per-channel diff {worst} at ({x}, {y}), mean {mean}",
+            steps.len()
+        );
+        assert!(
+            worst <= GPU_CPU_TOLERANCE,
+            "σ {sigma}: a blur at the region's own origin differs from `EdgeMode::None` by \
+             {worst} at ({x}, {y}), past the {GPU_CPU_TOLERANCE} eight-bit-rounding budget — a \
+             tap past the near edge read the region's own content instead of transparent black"
+        );
+        assert!(
+            mean <= GPU_CPU_MEAN_TOLERANCE,
+            "σ {sigma}: mean per-channel difference {mean} past {GPU_CPU_MEAN_TOLERANCE}"
+        );
+
+        // The reference-free half. The rectangle is 128 wide and 64 tall at the
+        // origin, so at σ 2, 8 and 32 alike its own middle row (y = 32) is more
+        // than 3σ from the far edges on the axis being measured while column 0
+        // sits exactly on the near one.
+        let interior_x = i64::from(FILTER_RECT_AT_ORIGIN.2) / 2;
+        let middle_y = i64::from(FILTER_RECT_AT_ORIGIN.3) / 2;
+        let edge = gpu.sample(0, middle_y);
+        let interior = gpu.sample(interior_x, middle_y);
+
+        println!(
+            "origin σ {sigma}: edge alpha {} vs interior {}",
+            edge[3], interior[3]
+        );
+        assert!(
+            interior[3] > 32.0,
+            "σ {sigma}: the interior has to be inked for the comparison below to mean anything: \
+             {interior:?}"
+        );
+        // Half the kernel's weight falls outside the region at the edge, so the
+        // edge texel is about half the interior's. Edge replication would put it
+        // at essentially the whole of it; three quarters separates the two
+        // without pinning a Gaussian's exact half-integral.
+        assert!(
+            edge[3] < 0.75 * interior[3],
+            "σ {sigma}: the region's own edge column is {} against an interior of {}, which is \
+             what replicating the edge texel into the taps past it looks like — the near-side \
+             taps must read transparent black",
+            edge[3],
+            interior[3]
+        );
+    }
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the filter passes raised {error:?}");
 }

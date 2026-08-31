@@ -164,7 +164,7 @@ use crate::config;
 use crate::error::EngineError;
 use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
 use crate::filters::drop_shadow::GpuDropShadow;
-use crate::filters::{FilterStep, served_blur, served_drop_shadow};
+use crate::filters::{FilterStep, ServedFilter, served_filter};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
@@ -2047,9 +2047,9 @@ impl Scratch {
     ///
     /// `None` for an ordinary round, and also for the two shapes that cannot
     /// occur: a filter round with no page (the scheduler always gives one a
-    /// page) and a recorded kind neither [`served_blur`] nor
-    /// [`served_drop_shadow`] recognises (the scheduler refuses one before it
-    /// plans a round). Both answer by leaving the round's pass unissued — its
+    /// page) and a recorded kind [`served_filter`] does not recognise (the
+    /// scheduler refuses one before it plans a round). Both answer by leaving
+    /// the round's pass unissued — its
     /// page is still cleared — rather than by asserting (E17).
     fn plan_filter(&mut self, frame: &CompiledFrame, round: &Round) -> Option<FilterPlan> {
         let pass = round.filter_pass()?;
@@ -2079,14 +2079,13 @@ impl Scratch {
         let index = match self.filter_layers.iter().position(|id| *id == layer) {
             Some(index) => index,
             None => {
-                // Tried in the same order every filter-recognising site in
-                // this crate tries them (`schedule::layer_role`/
-                // `filter_rounds`): a blur first, a shadow-only drop shadow
-                // otherwise.
-                let block = match served_blur(layer, kind) {
-                    Ok(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
-                    Err(_) => {
-                        let shadow = served_drop_shadow(layer, kind).ok()?;
+                // The one dispatch every filter-recognising site in this crate
+                // shares (`schedule::layer_role`/`filter_rounds`), so the block
+                // packed here is for the same filter the scheduler planned the
+                // passes of.
+                let block = match served_filter(layer, kind).ok()? {
+                    ServedFilter::Blur(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
+                    ServedFilter::DropShadow(shadow) => {
                         GpuFilterData::from(GpuDropShadow::from(&shadow))
                     }
                 };
