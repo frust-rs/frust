@@ -21,7 +21,9 @@
 //! `frust_scene` and `std`, so the copy compiled here is the same code the
 //! crate compiles, not a stand-in for it. The tier-dependent half — which page
 //! geometry an adapter gets — *is* reachable publicly, through
-//! `frust_engine::AtlasBudget`, and is pinned that way below.
+//! `frust_engine::AtlasBudget`, and is pinned that way below. (`kurbo` joins
+//! that list because the policy reads a run's transform: the scale `glifo`
+//! absorbs into the font size is what it keys, so the guard has to see it.)
 //!
 //! That the policy allocates through a *borrowed* `glifo::ImageCache` rather
 //! than one of its own is what keeps it nameable here at all: the shared
@@ -67,8 +69,8 @@ mod atlas_policy;
 
 use atlas_policy::{
     AtlasPass, AtlasPolicy, EVICTION_FREQUENCY, GlyphRoute, MAX_CACHED_FONT_SIZE, MAX_ENTRY_AGE,
-    OutlineReason, RunKey, RunRoute, SETTLE_FRAMES, SIZE_QUANTUM, glyph_cache_config,
-    quantize_font_size,
+    OutlineReason, RunKey, RunRoute, SETTLE_FRAMES, SIZE_QUANTUM, absorbed_scale, device_font_size,
+    glyph_cache_config, glyph_entry_ceiling, quantize_font_size,
 };
 
 /// Noto Sans, subsetted to Latin plus combining marks — the same bundled face
@@ -101,13 +103,23 @@ fn next_font() -> u64 {
     NEXT_FONT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A run identity at `size`, on its own private font.
+/// A run identity at `size`, on its own private font, drawn unscaled.
+///
+/// The identity transform is the ordinary case and keeps the device size equal
+/// to the asked-for one; [`scaled_run_key`] is what the transform cases use.
 fn run_key(font_id: u64, size: f32) -> RunKey {
+    scaled_run_key(font_id, size, Affine::IDENTITY)
+}
+
+/// A run identity at `size` drawn under `transform`, on its own private font.
+fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey {
     RunKey {
         font_id,
         font_index: 0,
         font_size: size,
+        transform,
         hinted: false,
+        color_font: false,
         context_color: BLACK,
     }
 }
@@ -185,13 +197,22 @@ fn collect_hello(engine: &mut AtlasPolicy, font_id: u64, size: f32) -> RunRoute 
 /// `images` is the shared allocator, handed to the two calls that allocate and
 /// evict — the same pairing the engine makes between the policy and the image
 /// residency's cache.
+///
+/// A *serviced* frame: both acknowledgements are made, exactly as
+/// `EngineRenderer::encode` makes them once the writes and the replay pass have
+/// really reached the array. That matters to eviction — the policy defers
+/// `glifo`'s ageing pass while a replay is outstanding — so a helper that
+/// skipped them would model a renderer whose every frame was refused. The
+/// unserviced case has its own cases below rather than being the default here.
 fn frame(engine: &mut AtlasPolicy, images: &mut ImageCache, runs: &[(u64, f32)]) -> AtlasPass {
     engine.begin_frame();
     for (font_id, size) in runs {
         collect_hello(engine, *font_id, *size);
     }
     let pass = engine.build(images, raster);
+    engine.acknowledge_clears();
     engine.end_frame(images);
+    engine.acknowledge_replay();
     pass
 }
 
@@ -261,6 +282,223 @@ fn a_size_that_cannot_be_rasterized_is_refused_rather_than_keyed() {
         0,
         "a size that was never usable must not enter the animation tracker"
     );
+}
+
+/// The absorption rule, restated here and checked against the shapes `glifo`
+/// itself accepts and refuses.
+///
+/// A transform on the accepted side has its scale folded into the font size, so
+/// the size the guard tracks and the size the key is built from are the same
+/// number. One on the refused side is not cached at all — and, more to the
+/// point, is never even *looked up*, since `glifo` probes with an unabsorbed
+/// key before it discovers it will not cache the run.
+#[test]
+fn the_size_a_run_is_keyed_at_is_its_font_size_with_the_transforms_scale_in_it() {
+    // Absorbed: a uniform positive scale, with or without a translation.
+    assert_eq!(device_font_size(16.0, Affine::IDENTITY), Some(16.0));
+    assert_eq!(device_font_size(16.0, Affine::scale(2.0)), Some(32.0));
+    assert_eq!(
+        device_font_size(16.0, Affine::translate((40.0, -3.0)) * Affine::scale(0.5)),
+        Some(8.0),
+        "a translation moves a run, it does not resize it"
+    );
+    assert_eq!(absorbed_scale(Affine::scale(3.0)), Some(3.0));
+
+    // Refused: everything `glifo` leaves in the draw transform instead.
+    for transform in [
+        Affine::rotate(0.4),
+        Affine::scale_non_uniform(2.0, 3.0),
+        Affine::scale(-1.0),
+        Affine::scale_non_uniform(1.0, -1.0),
+        Affine::skew(0.3, 0.0),
+        Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]),
+    ] {
+        assert_eq!(
+            absorbed_scale(transform),
+            None,
+            "{transform:?} is not a scale `glifo` absorbs, so no glyph drawn \
+             through it may reach — or read — the cache"
+        );
+    }
+
+    // And a run drawn through one of those is routed to outlines, rather than
+    // being offered a lookup that could hit a unit-scale entry and draw it flat.
+    let images = cache();
+    let mut engine = policy(&images, false);
+    engine.begin_frame();
+    assert_eq!(
+        engine
+            .classify_run(&scaled_run_key(next_font(), 16.0, Affine::rotate(0.4)))
+            .outline_reason(),
+        Some(OutlineReason::TransformUncacheable)
+    );
+}
+
+/// A container scaling while its `font_size` holds still is a size animation.
+///
+/// The whole point of measuring in device space: nothing about the display list
+/// changes across these frames, and every one of them is nevertheless a fresh
+/// cache key underneath.
+#[test]
+fn a_scale_that_moves_reads_as_an_animation_though_the_font_size_never_does() {
+    let images = cache();
+    let mut engine = policy(&images, false);
+    let font = next_font();
+
+    // The first appearance is cached, as any first appearance is.
+    engine.begin_frame();
+    assert!(
+        engine
+            .classify_run(&scaled_run_key(font, 16.0, Affine::scale(1.0)))
+            .atlas()
+            .is_some()
+    );
+
+    // Then the container starts scaling. The size the display list states is
+    // identical on every one of these frames.
+    let mut animating = 0;
+    for index in 1..40_u64 {
+        engine.begin_frame();
+        let scale = 1.0 + f64::from(index as u32) * 0.05;
+        let route = engine.classify_run(&scaled_run_key(font, 16.0, Affine::scale(scale)));
+        if route.outline_reason() == Some(OutlineReason::SizeAnimating) {
+            animating += 1;
+        }
+    }
+    assert_eq!(
+        animating, 39,
+        "every frame of a moving scale must read as animating"
+    );
+
+    // The ceiling is a device-space one too. The asked-for size is comfortably
+    // under it and the size actually rasterized is well over.
+    let asked = MAX_CACHED_FONT_SIZE / 2.0;
+    engine.begin_frame();
+    assert_eq!(
+        engine
+            .classify_run(&scaled_run_key(next_font(), asked, Affine::scale(3.0)))
+            .outline_reason(),
+        Some(OutlineReason::SizeTooLarge),
+        "the ceiling has to be compared against the size `glifo` rasterizes at, \
+         not the one the display list asked for"
+    );
+    engine.begin_frame();
+    assert!(
+        engine
+            .classify_run(&scaled_run_key(next_font(), asked, Affine::IDENTITY))
+            .atlas()
+            .is_some(),
+        "fixture precondition: the same size unscaled is well inside the ceiling"
+    );
+}
+
+/// Glyph residency is bounded independently of the LRU, so it cannot spend the
+/// allocator the images are packed into.
+#[test]
+fn the_atlas_route_closes_once_glyph_residency_reaches_its_ceiling() {
+    // The ceiling scales with the array and is clamped at both ends.
+    // Small enough that the ceiling clamps to its floor, and roomy enough that
+    // the *packer* is not what refuses first — the case's subject is the
+    // policy's own bound, not `vello_common`'s.
+    let mut small = pages();
+    small.atlas_size = (256, 256);
+    small.max_atlases = 1;
+    assert_eq!(
+        glyph_entry_ceiling(small),
+        256,
+        "a tiny atlas still has to cache something, or the bound would turn the \
+         cache off on exactly the devices it was budgeted for"
+    );
+
+    let mobile = AtlasBudget::MOBILE.config();
+    let desktop = AtlasBudget::DESKTOP.config();
+    assert!(
+        glyph_entry_ceiling(mobile) < glyph_entry_ceiling(desktop),
+        "a bigger array admits more glyphs"
+    );
+    assert!(
+        glyph_entry_ceiling(desktop) <= 65_536,
+        "the entry map's own bookkeeping is not free"
+    );
+
+    // And the route really closes: fill the ceiling, then ask for one more.
+    let mut images = ImageCache::new_with_config(small);
+    let mut engine = policy(&images, false);
+    let ceiling = engine.max_entries();
+
+    // Filled in a handful of wide frames rather than one glyph at a time: the
+    // LRU reaps anything unseen for `MAX_ENTRY_AGE` frames, so a slow fill
+    // would age its own head off and never reach any ceiling at all.
+    let font = next_font();
+    let mut next_glyph = 0_u32;
+    for _ in 0..8 {
+        engine.begin_frame();
+        let Some(run) = engine.classify_run(&run_key(font, 16.0)).atlas().copied() else {
+            break;
+        };
+        for _ in 0..64 {
+            // A fresh glyph id each time, so every one is a fresh key.
+            engine.collect_glyph(&run, next_glyph, 0.0);
+            next_glyph += 1;
+        }
+        // One texel apiece, so the *packer* is never what refuses.
+        engine.build(&mut images, |_| {
+            Some(RasterMetrics {
+                width: 1,
+                height: 1,
+                bearing_x: 0,
+                bearing_y: 1,
+            })
+        });
+        engine.acknowledge_clears();
+        engine.end_frame(&mut images);
+        engine.acknowledge_replay();
+        if engine.entry_count() >= ceiling {
+            break;
+        }
+    }
+
+    assert!(
+        engine.entry_count() >= ceiling,
+        "fixture precondition: residency reaches the ceiling (got {})",
+        engine.entry_count()
+    );
+    engine.begin_frame();
+    assert_eq!(
+        engine.classify_run(&run_key(font, 16.0)).outline_reason(),
+        Some(OutlineReason::ResidencyFull),
+        "a full glyph residency degrades to outlines rather than taking the \
+         images' share of the shared allocator"
+    );
+}
+
+/// A colour face is refused the atlas route outright, whatever it is drawn at.
+#[test]
+fn a_face_carrying_colour_glyphs_is_never_offered_the_atlas() {
+    let images = cache();
+    let mut engine = policy(&images, false);
+    let font = next_font();
+
+    engine.begin_frame();
+    let mut key = run_key(font, 16.0);
+    key.color_font = true;
+    assert_eq!(
+        engine.classify_run(&key).outline_reason(),
+        Some(OutlineReason::ColorFont)
+    );
+    assert_eq!(
+        engine.tracked_sizes(),
+        0,
+        "a face that can never take the route is not worth tracking sizes for"
+    );
+
+    // The same face at a size the guard would otherwise have cached on sight.
+    engine.begin_frame();
+    assert_eq!(
+        engine.classify_run(&key).outline_reason(),
+        Some(OutlineReason::ColorFont)
+    );
+    assert_eq!(engine.entry_count(), 0);
 }
 
 #[test]
@@ -992,7 +1230,7 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
             .collect(),
     };
 
-    let key = RunKey::for_run(&run, false, BLACK);
+    let key = RunKey::for_run(&run, Affine::IDENTITY, false, false, BLACK);
     assert_eq!(key.font_id, font.font().data.id());
     assert_eq!(key.font_index, 0);
     assert_eq!(key.font_size, 18.0);
@@ -1008,14 +1246,23 @@ fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
         transform: Affine::translate((0.0, 40.0)),
         glyphs: Vec::new(),
     };
-    assert_eq!(RunKey::for_run(&second, false, BLACK).font_id, key.font_id);
+    assert_eq!(
+        RunKey::for_run(&second, Affine::IDENTITY, false, false, BLACK).font_id,
+        key.font_id
+    );
 
     // Hinting is part of the key: a hinted outline is a different bitmap.
     let mut images = cache();
     let mut engine = policy(&images, false);
     engine.begin_frame();
-    let plain = engine.classify_run(&RunKey::for_run(&run, false, BLACK));
-    let hinted = engine.classify_run(&RunKey::for_run(&run, true, BLACK));
+    let plain = engine.classify_run(&RunKey::for_run(
+        &run,
+        Affine::IDENTITY,
+        false,
+        false,
+        BLACK,
+    ));
+    let hinted = engine.classify_run(&RunKey::for_run(&run, Affine::IDENTITY, true, false, BLACK));
     let plain = plain.atlas().expect("a first appearance is cached");
     let hinted = hinted.atlas().expect("hinting does not change the size");
     assert_ne!(
@@ -1083,13 +1330,25 @@ fn emoji_font() -> FontHandle {
         .clone()
 }
 
-/// A scene drawing `ids` from `font` at `size`, in `brush`.
+/// A scene drawing `ids` from `font` at `size`, in `brush`, placed on the
+/// baseline the wired cases use.
 fn text_scene(font: FontHandle, ids: &[u32], size: f32, brush: Brush) -> Scene {
+    text_scene_at(font, ids, size, brush, Affine::translate((8.0, 44.0)))
+}
+
+/// A scene drawing `ids` from `font` at `size`, in `brush`, under `transform`.
+fn text_scene_at(
+    font: FontHandle,
+    ids: &[u32],
+    size: f32,
+    brush: Brush,
+    transform: Affine,
+) -> Scene {
     let run = GlyphRun {
         font,
         font_size: size,
         brush,
-        transform: Affine::translate((8.0, 44.0)),
+        transform,
         glyphs: ids
             .iter()
             .enumerate()
@@ -1113,19 +1372,40 @@ fn hello_scene() -> Scene {
 }
 
 /// Compile `scene` through `compiler`, expecting it to be in range.
+///
+/// The compile alone. A frame the caller goes on to *service* also acknowledges
+/// the atlas work it carried, which is [`compile_serviced`]'s job — this
+/// variant is what a case modelling a refused frame wants.
 fn compile(compiler: &mut SceneCompiler, scene: &Scene) -> CompiledFrame {
     compiler
         .compile(scene, Affine::IDENTITY, VIEWPORT)
         .expect("an in-range scene compiles")
 }
 
+/// Compile `scene` and acknowledge what a serviced frame acknowledges.
+///
+/// The ordinary case, and what `EngineRenderer::encode` does on every frame it
+/// does not refuse: the evicted rectangles were zeroed and the recorded pages
+/// were replayed, so the compiler may stop re-offering them. It matters to
+/// eviction in particular — the policy defers `glifo`'s ageing pass while a
+/// replay is outstanding, so a case that never acknowledged would be modelling
+/// a surface whose every frame was refused.
+fn compile_serviced(compiler: &mut SceneCompiler, scene: &Scene) -> CompiledFrame {
+    let frame = compile(compiler, scene);
+    compiler.acknowledge_glyph_clears();
+    compiler.acknowledge_glyph_replay();
+    frame
+}
+
 /// How many atlas pages `compiler` has recorded rasterization commands for,
-/// draining them the way the render-to-atlas pass would.
+/// draining them the way the render-to-atlas pass would — and acknowledging
+/// the replay the same way it does.
 fn drain_dirty_pages(compiler: &mut SceneCompiler) -> usize {
     let mut pages = 0;
     compiler
         .glyph_atlas_mut()
         .replay_pending_atlas_commands(|_| pages += 1);
+    compiler.acknowledge_glyph_replay();
     pages
 }
 
@@ -1269,11 +1549,11 @@ fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
 }
 
 #[test]
-fn a_colour_glyph_draws_from_the_atlas_untinted_while_an_outline_carries_the_text_colour() {
+fn an_atlas_glyph_carries_the_text_colour_as_an_alpha_mask_tint() {
     // An outline glyph is a coverage mask: the shader fills it with the run's
     // own colour, which is what an alpha-mask tint means.
     let mut compiler = wired_compiler();
-    let frame = compile(
+    let frame = compile_serviced(
         &mut compiler,
         &text_scene(latin_font(), &HELLO[..1], WIRED_SIZE, Brush::Solid(WHITE)),
     );
@@ -1282,30 +1562,111 @@ fn a_colour_glyph_draws_from_the_atlas_untinted_while_an_outline_carries_the_tex
         .expect("an outline glyph is tinted with the run's colour");
     assert_eq!(tint.mode, TintMode::AlphaMask);
     assert_eq!(tint.color, WHITE);
+}
 
-    // A COLR glyph brings its own pixels. Multiplying them by the text colour
-    // would repaint a colour emoji in the paragraph's ink.
+/// The defect this file's colour cases exist for, on the wired path: a
+/// COLR-carrying face must never reach the atlas at all, and its glyphs must
+/// still be drawn.
+///
+/// Cached, a COLR glyph is recorded by `glifo` as `push_clip_path` around a
+/// colour-layer stream, into the command recorder *shared by every glyph on
+/// its atlas page*. The engine's replay lowers solid fills and nothing else, so
+/// it refuses that page whole — and `glifo` clears a recorder's commands
+/// whether or not the replay took them, while leaving every entry on the page
+/// resident. The Latin glyphs sharing that page therefore keep resolving to
+/// slots whose texels were never written: a transparent glyph, on every frame
+/// after the first, for as long as the entry survives. `glifo` 0.3.0 exposes no
+/// way to withdraw an entry after the fact, so the only place to close it is
+/// before the insertion happens.
+///
+/// The mixed frame is the point. A case drawing the emoji alone would pass on a
+/// fix that merely dropped the colour glyph; what has to hold is that the
+/// ordinary text sharing the frame is unharmed.
+#[test]
+fn a_colour_face_never_reaches_the_atlas_and_its_glyphs_still_draw() {
     let mut compiler = wired_compiler();
-    let frame = compile(
-        &mut compiler,
-        &text_scene(emoji_font(), &[EMOJI], WIRED_SIZE, Brush::Solid(WHITE)),
+
+    // One frame, two runs, both newly cached: a COLR emoji and a line of Latin
+    // — exactly the pairing that would have shared one page.
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_glyph_run(GlyphRun {
+            font: emoji_font(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(WHITE),
+            transform: Affine::translate((8.0, 44.0)),
+            glyphs: vec![Glyph {
+                id: EMOJI,
+                x: 0.0,
+                y: 0.0,
+            }],
+        });
+        builder.draw_glyph_run(GlyphRun {
+            font: latin_font(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((40.0, 44.0)),
+            glyphs: HELLO
+                .iter()
+                .enumerate()
+                .map(|(index, id)| Glyph {
+                    id: *id,
+                    x: index as f32 * 14.0,
+                    y: 0.0,
+                })
+                .collect(),
+        });
+    }
+
+    let first = compile_serviced(&mut compiler, &scene);
+
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        4,
+        "only the four distinct Latin glyphs may be resident — a COLR entry \
+         here is an entry whose page the replay cannot lower"
     );
     assert_eq!(
-        frame.atlas_glyph_draws, 1,
-        "a colour glyph is one atlas draw, not one per layer"
+        first.atlas_glyph_draws, 5,
+        "the Latin run keeps the atlas; the colour glyph does not take it"
+    );
+    // The colour glyph is still drawn, as engine strips through `text::color`'s
+    // layer recombination — degraded to the outline path, never to nothing.
+    assert!(
+        first.glyph_draws > first.atlas_glyph_draws,
+        "the colour glyph must still produce draws of its own"
     );
     assert_eq!(
-        only_image_tint(&frame).expect("one colour glyph, one image paint"),
-        None,
-        "a colour glyph must not be multiplied by the run's own colour"
+        first.skipped_glyphs, 0,
+        "a colour glyph routed to outlines is drawn, not skipped"
     );
-    assert_eq!(compiler.glyph_atlas_entries(), 1);
+
+    // And the frame after, which is where the defect showed: every glyph the
+    // atlas holds still resolves, and the page is not re-rasterized.
+    assert_eq!(
+        drain_dirty_pages(&mut compiler),
+        1,
+        "the Latin glyphs dirtied exactly one page, and it lowers"
+    );
+    let second = compile_serviced(&mut compiler, &scene);
+    assert_eq!(
+        second.atlas_glyph_draws, 5,
+        "a glyph that was cached on frame one must still resolve on frame two"
+    );
+    assert_eq!(
+        drain_dirty_pages(&mut compiler),
+        0,
+        "nothing missed on the second frame, so no page is dirtied"
+    );
+    assert_eq!(second.glyph_draws, first.glyph_draws);
+    assert_eq!(second.skipped_glyphs, 0);
 }
 
 #[test]
 fn an_idle_glyph_is_evicted_and_its_rectangle_carried_into_the_next_frames_clears() {
     let mut compiler = wired_compiler();
-    let first = compile(&mut compiler, &hello_scene());
+    let first = compile_serviced(&mut compiler, &hello_scene());
     assert!(first.atlas_glyph_draws > 0);
     assert_eq!(compiler.glyph_atlas_entries(), 4);
 
@@ -1313,7 +1674,7 @@ fn an_idle_glyph_is_evicted_and_its_rectangle_carried_into_the_next_frames_clear
     let empty = Scene::new();
     let mut clears = 0;
     for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
-        let frame = compile(&mut compiler, &empty);
+        let frame = compile_serviced(&mut compiler, &empty);
         clears += frame.glyph_clears.len();
     }
 
@@ -1327,6 +1688,232 @@ fn an_idle_glyph_is_evicted_and_its_rectangle_carried_into_the_next_frames_clear
         "every evicted rectangle is carried into a later frame's clears, so it \
          is zeroed before whatever is handed it next composites onto it"
     );
+}
+
+/// `glifo` dirties a page when it *inserts*, so a run drawn entirely off the
+/// target still leaves commands that have to reach the array.
+///
+/// The counterexample the replay gate was written from: gating the render-to-
+/// atlas pass on surviving draws skips a scrolled-away run's whole page, and
+/// the commands stay recorded. Left there long enough, the entries they name
+/// age out, their rectangles are freed and re-let, and the replay finally runs
+/// — painting the old run's ink into whichever glyphs were given those
+/// rectangles.
+#[test]
+fn a_run_whose_draws_are_all_culled_still_leaves_a_page_to_replay() {
+    let mut compiler = wired_compiler();
+    // Scrolled far below the viewport. Every glyph is still resolved, keyed and
+    // inserted — the culling happens downstream, on the rectangle each atlas
+    // draw would have covered.
+    let scene = text_scene_at(
+        latin_font(),
+        &HELLO,
+        WIRED_SIZE,
+        Brush::Solid(BLACK),
+        Affine::translate((8.0, 4_000.0)),
+    );
+
+    let frame = compile(&mut compiler, &scene);
+
+    assert_eq!(
+        frame.atlas_glyph_draws, 0,
+        "fixture precondition: no draw of this run survives the target's bounds"
+    );
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        4,
+        "fixture precondition: the run was still routed to the atlas and cached"
+    );
+    assert!(
+        compiler.glyph_replay_pending(),
+        "a page dirtied at insertion has pixel work outstanding however many of \
+         its draws survived"
+    );
+    assert_eq!(
+        drain_dirty_pages(&mut compiler),
+        1,
+        "the culled run recorded exactly one page's worth of fills"
+    );
+}
+
+/// A rectangle whose ink has not been replayed yet may not be freed.
+///
+/// The other half of the same defect: `glifo` clears a recorder's commands only
+/// when they are replayed, so an unreplayed page keeps naming its slots. If the
+/// LRU reaps those entries in the meantime the rectangles are handed to other
+/// glyphs, and the replay — whenever it finally runs — writes the old glyph's
+/// ink over them. Ageing is therefore deferred until the replay is
+/// acknowledged, and resumes the moment it is.
+#[test]
+fn eviction_waits_for_a_replay_that_has_not_happened_yet() {
+    let mut compiler = wired_compiler();
+
+    // A frame that missed every glyph and was then refused before its replay.
+    compile(&mut compiler, &hello_scene());
+    let entries = compiler.glyph_atlas_entries();
+    assert_eq!(entries, 4, "fixture precondition: the page was cached");
+    assert!(compiler.glyph_replay_pending());
+
+    // Idle for twice as long as it takes the LRU to reap a whole page.
+    let empty = Scene::new();
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY) * 2 {
+        let frame = compile(&mut compiler, &empty);
+        assert!(
+            frame.glyph_clears.is_empty(),
+            "a rectangle freed under an unreplayed command is a rectangle that \
+             command can be replayed into"
+        );
+    }
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        entries,
+        "no entry may be reaped while the commands naming its slot are still \
+         recorded"
+    );
+
+    // The replay lands. Ageing resumes and the idle page is given back.
+    assert_eq!(drain_dirty_pages(&mut compiler), 1);
+    let mut clears = 0;
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+        clears += compile_serviced(&mut compiler, &empty).glyph_clears.len();
+    }
+    assert_eq!(
+        compiler.glyph_atlas_entries(),
+        0,
+        "deferral must delay the reap, not cancel it"
+    );
+    assert_eq!(clears, entries);
+}
+
+/// A compiled frame the caller never encodes must not consume the eviction
+/// clears.
+///
+/// Symmetric to `ImageResidency`'s pending plan, and for the identical reason:
+/// the clears are the only thing that makes an eviction observable as absence
+/// rather than as the dead glyph's pixels, and a frame that took them and was
+/// then refused leaves the rectangle holding those pixels for as long as
+/// whatever is let it next samples them.
+#[test]
+fn a_frame_dropped_before_encode_leaves_the_eviction_clears_pending() {
+    let mut compiler = wired_compiler();
+    compile_serviced(&mut compiler, &hello_scene());
+
+    // Idle until the reap reports its rectangles — and drop that frame on the
+    // floor, acknowledging only the replay, which is not this case's subject.
+    let empty = Scene::new();
+    let mut dropped = Vec::new();
+    for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+        let frame = compile(&mut compiler, &empty);
+        compiler.acknowledge_glyph_replay();
+        if !frame.glyph_clears.is_empty() {
+            dropped = frame.glyph_clears.clone();
+            break;
+        }
+    }
+    assert_eq!(
+        dropped.len(),
+        4,
+        "fixture precondition: the idle page is evicted and reports its rects"
+    );
+    assert!(
+        compiler.glyph_clears_pending(),
+        "nothing wrote those rectangles, so they are still owed"
+    );
+
+    // The next frame is offered exactly the same rectangles.
+    let next = compile(&mut compiler, &empty);
+    assert_eq!(
+        rect_keys(&next.glyph_clears),
+        rect_keys(&dropped),
+        "a refused frame's clears must be re-offered, not lost"
+    );
+
+    // Acknowledged, and only then, they stop being offered.
+    compiler.acknowledge_glyph_clears();
+    let after = compile(&mut compiler, &empty);
+    assert!(
+        after.glyph_clears.is_empty(),
+        "an acknowledged clear is written and done — re-offering it forever \
+         would zero a rectangle its next occupant had already moved into"
+    );
+}
+
+/// A uniform scale animation over a text container keeps the atlas bounded and
+/// the images resident.
+///
+/// The counterexample the device-space guard was written from. `glifo` absorbs
+/// a run's uniform scale into the font size *before* it keys anything, so a
+/// container scaling 1x to 3x mints a fresh key every frame while the display
+/// list's own `font_size` never moves. A guard watching `font_size` sees a
+/// settled run, routes it to the atlas on all 200 frames, and the entries pile
+/// up in the allocator the images are packed into — which is how a text
+/// animation turns into a missing image.
+#[test]
+fn a_scale_animation_over_text_bounds_the_atlas_and_keeps_images_resident() {
+    let mut compiler = wired_compiler();
+
+    let picture = image(64, 64, 0x5A);
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_image(&picture, kurbo::Rect::new(0.0, 0.0, 64.0, 64.0));
+        builder.draw_glyph_run(GlyphRun {
+            font: latin_font(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((4.0, 40.0)),
+            glyphs: HELLO
+                .iter()
+                .enumerate()
+                .map(|(index, id)| Glyph {
+                    id: *id,
+                    x: index as f32 * 14.0,
+                    y: 0.0,
+                })
+                .collect(),
+        });
+    }
+
+    let mut worst_entries = 0_usize;
+    for index in 0..200_u64 {
+        // A sawtooth over 1x..3x that does not close on itself, so successive
+        // cycles land on different `f32`s exactly as a wall-clock-interpolated
+        // animation does.
+        let scale = 1.0 + 2.0 * ((index as f64) * 0.037_182_8).fract();
+        let frame = compiler
+            .compile(&scene, Affine::scale(scale), VIEWPORT)
+            .expect("an in-range scene compiles");
+        compiler.acknowledge_image_plan();
+        compiler.acknowledge_glyph_clears();
+        compiler.acknowledge_glyph_replay();
+
+        assert_eq!(
+            frame.skipped_images, 0,
+            "frame {index}: the image lost its atlas rectangle — glyph residency \
+             spent the allocator the two classes share"
+        );
+        worst_entries = worst_entries.max(compiler.glyph_atlas_entries());
+    }
+
+    assert!(
+        worst_entries <= ENTRY_BOUND,
+        "a scale animation left {worst_entries} entries resident (bound \
+         {ENTRY_BOUND}) — the size the guard watches is not the size `glifo` keys"
+    );
+    assert_eq!(
+        compiler.images().skipped(),
+        0,
+        "no image may be refused residency across the animation"
+    );
+}
+
+/// The identifying fields of each rect, for comparing two offers of the same
+/// eviction — `PendingClearRect` carries no `PartialEq` of its own.
+fn rect_keys(rects: &[glifo::PendingClearRect]) -> Vec<(u32, u16, u16, u16, u16)> {
+    rects
+        .iter()
+        .map(|rect| (rect.page_index, rect.x, rect.y, rect.width, rect.height))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,5 +2150,88 @@ fn a_cached_glyph_is_drawn_from_the_atlas_and_stays_put_on_the_next_frame() {
         "a cached glyph moved {:.4}% of the frame — that is ink somewhere the \
          outline path put none, not resampling",
         fraction * 100.0
+    );
+}
+
+/// The same defect in pixels: a colour emoji and Latin text newly cached on
+/// the same frame both render, and both keep rendering.
+///
+/// The device-free case above pins the *decision* — that the colour face is
+/// never offered the atlas. This pins the consequence nothing device-free can
+/// see. Routed to the atlas, `glifo` records the emoji as a clip bracket into
+/// the page recorder every glyph of that frame shares; the replay declines the
+/// page whole, `glifo` clears the recorder regardless, and every entry on the
+/// page — the Latin glyphs included — resolves to a slot whose texels were
+/// never written. On screen that is a paragraph of *transparent* glyphs, which
+/// is precisely the failure a compiled frame's counters cannot show: they are
+/// atlas draws, they name real slots, and they paint nothing.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test atlas_churn -- --ignored`"]
+fn a_colour_glyph_beside_latin_text_leaves_neither_of_them_transparent() {
+    let _serialized = render_lock();
+
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.draw_glyph_run(GlyphRun {
+            font: emoji_font(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((8.0, 48.0)),
+            glyphs: vec![Glyph {
+                id: EMOJI,
+                x: 0.0,
+                y: 0.0,
+            }],
+        });
+        builder.draw_glyph_run(GlyphRun {
+            font: latin_font(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((8.0, 92.0)),
+            glyphs: HELLO
+                .iter()
+                .enumerate()
+                .map(|(index, id)| Glyph {
+                    id: *id,
+                    x: index as f32 * 16.0,
+                    y: 0.0,
+                })
+                .collect(),
+        });
+    }
+
+    // Three frames: the one that caches, and two that have to keep resolving
+    // what it cached.
+    let frames = render_frames(&scene, true, 3);
+    let outline = render_frames(&scene, false, 1);
+
+    let baseline = inked(&outline[0]);
+    assert!(
+        baseline > 0,
+        "fixture precondition: this scene draws ink with the atlas off"
+    );
+
+    for (index, frame) in frames.iter().enumerate() {
+        let ink = inked(frame);
+        assert!(
+            ink > 0,
+            "frame {index} drew nothing at all — every glyph sampled a slot the \
+             replay never wrote"
+        );
+        // Half the outline path's ink is far below anything a subpixel or
+        // rasterization difference accounts for, and far above what losing
+        // either run would leave.
+        assert!(
+            ink * 2 >= baseline,
+            "frame {index} lost most of its ink ({ink} of {baseline}) — a run \
+             went transparent rather than falling back to outlines"
+        );
+    }
+
+    // And the frames after the caching one are the steady state, not a decay.
+    assert_eq!(
+        frames[1], frames[2],
+        "a page held still must render identically once it has settled"
     );
 }

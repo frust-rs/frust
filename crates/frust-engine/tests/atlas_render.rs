@@ -365,8 +365,16 @@ fn record_outline(glyphs: &mut GlyphAtlas, page: u32, slot: Slot, color: Color) 
 /// stays with the compiler, which is the layer that has a `SceneCompiler`. A
 /// command this tier has no lowering for — a clip path, a blend layer, a
 /// gradient paint, all of them COLR shapes — refuses the whole page rather than
-/// being skipped, so a colour glyph goes *missing* rather than landing as a
-/// partially-painted one.
+/// drawing part of it.
+///
+/// Refusal is a residual guard rather than the route a colour glyph takes.
+/// It cannot be made harmless at this seam: `glifo` clears the recorder whether
+/// or not the page was taken, and leaves every entry on it resident naming
+/// texels nothing wrote. So the engine keeps a colour face off the atlas
+/// entirely (`text::atlas_policy`'s `OutlineReason::ColorFont`), and what
+/// reaches this walk on the wired path is the solid outline stream it lowers.
+/// The refusal case below therefore drives the recorder by hand — nothing on
+/// the wired path produces such a page any more.
 fn lower_page(recorder: &AtlasCommandRecorder, buffers: &mut AtlasPageBuffers) -> bool {
     let mut scene = Scene::new();
     {
@@ -692,7 +700,10 @@ fn a_page_the_lowering_declines_is_refused_rather_than_drawn() {
         .push_error_scope(wgpu::ErrorFilter::Validation);
 
     // A blend layer is a COLR shape this tier has no lowering for, so the whole
-    // page is declined — the glyph goes missing rather than landing wrong.
+    // page is declined. Recorded by hand: the wired path routes a colour face
+    // to outlines before `glifo` can record anything like this (see
+    // `lower_page`), and this case pins what the residual guard does if such a
+    // stream ever reaches the pass anyway — nothing drawn, and counted.
     let mut glyphs = GlyphAtlas::new();
     {
         let recorder = glyphs.recorder_for_page(0, PAGE as u16, PAGE as u16);

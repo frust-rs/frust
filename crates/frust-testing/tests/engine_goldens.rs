@@ -223,8 +223,10 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
 ///
 /// # The hint-policy rows (text phase, p5-04)
 ///
-/// Every scoped case that shapes a glyph run carries one of these. The
-/// engine's `SceneCompiler::for_caps` turns hinting ON for a desktop-tier
+/// Every scoped case that shapes a glyph run carries one of these, `text-colr-
+/// emoji` excepted: a COLR glyph is hinted on neither side, so its row is a
+/// colour-boundary one measured on its own terms and is much the narrowest of
+/// the group. The engine's `SceneCompiler::for_caps` turns hinting ON for a desktop-tier
 /// adapter — `hint_text = !is_mobile_tier(caps)`, this pairing's own T400 rig
 /// included — while [`CpuOracle`](crate::oracle_cpu::CpuOracle) hints OFF
 /// UNCONDITIONALLY (`oracle_cpu.rs`'s `draw_glyph_run`: "hinting is a
@@ -489,16 +491,21 @@ const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
     (
         "text-colr-emoji",
         Tolerance {
-            channel: 255,
+            channel: 35,
             alpha: 2,
             diff_pixels: 0,
         },
-        "hint-policy row (see this table's module docs), amplified by colour: a COLR glyph's \
-         layers meet at sharp colour boundaries (yellow face, black eyes/mouth), so the same \
-         sub-pixel hinting shift that reads as a small grey delta on solid text reads as a large \
-         cross-colour one here — measured max delta [189,212,255,0], 2043 px (20.4300%) of this \
-         case's own glyph, all inside its bounding box. The engine and `vello_cpu` still agree on \
-         WHICH layer paints where; this is edge placement, not a COLR-decode defect",
+        "colour-boundary row rather than a hint-policy one: a COLR glyph is hinted on neither \
+         side, so what remains is the two rasterizers' own edge placement where the glyph's \
+         layers meet at sharp colour boundaries (yellow face, black eyes/mouth) — measured max \
+         delta [2,14,35,0], 0 px differing, mean [0.026,0.021,0.026,0.0], the blue channel \
+         carrying effectively all of it. `alpha` stays at the corpus default, which the measured \
+         0 sits inside. This is a narrow band and is meant to stay one: it read [189,212,255,0] \
+         over 2043 px while a colour face still took the glyph-atlas route, where the tier could \
+         not replay the COLR command stream `glifo` recorded and the glyph's own page went \
+         unwritten. That route is now refused before insertion \
+         (`frust_engine::text::atlas_policy`), so this case draws the glyph through the same \
+         layer recombination `vello_cpu` does",
     ),
     (
         "text-gradient-brush",
@@ -507,9 +514,10 @@ const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
             alpha: 2,
             diff_pixels: 0,
         },
-        "hint-policy row (see this table's module docs), amplified the same way as \
-         `text-colr-emoji`: the run's own red-to-blue gradient means a hinted edge shifts across a \
-         colour transition rather than a flat grey one — measured max delta [105,173,158,0], 338 \
+        "hint-policy row (see this table's module docs), amplified by colour: the run's own \
+         red-to-blue gradient means a hinted edge shifts across a colour transition rather than a \
+         flat grey one, so the same sub-pixel shift that reads as a small grey delta on solid \
+         text reads as a large cross-colour one here — measured max delta [105,173,158,0], 338 \
          px (1.5364%) of this case's own run",
     ),
     (
@@ -619,11 +627,17 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
          rigs' measured numbers; the percentage stays at the corpus budget, inside which both \
          rigs sit",
     ),
-    // The two text-phase (p5-04) rows below are hint-policy escalations, not
+    // The glyph-run row below is a hint-policy escalation, not
     // classic/`vello_cpu` antialiasing conflation: `ESCALATIONS`'s module docs
     // explain the mechanism (the engine hints on this desktop-tier rig,
     // neither the classic nor the CPU reference ever does), which shows up
     // here too since classic and `vello_cpu` shape the same UNHINTED glyphs.
+    //
+    // `text-colr-emoji` had a row of its own here and no longer needs one: it
+    // measured mean 16.045 / 20.3000% while a colour face still took the
+    // glyph-atlas route and its page went unwritten, and measures mean 0.110 /
+    // 0.5400% now that the route is refused before insertion — comfortably
+    // inside the corpus band, so it is gated by the corpus band.
     (
         "unit-glyph-run",
         Band {
@@ -634,19 +648,6 @@ const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
          over channel 8, on this 64x64 frame's own glyph ink — only the percentage is widened, \
          to just past the measured value; a small frame that is mostly text makes a hinted edge's \
          share of the whole image larger than the corpus-wide p95 was calibrated for",
-    ),
-    (
-        "text-colr-emoji",
-        Band {
-            mean: 16.1,
-            pct_over_8: 20.4,
-        },
-        "hint-policy row, amplified by colour exactly as its `ESCALATIONS` row explains: measured \
-         mean 16.045 / 20.3000% over channel 8, entirely inside this case's own glyph bounding \
-         box. Classic and `vello_cpu` also disagree with EACH OTHER on this case more than most \
-         (both are independent rasterizers over the same unhinted COLR layers), so this is the \
-         two known sources — colour-boundary edge placement and classic-vs-cpu conflation — \
-         stacking on one small, colour-dense glyph, not a third defect",
     ),
 ];
 

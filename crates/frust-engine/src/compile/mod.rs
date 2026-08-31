@@ -82,8 +82,8 @@ use crate::compile::clear::StagedPunch;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
 use crate::text::{
-    AtlasPolicy, GlyphRunTargets, RunKey, RunRoute, context_paint, font_is_readable,
-    glyph_atlas_policy, lower_glyph_run,
+    AtlasPolicy, GlyphRunTargets, RunKey, RunRoute, context_paint, font_has_color_glyphs,
+    font_is_readable, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -224,6 +224,11 @@ pub struct CompiledFrame {
     /// The measure of what the policy is actually buying: a page of settled
     /// text reads all-atlas, an animating size reads zero, and the difference
     /// between them is the frame's rasterization work.
+    ///
+    /// Observational only. It is **not** the signal for whether the atlas has
+    /// pixel work outstanding — a run whose draws were all culled still
+    /// inserted entries and dirtied a page while reporting zero here. That
+    /// question is [`SceneCompiler::glyph_replay_pending`]'s.
     pub atlas_glyph_draws: u32,
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
@@ -236,6 +241,12 @@ pub struct CompiledFrame {
     /// one, so clearing it after that frame's uploads and replay would erase
     /// whatever just moved in. Same ordering, same reason, as
     /// [`image_evictions`](Self::image_evictions).
+    ///
+    /// Reported rather than consumed, on the same terms as
+    /// [`image_evictions`](Self::image_evictions): the same rectangles appear
+    /// on every later frame until a caller that really wrote them calls
+    /// [`SceneCompiler::acknowledge_glyph_clears`]. A frame compiled and then
+    /// refused takes none of them with it.
     pub glyph_clears: Vec<PendingClearRect>,
 }
 
@@ -412,6 +423,56 @@ impl SceneCompiler {
         self.images.acknowledge_plan();
     }
 
+    /// Whether `glifo` still holds recorded page commands, bitmap uploads or
+    /// freed rectangles that have not reached the atlas array.
+    ///
+    /// The gate a caller drives
+    /// [`crate::gpu::atlas::AtlasRenderer::render_pending`] from. Deliberately
+    /// *not* [`CompiledFrame::atlas_glyph_draws`]: `glifo` dirties a page when
+    /// it inserts an entry, not when a draw survives, so a run scrolled behind
+    /// a clip inserts entries and records fills while contributing no draw at
+    /// all. Gating on draws leaves those commands recorded — and a recorded
+    /// command outliving the slot it names is old ink replayed into whichever
+    /// glyph was let that rectangle next.
+    ///
+    /// Stays `true` across a frame the caller refuses, exactly as the image
+    /// plan does, until [`acknowledge_glyph_replay`](Self::acknowledge_glyph_replay).
+    #[must_use]
+    pub fn glyph_replay_pending(&self) -> bool {
+        self.glyph_atlas.replay_pending()
+    }
+
+    /// Record that the recorded page commands were replayed into the atlas
+    /// array.
+    ///
+    /// Also what lets `glifo`'s eviction pass resume: while a replay is
+    /// outstanding the policy defers ageing, so that no rectangle a recorded
+    /// command still names can be freed and re-let underneath it (see
+    /// [`crate::text::atlas_policy`]).
+    pub fn acknowledge_glyph_replay(&mut self) {
+        self.glyph_atlas.acknowledge_replay();
+    }
+
+    /// Whether any rectangle freed by glyph eviction is still waiting to be
+    /// zeroed.
+    #[must_use]
+    pub fn glyph_clears_pending(&self) -> bool {
+        self.glyph_atlas.has_pending_clears()
+    }
+
+    /// Record that this frame's [`CompiledFrame::glyph_clears`] were written to
+    /// the atlas array.
+    ///
+    /// The glyph half of the same re-offer contract
+    /// [`acknowledge_image_plan`](Self::acknowledge_image_plan) closes for
+    /// images: [`compile`](Self::compile) reports the clears without consuming
+    /// them, and goes on reporting the same ones, until a caller that really
+    /// issued the writes says so. A frame compiled and then dropped therefore
+    /// leaves no rectangle holding an evicted glyph's pixels.
+    pub fn acknowledge_glyph_clears(&mut self) {
+        self.glyph_atlas.acknowledge_clears();
+    }
+
     /// Re-budget image residency, dropping every image currently resident.
     ///
     /// The atlas geometry is what an allocation's coordinates mean, so a change
@@ -498,7 +559,7 @@ impl SceneCompiler {
         // frame's eviction freed, to be zeroed ahead of anything this frame
         // writes (see [`CompiledFrame::glyph_clears`]).
         self.glyph_atlas.begin_frame();
-        self.classify_runs(scene);
+        self.classify_runs(scene, root);
         let glyph_clears = self
             .glyph_atlas
             .build(self.images.allocator_mut(), |_| {
@@ -967,6 +1028,85 @@ impl SceneCompiler {
         }
     }
 
+    /// Route every glyph run the scene records, in recording order.
+    ///
+    /// The whole of the frame's collect phase. It is a walk of its own rather
+    /// than a question asked inside the draw walk because the answer for one
+    /// run depends on what the *font* has been drawn at recently, and a policy
+    /// that learned a size only as it drew it would route the first run of a
+    /// changing frame as settled and the second as animating — the two halves
+    /// of one line of text taking different paths.
+    ///
+    /// Every run is classified, including ones the draw walk will refuse: the
+    /// refusals it makes (an empty run, a blocked clip, an unreadable face)
+    /// are not size observations, and a size drawn on a frame is a size drawn
+    /// on that frame whatever else happens to it.
+    ///
+    /// The walk carries a [`SnapshotStack`] of its own for one reason: a run's
+    /// route depends on the scale in its *device* transform (see
+    /// [`crate::text::atlas_policy`]), and inside a `PushSnapshot` bracket that
+    /// transform carries the bracket's presentation scale as well as the frame
+    /// root. Classifying against `root * run.transform` alone would answer for
+    /// a size the run is not drawn at. Only the correction is tracked here —
+    /// the bracket's *layers* are the draw walk's to open, and this walk opens
+    /// nothing.
+    fn classify_runs(&mut self, scene: &Scene, root: Affine) {
+        self.run_routes.clear();
+        self.next_run = 0;
+
+        let mut snapshots = SnapshotStack::new();
+        for command in scene.commands() {
+            match command {
+                Command::PushSnapshot {
+                    rect,
+                    scale,
+                    transform,
+                    ..
+                } => {
+                    snapshots.enter(*rect, *scale, *transform);
+                }
+                Command::PopSnapshot => {
+                    // The group depth a real close would be tested against is
+                    // the draw walk's; nothing here closes a group, so zero is
+                    // the honest answer and the return value is unused.
+                    snapshots.leave(0);
+                }
+                Command::GlyphRun(run) => {
+                    // The context colour `glifo` would resolve a COLR layer
+                    // against — the run's own brush when it is solid, black
+                    // otherwise, which is the same answer
+                    // `EngineGlyphSink::get_context_color` gives it.
+                    let context_color = match context_paint(&run.brush) {
+                        vello_common::paint::PaintType::Solid(color) => color,
+                        _ => peniko::color::palette::css::BLACK,
+                    };
+                    let key = RunKey::for_run(
+                        run,
+                        root * snapshots.correction() * run.transform,
+                        self.hint_text,
+                        font_has_color_glyphs(run.font.font()),
+                        context_color,
+                    );
+                    let route = self.glyph_atlas.classify_run(&key);
+                    self.run_routes.push(route);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The next run's route, or `None` once the collect walk's answers are
+    /// exhausted.
+    ///
+    /// `None` is the conservative answer rather than an error: a run with no
+    /// recorded route is drawn as outlines, which is correct pixels by the path
+    /// the engine has always used.
+    fn take_run_route(&mut self) -> Option<RunRoute> {
+        let route = self.run_routes.get(self.next_run).copied();
+        self.next_run = self.next_run.saturating_add(1);
+        route
+    }
+
     /// Draw one glyph run: its brush encoded once, then every glyph's outline
     /// rasterized under the active clip (see [`crate::text`]).
     ///
@@ -986,51 +1126,6 @@ impl SceneCompiler {
     /// A run whose font cannot be read is refused the same way and for a
     /// harder reason: the text backend's font gate is what keeps a blob that
     /// is not a font off the frame path at all (see [`crate::text`]).
-    /// Route every glyph run the scene records, in recording order.
-    ///
-    /// The whole of the frame's collect phase. It is a walk of its own rather
-    /// than a question asked inside the draw walk because the answer for one
-    /// run depends on what the *font* has been drawn at recently, and a policy
-    /// that learned a size only as it drew it would route the first run of a
-    /// changing frame as settled and the second as animating — the two halves
-    /// of one line of text taking different paths.
-    ///
-    /// Every run is classified, including ones the draw walk will refuse: the
-    /// refusals it makes (an empty run, a blocked clip, an unreadable face)
-    /// are not size observations, and a size drawn on a frame is a size drawn
-    /// on that frame whatever else happens to it.
-    fn classify_runs(&mut self, scene: &Scene) {
-        self.run_routes.clear();
-        self.next_run = 0;
-        for command in scene.commands() {
-            let Command::GlyphRun(run) = command else {
-                continue;
-            };
-            // The context colour `glifo` would resolve a COLR layer against —
-            // the run's own brush when it is solid, black otherwise, which is
-            // the same answer `EngineGlyphSink::get_context_color` gives it.
-            let context_color = match context_paint(&run.brush) {
-                vello_common::paint::PaintType::Solid(color) => color,
-                _ => peniko::color::palette::css::BLACK,
-            };
-            let key = RunKey::for_run(run, self.hint_text, context_color);
-            let route = self.glyph_atlas.classify_run(&key);
-            self.run_routes.push(route);
-        }
-    }
-
-    /// The next run's route, or `None` once the collect walk's answers are
-    /// exhausted.
-    ///
-    /// `None` is the conservative answer rather than an error: a run with no
-    /// recorded route is drawn as outlines, which is correct pixels by the path
-    /// the engine has always used.
-    fn take_run_route(&mut self) -> Option<RunRoute> {
-        let route = self.run_routes.get(self.next_run).copied();
-        self.next_run = self.next_run.saturating_add(1);
-        route
-    }
-
     fn compile_glyph_run(
         &mut self,
         run: &GlyphRun,

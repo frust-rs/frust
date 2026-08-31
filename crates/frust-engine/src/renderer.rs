@@ -613,7 +613,14 @@ impl EngineRenderer {
         // rectangles last frame's eviction freed are zeroed first, ahead of
         // every write this frame issues, so a rectangle handed straight back
         // out cannot be erased after its new occupant landed in it.
-        self.clear_glyph_rects(device, queue, &frame);
+        //
+        // Acknowledged only once the writes were really issued — the same
+        // re-offer contract the image plan keeps below. A frame refused before
+        // this point leaves every rectangle pending, so the next frame that
+        // gets here still zeroes it.
+        if self.clear_glyph_rects(device, queue, &frame) {
+            self.compiler.acknowledge_glyph_clears();
+        }
 
         self.resources.resize_alphas(device, alphas_grown);
         self.resources.resize_paints(device, paints_grown);
@@ -640,8 +647,16 @@ impl EngineRenderer {
         // contract — see this module's header and `gpu::atlas`). The queue
         // writes issued above are flushed ahead of that submit, so the pass
         // composites onto a layer whose clears and image uploads have landed.
-        if frame.atlas_glyph_draws > 0 {
+        //
+        // Driven by the atlas's own pending work, never by this frame's
+        // surviving draws: `glifo` dirties a page when it *inserts* an entry,
+        // so a run culled away behind a clip records fills while drawing
+        // nothing, and a draw-gated replay would leave those commands recorded
+        // until some later frame happened to run one — by which time eviction
+        // may have re-let the rectangles they name.
+        if self.compiler.glyph_replay_pending() {
             self.replay_glyph_pages(device, queue);
+            self.compiler.acknowledge_glyph_replay();
         }
 
         let format = target.format;
@@ -660,21 +675,31 @@ impl EngineRenderer {
         }
     }
 
-    /// Zero every atlas rectangle the previous frame's glyph eviction freed.
+    /// Zero every atlas rectangle an earlier frame's glyph eviction freed,
+    /// answering whether they were serviced.
     ///
     /// Queue writes, issued before this frame's image uploads and before the
     /// replay pass's submit — the first of the three orderings
     /// [`crate::gpu::atlas`] states. A rectangle the array will not take is
     /// counted rather than dropped silently, on the same terms an image region
     /// it refuses is.
+    ///
+    /// `true` means every rectangle was *offered* to the array — including one
+    /// it refused, which no later frame could place either — so the caller may
+    /// stop re-offering them. `false` means there was no array to write to at
+    /// all, which is the one case where trying again later can succeed. An
+    /// empty list is serviced trivially.
     fn clear_glyph_rects(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &CompiledFrame,
-    ) {
-        if frame.glyph_clears.is_empty() || self.resources.atlas.is_none() {
-            return;
+    ) -> bool {
+        if frame.glyph_clears.is_empty() {
+            return true;
+        }
+        if self.resources.atlas.is_none() {
+            return false;
         }
         self.ensure_atlas_renderer(device);
 
@@ -686,7 +711,7 @@ impl EngineRenderer {
             } = self;
             let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_ref(), resources.atlas.as_ref())
             else {
-                return;
+                return false;
             };
             frame
                 .glyph_clears
@@ -698,6 +723,7 @@ impl EngineRenderer {
         if refused > 0 {
             self.resources.note_refused_regions(refused as u64);
         }
+        true
     }
 
     /// Draw every atlas page `glifo` dirtied this frame into its own array
@@ -2287,7 +2313,6 @@ impl FrameResources {
     }
 }
 
-/// The [`ImageId`] an encoded image paint names, or `None` for the one
 /// Lower one atlas page's recorded commands into the strips that draw it,
 /// answering whether the whole page could be expressed.
 ///
@@ -2302,10 +2327,17 @@ impl FrameResources {
 /// the surface. Only the four commands an outline glyph produces are lowered;
 /// anything else — a clip path, a blend layer, a gradient paint, which is to
 /// say every COLR shape — refuses the page whole rather than drawing part of
-/// it, so a colour glyph the tier cannot express is a glyph that goes missing
-/// rather than one that lands wrong. An indexed paint coming back out of the
-/// compile means the same thing: the atlas pass binds no paint texture, so a
-/// record it would have to sample cannot be drawn.
+/// it. An indexed paint coming back out of the compile means the same thing:
+/// the atlas pass binds no paint texture, so a record it would have to sample
+/// cannot be drawn.
+///
+/// Refusing a page is a *last* line rather than the design, because refusal
+/// cannot be made harmless here: `glifo` clears a recorder's commands whether
+/// or not this answered `true`, and it offers no way to withdraw the entries
+/// whose pixels those commands were going to be. Nothing that would reach this
+/// refusal is therefore admitted to the atlas in the first place — a colour
+/// face never takes the atlas route at all (`crate::text::atlas_policy`), so
+/// what arrives here is the solid outline stream this lowers.
 fn lower_atlas_page(
     recorder: &AtlasCommandRecorder,
     buffers: &mut AtlasPageBuffers,
@@ -2360,6 +2392,7 @@ fn lower_atlas_page(
     true
 }
 
+/// The [`ImageId`] an encoded image paint names, or `None` for the one
 /// [`ImageSource`] variant no residency ever mints — the paint carrying its
 /// pixels inline as a [`vello_common::pixmap::Pixmap`] rather than through a
 /// handle. The compiler's own image encoding always produces the handle form

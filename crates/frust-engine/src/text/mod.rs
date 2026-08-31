@@ -76,14 +76,33 @@
 //!   thousand.
 //! - **Routed to outlines.** Every glyph is fetched, scaled and rasterized as
 //!   strips, exactly as before — one draw per glyph, no texture residency at
-//!   all. This is what an animating size, an oversized run, an unusable size
-//!   and `FRUST_ENGINE_NO_ATLAS` all get, and it is also where a glyph the
-//!   atlas had no room for (or whose transform `glifo` will not cache) lands
-//!   on its own. Correct pixels, slower — never wrong ones.
+//!   all. This is what an animating size, an oversized run, an unusable size, a
+//!   [colour face](font_has_color_glyphs), a transform `glifo` will not absorb
+//!   a scale out of, a full glyph residency and `FRUST_ENGINE_NO_ATLAS` all
+//!   get, and it is also where a glyph the atlas had no room for lands on its
+//!   own. Correct pixels, slower — never wrong ones.
 //!
 //! The two paths are not pixel-identical by construction and are not claimed to
 //! be: an atlas glyph is rasterized once at its quantized size and sampled,
 //! an outline glyph is rasterized per frame at its exact transform.
+//!
+//! The *size* that quantization applies to is the device one — `font_size` with
+//! the run's own transform scale absorbed into it, which is the quantity
+//! `glifo` builds its key from. [`atlas_policy::device_font_size`] is where that
+//! is restated, and its module doc has the whole reason a guard watching the
+//! display list's `font_size` alone watches the wrong number.
+//!
+//! # Which glyphs never reach the atlas at all
+//!
+//! A colour (COLR) glyph is not merely uncacheable on this tier — cached, it is
+//! *destructive*: `glifo` records it as a clip bracket around a colour-layer
+//! stream, into the command recorder shared by every glyph on its atlas page,
+//! and a replay that cannot lower a clip loses the whole page while its entries
+//! stay resident pointing at texels nothing wrote. `glifo` 0.3.0 has no way to
+//! withdraw them afterwards, so the run is refused the route beforehand:
+//! [`font_has_color_glyphs`] reads the face's table directory once per run, and
+//! a face carrying `COLR` draws every glyph through [`color`]'s layer
+//! recombination instead.
 //!
 //! # The font gate
 //!
@@ -257,6 +276,9 @@ const HEAD_TABLE_LEN: usize = 54;
 const HEAD_UNITS_PER_EM: usize = 18;
 /// `head`, as a table record's tag reads.
 const HEAD_TAG: [u8; 4] = *b"head";
+/// `COLR`, on the same terms — the colour-glyph table
+/// [`font_has_color_glyphs`] looks for.
+const COLR_TAG: [u8; 4] = *b"COLR";
 /// A font collection's own file tag.
 const TTC_TAG: [u8; 4] = *b"ttcf";
 /// Byte offset of a collection header's font count.
@@ -321,37 +343,73 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
     (end <= data.len()).then_some(start)
 }
 
-/// The units-per-em of the `head` table named by the directory at
-/// `directory`, or `None` when there is no readable one.
-fn head_units_per_em(data: &[u8], directory: usize) -> Option<u16> {
+/// Whether `font`'s face carries a `COLR` table, and so could hand `glifo` a
+/// colour glyph.
+///
+/// The gate that keeps colour glyphs off the atlas route — see
+/// [`atlas_policy`]'s module doc for why a cached COLR glyph voids the whole
+/// atlas page it lands on, and why `glifo` 0.3.0 offers no way to undo that
+/// after the fact. A face this answers `true` for has every one of its runs
+/// routed to outlines, which is where `text::color` recombines a colour glyph's
+/// layers into engine shapes.
+///
+/// `COLR` alone, because `COLR` alone is what `glifo` looks at: it resolves
+/// colour glyphs through `skrifa`'s `color_glyphs()`, which reads COLRv0/v1 and
+/// nothing else. A bitmap strike (`CBDT`/`sbix`) reaches the atlas as a
+/// pre-rasterized pixmap through the upload queue rather than as recorded
+/// commands, so it dirties no page and needs no gate; an `SVG ` table is not a
+/// path this backend takes at all.
+///
+/// Answers per face, not per glyph: `glifo` decides colour-glyph caching from
+/// the presence of a cacher, so there is no way to offer a run's outlines the
+/// atlas while holding its colour glyphs back. Refusing the whole face is
+/// conservative in the direction that costs speed rather than pixels — an
+/// emoji font's Latin glyphs, if it has any, rasterize per frame.
+pub(crate) fn font_has_color_glyphs(font: &FontData) -> bool {
+    let data = font.data.data();
+    table_directory(data, font.index)
+        .and_then(|directory| table_record(data, directory, COLR_TAG))
+        .is_some()
+}
+
+/// Where the record for `tag` starts inside the table directory at
+/// `directory`, or `None` when the directory names no such table.
+///
+/// The first record carrying the tag, which is the one the parser resolves it
+/// to whether or not the directory is sorted.
+fn table_record(data: &[u8], directory: usize, tag: [u8; 4]) -> Option<usize> {
     let records = read_u16(data, directory.checked_add(4)?)?;
 
     for index in 0..usize::from(records) {
         let record = directory
             .checked_add(TABLE_DIRECTORY_LEN)?
             .checked_add(index.checked_mul(TABLE_RECORD_LEN)?)?;
-        let tag: [u8; 4] = data.get(record..record.checked_add(4)?)?.try_into().ok()?;
-        if tag != HEAD_TAG {
-            continue;
+        let found: [u8; 4] = data.get(record..record.checked_add(4)?)?.try_into().ok()?;
+        if found == tag {
+            return Some(record);
         }
-
-        // The first record carrying the tag, which is the one the parser
-        // resolves it to whether or not the directory is sorted.
-        let offset = usize::try_from(read_u32(data, record.checked_add(8)?)?).ok()?;
-        let length = usize::try_from(read_u32(data, record.checked_add(12)?)?).ok()?;
-        let fits = offset != 0
-            && length >= HEAD_TABLE_LEN
-            && offset
-                .checked_add(length)
-                .is_some_and(|end| end <= data.len());
-        if !fits {
-            return None;
-        }
-
-        return read_u16(data, offset.checked_add(HEAD_UNITS_PER_EM)?);
     }
 
     None
+}
+
+/// The units-per-em of the `head` table named by the directory at
+/// `directory`, or `None` when there is no readable one.
+fn head_units_per_em(data: &[u8], directory: usize) -> Option<u16> {
+    let record = table_record(data, directory, HEAD_TAG)?;
+
+    let offset = usize::try_from(read_u32(data, record.checked_add(8)?)?).ok()?;
+    let length = usize::try_from(read_u32(data, record.checked_add(12)?)?).ok()?;
+    let fits = offset != 0
+        && length >= HEAD_TABLE_LEN
+        && offset
+            .checked_add(length)
+            .is_some_and(|end| end <= data.len());
+    if !fits {
+        return None;
+    }
+
+    read_u16(data, offset.checked_add(HEAD_UNITS_PER_EM)?)
 }
 
 /// The big-endian `u16` at `at`, or `None` when it does not fit.

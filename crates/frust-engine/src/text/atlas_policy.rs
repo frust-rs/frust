@@ -65,7 +65,7 @@
 //! the same subpixel bucket in two runs, is one key and therefore one
 //! rasterization.
 //!
-//! # Clears come before uploads, one frame later
+//! # Clears come before uploads, one frame later — and are re-offered
 //!
 //! `glifo` evicts inside [`GlyphAtlas::maintain`] and queues a
 //! [`PendingClearRect`] per evicted slot; a freed rectangle that is not zeroed
@@ -77,14 +77,78 @@
 //! a rectangle freed on one frame can be re-allocated on the next, and clearing
 //! after uploading would erase the glyph that just moved in.
 //!
+//! [`build`](AtlasPolicy::build) *copies* those rects into the pass rather than
+//! draining them, exactly as `crate::cache::images`' `ImageResidency::plan`
+//! copies the image plan: a frame can be compiled and then refused before
+//! anything reaches a queue, and a clear consumed by such a frame would leave
+//! the rectangle holding a dead glyph's pixels forever. They stay pending, and
+//! keep being offered on every later frame, until
+//! [`acknowledge_clears`](AtlasPolicy::acknowledge_clears) says the writes were
+//! really issued.
+//!
+//! # The size a glyph is actually keyed at is a *device* size
+//!
+//! `glifo` absorbs a run's uniform scale into the font size before it keys
+//! anything: a run asking for 16 px under a 2x transform is prepared, keyed and
+//! rasterized at 32 px, and the transform it draws through is left at unit
+//! scale. So the display list's own `font_size` is not the quantity a cache
+//! entry is minted against, and a guard watching it watches the wrong number —
+//! a container scaling from 1x to 3x over a second holds `font_size` perfectly
+//! still while minting a fresh 60-key-per-second sweep underneath.
+//!
+//! [`device_font_size`] restates that absorption so the policy observes what
+//! `glifo` keys. It also answers `None` for a transform `glifo` will *not*
+//! absorb — anything but a positive uniform scale without skew — and such a run
+//! is routed to outlines outright ([`OutlineReason::TransformUncacheable`]).
+//! That refusal is not an optimization: `glifo` probes the cache with a key
+//! built from the unabsorbed size *before* it discovers the transform is
+//! uncacheable, so a rotated or skewed run can hit an entry rasterized under a
+//! different transform and draw that bitmap unrotated. Keeping the run off the
+//! atlas route is what keeps that hit from being possible.
+//!
+//! # Glyphs cannot spend the whole allocator
+//!
+//! The packer is shared with the image residency, so an unbounded glyph
+//! population is an image *outage*: every rectangle a glyph holds is one an
+//! image cannot have, and a full atlas answers `ImageSkip::NoAtlasSpace`
+//! rather than making room. `glifo`'s LRU bounds residency only over its own 64-frame
+//! horizon, which a fast enough churn outruns. So the policy carries a ceiling
+//! of its own — [`glyph_entry_ceiling`], a fraction of the array's texels
+//! divided by what a typical glyph occupies — and stops *offering* the atlas
+//! route once it is reached ([`OutlineReason::ResidencyFull`]). Text keeps
+//! drawing; it draws as outlines until the LRU gives space back.
+//!
+//! # A page this tier cannot replay must never have been cached
+//!
+//! `glifo` records a cached COLR glyph as a clip bracket around a colour-layer
+//! stream, into the recorder *shared by every glyph on that page*, and
+//! [`GlyphAtlas::replay_pending_atlas_commands`] clears a recorder's commands
+//! whether or not the caller could replay them. A tier whose replay lowers only
+//! solid fills therefore loses the whole page — including the ordinary Latin
+//! glyphs sharing it — while their entries stay in the map pointing at texels
+//! nothing ever wrote, which is a *transparent* glyph on every later frame.
+//!
+//! `glifo` 0.3.0 offers no way to withdraw those entries after the fact —
+//! [`GlyphAtlas`] has no per-entry removal, and its whole-map `clear` drops the
+//! entries without giving their `ImageId`s back to the shared packer, which
+//! leaks the allocator permanently. So the defect is closed on the near side
+//! instead: a face carrying a `COLR` table is never offered the atlas route at
+//! all ([`OutlineReason::ColorFont`]), and its glyphs draw through
+//! `crate::text::color`'s layer recombination as they did before the atlas
+//! existed. The route has to be refused per *run* rather than per glyph because
+//! `glifo` derives colour-glyph caching from the presence of a cacher alone —
+//! there is no way to enable it for a run's outlines and not for its COLR
+//! glyphs.
+//!
 //! # What is not cached
 //!
-//! Five things route to outline strips instead, each for its own reason — see
-//! [`OutlineReason`]. The one that matters most is [`OutlineReason::SizeAnimating`]:
-//! a run whose font size has moved in the last [`SETTLE_FRAMES`] frames is drawn
-//! as outlines outright, because each of its frames would otherwise be a fresh
-//! key, a fresh rasterization and a fresh slot that nothing ever reuses. Not
-//! caching it is *cheaper* than caching it, not merely safer.
+//! Everything in [`OutlineReason`] routes to outline strips instead, each for
+//! its own reason. The one that matters most is
+//! [`OutlineReason::SizeAnimating`]: a run whose device font size has moved in
+//! the last [`SETTLE_FRAMES`] frames is drawn as outlines outright, because each
+//! of its frames would otherwise be a fresh key, a fresh rasterization and a
+//! fresh slot that nothing ever reuses. Not caching it is *cheaper* than
+//! caching it, not merely safer.
 //!
 //! And [`OutlineReason::Disabled`] is a real fallback rather than a stub:
 //! `FRUST_ENGINE_NO_ATLAS` routes every glyph in the process to outlines, which
@@ -106,6 +170,7 @@ use glifo::{
     AtlasConfig, AtlasSlot, FontEmbolden, GlyphAtlas, GlyphCacheConfig, GlyphCacheKey, ImageCache,
     PendingClearRect, RasterMetrics,
 };
+use kurbo::Affine;
 use peniko::color::{AlphaColor, Srgb};
 
 /// Grid a font size is snapped to before it reaches a cache key, in pixels.
@@ -155,6 +220,125 @@ pub(crate) const EVICTION_FREQUENCY: u64 = 64;
 /// cheaper and unbounded. Also `glifo`'s own default.
 pub(crate) const MAX_CACHED_FONT_SIZE: f32 = 128.0;
 
+/// Below what magnitude a transform coefficient counts as zero.
+///
+/// `glifo`'s own `SCALAR_NEARLY_ZERO_F64` — a twelfth of a binary order, i.e.
+/// `1/4096` — restated because the trait carrying it (`AffineExt`) is
+/// `pub(crate)` there and never exported. The number has to be the same one:
+/// this module refuses the atlas route for exactly the transforms `glifo`
+/// declines to absorb, and a stricter or looser threshold would put a band of
+/// transforms on one side here and the other side there.
+const NEARLY_ZERO: f64 = 1.0 / 4096.0;
+
+/// The share of the atlas array's texels glyph residency may hold at once.
+///
+/// A half. The array is shared with the image residency, and an occupant that
+/// may take all of it can starve the other one outright — so each class is left
+/// room the other cannot spend. Half rather than a tuned split because there is
+/// no per-application answer: a text-heavy screen and an image-heavy one are
+/// both ordinary, and a bound exists to stop a *runaway*, not to ration a
+/// steady state (a steady state never reaches it — see
+/// [`glyph_entry_ceiling`]).
+const GLYPH_ATLAS_SHARE: u64 = 2;
+
+/// Texels a typical padded glyph slot occupies, for sizing the entry ceiling.
+///
+/// 32x32. A 16 px Latin glyph rasterizes to roughly 10x16 plus `glifo`'s one
+/// texel of padding on each side; 32 square is comfortably above that and
+/// still below what a 64 px glyph takes, so the ceiling it implies is an
+/// *estimate* of how many glyphs fit rather than a promise. It does not need to
+/// be exact: the packer refuses an allocation it genuinely has no room for
+/// regardless, and this ceiling exists to stop the population growing to that
+/// point in the first place.
+const TYPICAL_GLYPH_TEXELS: u64 = 32 * 32;
+
+/// The fewest entries the ceiling ever admits.
+///
+/// A deliberately tiny atlas — a test constraining the packer, a downlevel
+/// adapter clamped to a small texture — must still cache *something*, or the
+/// ceiling would turn the atlas off on exactly the devices it was budgeted for.
+const MIN_GLYPH_ENTRIES: usize = 256;
+
+/// The most entries the ceiling ever admits.
+///
+/// The entry map's own bookkeeping is not free, and a population past this is
+/// past what any one surface's text can be reusing; a larger array should widen
+/// the *images*' share, not keep growing a glyph population nothing looks up.
+const MAX_GLYPH_ENTRIES: usize = 65_536;
+
+/// How many glyph entries `pages`' geometry admits at once.
+///
+/// [`GLYPH_ATLAS_SHARE`] of the array's whole texel count, divided by
+/// [`TYPICAL_GLYPH_TEXELS`] and clamped into
+/// `MIN_GLYPH_ENTRIES..=MAX_GLYPH_ENTRIES`. Derived from the geometry rather
+/// than fixed, because the mobile and desktop budgets differ by eight times
+/// their area and a constant sized for one would either strand the other's
+/// atlas or fail to bound it.
+#[must_use]
+pub(crate) fn glyph_entry_ceiling(pages: AtlasConfig) -> usize {
+    let (width, height) = pages.atlas_size;
+    let layers = u64::try_from(pages.max_atlases).unwrap_or(u64::MAX).max(1);
+    let texels = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(layers);
+
+    let entries = texels / GLYPH_ATLAS_SHARE / TYPICAL_GLYPH_TEXELS;
+    usize::try_from(entries)
+        .unwrap_or(MAX_GLYPH_ENTRIES)
+        .clamp(MIN_GLYPH_ENTRIES, MAX_GLYPH_ENTRIES)
+}
+
+/// The scale `glifo` will absorb out of `transform` into the font size, or
+/// `None` when it will absorb none and so cache nothing drawn through it.
+///
+/// `glifo` prepares a run by *absorbing* a positive uniform scale out of the
+/// transform and into the font size — the outline is fetched larger and drawn
+/// through a unit transform — and it is that absorbed size, unquantized, that
+/// reaches the cache key.
+///
+/// `None` covers every transform it leaves unabsorbed: a rotation, a skew, a
+/// mirror, a non-uniform or non-positive scale, or a non-finite coefficient.
+/// Those are runs it draws through the full transform and then declines to
+/// cache — but only *after* probing the cache with a key built from the raw
+/// font size, which can hit an entry some other frame rasterized under a unit
+/// transform and paint it with the rotation and scale simply dropped. A caller
+/// that refuses the atlas route on `None` never lets that probe happen.
+///
+/// Restates `glifo`'s `is_positive_uniform_scale_without_skew` rather than
+/// calling it: the trait carrying it is private there. It is deliberately the
+/// stricter of `glifo`'s two absorption predicates — the hinted path admits a
+/// horizontal skew, which `glifo` then refuses at insertion anyway, again only
+/// after the probe.
+#[must_use]
+pub(crate) fn absorbed_scale(transform: Affine) -> Option<f64> {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
+        return None;
+    }
+    let uniform = (a - d).abs() <= NEARLY_ZERO && a > 0.0 && d > 0.0;
+    let skewed = b.abs() > NEARLY_ZERO || c.abs() > NEARLY_ZERO;
+    // The vertical coefficient, which is the one `glifo` multiplies the font
+    // size by (`run.font_size * t_d`). Equal to the horizontal one to within
+    // the tolerance above whenever that check passed.
+    (uniform && !skewed).then_some(d)
+}
+
+/// The font size `glifo` will key a run of `size` drawn under `transform` at.
+///
+/// The number a size guard has to watch: a run at 16 px under a 2x transform is
+/// a 32 px cache entry, and a transform sweeping 1x to 3x is a size animation
+/// however still `size` itself holds.
+///
+/// `None` is a statement about the *transform* only — see [`absorbed_scale`].
+/// A `size` that is not one a glyph can be rasterized at comes back as the
+/// non-finite or non-positive number it is, and is
+/// [`quantize_font_size`]'s to refuse; keeping the two answers apart is what
+/// lets a caller say *which* of them refused a run.
+#[must_use]
+pub(crate) fn device_font_size(size: f32, transform: Affine) -> Option<f32> {
+    absorbed_scale(transform).map(|scale| (f64::from(size) * scale) as f32)
+}
+
 /// The cache-behaviour half of the policy, as `glifo` consumes it.
 #[must_use]
 pub(crate) fn glyph_cache_config() -> GlyphCacheConfig {
@@ -196,13 +380,26 @@ pub(crate) fn quantize_font_size(size: f32) -> Option<f32> {
 pub(crate) enum OutlineReason {
     /// `FRUST_ENGINE_NO_ATLAS` is set; the atlas is out of the frame entirely.
     Disabled,
-    /// The run's font size changed within the last [`SETTLE_FRAMES`] frames.
+    /// The run's device font size changed within the last [`SETTLE_FRAMES`]
+    /// frames.
     SizeAnimating,
-    /// The run's size is past [`MAX_CACHED_FONT_SIZE`].
+    /// The run's device size is past [`MAX_CACHED_FONT_SIZE`].
     SizeTooLarge,
     /// The run's size is not one a glyph can be rasterized at (see
     /// [`quantize_font_size`]).
     UnusableSize,
+    /// The run's transform is not one `glifo` absorbs a scale out of, so no
+    /// glyph of it can be cached and none may be *looked up* either (see
+    /// [`device_font_size`]).
+    TransformUncacheable,
+    /// The run's face carries a `COLR` table, so `glifo` would cache its colour
+    /// glyphs as a clip-bracketed command stream this tier cannot replay — and
+    /// would take the page's ordinary glyphs down with it (see this module's
+    /// doc).
+    ColorFont,
+    /// Glyph residency is at [`glyph_entry_ceiling`], so a further entry would
+    /// be taken out of the images' share of the shared allocator.
+    ResidencyFull,
     /// Asked outside the frame's collect phase, so there was nothing to collect
     /// into (see this module's doc).
     NotCollecting,
@@ -348,6 +545,12 @@ impl AtlasPass {
 
 /// The run identity a caller hands [`AtlasPolicy::classify_run`], before
 /// quantization.
+///
+/// Two of its fields are *routing* inputs rather than parts of the identity —
+/// [`transform`](Self::transform) and [`color_font`](Self::color_font). They
+/// live here because the route is decided in one call from one value, and
+/// neither reaches a cache key: an [`AtlasRun`] carries only what
+/// [`AtlasRun::key`] hashes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RunKey {
     /// The font blob's process-unique id (`peniko::Blob::id`).
@@ -356,8 +559,15 @@ pub(crate) struct RunKey {
     pub(crate) font_index: u32,
     /// The run's font size as the display list stated it.
     pub(crate) font_size: f32,
+    /// The run's own transform composed with the frame root — the full
+    /// device-space mapping `glifo` absorbs a scale out of (see
+    /// [`device_font_size`]).
+    pub(crate) transform: Affine,
     /// Whether the run's outlines are hinted.
     pub(crate) hinted: bool,
+    /// Whether the run's face carries a `COLR` table, and so could produce a
+    /// colour glyph this tier's replay cannot lower.
+    pub(crate) color_font: bool,
     /// The context colour a COLR glyph resolves against.
     pub(crate) context_color: AlphaColor<Srgb>,
 }
@@ -379,10 +589,22 @@ impl RunKey {
     /// `glifo` decides for itself: a run whose transform it refuses to hint is
     /// keyed as the caller asked, which is conservative in the safe direction
     /// (a redundant entry) rather than the unsafe one.
+    ///
+    /// `transform` is the run's *device* transform — its own composed with the
+    /// frame root, the same value the lowering hands `glifo` — not the display
+    /// list's `run.transform` alone. Passing the composed one is the whole point:
+    /// the scale the guard has to watch is usually the root's, not the run's.
+    ///
+    /// `color_font` is passed rather than derived because answering it means
+    /// reading the face's table directory, which is `super`'s job (see
+    /// `crate::text::font_has_color_glyphs`) and would tie this module to a
+    /// font parser it otherwise has no need of.
     #[must_use]
     pub(crate) fn for_run(
         run: &frust_scene::GlyphRun,
+        transform: Affine,
         hinted: bool,
+        color_font: bool,
         context_color: AlphaColor<Srgb>,
     ) -> Self {
         let font = run.font.font();
@@ -390,7 +612,9 @@ impl RunKey {
             font_id: font.data.id(),
             font_index: font.index,
             font_size: run.font_size,
+            transform,
             hinted,
+            color_font,
             context_color,
         }
     }
@@ -436,6 +660,9 @@ pub(crate) struct AtlasPolicy {
     /// kept for reporting. Fixed for a cache's lifetime, so the copy cannot
     /// drift from the allocator it was taken from.
     pages: AtlasConfig,
+    /// How many entries may be resident before the atlas route stops being
+    /// offered — [`glyph_entry_ceiling`] over [`Self::pages`].
+    max_entries: usize,
     /// Whether `FRUST_ENGINE_NO_ATLAS` took the atlas out of the frame.
     disabled: bool,
     /// Frames begun, which is what the size tracker ages against. Distinct from
@@ -447,9 +674,45 @@ pub(crate) struct AtlasPolicy {
     pending: Vec<GlyphCacheKey>,
     /// The same set, for deduplicating a glyph collected twice in one frame.
     claimed: HashSet<GlyphCacheKey>,
-    /// Clear rects drained after the previous frame's eviction, awaiting the
-    /// next [`AtlasPass`].
+    /// Clear rects drained after an earlier frame's eviction, awaiting a pass
+    /// that actually writes them.
+    ///
+    /// Offered by every [`build`](Self::build) and cleared only by
+    /// [`acknowledge_clears`](Self::acknowledge_clears), so a compiled frame
+    /// that is refused before it reaches a queue does not consume them (see
+    /// this module's doc).
     clears: Vec<PendingClearRect>,
+    /// How many of [`clears`](Self::clears) the last [`build`](Self::build)
+    /// offered.
+    ///
+    /// The queue is only ever appended to, so the offered rects are a prefix of
+    /// it and [`acknowledge_clears`](Self::acknowledge_clears) can drop exactly
+    /// them. Acknowledging the whole queue instead would silently swallow the
+    /// rectangles the *same* frame's eviction queued after the offer was made —
+    /// which no caller has written, because they did not exist when it wrote.
+    offered_clears: usize,
+    /// `glifo`'s cumulative miss count as this frame opened, so the frame's own
+    /// misses can be read as a difference.
+    misses_at_frame_start: u64,
+    /// Whether page commands recorded by this or an earlier frame are still
+    /// waiting to be replayed into the atlas.
+    ///
+    /// Set by [`end_frame`](Self::end_frame) on any frame that missed, cleared
+    /// by [`acknowledge_replay`](Self::acknowledge_replay). It is what the
+    /// caller drives its replay pass from: driving it from *surviving draws*
+    /// instead misses a run whose coverage was entirely culled, which still
+    /// inserted entries and still dirtied a page.
+    replay_pending: bool,
+    /// Whether [`replay_pending`](Self::replay_pending) was already set when
+    /// this frame opened — that is, whether commands from a *previous* frame
+    /// are still unreplayed.
+    ///
+    /// While it is set, [`end_frame`](Self::end_frame) skips `glifo`'s eviction
+    /// pass: eviction frees an entry's `ImageId` back to the shared packer and
+    /// queues its rectangle for clearing, and a recorded command naming that
+    /// rectangle would then replay old ink into whichever glyph was let it
+    /// next. Ageing resumes as soon as the replay lands.
+    replay_stale: bool,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
 }
@@ -469,15 +732,21 @@ impl AtlasPolicy {
     /// application drawing neither pays for no atlas.
     #[must_use]
     pub(crate) fn new(images: &ImageCache, disabled: bool) -> Self {
+        let pages = *images.atlas_manager().config();
         Self {
             atlas: GlyphAtlas::with_config(glyph_cache_config()),
-            pages: *images.atlas_manager().config(),
+            pages,
+            max_entries: glyph_entry_ceiling(pages),
             disabled,
             frame: 0,
             fonts: HashMap::new(),
             pending: Vec::new(),
             claimed: HashSet::new(),
             clears: Vec::new(),
+            offered_clears: 0,
+            misses_at_frame_start: 0,
+            replay_pending: false,
+            replay_stale: false,
             phase: Phase::Idle,
         }
     }
@@ -540,12 +809,86 @@ impl AtlasPolicy {
         self.fonts.values().map(|font| font.sizes.len()).sum()
     }
 
+    /// How many entries may be resident before the atlas route closes.
+    #[must_use]
+    pub(crate) fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    /// Whether page commands are still waiting to be replayed into the atlas.
+    ///
+    /// The gate a caller drives its render-to-atlas pass from. Deliberately not
+    /// "did this frame draw an atlas glyph": `glifo` dirties a page at
+    /// *insertion*, so a run whose every draw was culled away still recorded
+    /// fills that have to reach the array, and a caller gating on surviving
+    /// draws leaves them recorded until something else happens to replay them
+    /// — by which time the slots they name may belong to other glyphs.
+    #[must_use]
+    pub(crate) fn replay_pending(&self) -> bool {
+        self.replay_pending
+    }
+
+    /// Record that the recorded page commands reached the atlas array.
+    ///
+    /// The counterpart of [`replay_pending`](Self::replay_pending), and the
+    /// same shape as the image residency's `acknowledge_plan`: call it only
+    /// once the replay really ran, because it is also what lets eviction resume
+    /// (see [`replay_stale`](Self::replay_stale)).
+    pub(crate) fn acknowledge_replay(&mut self) {
+        self.replay_pending = false;
+    }
+
+    /// Whether any evicted rectangle is still waiting to be zeroed.
+    #[must_use]
+    pub(crate) fn has_pending_clears(&self) -> bool {
+        !self.clears.is_empty()
+    }
+
+    /// Record that the rects the last [`build`](Self::build) offered were
+    /// written to the array, dropping exactly those.
+    ///
+    /// Call it only once the writes were really issued: a frame that consumed
+    /// them and was then refused would leave every one of those rectangles
+    /// holding the pixels of the glyph that was evicted out of it.
+    ///
+    /// Only the offered prefix is dropped. The same frame's own
+    /// [`end_frame`](Self::end_frame) may have queued more rects behind them —
+    /// this frame's eviction, which belongs to the *next* pass — and those have
+    /// been written by nobody.
+    pub(crate) fn acknowledge_clears(&mut self) {
+        let offered = self.offered_clears.min(self.clears.len());
+        self.clears.drain(..offered);
+        self.offered_clears = 0;
+    }
+
     /// Open the frame's collect phase.
     pub(crate) fn begin_frame(&mut self) {
         self.frame = self.frame.saturating_add(1);
         self.pending.clear();
         self.claimed.clear();
+        // Read before anything this frame can miss, so `frame_misses` below is
+        // this frame's own count rather than the process's.
+        self.misses_at_frame_start = self.atlas.cache_misses();
+        // Whether the *previous* frame's commands are still outstanding, latched
+        // here so `end_frame` can tell them from the ones this frame is about to
+        // record.
+        self.replay_stale = self.replay_pending;
         self.phase = Phase::Collect;
+    }
+
+    /// How many glyphs have missed the cache since this frame opened.
+    ///
+    /// The proxy for "this frame left work in `glifo`'s pending queues": every
+    /// path that records a page command, queues a bitmap upload or allocates a
+    /// slot goes through a miss first. An over-approximation by construction —
+    /// a miss whose transform `glifo` then declines to cache records nothing —
+    /// and deliberately so, since the cost of the extra answer is a replay call
+    /// that finds nothing to do, while the cost of a missed one is stale ink.
+    #[must_use]
+    fn frame_misses(&self) -> u64 {
+        self.atlas
+            .cache_misses()
+            .saturating_sub(self.misses_at_frame_start)
     }
 
     /// Decide how `run` is drawn, and record its size against the font's
@@ -556,6 +899,13 @@ impl AtlasPolicy {
     /// through the cacheable range is still a size change while it is above it,
     /// and forgetting that would let an animation slowing down above 128 px be
     /// treated as settled the moment it dropped back under.
+    ///
+    /// The size observed is the *device* one — `font_size` with the transform's
+    /// absorbed scale in it, which is what `glifo` keys (see
+    /// [`device_font_size`]). A transform it will not absorb is refused before
+    /// any observation is made: the raw size such a run would be keyed at is a
+    /// different quantity from the one this tracker follows, and mixing the two
+    /// into one history would read a scale change as a settled size.
     pub(crate) fn classify_run(&mut self, run: &RunKey) -> RunRoute {
         if self.disabled {
             return RunRoute::Outline(OutlineReason::Disabled);
@@ -563,16 +913,34 @@ impl AtlasPolicy {
         if self.phase != Phase::Collect {
             return RunRoute::Outline(OutlineReason::NotCollecting);
         }
-        let Some(size) = quantize_font_size(run.font_size) else {
+        // Ahead of every other answer, and ahead of the size observation: a
+        // colour face is refused whatever it is drawn at, so recording its
+        // sizes would only be tracking a font that can never take the route.
+        if run.color_font {
+            return RunRoute::Outline(OutlineReason::ColorFont);
+        }
+        let Some(device_size) = device_font_size(run.font_size, run.transform) else {
+            return RunRoute::Outline(OutlineReason::TransformUncacheable);
+        };
+        let Some(size) = quantize_font_size(device_size) else {
             return RunRoute::Outline(OutlineReason::UnusableSize);
         };
 
         let animating = self.observe_size((run.font_id, run.font_index), size);
-        if size > MAX_CACHED_FONT_SIZE {
+        // Compared against the device size rather than the quantized one, on
+        // the same terms `glifo` compares its own ceiling against the absorbed
+        // size: a run just over the line must not be admitted by rounding down
+        // to it.
+        if device_size > MAX_CACHED_FONT_SIZE {
             return RunRoute::Outline(OutlineReason::SizeTooLarge);
         }
         if animating {
             return RunRoute::Outline(OutlineReason::SizeAnimating);
+        }
+        // Last, because it is the only answer that depends on what other runs
+        // have already been admitted this frame rather than on this one alone.
+        if self.atlas.len() >= self.max_entries {
+            return RunRoute::Outline(OutlineReason::ResidencyFull);
         }
 
         RunRoute::Atlas(AtlasRun {
@@ -629,8 +997,13 @@ impl AtlasPolicy {
     where
         F: FnMut(&GlyphCacheKey) -> Option<RasterMetrics>,
     {
+        // Cloned, not taken: the pass this returns may belong to a frame the
+        // caller refuses before anything reaches a queue, and a clear consumed
+        // by such a frame is a rectangle that keeps a dead glyph's pixels for
+        // good. They go on being offered until `acknowledge_clears`.
+        self.offered_clears = self.clears.len();
         let mut pass = AtlasPass {
-            clears: std::mem::take(&mut self.clears),
+            clears: self.clears.clone(),
             uploads: Vec::new(),
             refused: 0,
         };
@@ -683,7 +1056,24 @@ impl AtlasPolicy {
     /// screen returns its space to whichever class asks for it next. Only
     /// handles from the entry map below are freed — a resident image's handle
     /// is not `glifo`'s to reach.
+    ///
+    /// The ageing pass is *skipped* while an earlier frame's page commands are
+    /// still unreplayed. Eviction hands an entry's rectangle back to the packer
+    /// and queues it for clearing, so a recorded command still naming it would
+    /// be replayed into whatever was let that rectangle next — old ink in
+    /// another glyph's slot. Deferring costs a delayed reap; not deferring
+    /// costs a wrong pixel.
     pub(crate) fn end_frame(&mut self, images: &mut ImageCache) {
+        if self.frame_misses() > 0 {
+            self.replay_pending = true;
+        }
+
+        if self.replay_stale {
+            self.prune_sizes();
+            self.phase = Phase::Idle;
+            return;
+        }
+
         self.atlas.maintain(images);
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
         self.clears.extend(evicted);
