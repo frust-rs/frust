@@ -1806,9 +1806,67 @@ cleared it without policy changes.
   columns are the per-frame sum, the comparable whole-pipe figure; neither
   is a GPU timer.
 - **S6 (text) and any glyph-bearing content on the engine arm** — out of
-  scope until the text phase lands; every engine number above excludes
-  glyph rasterization the classic frame beside it includes.
+  scope when this section was written; the text phase has since landed and
+  S6 is measured in the "Engine text (s6)" section below.
 - **Pixel 5a** — this pass ran on the Pixel 5 only.
+
+## Engine text (s6) — Phase 5 (glifo text + glyph atlas)
+
+The engine's text stack measured end-to-end for the first time: the glifo
+glyph backend, the additive-accounting glyph atlas (the residency fix that
+replaced the entry-count ceiling — every number below postdates it), and the
+filter machinery merged beside them. Same `--tier` axis and quick-pass
+sizing as the Phase-4 section above:
+
+```
+bash benchmarks/harness/ab_matrix.sh --device <pixel5-serial> --device-name pixel5 \
+    --tier classic,engine --aa area --scale 1.0 --scenarios s6 --runs 5 --duration 20
+```
+
+### Pixel 5 — the gate device (measured)
+
+Kept 3 of 5 runs (first 2 discarded per PROTOCOL §4), ~1760 frames per run.
+The gate bar is engine p50 ≤ classic p50 AND engine p95 ≤ 1.15× classic p95.
+
+| Arm | S6 p50 (ms) | S6 p95 (ms) |
+|---|---|---|
+| classic (same-day, area/1.0) | 22.55 | 23.87 |
+| engine | **11.23** | **11.85** |
+| engine, `FRUST_ENGINE_NO_ATLAS=1` | 11.59 | 12.48 |
+
+**The gate PASSES**: 11.23 ≤ 22.55 and 11.85 ≤ 27.45. Two findings ride
+along. First, classic's S6 is over the 16.7 ms budget on this device —
+per-frame glyph outline rasterization through vello's fine stage is what the
+Adreno 620 cannot afford, and the engine's strip pipeline halves it. Second,
+the atlas's own contribution is small on this scene: the `NO_ATLAS` arm
+(every glyph as outline strips, atlas allocation off) costs only ~0.4 ms at
+p50 over the cached arm, so the 2x win comes from the strip pipeline itself,
+with the atlas as a modest bound on top.
+
+### Xiaomi 12 — cross-device context (Adreno 730)
+
+Same pass shape, same tree. classic 5.92 / 8.80; engine 7.76 / 8.74
+(p50/p95 ms). On a GPU ~3x the Pixel 5's, classic's fine-stage raster is
+cheap and the engine's fixed per-frame overhead shows: the engine is
+~1.8 ms slower at p50 (both arms far inside the budget) with a marginally
+tighter tail. The engine's text win concentrates exactly where the budget
+pressure is — weak GPUs; the `NO_ATLAS` bound above says the gap is not
+the atlas machinery.
+
+### Methodology deviations
+
+Same 5-run x 20 s quick-pass sizing as the Phase-4 section (below
+PROTOCOL §4's ≥10-run/30 s convention). Both devices were driven from the
+Linux workstation over wireless adb (serials redacted), not the Mac rig.
+The nav columns of both passes are not reported: the tap script's
+coordinates are Pixel-calibrated (the Xiaomi pass skipped nav outright)
+and the nav gate was closed in Phase 4 — nothing here re-measures it.
+
+Raw series: `benchmarks/raw/pixel5/tier/{classic-area-1.0,engine,engine-noatlas}/s6/`
+and `benchmarks/raw/xiaomi12/tier/{classic-area-1.0,engine}/s6/`
+(`run-NN.log` + `stats.txt`; the `engine-noatlas` cell was captured via
+`run.sh` directly with the same filtering and reproduces via `stats.py
+--scenario s6 --discard-first 2`).
 
 ---
 
