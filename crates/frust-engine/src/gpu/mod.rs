@@ -29,6 +29,7 @@ pub mod config;
 pub mod depth;
 pub mod paint_texture;
 pub mod pipelines;
+pub mod present;
 pub mod shader_src;
 pub mod strips;
 pub mod targets;
