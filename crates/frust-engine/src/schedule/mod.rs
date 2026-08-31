@@ -150,7 +150,7 @@
 
 pub mod pages;
 
-pub use pages::{PageConfig, PageParity, PageSize, page_ceiling, page_size};
+pub use pages::{PageConfig, PageParity, PageSize, filter_page_size, page_ceiling, page_size};
 
 use core::ops::Range;
 
@@ -563,7 +563,19 @@ fn finish<'a>(
 
     let bounds = layer.bbox;
     let depth = stream.depth;
-    let size = page_size(bounds, config, caps)?;
+    // A filter layer's page is sized with the extra atlas margin
+    // (`filter_page_size`) its kernel taps can reach past: both this
+    // contents round and every filter-pass round the layer costs share this
+    // one `size` (see `filter_rounds`'s own `filtered.size`), so the margin
+    // has to be reserved here, before the first byte of the layer is ever
+    // rendered — sizing only the pass rounds would leave the contents
+    // themselves on an unpadded page while the first pass reads past its
+    // edge. A regular layer never filters its contents, so it keeps the
+    // plain `page_size` this always used.
+    let size = match &layer.kind {
+        RecordedLayerKind::Regular => page_size(bounds, config, caps)?,
+        _ => filter_page_size(bounds, config, caps)?,
+    };
     let page = |parity, continued| {
         RoundTarget::Page(PageTarget {
             layer: id,
@@ -879,7 +891,16 @@ fn cut_at(
         StreamOwner::Root => RoundTarget::Root,
         StreamOwner::Isolated { id, layer } => {
             let bounds = layer.bbox;
-            let size = page_size(bounds, config, caps)?;
+            // A filter layer's stream can itself be cut mid-frame — nothing
+            // stops a regular/opacity layer from being recorded nested inside
+            // one, and `make_room` treats every isolated stream on the stack
+            // alike — so this has to size the page on the same terms `finish`
+            // does above, or a cut filter layer's contents would land on an
+            // unpadded page its own first pass then reads past the edge of.
+            let size = match &layer.kind {
+                RecordedLayerKind::Regular => page_size(bounds, config, caps)?,
+                _ => filter_page_size(bounds, config, caps)?,
+            };
             let parity = match stack[index].page {
                 Some(parity) => parity,
                 None => {

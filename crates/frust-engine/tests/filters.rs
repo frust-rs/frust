@@ -1361,6 +1361,16 @@ fn a_filter_layer_inside_another_layer_is_refused() {
 /// The padding overflow the reference guards: a blur grows its layer past what
 /// a page can be sized to, and the frame is refused rather than clipped to the
 /// ceiling — and never panicked (E17), however far past the ceiling it lands.
+///
+/// A filter layer's page is sized by [`frust_engine::schedule::filter_page_size`]
+/// (wired into `Schedule::build` since this test's own boundary was pinned),
+/// which checks the PADDED request against two ceilings rather than one: this
+/// case's bbox alone already clears the pool's configured `max_page_size`, so
+/// once padded it is refused as [`EngineError::IntermediateTextureLimitReached`]
+/// — the adapter could still serve it, but this pool's own budget will not —
+/// rather than [`EngineError::IntermediateTextureTooLarge`], which is reserved
+/// for a request past the ADAPTER's own ceiling (see the sibling test below,
+/// which drives a σ large enough to cross that one too).
 #[test]
 fn a_blur_that_grows_its_layer_past_a_page_is_refused_rather_than_clipped() {
     let config = PageConfig {
@@ -1388,12 +1398,17 @@ fn a_blur_that_grows_its_layer_past_a_page_is_refused_rather_than_clipped() {
     );
     assert!(matches!(
         Schedule::build(&recorder, &caps(), &config),
-        Err(EngineError::IntermediateTextureTooLarge)
+        Err(EngineError::IntermediateTextureLimitReached)
     ));
 }
 
 /// The refusal is a return value at every σ the recorder accepts, including the
 /// largest — a blur is never a panic, whatever it is asked for.
+///
+/// Both refusal shapes are accepted here: `filter_page_size`'s padded request
+/// can cross either ceiling depending how far the σ pushes it (see the two
+/// tests above), and this sweep exists to pin "never a panic", not which of
+/// the two named errors a given σ lands on.
 #[test]
 fn no_sigma_the_recorder_accepts_panics_the_scheduler() {
     let config = PageConfig {
@@ -1415,7 +1430,10 @@ fn no_sigma_the_recorder_accepts_panics_the_scheduler() {
 
         match Schedule::build(&recorder, &caps(), &config) {
             Ok(rounds) => assert!(!rounds.is_empty(), "σ {sigma}"),
-            Err(EngineError::IntermediateTextureTooLarge) => {}
+            Err(
+                EngineError::IntermediateTextureTooLarge
+                | EngineError::IntermediateTextureLimitReached,
+            ) => {}
             Err(other) => panic!("σ {sigma} refused unexpectedly: {other:?}"),
         }
     }
@@ -2427,11 +2445,21 @@ fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver(
         .push_error_scope(wgpu::ErrorFilter::Validation);
 
     let config = PageConfig::default();
-    let ceiling = frust_engine::schedule::page_ceiling(&config, &harness.caps);
+    // The DEVICE ceiling, not the pool's own configured budget: a filter
+    // layer's page is sized by `filter_page_size` since this test's own
+    // boundary was pinned, which checks the padded request against both
+    // ceilings separately (see that function's doc) — this test's claim is
+    // specifically about the adapter's own `max_texture_dimension_2d`, so the
+    // σ below has to cross THAT one, not merely the pool's configured
+    // `max_page_size` (a σ that only crosses the latter is `pages.rs`'s own
+    // host-level `a_filter_layer_inside_the_device_ceiling_but_past_the_pool_
+    // budget_is_limit_reached`, not this device-level claim).
+    let device_ceiling = frust_engine::gpu::targets::max_texture_size(&harness.caps);
 
-    // A σ whose 3σ spread on every side is past the adapter's own page ceiling,
-    // over contents small enough that only the blur can have done it.
-    let sigma = (ceiling as f32) / 2.0;
+    // A σ whose 3σ spread on every side is past the adapter's own device
+    // ceiling, over contents small enough that only the blur can have done
+    // it.
+    let sigma = (device_ceiling as f32) / 2.0;
     let mut recorder = recorder();
     push_filter_layer(
         &mut recorder,
@@ -2444,8 +2472,8 @@ fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver(
     recorder.pop_layer();
 
     assert!(
-        u32::from(recorder.layers[0].bbox.width()) > ceiling,
-        "the blur has to be what pushes the layer past this adapter's ceiling: {:?}",
+        u32::from(recorder.layers[0].bbox.width()) > device_ceiling,
+        "the blur has to be what pushes the layer past this adapter's device ceiling: {:?}",
         recorder.layers[0].bbox
     );
     assert!(
@@ -2453,7 +2481,8 @@ fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver(
             Schedule::build(&recorder, &harness.caps, &config),
             Err(EngineError::IntermediateTextureTooLarge)
         ),
-        "a filter layer past the page ceiling is refused rather than clipped onto it"
+        "a filter layer past the adapter's own device ceiling is refused rather than clipped \
+         onto it"
     );
 
     // And the pool the frame path would have asked answers the same way,

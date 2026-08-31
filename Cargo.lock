@@ -2639,6 +2639,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 1.1.4+spec-1.1.0",
+ "vello_common 0.2.0",
  "vello_cpu 0.2.0",
  "wgpu",
 ]
