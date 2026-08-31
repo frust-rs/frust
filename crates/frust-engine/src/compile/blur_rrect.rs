@@ -71,22 +71,36 @@ use frust_scene::CornerRadii;
 /// agree on where a shadow ends.
 const BLUR_KERNEL_STD_DEVS: f64 = 2.5;
 
+/// The widest pad [`inflated_bounds`] will apply, in the same pre-transform
+/// units as the rectangle it inflates.
+///
+/// The compiler accepts any finite `std_dev`, and an extreme one inflates
+/// the coverage rectangle to coordinates that degrade the strip generator's
+/// tile arithmetic into malformed strips outside the tile-snapped viewport.
+/// The cap bounds the *pad* — never the standard deviation the shader
+/// evaluates — at a distance no addressable surface approaches
+/// (`max_texture_size` tops out at 16384), so it cannot change a rendered
+/// pixel: coverage past the surface is invisible, and every realistic blur
+/// keeps its full falloff.
+const MAX_KERNEL_PAD: f64 = 1.0e6;
+
 /// The axis-aligned rectangle a blurred rounded rectangle's strip coverage is
 /// generated over, in the same (pre-transform) coordinate space as `rect`.
 ///
 /// Padding by [`BLUR_KERNEL_STD_DEVS`] standard deviations on every side is
 /// what keeps the strip generator from clipping the blur's own falloff tail
 /// — see the module doc for why this is a plain rectangle pad rather than a
-/// rounded one. A non-finite or negative `std_dev` is not guarded here: it
-/// cannot reach this function at all, because [`super::check_geometry`]
-/// refuses a non-finite `std_dev` before any command is compiled, and
-/// `frust_scene::SceneBuilder`'s blurred-rect constructors take a caller-
-/// supplied standard deviation on the same terms every other geometry
-/// parameter is — a negative one is nonsensical but not this compiler's to
-/// reject.
+/// rounded one. The pad is capped at [`MAX_KERNEL_PAD`], a coverage-only
+/// bound that no visible blur reaches. A non-finite or negative `std_dev`
+/// is not guarded here: it cannot reach this function at all, because
+/// [`super::check_geometry`] refuses a non-finite `std_dev` before any
+/// command is compiled, and `frust_scene::SceneBuilder`'s blurred-rect
+/// constructors take a caller-supplied standard deviation on the same terms
+/// every other geometry parameter is — a negative one is nonsensical but
+/// not this compiler's to reject.
 #[must_use]
 pub fn inflated_bounds(rect: Rect, std_dev: f64) -> Rect {
-    let kernel = BLUR_KERNEL_STD_DEVS * std_dev;
+    let kernel = (BLUR_KERNEL_STD_DEVS * std_dev).min(MAX_KERNEL_PAD);
     rect.inflate(kernel, kernel)
 }
 

@@ -170,21 +170,27 @@ fn caps() -> TierCaps {
     TierCaps::fake(DownlevelProfile::Full)
 }
 
-/// Three sibling half-opacity layers over a scene that also draws `data` — a
-/// fan wider than the two page groups serve, so `Schedule::build` refuses it,
-/// recorded around a real image draw so the refusal lands on a frame that made
-/// an image resident.
+/// A half-opacity layer holding a flat isolated child and then a nesting one,
+/// over a scene that also draws `data`.
+///
+/// The smallest shape two pooled pages cannot serve — the parent takes a group
+/// of its own once its round is cut after the first child, and the second child
+/// then needs two more for the chain below it — so `Schedule::build` refuses it.
+/// Recorded around a real image draw, so the refusal lands on a frame that made
+/// an image resident. (A plain sibling fan is *not* a counterexample any more:
+/// the scheduler serves one of any width by cutting the parent's round.)
 fn branching_layers_with_an_image(data: &ImageData) -> Scene {
     scene_of(|b| {
         b.draw_image(data, DEST);
+        b.push_layer(Rect::new(0.0, 0.0, 56.0, 24.0), 0.5);
         b.push_layer(Rect::new(0.0, 0.0, 24.0, 24.0), 0.5);
         b.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
         b.push_layer(Rect::new(28.0, 0.0, 52.0, 24.0), 0.5);
-        b.fill_rect(Rect::new(30.0, 2.0, 48.0, 20.0), Brush::Solid(RED));
+        b.push_layer(Rect::new(30.0, 2.0, 50.0, 22.0), 0.5);
+        b.fill_rect(Rect::new(32.0, 4.0, 48.0, 20.0), Brush::Solid(RED));
         b.pop_layer();
-        b.push_layer(Rect::new(56.0, 0.0, 80.0, 24.0), 0.5);
-        b.fill_rect(Rect::new(58.0, 2.0, 76.0, 20.0), Brush::Solid(RED));
+        b.pop_layer();
         b.pop_layer();
     })
 }

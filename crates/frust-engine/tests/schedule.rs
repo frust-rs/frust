@@ -8,13 +8,13 @@
 //! a page is a decision about a group and an extent, and the pool that hands the
 //! texture out is not consulted until execute time.
 //!
-//! The five claims under test are the ones the scheduler exists for: a frame
-//! with no isolated layer costs exactly one pass, each isolated layer costs one
-//! more, a nested chain ping-pongs between two texture groups however deep it
-//! runs, sibling layers beside each other take the two groups one apiece rather
-//! than overwriting one another, and a shape needing a third live page is
-//! refused with a reason a log can be read from rather than rendered
-//! incorrectly.
+//! The claims under test are the ones the scheduler exists for: a frame with no
+//! isolated layer costs exactly one pass, each isolated layer costs one more, a
+//! nested chain ping-pongs between two texture groups however deep it runs,
+//! sibling layers beside each other take the two groups one apiece and a fan
+//! wider than that is served by cutting its parent's round short rather than by
+//! a third group, and a shape that still finds no group after a cut is refused
+//! with a reason a log can be read from rather than rendered incorrectly.
 
 use frust_engine::schedule::{
     MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PageConfig, PageParity, Round, RoundOp, Schedule, pages,
@@ -115,13 +115,36 @@ fn sibling_fan(count: u16) -> CommandRecorder<EngineDraw> {
     recorder
 }
 
+/// A recording of one isolated parent holding a flat isolated child and then a
+/// nesting one — the smallest shape two pooled pages cannot serve.
+///
+/// The parent takes a group of its own once its round is cut after the first
+/// child, and the second child then needs two more for the chain below it.
+fn branching_chain() -> CommandRecorder<EngineDraw> {
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 16, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 64, 16, 32);
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder
+}
+
 /// Walks `rounds` the way the renderer executes them and fails if any round
 /// would sample a page an earlier round had already overwritten.
 ///
 /// One slot per ping-pong group, which is the bound itself: the scheduler hands
 /// out a parity, and a parity *is* a page identity for the shapes it serves, so
 /// a schedule that put two live pages in one group shows up here as a round
-/// rendering over a page still owed to a later composite.
+/// rendering over a page still owed to a later composite. A continuation round
+/// is the one round allowed to render into an occupied group, and only into its
+/// own layer's page — the whole point of the `continued` flag is that the
+/// renderer loads that page instead of clearing it.
 fn assert_pages_survive_until_composited(rounds: &[Round]) {
     let mut live: [Option<u32>; MAX_LIVE_PAGES] = [None; MAX_LIVE_PAGES];
 
@@ -138,14 +161,24 @@ fn assert_pages_survive_until_composited(rounds: &[Round]) {
         }
 
         // The round's own page is live for the whole of its pass, alongside
-        // every page that pass samples, so the group has to be free first.
+        // every page that pass samples, so the group has to be free first —
+        // unless this round is continuing the page it already holds there.
         if let Some(page) = round.page() {
-            assert!(
-                live[page.parity.index()].is_none(),
-                "a round renders into the {:?} group over a page a later round still \
-                 composites: {round:?}",
-                page.parity
-            );
+            if page.continued {
+                assert_eq!(
+                    live[page.parity.index()],
+                    Some(page.layer),
+                    "a round continues a page the {:?} group is not holding: {round:?}",
+                    page.parity
+                );
+            } else {
+                assert!(
+                    live[page.parity.index()].is_none(),
+                    "a round renders into the {:?} group over a page a later round still \
+                     composites: {round:?}",
+                    page.parity
+                );
+            }
         }
 
         for parity in &round.released {
@@ -155,6 +188,16 @@ fn assert_pages_survive_until_composited(rounds: &[Round]) {
             live[page.parity.index()] = Some(page.layer);
         }
     }
+}
+
+/// The layers `rounds` composites, in execution order, paired with the round
+/// each composite happens in.
+fn composite_order(rounds: &[Round]) -> Vec<(usize, u32)> {
+    rounds
+        .iter()
+        .enumerate()
+        .flat_map(|(index, round)| round.composites().map(move |c| (index, c.layer)))
+        .collect()
 }
 
 /// The draw ranges a round issues, in execution order.
@@ -523,33 +566,197 @@ fn a_layer_covering_nothing_costs_no_pass() {
     assert_eq!(rounds[0].composites().count(), 0);
 }
 
+#[test]
+fn nothing_inside_a_layer_covering_nothing_costs_a_pass_either() {
+    // A layer covering no pixels composites nothing, so no round of its own is
+    // emitted — and neither is any round its children would have rendered,
+    // whose pages nothing would ever have sampled. They used to be scheduled
+    // and then thrown away with the parent that would have read them.
+    let mut recorder = recorder();
+    draw(&mut recorder, 0, 0, 16);
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    recorder.pop_layer();
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    recorder.pop_layer();
+    recorder.pop_layer();
+    draw(&mut recorder, 64, 64, 16);
+
+    let rounds = schedule(&recorder);
+
+    assert_eq!(
+        rounds.len(),
+        1,
+        "an empty layer's whole subtree is pruned, not rendered into pages: {rounds:?}"
+    );
+    assert!(rounds[0].is_root());
+    assert_eq!(rounds[0].composites().count(), 0);
+    assert_eq!(draw_ranges(&rounds[0]), vec![(0, 1), (1, 2)]);
+}
+
+#[test]
+fn a_layer_covering_nothing_still_refuses_a_shape_the_scheduler_cannot_serve() {
+    // Pruning is about what is rendered, not about what is validated: a layer
+    // shape past what this scheduler serves refuses the frame wherever it was
+    // recorded, so a display list that starts drawing into an empty layer does
+    // not silently become servable.
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(
+        LayerProps {
+            blend_mode: BlendMode::new(Mix::Multiply, Compose::SrcOver),
+            opacity: 1.0,
+            mask: None,
+            clip_path: None,
+        },
+        None,
+    );
+    recorder.pop_layer();
+    recorder.pop_layer();
+
+    assert!(
+        escalation(&recorder).contains("non-default blend mode"),
+        "an unservable layer is refused inside an empty one too"
+    );
+}
+
 // ---------------------------------------------------------------------
-// Shapes the scheduler refuses
+// A fan wider than the two groups is served by cutting the parent's round
 // ---------------------------------------------------------------------
 
 #[test]
-fn a_sibling_fan_wider_than_the_two_groups_escalates_with_a_readable_reason() {
-    // Three siblings under the root need three pages live at the one pass that
-    // composites them all, and there are two groups to take them from.
-    let reason = escalation(&sibling_fan(3));
+fn a_three_wide_sibling_fan_cuts_the_root_round_and_reuses_the_first_page() {
+    // GRADUATED: this shape used to escalate. Three siblings do need three
+    // pages live at once *if* one pass has to composite them all — so the root
+    // round is cut after the first two, both pages go back, and the third
+    // sibling takes the group the first one had.
+    let rounds = schedule(&sibling_fan(3));
 
-    assert!(
-        reason.contains("layer 2"),
-        "the reason names the sibling that found no group: {reason}"
+    assert_eq!(
+        rounds.len(),
+        5,
+        "a page each, and the surface split either side of the third: {rounds:?}"
     );
+    assert_pages_survive_until_composited(&rounds);
+
+    let pages: Vec<(u32, PageParity)> = rounds
+        .iter()
+        .filter_map(|round| round.page().map(|page| (page.layer, page.parity)))
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            (0, PageParity::Odd),
+            (1, PageParity::Even),
+            (2, PageParity::Odd)
+        ],
+        "the third sibling reuses the group the first one was released from"
+    );
+
+    // The cut is a split of one painter's-order walk, so the composites still
+    // run in recording order — the first two in the cut round, the third after.
+    assert_eq!(composite_order(&rounds), vec![(2, 0), (2, 1), (4, 2)]);
+    assert!(rounds[2].is_root() && rounds[4].is_root());
+    assert_eq!(rounds[2].released, vec![PageParity::Odd, PageParity::Even]);
+    assert_eq!(rounds[4].released, vec![PageParity::Odd]);
     assert!(
-        reason.contains("third live intermediate page"),
-        "the reason says what ran out: {reason}"
+        rounds
+            .iter()
+            .all(|round| !round.page().is_some_and(|page| page.continued)),
+        "the surface takes the cut here, and a surface round always loads: {rounds:?}"
     );
 }
 
 #[test]
-fn a_branch_whose_second_subtree_nests_escalates() {
-    // A parent with two children, the second of which has a child of its own:
-    // scheduling that grandchild takes the group the first child's finished
-    // page is in, and the parent then has none left for its own.
+fn a_sibling_fan_of_any_width_costs_one_page_round_each_and_a_root_round_per_pair() {
+    // The shape the hoisted opaque pass exists for: a staggered list entrance
+    // fading five rows at once no longer skips the frame.
+    for count in 1..=8_u16 {
+        let rounds = schedule(&sibling_fan(count));
+        assert_pages_survive_until_composited(&rounds);
+
+        let count = usize::from(count);
+        let root_rounds = rounds.iter().filter(|round| round.is_root()).count();
+        assert_eq!(
+            root_rounds,
+            count.div_ceil(MAX_LIVE_PAGES).max(1),
+            "a {count}-wide fan cuts the surface once per pair of groups: {rounds:?}"
+        );
+        assert_eq!(
+            rounds.iter().filter_map(Round::page).count(),
+            count,
+            "one page round per sibling, however wide the fan"
+        );
+
+        let composited: Vec<u32> = rounds
+            .iter()
+            .flat_map(Round::composites)
+            .map(|c| c.layer)
+            .collect();
+        assert_eq!(
+            composited,
+            (0..count as u32).collect::<Vec<_>>(),
+            "every sibling is composited, in the order the recording entered them"
+        );
+    }
+}
+
+#[test]
+fn a_nested_sibling_pair_gives_the_parent_its_page_early_and_continues_it() {
+    // GRADUATED: this shape used to escalate. A sibling pair *inside* a layer
+    // costs three pages while the parent composites both in one pass — its own
+    // and the two children's. Cutting the parent after the first child is what
+    // keeps it to two: the parent takes its page while one group is still free,
+    // composites the first child into it, and its second round loads that same
+    // page rather than clearing the half already drawn.
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 48, 16, 32);
+    recorder.pop_layer();
+    recorder.pop_layer();
+
+    let rounds = schedule(&recorder);
+    assert_pages_survive_until_composited(&rounds);
+
+    let pages: Vec<(u32, PageParity, bool)> = rounds
+        .iter()
+        .filter_map(|round| {
+            round
+                .page()
+                .map(|page| (page.layer, page.parity, page.continued))
+        })
+        .collect();
+    assert_eq!(
+        pages,
+        vec![
+            (1, PageParity::Even, false),
+            (0, PageParity::Odd, false),
+            (2, PageParity::Even, false),
+            (0, PageParity::Odd, true),
+        ],
+        "the parent opens its page between its children and continues it after the second"
+    );
+
+    // Both children reach the parent, in recording order, and the parent
+    // reaches the surface once.
+    assert_eq!(composite_order(&rounds), vec![(1, 1), (3, 2), (4, 0)]);
+    assert!(rounds[4].is_root());
+    assert_eq!(rounds.len(), 5);
+}
+
+#[test]
+fn a_flat_sibling_beside_one_that_nests_is_served_by_cutting_the_root_round() {
+    // GRADUATED: this shape used to escalate. A flat sibling first, then one
+    // that nests: the nesting sibling needs both groups at once, and the flat
+    // one's page was still owed to the surface. Cutting the surface round pays
+    // that debt early, and the nesting sibling then has both groups.
+    let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
     draw(&mut recorder, 16, 16, 32);
     recorder.pop_layer();
@@ -558,9 +765,67 @@ fn a_branch_whose_second_subtree_nests_escalates() {
     draw(&mut recorder, 64, 16, 32);
     recorder.pop_layer();
     recorder.pop_layer();
-    recorder.pop_layer();
 
-    let reason = escalation(&recorder);
+    let rounds = schedule(&recorder);
+    assert_pages_survive_until_composited(&rounds);
+
+    assert_eq!(rounds.len(), 5, "{rounds:?}");
+    assert_eq!(
+        composite_order(&rounds),
+        vec![(2, 0), (3, 2), (4, 1)],
+        "the flat sibling is composited in the cut round, the nesting one after it"
+    );
+    assert!(rounds[2].is_root() && rounds[4].is_root());
+    assert_eq!(
+        rounds[2].released,
+        vec![PageParity::Odd],
+        "the cut is what hands the flat sibling's group back"
+    );
+}
+
+#[test]
+fn a_cut_round_still_draws_every_range_once_and_in_recording_order() {
+    // A cut splits a target's work across passes; it must not duplicate or drop
+    // any of it. Draws either side of each layer, so the surface's own ranges
+    // straddle both cuts.
+    let mut recorder = recorder();
+    for index in 0..3_u16 {
+        draw(&mut recorder, index.saturating_mul(48), 0, 16);
+        recorder.push_layer(layer(HALF), None);
+        draw(&mut recorder, index.saturating_mul(48), 16, 32);
+        recorder.pop_layer();
+    }
+    draw(&mut recorder, 0, 48, 16);
+
+    let rounds = schedule(&recorder);
+    assert_pages_survive_until_composited(&rounds);
+
+    let mut issued: Vec<(u32, u32)> = rounds.iter().flat_map(draw_ranges).collect();
+    issued.sort_unstable();
+    assert_eq!(
+        issued,
+        vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)],
+        "every recorded draw reaches exactly one round: {rounds:?}"
+    );
+    assert_eq!(
+        rounds.iter().map(Round::draw_count).sum::<u32>(),
+        recorder.draws.len() as u32
+    );
+}
+
+// ---------------------------------------------------------------------
+// Shapes the scheduler refuses
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_branch_whose_second_subtree_nests_escalates() {
+    // A parent with two children, the second of which has a child of its own.
+    // Cutting the parent after the first child is what serves a plain sibling
+    // pair, and it happens here too — but it costs the parent a group for the
+    // rest of the frame, so the second child, needing two of its own for the
+    // chain below it, finds none. Three pages really are live at that point:
+    // the parent's, the grandchild's, and the child's own.
+    let reason = escalation(&branching_chain());
 
     assert!(
         reason.contains("layer 2"),
@@ -573,25 +838,32 @@ fn a_branch_whose_second_subtree_nests_escalates() {
 }
 
 #[test]
-fn a_sibling_needing_both_groups_beside_a_finished_page_escalates() {
-    // The mirror of the shape that schedules: a flat sibling first, then one
-    // that nests. The nesting sibling needs both groups at once, and the flat
-    // one's page is still owed to the surface, so there is only one to have.
+fn a_sibling_pair_nested_inside_a_sibling_pair_escalates() {
+    // A fan inside a layer costs that layer its group for the rest of the
+    // frame, and a fan two levels deep wants the same of its own parent: three
+    // groups, one of them for a page still owed upwards. A cut cannot pay for
+    // this one — there is no free group for the inner parent to open its page
+    // with — so the frame is refused rather than rendered wrong.
     let mut recorder = recorder();
     recorder.push_layer(layer(HALF), None);
-    draw(&mut recorder, 16, 16, 32);
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 16, 32);
     recorder.pop_layer();
     recorder.push_layer(layer(HALF), None);
     recorder.push_layer(layer(HALF), None);
-    draw(&mut recorder, 64, 16, 32);
+    draw(&mut recorder, 48, 16, 32);
+    recorder.pop_layer();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 96, 16, 32);
+    recorder.pop_layer();
     recorder.pop_layer();
     recorder.pop_layer();
 
     let reason = escalation(&recorder);
 
     assert!(
-        reason.contains("layer 1"),
-        "the reason names the sibling that found no group: {reason}"
+        reason.contains("layer 4"),
+        "the reason names the layer that found no group: {reason}"
     );
     assert!(
         reason.contains("third live intermediate page"),
@@ -679,8 +951,10 @@ fn a_layer_larger_than_a_page_is_refused_rather_than_clipped_to_the_ceiling() {
 fn a_refused_frame_never_reports_a_target_it_would_have_rendered() {
     // Every escalation path returns the error rather than a partial schedule:
     // a caller that took a `Vec<Round>` from a refused frame would render a
-    // layer graph it had already been told the scheduler cannot serve.
-    let recorders = [nested_chain(MAX_CHAIN_DEPTH + 1), sibling_fan(3)];
+    // layer graph it had already been told the scheduler cannot serve. The
+    // second recorder is the one that matters here — its escalation happens
+    // after several rounds have already been pushed, cut rounds among them.
+    let recorders = [nested_chain(MAX_CHAIN_DEPTH + 1), branching_chain()];
 
     for recorder in &recorders {
         assert!(Schedule::build(recorder, &caps(), &PageConfig::default()).is_err());

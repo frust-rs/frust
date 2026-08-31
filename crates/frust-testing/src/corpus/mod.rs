@@ -24,6 +24,18 @@
 //! "Thresholds belong to the golden class or named test, not an ad hoc retry
 //! path." Nothing in this module re-runs a comparison at a looser threshold.
 //!
+//! # The one exception: filter cases
+//!
+//! [`filters`] is deliberately NOT built on [`CorpusCase`]: a [`CorpusCase`]
+//! records through [`frust_scene::SceneBuilder`] only, and `frust_scene`
+//! carries no filter command (the scene seam is a later plan). Its
+//! [`filters::FilterCase`] family is driven straight through
+//! `frust_engine`'s own [`push_filter_layer`](frust_engine::filters::push_filter_layer)/
+//! [`Schedule`](frust_engine::schedule::Schedule)/[`FilterResources`](frust_engine::renderer::FilterResources)
+//! on the engine side and through `vello_cpu_oracle::RenderContext::
+//! push_layer`'s own `filter` parameter on the CPU side — see that module's
+//! own docs for the shape of the comparison.
+//!
 //! # Alpha
 //!
 //! The two oracle arms disagree about alpha representation — [`CpuOracle`]
@@ -36,7 +48,9 @@
 //! passed through it.
 
 pub mod adversarial;
+pub mod filters;
 pub mod page;
+pub mod text;
 pub mod unit;
 pub mod widget;
 
@@ -47,7 +61,9 @@ use crate::case::CaseSpec;
 use crate::render::{AlphaKind, RenderSpec, RenderedImage, SceneRenderer};
 
 pub use adversarial::adversarial_cases;
+pub use filters::{FilterCase, filter_cases};
 pub use page::page_cases;
+pub use text::text_cases;
 pub use unit::unit_cases;
 pub use widget::widget_cases;
 

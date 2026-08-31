@@ -106,6 +106,16 @@ vello_cpu_oracle = { workspace = true }
 # `frust-widgets`/`frust`/`plugins/*`, and this crate is none of those.
 frust-engine = { workspace = true }
 frust-gpu = { workspace = true }
+# The engine's own filter vocabulary (`vello_common::filter_effects::{Filter,
+# FilterPrimitive}`) — the `filter: Option<Filter>` `corpus::filters`'
+# CPU-side reference hands straight to `vello_cpu_oracle::RenderContext::
+# push_layer`, so a filter case's CPU arm renders through vello_cpu's OWN
+# filter pipeline rather than a hand-rolled second one. Exactly the SAME
+# `=0.2.0` pin `vello_cpu_oracle` and `frust-engine` already resolve
+# transitively (`tests/dup_identities.rs`'s guard re-verifies no third
+# identity), so this is a direct edge onto an identity already in the graph,
+# not a new one.
+vello_common = { workspace = true }
 # Named directly because the engine seam is spelled in wgpu's own vocabulary:
 # `EngineTarget` carries a `wgpu::TextureView`/`wgpu::TextureFormat` and
 # `EngineRenderer::encode` records into a `wgpu::CommandEncoder` the CALLER

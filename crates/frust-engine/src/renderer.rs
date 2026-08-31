@@ -37,32 +37,52 @@
 //!    populated (see [`crate::gpu::depth`]). It draws nothing; separating it
 //!    from the strip passes is what lets a frame with no draws at all still
 //!    resolve to a clean surface.
-//! 2. **One pass per [layer round](crate::schedule), innermost first.** Each
-//!    renders one isolated layer into a pooled intermediate
+//! 2. **Opaque strips**, depth-tested and depth-writing, unblended. Once per
+//!    frame, ahead of every round: only the fully-covered interior spans of
+//!    opaque draws *targeting the surface* reach it — an anti-aliased edge is by
+//!    definition not opaque, and a page carries no depth attachment for the
+//!    split to be sound against. The depth it establishes is what lets the alpha
+//!    passes reject fragments an opaque draw in front of them already covered.
+//!
+//!    Once, not once per surface round, and that is a correctness requirement:
+//!    the surface can take several rounds (a [cut](crate::schedule::cut_at)
+//!    round is how a wide sibling fan is served), and re-recording this pass
+//!    ahead of each would re-draw opaque coverage at equal stored depth over
+//!    composites the round before it had already blended. Running it ahead of
+//!    the layer rounds rather than after them changes nothing they do: a layer
+//!    round writes a pooled page and reads neither the surface nor the depth
+//!    attachment.
+//! 3. **One pass per [round](crate::schedule).** A page round renders one
+//!    isolated layer into a pooled intermediate
 //!    [page](crate::schedule::pages) it clears to transparent, at the page's
 //!    own origin — so every instance is shifted by the layer's tile-aligned
-//!    bounds — and through the page's own viewport uniform. A round's ops run
-//!    in the order [`Schedule::build`] listed them, so a finished child page
-//!    composites into its parent exactly where the recording entered it.
-//! 3. **Opaque strips**, depth-tested and depth-writing, unblended. Only the
-//!    fully-covered interior spans of opaque draws *in the root round* reach it
-//!    — an anti-aliased edge is by definition not opaque, and a page carries no
-//!    depth attachment for the split to be sound against. The depth it
-//!    establishes is what lets the alpha pass reject fragments an opaque draw
-//!    in front of them already covered.
-//! 4. **Alpha strips**, premultiplied-blended, in painter order. Depth-tested
-//!    but not depth-writing when a depth attachment is in play; a plain
-//!    painter's-algorithm pass when it is not.
-//! 5. **The hole punch**, destination-out, when the frame recorded a
+//!    bounds — and through the page's own viewport uniform; a round continuing a
+//!    page an earlier round of the same layer opened loads it instead. A surface
+//!    round draws **alpha strips**, premultiplied-blended, in painter order:
+//!    depth-tested but not depth-writing when a depth attachment is in play, a
+//!    plain painter's-algorithm pass when it is not. A round's ops run in the
+//!    order [`Schedule::build`] listed them, so a finished child page composites
+//!    into its parent exactly where the recording entered it.
+//!
+//!    A **filter round** is the one round that draws no strip at all: it runs
+//!    one pass of a [filter](crate::filters)'s sequence, one instanced quad
+//!    through [`EnginePipeline::Filter`], reading the layer's other pooled page
+//!    through the engine's only sampler and clearing the page it writes (see
+//!    [`FilterResources`]). It is an ordinary round of this walk in every other
+//!    respect — recorded into the caller's own encoder, in the order the
+//!    scheduler listed it, with its pages handed back the moment its pass ends.
+//!    It is *not* an own-encoder exception; the atlas replay remains the only
+//!    one of those.
+//! 4. **The hole punch**, destination-out, when the frame recorded a
 //!    `ClearRect` — see [`crate::compile::clear`] for the whole contract this
 //!    pass implements.
 //!
 //! With depth unavailable — no attachment, or `FRUST_ENGINE_NO_DEPTH` set —
-//! passes 3 and 4 collapse into one blended pass carrying *every* instance in
-//! painter order. That is a correctness requirement rather than a fallback
-//! detail: routing the opaque spans into a separate, earlier pass is only sound
-//! because the depth buffer re-establishes their ordering against the blended
-//! ones.
+//! pass 2 disappears and every instance travels through the surface rounds,
+//! blended in painter order. That is a correctness requirement rather than a
+//! fallback detail: routing the opaque spans into a separate, earlier pass is
+//! only sound because the depth buffer re-establishes their ordering against the
+//! blended ones.
 //!
 //! # Compositing a layer
 //!
@@ -125,9 +145,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 use frust_gpu::{PipelineCache, PooledTexture, ShaderLibrary, TextureId, TierCaps};
-use frust_scene::Scene;
+use frust_scene::{Scene, SceneBuilder};
+use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
 use kurbo::Affine;
-use peniko::Color;
+use peniko::{Brush, Color};
 use vello_common::encode::{EncodedImage, EncodedPaint};
 use vello_common::fearless_simd::Level;
 use vello_common::paint::{ImageId, ImageSource, Paint};
@@ -141,16 +162,26 @@ use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
-use crate::gpu::atlas::lower_encoded_image;
+use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
+use crate::filters::drop_shadow::GpuDropShadow;
+use crate::filters::{FilterStep, ServedFilter, served_filter};
+use crate::gpu::atlas::{
+    AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
+};
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
-use crate::gpu::pipelines::{EnginePipeline, EngineShaders, warm_up_descs};
+use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs};
 use crate::gpu::strips::{PaintType, pack_paint_descriptor};
-use crate::gpu::targets::{IntermediateTargets, IntermediateTexture};
+use crate::gpu::targets::{
+    IntermediateTargets, IntermediateTexture, filter_data_texture_descriptor,
+    filter_data_texture_height, filter_sampler,
+};
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::schedule::pages::{PageConfig, PageSize};
 use crate::schedule::{Composite, PageParity, Round, RoundOp, Schedule};
 use crate::{EngineTarget, OutputAlpha};
+use vello_common::geometry::SizeU16;
+use vello_common::record::RecordedLayerKind;
 
 /// The packed paint descriptor of an inline premultiplied solid colour.
 ///
@@ -195,6 +226,19 @@ const PUNCH_SOURCE: u32 = u32::MAX;
 /// The label every intermediate page is acquired from the pool under.
 const PAGE_LABEL: &str = "frust-engine layer page";
 
+/// The label every filter round's pass is recorded under.
+const FILTER_LABEL: &str = "frust-engine filter pass";
+
+/// Vertices one filter pass's quad is built from, the same four-vertex
+/// triangle strip every engine program expands an instance into.
+const FILTER_QUAD_VERTICES: u32 = 4;
+
+/// The smallest filter instance buffer the engine allocates, in instances.
+///
+/// A σ-32 blur is ten passes, so this is roughly "one deep blur costs no second
+/// allocation"; the buffer is 32 bytes an instance and grows from here.
+const MIN_FILTER_INSTANCE_CAPACITY: u64 = 16;
+
 static INDEXED_PAINT_WARNING: Once = Once::new();
 
 /// Raised the first time an atlas region is declined, so a renderer whose
@@ -223,6 +267,33 @@ pub struct EngineRenderer {
     textures: HashMap<TextureId, wgpu::TextureView>,
     resources: FrameResources,
     scratch: Scratch,
+    /// The render-to-atlas pass, created by the first frame that caches a
+    /// glyph.
+    ///
+    /// Lazy because it owns a coverage texture, an instance buffer and five
+    /// stand-in bindings of its own, and a renderer that never draws text —
+    /// or one running with `FRUST_ENGINE_NO_ATLAS` — should pay for none of
+    /// them.
+    atlas_glyphs: Option<AtlasRenderer>,
+    /// The compiler the atlas replay lowers a page's recorded commands
+    /// through, sized to the atlas page rather than to the surface.
+    ///
+    /// A second compiler rather than this renderer's own: the frame's compiler
+    /// is mid-frame (its glyph entry map is exactly what the replay is
+    /// draining) and its viewport is the surface's, while a page's commands are
+    /// in page space. Created on the first replay and kept, so a steady stream
+    /// of first-seen glyphs allocates a strip generator once.
+    atlas_lowering: Option<SceneCompiler>,
+    /// What the last frame's replay serviced, for
+    /// [`Self::atlas_render_report`].
+    atlas_report: AtlasRenderReport,
+    /// The filter-data texture, sampler and instance buffer a filter round is
+    /// executed with.
+    ///
+    /// Lazy for the same reason [`Self::atlas_glyphs`] is: a renderer that
+    /// never blurs should own neither a sampler nor a resource texture it will
+    /// not read. Created by the first frame that schedules a filter round.
+    filters: Option<FilterResources>,
 }
 
 impl EngineRenderer {
@@ -278,6 +349,10 @@ impl EngineRenderer {
             textures: HashMap::new(),
             resources: FrameResources::new(device, dim),
             scratch: Scratch::default(),
+            atlas_glyphs: None,
+            atlas_lowering: None,
+            atlas_report: AtlasRenderReport::default(),
+            filters: None,
         })
     }
 
@@ -325,6 +400,19 @@ impl EngineRenderer {
     /// operation, never a per-frame one.
     pub fn set_atlas_budget(&mut self, budget: AtlasBudget) {
         self.compiler.set_atlas_budget(budget);
+        self.resources.reset_atlas();
+    }
+
+    /// Replace image residency wholesale, on the same invalidation terms as
+    /// [`Self::set_atlas_budget`].
+    ///
+    /// The programmatic counterpart to `FRUST_ENGINE_NO_ATLAS`: an
+    /// [`ImageResidency::disabled`] residency takes both atlas classes out of
+    /// the frame — images are skipped and every glyph is drawn as outline
+    /// strips — without a process-global environment variable, which is what a
+    /// caller comparing the two paths on one device needs.
+    pub fn set_image_residency(&mut self, images: crate::cache::images::ImageResidency) {
+        self.compiler.set_image_residency(images);
         self.resources.reset_atlas();
     }
 
@@ -570,6 +658,19 @@ impl EngineRenderer {
         self.resources
             .ensure_atlas(device, queue, atlas_budget, frame.atlas_layers);
 
+        // The glyph atlas, in the order [`crate::gpu::atlas`] documents: the
+        // rectangles last frame's eviction freed are zeroed first, ahead of
+        // every write this frame issues, so a rectangle handed straight back
+        // out cannot be erased after its new occupant landed in it.
+        //
+        // Acknowledged only once the writes were really issued — the same
+        // re-offer contract the image plan keeps below. A frame refused before
+        // this point leaves every rectangle pending, so the next frame that
+        // gets here still zeroes it.
+        if self.clear_glyph_rects(device, queue, &frame) {
+            self.compiler.acknowledge_glyph_clears();
+        }
+
         self.resources.resize_alphas(device, alphas_grown);
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
@@ -588,13 +689,188 @@ impl EngineRenderer {
             self.compiler.acknowledge_image_plan();
         }
 
+        // The glyph pixels themselves, last of the atlas work and strictly
+        // before the scene pass: every page `glifo` dirtied this frame is
+        // lowered to strips and drawn into its own array layer, on an encoder
+        // this call owns and submits (the sanctioned exception to the encode
+        // contract — see this module's header and `gpu::atlas`). The queue
+        // writes issued above are flushed ahead of that submit, so the pass
+        // composites onto a layer whose clears and image uploads have landed.
+        //
+        // Driven by the atlas's own pending work, never by this frame's
+        // surviving draws: `glifo` dirties a page when it *inserts* an entry,
+        // so a run culled away behind a clip records fills while drawing
+        // nothing, and a draw-gated replay would leave those commands recorded
+        // until some later frame happened to run one — by which time eviction
+        // may have re-let the rectangles they name.
+        //
+        // Acknowledged only when the pass really ran, the same way the clears
+        // above are: acknowledging is what lifts the eviction deferral, so an
+        // acknowledgement for a replay that returned early would let `glifo`
+        // free and re-let the very rectangles those commands still name.
+        if self.compiler.glyph_replay_pending() && self.replay_glyph_pages(device, queue) {
+            self.compiler.acknowledge_glyph_replay();
+        }
+
         let format = target.format;
         let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
+
+        // The filter rounds' own resources, created by the first frame that
+        // schedules one. Only the parameter blocks are uploaded here: a pass's
+        // instance names the extent the *pool* quantized its destination page
+        // up to, which only the round that acquires it knows, so the instances
+        // are written round by round in `record_frame`.
+        if let Some(pipeline) = pipelines.filter.as_ref() {
+            let scratch = &self.scratch;
+            self.filters
+                .get_or_insert_with(|| FilterResources::new(device))
+                .prepare(
+                    device,
+                    queue,
+                    pipeline,
+                    &scratch.filter_blocks,
+                    scratch.filter_passes,
+                );
+        }
+
         self.record_frame(
             device, queue, encoder, &target, depth_view, base_color, &pipelines,
         );
 
         Ok(())
+    }
+
+    /// Creates the render-to-atlas pass on first use.
+    fn ensure_atlas_renderer(&mut self, device: &wgpu::Device) {
+        if self.atlas_glyphs.is_none() {
+            self.atlas_glyphs = Some(AtlasRenderer::new(device, &self.caps));
+        }
+    }
+
+    /// Zero every atlas rectangle an earlier frame's glyph eviction freed,
+    /// answering whether they were serviced.
+    ///
+    /// Queue writes, issued before this frame's image uploads and before the
+    /// replay pass's submit — the first of the three orderings
+    /// [`crate::gpu::atlas`] states. A rectangle the array will not take is
+    /// counted rather than dropped silently, on the same terms an image region
+    /// it refuses is.
+    ///
+    /// `true` means every rectangle was *offered* to the array — including one
+    /// it refused, which no later frame could place either — so the caller may
+    /// stop re-offering them. `false` means there was no array to write to at
+    /// all, which is the one case where trying again later can succeed. An
+    /// empty list is serviced trivially.
+    fn clear_glyph_rects(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &CompiledFrame,
+    ) -> bool {
+        if frame.glyph_clears.is_empty() {
+            return true;
+        }
+        if self.resources.atlas.is_none() {
+            return false;
+        }
+        self.ensure_atlas_renderer(device);
+
+        let refused = {
+            let Self {
+                atlas_glyphs,
+                resources,
+                ..
+            } = self;
+            let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_ref(), resources.atlas.as_ref())
+            else {
+                return false;
+            };
+            frame
+                .glyph_clears
+                .iter()
+                .filter(|rect| !glyphs.clear_rect(queue, atlas, **rect))
+                .count()
+        };
+
+        if refused > 0 {
+            self.resources.note_refused_regions(refused as u64);
+        }
+        true
+    }
+
+    /// Draw every atlas page `glifo` dirtied this frame into its own array
+    /// layer.
+    ///
+    /// The pixels of a newly cached glyph, and the last atlas work before the
+    /// scene pass. Each page's recorded commands are lowered to strips by
+    /// [`lower_atlas_page`] and drawn through the pipeline
+    /// [`atlas_strip_desc`] describes; a page the lowering declines is left
+    /// undrawn and counted, so a glyph whose shape this tier cannot express
+    /// goes *missing* rather than landing half-painted.
+    ///
+    /// Answers whether the pass really ran, on the same terms
+    /// [`clear_glyph_rects`](Self::clear_glyph_rects) does and for the same
+    /// reason: `false` means there was no atlas array to draw into at all, so
+    /// the recorded commands are still recorded and the caller must go on
+    /// offering them. A page the lowering *declined* is not a `false` — it was
+    /// offered to the array and counted refused, and no later frame could lower
+    /// it either.
+    #[must_use]
+    fn replay_glyph_pages(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        if self.resources.atlas.is_none() {
+            return false;
+        }
+        self.ensure_atlas_renderer(device);
+        let pipeline = self
+            .pipelines
+            .get_or_create(device, &atlas_strip_desc(&self.shaders))
+            .clone();
+
+        let report = {
+            let Self {
+                atlas_glyphs,
+                atlas_lowering,
+                resources,
+                compiler,
+                ..
+            } = self;
+            let (Some(glyphs), Some(atlas)) = (atlas_glyphs.as_mut(), resources.atlas.as_ref())
+            else {
+                return false;
+            };
+
+            let (width, height) = atlas.size();
+            let page = (
+                u16::try_from(width).unwrap_or(u16::MAX),
+                u16::try_from(height).unwrap_or(u16::MAX),
+            );
+            let lowering = atlas_lowering.get_or_insert_with(|| SceneCompiler::new(page.0, page.1));
+
+            glyphs.render_pending(
+                device,
+                queue,
+                &pipeline,
+                atlas,
+                compiler.glyph_atlas_mut(),
+                |recorder, buffers| lower_atlas_page(recorder, buffers, lowering, page),
+            )
+        };
+
+        if report.refused > 0 {
+            self.resources
+                .note_refused_regions(u64::from(report.refused));
+        }
+        self.atlas_report = report;
+        true
+    }
+
+    /// What the last frame's render-to-atlas pass serviced.
+    ///
+    /// Zero across the board on a steady-state frame: text that hit the cache
+    /// on every glyph frees no rectangle, queues no pixmap and dirties no page.
+    #[must_use]
+    pub fn atlas_render_report(&self) -> AtlasRenderReport {
+        self.atlas_report
     }
 
     /// Builds (or takes from the cache) every pipeline this frame's passes
@@ -631,6 +907,7 @@ impl EngineRenderer {
             opaque: None,
             page: None,
             punch: None,
+            filter: None,
         };
         if depth && !self.scratch.opaque.is_empty() {
             frame.opaque = Some(
@@ -659,6 +936,18 @@ impl EngineRenderer {
                     .get_or_create(device, &punch_variant.desc(&self.shaders, format))
                     .clone(),
             ));
+        }
+        if self.scratch.filter_passes > 0 {
+            // Takes the frame's format like every other variant and ignores
+            // it: a filter pass only ever writes a pooled page, so its own
+            // description is pinned to `INTERMEDIATE_FORMAT`. One filter
+            // pipeline therefore serves a renderer for its whole life,
+            // whatever its surface is reconfigured to.
+            frame.filter = Some(
+                self.pipelines
+                    .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
+                    .clone(),
+            );
         }
 
         self.resources
@@ -739,6 +1028,40 @@ impl EngineRenderer {
         // own index is relative to that.
         let base = opaque_count;
 
+        // The opaque pass, once for the whole frame and ahead of every round:
+        // the depth it writes is what every blended instance the frame draws
+        // onto its own target, composites included, is then tested against.
+        //
+        // Hoisted out of the round walk rather than recorded ahead of each
+        // surface round, because a frame can take several of those (the
+        // scheduler cuts one short to hand a page group back) and a second
+        // recording of this pass would re-draw opaque coverage at equal stored
+        // depth over composites the round before it had already blended. Ahead
+        // of the layer rounds costs them nothing: a layer round writes a pooled
+        // page and reads neither this target nor the depth attachment.
+        if opaque_count > 0
+            && let Some(opaque) = pipelines.opaque.as_ref()
+            && let Some(opaque_groups) =
+                self.resources.bind_groups.get(&EnginePipeline::StripOpaque)
+        {
+            record_pass(
+                encoder,
+                &PassPlan {
+                    label: "frust-engine opaque strips",
+                    view: target.view,
+                    load: wgpu::LoadOp::Load,
+                    depth: depth_view,
+                    pipeline: opaque,
+                    groups: opaque_groups,
+                    resources: &opaque_groups.resources,
+                    composites: &[],
+                    instances,
+                    base: 0,
+                    segments: &[Segment::Strips(0, opaque_count)],
+                },
+            );
+        }
+
         // The two ping-pong groups, each holding the finished page a later
         // round composites (see [`crate::schedule`]).
         let mut live: [Option<PooledTexture>; 2] = [None, None];
@@ -747,6 +1070,16 @@ impl EngineRenderer {
         for plan in &self.scratch.rounds {
             let own = match plan.page {
                 None => None,
+                // A round continuing a page an earlier round of the same layer
+                // opened takes that very texture back out of its group: a fresh
+                // one from the pool would hold the previous holder's pixels
+                // instead of the half already drawn.
+                Some(page) if page.continued => match live[page.parity.index()].take() {
+                    Some(pooled) => Some((page.parity, pooled)),
+                    // Unreachable: the round that opened the page put it in
+                    // this group, and no round between the two releases it.
+                    None => continue,
+                },
                 Some(page) => match self.targets.acquire(
                     device,
                     page.size.width,
@@ -761,6 +1094,61 @@ impl EngineRenderer {
                     IntermediateTexture::TooLarge { .. } => continue,
                 },
             };
+
+            // A filter round is only a filter pass: no strip instance, no
+            // composite, no viewport uniform of its own — the pass maps NDC
+            // against the destination extent its own instance carries, which is
+            // why that instance is written here, where the pool's quantized
+            // extent is finally known.
+            if let Some(filter) = plan.filter {
+                if let Some((_, pooled)) = own.as_ref()
+                    && let Some(pipeline) = pipelines.filter.as_ref()
+                    && let Some(filters) = self.filters.as_ref()
+                {
+                    let (width, height) = pooled.size();
+                    filters.write_instance(
+                        queue,
+                        filter.instance,
+                        &FilterInstanceData::new(
+                            &filter.step,
+                            filter.data_offset,
+                            // Both pages hold the layer at their own origin, so
+                            // neither region is offset within its page.
+                            (0, 0),
+                            (0, 0),
+                            SizeU16::from_wh(
+                                u16::try_from(width).unwrap_or(u16::MAX),
+                                u16::try_from(height).unwrap_or(u16::MAX),
+                            ),
+                            filter.original,
+                        ),
+                    );
+                    // A group with no live page samples the transparent
+                    // placeholder, which filters nothing — the same "draw less,
+                    // never wrong" answer an unresolvable paint gets.
+                    // Unreachable: the round that wrote this pass's source is
+                    // the one before it, and nothing between the two releases
+                    // that group.
+                    let source = live[filter.source.index()].as_ref().map_or(
+                        &self.resources.placeholders.layer_input,
+                        PooledTexture::view,
+                    );
+                    filters.record_pass(
+                        device,
+                        encoder,
+                        &FilterPassPlan {
+                            label: FILTER_LABEL,
+                            pipeline,
+                            dest: pooled.view(),
+                            source,
+                            instance: filter.instance,
+                        },
+                    );
+                }
+
+                settle_pages(&mut self.targets, &mut live, plan.released, own);
+                continue;
+            }
 
             // The round's viewport uniform. A page's is written here rather
             // than with the frame's other uploads because only the pool knows
@@ -835,40 +1223,19 @@ impl EngineRenderer {
                 }
             }
 
-            // The opaque pass belongs to the root round and runs ahead of it:
-            // the depth it writes is what the round's own blended instances,
-            // composites included, are then tested against.
-            if own.is_none()
-                && opaque_count > 0
-                && let Some(opaque) = pipelines.opaque.as_ref()
-                && let Some(opaque_groups) =
-                    self.resources.bind_groups.get(&EnginePipeline::StripOpaque)
-            {
-                record_pass(
-                    encoder,
-                    &PassPlan {
-                        label: "frust-engine opaque strips",
-                        view: target.view,
-                        load: wgpu::LoadOp::Load,
-                        depth: depth_view,
-                        pipeline: opaque,
-                        groups: opaque_groups,
-                        resources: &opaque_groups.resources,
-                        composites: &[],
-                        instances,
-                        base: 0,
-                        segments: &[Segment::Strips(0, opaque_count)],
-                    },
-                );
-            }
-
             let (view, label, load, depth) = match &own {
                 Some((_, pooled)) => (
                     pooled.view(),
                     PAGE_LABEL,
                     // A pooled texture holds whatever its last holder left
-                    // there, so a page is always cleared rather than loaded.
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    // there, so a layer's first round into a page clears it —
+                    // and a round continuing that same page loads it, because
+                    // clearing again would wipe the half already drawn.
+                    if plan.page.is_some_and(|page| page.continued) {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    },
                     None,
                 ),
                 None => (
@@ -896,20 +1263,7 @@ impl EngineRenderer {
                 },
             );
 
-            // The pages this round consumed are free the moment its pass ends,
-            // which is what bounds a chain of any depth to two live pages.
-            for (index, slot) in live.iter_mut().enumerate() {
-                if plan.released.get(index).copied().unwrap_or(false)
-                    && let Some(page) = slot.take()
-                {
-                    self.targets.release(page);
-                }
-            }
-            if let Some((parity, pooled)) = own
-                && let Some(previous) = live[parity.index()].replace(pooled)
-            {
-                self.targets.release(previous);
-            }
+            settle_pages(&mut self.targets, &mut live, plan.released, own);
         }
 
         let (punch_first, punch_count) = self.scratch.punch;
@@ -958,6 +1312,8 @@ struct FramePipelines {
     page: Option<wgpu::RenderPipeline>,
     /// The destination-out pass, with its variant, when the frame punches.
     punch: Option<(EnginePipeline, wgpu::RenderPipeline)>,
+    /// The pass one filter round runs through, when the frame filters a layer.
+    filter: Option<wgpu::RenderPipeline>,
 }
 
 /// One pass's full recording state, assembled before the pass is begun.
@@ -1029,6 +1385,286 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
         plan.groups.bind_with(&mut pass, group);
         pass.draw(GpuStrip::vertex_range(), range);
     }
+}
+
+/// Hands back the page groups a finished round consumed, and parks the page it
+/// wrote in its own group.
+///
+/// The same bookkeeping after every round, strip and filter alike: a page is
+/// free the moment the pass that sampled it ends, which is what bounds a chain
+/// of any depth — and a filter layer's own pair of pages — to
+/// [`MAX_LIVE_PAGES`](crate::schedule::MAX_LIVE_PAGES) live intermediates.
+///
+/// A round that is not continuing a page of its own takes a *fresh* texture out
+/// of the pool rather than the group's current occupant, and the occupant it
+/// displaces goes back here. That is what keeps a filter pass from ever holding
+/// one texture as both its attachment and its source: a filter round never
+/// continues a page — it clears — so what it writes is always a different
+/// texture from the one the pass before it wrote and this pass reads.
+fn settle_pages(
+    targets: &mut IntermediateTargets,
+    live: &mut [Option<PooledTexture>; 2],
+    released: [bool; 2],
+    own: Option<(PageParity, PooledTexture)>,
+) {
+    for (index, slot) in live.iter_mut().enumerate() {
+        if released.get(index).copied().unwrap_or(false)
+            && let Some(page) = slot.take()
+        {
+            targets.release(page);
+        }
+    }
+    if let Some((parity, pooled)) = own
+        && let Some(previous) = live[parity.index()].replace(pooled)
+    {
+        targets.release(previous);
+    }
+}
+
+/// The GPU resources a frame's [filter](crate::filters) rounds are executed
+/// with, beyond the two pooled pages they ping-pong between.
+///
+/// Three of them, and each is the engine's only one of its kind: the
+/// filter-data texture holding every filter in the frame's 48-byte parameter
+/// block, the bilinear sampler
+/// ([`filter_sampler`](crate::gpu::targets::filter_sampler)) the blur kernels
+/// read their source page through, and the instance buffer one quad per pass is
+/// drawn from.
+///
+/// Public because this *is* executing a filter pass — the renderer holds one
+/// and drives it over the pages the scheduler named, and `tests/filters.rs`
+/// drives the same type over pages of its own on real hardware. That second
+/// caller is not a convenience: `frust_scene` carries no filter command yet
+/// (the scene seam is a later plan), so a filter layer cannot reach
+/// [`EngineRenderer::encode`] through a `Scene` at all, and driving this type
+/// directly is the only way the ported WGSL is exercised on a device.
+#[derive(Debug)]
+pub struct FilterResources {
+    /// Every filter in the frame's parameter block, back to back.
+    data: ResourceTexture,
+    /// Group 0, naming [`Self::data`]'s view. Rebuilt whenever that texture is,
+    /// and valid for the renderer's whole life otherwise: a filter pipeline's
+    /// description does not depend on the frame's target format, so there is
+    /// only ever one layout to have derived it from.
+    data_group: Option<wgpu::BindGroup>,
+    sampler: wgpu::Sampler,
+    instances: Option<wgpu::Buffer>,
+    instance_capacity: u64,
+    /// Reusable staging for the parameter-block upload, padded to the
+    /// texture's own footprint.
+    staging: Vec<u8>,
+}
+
+impl FilterResources {
+    /// A renderer's filter resources, with nothing uploaded yet.
+    #[must_use]
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            data: ResourceTexture::new(
+                device,
+                &filter_data_texture_descriptor(gpu::MIN_RESOURCE_TEXTURE_HEIGHT),
+            ),
+            data_group: None,
+            sampler: filter_sampler(device),
+            instances: None,
+            instance_capacity: 0,
+            staging: Vec::new(),
+        }
+    }
+
+    /// Uploads this frame's parameter `blocks` and reserves room for `passes`
+    /// pass instances, growing either resource if the frame outgrew it.
+    ///
+    /// `pipeline` is the one [`EnginePipeline::Filter`] describes; it is needed
+    /// because wgpu derives a pipeline's bind-group layouts from its shader
+    /// module, so the group naming the filter-data texture can only be built
+    /// against the pipeline that will bind it.
+    ///
+    /// A block count no filter-data texture could hold (see
+    /// [`filter_data_texture_height`]) leaves the group unbuilt, which leaves
+    /// every filter pass of the frame issuing no draw — the page is still
+    /// cleared, so the layer composites as transparent rather than as whatever
+    /// its page last held. Unreachable in practice, and "draw less, never
+    /// wrong" when it is not.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &wgpu::RenderPipeline,
+        blocks: &[GpuFilterData],
+        passes: u32,
+    ) {
+        let Some(height) = filter_data_texture_height(blocks.len()) else {
+            self.data_group = None;
+            return;
+        };
+        if height > self.data.height {
+            self.data = ResourceTexture::new(device, &filter_data_texture_descriptor(height));
+            self.data_group = None;
+        }
+        if self.data_group.is_none() {
+            self.data_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("frust-engine filter data"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.data.view),
+                }],
+            }));
+        }
+
+        // A queue write covers the whole texture extent, so the blocks are
+        // padded out to its footprint; the trailing texels are never addressed,
+        // because a pass names its own block by a texel offset the host handed
+        // it.
+        let footprint = gpu::resource_texture_bytes(self.data.width, self.data.height);
+        self.staging.clear();
+        self.staging
+            .resize(usize::try_from(footprint).unwrap_or(usize::MAX), 0);
+        let bytes: &[u8] = bytemuck::cast_slice(blocks);
+        if let Some(head) = self.staging.get_mut(..bytes.len()) {
+            head.copy_from_slice(bytes);
+        }
+        queue.write_texture(
+            self.data.copy_target(),
+            &self.staging,
+            resource_layout(
+                gpu::resource_bytes_per_row(self.data.width),
+                self.data.height,
+            ),
+            self.data.extent(),
+        );
+
+        self.reserve_instances(device, passes);
+    }
+
+    /// Grows the instance buffer if this frame's pass count outgrew it.
+    fn reserve_instances(&mut self, device: &wgpu::Device, passes: u32) {
+        let stride = size_of::<FilterInstanceData>() as u64;
+        let required = u64::from(passes).saturating_mul(stride).max(stride);
+        if self.instances.is_some() && self.instance_capacity >= required {
+            return;
+        }
+        let capacity = required
+            .checked_next_power_of_two()
+            .unwrap_or(required)
+            .max(MIN_FILTER_INSTANCE_CAPACITY.saturating_mul(stride));
+        self.instance_capacity = capacity;
+        self.instances = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frust-engine filter instances"),
+            size: capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+
+    /// Writes one pass's instance into slot `index` of the instance buffer.
+    ///
+    /// Separate from [`Self::prepare`] because a pass's `dest_texture_size` is
+    /// the extent the texture pool *quantized* its destination page up to, and
+    /// NDC is computed against the attachment's real extent — only the round
+    /// that acquires the page knows it. A queue write issued while the frame is
+    /// being recorded still lands ahead of the command buffers it is submitted
+    /// with, which is the same ordering a page's viewport uniform already
+    /// relies on.
+    ///
+    /// A slot past the reserved capacity is dropped rather than written, which
+    /// leaves that pass drawing whatever the slot last held; unreachable, since
+    /// `prepare` reserved one slot per pass of this very frame.
+    pub fn write_instance(&self, queue: &wgpu::Queue, index: u32, instance: &FilterInstanceData) {
+        let Some(buffer) = self.instances.as_ref() else {
+            return;
+        };
+        let stride = size_of::<FilterInstanceData>() as u64;
+        let offset = u64::from(index).saturating_mul(stride);
+        if offset.saturating_add(stride) > self.instance_capacity {
+            return;
+        }
+        queue.write_buffer(buffer, offset, bytemuck::bytes_of(instance));
+    }
+
+    /// Records one filter pass into `encoder`: clear the destination page, then
+    /// draw the one instanced quad that filters `plan`'s source into it.
+    ///
+    /// The clear is unconditional and the draw is not. A filter pass writes only
+    /// the region its step names — a decimated one a quarter of the texels the
+    /// pass before it did — and the kernels sample past that region without
+    /// bounds checks, so whatever surrounds it has to be transparent rather than
+    /// a previous holder's pixels. That has to hold even on the path where the
+    /// pass itself cannot be issued, or the layer's composite would sample the
+    /// page's previous tenant instead of nothing.
+    ///
+    /// The pass is opened and closed here, on the caller's own encoder: a filter
+    /// round is not an exception to [`EngineRenderer::encode`]'s contract.
+    pub fn record_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FilterPassPlan<'_>,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(plan.label),
+            color_attachments: &[Some(color_attachment(
+                plan.dest,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            ))],
+            // A pooled page carries no depth attachment, which is also why the
+            // filter pipeline declares no depth state.
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        let (Some(data_group), Some(instances)) =
+            (self.data_group.as_ref(), self.instances.as_ref())
+        else {
+            return;
+        };
+
+        let source = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-engine filter source"),
+            layout: &plan.pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(plan.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        pass.set_pipeline(plan.pipeline);
+        pass.set_vertex_buffer(0, instances.slice(..));
+        pass.set_bind_group(0, data_group, &[]);
+        pass.set_bind_group(1, &source, &[]);
+        pass.draw(
+            0..FILTER_QUAD_VERTICES,
+            plan.instance..plan.instance.saturating_add(1),
+        );
+    }
+}
+
+/// One filter pass's full recording state.
+///
+/// The two pages are named as views rather than as parities because
+/// [`FilterResources`] holds no pool: which texture each group is holding is the
+/// caller's bookkeeping, whether that caller is the frame path or a test.
+#[derive(Debug)]
+pub struct FilterPassPlan<'a> {
+    /// Label for captures and validation messages.
+    pub label: &'a str,
+    /// The pipeline [`EnginePipeline::Filter`] describes.
+    pub pipeline: &'a wgpu::RenderPipeline,
+    /// The page this pass writes. Cleared to transparent before it is written.
+    pub dest: &'a wgpu::TextureView,
+    /// The page this pass reads — the one the pass before it wrote.
+    pub source: &'a wgpu::TextureView,
+    /// Which instance of the filter instance buffer this pass draws.
+    pub instance: u32,
 }
 
 /// A colour attachment over `view` with `load`, keeping what it stores.
@@ -1129,6 +1765,27 @@ struct RoundPlan {
     /// Page groups this round consumed, indexed by
     /// [`PageParity::index`]; each returns to the pool once the pass ends.
     released: [bool; 2],
+    /// The filter pass this round runs, on a filter round — which draws no
+    /// strip and composites nothing, so its `segments` range is empty.
+    filter: Option<FilterPlan>,
+}
+
+/// One filter pass, resolved to the instance slot it draws and the page group
+/// it reads.
+#[derive(Debug, Clone, Copy)]
+struct FilterPlan {
+    /// Which pass of the filter's sequence this is, and at what extents.
+    step: FilterStep,
+    /// The group holding the page this pass reads.
+    source: PageParity,
+    /// The texel this filter's parameter block starts at in the filter-data
+    /// texture — where the fragment stage reads its kernel from.
+    data_offset: u32,
+    /// The filter layer's own extent, before any decimation; it bounds the
+    /// transparent border a decimated pass overdraws.
+    original: SizeU16,
+    /// This pass's slot in the frame's filter instance buffer.
+    instance: u32,
 }
 
 /// The pooled page one round renders into.
@@ -1136,6 +1793,10 @@ struct RoundPlan {
 struct PagePlan {
     parity: PageParity,
     size: PageSize,
+    /// Whether an earlier round of the same layer already rendered into this
+    /// page, so this round takes that texture back rather than acquiring a
+    /// fresh one, and loads it rather than clearing it.
+    continued: bool,
 }
 
 /// The frame's instance buffers and pass plan, retained so a steady-state frame
@@ -1146,15 +1807,17 @@ struct PagePlan {
 /// grown these buffers.
 #[derive(Debug, Default)]
 struct Scratch {
-    /// Fully-covered spans of the root round's opaque draws, drawn unblended
-    /// with depth write.
+    /// Fully-covered spans of the opaque draws targeting the frame's own
+    /// surface, drawn unblended with depth write in one pass ahead of every
+    /// round — including the surface's own, of which a frame may have several.
     opaque: Vec<GpuStrip>,
     /// Everything else, drawn premultiplied-blended in painter order and laid
     /// out round by round in execution order.
     alpha: Vec<GpuStrip>,
     /// Every round's segments, back to back; [`RoundPlan::segments`] slices it.
     segments: Vec<Segment>,
-    /// The frame's rounds, innermost layer first and the surface last.
+    /// The frame's rounds, each layer's before the round that composites it and
+    /// the surface's last round last.
     rounds: Vec<RoundPlan>,
     /// The hole punch's own instances, as `(first, count)` into the alpha
     /// region — past every round's segments, so dropping the punch pass leaves
@@ -1165,6 +1828,17 @@ struct Scratch {
     /// is sound because a layer's own round always precedes the round that
     /// composites it.
     layer_depth: Vec<u32>,
+    /// One parameter block per *filter layer* of the frame, in the order the
+    /// rounds first named them — which is the order the texel offsets in
+    /// [`FilterPlan::data_offset`] were taken from.
+    filter_blocks: Vec<GpuFilterData>,
+    /// The layers `filter_blocks` holds, parallel to it, so a filter's second
+    /// and later passes reuse the block its first one packed rather than
+    /// repacking one per pass.
+    filter_layers: Vec<u32>,
+    /// How many filter passes this frame runs, and so how many instances its
+    /// filter instance buffer has to hold.
+    filter_passes: u32,
 }
 
 impl Scratch {
@@ -1175,8 +1849,8 @@ impl Scratch {
     /// coverage is not opaque however opaque the paint is. Its fully-covered
     /// spans land in the opaque buffer only when the paint is opaque, depth is
     /// available to re-establish their ordering against the blended ones, *and*
-    /// the draw belongs to the root round — a page has no depth attachment, so
-    /// its own round is a plain painter's-algorithm walk.
+    /// the draw targets the frame's own surface — a page has no depth
+    /// attachment, so a page round is a plain painter's-algorithm walk.
     fn build(
         &mut self,
         frame: &CompiledFrame,
@@ -1192,12 +1866,16 @@ impl Scratch {
         self.punch = (0, 0);
         self.layer_depth.clear();
         self.layer_depth.resize(frame.recorder.layers.len(), 0);
+        self.filter_blocks.clear();
+        self.filter_layers.clear();
+        self.filter_passes = 0;
 
         let draws = frame.draws();
         let strips = frame.strip_buf();
 
         for round in rounds {
             let page = round.page();
+            let filter = self.plan_filter(frame, round);
             // A page holds its layer at the page's own origin, so every
             // instance of the round is shifted by the layer's bounds.
             let origin = page.map_or((0, 0), |page| (page.bounds.x0, page.bounds.y0));
@@ -1264,10 +1942,13 @@ impl Scratch {
                     .push(Segment::Strips(run_start, end - run_start));
             }
 
+            // Accumulated rather than assigned: a layer whose round was cut
+            // renders in several rounds, and the depth its composite carries is
+            // the deepest index across all of them.
             if let Some(page) = page
                 && let Some(slot) = self.layer_depth.get_mut(page.layer as usize)
             {
-                *slot = deepest;
+                *slot = (*slot).max(deepest);
             }
 
             let mut released = [false; 2];
@@ -1279,9 +1960,11 @@ impl Scratch {
                 page: page.map(|page| PagePlan {
                     parity: page.parity,
                     size: page.size,
+                    continued: page.continued,
                 }),
                 segments: first_segment..self.segments.len(),
                 released,
+                filter,
             });
         }
 
@@ -1359,11 +2042,74 @@ impl Scratch {
         }
     }
 
-    /// How many of this frame's rounds render into a pooled page.
+    /// Resolves `round`'s filter pass, if it has one, packing the layer's
+    /// parameter block on first sight and claiming the pass's instance slot.
+    ///
+    /// `None` for an ordinary round, and also for the two shapes that cannot
+    /// occur: a filter round with no page (the scheduler always gives one a
+    /// page) and a recorded kind [`served_filter`] does not recognise (the
+    /// scheduler refuses one before it plans a round). Both answer by leaving
+    /// the round's pass unissued — its
+    /// page is still cleared — rather than by asserting (E17).
+    fn plan_filter(&mut self, frame: &CompiledFrame, round: &Round) -> Option<FilterPlan> {
+        let pass = round.filter_pass()?;
+        let page = round.page()?;
+        let recorded = frame.recorder.layers.get(pass.layer as usize)?;
+        let data_offset = self.filter_block(pass.layer, &recorded.kind)?;
+
+        let instance = self.filter_passes;
+        self.filter_passes = self.filter_passes.saturating_add(1);
+        Some(FilterPlan {
+            step: pass.step,
+            source: pass.source,
+            data_offset,
+            original: SizeU16::from(page.bounds),
+            instance,
+        })
+    }
+
+    /// The texel offset of `layer`'s parameter block, packing the block on
+    /// first sight.
+    ///
+    /// A linear scan rather than a map: a frame's filter layers are counted in
+    /// ones (a filter layer is served only directly under the surface), and one
+    /// allocation-free vector beats a hash map that would have to be cleared
+    /// every frame.
+    fn filter_block(&mut self, layer: u32, kind: &RecordedLayerKind) -> Option<u32> {
+        let index = match self.filter_layers.iter().position(|id| *id == layer) {
+            Some(index) => index,
+            None => {
+                // The one dispatch every filter-recognising site in this crate
+                // shares (`schedule::layer_role`/`filter_rounds`), so the block
+                // packed here is for the same filter the scheduler planned the
+                // passes of.
+                let block = match served_filter(layer, kind).ok()? {
+                    ServedFilter::Blur(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
+                    ServedFilter::DropShadow(shadow) => {
+                        GpuFilterData::from(GpuDropShadow::from(&shadow))
+                    }
+                };
+                self.filter_layers.push(layer);
+                self.filter_blocks.push(block);
+                self.filter_layers.len().saturating_sub(1)
+            }
+        };
+
+        u32::try_from(index)
+            .ok()?
+            .checked_mul(GpuFilterData::SIZE_TEXELS)
+    }
+
+    /// How many of this frame's rounds render *strips* into a pooled page, and
+    /// so how many viewport uniforms of their own the frame needs.
+    ///
+    /// A filter round targets a page too and is deliberately not counted: it
+    /// binds no viewport uniform at all, mapping NDC against the destination
+    /// extent its own instance carries.
     fn page_rounds(&self) -> usize {
         self.rounds
             .iter()
-            .filter(|plan| plan.page.is_some())
+            .filter(|plan| plan.page.is_some() && plan.filter.is_none())
             .count()
     }
 
@@ -1797,6 +2543,33 @@ impl FrameResources {
                 },
             );
         }
+        // The glyph half of the same registry, and the reason it is a second
+        // loop rather than a branch inside the first: a glyph slot carries no
+        // pixels and is *not* re-offered across frames, because the pixels are
+        // produced by the replay pass rather than uploaded from here. Its
+        // rectangle is reported by every draw that names it (see
+        // [`crate::compile::GlyphSlot`]), so registering it here is what makes
+        // a handle `glifo` recycled resolve against its current occupant.
+        for slot in &frame.glyph_slots {
+            if !budget.contains(slot.region, frame.atlas_layers) {
+                refused = refused.saturating_add(1);
+                continue;
+            }
+            self.image_registry.insert(
+                slot.id,
+                ResidentImage {
+                    id: slot.id,
+                    region: slot.region,
+                    // Never minified: a glyph is rasterized straight into the
+                    // rectangle it was allocated, so the natural extent and the
+                    // resident one are the same value by construction.
+                    natural: slot.region.size,
+                    padding: slot.padding,
+                    may_have_transparency: true,
+                },
+            );
+        }
+
         if refused > 0 {
             self.note_refused_regions(refused);
         }
@@ -2090,6 +2863,85 @@ impl FrameResources {
         );
         self.bind_groups.insert(variant, groups);
     }
+}
+
+/// Lower one atlas page's recorded commands into the strips that draw it,
+/// answering whether the whole page could be expressed.
+///
+/// The caller-supplied half of the render-to-atlas seam: `gpu::atlas` owns the
+/// pass, the orderings and the submit, while turning a command stream into
+/// strips is compiler work and stays on this side of the edge — `compile`
+/// already depends on `gpu::atlas`, so taking the reverse dependency would make
+/// the two mutually recursive.
+///
+/// The stream is replayed as a scene in *page* space and compiled by
+/// `lowering`, which is why that compiler is sized to the page rather than to
+/// the surface. Only the four commands an outline glyph produces are lowered;
+/// anything else — a clip path, a blend layer, a gradient paint, which is to
+/// say every COLR shape — refuses the page whole rather than drawing part of
+/// it. An indexed paint coming back out of the compile means the same thing:
+/// the atlas pass binds no paint texture, so a record it would have to sample
+/// cannot be drawn.
+///
+/// Refusing a page is a *last* line rather than the design, because refusal
+/// cannot be made harmless here: `glifo` clears a recorder's commands whether
+/// or not this answered `true`, and it offers no way to withdraw the entries
+/// whose pixels those commands were going to be. Nothing that would reach this
+/// refusal is therefore admitted to the atlas in the first place — a colour
+/// face never takes the atlas route at all (`crate::text::atlas_policy`), so
+/// what arrives here is the solid outline stream this lowers.
+fn lower_atlas_page(
+    recorder: &AtlasCommandRecorder,
+    buffers: &mut AtlasPageBuffers,
+    lowering: &mut SceneCompiler,
+    page: (u16, u16),
+) -> bool {
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        let mut transform = Affine::IDENTITY;
+        let mut brush = Brush::Solid(Color::BLACK);
+
+        for command in &recorder.commands {
+            match command {
+                AtlasCommand::SetTransform(next) => transform = *next,
+                AtlasCommand::SetPaint(AtlasPaint::Solid(color)) => brush = Brush::Solid(*color),
+                AtlasCommand::FillPath(path) => {
+                    builder.push_transform(transform);
+                    builder.fill_path((**path).clone(), brush.clone());
+                    builder.pop_transform();
+                }
+                AtlasCommand::FillRect(rect) => {
+                    builder.push_transform(transform);
+                    builder.fill_rect(*rect, brush.clone());
+                    builder.pop_transform();
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    let Ok(frame) = lowering.compile(&scene, Affine::IDENTITY, page) else {
+        return false;
+    };
+
+    let strips = frame.strip_buf();
+    for draw in frame.draws() {
+        let Paint::Solid(color) = &draw.paint else {
+            return false;
+        };
+        let Some(run) = strips.get(draw.strip_range.clone()) else {
+            continue;
+        };
+        push_solid_strips(
+            run,
+            color.as_premul_rgba8().to_u32(),
+            draw.depth,
+            &mut buffers.instances,
+        );
+    }
+    buffers.alphas.extend_from_slice(frame.alphas());
+    true
 }
 
 /// The [`ImageId`] an encoded image paint names, or `None` for the one

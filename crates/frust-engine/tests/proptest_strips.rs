@@ -714,13 +714,27 @@ fn strip_packing_failures(frame: &CompiledFrame) -> Vec<String> {
             }
             let strip_width = u32::from(strip.width_to(next));
             let x0 = u32::from(strip.x);
+            let coverage = strip_width * u32::from(Tile::HEIGHT);
 
             if x0 + strip_width > width {
-                failures.push(format!(
-                    "draw {index}: strip at ({}, {}) spans {strip_width}px, past the {width}px \
-                     tile-snapped viewport",
-                    strip.x, strip.y
-                ));
+                // `vello_common`'s fast rect path treats `x1` inclusively: a
+                // rect clamped to the exact viewport width gets its
+                // right-edge column AT the snapped edge. That column carries
+                // only zeroed coverage and exists to anchor the interior
+                // `fill_gap` run — the render pass scissors it away, so it
+                // is benign. Anything else past the edge is malformed.
+                let benign_boundary_column = x0 == width
+                    && frame
+                        .alphas()
+                        .get(strip.alpha_idx() as usize..(strip.alpha_idx() + coverage) as usize)
+                        .is_some_and(|bytes| bytes.iter().all(|&byte| byte == 0));
+                if !benign_boundary_column {
+                    failures.push(format!(
+                        "draw {index}: strip at ({}, {}) spans {strip_width}px, past the {width}px \
+                         tile-snapped viewport",
+                        strip.x, strip.y
+                    ));
+                }
             }
             if u32::from(strip.y) >= height {
                 failures.push(format!(
@@ -735,7 +749,6 @@ fn strip_packing_failures(frame: &CompiledFrame) -> Vec<String> {
                 ));
             }
 
-            let coverage = strip_width * u32::from(Tile::HEIGHT);
             if strip.alpha_idx().saturating_add(coverage) > alphas {
                 failures.push(format!(
                     "draw {index}: strip at ({}, {}) reads coverage {}..{} out of the frame's \
@@ -813,7 +826,6 @@ fn frames_differ(first: &CompiledFrame, second: &CompiledFrame) -> Option<String
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: CASES,
-        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -900,7 +912,6 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: ALLOCATION_CASES,
-        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -1141,6 +1152,68 @@ fn the_documented_non_terminating_dash_cycle_is_refused() {
     ));
 }
 
+/// The captured minimal input from the strip-packing flake: a degenerate
+/// rect blurred at `std_dev` 1e18. The kernel pad cap bounds the coverage
+/// rectangle's coordinates, so the strip generator's tile arithmetic stays
+/// exact and every strip lands inside the tile-snapped viewport — the same
+/// property `strip_packing_stays_inside_the_frame` asserts over random
+/// scenes, pinned here deterministically.
+#[test]
+fn blurred_rect_with_extreme_std_dev_produces_valid_strips() {
+    let scene = scene_of(&[Op::BlurredRoundedRect {
+        rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+        radii: CornerRadii::uniform(0.0),
+        std_dev: 1e18,
+        color: RED,
+    }]);
+
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("a blurred rect with an extreme finite std_dev must compile");
+
+    let failures = strip_packing_failures(&frame);
+    assert!(
+        failures.is_empty(),
+        "{} malformed strip(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// A wide-but-realistic blur keeps its full falloff: the kernel pad cap is a
+/// coverage-only overflow guard, so at `std_dev` 32 the inflated bounds are
+/// exactly the uncapped `2.5 * std_dev` inflation on every side, and the
+/// strips it packs are still well-formed.
+#[test]
+fn a_realistic_wide_blur_keeps_its_full_coverage() {
+    let rect = Rect::new(8.0, 8.0, 24.0, 24.0);
+    let std_dev = 32.0;
+
+    let bounds = frust_engine::inflated_bounds(rect, std_dev);
+    assert_eq!(
+        bounds,
+        rect.inflate(2.5 * std_dev, 2.5 * std_dev),
+        "a realistic blur's coverage must be the full kernel inflation, untruncated"
+    );
+
+    let scene = scene_of(&[Op::BlurredRoundedRect {
+        rect,
+        radii: CornerRadii::uniform(4.0),
+        std_dev,
+        color: RED,
+    }]);
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("a wide realistic blur must compile");
+    let failures = strip_packing_failures(&frame);
+    assert!(
+        failures.is_empty(),
+        "{} malformed strip(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// Every geometry field the compiler lowers is refused when it is non-finite,
 /// and refused as geometry rather than as a transform — a caller chasing a
 /// blank frame is told which half of the input they recorded wrong.
@@ -1306,7 +1379,6 @@ fn the_generator_still_produces_frames_that_compile() {
 
     let mut runner = TestRunner::new(ProptestConfig {
         cases: SAMPLES,
-        failure_persistence: None,
         ..ProptestConfig::default()
     });
     let compiled = Cell::new(0_u32);
@@ -1363,4 +1435,40 @@ fn a_non_finite_root_transform_is_refused_whole() {
             Err(EngineError::InvalidTransform)
         ));
     }
+}
+
+/// The benign-boundary-column exception, pinned from the fill side: a rect
+/// covering the exact viewport takes the fast rect path, whose inclusive
+/// right edge emits a zero-coverage column AT the tile-snapped edge (the
+/// anchor of the interior `fill_gap` run). The packing checker accepts
+/// exactly that column and nothing else past the edge — this shape is what
+/// the four-sighting strip-packing "flake" always was: any huge-coordinate
+/// rect the generator clamps to the full viewport produces it.
+#[test]
+fn a_full_viewport_fast_rect_emits_only_the_benign_boundary_column() {
+    let scene = scene_of(&[Op::FillRect {
+        rect: Rect::new(0.0, 0.0, 64.0, 64.0),
+        brush: Brush::Solid(RED),
+    }]);
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("must compile");
+    let failures = strip_packing_failures(&frame);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Same exception from the clamping side: a rect extending past every
+/// viewport edge is clamped by the generator to the exact viewport and packs
+/// identically to the full-bleed fill above.
+#[test]
+fn an_edge_crossing_fast_rect_packs_like_a_full_viewport_one() {
+    let scene = scene_of(&[Op::FillRect {
+        rect: Rect::new(8.0, 8.0, 104.0, 104.0),
+        brush: Brush::Solid(RED),
+    }]);
+    let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
+        .compile(&scene, Affine::IDENTITY, VIEWPORT)
+        .expect("must compile");
+    let failures = strip_packing_failures(&frame);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

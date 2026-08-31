@@ -25,9 +25,11 @@ pub mod cache;
 pub mod compile;
 pub mod config;
 pub mod error;
+pub mod filters;
 pub mod gpu;
 pub mod renderer;
 pub mod schedule;
+pub(crate) mod text;
 
 pub use cache::{
     AtlasBudget, AtlasRegion, CachedRamp, GradientCache, GradientTextureLayout, ImageResidency,
