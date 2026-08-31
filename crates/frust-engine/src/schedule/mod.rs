@@ -304,11 +304,13 @@ pub struct Round {
     pub released: Vec<PageParity>,
     /// The filter pass this round runs, on a filter round.
     ///
-    /// A separate field rather than a [`RoundOp`]: a filter round is *only* a
-    /// filter pass — it draws nothing and composites nothing — and a caller
-    /// that cannot run one has to be able to tell that from a round it can run,
-    /// rather than discovering an op it does not understand halfway through a
-    /// list it has already started issuing.
+    /// A field rather than a [`RoundOp`] variant, and it stays one now that the
+    /// renderer executes filter rounds: a filter round is *only* a filter pass
+    /// — it draws nothing and composites nothing, and it is drawn through a
+    /// different pipeline, off a different instance buffer, with no viewport
+    /// uniform and no strip bind groups. Naming it here is what lets the frame
+    /// path branch on the round before it starts issuing a list, and keeps
+    /// [`RoundOp`] exactly the set of things one strip pass can interleave.
     pub filter: Option<FilterPass>,
 }
 
@@ -376,53 +378,23 @@ impl Schedule {
     /// routes the frame anywhere: both hand the caller a frame it is expected
     /// to skip.
     ///
-    /// Every filter layer is refused here, [`build_with_filters`] being where
-    /// one is planned instead. The two are separate because *planning* a filter
-    /// round and *executing* one are separate pieces of work: the rounds a
-    /// blurred layer costs are settled (and tested) below, and the renderer has
-    /// no filter pipeline to run them through yet. Refusing on this entry point
-    /// is what keeps the frame path from reaching a round nothing can execute —
-    /// a filter round draws nothing and composites nothing, so a caller that
-    /// ignored it would clear the page and composite the hole. The two collapse
-    /// into one call the moment the renderer grows the pass.
+    /// A Gaussian-blur filter layer is *planned* here: its contents' round,
+    /// then one round per pass of its filter's sequence, then the composite of
+    /// whichever page the last pass wrote. Every other filter is refused by
+    /// name (see [`crate::filters::served_blur`]), and so are the two shapes a
+    /// served filter layer still cannot take — one recorded inside another
+    /// layer, and one that cannot be handed the second page group its passes
+    /// ping-pong into.
     ///
-    /// [`build_with_filters`]: Self::build_with_filters
+    /// One entry point, not two. While the renderer had no filter pipeline,
+    /// this call refused every filter and a second one planned them, so the
+    /// frame path could not reach a round nothing could execute; the renderer
+    /// runs them now ([`crate::renderer::FilterResources`]), and the split went
+    /// with the reason for it.
     pub fn build(
         recorder: &CommandRecorder<EngineDraw>,
         caps: &TierCaps,
         config: &PageConfig,
-    ) -> Result<Vec<Round>, EngineError> {
-        Self::plan(recorder, caps, config, Filters::Refused)
-    }
-
-    /// [`build`](Self::build), with a Gaussian-blur filter layer planned rather
-    /// than refused: its contents' round, then one round per pass of its
-    /// filter's sequence, then the composite of whichever page the last pass
-    /// wrote.
-    ///
-    /// Only a caller that can execute a [filter round](Round::filter) may use
-    /// this — see [`build`](Self::build) for why the frame path does not yet.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`build`](Self::build) refuses, minus the blur filter itself,
-    /// plus the two shapes a served filter layer still cannot take: one
-    /// recorded inside another layer, and one that cannot be handed the second
-    /// page group its passes ping-pong into.
-    pub fn build_with_filters(
-        recorder: &CommandRecorder<EngineDraw>,
-        caps: &TierCaps,
-        config: &PageConfig,
-    ) -> Result<Vec<Round>, EngineError> {
-        Self::plan(recorder, caps, config, Filters::Planned)
-    }
-
-    /// The walk both entry points share.
-    fn plan(
-        recorder: &CommandRecorder<EngineDraw>,
-        caps: &TierCaps,
-        config: &PageConfig,
-        filters: Filters,
     ) -> Result<Vec<Round>, EngineError> {
         let mut rounds: Vec<Round> = Vec::new();
         let mut pages = LivePages::default();
@@ -493,7 +465,7 @@ impl Schedule {
                     // Nothing nested inside a dropped layer is rendered, so
                     // nothing inside one is validated either — the walk does
                     // not enter it.
-                    let role = layer_role(id, layer, filters)?;
+                    let role = layer_role(id, layer)?;
                     // A filter layer's placement in its parent is computed by
                     // undoing a shift the reference renderer applies to a
                     // filter layer's contents and frust's compiler does not, so
@@ -1134,21 +1106,8 @@ impl LivePages {
     }
 }
 
-/// Whether a walk plans a filter layer's rounds or refuses it.
-///
-/// Not a property of the recording but of the caller: the rounds are the same
-/// either way, and what differs is whether the caller can execute one (see
-/// [`Schedule::build`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Filters {
-    /// Plan a served filter layer's rounds.
-    Planned,
-    /// Refuse every filter layer, served or not.
-    Refused,
-}
-
 /// How `layer` is served, refusing every property this scheduler cannot honour.
-fn layer_role(id: u32, layer: &RecordedLayer, filters: Filters) -> Result<LayerRole, EngineError> {
+fn layer_role(id: u32, layer: &RecordedLayer) -> Result<LayerRole, EngineError> {
     if layer.props.blend_mode != BlendMode::default() {
         return Err(escalate(format!(
             "layer {id} composites with a non-default blend mode ({:?}), which has to read the \
@@ -1189,17 +1148,11 @@ fn layer_role(id: u32, layer: &RecordedLayer, filters: Filters) -> Result<LayerR
         // filter a recording can carry is refused here, by name, and the frame
         // is skipped. A filtered layer is never inlined, whatever its opacity.
         kind => {
-            // Recognised even on a walk that refuses every filter, so the
-            // reason names what was found: a filter this engine renders nothing
-            // of reads differently from a blur it can plan but not yet run.
+            // Recognised here rather than at the filter round, so a refusal
+            // names what was found before any round has been emitted and a
+            // filter shape this engine cannot render is refused wherever it is
+            // recorded — including inside a layer whose contents cover nothing.
             served_blur(id, kind).map_err(escalate)?;
-            if filters == Filters::Refused {
-                return Err(escalate(format!(
-                    "layer {id} carries a Gaussian blur, which this scheduler plans but the \
-                     renderer has no filter pipeline to execute yet; see \
-                     `Schedule::build_with_filters`"
-                )));
-            }
             Ok(LayerRole::Filtered)
         }
     }

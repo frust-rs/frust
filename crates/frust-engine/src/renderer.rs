@@ -63,6 +63,16 @@
 //!    plain painter's-algorithm pass when it is not. A round's ops run in the
 //!    order [`Schedule::build`] listed them, so a finished child page composites
 //!    into its parent exactly where the recording entered it.
+//!
+//!    A **filter round** is the one round that draws no strip at all: it runs
+//!    one pass of a [filter](crate::filters)'s sequence, one instanced quad
+//!    through [`EnginePipeline::Filter`], reading the layer's other pooled page
+//!    through the engine's only sampler and clearing the page it writes (see
+//!    [`FilterResources`]). It is an ordinary round of this walk in every other
+//!    respect — recorded into the caller's own encoder, in the order the
+//!    scheduler listed it, with its pages handed back the moment its pass ends.
+//!    It is *not* an own-encoder exception; the atlas replay remains the only
+//!    one of those.
 //! 4. **The hole punch**, destination-out, when the frame recorded a
 //!    `ClearRect` — see [`crate::compile::clear`] for the whole contract this
 //!    pass implements.
@@ -152,6 +162,8 @@ use crate::compile::paint::resolve_lut_request;
 use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
+use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
+use crate::filters::{FilterStep, served_blur};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
@@ -159,11 +171,16 @@ use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs};
 use crate::gpu::strips::{PaintType, pack_paint_descriptor};
-use crate::gpu::targets::{IntermediateTargets, IntermediateTexture};
+use crate::gpu::targets::{
+    IntermediateTargets, IntermediateTexture, filter_data_texture_descriptor,
+    filter_data_texture_height, filter_sampler,
+};
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::schedule::pages::{PageConfig, PageSize};
 use crate::schedule::{Composite, PageParity, Round, RoundOp, Schedule};
 use crate::{EngineTarget, OutputAlpha};
+use vello_common::geometry::SizeU16;
+use vello_common::record::RecordedLayerKind;
 
 /// The packed paint descriptor of an inline premultiplied solid colour.
 ///
@@ -207,6 +224,19 @@ const PUNCH_SOURCE: u32 = u32::MAX;
 
 /// The label every intermediate page is acquired from the pool under.
 const PAGE_LABEL: &str = "frust-engine layer page";
+
+/// The label every filter round's pass is recorded under.
+const FILTER_LABEL: &str = "frust-engine filter pass";
+
+/// Vertices one filter pass's quad is built from, the same four-vertex
+/// triangle strip every engine program expands an instance into.
+const FILTER_QUAD_VERTICES: u32 = 4;
+
+/// The smallest filter instance buffer the engine allocates, in instances.
+///
+/// A σ-32 blur is ten passes, so this is roughly "one deep blur costs no second
+/// allocation"; the buffer is 32 bytes an instance and grows from here.
+const MIN_FILTER_INSTANCE_CAPACITY: u64 = 16;
 
 static INDEXED_PAINT_WARNING: Once = Once::new();
 
@@ -256,6 +286,13 @@ pub struct EngineRenderer {
     /// What the last frame's replay serviced, for
     /// [`Self::atlas_render_report`].
     atlas_report: AtlasRenderReport,
+    /// The filter-data texture, sampler and instance buffer a filter round is
+    /// executed with.
+    ///
+    /// Lazy for the same reason [`Self::atlas_glyphs`] is: a renderer that
+    /// never blurs should own neither a sampler nor a resource texture it will
+    /// not read. Created by the first frame that schedules a filter round.
+    filters: Option<FilterResources>,
 }
 
 impl EngineRenderer {
@@ -314,6 +351,7 @@ impl EngineRenderer {
             atlas_glyphs: None,
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
+            filters: None,
         })
     }
 
@@ -675,6 +713,25 @@ impl EngineRenderer {
 
         let format = target.format;
         let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
+
+        // The filter rounds' own resources, created by the first frame that
+        // schedules one. Only the parameter blocks are uploaded here: a pass's
+        // instance names the extent the *pool* quantized its destination page
+        // up to, which only the round that acquires it knows, so the instances
+        // are written round by round in `record_frame`.
+        if let Some(pipeline) = pipelines.filter.as_ref() {
+            let scratch = &self.scratch;
+            self.filters
+                .get_or_insert_with(|| FilterResources::new(device))
+                .prepare(
+                    device,
+                    queue,
+                    pipeline,
+                    &scratch.filter_blocks,
+                    scratch.filter_passes,
+                );
+        }
+
         self.record_frame(
             device, queue, encoder, &target, depth_view, base_color, &pipelines,
         );
@@ -849,6 +906,7 @@ impl EngineRenderer {
             opaque: None,
             page: None,
             punch: None,
+            filter: None,
         };
         if depth && !self.scratch.opaque.is_empty() {
             frame.opaque = Some(
@@ -877,6 +935,18 @@ impl EngineRenderer {
                     .get_or_create(device, &punch_variant.desc(&self.shaders, format))
                     .clone(),
             ));
+        }
+        if self.scratch.filter_passes > 0 {
+            // Takes the frame's format like every other variant and ignores
+            // it: a filter pass only ever writes a pooled page, so its own
+            // description is pinned to `INTERMEDIATE_FORMAT`. One filter
+            // pipeline therefore serves a renderer for its whole life,
+            // whatever its surface is reconfigured to.
+            frame.filter = Some(
+                self.pipelines
+                    .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
+                    .clone(),
+            );
         }
 
         self.resources
@@ -1024,6 +1094,61 @@ impl EngineRenderer {
                 },
             };
 
+            // A filter round is only a filter pass: no strip instance, no
+            // composite, no viewport uniform of its own — the pass maps NDC
+            // against the destination extent its own instance carries, which is
+            // why that instance is written here, where the pool's quantized
+            // extent is finally known.
+            if let Some(filter) = plan.filter {
+                if let Some((_, pooled)) = own.as_ref()
+                    && let Some(pipeline) = pipelines.filter.as_ref()
+                    && let Some(filters) = self.filters.as_ref()
+                {
+                    let (width, height) = pooled.size();
+                    filters.write_instance(
+                        queue,
+                        filter.instance,
+                        &FilterInstanceData::new(
+                            &filter.step,
+                            filter.data_offset,
+                            // Both pages hold the layer at their own origin, so
+                            // neither region is offset within its page.
+                            (0, 0),
+                            (0, 0),
+                            SizeU16::from_wh(
+                                u16::try_from(width).unwrap_or(u16::MAX),
+                                u16::try_from(height).unwrap_or(u16::MAX),
+                            ),
+                            filter.original,
+                        ),
+                    );
+                    // A group with no live page samples the transparent
+                    // placeholder, which filters nothing — the same "draw less,
+                    // never wrong" answer an unresolvable paint gets.
+                    // Unreachable: the round that wrote this pass's source is
+                    // the one before it, and nothing between the two releases
+                    // that group.
+                    let source = live[filter.source.index()].as_ref().map_or(
+                        &self.resources.placeholders.layer_input,
+                        PooledTexture::view,
+                    );
+                    filters.record_pass(
+                        device,
+                        encoder,
+                        &FilterPassPlan {
+                            label: FILTER_LABEL,
+                            pipeline,
+                            dest: pooled.view(),
+                            source,
+                            instance: filter.instance,
+                        },
+                    );
+                }
+
+                settle_pages(&mut self.targets, &mut live, plan.released, own);
+                continue;
+            }
+
             // The round's viewport uniform. A page's is written here rather
             // than with the frame's other uploads because only the pool knows
             // the extent it quantized the request up to, and NDC is computed
@@ -1137,20 +1262,7 @@ impl EngineRenderer {
                 },
             );
 
-            // The pages this round consumed are free the moment its pass ends,
-            // which is what bounds a chain of any depth to two live pages.
-            for (index, slot) in live.iter_mut().enumerate() {
-                if plan.released.get(index).copied().unwrap_or(false)
-                    && let Some(page) = slot.take()
-                {
-                    self.targets.release(page);
-                }
-            }
-            if let Some((parity, pooled)) = own
-                && let Some(previous) = live[parity.index()].replace(pooled)
-            {
-                self.targets.release(previous);
-            }
+            settle_pages(&mut self.targets, &mut live, plan.released, own);
         }
 
         let (punch_first, punch_count) = self.scratch.punch;
@@ -1199,6 +1311,8 @@ struct FramePipelines {
     page: Option<wgpu::RenderPipeline>,
     /// The destination-out pass, with its variant, when the frame punches.
     punch: Option<(EnginePipeline, wgpu::RenderPipeline)>,
+    /// The pass one filter round runs through, when the frame filters a layer.
+    filter: Option<wgpu::RenderPipeline>,
 }
 
 /// One pass's full recording state, assembled before the pass is begun.
@@ -1270,6 +1384,286 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
         plan.groups.bind_with(&mut pass, group);
         pass.draw(GpuStrip::vertex_range(), range);
     }
+}
+
+/// Hands back the page groups a finished round consumed, and parks the page it
+/// wrote in its own group.
+///
+/// The same bookkeeping after every round, strip and filter alike: a page is
+/// free the moment the pass that sampled it ends, which is what bounds a chain
+/// of any depth — and a filter layer's own pair of pages — to
+/// [`MAX_LIVE_PAGES`](crate::schedule::MAX_LIVE_PAGES) live intermediates.
+///
+/// A round that is not continuing a page of its own takes a *fresh* texture out
+/// of the pool rather than the group's current occupant, and the occupant it
+/// displaces goes back here. That is what keeps a filter pass from ever holding
+/// one texture as both its attachment and its source: a filter round never
+/// continues a page — it clears — so what it writes is always a different
+/// texture from the one the pass before it wrote and this pass reads.
+fn settle_pages(
+    targets: &mut IntermediateTargets,
+    live: &mut [Option<PooledTexture>; 2],
+    released: [bool; 2],
+    own: Option<(PageParity, PooledTexture)>,
+) {
+    for (index, slot) in live.iter_mut().enumerate() {
+        if released.get(index).copied().unwrap_or(false)
+            && let Some(page) = slot.take()
+        {
+            targets.release(page);
+        }
+    }
+    if let Some((parity, pooled)) = own
+        && let Some(previous) = live[parity.index()].replace(pooled)
+    {
+        targets.release(previous);
+    }
+}
+
+/// The GPU resources a frame's [filter](crate::filters) rounds are executed
+/// with, beyond the two pooled pages they ping-pong between.
+///
+/// Three of them, and each is the engine's only one of its kind: the
+/// filter-data texture holding every filter in the frame's 48-byte parameter
+/// block, the bilinear sampler
+/// ([`filter_sampler`](crate::gpu::targets::filter_sampler)) the blur kernels
+/// read their source page through, and the instance buffer one quad per pass is
+/// drawn from.
+///
+/// Public because this *is* executing a filter pass — the renderer holds one
+/// and drives it over the pages the scheduler named, and `tests/filters.rs`
+/// drives the same type over pages of its own on real hardware. That second
+/// caller is not a convenience: `frust_scene` carries no filter command yet
+/// (the scene seam is a later plan), so a filter layer cannot reach
+/// [`EngineRenderer::encode`] through a `Scene` at all, and driving this type
+/// directly is the only way the ported WGSL is exercised on a device.
+#[derive(Debug)]
+pub struct FilterResources {
+    /// Every filter in the frame's parameter block, back to back.
+    data: ResourceTexture,
+    /// Group 0, naming [`Self::data`]'s view. Rebuilt whenever that texture is,
+    /// and valid for the renderer's whole life otherwise: a filter pipeline's
+    /// description does not depend on the frame's target format, so there is
+    /// only ever one layout to have derived it from.
+    data_group: Option<wgpu::BindGroup>,
+    sampler: wgpu::Sampler,
+    instances: Option<wgpu::Buffer>,
+    instance_capacity: u64,
+    /// Reusable staging for the parameter-block upload, padded to the
+    /// texture's own footprint.
+    staging: Vec<u8>,
+}
+
+impl FilterResources {
+    /// A renderer's filter resources, with nothing uploaded yet.
+    #[must_use]
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            data: ResourceTexture::new(
+                device,
+                &filter_data_texture_descriptor(gpu::MIN_RESOURCE_TEXTURE_HEIGHT),
+            ),
+            data_group: None,
+            sampler: filter_sampler(device),
+            instances: None,
+            instance_capacity: 0,
+            staging: Vec::new(),
+        }
+    }
+
+    /// Uploads this frame's parameter `blocks` and reserves room for `passes`
+    /// pass instances, growing either resource if the frame outgrew it.
+    ///
+    /// `pipeline` is the one [`EnginePipeline::Filter`] describes; it is needed
+    /// because wgpu derives a pipeline's bind-group layouts from its shader
+    /// module, so the group naming the filter-data texture can only be built
+    /// against the pipeline that will bind it.
+    ///
+    /// A block count no filter-data texture could hold (see
+    /// [`filter_data_texture_height`]) leaves the group unbuilt, which leaves
+    /// every filter pass of the frame issuing no draw — the page is still
+    /// cleared, so the layer composites as transparent rather than as whatever
+    /// its page last held. Unreachable in practice, and "draw less, never
+    /// wrong" when it is not.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &wgpu::RenderPipeline,
+        blocks: &[GpuFilterData],
+        passes: u32,
+    ) {
+        let Some(height) = filter_data_texture_height(blocks.len()) else {
+            self.data_group = None;
+            return;
+        };
+        if height > self.data.height {
+            self.data = ResourceTexture::new(device, &filter_data_texture_descriptor(height));
+            self.data_group = None;
+        }
+        if self.data_group.is_none() {
+            self.data_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("frust-engine filter data"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.data.view),
+                }],
+            }));
+        }
+
+        // A queue write covers the whole texture extent, so the blocks are
+        // padded out to its footprint; the trailing texels are never addressed,
+        // because a pass names its own block by a texel offset the host handed
+        // it.
+        let footprint = gpu::resource_texture_bytes(self.data.width, self.data.height);
+        self.staging.clear();
+        self.staging
+            .resize(usize::try_from(footprint).unwrap_or(usize::MAX), 0);
+        let bytes: &[u8] = bytemuck::cast_slice(blocks);
+        if let Some(head) = self.staging.get_mut(..bytes.len()) {
+            head.copy_from_slice(bytes);
+        }
+        queue.write_texture(
+            self.data.copy_target(),
+            &self.staging,
+            resource_layout(
+                gpu::resource_bytes_per_row(self.data.width),
+                self.data.height,
+            ),
+            self.data.extent(),
+        );
+
+        self.reserve_instances(device, passes);
+    }
+
+    /// Grows the instance buffer if this frame's pass count outgrew it.
+    fn reserve_instances(&mut self, device: &wgpu::Device, passes: u32) {
+        let stride = size_of::<FilterInstanceData>() as u64;
+        let required = u64::from(passes).saturating_mul(stride).max(stride);
+        if self.instances.is_some() && self.instance_capacity >= required {
+            return;
+        }
+        let capacity = required
+            .checked_next_power_of_two()
+            .unwrap_or(required)
+            .max(MIN_FILTER_INSTANCE_CAPACITY.saturating_mul(stride));
+        self.instance_capacity = capacity;
+        self.instances = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frust-engine filter instances"),
+            size: capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+
+    /// Writes one pass's instance into slot `index` of the instance buffer.
+    ///
+    /// Separate from [`Self::prepare`] because a pass's `dest_texture_size` is
+    /// the extent the texture pool *quantized* its destination page up to, and
+    /// NDC is computed against the attachment's real extent — only the round
+    /// that acquires the page knows it. A queue write issued while the frame is
+    /// being recorded still lands ahead of the command buffers it is submitted
+    /// with, which is the same ordering a page's viewport uniform already
+    /// relies on.
+    ///
+    /// A slot past the reserved capacity is dropped rather than written, which
+    /// leaves that pass drawing whatever the slot last held; unreachable, since
+    /// `prepare` reserved one slot per pass of this very frame.
+    pub fn write_instance(&self, queue: &wgpu::Queue, index: u32, instance: &FilterInstanceData) {
+        let Some(buffer) = self.instances.as_ref() else {
+            return;
+        };
+        let stride = size_of::<FilterInstanceData>() as u64;
+        let offset = u64::from(index).saturating_mul(stride);
+        if offset.saturating_add(stride) > self.instance_capacity {
+            return;
+        }
+        queue.write_buffer(buffer, offset, bytemuck::bytes_of(instance));
+    }
+
+    /// Records one filter pass into `encoder`: clear the destination page, then
+    /// draw the one instanced quad that filters `plan`'s source into it.
+    ///
+    /// The clear is unconditional and the draw is not. A filter pass writes only
+    /// the region its step names — a decimated one a quarter of the texels the
+    /// pass before it did — and the kernels sample past that region without
+    /// bounds checks, so whatever surrounds it has to be transparent rather than
+    /// a previous holder's pixels. That has to hold even on the path where the
+    /// pass itself cannot be issued, or the layer's composite would sample the
+    /// page's previous tenant instead of nothing.
+    ///
+    /// The pass is opened and closed here, on the caller's own encoder: a filter
+    /// round is not an exception to [`EngineRenderer::encode`]'s contract.
+    pub fn record_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &FilterPassPlan<'_>,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(plan.label),
+            color_attachments: &[Some(color_attachment(
+                plan.dest,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            ))],
+            // A pooled page carries no depth attachment, which is also why the
+            // filter pipeline declares no depth state.
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        let (Some(data_group), Some(instances)) =
+            (self.data_group.as_ref(), self.instances.as_ref())
+        else {
+            return;
+        };
+
+        let source = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-engine filter source"),
+            layout: &plan.pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(plan.source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        pass.set_pipeline(plan.pipeline);
+        pass.set_vertex_buffer(0, instances.slice(..));
+        pass.set_bind_group(0, data_group, &[]);
+        pass.set_bind_group(1, &source, &[]);
+        pass.draw(
+            0..FILTER_QUAD_VERTICES,
+            plan.instance..plan.instance.saturating_add(1),
+        );
+    }
+}
+
+/// One filter pass's full recording state.
+///
+/// The two pages are named as views rather than as parities because
+/// [`FilterResources`] holds no pool: which texture each group is holding is the
+/// caller's bookkeeping, whether that caller is the frame path or a test.
+#[derive(Debug)]
+pub struct FilterPassPlan<'a> {
+    /// Label for captures and validation messages.
+    pub label: &'a str,
+    /// The pipeline [`EnginePipeline::Filter`] describes.
+    pub pipeline: &'a wgpu::RenderPipeline,
+    /// The page this pass writes. Cleared to transparent before it is written.
+    pub dest: &'a wgpu::TextureView,
+    /// The page this pass reads — the one the pass before it wrote.
+    pub source: &'a wgpu::TextureView,
+    /// Which instance of the filter instance buffer this pass draws.
+    pub instance: u32,
 }
 
 /// A colour attachment over `view` with `load`, keeping what it stores.
@@ -1370,6 +1764,27 @@ struct RoundPlan {
     /// Page groups this round consumed, indexed by
     /// [`PageParity::index`]; each returns to the pool once the pass ends.
     released: [bool; 2],
+    /// The filter pass this round runs, on a filter round — which draws no
+    /// strip and composites nothing, so its `segments` range is empty.
+    filter: Option<FilterPlan>,
+}
+
+/// One filter pass, resolved to the instance slot it draws and the page group
+/// it reads.
+#[derive(Debug, Clone, Copy)]
+struct FilterPlan {
+    /// Which pass of the filter's sequence this is, and at what extents.
+    step: FilterStep,
+    /// The group holding the page this pass reads.
+    source: PageParity,
+    /// The texel this filter's parameter block starts at in the filter-data
+    /// texture — where the fragment stage reads its kernel from.
+    data_offset: u32,
+    /// The filter layer's own extent, before any decimation; it bounds the
+    /// transparent border a decimated pass overdraws.
+    original: SizeU16,
+    /// This pass's slot in the frame's filter instance buffer.
+    instance: u32,
 }
 
 /// The pooled page one round renders into.
@@ -1412,6 +1827,17 @@ struct Scratch {
     /// is sound because a layer's own round always precedes the round that
     /// composites it.
     layer_depth: Vec<u32>,
+    /// One parameter block per *filter layer* of the frame, in the order the
+    /// rounds first named them — which is the order the texel offsets in
+    /// [`FilterPlan::data_offset`] were taken from.
+    filter_blocks: Vec<GpuFilterData>,
+    /// The layers `filter_blocks` holds, parallel to it, so a filter's second
+    /// and later passes reuse the block its first one packed rather than
+    /// repacking one per pass.
+    filter_layers: Vec<u32>,
+    /// How many filter passes this frame runs, and so how many instances its
+    /// filter instance buffer has to hold.
+    filter_passes: u32,
 }
 
 impl Scratch {
@@ -1439,12 +1865,16 @@ impl Scratch {
         self.punch = (0, 0);
         self.layer_depth.clear();
         self.layer_depth.resize(frame.recorder.layers.len(), 0);
+        self.filter_blocks.clear();
+        self.filter_layers.clear();
+        self.filter_passes = 0;
 
         let draws = frame.draws();
         let strips = frame.strip_buf();
 
         for round in rounds {
             let page = round.page();
+            let filter = self.plan_filter(frame, round);
             // A page holds its layer at the page's own origin, so every
             // instance of the round is shifted by the layer's bounds.
             let origin = page.map_or((0, 0), |page| (page.bounds.x0, page.bounds.y0));
@@ -1533,6 +1963,7 @@ impl Scratch {
                 }),
                 segments: first_segment..self.segments.len(),
                 released,
+                filter,
             });
         }
 
@@ -1610,11 +2041,66 @@ impl Scratch {
         }
     }
 
-    /// How many of this frame's rounds render into a pooled page.
+    /// Resolves `round`'s filter pass, if it has one, packing the layer's
+    /// parameter block on first sight and claiming the pass's instance slot.
+    ///
+    /// `None` for an ordinary round, and also for the two shapes that cannot
+    /// occur: a filter round with no page (the scheduler always gives one a
+    /// page) and a recorded kind [`served_blur`] does not recognise (the
+    /// scheduler refuses one before it plans a round). Both answer by leaving
+    /// the round's pass unissued — its page is still cleared — rather than by
+    /// asserting (E17).
+    fn plan_filter(&mut self, frame: &CompiledFrame, round: &Round) -> Option<FilterPlan> {
+        let pass = round.filter_pass()?;
+        let page = round.page()?;
+        let recorded = frame.recorder.layers.get(pass.layer as usize)?;
+        let data_offset = self.filter_block(pass.layer, &recorded.kind)?;
+
+        let instance = self.filter_passes;
+        self.filter_passes = self.filter_passes.saturating_add(1);
+        Some(FilterPlan {
+            step: pass.step,
+            source: pass.source,
+            data_offset,
+            original: SizeU16::from(page.bounds),
+            instance,
+        })
+    }
+
+    /// The texel offset of `layer`'s parameter block, packing the block on
+    /// first sight.
+    ///
+    /// A linear scan rather than a map: a frame's filter layers are counted in
+    /// ones (a filter layer is served only directly under the surface), and one
+    /// allocation-free vector beats a hash map that would have to be cleared
+    /// every frame.
+    fn filter_block(&mut self, layer: u32, kind: &RecordedLayerKind) -> Option<u32> {
+        let index = match self.filter_layers.iter().position(|id| *id == layer) {
+            Some(index) => index,
+            None => {
+                let blur = served_blur(layer, kind).ok()?;
+                self.filter_layers.push(layer);
+                self.filter_blocks
+                    .push(GpuFilterData::from(GpuGaussianBlur::from(&blur)));
+                self.filter_layers.len().saturating_sub(1)
+            }
+        };
+
+        u32::try_from(index)
+            .ok()?
+            .checked_mul(GpuFilterData::SIZE_TEXELS)
+    }
+
+    /// How many of this frame's rounds render *strips* into a pooled page, and
+    /// so how many viewport uniforms of their own the frame needs.
+    ///
+    /// A filter round targets a page too and is deliberately not counted: it
+    /// binds no viewport uniform at all, mapping NDC against the destination
+    /// extent its own instance carries.
     fn page_rounds(&self) -> usize {
         self.rounds
             .iter()
-            .filter(|plan| plan.page.is_some())
+            .filter(|plan| plan.page.is_some() && plan.filter.is_none())
             .count()
     }
 

@@ -2,14 +2,15 @@
 //! block the fragment stage reads, the passes it costs, and the rounds the
 //! scheduler plans for it.
 //!
-//! No GPU, device, surface or texture is involved anywhere in this file. Every
-//! claim below is about a decision over plain values — which passes a σ costs
-//! and at what extents, what a kernel packs into 48 bytes, which page each
-//! round writes — because that is the half of the filter this tier owns; the
-//! passes themselves are one instanced quad each through a pipeline the
-//! renderer has yet to grow.
+//! Most of the file is device-free: which passes a σ costs and at what extents,
+//! what a kernel packs into 48 bytes, which page each round writes are all
+//! decisions over plain values. The last section is not — it runs the ported
+//! WGSL on a real adapter and compares the texels it produces against a CPU
+//! reference computed from the same `vello_common` kernels, which is the only
+//! claim a host test cannot make and the only place the shader is exercised at
+//! all (see *On real hardware* below).
 //!
-//! Three kinds of claim are made here.
+//! Four kinds of claim are made here.
 //!
 //! - **Parity with the CPU rasterizer.** Both tiers blur with
 //!   `vello_common::filter::gaussian_blur`'s own kernel, so σ 2, 8 and 32 plan
@@ -27,18 +28,38 @@
 //!   composite; a filter layer nested inside another layer, a filter that is
 //!   not a blur, and a layer whose blur grows it past what a page can be sized
 //!   to are each refused with a reason, never rendered wrong and never a panic.
+//! - **On real hardware.** The `#[ignore]`d cases at the end run a whole blur
+//!   sequence at σ 2, 8 and 32 through `FilterResources` — the same type the
+//!   frame path drives, with the same pipeline, the same filter-data texture,
+//!   the same sampler and the same instance packing — over two pages of the
+//!   test's own, and compare the result against a CPU reference built from
+//!   `vello_common::filter::gaussian_blur`'s own kernel and decimation plan.
+//!
+//!   Over the test's own pages rather than through
+//!   [`frust_engine::EngineRenderer::encode`], and that is a limitation worth
+//!   naming: `frust_scene` carries no filter command (the scene seam is a later
+//!   plan), so no `Scene` can record a filter layer and no `encode` call can
+//!   reach a filter round. What these cases prove is that the WGSL, the
+//!   pipeline, the bind-group shapes and the wire layouts are right on a
+//!   device; that the *scheduler's* rounds drive them in the right order is
+//!   pinned by the host cases above, and the two meet in the frame path the day
+//!   a scene command exists to enter it.
 
 use frust_engine::filters::blur::{
     FILTER_ATLAS_PADDING, FILTER_SIZE_BYTES, FilterInstanceData, GpuFilterData, GpuGaussianBlur,
     LinearKernel, MAX_KERNEL_SIZE, MAX_TAPS_PER_SIDE, blur_passes, edge_mode, filter_type,
     pack_u16_pair,
 };
-use frust_engine::filters::{
-    FILTER, FILTER_NAME, FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, push_filter_layer,
+use frust_engine::filters::{FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, push_filter_layer};
+use frust_engine::gpu::pipelines::{
+    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, warm_up_descs,
 };
+use frust_engine::gpu::shader_src::{FILTER, FILTER_NAME};
+use frust_engine::gpu::targets::{INTERMEDIATE_USAGE, IntermediateTargets};
+use frust_engine::renderer::{FilterPassPlan, FilterResources};
 use frust_engine::schedule::{PageConfig, PageParity, Round, RoundOp, RoundTarget, Schedule};
 use frust_engine::{EngineDraw, EngineError};
-use frust_gpu::{DownlevelProfile, TierCaps};
+use frust_gpu::{DownlevelProfile, PipelineCache, ShaderLibrary, TierCaps};
 use kurbo::Affine;
 use vello_common::color::palette::css::RED;
 use vello_common::filter::gaussian_blur::{
@@ -114,12 +135,12 @@ fn blurred_layer(sigma: f32, opacity: f32) -> CommandRecorder<EngineDraw> {
 }
 
 fn schedule(recorder: &CommandRecorder<EngineDraw>) -> Vec<Round> {
-    Schedule::build_with_filters(recorder, &caps(), &PageConfig::default())
+    Schedule::build(recorder, &caps(), &PageConfig::default())
         .expect("a blurred layer under the surface schedules")
 }
 
 fn escalation(recorder: &CommandRecorder<EngineDraw>) -> String {
-    match Schedule::build_with_filters(recorder, &caps(), &PageConfig::default()) {
+    match Schedule::build(recorder, &caps(), &PageConfig::default()) {
         Err(EngineError::SchedulerEscalation { reason }) => reason,
         other => panic!("expected an escalation, got {other:?}"),
     }
@@ -722,6 +743,22 @@ fn the_transform_scales_the_blur_into_device_space() {
 // The rounds a filter layer costs
 // -----------------------------------------------------------------------------
 
+/// The frame path's own entry point plans a blur rather than refusing it, and
+/// it is the only entry point there is.
+///
+/// While the renderer had no filter pipeline, `Schedule::build` refused every
+/// filter and a second `build_with_filters` planned them, so the frame path
+/// could not reach a round nothing could execute. The renderer runs them now,
+/// and one call plans them for every caller — this is the case that would fail
+/// if the refusing arm ever came back without the pipeline going with it.
+#[test]
+fn the_frame_paths_own_entry_point_plans_a_blur() {
+    let rounds = Schedule::build(&blurred_layer(8.0, 0.5), &caps(), &PageConfig::default())
+        .expect("the one entry point plans a blur");
+
+    assert!(rounds.iter().any(|round| round.filter_pass().is_some()));
+}
+
 /// The shape the whole feature is for: the layer's contents into one page, one
 /// round per filter pass alternating between the two, and the surface's own
 /// round compositing whatever the last pass wrote.
@@ -929,27 +966,8 @@ fn a_blurred_layer_beside_an_opacity_layer_is_served_by_cutting_the_surfaces_rou
 // What is refused
 // -----------------------------------------------------------------------------
 
-/// The frame path's own entry point still refuses every filter layer, because
-/// the renderer has no pipeline to run a filter pass through: a filter round
-/// draws nothing and composites nothing, so a caller that ignored one would
-/// clear the page and composite the hole.
-#[test]
-fn the_frame_paths_entry_point_still_refuses_a_filter_layer() {
-    let recorder = blurred_layer(8.0, 0.5);
-    let refusal = Schedule::build(&recorder, &caps(), &PageConfig::default());
-
-    let EngineError::SchedulerEscalation { reason } = refusal.expect_err("build refuses filters")
-    else {
-        panic!("expected an escalation");
-    };
-    assert!(
-        reason.contains("Gaussian blur") && reason.contains("build_with_filters"),
-        "the reason has to name both what was found and where it is served: {reason}"
-    );
-}
-
 /// Only the blur graduates. Every other filter a recording can carry is refused
-/// by name — including on the entry point that serves the blur.
+/// by name.
 #[test]
 fn every_filter_but_the_blur_is_still_refused_by_name() {
     let mut recorder = recorder();
@@ -1028,7 +1046,7 @@ fn a_blur_that_grows_its_layer_past_a_page_is_refused_rather_than_clipped() {
         recorder.layers[0].bbox
     );
     assert!(matches!(
-        Schedule::build_with_filters(&recorder, &caps(), &config),
+        Schedule::build(&recorder, &caps(), &config),
         Err(EngineError::IntermediateTextureTooLarge)
     ));
 }
@@ -1054,7 +1072,7 @@ fn no_sigma_the_recorder_accepts_panics_the_scheduler() {
         draw(&mut recorder, 64, 64, 32);
         recorder.pop_layer();
 
-        match Schedule::build_with_filters(&recorder, &caps(), &config) {
+        match Schedule::build(&recorder, &caps(), &config) {
             Ok(rounds) => assert!(!rounds.is_empty(), "σ {sigma}"),
             Err(EngineError::IntermediateTextureTooLarge) => {}
             Err(other) => panic!("σ {sigma} refused unexpectedly: {other:?}"),
@@ -1088,4 +1106,961 @@ fn a_blurred_layer_with_a_blend_mode_is_refused_on_the_blend() {
 
     let reason = escalation(&recorder);
     assert!(reason.contains("blend mode"), "{reason}");
+}
+
+// -----------------------------------------------------------------------------
+// On real hardware
+// -----------------------------------------------------------------------------
+//
+// Everything above is a decision over plain values. Below is the other half:
+// the ported WGSL, the pipeline derived from it, the filter-data texture, the
+// engine's one sampler and the instance packing, all exercised on a real
+// adapter — the first time any of them runs at all.
+//
+// The pass sequence is driven through `FilterResources`, which is exactly what
+// `EngineRenderer::record_frame` drives, over two pages of this file's own
+// rather than two the scheduler named. See this file's header for why that
+// stops short of `EngineRenderer::encode` and what it therefore does not claim.
+
+/// Extent of both pages every hardware case renders between.
+///
+/// A power of two so a page read-back's `bytes_per_row` needs no padding, and
+/// larger than [`FILTER_REGION`] on both axes, exactly as a pooled page is — the
+/// pool quantizes a request up to its own 256-texel keys and never sizes a page
+/// to the layer. The slack is not cosmetic: it is what makes a tap that reaches
+/// *past* the region read a texel the round's own clear already zeroed.
+const FILTER_PAGE: u32 = 512;
+
+/// The filter layer's own extent inside those pages, at the page origin exactly
+/// as the scheduler places one.
+///
+/// Deliberately not square, and its width is a multiple of 64 so the source
+/// upload's `bytes_per_row` is already `COPY_BYTES_PER_ROW_ALIGNMENT`-aligned.
+const FILTER_REGION: (u32, u32) = (448, 384);
+
+/// The opaque rectangle the blur is measured on, inset inside
+/// [`FILTER_REGION`] on every side.
+///
+/// The inset is what lets the comparison be exact rather than approximate, and
+/// it is sized rather than picked. The one place the two tiers can disagree is
+/// a tap that reaches past the region's *low* edge: the page extends past the
+/// high edges, so a tap there reads a cleared texel exactly as the reference
+/// reads transparent black, but a negative coordinate is clamped to the region's
+/// own edge texel instead. That is harmless as long as the edge texel is itself
+/// transparent — at every level of the pyramid.
+///
+/// A 160-texel transparent margin survives the deepest plan σ 32 produces with
+/// room to spare: each halving takes it to roughly half (160 → 79 → 39 → 19 →
+/// 9), the coarsest convolution's widest tap is `MAX_KERNEL_SIZE / 2` = 6, and
+/// each doubling back restores it faster than the reconstruction spreads ink
+/// into it. So the low edges stay transparent throughout and no border has to be
+/// excluded from the comparison.
+const FILTER_RECT: (u32, u32, u32, u32) = (160, 160, 128, 64);
+
+/// Bytes one page texel occupies at `INTERMEDIATE_FORMAT`.
+const PAGE_TEXEL_BYTES: u32 = 4;
+
+/// Serializes every case in this binary that creates a GPU device, for the
+/// reason `atlas_render.rs` and `encode_contract.rs` both document: each builds
+/// a `wgpu::Device` of its own, and a driver that serializes device teardown on
+/// a process-global mutex deadlocks when two tear down at once. Poison is
+/// ignored deliberately — one case's failure must not cascade into its
+/// siblings.
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn render_lock() -> std::sync::MutexGuard<'static, ()> {
+    RENDER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Blocks on `future` by polling it to completion.
+///
+/// wgpu's native adapter and device requests resolve without an executor
+/// driving them, so a bare poll loop is enough; this crate has no async runtime
+/// of its own and these cases are the only callers.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// Pops a validation error scope, pumping the device until the pop resolves.
+fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = std::pin::pin!(scope.pop());
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(error) => return error,
+            Poll::Pending => {
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
+    }
+}
+
+/// A device plus the capabilities probed off the adapter it came from.
+fn gpu() -> (wgpu::Device, wgpu::Queue, TierCaps) {
+    block_on(async {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks the
+        // GPU on a multi-adapter host instead of the run silently landing on
+        // whichever one enumerates first.
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+            .await
+            .expect("no compatible GPU adapter");
+        println!("frust-engine filter adapter: {:?}", adapter.get_info());
+        let caps = TierCaps::probe(&adapter);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("frust-engine filter test device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to create the device");
+        (device, queue, caps)
+    })
+}
+
+/// One case's device, filter pipeline, filter resources and page pair.
+struct FilterHarness {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    caps: TierCaps,
+    pipeline: wgpu::RenderPipeline,
+    filters: FilterResources,
+    /// The two pooled pages a filter sequence ping-pongs between, standing in
+    /// for the two the scheduler's parity groups would hand out.
+    pages: [Page; 2],
+    /// Kept alive so the pipeline's shader module outlives the passes.
+    _cache: PipelineCache,
+}
+
+/// One page: a texture with the exact usage
+/// [`frust_engine::gpu::targets::INTERMEDIATE_USAGE`] gives a pooled one.
+struct Page {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl FilterHarness {
+    fn new() -> Self {
+        let (device, queue, caps) = gpu();
+
+        let mut library = ShaderLibrary::new();
+        let shaders = EngineShaders::register(&mut library, &device);
+        let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
+        // The very description the warm-up list carries, so this is the same
+        // pipeline object a real renderer would have compiled before its first
+        // frame — the format argument is ignored by the filter variant.
+        let desc = EnginePipeline::Filter.desc(&shaders, wgpu::TextureFormat::Bgra8Unorm);
+        assert!(
+            warm_up_descs(&shaders, wgpu::TextureFormat::Bgra8Unorm).contains(&desc),
+            "the filter description must be one the warm-up list already covers"
+        );
+        let pipeline = cache.get_or_create(&device, &desc).clone();
+
+        let pages = [page(&device, "a"), page(&device, "b")];
+        let filters = FilterResources::new(&device);
+
+        Self {
+            device,
+            queue,
+            caps,
+            pipeline,
+            filters,
+            pages,
+            _cache: cache,
+        }
+    }
+
+    /// Uploads `image` into page 0 at its origin, where the scheduler puts a
+    /// filter layer's own contents.
+    fn upload_source(&self, image: &Image) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pages[0].texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &image.to_rgba8(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width as u32 * PAGE_TEXEL_BYTES),
+                rows_per_image: Some(image.height as u32),
+            },
+            wgpu::Extent3d {
+                width: image.width as u32,
+                height: image.height as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Runs every pass of `steps` in one encoder, answering which page holds
+    /// the result.
+    ///
+    /// The ping-pong the scheduler plans, with page indices standing in for its
+    /// parity groups: pass `i` reads the page pass `i - 1` wrote and writes the
+    /// other, and the first reads the contents page.
+    fn run(&mut self, blur: &GaussianBlur, steps: &[frust_engine::filters::FilterStep]) -> usize {
+        let block = GpuFilterData::from(GpuGaussianBlur::from(blur));
+        let passes = u32::try_from(steps.len()).expect("a blur costs a handful of passes");
+        self.filters
+            .prepare(&self.device, &self.queue, &self.pipeline, &[block], passes);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine filter test"),
+            });
+
+        let mut source = 0_usize;
+        for (index, step) in steps.iter().enumerate() {
+            let dest = 1 - source;
+            let instance = u32::try_from(index).expect("a blur costs a handful of passes");
+            self.filters.write_instance(
+                &self.queue,
+                instance,
+                &FilterInstanceData::new(
+                    step,
+                    0,
+                    (0, 0),
+                    (0, 0),
+                    SizeU16::from_wh(FILTER_PAGE as u16, FILTER_PAGE as u16),
+                    SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+                ),
+            );
+            self.filters.record_pass(
+                &self.device,
+                &mut encoder,
+                &FilterPassPlan {
+                    label: "frust-engine filter test pass",
+                    pipeline: &self.pipeline,
+                    dest: &self.pages[dest].view,
+                    source: &self.pages[source].view,
+                    instance,
+                },
+            );
+            source = dest;
+        }
+
+        self.queue.submit([encoder.finish()]);
+        source
+    }
+
+    /// One page's texels as an [`Image`] of [`FILTER_REGION`]'s extent.
+    fn read_region(&self, page: usize) -> Image {
+        let bytes_per_row = (FILTER_PAGE * PAGE_TEXEL_BYTES).next_multiple_of(256);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frust-engine filter readback"),
+            size: u64::from(bytes_per_row) * u64::from(FILTER_PAGE),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine filter readback copy"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pages[page].texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(FILTER_PAGE),
+                },
+            },
+            wgpu::Extent3d {
+                width: FILTER_PAGE,
+                height: FILTER_PAGE,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the readback poll must succeed");
+        rx.recv()
+            .expect("the readback channel must stay open")
+            .expect("the readback buffer must map");
+
+        let mapped = slice.get_mapped_range();
+        let stride = bytes_per_row as usize;
+        let mut image = Image::new(FILTER_REGION.0 as usize, FILTER_REGION.1 as usize);
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let at = y * stride + x * PAGE_TEXEL_BYTES as usize;
+                image.data[y * image.width + x] = [
+                    f32::from(mapped[at]),
+                    f32::from(mapped[at + 1]),
+                    f32::from(mapped[at + 2]),
+                    f32::from(mapped[at + 3]),
+                ];
+            }
+        }
+        drop(mapped);
+        buffer.unmap();
+        image
+    }
+}
+
+/// One page texture, with the pool's own format and usage plus `COPY_DST`.
+///
+/// The extra usage is the one place these pages differ from a pooled one, and
+/// it is the test harness rather than the filter: a real contents page is
+/// *rendered* into by a strip pass, and this file seeds it with an upload
+/// instead so the source is an exact set of texels rather than a rasterization
+/// the comparison would then have to model.
+fn page(device: &wgpu::Device, label: &str) -> Page {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: FILTER_PAGE,
+            height: FILTER_PAGE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: INTERMEDIATE_FORMAT,
+        usage: INTERMEDIATE_USAGE | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Page { texture, view }
+}
+
+/// A premultiplied RGBA image in 0..=255 floats — the space both the GPU pages
+/// and the CPU reference work in, so a comparison is a subtraction.
+#[derive(Clone)]
+struct Image {
+    width: usize,
+    height: usize,
+    data: Vec<[f32; 4]>,
+}
+
+impl Image {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![[0.0; 4]; width * height],
+        }
+    }
+
+    /// Transparent everywhere but `rect`, which is opaque `color`.
+    fn with_rect(width: usize, height: usize, rect: (u32, u32, u32, u32), color: [f32; 4]) -> Self {
+        let mut image = Self::new(width, height);
+        for y in rect.1 as usize..(rect.1 + rect.3) as usize {
+            for x in rect.0 as usize..(rect.0 + rect.2) as usize {
+                image.data[y * width + x] = color;
+            }
+        }
+        image
+    }
+
+    /// The texel at `(x, y)`, or transparent black outside — `EdgeMode::None`,
+    /// which is the mode every filter this engine serves is prepared with.
+    fn sample(&self, x: i64, y: i64) -> [f32; 4] {
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return [0.0; 4];
+        }
+        self.data[y as usize * self.width + x as usize]
+    }
+
+    /// Tightly packed RGBA8 bytes, for a texture upload.
+    fn to_rgba8(&self) -> Vec<u8> {
+        self.data
+            .iter()
+            .flat_map(|texel| texel.map(|c| c.clamp(0.0, 255.0).round() as u8))
+            .collect()
+    }
+
+    /// Rounds every channel to the byte a pass would have stored.
+    ///
+    /// Applied once per *pass*, which is where this reference follows the GPU
+    /// rather than the CPU rasterizer. Both store their intermediates in eight
+    /// bits per channel — an `Rgba8Unorm` page here, a `PremulRgba8` pixmap
+    /// there — but the rasterizer runs each rescaling step as two separable
+    /// passes and rounds between them, while the shader collapses the two axes
+    /// into one pass and rounds once. The kernel is identical either way (four
+    /// bilinear samples reproduce `[1,3,3,1]/8` on both axes exactly); only the
+    /// rounding schedule differs, and the schedule modelled here is the one the
+    /// texels being compared actually went through.
+    fn quantize(mut self) -> Self {
+        for texel in &mut self.data {
+            for channel in texel {
+                *channel = channel.clamp(0.0, 255.0).round();
+            }
+        }
+        self
+    }
+
+    /// The `(x, y)` of the largest per-channel difference from `other` inside
+    /// the window `margin` texels in from every edge, and its size.
+    fn worst_diff(&self, other: &Self, margin: usize) -> (f32, usize, usize) {
+        let mut worst = (0.0_f32, 0_usize, 0_usize);
+        for y in margin..self.height.saturating_sub(margin) {
+            for x in margin..self.width.saturating_sub(margin) {
+                let mine = self.data[y * self.width + x];
+                let theirs = other.data[y * other.width + x];
+                for channel in 0..4 {
+                    let diff = (mine[channel] - theirs[channel]).abs();
+                    if diff > worst.0 {
+                        worst = (diff, x, y);
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    /// The mean per-channel difference from `other` over the same window.
+    fn mean_diff(&self, other: &Self, margin: usize) -> f32 {
+        let mut total = 0.0_f64;
+        let mut count = 0_u64;
+        for y in margin..self.height.saturating_sub(margin) {
+            for x in margin..self.width.saturating_sub(margin) {
+                let mine = self.data[y * self.width + x];
+                let theirs = other.data[y * other.width + x];
+                for channel in 0..4 {
+                    total += f64::from((mine[channel] - theirs[channel]).abs());
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return 0.0;
+        }
+        (total / count as f64) as f32
+    }
+}
+
+/// The reference blur: `vello_common`'s own decimation plan and discrete
+/// kernel, applied exactly the way the CPU rasterizer applies them.
+///
+/// Not a second implementation of the *kernel* — `blur.kernel` and
+/// `blur.n_decimations` come straight out of
+/// `vello_common::filter::gaussian_blur`, which is the whole point of the
+/// comparison. What is reproduced here is the pyramid the rasterizer walks:
+/// `n` decimations by the separable `[1,3,3,1]/8` binomial filter, one
+/// horizontal and one vertical convolution at the coarsest level, then `n`
+/// phase-aligned doublings back, with transparent black past every edge and a
+/// round to bytes after each pass.
+fn cpu_blur(source: &Image, blur: &GaussianBlur) -> Image {
+    let mut image = source.clone();
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    for _ in 0..blur.n_decimations {
+        stack.push((image.width, image.height));
+        image = downscale(&image);
+    }
+
+    let kernel = &blur.kernel[..usize::from(blur.kernel_size)];
+    image = convolve(&image, kernel, Axis::X);
+    image = convolve(&image, kernel, Axis::Y);
+
+    while let Some(target) = stack.pop() {
+        image = upscale(&image, target);
+    }
+
+    image
+}
+
+/// Which axis a separable pass runs along.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
+}
+
+/// One separable convolution pass along `axis`.
+fn convolve(source: &Image, kernel: &[f32], axis: Axis) -> Image {
+    let radius = (kernel.len() / 2) as i64;
+    let mut out = Image::new(source.width, source.height);
+
+    for y in 0..source.height {
+        for x in 0..source.width {
+            let mut rgba = [0.0_f32; 4];
+            for (j, weight) in kernel.iter().enumerate() {
+                let offset = j as i64 - radius;
+                let texel = match axis {
+                    Axis::X => source.sample(x as i64 + offset, y as i64),
+                    Axis::Y => source.sample(x as i64, y as i64 + offset),
+                };
+                for channel in 0..4 {
+                    rgba[channel] += texel[channel] * weight;
+                }
+            }
+            out.data[y * out.width + x] = rgba;
+        }
+    }
+
+    out.quantize()
+}
+
+/// One 2x decimation: the `[1,3,3,1]/8` binomial filter along each axis, over
+/// the taps `[2k - 1, 2k, 2k + 1, 2k + 2]`.
+///
+/// Both axes inside one [`Image::quantize`], because the shader's four bilinear
+/// samples do the same — see that method for why the reference follows the
+/// shader's rounding schedule rather than the rasterizer's.
+fn downscale(source: &Image) -> Image {
+    let dst_width = source.width.div_ceil(2);
+    let dst_height = source.height.div_ceil(2);
+
+    let mut horizontal = Image::new(dst_width, source.height);
+    for y in 0..source.height {
+        for x in 0..dst_width {
+            let base = 2 * x as i64;
+            horizontal.data[y * dst_width + x] = binomial(
+                source.sample(base - 1, y as i64),
+                source.sample(base, y as i64),
+                source.sample(base + 1, y as i64),
+                source.sample(base + 2, y as i64),
+            );
+        }
+    }
+
+    let mut out = Image::new(dst_width, dst_height);
+    for x in 0..dst_width {
+        for y in 0..dst_height {
+            let base = 2 * y as i64;
+            out.data[y * dst_width + x] = binomial(
+                horizontal.sample(x as i64, base - 1),
+                horizontal.sample(x as i64, base),
+                horizontal.sample(x as i64, base + 1),
+                horizontal.sample(x as i64, base + 2),
+            );
+        }
+    }
+    out.quantize()
+}
+
+/// One 2x reconstruction, cropped back to the extent the matching decimation
+/// consumed: the phase-aligned `[0.75, 0.25]` interpolation the decimation's
+/// half-texel offset calls for.
+///
+/// Both axes inside one [`Image::quantize`], for the same reason
+/// [`downscale`] is: the shader reconstructs with a single bilinear sample.
+fn upscale(source: &Image, target: (usize, usize)) -> Image {
+    let mut horizontal = Image::new(source.width * 2, source.height);
+    for y in 0..source.height {
+        for x in 0..source.width {
+            let centre = source.sample(x as i64, y as i64);
+            let low = interpolate(source.sample(x as i64 - 1, y as i64), centre);
+            let high = interpolate(source.sample(x as i64 + 1, y as i64), centre);
+            horizontal.data[y * horizontal.width + 2 * x] = low;
+            horizontal.data[y * horizontal.width + 2 * x + 1] = high;
+        }
+    }
+
+    let mut doubled = Image::new(horizontal.width, source.height * 2);
+    for x in 0..doubled.width {
+        for y in 0..source.height {
+            let centre = horizontal.sample(x as i64, y as i64);
+            let low = interpolate(horizontal.sample(x as i64, y as i64 - 1), centre);
+            let high = interpolate(horizontal.sample(x as i64, y as i64 + 1), centre);
+            doubled.data[2 * y * doubled.width + x] = low;
+            doubled.data[(2 * y + 1) * doubled.width + x] = high;
+        }
+    }
+    let doubled = doubled.quantize();
+
+    let mut out = Image::new(target.0, target.1);
+    for y in 0..target.1 {
+        for x in 0..target.0 {
+            out.data[y * target.0 + x] = doubled.sample(x as i64, y as i64);
+        }
+    }
+    out
+}
+
+/// `(a + 3b + 3c + d) / 8`.
+fn binomial(a: [f32; 4], b: [f32; 4], c: [f32; 4], d: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0_f32; 4];
+    for channel in 0..4 {
+        out[channel] = (a[channel] + 3.0 * b[channel] + 3.0 * c[channel] + d[channel]) / 8.0;
+    }
+    out
+}
+
+/// `0.25 * neighbour + 0.75 * centre`.
+fn interpolate(neighbour: [f32; 4], centre: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0_f32; 4];
+    for channel in 0..4 {
+        out[channel] = 0.25 * neighbour[channel] + 0.75 * centre[channel];
+    }
+    out
+}
+
+/// The claim the whole card exists for: at σ 2, 8 and 32 the ported WGSL
+/// produces the same blur on a real GPU that `vello_common`'s own kernel and
+/// decimation plan produce on the CPU.
+///
+/// Three σ so all three shapes of the plan are covered — no decimation at all,
+/// two levels, and the four the plan tops out at — which is also every pass kind
+/// the shader implements bar the closing copy a blur never needs.
+///
+/// The tolerance is a *quantization* budget, not a correctness one. Both tiers
+/// round to eight bits per channel after every pass of the pyramid and a deep
+/// plan is ten passes, so the two walk apart by an LSB at a time; what would
+/// show up as a real disagreement — a kernel read at the wrong offset, an axis
+/// swapped, a tap merged wrong, a pass reading the page it wrote — moves texels
+/// by tens or empties the region entirely, and neither is inside any budget.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_blur_on_the_gpu_matches_the_shared_kernel_on_the_cpu() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT,
+        // Premultiplied opaque red: every channel is exercised, and an opaque
+        // source is what makes an alpha that is not blurred with the colour
+        // show up as a difference rather than as a coincidence.
+        [255.0, 0.0, 0.0, 255.0],
+    );
+
+    for sigma in SIGMAS {
+        let blur = GaussianBlur::new(sigma, EdgeMode::default());
+        let steps = blur_passes(
+            &blur,
+            SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+        );
+
+        harness.upload_source(&source);
+        let result = harness.run(&blur, &steps);
+        let gpu = harness.read_region(result);
+        let cpu = cpu_blur(&source, &blur);
+
+        // The whole region, with no border excluded — see [`FILTER_RECT`] for
+        // why the inset makes that sound.
+        let (worst, x, y) = gpu.worst_diff(&cpu, 0);
+        let mean = gpu.mean_diff(&cpu, 0);
+        println!(
+            "σ {sigma}: {} passes, worst per-channel diff {worst} at ({x}, {y}), mean {mean}",
+            steps.len()
+        );
+
+        assert!(
+            worst <= GPU_CPU_TOLERANCE,
+            "σ {sigma}: the GPU blur differs from the shared kernel's own by {worst} at ({x}, {y}), \
+             past the {GPU_CPU_TOLERANCE} eight-bit-rounding budget"
+        );
+        assert!(
+            mean <= GPU_CPU_MEAN_TOLERANCE,
+            "σ {sigma}: mean per-channel difference {mean} past {GPU_CPU_MEAN_TOLERANCE}"
+        );
+
+        // A blur that produced nothing at all would satisfy any tolerance
+        // against a reference that also produced nothing, so three properties
+        // of the output are asserted directly, none of them derived from the
+        // reference.
+        //
+        // It paints outside the rectangle that produced it…
+        let outside = gpu.sample(
+            i64::from(FILTER_RECT.0) - 2,
+            i64::from(FILTER_RECT.1 + FILTER_RECT.3 / 2),
+        );
+        assert!(
+            outside[3] > 0.0,
+            "σ {sigma}: nothing was painted outside the source rectangle — the pass produced no \
+             texels at all: {outside:?}"
+        );
+
+        // …its middle is still the brightest thing in the region, and still
+        // substantially inked. Not "nearly opaque": at σ 32 the 3σ spread is
+        // wider than the rectangle is tall, so a correct blur really does thin
+        // its own middle out — which is the point of running the deepest plan.
+        let centre = gpu.sample(
+            i64::from(FILTER_RECT.0 + FILTER_RECT.2 / 2),
+            i64::from(FILTER_RECT.1 + FILTER_RECT.3 / 2),
+        );
+        assert!(
+            centre[3] > 64.0,
+            "σ {sigma}: the rectangle's own middle should stay the region's brightest texel by a \
+             wide margin: {centre:?}"
+        );
+        assert!(
+            gpu.data.iter().all(|texel| texel[3] <= centre[3]),
+            "σ {sigma}: some texel outranks the rectangle's own middle, so the blur is not \
+             centred where its source was"
+        );
+
+        // …and it blurs every channel alike. The source is premultiplied opaque
+        // red, so red equals alpha at every texel a correct convolution
+        // produces, and green and blue stay zero — a kernel applied per channel
+        // with a mismatched weight, or an alpha left unfiltered, shows up here
+        // whatever the reference says.
+        assert!(
+            gpu.data
+                .iter()
+                .all(|texel| texel[0] == texel[3] && texel[1] == 0.0 && texel[2] == 0.0),
+            "σ {sigma}: premultiplied opaque red must stay red-equals-alpha through every pass"
+        );
+
+        // Coverage is conserved: a normalized kernel neither creates nor
+        // destroys alpha, and the region is wide enough to hold the whole 3σ
+        // spread, so the blurred total must match the rectangle's own to within
+        // the pyramid's eight-bit rounding.
+        let painted: f64 = gpu.data.iter().map(|texel| f64::from(texel[3])).sum();
+        let source_total: f64 = source.data.iter().map(|texel| f64::from(texel[3])).sum();
+        let drift = (painted - source_total).abs() / source_total;
+        println!("σ {sigma}: coverage drift {drift}");
+        assert!(
+            drift <= COVERAGE_DRIFT_TOLERANCE,
+            "σ {sigma}: the blur moved {drift} of the layer's total coverage, past the \
+             {COVERAGE_DRIFT_TOLERANCE} eight-bit-rounding budget — a normalized kernel conserves it"
+        );
+    }
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the filter passes raised {error:?}");
+}
+
+/// The largest per-channel difference the eight-bit rounding of a ten-pass
+/// pyramid is allowed to accumulate.
+///
+/// Measured on the pinned T400 runner (NVIDIA 610.43.03, Vulkan), not guessed:
+/// worst 1 at σ 2, 2 at σ 8 and 2 at σ 32. Two LSBs of headroom over the
+/// deepest plan's measured worst, which is room for another driver's own
+/// bilinear-weight precision without room for a wrong kernel.
+const GPU_CPU_TOLERANCE: f32 = 4.0;
+
+/// The mean per-channel difference over the same region.
+///
+/// Measured on the same runner: 0.00006 at σ 2, 0.033 at σ 8, 0.098 at σ 32 —
+/// three orders of magnitude under the worst case, because a rounding
+/// disagreement is a rare texel rather than a bias.
+const GPU_CPU_MEAN_TOLERANCE: f32 = 0.3;
+
+/// The fraction of the layer's total coverage a blur is allowed to gain or
+/// lose.
+///
+/// A normalized kernel conserves it exactly; eight-bit rounding does not, and
+/// each level of the pyramid rounds again. Measured on the same runner:
+/// 0.00001 at σ 2, 0.0035 at σ 8, 0.0137 at σ 32 — the deepest plan loses the
+/// most because it rounds ten times.
+const COVERAGE_DRIFT_TOLERANCE: f64 = 0.02;
+
+/// A σ of zero is an identity kernel, so the sequence has to hand the layer
+/// back unchanged rather than blank, doubled or shifted.
+///
+/// The negative control for the case above: it is the one input whose expected
+/// output is known without a reference implementation at all, so a shader that
+/// sampled at a constant offset, or a pass that read the page it was writing,
+/// fails here with nothing to hide behind.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_zero_sigma_blur_returns_the_layer_unchanged_on_the_gpu() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT,
+        [255.0, 0.0, 0.0, 255.0],
+    );
+    let blur = GaussianBlur::new(0.0, EdgeMode::default());
+    let steps = blur_passes(
+        &blur,
+        SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+    );
+    assert_eq!(steps.len(), 2, "an undecimated blur is one pass per axis");
+
+    harness.upload_source(&source);
+    let result = harness.run(&blur, &steps);
+    let gpu = harness.read_region(result);
+
+    let (worst, x, y) = gpu.worst_diff(&source, 0);
+    println!("σ 0: worst per-channel diff {worst} at ({x}, {y})");
+    assert!(
+        worst <= 1.0,
+        "an identity kernel must return the layer it was handed, but ({x}, {y}) moved by {worst}"
+    );
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the filter passes raised {error:?}");
+}
+
+/// Every pass of the sequence writes real texels, not just the last one.
+///
+/// A sequence whose middle passes silently did nothing would still end with a
+/// plausible image at σ 2 (two passes, both of them the ones that matter), so
+/// the decimated plan is the one to check: after the two halvings of σ 8 the
+/// region really is a quarter of the texels on each axis, and the padding
+/// border around it really is transparent — which is the invariant the kernels'
+/// bounds-check-free sampling rests on.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_decimated_pass_writes_its_own_extent_and_clears_the_border_around_it() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT,
+        [255.0, 0.0, 0.0, 255.0],
+    );
+    let blur = GaussianBlur::new(8.0, EdgeMode::default());
+    let all = blur_passes(
+        &blur,
+        SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+    );
+    // Just the two decimations, so the page that is read back is the one the
+    // second halving wrote rather than the one the way back up restored.
+    let downscales: Vec<frust_engine::filters::FilterStep> = all
+        .iter()
+        .take_while(|step| step.kind == FilterPassKind::Downscale)
+        .copied()
+        .collect();
+    assert_eq!(downscales.len(), 2, "σ 8 halves twice");
+
+    harness.upload_source(&source);
+    let result = harness.run(&blur, &downscales);
+    let page = harness.read_region(result);
+
+    let decimated = downscales[1].dest;
+    assert_eq!(
+        (decimated.width(), decimated.height()),
+        (112, 96),
+        "448 x 384 halved twice"
+    );
+
+    // Ink inside the decimated region…
+    let inked = page.sample(
+        i64::from(decimated.width()) / 2,
+        i64::from(decimated.height()) / 2,
+    );
+    assert!(
+        inked[3] > 200.0,
+        "the decimated region's own middle should still be very nearly opaque: {inked:?}"
+    );
+
+    // …and nothing at all past the padding border the quad overdraws. A pass
+    // that wrote its *source* extent instead of its destination one would leave
+    // the previous level's ink out here.
+    let padding = i64::from(FILTER_ATLAS_PADDING);
+    for offset in 0..8 {
+        let beyond = i64::from(decimated.width()) + padding + offset;
+        let texel = page.sample(beyond, i64::from(decimated.height()) / 2);
+        assert_eq!(
+            texel, [0.0; 4],
+            "texel ({beyond}, mid) is past the region and its padding, so it must be transparent"
+        );
+    }
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the filter passes raised {error:?}");
+}
+
+/// The oversized-layer case on the real device path: a blur that grows its
+/// layer past what this adapter's own pool will allocate is refused as a value,
+/// and nothing is allocated and no device error is raised on the way.
+///
+/// The host cases above make the same claim against `TierCaps::fake`; this one
+/// makes it against the adapter's real `max_texture_dimension_2d` and a real
+/// `wgpu::Device`, which is where "refused" and "the driver refused it for us"
+/// would finally read differently.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver() {
+    let _guard = render_lock();
+    let harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let config = PageConfig::default();
+    let ceiling = frust_engine::schedule::page_ceiling(&config, &harness.caps);
+
+    // A σ whose 3σ spread on every side is past the adapter's own page ceiling,
+    // over contents small enough that only the blur can have done it.
+    let sigma = (ceiling as f32) / 2.0;
+    let mut recorder = recorder();
+    push_filter_layer(
+        &mut recorder,
+        layer(0.5),
+        LayerFilter::Blur { sigma },
+        Affine::IDENTITY,
+    )
+    .expect("a σ under the ceiling records");
+    draw(&mut recorder, 64, 64, 32);
+    recorder.pop_layer();
+
+    assert!(
+        u32::from(recorder.layers[0].bbox.width()) > ceiling,
+        "the blur has to be what pushes the layer past this adapter's ceiling: {:?}",
+        recorder.layers[0].bbox
+    );
+    assert!(
+        matches!(
+            Schedule::build(&recorder, &harness.caps, &config),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ),
+        "a filter layer past the page ceiling is refused rather than clipped onto it"
+    );
+
+    // And the pool the frame path would have asked answers the same way,
+    // without touching the device.
+    let mut targets = IntermediateTargets::new(&harness.caps);
+    let max = targets.max_texture_size();
+    let before = targets.stats().created;
+    let refused = targets.acquire(&harness.device, max + 1, 64, "oversized filter page");
+    assert!(refused.is_too_large());
+    assert_eq!(
+        targets.stats().created,
+        before,
+        "a refused request must allocate nothing on a real device either"
+    );
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(
+        error.is_none(),
+        "refusing an oversized filter layer raised {error:?}"
+    );
 }

@@ -20,7 +20,13 @@
 //! because [`HELPERS`] declares no `@group`/`@binding` global: a helper that
 //! reads a texture takes it as a parameter. An entry-point module's derived
 //! bind-group layout is therefore exactly what its own bindings say, with or
-//! without the prelude.
+//! without the prelude. [`FILTER_KERNELS`] is a second prelude on the same
+//! terms, prepended to [`FILTER`] alone.
+//!
+//! Every module the engine compiles is assembled here and nowhere else, so
+//! [`MODULES`] is the whole list — the one
+//! [`crate::gpu::pipelines::EngineShaders::register`] walks, and the one the
+//! validation tests below walk.
 
 /// Binding-free helper functions shared by every entry-point module:
 /// packing, quad geometry, extend modes, encoded-paint accessors, gradient
@@ -51,6 +57,30 @@ pub const COPY: &str = concat!(
     include_str!("../../shaders/copy.wgsl")
 );
 
+/// The Gaussian-blur kernels [`FILTER`]'s fragment stage dispatches into: the
+/// two rescaling steps a decimated blur is built from, and the separable
+/// convolution run between them.
+///
+/// A second prelude rather than a module of its own: like [`HELPERS`] it
+/// declares no entry point and no `@group`/`@binding` global — a kernel that
+/// reads a texture takes the texture and the sampler as parameters — so
+/// prepending it cannot disturb [`FILTER`]'s derived bind-group layout.
+pub const FILTER_KERNELS: &str = include_str!("../../shaders/filters_blur.wgsl");
+
+/// One filter pass over one destination page: `vs_main` + `fs_main`, one
+/// pipeline (see [`crate::gpu::pipelines::EnginePipeline::Filter`]).
+///
+/// The only module assembled from *two* preludes: the binding-free helpers
+/// every module gets, then [`FILTER_KERNELS`], then the entry-point module
+/// that declares the bindings and dispatches on the pass kind. The layouts and
+/// constants it reads are [`crate::filters::blur`]'s; that module's own tests
+/// pin the two sides against each other.
+pub const FILTER: &str = concat!(
+    include_str!("../../shaders/helpers.wgsl"),
+    include_str!("../../shaders/filters_blur.wgsl"),
+    include_str!("../../shaders/filter.wgsl")
+);
+
 /// The name [`STRIP`] is registered under in the shader library.
 pub const STRIP_NAME: &str = "frust-engine strip";
 
@@ -60,11 +90,18 @@ pub const CLEAR_NAME: &str = "frust-engine clear";
 /// The name [`COPY`] is registered under in the shader library.
 pub const COPY_NAME: &str = "frust-engine copy";
 
+/// The name [`FILTER`] is registered under in the shader library.
+pub const FILTER_NAME: &str = "frust-engine filter";
+
 /// Every module the engine compiles, as `(name, source)` pairs — the list
 /// [`crate::gpu::pipelines::EngineShaders::register`] walks, and the list the
 /// validation tests walk.
-pub const MODULES: [(&str, &str); 3] =
-    [(STRIP_NAME, STRIP), (CLEAR_NAME, CLEAR), (COPY_NAME, COPY)];
+pub const MODULES: [(&str, &str); 4] = [
+    (STRIP_NAME, STRIP),
+    (CLEAR_NAME, CLEAR),
+    (COPY_NAME, COPY),
+    (FILTER_NAME, FILTER),
+];
 
 #[cfg(test)]
 mod tests {
@@ -139,14 +176,39 @@ mod tests {
     fn the_helper_prelude_declares_no_bindings() {
         // The whole reason every entry-point module can be prefixed with it
         // without disturbing its derived bind-group layout. Comment lines are
-        // skipped: this file's own header describes the rule.
-        let declaration = HELPERS
-            .lines()
-            .find(|line| !line.trim_start().starts_with("//") && line.contains("@group"));
-        assert!(
-            declaration.is_none(),
-            "a helper that declared a binding would change every module's bind-group layout: \
-             {declaration:?}"
+        // skipped: this file's own header describes the rule. The blur
+        // kernels are held to the same rule for the same reason — they are a
+        // prelude too, just one only the filter module gets.
+        for (name, prelude) in [("helpers", HELPERS), ("filter kernels", FILTER_KERNELS)] {
+            let declaration = prelude
+                .lines()
+                .find(|line| !line.trim_start().starts_with("//") && line.contains("@group"));
+            assert!(
+                declaration.is_none(),
+                "a prelude that declared a binding would change the bind-group layout of every \
+                 module it is prepended to ({name}): {declaration:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_filter_module_is_both_preludes_followed_by_its_own_source() {
+        // `every_module_is_the_helper_prelude_followed_by_its_own_source`
+        // above only pins the first prelude; the filter program is the one
+        // module assembled from two, and the kernels have to sit between the
+        // helpers they call and the entry point that calls them.
+        assert!(FILTER.starts_with(HELPERS));
+        assert!(FILTER[HELPERS.len()..].starts_with(FILTER_KERNELS));
+        assert!(FILTER.len() > HELPERS.len() + FILTER_KERNELS.len());
+    }
+
+    #[test]
+    fn the_filter_instance_matches_its_rust_layout() {
+        let module = validate(FILTER_NAME, FILTER);
+        assert_eq!(
+            struct_span(&module, "FilterInstanceData") as usize,
+            size_of::<crate::filters::blur::FilterInstanceData>(),
+            "the shader's `FilterInstanceData` must stay byte-identical to the Rust one"
         );
     }
 

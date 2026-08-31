@@ -1,8 +1,9 @@
-//! The eight render pipelines the engine draws with, as plain values.
+//! The nine render pipelines the engine draws with, as plain values.
 //!
 //! Six of them rasterize sparse strips out of the one `strip.wgsl` program,
-//! differing only in their render state; the other two clear and copy
-//! intermediate textures. Each is described by a
+//! differing only in their render state; two more clear and copy intermediate
+//! textures, and the last runs one pass of a layer
+//! [filter](crate::filters). Each is described by a
 //! [`frust_gpu::RenderPipelineDesc`] — a value holding no GPU handle — so the
 //! whole set can be listed at start-up and handed to
 //! [`frust_gpu::PipelineCache::warm_up`] before the first frame asks for one.
@@ -61,6 +62,26 @@
 //! is what restores the paint order the display list recorded; the other is
 //! the same trade the two draw passes already make when they collapse into one.
 //!
+//! ## The filter pass
+//!
+//! [`EnginePipeline::Filter`] is a genuinely new pipeline rather than a second
+//! name for an existing one: a different program (`filter.wgsl`), a different
+//! instance layout ([`filter_vertex_layout`], eight words per instance against
+//! the strip's six), and a different bind-group shape. It writes
+//! [`INTERMEDIATE_FORMAT`] unblended and with no depth, because a filter pass
+//! *replaces* the region it writes rather than compositing onto it — the
+//! scheduler clears the destination page ahead of every filter round, and the
+//! quad overdraws a transparent padding border around the region for the same
+//! reason (see [`crate::schedule`]'s *Filter rounds*).
+//!
+//! It is also where the engine's **first sampler** appears. Every other
+//! pipeline reads its textures with `textureLoad` at integer coordinates; the
+//! blur kernels sample bilinearly at fractional offsets, which is what lets a
+//! decimation cost four samples instead of sixteen and a convolution tap one
+//! instead of two. The sampler itself is [`crate::gpu::targets::filter_sampler`]
+//! — the layout here only has to know that group 1 carries a texture *and* a
+//! sampler.
+//!
 //! ## Bind groups
 //!
 //! [`frust_gpu::RenderPipelineDesc`] has no explicit-layout axis: every
@@ -69,9 +90,11 @@
 //! reference renderer's explicit layouts group for group — strip programs bind
 //! groups 0..3 (alphas + config + layer input; atlas array + external texture;
 //! encoded paints; gradient LUT), which is the WebGL2 ceiling of four exactly,
-//! with no headroom. [`EnginePipeline::layout_desc`] restates each pipeline's
-//! shape as the value `frust_gpu::lint::lint_pipeline_layout` checks, so that
-//! ceiling is a test rather than a comment.
+//! with no headroom. The filter program binds two (the filter-data texture;
+//! the source page plus its sampler), well inside it.
+//! [`EnginePipeline::layout_desc`] restates each pipeline's shape as the value
+//! `frust_gpu::lint::lint_pipeline_layout` checks, so that ceiling is a test
+//! rather than a comment.
 
 use frust_gpu::lint::PipelineLayoutDesc;
 use frust_gpu::{PipelineCache, RenderPipelineDesc, ShaderId, ShaderLibrary, VertexLayout};
@@ -133,6 +156,10 @@ const STRIP_BIND_GROUPS: usize = 4;
 /// Bind groups the copy program declares: its source texture.
 const COPY_BIND_GROUPS: usize = 1;
 
+/// Bind groups the filter program declares: the filter-data texture, then the
+/// source page together with the sampler its kernels read it through.
+const FILTER_BIND_GROUPS: usize = 2;
+
 /// The engine's compiled shader modules, by id.
 ///
 /// Registered once at start-up into the [`ShaderLibrary`] a
@@ -146,6 +173,8 @@ pub struct EngineShaders {
     pub clear: ShaderId,
     /// Rectangular region copies.
     pub copy: ShaderId,
+    /// One pass of a layer filter's sequence.
+    pub filter: ShaderId,
 }
 
 impl EngineShaders {
@@ -160,11 +189,12 @@ impl EngineShaders {
             strip: library.insert_wgsl(device, shader_src::STRIP_NAME, shader_src::STRIP),
             clear: library.insert_wgsl(device, shader_src::CLEAR_NAME, shader_src::CLEAR),
             copy: library.insert_wgsl(device, shader_src::COPY_NAME, shader_src::COPY),
+            filter: library.insert_wgsl(device, shader_src::FILTER_NAME, shader_src::FILTER),
         }
     }
 }
 
-/// Which of the three registered modules a pipeline draws with.
+/// Which of the four registered modules a pipeline draws with.
 ///
 /// The module identity a [`RenderPipelineDesc`] carries is a [`ShaderId`],
 /// which only a [`ShaderLibrary`] can mint. This names the same distinction
@@ -177,6 +207,8 @@ pub enum EngineShaderModule {
     Clear,
     /// `copy.wgsl` — rectangular region copies.
     Copy,
+    /// `filter.wgsl` — one pass of a layer filter's sequence.
+    Filter,
 }
 
 /// One of the engine's render pipelines.
@@ -202,11 +234,14 @@ pub enum EnginePipeline {
     Clear,
     /// Copies rectangular regions between intermediate targets.
     Copy,
+    /// Runs one pass of a layer filter's sequence into an intermediate target,
+    /// reading the other page of the pair through a bilinear sampler.
+    Filter,
 }
 
 impl EnginePipeline {
     /// Every pipeline the engine warms up, in warm-up order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::StripIntermediate,
         Self::StripAlpha,
         Self::StripDepthAlpha,
@@ -215,6 +250,7 @@ impl EnginePipeline {
         Self::StripDepthDestOut,
         Self::Clear,
         Self::Copy,
+        Self::Filter,
     ];
 
     /// A human-readable name for logs and captures.
@@ -229,6 +265,7 @@ impl EnginePipeline {
             Self::StripDepthDestOut => "strip-depth-dest-out",
             Self::Clear => "clear",
             Self::Copy => "copy",
+            Self::Filter => "filter",
         }
     }
 
@@ -261,6 +298,7 @@ impl EnginePipeline {
             | Self::StripDepthDestOut => STRIP_BIND_GROUPS,
             Self::Clear => 0,
             Self::Copy => COPY_BIND_GROUPS,
+            Self::Filter => FILTER_BIND_GROUPS,
         }
     }
 
@@ -277,7 +315,9 @@ impl EnginePipeline {
             | Self::StripOpaque
             | Self::StripDestOut
             | Self::StripDepthDestOut => target_format,
-            Self::StripIntermediate | Self::Clear | Self::Copy => INTERMEDIATE_FORMAT,
+            Self::StripIntermediate | Self::Clear | Self::Copy | Self::Filter => {
+                INTERMEDIATE_FORMAT
+            }
         }
     }
 
@@ -289,7 +329,11 @@ impl EnginePipeline {
                 Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
             }
             Self::StripDestOut | Self::StripDepthDestOut => Some(DEST_OUT_BLEND),
-            Self::StripOpaque | Self::Clear | Self::Copy => None,
+            // A filter pass replaces the region it writes rather than
+            // compositing onto it: the round cleared the page first, and the
+            // quad's padding border writes transparent black on purpose. A
+            // blend would turn that deliberate erase into a no-op.
+            Self::StripOpaque | Self::Clear | Self::Copy | Self::Filter => None,
         }
     }
 
@@ -303,7 +347,8 @@ impl EnginePipeline {
             | Self::StripAlpha
             | Self::StripDestOut
             | Self::Clear
-            | Self::Copy => None,
+            | Self::Copy
+            | Self::Filter => None,
         }
     }
 
@@ -319,6 +364,7 @@ impl EnginePipeline {
             | Self::StripDepthDestOut => vec![GpuStrip::vertex_layout()],
             Self::Clear => vec![clear_vertex_layout()],
             Self::Copy => vec![copy_vertex_layout()],
+            Self::Filter => vec![filter_vertex_layout()],
         }
     }
 
@@ -334,6 +380,7 @@ impl EnginePipeline {
             | Self::StripDepthDestOut => EngineShaderModule::Strip,
             Self::Clear => EngineShaderModule::Clear,
             Self::Copy => EngineShaderModule::Copy,
+            Self::Filter => EngineShaderModule::Filter,
         }
     }
 
@@ -344,6 +391,7 @@ impl EnginePipeline {
             EngineShaderModule::Strip => shaders.strip,
             EngineShaderModule::Clear => shaders.clear,
             EngineShaderModule::Copy => shaders.copy,
+            EngineShaderModule::Filter => shaders.filter,
         }
     }
 
@@ -445,6 +493,33 @@ pub fn copy_vertex_layout() -> VertexLayout {
     }
 }
 
+/// The filter program's instance layout: two `u16`-pair extents each for the
+/// source region, the destination region and the destination page, plus the
+/// filter's own texel offset, the layer's unscaled extent and the pass kind —
+/// eight `u32`s, 32 bytes per instance.
+///
+/// Byte-identical to [`crate::filters::blur::FilterInstanceData`], which is
+/// what the fragment stage unpacks; `shader_src`'s own naga test pins the two
+/// against each other.
+#[must_use]
+pub fn filter_vertex_layout() -> VertexLayout {
+    VertexLayout {
+        array_stride: 32,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: wgpu::vertex_attr_array![
+            0 => Uint32,
+            1 => Uint32,
+            2 => Uint32,
+            3 => Uint32,
+            4 => Uint32,
+            5 => Uint32,
+            6 => Uint32,
+            7 => Uint32,
+        ]
+        .to_vec(),
+    }
+}
+
 /// The strip pipeline a pass whose colour attachment is one atlas array layer
 /// draws through.
 ///
@@ -522,7 +597,7 @@ mod tests {
 
     #[test]
     fn the_warm_up_list_covers_every_pipeline_exactly_once() {
-        assert_eq!(EnginePipeline::ALL.len(), 8);
+        assert_eq!(EnginePipeline::ALL.len(), 9);
         for (i, a) in EnginePipeline::ALL.iter().enumerate() {
             for b in EnginePipeline::ALL.iter().skip(i + 1) {
                 assert_ne!(a, b, "the warm-up list repeats {}", a.label());
@@ -743,6 +818,48 @@ mod tests {
         assert_eq!(EnginePipeline::Copy.bind_group_count(), COPY_BIND_GROUPS);
     }
 
+    /// The filter pass is a pipeline of its own, not a strip variant under
+    /// another name: its own program, its own instance layout, and the only
+    /// one whose bind groups carry a sampler.
+    ///
+    /// Its render state is stated here rather than left to the module doc
+    /// because each field is load-bearing: an intermediate colour format (a
+    /// filter round only ever writes a pooled page), no blend (the pass
+    /// replaces the region and deliberately writes transparent black over the
+    /// padding border), and no depth (a page carries no depth attachment).
+    #[test]
+    fn the_filter_pipeline_replaces_an_intermediate_region_unblended_and_undepthed() {
+        let filter = EnginePipeline::Filter;
+
+        assert_eq!(filter.module(), EngineShaderModule::Filter);
+        assert_eq!(
+            filter.format(TARGET),
+            INTERMEDIATE_FORMAT,
+            "a filter pass writes a pooled page, never the frame's own target"
+        );
+        assert_eq!(
+            filter.blend(),
+            None,
+            "a blend would turn the padding border's deliberate erase into a no-op"
+        );
+        assert_eq!(filter.depth(), None);
+        assert!(!filter.is_strip());
+        assert_eq!(filter.bind_group_count(), FILTER_BIND_GROUPS);
+        assert_eq!(filter.vertex_layouts(), vec![filter_vertex_layout()]);
+        assert!(
+            filter.layout_desc().uniform_buffer_sizes.is_empty(),
+            "a filter pass takes its viewport from its own instance, not a uniform"
+        );
+
+        // Warmed up with the rest, so a frame that blurs never compiles a
+        // pipeline inline.
+        assert!(EnginePipeline::ALL.contains(&filter));
+        assert!(
+            frust_gpu::lint_pipeline_layout(&filter.layout_desc()).is_empty(),
+            "the filter pass must stay inside the downlevel design rules"
+        );
+    }
+
     #[test]
     fn the_instance_layouts_match_their_shader_declarations() {
         let strip = GpuStrip::vertex_layout();
@@ -758,6 +875,14 @@ mod tests {
         assert_eq!(copy.step_mode, wgpu::VertexStepMode::Instance);
         assert_eq!(copy.attributes.len(), 4);
         assert_eq!(copy.array_stride, 16);
+
+        let filter = filter_vertex_layout();
+        assert_eq!(filter.step_mode, wgpu::VertexStepMode::Instance);
+        assert_eq!(filter.attributes.len(), 8);
+        assert_eq!(
+            filter.array_stride as usize,
+            size_of::<crate::filters::blur::FilterInstanceData>()
+        );
     }
 
     /// Blocks on `future` by polling it to completion.
@@ -841,7 +966,11 @@ mod tests {
 
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register(&mut library, &device);
-        assert_eq!(library.len(), 3, "one module per engine shader source");
+        assert_eq!(
+            library.len(),
+            shader_src::MODULES.len(),
+            "one module per engine shader source"
+        );
         assert_eq!(
             EnginePipeline::ALL
                 .iter()

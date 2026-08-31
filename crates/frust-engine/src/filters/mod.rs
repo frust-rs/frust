@@ -34,8 +34,16 @@
 //! the fragment stage reads out of the filter-data texture
 //! ([`blur::GpuGaussianBlur`]), and how one pass's instance is packed
 //! ([`blur::FilterInstanceData`]). No device is touched and no texture is
-//! allocated; the renderer binds the pages the scheduler named and issues one
-//! instanced quad per pass.
+//! allocated here.
+//!
+//! The three device-side halves live where every other engine pipeline's do:
+//! the WGSL program is assembled by [`crate::gpu::shader_src::FILTER`], the
+//! pipeline it is drawn through is
+//! [`crate::gpu::pipelines::EnginePipeline::Filter`], and the texture holding
+//! the frame's parameter blocks plus the bilinear sampler the kernels read
+//! through are [`crate::gpu::targets`]'. The renderer binds the pages the
+//! scheduler named and issues one instanced quad per pass
+//! ([`crate::renderer::FilterResources`]).
 
 pub mod blur;
 
@@ -47,23 +55,6 @@ use vello_common::geometry::SizeU16;
 use vello_common::record::{CommandRecorder, LayerProps, RecordedLayerKind};
 
 use crate::error::EngineError;
-
-/// The whole filter program, assembled the way every engine module is: the
-/// binding-free helper prelude, then the blur kernels, then the entry-point
-/// module that declares the bindings and dispatches on the pass kind.
-///
-/// Neither prelude declares a `@group`/`@binding` global, so this module's
-/// derived bind-group layout is exactly what `shaders/filter.wgsl` itself
-/// says. See [`crate::gpu::shader_src`] for why the imports are resolved by
-/// concatenation rather than by a WESL resolver.
-pub const FILTER: &str = concat!(
-    include_str!("../../shaders/helpers.wgsl"),
-    include_str!("../../shaders/filters_blur.wgsl"),
-    include_str!("../../shaders/filter.wgsl")
-);
-
-/// The name [`FILTER`] is registered under in the shader library.
-pub const FILTER_NAME: &str = "frust-engine filter";
 
 /// The largest standard deviation a blur layer is served at.
 ///
