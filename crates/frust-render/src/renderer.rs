@@ -23,11 +23,16 @@
 //! the acquired swapchain view and its surface-owned depth attachment
 //! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
 //! `end_frame`. No intermediate, no blit, no vello, no shader pre-pass and no
-//! snapshot cache. A swapchain that stores STRAIGHT alpha (iOS's
-//! `PostMultiplied`) takes the same shape with one pass appended and one
-//! indirection added: the frame is encoded into a surface-owned intermediate
-//! and un-premultiplied into the acquired view from there, in the same encoder
-//! ([`crate::context::RenderPath::EngineDirectUnpremultiply`]).
+//! snapshot cache. A swapchain whose compositor genuinely reads it as STRAIGHT
+//! alpha takes the same shape with one pass appended and one indirection
+//! added: the frame is encoded into a surface-owned intermediate and
+//! un-premultiplied into the acquired view from there, in the same encoder
+//! ([`crate::context::RenderPath::EngineDirectUnpremultiply`]). iOS's sole
+//! translucent mode (`PostMultiplied`) does NOT take that arm: it is backed
+//! by Metal, whose compositor reads a `PostMultiplied` swapchain premultiplied
+//! regardless of the mode's name (an upstream wgpu-hal truth bug — see
+//! [`crate::context::choose_engine_render_path`]), so it stays on the
+//! `EngineDirect` arm above with no conversion pass at all.
 //!
 //! This arm remaps the v3 present spans — see [`SurfaceRenderer::submit`].
 //!
@@ -1965,8 +1970,13 @@ impl SurfaceRenderer {
                         // alpha, which is what this surface's swapchain
                         // expects — an opaque one ignores alpha, and a
                         // premultiplied-expecting translucent one takes it
-                        // as-is. A swapchain storing STRAIGHT alpha is the
-                        // other arm below (`context::choose_engine_render_path`).
+                        // as-is. A swapchain whose compositor genuinely
+                        // stores STRAIGHT alpha is the other arm below
+                        // (`context::choose_engine_render_path`); a Metal
+                        // `PostMultiplied` swapchain (iOS included) lands
+                        // HERE despite its name, because Metal's own
+                        // compositor reads that mode premultiplied regardless
+                        // (`context::compositor_expects_premultiplied`).
                         output: frust_engine::OutputAlpha::Premultiplied,
                     },
                     base_color,
@@ -2014,9 +2024,14 @@ impl SurfaceRenderer {
             // submit, then the engine's end-of-frame maintenance.
             //
             // The deferred-present contract is untouched: this is still
-            // `submit_impl`, so the iOS branch that hands the frame back
+            // `submit_impl`, so a caller that hands the frame back
             // un-presented (`Self::submit_deferred`) gets a fully converted
-            // swapchain texture to present inside its transaction.
+            // swapchain texture to present inside its own transaction. (iOS
+            // itself never reaches this arm — its sole translucent mode is a
+            // Metal `PostMultiplied` swapchain, which
+            // `context::choose_engine_render_path` now routes onto
+            // `EngineDirect` above instead; this arm serves a genuinely
+            // straight-alpha, non-Metal `PostMultiplied` compositor.)
             #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirectUnpremultiply {
                 depth,
