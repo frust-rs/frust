@@ -163,7 +163,8 @@ use crate::compile::{CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::error::EngineError;
 use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
-use crate::filters::{FilterStep, served_blur};
+use crate::filters::drop_shadow::GpuDropShadow;
+use crate::filters::{FilterStep, served_blur, served_drop_shadow};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
@@ -2046,10 +2047,10 @@ impl Scratch {
     ///
     /// `None` for an ordinary round, and also for the two shapes that cannot
     /// occur: a filter round with no page (the scheduler always gives one a
-    /// page) and a recorded kind [`served_blur`] does not recognise (the
-    /// scheduler refuses one before it plans a round). Both answer by leaving
-    /// the round's pass unissued — its page is still cleared — rather than by
-    /// asserting (E17).
+    /// page) and a recorded kind neither [`served_blur`] nor
+    /// [`served_drop_shadow`] recognises (the scheduler refuses one before it
+    /// plans a round). Both answer by leaving the round's pass unissued — its
+    /// page is still cleared — rather than by asserting (E17).
     fn plan_filter(&mut self, frame: &CompiledFrame, round: &Round) -> Option<FilterPlan> {
         let pass = round.filter_pass()?;
         let page = round.page()?;
@@ -2078,10 +2079,19 @@ impl Scratch {
         let index = match self.filter_layers.iter().position(|id| *id == layer) {
             Some(index) => index,
             None => {
-                let blur = served_blur(layer, kind).ok()?;
+                // Tried in the same order every filter-recognising site in
+                // this crate tries them (`schedule::layer_role`/
+                // `filter_rounds`): a blur first, a shadow-only drop shadow
+                // otherwise.
+                let block = match served_blur(layer, kind) {
+                    Ok(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
+                    Err(_) => {
+                        let shadow = served_drop_shadow(layer, kind).ok()?;
+                        GpuFilterData::from(GpuDropShadow::from(&shadow))
+                    }
+                };
                 self.filter_layers.push(layer);
-                self.filter_blocks
-                    .push(GpuFilterData::from(GpuGaussianBlur::from(&blur)));
+                self.filter_blocks.push(block);
                 self.filter_layers.len().saturating_sub(1)
             }
         };

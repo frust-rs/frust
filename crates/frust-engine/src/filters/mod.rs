@@ -13,14 +13,17 @@
 //!
 //! ## What is served
 //!
-//! One filter: [`LayerFilter::Blur`], the Gaussian blur that the theme layer's
-//! `GlassMaterial` backdrop needs and that nothing in the engine could express
-//! before. Every other filter a recording can carry — a flood, an offset, a
-//! drop shadow, or a graph of more than one primitive — is refused by
-//! [`served_blur`] with a reason naming what was found, and the frame is
-//! skipped rather than rendered without its filter. That refusal is not a
-//! placeholder for a fallback: the engine tier carries no second renderer (see
-//! the [`schedule`] module header).
+//! Two filters: [`LayerFilter::Blur`], the Gaussian blur that the theme
+//! layer's `GlassMaterial` backdrop needs, and [`LayerFilter::DropShadow`], a
+//! shadow-only drop shadow (`vello_common`'s `DropShadowOnly`, never
+//! compositing the layer's own unfiltered content back over the shadow — see
+//! [`drop_shadow`]'s own doc for why). Every other filter a recording can
+//! carry — a flood, a standalone offset, a drop shadow that composites the
+//! original back over itself, or a graph of more than one primitive — is
+//! refused by [`served_blur`]/[`served_drop_shadow`] with a reason naming what
+//! was found, and the frame is skipped rather than rendered without its
+//! filter. That refusal is not a placeholder for a fallback: the engine tier
+//! carries no second renderer (see the [`schedule`] module header).
 //!
 //! The scene seam is deliberately absent. `frust_scene` has no filter command
 //! and gains none here — [`push_filter_layer`] is how the engine's own compiler
@@ -46,8 +49,11 @@
 //! ([`crate::renderer::FilterResources`]).
 
 pub mod blur;
+pub mod drop_shadow;
 
 use kurbo::Affine;
+use peniko::color::{AlphaColor, Srgb};
+use vello_common::filter::drop_shadow::DropShadow;
 use vello_common::filter::gaussian_blur::GaussianBlur;
 use vello_common::filter::{FilterData, PreparedFilter};
 use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
@@ -55,6 +61,12 @@ use vello_common::geometry::SizeU16;
 use vello_common::record::{CommandRecorder, LayerProps, RecordedLayerKind};
 
 use crate::error::EngineError;
+
+/// What both [`served_blur`] and [`served_drop_shadow`] say this engine
+/// renders, shared so a caller that fails both is told the whole served set
+/// rather than one filter's half of it.
+const SERVED_FILTERS: &str = "the only filters it renders are a single Gaussian blur or a single, \
+     shadow-only drop shadow (no original content composited back over it)";
 
 /// The largest standard deviation a blur layer is served at.
 ///
@@ -78,6 +90,22 @@ pub enum LayerFilter {
         /// The blur's standard deviation. Zero blurs nothing.
         sigma: f32,
     },
+    /// A shadow-only drop shadow: the layer's alpha, blurred by `sigma`,
+    /// shifted by `offset`, and recoloured to `color` — never the layer's own
+    /// unfiltered content composited back over it (see [`drop_shadow`]'s own
+    /// doc for why).
+    DropShadow {
+        /// Horizontal, vertical offset of the shadow, in the layer's own user
+        /// space — the transform in force when the layer is opened scales it
+        /// into device space, exactly as `sigma` is.
+        offset: (f32, f32),
+        /// The shadow's blur standard deviation. Zero blurs nothing, leaving a
+        /// hard-edged, offset silhouette.
+        sigma: f32,
+        /// The shadow's own colour. Its alpha scales the shadow's own opacity;
+        /// the layer's colour never reaches the shadow.
+        color: AlphaColor<Srgb>,
+    },
 }
 
 impl LayerFilter {
@@ -91,7 +119,8 @@ impl LayerFilter {
     /// # Errors
     ///
     /// [`EngineError::InvalidGeometry`] for a σ that is not finite, is
-    /// negative, or is past [`MAX_BLUR_SIGMA`], and
+    /// negative, or is past [`MAX_BLUR_SIGMA`] (a [`Self::DropShadow`]'s own
+    /// offset held to the same finiteness), and
     /// [`EngineError::InvalidTransform`] for a transform that is not finite —
     /// the same terms the compiler already refuses a draw's own geometry and
     /// transform on, checked here because every quantity below is derived from
@@ -112,6 +141,28 @@ impl LayerFilter {
 
                 let filter = Filter::from_primitive(FilterPrimitive::GaussianBlur {
                     std_deviation: sigma,
+                    edge_mode: EdgeMode::default(),
+                });
+
+                Ok(FilterData::new(filter, transform))
+            }
+            Self::DropShadow {
+                offset: (dx, dy),
+                sigma,
+                color,
+            } => {
+                if !(0.0..=MAX_BLUR_SIGMA).contains(&sigma) || !dx.is_finite() || !dy.is_finite() {
+                    return Err(EngineError::InvalidGeometry);
+                }
+
+                // `DropShadowOnly`, never `DropShadow`: the shadow-only shape
+                // is the whole of what this engine serves (see this module's
+                // own doc and `served_drop_shadow` below).
+                let filter = Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+                    dx,
+                    dy,
+                    std_deviation: sigma,
+                    color,
                     edge_mode: EdgeMode::default(),
                 });
 
@@ -168,8 +219,8 @@ pub fn served_blur(id: u32, kind: &RecordedLayerKind) -> Result<GaussianBlur, St
     let primitives = filter_data.filter.graph.primitives.as_slice();
     let [FilterPrimitive::GaussianBlur { std_deviation, .. }] = primitives else {
         return Err(format!(
-            "layer {id} carries a filter graph of {} primitive(s) the engine does not serve; the \
-             only filter it renders is a single Gaussian blur",
+            "layer {id} carries a filter graph of {} primitive(s) the engine does not serve as a \
+             Gaussian blur; {SERVED_FILTERS}",
             primitives.len()
         ));
     };
@@ -189,16 +240,64 @@ pub fn served_blur(id: u32, kind: &RecordedLayerKind) -> Result<GaussianBlur, St
     }
 }
 
+/// The drop shadow that layer `id`'s recorded filter describes, or a reason
+/// naming what was found instead.
+///
+/// The counterpart of [`served_blur`], on the same terms: refused as a value
+/// rather than panicked, and read through a log via
+/// [`EngineError::SchedulerEscalation`] where a caller is trying to find out
+/// which recorded shape froze a surface.
+///
+/// # Errors
+///
+/// A `kind` that is not a filter at all, a filter graph of anything but one
+/// primitive, a primitive that is not a shadow-only drop shadow (a
+/// `DropShadow` that composites its original content back over the shadow
+/// included — this engine serves only `DropShadowOnly`, see this module's own
+/// doc), a σ [`served_blur`] would also refuse, or a drop shadow whose
+/// prepared kernel is not a drop shadow after all.
+pub fn served_drop_shadow(id: u32, kind: &RecordedLayerKind) -> Result<DropShadow, String> {
+    let RecordedLayerKind::Filter { filter_data, .. } = kind else {
+        return Err(format!("layer {id} carries no filter"));
+    };
+
+    let primitives = filter_data.filter.graph.primitives.as_slice();
+    let [FilterPrimitive::DropShadowOnly { std_deviation, .. }] = primitives else {
+        return Err(format!(
+            "layer {id} carries a filter graph of {} primitive(s) the engine does not serve as a \
+             shadow-only drop shadow; {SERVED_FILTERS}",
+            primitives.len()
+        ));
+    };
+
+    if !(0.0..=MAX_BLUR_SIGMA).contains(std_deviation) {
+        return Err(format!(
+            "layer {id} carries a drop shadow of σ {std_deviation}, which is not a standard \
+             deviation this engine blurs its shadow at (0 to {MAX_BLUR_SIGMA})"
+        ));
+    }
+
+    match PreparedFilter::new(&filter_data.filter, &filter_data.transform) {
+        PreparedFilter::DropShadow(shadow) => Ok(shadow),
+        _ => Err(format!(
+            "layer {id} carries a drop shadow that prepared as another filter"
+        )),
+    }
+}
+
 /// One pass of a filter's sequence.
 ///
 /// The numbering is the wire format the fragment stage switches on; it matches
-/// the reference renderer's own so the kinds this engine does not serve —
-/// flood (1), offset (2) and the two drop-shadow composites (7, 8) — can be
-/// added later without renumbering.
+/// the reference renderer's own — flood (1) and the drop-shadow composite that
+/// reads the layer's own unfiltered content back (7) are still reserved and
+/// still unserved (see [`drop_shadow`]'s own doc), and can be added later
+/// without renumbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FilterPassKind {
     /// Copy the source region through unchanged.
     Copy,
+    /// Shift the source region by a drop shadow's own device-space offset.
+    Offset,
     /// Halve both axes.
     Downscale,
     /// Convolve horizontally with the blur kernel.
@@ -207,6 +306,9 @@ pub enum FilterPassKind {
     BlurV,
     /// Double both axes.
     Upscale,
+    /// Recolour a blurred, offset alpha mask into a drop shadow's own
+    /// premultiplied colour.
+    Colorize,
 }
 
 impl FilterPassKind {
@@ -215,10 +317,12 @@ impl FilterPassKind {
     pub const fn code(self) -> u32 {
         match self {
             Self::Copy => 0,
+            Self::Offset => 2,
             Self::Downscale => 3,
             Self::BlurH => 4,
             Self::BlurV => 5,
             Self::Upscale => 6,
+            Self::Colorize => 8,
         }
     }
 }

@@ -67,17 +67,31 @@ pub const COPY: &str = concat!(
 /// prepending it cannot disturb [`FILTER`]'s derived bind-group layout.
 pub const FILTER_KERNELS: &str = include_str!("../../shaders/filters_blur.wgsl");
 
+/// The drop-shadow passes [`FILTER`]'s fragment stage dispatches into beyond
+/// what [`FILTER_KERNELS`] already covers: the shadow's own device-space
+/// shift, and the recolour from a blurred alpha mask into the shadow's
+/// premultiplied colour.
+///
+/// A third prelude on the same terms as [`FILTER_KERNELS`]: no entry point, no
+/// `@group`/`@binding` global, so prepending it cannot disturb [`FILTER`]'s
+/// derived bind-group layout either. The layouts and constants it reads are
+/// [`crate::filters::drop_shadow`]'s; that module's own tests pin the two
+/// sides against each other.
+pub const DROP_SHADOW_KERNELS: &str = include_str!("../../shaders/filters_drop_shadow.wgsl");
+
 /// One filter pass over one destination page: `vs_main` + `fs_main`, one
 /// pipeline (see [`crate::gpu::pipelines::EnginePipeline::Filter`]).
 ///
-/// The only module assembled from *two* preludes: the binding-free helpers
-/// every module gets, then [`FILTER_KERNELS`], then the entry-point module
-/// that declares the bindings and dispatches on the pass kind. The layouts and
-/// constants it reads are [`crate::filters::blur`]'s; that module's own tests
-/// pin the two sides against each other.
+/// The only module assembled from more than one prelude: the binding-free
+/// helpers every module gets, then [`FILTER_KERNELS`], then
+/// [`DROP_SHADOW_KERNELS`], then the entry-point module that declares the
+/// bindings and dispatches on the pass kind. The layouts and constants it
+/// reads are [`crate::filters::blur`]'s and [`crate::filters::drop_shadow`]'s;
+/// those modules' own tests pin all three sides against each other.
 pub const FILTER: &str = concat!(
     include_str!("../../shaders/helpers.wgsl"),
     include_str!("../../shaders/filters_blur.wgsl"),
+    include_str!("../../shaders/filters_drop_shadow.wgsl"),
     include_str!("../../shaders/filter.wgsl")
 );
 
@@ -179,7 +193,11 @@ mod tests {
         // skipped: this file's own header describes the rule. The blur
         // kernels are held to the same rule for the same reason — they are a
         // prelude too, just one only the filter module gets.
-        for (name, prelude) in [("helpers", HELPERS), ("filter kernels", FILTER_KERNELS)] {
+        for (name, prelude) in [
+            ("helpers", HELPERS),
+            ("filter kernels", FILTER_KERNELS),
+            ("drop shadow kernels", DROP_SHADOW_KERNELS),
+        ] {
             let declaration = prelude
                 .lines()
                 .find(|line| !line.trim_start().starts_with("//") && line.contains("@group"));
@@ -192,14 +210,15 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_module_is_both_preludes_followed_by_its_own_source() {
+    fn the_filter_module_is_every_prelude_followed_by_its_own_source() {
         // `every_module_is_the_helper_prelude_followed_by_its_own_source`
         // above only pins the first prelude; the filter program is the one
-        // module assembled from two, and the kernels have to sit between the
-        // helpers they call and the entry point that calls them.
+        // module assembled from three, and each has to sit between the helpers
+        // it calls and the entry point that calls it.
         assert!(FILTER.starts_with(HELPERS));
         assert!(FILTER[HELPERS.len()..].starts_with(FILTER_KERNELS));
-        assert!(FILTER.len() > HELPERS.len() + FILTER_KERNELS.len());
+        assert!(FILTER[HELPERS.len() + FILTER_KERNELS.len()..].starts_with(DROP_SHADOW_KERNELS));
+        assert!(FILTER.len() > HELPERS.len() + FILTER_KERNELS.len() + DROP_SHADOW_KERNELS.len());
     }
 
     #[test]

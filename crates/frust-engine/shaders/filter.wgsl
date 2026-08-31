@@ -3,20 +3,27 @@
 
 // Derived from vello_sparse_shaders 0.2.0 (`shaders/filter.wesl`); its
 // `import package::helpers::...` lines are resolved by prepending
-// `helpers.wgsl`, and the blur kernels it calls by prepending
-// `filters_blur.wgsl`, at load time (`crate::filters::FILTER`).
+// `helpers.wgsl`, the blur kernels it calls by prepending `filters_blur.wgsl`,
+// and the drop-shadow passes it calls by prepending
+// `filters_drop_shadow.wgsl`, at load time (`crate::filters::FILTER`).
 //
 // One filter pass over one destination page: the vertex stage places the quad
 // the pass writes, the fragment stage dispatches on the pass kind and returns
-// that texel's filtered colour. A whole Gaussian blur is a sequence of these
-// passes, each its own render pass over the page the previous one did not
-// write, planned host-side by `crate::filters::blur`.
+// that texel's filtered colour. A whole Gaussian blur, or a whole shadow-only
+// drop shadow, is a sequence of these passes, each its own render pass over
+// the page the previous one did not write, planned host-side by
+// `crate::filters::blur`/`crate::filters::drop_shadow`.
 //
-// Only the blur half of the reference's pass set is implemented here. The
-// numbering of every pass kind is kept, so the flood, offset and drop-shadow
-// arms can be added without renumbering the wire format; a pass kind this
-// module does not implement can never reach it, because the scheduler refuses
-// every filter but the blur before a pass is ever planned.
+// The blur half of the reference's pass set, plus the offset and colourize
+// halves a shadow-only drop shadow needs, are implemented here. Flood (1) and
+// the drop-shadow composite that reads a layer's own unfiltered content back
+// (7) are still reserved rather than implemented — this engine never
+// composites a filter layer's original content back over its shadow (see
+// `crate::filters::drop_shadow`'s own doc for why) — so the numbering of
+// every pass kind is kept and those two arms can be added later without
+// renumbering the wire format; a pass kind this module does not implement can
+// never reach it, because the scheduler refuses every filter but a blur or a
+// shadow-only drop shadow before a pass is ever planned.
 
 // The texture holding the encoded parameters of every filter in the frame.
 @group(0) @binding(0)
@@ -38,13 +45,16 @@ const FILTER_SIZE_BYTES: u32 = 48u;
 const FILTER_SIZE_U32: u32 = FILTER_SIZE_BYTES / 4u;
 const TEXELS_PER_FILTER: u32 = FILTER_SIZE_U32 / 4u;
 
-// Pass kinds 1, 2, 7 and 8 are the reference's flood, offset and the two
-// drop-shadow composites; they are reserved rather than implemented.
+// Pass kind 1 (flood) and 7 (the drop-shadow composite that reads a layer's
+// own unfiltered content back) are the reference's; they are reserved rather
+// than implemented (see this file's header).
 const PASS_COPY: u32 = 0u;
+const PASS_OFFSET: u32 = 2u;
 const PASS_DOWNSCALE: u32 = 3u;
 const PASS_BLUR_H: u32 = 4u;
 const PASS_BLUR_V: u32 = 5u;
 const PASS_UPSCALE: u32 = 6u;
+const PASS_COLORIZE: u32 = 8u;
 
 // Transparent border a decimated pass overdraws around the region it writes.
 //
@@ -201,6 +211,11 @@ fn fs_main(
         case PASS_COPY: {
             return sample_source(source_origin, rel_coord);
         }
+        case PASS_OFFSET: {
+            let filter_texel2 = load_filter_texel(filter_data_offset, 2u);
+            let dxdy = get_drop_shadow_offset(filter_texel2);
+            return offset_drop_shadow(source_texture, source_origin, dest_size, rel_coord, dxdy);
+        }
         case PASS_DOWNSCALE: {
             return filter_downscale(source_texture, linear_sampler, position, source_origin, dest_origin);
         }
@@ -236,6 +251,11 @@ fn fs_main(
         }
         case PASS_UPSCALE: {
             return filter_upscale(source_texture, linear_sampler, position, source_origin, dest_origin);
+        }
+        case PASS_COLORIZE: {
+            let filter_texel2 = load_filter_texel(filter_data_offset, 2u);
+            let color = get_drop_shadow_color(filter_texel2);
+            return colorize_drop_shadow(source_texture, source_origin, rel_coord, color);
         }
         // A pass kind this module does not implement; unreachable, because the
         // scheduler plans none.

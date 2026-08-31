@@ -50,7 +50,10 @@ use frust_engine::filters::blur::{
     LinearKernel, MAX_KERNEL_SIZE, MAX_TAPS_PER_SIDE, blur_passes, edge_mode, filter_type,
     pack_u16_pair,
 };
-use frust_engine::filters::{FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, push_filter_layer};
+use frust_engine::filters::drop_shadow::{GpuDropShadow, drop_shadow_passes};
+use frust_engine::filters::{
+    FilterPassKind, LayerFilter, MAX_BLUR_SIGMA, push_filter_layer, served_drop_shadow,
+};
 use frust_engine::gpu::pipelines::{
     EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, warm_up_descs,
 };
@@ -61,7 +64,9 @@ use frust_engine::schedule::{PageConfig, PageParity, Round, RoundOp, RoundTarget
 use frust_engine::{EngineDraw, EngineError};
 use frust_gpu::{DownlevelProfile, PipelineCache, ShaderLibrary, TierCaps};
 use kurbo::Affine;
+use peniko::color::{AlphaColor, Srgb};
 use vello_common::color::palette::css::RED;
+use vello_common::filter::drop_shadow::DropShadow;
 use vello_common::filter::gaussian_blur::{
     GaussianBlur, compute_gaussian_kernel, plan_decimated_blur,
 };
@@ -132,6 +137,47 @@ fn blurred_layer(sigma: f32, opacity: f32) -> CommandRecorder<EngineDraw> {
     draw(&mut recorder, 64, 64, 32);
     recorder.pop_layer();
     recorder
+}
+
+/// A recording of one shadowed layer under the surface, holding one draw.
+fn drop_shadow_layer(
+    offset: (f32, f32),
+    sigma: f32,
+    color: AlphaColor<Srgb>,
+    opacity: f32,
+) -> CommandRecorder<EngineDraw> {
+    let mut recorder = recorder();
+    push_filter_layer(
+        &mut recorder,
+        layer(opacity),
+        LayerFilter::DropShadow {
+            offset,
+            sigma,
+            color,
+        },
+        Affine::IDENTITY,
+    )
+    .expect("a finite offset and σ under the ceiling records");
+    draw(&mut recorder, 64, 64, 32);
+    recorder.pop_layer();
+    recorder
+}
+
+/// A `vello_common` drop shadow built the way [`served_drop_shadow`] hands one
+/// back: through `PreparedFilter::new`, so its decimation plan and kernel are
+/// the reference's own rather than re-derived.
+fn shadow(offset: (f32, f32), sigma: f32, color: AlphaColor<Srgb>) -> DropShadow {
+    let filter = Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+        dx: offset.0,
+        dy: offset.1,
+        std_deviation: sigma,
+        color,
+        edge_mode: EdgeMode::default(),
+    });
+    match vello_common::filter::PreparedFilter::new(&filter, &Affine::IDENTITY) {
+        vello_common::filter::PreparedFilter::DropShadow(shadow) => shadow,
+        other => panic!("a `DropShadowOnly` primitive must prepare as a drop shadow: {other:?}"),
+    }
 }
 
 fn schedule(recorder: &CommandRecorder<EngineDraw>) -> Vec<Round> {
@@ -292,9 +338,70 @@ fn every_filter_parameter_block_is_one_size() {
     assert_eq!(FILTER_SIZE_BYTES, 48);
     assert_eq!(size_of::<GpuFilterData>(), FILTER_SIZE_BYTES);
     assert_eq!(size_of::<GpuGaussianBlur>(), FILTER_SIZE_BYTES);
+    assert_eq!(size_of::<GpuDropShadow>(), FILTER_SIZE_BYTES);
     assert_eq!(align_of::<GpuFilterData>(), 16);
     assert_eq!(align_of::<GpuGaussianBlur>(), 16);
+    assert_eq!(align_of::<GpuDropShadow>(), 16);
     assert_eq!(GpuFilterData::SIZE_TEXELS, 3);
+}
+
+/// A drop shadow's parameter block survives the round trip through the
+/// type-erased form, and packs its kernel at the same offsets a blur's own
+/// does — the reason its blur passes read through the exact accessors a plain
+/// blur's do, unmodified.
+#[test]
+fn a_drop_shadows_parameter_block_round_trips_through_the_erased_form() {
+    for (offset, sigma) in [((0.0, 0.0), 2.0), ((3.0, -4.0), 8.0), ((-12.0, 20.0), 32.0)] {
+        let shadow_value = shadow(offset, sigma, RED);
+        let packed = GpuDropShadow::from(&shadow_value);
+        let erased = GpuFilterData::from(packed);
+
+        assert_eq!(
+            erased.filter_type(),
+            filter_type::DROP_SHADOW,
+            "{offset:?} σ {sigma}"
+        );
+        assert_eq!(
+            erased.n_decimations(),
+            shadow_value.n_decimations,
+            "{offset:?} σ {sigma}"
+        );
+        assert_eq!(
+            bytemuck::cast::<GpuFilterData, GpuDropShadow>(erased),
+            packed,
+            "{offset:?} σ {sigma}"
+        );
+        assert_eq!(packed.dx, offset.0, "{offset:?} σ {sigma}");
+        assert_eq!(packed.dy, offset.1, "{offset:?} σ {sigma}");
+        assert_eq!(
+            packed.color,
+            RED.premultiply().to_rgba8().to_u32(),
+            "{offset:?} σ {sigma}"
+        );
+
+        let linear = LinearKernel::new(&shadow_value.kernel, shadow_value.kernel_size);
+        assert_eq!(
+            packed.center_weight, linear.center_weight,
+            "{offset:?} σ {sigma}"
+        );
+        assert_eq!(
+            (packed.header >> 11) & 0x3,
+            u32::from(linear.n_taps),
+            "{offset:?} σ {sigma}"
+        );
+    }
+}
+
+/// This engine never composites a filter layer's original content back over
+/// its shadow (see `frust_engine::filters::drop_shadow`'s own doc), so a
+/// shadow-only block never sets the bit a future `composite_original` shape
+/// would read.
+#[test]
+fn a_drop_shadows_header_never_sets_the_composite_bit() {
+    for sigma in [0.0, 2.0, 8.0, 32.0, MAX_BLUR_SIGMA] {
+        let packed = GpuDropShadow::from(&shadow((3.0, -4.0), sigma, RED));
+        assert_eq!(packed.header & (1 << 13), 0, "σ {sigma}");
+    }
 }
 
 /// The padding a filter layer reserves is half a kernel, because that is how
@@ -391,10 +498,12 @@ fn an_instance_carries_its_steps_extents_and_the_pages_it_addresses() {
 #[test]
 fn the_pass_kinds_keep_the_reference_numbering() {
     assert_eq!(FilterPassKind::Copy.code(), 0);
+    assert_eq!(FilterPassKind::Offset.code(), 2);
     assert_eq!(FilterPassKind::Downscale.code(), 3);
     assert_eq!(FilterPassKind::BlurH.code(), 4);
     assert_eq!(FilterPassKind::BlurV.code(), 5);
     assert_eq!(FilterPassKind::Upscale.code(), 6);
+    assert_eq!(FilterPassKind::Colorize.code(), 8);
 }
 
 // -----------------------------------------------------------------------------
@@ -410,17 +519,23 @@ fn the_filter_module_parses_and_validates() {
 }
 
 /// Assembled the way every engine module is: the binding-free helper prelude,
-/// then the blur kernels, then the entry-point module. Neither prelude declares
-/// a binding, so the module's derived bind-group layout is its own.
+/// then the blur kernels, then the drop-shadow kernels, then the entry-point
+/// module. No prelude declares a binding, so the module's derived bind-group
+/// layout is its own.
 #[test]
 fn the_filter_module_is_its_preludes_followed_by_its_own_source() {
     let helpers = include_str!("../shaders/helpers.wgsl");
     let kernels = include_str!("../shaders/filters_blur.wgsl");
+    let shadow_kernels = include_str!("../shaders/filters_drop_shadow.wgsl");
     let entry = include_str!("../shaders/filter.wgsl");
 
-    assert_eq!(FILTER, format!("{helpers}{kernels}{entry}"));
+    assert_eq!(FILTER, format!("{helpers}{kernels}{shadow_kernels}{entry}"));
 
-    for (name, source) in [("helpers", helpers), ("filters_blur", kernels)] {
+    for (name, source) in [
+        ("helpers", helpers),
+        ("filters_blur", kernels),
+        ("filters_drop_shadow", shadow_kernels),
+    ] {
         let declaration = source
             .lines()
             .find(|line| !line.trim_start().starts_with("//") && line.contains("@group"));
@@ -449,17 +564,21 @@ fn the_shader_constants_match_the_host_ones() {
 
     for kind in [
         FilterPassKind::Copy,
+        FilterPassKind::Offset,
         FilterPassKind::Downscale,
         FilterPassKind::BlurH,
         FilterPassKind::BlurV,
         FilterPassKind::Upscale,
+        FilterPassKind::Colorize,
     ] {
         let name = match kind {
             FilterPassKind::Copy => "PASS_COPY",
+            FilterPassKind::Offset => "PASS_OFFSET",
             FilterPassKind::Downscale => "PASS_DOWNSCALE",
             FilterPassKind::BlurH => "PASS_BLUR_H",
             FilterPassKind::BlurV => "PASS_BLUR_V",
             FilterPassKind::Upscale => "PASS_UPSCALE",
+            FilterPassKind::Colorize => "PASS_COLORIZE",
         };
         assert_shader_const(entry, name, kind.code());
     }
@@ -636,7 +755,67 @@ fn only_the_rescaling_passes_change_extent() {
             FilterPassKind::BlurH | FilterPassKind::BlurV | FilterPassKind::Copy => {
                 assert_eq!(step.source, step.dest);
             }
+            FilterPassKind::Offset | FilterPassKind::Colorize => {
+                unreachable!("a blur's own sequence never emits an offset or colourize pass")
+            }
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The drop shadow's own passes
+// -----------------------------------------------------------------------------
+
+/// A shadow is the offset, exactly the blur sequence its own kernel plans, and
+/// the colourize, in that order — the reference's own drop-shadow plan
+/// narrowed to the shadow-only shape.
+#[test]
+fn a_drop_shadow_is_the_offset_the_blur_and_the_colorize() {
+    for (offset, sigma) in [((0.0, 0.0), 2.0), ((3.0, -4.0), 8.0), ((12.0, 20.0), 32.0)] {
+        let shadow_value = shadow(offset, sigma, RED);
+        let blur = GaussianBlur::new(sigma, EdgeMode::default());
+        let size = SizeU16::from_wh(96, 64);
+
+        let steps = drop_shadow_passes(&shadow_value, size);
+        let (first, rest) = steps
+            .split_first()
+            .expect("a shadow costs at least one pass");
+        let (last, middle) = rest
+            .split_last()
+            .expect("a shadow costs at least two passes");
+
+        assert_eq!(first.kind, FilterPassKind::Offset, "{offset:?} σ {sigma}");
+        assert_eq!(first.source, size, "{offset:?} σ {sigma}");
+        assert_eq!(first.dest, size, "{offset:?} σ {sigma}");
+
+        assert_eq!(last.kind, FilterPassKind::Colorize, "{offset:?} σ {sigma}");
+        assert_eq!(last.source, size, "{offset:?} σ {sigma}");
+        assert_eq!(last.dest, size, "{offset:?} σ {sigma}");
+
+        let blur_kinds: Vec<FilterPassKind> = middle.iter().map(|step| step.kind).collect();
+        let expected_kinds: Vec<FilterPassKind> = blur_passes(&blur, size)
+            .iter()
+            .map(|step| step.kind)
+            .collect();
+        assert_eq!(blur_kinds, expected_kinds, "{offset:?} σ {sigma}");
+    }
+}
+
+/// Offset and colourize add exactly two passes to the blur's own always-even
+/// sequence, so a drop shadow's sequence never needs the closing copy
+/// [`drop_shadow_passes`] would append if it ever went odd.
+#[test]
+fn a_drop_shadows_pass_sequence_is_always_even_and_never_needs_a_closing_copy() {
+    for sigma in [0.0, 0.5, 2.0, 8.0, 32.0, 512.0, MAX_BLUR_SIGMA] {
+        let shadow_value = shadow((3.0, -4.0), sigma, RED);
+        let steps = drop_shadow_passes(&shadow_value, SizeU16::from_wh(96, 64));
+
+        assert_eq!(steps.len(), 2 * shadow_value.n_decimations + 4, "σ {sigma}");
+        assert!(steps.len().is_multiple_of(2), "σ {sigma}");
+        assert!(
+            !steps.iter().any(|step| step.kind == FilterPassKind::Copy),
+            "σ {sigma} planned a closing copy it should not have needed"
+        );
     }
 }
 
@@ -739,9 +918,96 @@ fn the_transform_scales_the_blur_into_device_space() {
     );
 }
 
+/// A shadow's bounds grow by its own offset on top of the blur's 3σ spread —
+/// the reference's own filter expansion for `DropShadowOnly`
+/// (`vello_common::filter_effects::FilterPrimitive::filter_expansion`), which
+/// this engine takes as given rather than re-deriving (see
+/// [`LayerFilter::filter_data`]).
+#[test]
+fn a_shadowed_layers_bounds_grow_by_the_blurs_spread_and_the_shadows_own_offset() {
+    let plain = {
+        let mut recorder = recorder();
+        recorder.push_layer(layer(0.5), None);
+        draw(&mut recorder, 64, 64, 32);
+        recorder.pop_layer();
+        recorder
+    };
+    let plain_bbox = plain.layers[0].bbox;
+
+    let unshifted = drop_shadow_layer((0.0, 0.0), 8.0, RED, 0.5);
+    let shifted = drop_shadow_layer((40.0, 0.0), 8.0, RED, 0.5);
+
+    assert!(
+        unshifted.layers[0].bbox.width() >= plain_bbox.width(),
+        "a shadow's blur alone must still grow the layer: {:?}",
+        unshifted.layers[0].bbox
+    );
+    assert!(
+        shifted.layers[0].bbox.width() > unshifted.layers[0].bbox.width(),
+        "an offset shadow must grow its layer past an unshifted one of the same σ: {:?} vs {:?}",
+        shifted.layers[0].bbox,
+        unshifted.layers[0].bbox
+    );
+}
+
+/// A σ or an offset that is not finite is refused where it is recorded, on the
+/// same terms [`LayerFilter::Blur`] is, and refused without opening a layer no
+/// `pop_layer` would balance.
+#[test]
+fn a_drop_shadow_with_a_non_finite_sigma_or_offset_is_refused_at_the_recorder() {
+    let cases: [(f32, f32, f32); 5] = [
+        (f32::NAN, 0.0, 0.0),
+        (8.0, f32::NAN, 0.0),
+        (8.0, 0.0, f32::NAN),
+        (8.0, f32::INFINITY, 0.0),
+        (MAX_BLUR_SIGMA + 1.0, 0.0, 0.0),
+    ];
+
+    for (sigma, dx, dy) in cases {
+        let mut recorder = recorder();
+        let refusal = push_filter_layer(
+            &mut recorder,
+            layer(0.5),
+            LayerFilter::DropShadow {
+                offset: (dx, dy),
+                sigma,
+                color: RED,
+            },
+            Affine::IDENTITY,
+        );
+
+        assert!(
+            matches!(refusal, Err(EngineError::InvalidGeometry)),
+            "σ {sigma}, offset ({dx}, {dy}) recorded as {refusal:?}"
+        );
+        assert!(
+            recorder.layers.is_empty(),
+            "σ {sigma}, offset ({dx}, {dy}) opened a layer despite being refused"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // The rounds a filter layer costs
 // -----------------------------------------------------------------------------
+
+/// `served_drop_shadow` is what `Schedule::build` (and the renderer's own
+/// `filter_block`) reads a recorded shadow-only drop shadow back through; it
+/// has to hand back the same parameters [`LayerFilter::DropShadow`] recorded.
+#[test]
+fn served_drop_shadow_reads_back_what_was_recorded() {
+    let recording = drop_shadow_layer((3.0, -4.0), 8.0, RED, 0.5);
+    let kind = &recording.layers[0].kind;
+
+    let served = served_drop_shadow(0, kind).expect("a recorded shadow-only drop shadow serves");
+    assert_eq!(served.dx, 3.0);
+    assert_eq!(served.dy, -4.0);
+    assert_eq!(served.color, RED);
+    assert!(
+        !served.composite_original,
+        "this engine never serves the compositing shape"
+    );
+}
 
 /// The frame path's own entry point plans a blur rather than refusing it, and
 /// it is the only entry point there is.
@@ -962,14 +1228,58 @@ fn a_blurred_layer_beside_an_opacity_layer_is_served_by_cutting_the_surfaces_rou
     );
 }
 
+/// The shape a shadow costs, on the same terms a blur's own does: the layer's
+/// contents into one page, one round per pass of `drop_shadow_passes`
+/// alternating between the two, and the surface's own round compositing
+/// whatever the last pass wrote.
+#[test]
+fn a_shadowed_layer_costs_its_contents_its_passes_and_the_composite() {
+    let shadow_value = shadow((3.0, -4.0), 8.0, RED);
+    let passes = drop_shadow_passes(&shadow_value, SizeU16::from_wh(1, 1)).len();
+    let rounds = schedule(&drop_shadow_layer((3.0, -4.0), 8.0, RED, 0.5));
+
+    assert_eq!(
+        rounds.len(),
+        passes + 2,
+        "one round for the contents, one per pass, and the surface's own: {rounds:#?}"
+    );
+
+    let contents = &rounds[0];
+    assert!(contents.filter_pass().is_none());
+    let contents_page = contents.page().expect("the contents render into a page");
+
+    let mut source = contents_page.parity;
+    for round in &rounds[1..rounds.len() - 1] {
+        let pass = round.filter_pass().expect("a filter round runs a pass");
+        let page = round.page().expect("a filter pass writes a page");
+        assert_eq!(pass.source, source, "a pass reads the page before it wrote");
+        assert_eq!(
+            page.parity,
+            source.opposite(),
+            "a pass writes the group it did not read"
+        );
+        source = page.parity;
+    }
+
+    let root = rounds.last().expect("a frame always has a root round");
+    let composite = root
+        .composites()
+        .next()
+        .expect("the surface composites the shadowed layer");
+    assert_eq!(
+        composite.parity, contents_page.parity,
+        "an even sequence leaves the result in the page the contents were rendered into"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // What is refused
 // -----------------------------------------------------------------------------
 
-/// Only the blur graduates. Every other filter a recording can carry is refused
-/// by name.
+/// Only the blur and the shadow-only drop shadow graduate. Every other filter
+/// a recording can carry is refused by name.
 #[test]
-fn every_filter_but_the_blur_is_still_refused_by_name() {
+fn every_filter_but_the_blur_or_drop_shadow_is_still_refused_by_name() {
     let mut recorder = recorder();
     let flood = Filter::from_primitive(FilterPrimitive::Flood { color: RED });
     recorder.push_layer(
@@ -986,6 +1296,37 @@ fn every_filter_but_the_blur_is_still_refused_by_name() {
     assert!(
         reason.contains("Gaussian blur"),
         "the reason has to say what the engine does serve: {reason}"
+    );
+}
+
+/// The reference's other drop-shadow shape — the one that composites the
+/// layer's own unfiltered content back over the shadow — is refused by name
+/// too: this engine serves only `DropShadowOnly`, never `DropShadow` (see
+/// `frust_engine::filters::drop_shadow`'s own doc for why).
+#[test]
+fn a_drop_shadow_that_composites_the_original_is_refused_by_name() {
+    let mut recorder = recorder();
+    let compositing = Filter::from_primitive(FilterPrimitive::DropShadow {
+        dx: 3.0,
+        dy: -4.0,
+        std_deviation: 8.0,
+        color: RED,
+        edge_mode: EdgeMode::default(),
+    });
+    recorder.push_layer(
+        layer(0.5),
+        Some(vello_common::filter::FilterData::new(
+            compositing,
+            Affine::IDENTITY,
+        )),
+    );
+    draw(&mut recorder, 64, 64, 32);
+    recorder.pop_layer();
+
+    let reason = escalation(&recorder);
+    assert!(
+        reason.contains("shadow-only"),
+        "the reason has to name what this engine actually serves: {reason}"
     );
 }
 
@@ -1312,15 +1653,27 @@ impl FilterHarness {
         );
     }
 
-    /// Runs every pass of `steps` in one encoder, answering which page holds
-    /// the result.
+    /// Runs every pass of a blur's `steps` in one encoder, answering which page
+    /// holds the result. A thin wrapper over [`Self::run_block`] for the
+    /// blur-only callers this harness has always had.
+    fn run(&mut self, blur: &GaussianBlur, steps: &[frust_engine::filters::FilterStep]) -> usize {
+        self.run_block(GpuFilterData::from(GpuGaussianBlur::from(blur)), steps)
+    }
+
+    /// Runs every pass of `steps` against parameter block `block` in one
+    /// encoder, answering which page holds the result.
     ///
     /// The ping-pong the scheduler plans, with page indices standing in for its
     /// parity groups: pass `i` reads the page pass `i - 1` wrote and writes the
-    /// other, and the first reads the contents page.
-    fn run(&mut self, blur: &GaussianBlur, steps: &[frust_engine::filters::FilterStep]) -> usize {
-        let block = GpuFilterData::from(GpuGaussianBlur::from(blur));
-        let passes = u32::try_from(steps.len()).expect("a blur costs a handful of passes");
+    /// other, and the first reads the contents page. Generic over the block
+    /// itself — a blur's and a drop shadow's alike are just erased 48-byte
+    /// records by the time they reach here.
+    fn run_block(
+        &mut self,
+        block: GpuFilterData,
+        steps: &[frust_engine::filters::FilterStep],
+    ) -> usize {
+        let passes = u32::try_from(steps.len()).expect("a filter costs a handful of passes");
         self.filters
             .prepare(&self.device, &self.queue, &self.pipeline, &[block], passes);
 
@@ -1724,6 +2077,64 @@ fn interpolate(neighbour: [f32; 4], centre: [f32; 4]) -> [f32; 4] {
     out
 }
 
+/// The reference drop shadow: [`cpu_blur`]'s own pyramid, run over a shifted
+/// copy of the source, then recoloured into the shadow's own premultiplied
+/// colour — the host-side mirror of the sequence
+/// `drop_shadow_passes` plans (offset, the blur, colourize), built from the
+/// same `vello_common::filter::drop_shadow::DropShadow` kernel and decimation
+/// plan every other reference in this file uses.
+fn cpu_drop_shadow(source: &Image, shadow: &DropShadow) -> Image {
+    let shifted = shift_image(source, shadow.dx, shadow.dy);
+    let blur = GaussianBlur {
+        std_deviation: shadow.std_deviation,
+        n_decimations: shadow.n_decimations,
+        kernel: shadow.kernel,
+        kernel_size: shadow.kernel_size,
+        edge_mode: shadow.edge_mode,
+    };
+    let blurred = cpu_blur(&shifted, &blur);
+    colorize(&blurred, shadow.color)
+}
+
+/// Shift `source` by `(dx, dy)`, rounded to the nearest whole texel the same
+/// way the WGSL offset pass does (`floor(x + 0.5)`, ties away from zero,
+/// rather than `round()`'s ties-to-even) — transparent black past every edge,
+/// exactly [`Image::sample`]'s own `EdgeMode::None`.
+fn shift_image(source: &Image, dx: f32, dy: f32) -> Image {
+    let shift_x = (dx + 0.5).floor() as i64;
+    let shift_y = (dy + 0.5).floor() as i64;
+    let mut out = Image::new(source.width, source.height);
+    for y in 0..source.height {
+        for x in 0..source.width {
+            out.data[y * source.width + x] = source.sample(x as i64 - shift_x, y as i64 - shift_y);
+        }
+    }
+    out
+}
+
+/// Recolour every texel of `source` into `color`'s own premultiplied value,
+/// scaled by the texel's own alpha — the mask's own colour is discarded, as
+/// `colorize_drop_shadow` discards it on the GPU. Quantized once, the same
+/// per-pass 8-bit rounding budget every other pass in this pyramid pays.
+fn colorize(source: &Image, color: AlphaColor<Srgb>) -> Image {
+    let premultiplied = color.premultiply().to_rgba8();
+    let channels = [
+        f32::from(premultiplied.r),
+        f32::from(premultiplied.g),
+        f32::from(premultiplied.b),
+        f32::from(premultiplied.a),
+    ];
+
+    let mut out = Image::new(source.width, source.height);
+    for (dest, texel) in out.data.iter_mut().zip(source.data.iter()) {
+        let alpha = texel[3] / 255.0;
+        for channel in 0..4 {
+            dest[channel] = channels[channel] * alpha;
+        }
+    }
+    out.quantize()
+}
+
 /// The claim the whole card exists for: at σ 2, 8 and 32 the ported WGSL
 /// produces the same blur on a real GPU that `vello_common`'s own kernel and
 /// decimation plan produce on the CPU.
@@ -2063,4 +2474,182 @@ fn an_oversized_filter_layer_is_refused_by_the_real_pool_rather_than_the_driver(
         error.is_none(),
         "refusing an oversized filter layer raised {error:?}"
     );
+}
+
+// -----------------------------------------------------------------------------
+// On real hardware: the drop shadow
+// -----------------------------------------------------------------------------
+//
+// The same claim the blur cases above make, run over `drop_shadow_passes`'
+// sequence instead: the offset and colourize this file's own
+// `filters_drop_shadow.wgsl` prelude adds, plus the blur passes a shadow reuses
+// unmodified, driven through the identical `FilterHarness` and compared
+// against a CPU reference built from the same `vello_common::filter::gaussian_blur`
+// kernel `cpu_blur` already uses, wrapped in [`shift_image`]/[`colorize`].
+
+/// The offset every drop-shadow GPU case shifts its shadow by.
+///
+/// Small enough that even σ 32's own 3σ ≈ 96px spread, plus this shift, stays
+/// inside [`FILTER_RECT`]'s ~160px margin from [`FILTER_REGION`]'s edge on
+/// every side (see those constants' own docs) — the same margin the plain
+/// blur cases rely on to keep every tap reading transparent padding rather
+/// than a stale texel.
+const DROP_SHADOW_OFFSET: (f32, f32) = (16.0, -12.0);
+
+/// The shadow's own colour: opaque blue, deliberately not [`FILTER_RECT`]'s
+/// opaque red — a colorize pass that let the source's own colour leak
+/// through, or one that ran before the blur rather than after, shows up as a
+/// colour disagreement rather than only a shape one.
+const DROP_SHADOW_COLOR: AlphaColor<Srgb> = AlphaColor::new([0.0, 0.0, 1.0, 1.0]);
+
+/// The claim this half of the card exists for: at σ 2, 8 and 32 the ported
+/// offset and colourize passes, run around the same blur pyramid the plain
+/// blur cases already proved, produce the same shadow on a real GPU that
+/// `vello_common`'s own kernel, decimation plan and drop-shadow colour packing
+/// produce on the CPU.
+///
+/// The tolerance is the blur's own quantization budget plus the one extra
+/// 8-bit rounding the colourize pass pays (see [`DROP_SHADOW_GPU_CPU_TOLERANCE`]).
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_drop_shadow_on_the_gpu_matches_the_shared_kernel_on_the_cpu() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT,
+        [255.0, 0.0, 0.0, 255.0],
+    );
+
+    for sigma in SIGMAS {
+        let shadow_value = shadow(DROP_SHADOW_OFFSET, sigma, DROP_SHADOW_COLOR);
+        let steps = drop_shadow_passes(
+            &shadow_value,
+            SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+        );
+
+        harness.upload_source(&source);
+        let block = GpuFilterData::from(GpuDropShadow::from(&shadow_value));
+        let result = harness.run_block(block, &steps);
+        let gpu = harness.read_region(result);
+        let cpu = cpu_drop_shadow(&source, &shadow_value);
+
+        let (worst, x, y) = gpu.worst_diff(&cpu, 0);
+        let mean = gpu.mean_diff(&cpu, 0);
+        println!(
+            "drop shadow σ {sigma}: {} passes, worst per-channel diff {worst} at ({x}, {y}), mean {mean}",
+            steps.len()
+        );
+
+        assert!(
+            worst <= DROP_SHADOW_GPU_CPU_TOLERANCE,
+            "σ {sigma}: the GPU drop shadow differs from the shared kernel's own by {worst} at \
+             ({x}, {y}), past the {DROP_SHADOW_GPU_CPU_TOLERANCE} eight-bit-rounding budget"
+        );
+        assert!(
+            mean <= DROP_SHADOW_GPU_CPU_MEAN_TOLERANCE,
+            "σ {sigma}: mean per-channel difference {mean} past {DROP_SHADOW_GPU_CPU_MEAN_TOLERANCE}"
+        );
+
+        // The shadow is inked at its own shifted centre...
+        let shifted_x = i64::from(FILTER_RECT.0 as u16 + FILTER_RECT.2 as u16 / 2)
+            + DROP_SHADOW_OFFSET.0.round() as i64;
+        let shifted_y = i64::from(FILTER_RECT.1 as u16 + FILTER_RECT.3 as u16 / 2)
+            + DROP_SHADOW_OFFSET.1.round() as i64;
+        let centre = gpu.sample(shifted_x, shifted_y);
+        assert!(
+            centre[3] > 64.0,
+            "σ {sigma}: the shadow's own shifted middle should be substantially inked: {centre:?}"
+        );
+
+        // ...and every texel of it is blue, never red: the source's own
+        // colour must never reach a colorized shadow, wherever the blur or
+        // the offset placed it.
+        assert!(
+            gpu.data.iter().all(|texel| texel[0] <= 1.0),
+            "σ {sigma}: a shadow texel carries red, so the source's own colour leaked through \
+             the colourize pass"
+        );
+    }
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the drop-shadow passes raised {error:?}");
+}
+
+/// The largest per-channel difference the eight-bit rounding of a drop
+/// shadow's pyramid is allowed to accumulate.
+///
+/// Measured on the pinned T400 runner (NVIDIA 610.43.03, Vulkan), not
+/// guessed: worst 1 at σ 2, 2 at σ 8 and 2 at σ 32 — identical to
+/// [`GPU_CPU_TOLERANCE`]'s own blur-only measurement, so the offset and
+/// colourize passes this file adds cost the pyramid no extra rounding this
+/// budget has to account for. Kept as its own named constant rather than
+/// reusing [`GPU_CPU_TOLERANCE`] directly: the two are equal by measurement,
+/// not by any shared reasoning that would make a future drift in one an
+/// error in the other.
+const DROP_SHADOW_GPU_CPU_TOLERANCE: f32 = 4.0;
+
+/// The mean per-channel difference over the same region.
+///
+/// Measured on the same runner: 0.00006 at σ 2, 0.033 at σ 8, 0.082 at σ 32 —
+/// on the same order as [`GPU_CPU_MEAN_TOLERANCE`]'s own blur-only
+/// measurement.
+const DROP_SHADOW_GPU_CPU_MEAN_TOLERANCE: f32 = 0.3;
+
+/// σ 0 at offset 0 is an identity blur and a no-op shift, so the sequence has
+/// to hand back the source's own shape, recoloured — neither blank, shifted
+/// nor still the source's own colour.
+///
+/// The negative control for the case above, on the same terms the blur's own
+/// zero-σ case is: the one input whose expected output is knowable without a
+/// pyramid at all, so a shader that shifted at a constant offset regardless of
+/// the parameter block, or a colourize pass that ran before the blur instead
+/// of after, fails here with nothing to hide behind.
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test filters -- --ignored`"]
+fn a_zero_sigma_zero_offset_drop_shadow_recolors_the_sources_own_shape_on_the_gpu() {
+    let _guard = render_lock();
+    let mut harness = FilterHarness::new();
+    let scope = harness
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let source = Image::with_rect(
+        FILTER_REGION.0 as usize,
+        FILTER_REGION.1 as usize,
+        FILTER_RECT,
+        [255.0, 0.0, 0.0, 255.0],
+    );
+    let shadow_value = shadow((0.0, 0.0), 0.0, DROP_SHADOW_COLOR);
+    let steps = drop_shadow_passes(
+        &shadow_value,
+        SizeU16::from_wh(FILTER_REGION.0 as u16, FILTER_REGION.1 as u16),
+    );
+    assert_eq!(
+        steps.len(),
+        4,
+        "an unshifted, undecimated shadow is one offset, one pass per blur axis, and one colourize"
+    );
+
+    harness.upload_source(&source);
+    let block = GpuFilterData::from(GpuDropShadow::from(&shadow_value));
+    let result = harness.run_block(block, &steps);
+    let gpu = harness.read_region(result);
+    let expected = colorize(&source, DROP_SHADOW_COLOR);
+
+    let (worst, x, y) = gpu.worst_diff(&expected, 0);
+    println!("drop shadow σ 0, offset 0: worst per-channel diff {worst} at ({x}, {y})");
+    assert!(
+        worst <= 1.0,
+        "an identity blur at zero offset must recolour the source's own shape unchanged, but \
+         ({x}, {y}) moved by {worst}"
+    );
+
+    let error = drain_error_scope(&harness.device, scope);
+    assert!(error.is_none(), "the drop-shadow passes raised {error:?}");
 }
