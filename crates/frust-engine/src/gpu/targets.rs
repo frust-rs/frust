@@ -25,9 +25,22 @@
 //! types, so its keying, reuse and aging are exercised against a counting fake
 //! with no GPU in the loop. The engine always uses the default
 //! `IntermediateTargets<wgpu::Texture, wgpu::TextureView>`.
+//!
+//! ## The one off-screen target this module does not hand out
+//!
+//! [`atlas_layer_config`] describes a pass whose colour attachment is one
+//! layer of the glyph/image atlas array — a target [`crate::gpu::atlas`] owns
+//! outright and deliberately keeps out of the pool (its module doc gives the
+//! reason: residency across frames is the atlas's whole purpose). The
+//! *allocation* therefore belongs there; the *viewport* decision belongs here,
+//! beside [`IntermediateTargets::descriptor`], because it is the same decision
+//! this module already makes for every other target that is not the frame's own
+//! surface — what extent the vertex stage maps its NDC against, and which
+//! resource-texture widths the fragment stage reconstructs by shift.
 
 use frust_gpu::{PoolStats, PooledTexture, TextureAllocator, TextureDesc, TexturePool, TierCaps};
 
+use super::config::GpuConfig;
 use super::pipelines::INTERMEDIATE_FORMAT;
 
 /// The largest intermediate the engine allocates on any adapter, whatever its
@@ -50,6 +63,57 @@ pub const INTERMEDIATE_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_
 pub fn max_texture_size(caps: &TierCaps) -> u32 {
     caps.max_texture_dimension_2d
         .min(MAX_INTERMEDIATE_DIMENSION)
+}
+
+/// The viewport uniform a strip pass whose colour attachment is one atlas
+/// array layer draws with.
+///
+/// `page` is the layer's own extent in texels — the atlas page size, not the
+/// frame's — because the vertex stage maps a strip's pixel coordinates into NDC
+/// against the *attachment* it writes, and an atlas layer is neither the
+/// surface's extent nor a pooled page's. Getting this wrong does not fail
+/// validation: it silently scales every glyph by the ratio of the two extents.
+///
+/// `alphas_tex_width` is the coverage texture the replayed strips sample;
+/// `encoded_paints_tex_width` is the encoded-paint texture, which an atlas pass
+/// only ever binds as a stand-in — a replayed glyph outline paints solid, and a
+/// solid instance carries its colour in its own payload rather than indexing a
+/// record. Both must be powers of two, for
+/// [`tex_width_bits`](super::config::tex_width_bits)' reason.
+///
+/// No strip offset and no NDC negation: an atlas page holds its glyphs at the
+/// slot coordinates the allocator handed out, in the same y-down space every
+/// other engine target uses.
+#[must_use]
+pub fn atlas_layer_config(
+    page: (u32, u32),
+    alphas_tex_width: u32,
+    encoded_paints_tex_width: u32,
+) -> GpuConfig {
+    GpuConfig::new(page.0, page.1, alphas_tex_width, encoded_paints_tex_width)
+}
+
+/// Whether an atlas page of `page` texels can be a render attachment on
+/// `caps`' adapter.
+///
+/// The atlas is not pooled, so it never passes through
+/// [`IntermediateTargets::acquire`]'s own ceiling check — but a page is still a
+/// texture a driver has to accept, and the budgets
+/// [`crate::cache::images::AtlasBudget`] hands out are chosen without the
+/// adapter in view. This is the check a caller makes once, at the point it
+/// decides a page size, rather than discovering the refusal as a device error
+/// on the first frame that misses a glyph.
+///
+/// The adapter's own `max_texture_dimension_2d` is the bound, not
+/// [`MAX_INTERMEDIATE_DIMENSION`]: that ceiling is a transient-memory decision
+/// about targets allocated per frame, and an atlas page is allocated once and
+/// lives for the renderer.
+#[must_use]
+pub fn atlas_page_fits(caps: &TierCaps, page: (u32, u32)) -> bool {
+    page.0 > 0
+        && page.1 > 0
+        && page.0 <= caps.max_texture_dimension_2d
+        && page.1 <= caps.max_texture_dimension_2d
 }
 
 /// The result of asking for an intermediate: a pooled texture, or the extent
@@ -250,6 +314,48 @@ mod tests {
         assert!(desc.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
         assert!(desc.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
         assert_eq!(desc.sample_count(), 1);
+    }
+
+    #[test]
+    fn an_atlas_layer_pass_maps_its_ndc_against_the_page_not_the_frame() {
+        let config = atlas_layer_config((1024, 1024), 2048, 1);
+
+        assert_eq!(config.width, 1024);
+        assert_eq!(config.height, 1024);
+        assert_eq!(config.strip_offset_x, 0);
+        assert_eq!(config.strip_offset_y, 0);
+        assert_eq!(config.negate_ndc, 0);
+        assert_eq!(config.alphas_tex_width_bits, 11, "log2(2048)");
+        assert_eq!(
+            config.encoded_paints_tex_width_bits, 0,
+            "a 1-texel stand-in reconstructs as `1 << 0`"
+        );
+    }
+
+    #[test]
+    fn a_page_past_the_adapters_own_limit_does_not_fit() {
+        let mut caps = caps();
+        caps.max_texture_dimension_2d = 2048;
+
+        assert!(atlas_page_fits(&caps, (2048, 2048)));
+        assert!(!atlas_page_fits(&caps, (4096, 1024)));
+        assert!(!atlas_page_fits(&caps, (1024, 4096)));
+        // A degenerate page is not a page: nothing can be allocated in it, and
+        // a zero-extent attachment is a device error rather than an empty pass.
+        assert!(!atlas_page_fits(&caps, (0, 1024)));
+        assert!(!atlas_page_fits(&caps, (1024, 0)));
+    }
+
+    #[test]
+    fn the_atlas_pages_ceiling_is_the_adapters_rather_than_the_transient_cap() {
+        let mut caps = caps();
+        caps.max_texture_dimension_2d = 16384;
+
+        // The pool refuses this; the atlas does not, because a page is
+        // allocated once for the renderer rather than per frame.
+        const { assert!(MAX_INTERMEDIATE_DIMENSION < 16384) };
+        assert!(atlas_page_fits(&caps, (16384, 16384)));
+        assert_eq!(max_texture_size(&caps), MAX_INTERMEDIATE_DIMENSION);
     }
 
     #[test]

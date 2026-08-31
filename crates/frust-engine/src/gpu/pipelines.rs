@@ -26,6 +26,24 @@
 //! draw) to z = 1.0 and each draw in front of it to a smaller z, so drawing
 //! front-to-back lets the opaque pass reject everything already covered.
 //!
+//! ## The atlas-layer target
+//!
+//! A pass that rasterizes glyph outlines into one layer of the atlas array
+//! draws through [`ATLAS_STRIP_PIPELINE`], which is
+//! [`EnginePipeline::StripIntermediate`] itself rather than a variant of its
+//! own. An atlas layer is an [`crate::gpu::atlas::ATLAS_FORMAT`] colour target
+//! with no depth attachment, composited source-over so a COLR glyph's layers
+//! and a re-used slot's clear stack in the order they were recorded — which is
+//! the render state `StripIntermediate` already *is*, field for field. A second
+//! enum arm carrying identical state would compile a second identical pipeline
+//! object, and would break
+//! `the_warm_up_list_covers_every_pipeline_exactly_once`, whose whole point is
+//! that no two arms describe the same pipeline. What the atlas target gets
+//! instead is a name and [`the_atlas_target_reuses_the_intermediate_variant`],
+//! which pins the format equality the reuse rests on: if either format is ever
+//! moved, that test fails rather than glyphs quietly rendering through a
+//! pipeline whose colour target no longer matches its attachment.
+//!
 //! ## The destination-out pair
 //!
 //! The hole punch [`crate::compile::clear`] lowers is a strip run like any
@@ -427,6 +445,25 @@ pub fn copy_vertex_layout() -> VertexLayout {
     }
 }
 
+/// The strip pipeline a pass whose colour attachment is one atlas array layer
+/// draws through.
+///
+/// See the module doc's *The atlas-layer target* for why this is a name for an
+/// existing variant rather than a variant of its own.
+pub const ATLAS_STRIP_PIPELINE: EnginePipeline = EnginePipeline::StripIntermediate;
+
+/// The description [`ATLAS_STRIP_PIPELINE`] is built from.
+///
+/// Takes no target format: the atlas array's format is fixed by the array
+/// itself, so unlike a pass over the frame's own target there is nothing here
+/// to negotiate. Already covered by [`warm_up_descs`] — an atlas pass is
+/// therefore never the first place a pipeline is compiled, on the frames that
+/// have one.
+#[must_use]
+pub fn atlas_strip_desc(shaders: &EngineShaders) -> RenderPipelineDesc {
+    ATLAS_STRIP_PIPELINE.desc(shaders, INTERMEDIATE_FORMAT)
+}
+
 /// The full warm-up list: every pipeline in [`EnginePipeline::ALL`],
 /// described against `target_format`.
 #[must_use]
@@ -651,6 +688,49 @@ mod tests {
         );
     }
 
+    /// The atlas pass reuses the intermediate variant, and the equality that
+    /// makes the reuse sound is checked rather than asserted in prose.
+    ///
+    /// A colour attachment whose format disagrees with its pipeline's is a
+    /// validation error, not a mis-render — but the failure would surface on a
+    /// device, on the first frame that missed a glyph, rather than here.
+    #[test]
+    fn the_atlas_target_reuses_the_intermediate_variant() {
+        assert_eq!(
+            crate::gpu::atlas::ATLAS_FORMAT,
+            INTERMEDIATE_FORMAT,
+            "an atlas layer is drawn through the intermediate variant, so the two formats are one \
+             decision"
+        );
+
+        assert_eq!(ATLAS_STRIP_PIPELINE, EnginePipeline::StripIntermediate);
+        assert_eq!(
+            ATLAS_STRIP_PIPELINE.format(TARGET),
+            crate::gpu::atlas::ATLAS_FORMAT,
+            "the atlas pipeline writes the atlas format whatever the frame's own target is"
+        );
+        assert_eq!(
+            ATLAS_STRIP_PIPELINE.blend(),
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "a replayed glyph composites source-over onto whatever the slot already holds"
+        );
+        assert_eq!(
+            ATLAS_STRIP_PIPELINE.depth(),
+            None,
+            "an atlas layer carries no depth attachment for a pipeline to test against"
+        );
+        assert!(ATLAS_STRIP_PIPELINE.is_strip());
+
+        // Warmed up with the rest, so an atlas pass never compiles inline.
+        let module = ATLAS_STRIP_PIPELINE.module();
+        assert_eq!(module, EngineShaderModule::Strip);
+        assert!(EnginePipeline::ALL.contains(&ATLAS_STRIP_PIPELINE));
+        assert!(
+            frust_gpu::lint_pipeline_layout(&ATLAS_STRIP_PIPELINE.layout_desc()).is_empty(),
+            "the atlas pass must stay inside the downlevel design rules"
+        );
+    }
+
     #[test]
     fn the_clear_and_copy_pipelines_write_the_intermediate_format_unblended() {
         for pipeline in [EnginePipeline::Clear, EnginePipeline::Copy] {
@@ -774,6 +854,13 @@ mod tests {
         let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
         let descs = warm_up_descs(&shaders, TARGET);
         assert_eq!(descs.len(), EnginePipeline::ALL.len());
+        // The atlas pass draws through a description the warm-up list already
+        // carries, so it never compiles a pipeline inline on a frame that
+        // misses a glyph.
+        assert!(
+            descs.contains(&atlas_strip_desc(&shaders)),
+            "the atlas description must be one the warm-up list already covers"
+        );
         for desc in &descs {
             let _pipeline = cache.get_or_create(&device, desc);
         }
