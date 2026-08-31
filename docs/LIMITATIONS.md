@@ -3817,3 +3817,81 @@ out of the root-round loop, which lets the scheduler serve same-parity
 sequential page reuse and sibling fans of any width within two live pages —
 tracked as an open action item; or the swap phase making the engine the only
 tier, at which point the served set must cover the widget tree's real shapes.
+
+### `engine-glifo-atlas-experimental` — the engine's glyph atlas is built on a cache upstream labels experimental, wrapped in frust-owned policy
+
+**Observed** (evidence: glifo 0.3.0 `glyph.rs`'s atlas-cache doc — "highly
+experimental and not recommended for external use" — and
+`crates/frust-engine/src/text/atlas_policy.rs`): the engine caches settled
+glyph runs in a GPU atlas driven by glifo's cacher, which keys font size by
+exact `f32` bits and leaves eviction/layout policy to the integrator. frust
+wraps it in its own policy rather than trusting the defaults: font size is
+quantized to a 1/4-px grid before keying, a run whose size changed inside an
+8-frame window draws as outline strips instead of minting per-frame entries,
+the frame is two-phase (collect, then one atlas build strictly before the
+scene pass), glifo's `PendingClearRect`s are drained into real atlas clears
+after `maintain()`, and glyphs share one `ImageCache` allocator with images so
+their slot ids and rectangles cannot collide. `FRUST_ENGINE_NO_ATLAS` routes
+every glyph to the outline path — a correct, slower, tested fallback — and a
+10,000-frame animated-size churn test bounds resident entries. The
+atlas-drawn and outline paths are byte-identical for a whole-pixel-placed run
+on the T400 reference adapter.
+
+**Accepted because**: the outline fallback is always live (animating sizes,
+oversized glyphs, refused allocations, the kill switch all take it), so an
+atlas defect degrades to the slower correct path rather than wrong pixels;
+and the policy layer pins every behaviour upstream leaves open.
+
+**Trigger for removal**: glifo stabilising its atlas surface, or the swap
+phase absorbing the vendored core.
+
+### `engine-bitmap-glyphs-gap` — bitmap-strike (PNG/BGRA/Mask) emoji do not render on the engine tier; COLR emoji do
+
+**Observed** (evidence: glifo 0.3.0 `glyph.rs` — `BitmapData::Png` decodes
+only under glifo's `png` feature, `Bgra`/`Mask` return `None` unconditionally;
+`crates/frust-engine/src/text/backend.rs` counts such glyphs in
+`skipped_glyphs`): the engine leaves glifo's `png` feature off because frust
+already ships a PNG decoder (`image` 0.25.10) and a second one is pure
+dependency weight, so a PNG-strike emoji glyph goes missing rather than
+landing wrong; BGRA and Mask strikes are undecoded upstream regardless.
+COLRv1 colour glyphs are the supported emoji path
+(`crates/frust-engine/src/text/color.rs`). Within COLR, a glyph whose paint
+graph needs a shape the engine cannot express exactly — a layer inside an
+isolated blend bracket, or two nested outline clips at once — is dropped
+whole and counted, never half-painted.
+
+**Accepted because**: the bundled and platform emoji fonts frust targets ship
+COLR tables; a wrong-pixels approximation of an inexpressible COLR shape
+would violate the backend's never-wrong-pixels invariant; and decoding PNG
+strikes properly belongs to a routing seam that hands glifo frust's own
+decoder rather than enabling a duplicate one.
+
+**Trigger for removal**: a glifo release taking an external PNG decode hook
+(or decoding BGRA/Mask), or a measured need for a bitmap-strike font on a
+target platform.
+
+### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; reference oracles never hint
+
+**Observed** (evidence: `crates/frust-engine/src/compile/mod.rs`'s
+`hint_text` from `for_caps`, `crates/frust-engine/src/text/mod.rs`'s
+`lower_glyph_run`, glifo 0.3.0 `GlyphRunBuilder::hint`): the engine asks
+glifo to hint only when the device class is desktop
+(`hint_text = !is_mobile_tier(caps)`); glifo then applies vertical-only
+autohinting, and only when the run's full transform is a positive uniform
+scale without vertical skew — any other transform falls back to unhinted.
+Mobile stays unhinted (≥2x DPR gains nothing and hinting doubles cache
+keys), and there is no LCD subpixel rendering on any tier — the same posture
+as the classic tier. Both golden oracles (`vello_cpu`, classic) never hint,
+so on a desktop-class adapter the engine's text pixels legitimately differ
+from the oracles' by a fraction-of-a-pixel grid snap per glyph edge; the
+text goldens carry per-case escalation rows measuring exactly that
+divergence rather than loosening the corpus budget.
+
+**Accepted because**: hinted small text is measurably crisper on low-DPR
+desktop displays, the divergence is deterministic and byte-stable
+frame-to-frame, and the unhinted lowering stays fully exercised (mobile,
+every oracle, and the dedicated hinted-vs-unhinted stability tests).
+
+**Trigger for removal**: an `EngineRenderer` hint override letting parity
+gates compare unhinted-vs-unhinted (tracked as an open action item), or a
+DPR-aware policy replacing the binary device-class switch.

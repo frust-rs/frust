@@ -68,8 +68,8 @@ The repository already contains substantial non-pixel coverage:
   `vello_cpu` 0.2.0 pin, `ClassicOracle` over `HeadlessRenderer`), a 4-channel
   diff with a separate alpha threshold and 1-px eroded-interior mask,
   triptych/JSON failure artifacts under `target/frust-testing/`, and the
-  committed `testing/goldens/cpu/` class (unit, adversarial, widget, and page
-  cases, incl. `examples/material3-demo`'s standalone page goldens).
+  committed `testing/goldens/cpu/` class (unit, adversarial, widget, page, and
+  text cases, incl. `examples/material3-demo`'s standalone page goldens).
 - `frust-cli` and `frust-drive`: command construction, project mutation,
   device selection, preflight, process supervision, and ignored scaffold/build
   end-to-end tests.
@@ -264,7 +264,23 @@ compared; whole-image max |Δ| ≤ 1 across the rect/path/gradient corpus). That
 is made in premultiplied space: straightening divides by the pixel's own
 alpha, which amplifies a 1-level difference by up to 255× at hairline/dash
 coverage — a diff there measures the conversion's information loss, not the
-rasterizers. Native offscreen and Android screenshots are never cross-compared:
+rasterizers.
+
+Text has its own corpus family (`crates/frust-testing/src/corpus/text.rs`:
+Latin mixed sizes, RTL Arabic joining, CJK, stacked combining marks, COLRv1
+emoji, a gradient-brushed run, a clipped run, and a `no_ref` 10k-glyph layout
+case) and its own font policy: every case shapes only against the bundled
+subsets in `testing/fonts/` (Noto subsets; provenance in
+`testing/fonts/LICENSES.md`), and the `foreign_font_runs` byte-identity gate
+fails any case whose codepoints leak to host-font fallback — extend a subset
+rather than widening a case's text. Text is also the family where the two
+arms legitimately diverge most: the engine hints on desktop-class adapters
+(`SceneCompiler::for_caps`) while both reference oracles never hint, so the
+text cases carry per-case `ESCALATIONS`/`BAND_ESCALATIONS` rows whose measured
+numbers document a hinted-vs-unhinted edge shift, not a rasterizer
+disagreement (see `engine-text-hinting-policy` in `docs/LIMITATIONS.md`).
+
+Native offscreen and Android screenshots are never cross-compared:
 Android adds density, platform fonts, surface composition, system bars, color
 management, and potentially a different Vulkan implementation.
 
