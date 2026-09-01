@@ -1932,7 +1932,7 @@ cost.
 | `Device::destroy()` mid-session, then a fresh renderer | E17 / R8 | **pass** — see the note below |
 | DPR 1.5 and 2.25, scale in the root `Affine`, whole-pixel target | E15 | **pass** |
 | Translucent destination (base colour alpha 0.5) | E16 | **pass** |
-| Manual macOS window session — `material3-demo` fullscreen on the 5K display, drag-resize storm, no validation errors, no black frame | — | **pending (Ed at the desk)** |
+| Manual macOS window session — `material3-demo` fullscreen + drag-resize storm on the attached external display, no validation errors, no black frame | frame p50 16.41 ms (display-paced, 60 Hz panel), p95 19.64, worst 72.52 (resize reconfigure); `gpu_total` p50 0.99 ms / p95 2.45 (live ring); 4065 frames, 0 validation/error lines | **done 2026-09-01 (Ed)** — smooth, no black frames, no artifacts. Deviation: run on a Samsung M70C 4K (3840x2160) — the only display at the rig, continuing Phase 0's unmeasured-5K note; `FRUST_WINDOW_SIZE=5120x2880` was requested and clamped by macOS to the panel, so the live-window drawable stayed ≤4K; the 5120x2880 coverage incl. band tiling stands in the headless (a)/(e)/(f) cases above |
 
 The 5K root-layer cell, previously the suite's one open engineering item, is
 now closed: `Schedule::build` reaches for `schedule::pages::page_bands` itself
