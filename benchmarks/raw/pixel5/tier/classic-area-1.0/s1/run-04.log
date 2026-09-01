@@ -2,440 +2,658 @@ frust-perf activity-create
 frust_shell_common::perf: bench-scenario-start s1
 frust_render::context: frust-perf surface-caps formats=[Rgba8UnormSrgb,Rgba8Unorm,Rgba16Float,Rgb10a2Unorm] usages=TextureUsages(COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING | RENDER_ATTACHMENT | STORAGE_ATOMIC) direct_to_surface=YES (Rgba8Unorm+STORAGE_BINDING)
 frust_render::context: frust-perf render-path direct (Rgba8Unorm+STORAGE_BINDING)
-frust_shell_common::perf: frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=0ms preinit_started=0ms preinit_joined=0ms cache_loaded=0ms pipeline_cache_restored=0ms adapter_ready=50ms device_ready=50ms renderer_ready=50ms first_rebuild_done=64ms first_encode_done=64ms first_frame_presented=87ms
-frust_shell_common::perf: frust-perf raw n=1 total_us=23830 rebuild_us=61 layout_us=0 paint_us=95 encode_us=218 acquire_us=44 submit_us=23410 skipped=0
-frust_shell_common::perf: frust-perf raw n=2 total_us=89989 rebuild_us=186 layout_us=0 paint_us=690 encode_us=98 acquire_us=20 submit_us=88992 skipped=0
-frust_shell_common::perf: frust-perf raw n=3 total_us=60043 rebuild_us=120 layout_us=0 paint_us=163 encode_us=122 acquire_us=39 submit_us=59597 skipped=0
-frust_shell_common::perf: frust-perf raw n=4 total_us=53895 rebuild_us=221 layout_us=0 paint_us=391 encode_us=169 acquire_us=59 submit_us=53053 skipped=0
-frust_shell_common::perf: frust-perf raw n=5 total_us=52285 rebuild_us=63 layout_us=0 paint_us=122 encode_us=155 acquire_us=55 submit_us=51888 skipped=0
-frust_shell_common::perf: frust-perf raw n=6 total_us=54404 rebuild_us=84 layout_us=0 paint_us=157 encode_us=206 acquire_us=73 submit_us=53881 skipped=0
-frust_shell_common::perf: frust-perf raw n=7 total_us=54101 rebuild_us=127 layout_us=0 paint_us=287 encode_us=279 acquire_us=80 submit_us=53325 skipped=0
-frust_shell_common::perf: frust-perf raw n=8 total_us=49230 rebuild_us=94 layout_us=0 paint_us=137 encode_us=162 acquire_us=56 submit_us=48780 skipped=0
-frust_shell_common::perf: frust-perf raw n=9 total_us=50210 rebuild_us=95 layout_us=0 paint_us=155 encode_us=169 acquire_us=94 submit_us=49693 skipped=0
-frust_shell_common::perf: frust-perf raw n=10 total_us=48298 rebuild_us=85 layout_us=0 paint_us=129 encode_us=154 acquire_us=77 submit_us=47850 skipped=0
-frust_shell_common::perf: frust-perf raw n=11 total_us=49693 rebuild_us=93 layout_us=0 paint_us=137 encode_us=167 acquire_us=88 submit_us=49206 skipped=0
-frust_shell_common::perf: frust-perf raw n=12 total_us=48808 rebuild_us=56 layout_us=0 paint_us=100 encode_us=137 acquire_us=72 submit_us=48441 skipped=0
-frust_shell_common::perf: frust-perf raw n=13 total_us=48790 rebuild_us=54 layout_us=0 paint_us=100 encode_us=138 acquire_us=82 submit_us=48413 skipped=0
-frust_shell_common::perf: frust-perf raw n=14 total_us=47595 rebuild_us=58 layout_us=0 paint_us=114 encode_us=139 acquire_us=77 submit_us=47204 skipped=0
-frust_shell_common::perf: frust-perf raw n=15 total_us=48176 rebuild_us=79 layout_us=0 paint_us=100 encode_us=139 acquire_us=78 submit_us=47778 skipped=0
-frust_shell_common::perf: frust-perf raw n=16 total_us=48243 rebuild_us=62 layout_us=0 paint_us=120 encode_us=156 acquire_us=77 submit_us=47825 skipped=0
-frust_shell_common::perf: frust-perf raw n=17 total_us=48320 rebuild_us=58 layout_us=0 paint_us=114 encode_us=154 acquire_us=77 submit_us=47915 skipped=0
-frust_shell_common::perf: frust-perf raw n=18 total_us=47804 rebuild_us=68 layout_us=0 paint_us=129 encode_us=157 acquire_us=78 submit_us=47369 skipped=0
-frust_shell_common::perf: frust-perf raw n=19 total_us=48887 rebuild_us=123 layout_us=0 paint_us=231 encode_us=158 acquire_us=81 submit_us=48290 skipped=0
-frust_shell_common::perf: frust-perf raw n=20 total_us=47512 rebuild_us=70 layout_us=153 paint_us=115 encode_us=90 acquire_us=66 submit_us=47016 skipped=0
-frust_shell_common::perf: frust-perf raw n=21 total_us=47966 rebuild_us=67 layout_us=0 paint_us=119 encode_us=162 acquire_us=75 submit_us=47541 skipped=0
-frust_shell_common::perf: frust-perf raw n=22 total_us=48414 rebuild_us=62 layout_us=0 paint_us=112 encode_us=155 acquire_us=77 submit_us=48006 skipped=0
-frust_shell_common::perf: frust-perf raw n=23 total_us=47815 rebuild_us=61 layout_us=0 paint_us=118 encode_us=158 acquire_us=78 submit_us=47396 skipped=0
-frust_shell_common::perf: frust-perf raw n=24 total_us=48213 rebuild_us=61 layout_us=0 paint_us=119 encode_us=140 acquire_us=72 submit_us=47819 skipped=0
-frust_shell_common::perf: frust-perf raw n=25 total_us=47935 rebuild_us=67 layout_us=0 paint_us=131 encode_us=145 acquire_us=75 submit_us=47515 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=120 expected_present_us=0 acquire_us=74 period_us=11142
-frust_shell_common::perf: frust-perf raw n=26 total_us=47972 rebuild_us=64 layout_us=0 paint_us=163 encode_us=156 acquire_us=75 submit_us=47510 skipped=0
-frust_shell_common::perf: frust-perf raw n=27 total_us=47662 rebuild_us=72 layout_us=0 paint_us=135 encode_us=157 acquire_us=78 submit_us=47217 skipped=0
-frust_shell_common::perf: frust-perf raw n=28 total_us=48170 rebuild_us=62 layout_us=0 paint_us=115 encode_us=155 acquire_us=84 submit_us=47751 skipped=0
-frust_shell_common::perf: frust-perf raw n=29 total_us=47537 rebuild_us=74 layout_us=0 paint_us=132 encode_us=159 acquire_us=79 submit_us=47091 skipped=0
-frust_shell_common::perf: frust-perf raw n=30 total_us=47675 rebuild_us=55 layout_us=0 paint_us=102 encode_us=127 acquire_us=63 submit_us=47325 skipped=0
-frust_shell_common::perf: frust-perf raw n=31 total_us=48448 rebuild_us=76 layout_us=0 paint_us=137 encode_us=166 acquire_us=82 submit_us=47984 skipped=0
-frust_shell_common::perf: frust-perf raw n=32 total_us=47843 rebuild_us=59 layout_us=0 paint_us=116 encode_us=156 acquire_us=79 submit_us=47430 skipped=0
-frust_shell_common::perf: frust-perf raw n=33 total_us=47608 rebuild_us=60 layout_us=0 paint_us=115 encode_us=164 acquire_us=78 submit_us=47190 skipped=0
-frust_shell_common::perf: frust-perf raw n=34 total_us=47523 rebuild_us=61 layout_us=0 paint_us=117 encode_us=154 acquire_us=77 submit_us=47111 skipped=0
-frust_shell_common::perf: frust-perf raw n=35 total_us=48343 rebuild_us=61 layout_us=0 paint_us=115 encode_us=161 acquire_us=82 submit_us=47922 skipped=0
-frust_shell_common::perf: frust-perf raw n=36 total_us=47602 rebuild_us=62 layout_us=0 paint_us=113 encode_us=157 acquire_us=79 submit_us=47189 skipped=0
-frust_shell_common::perf: frust-perf raw n=37 total_us=48532 rebuild_us=64 layout_us=0 paint_us=120 encode_us=131 acquire_us=70 submit_us=48144 skipped=0
-frust_shell_common::perf: frust-perf raw n=38 total_us=48657 rebuild_us=63 layout_us=0 paint_us=117 encode_us=156 acquire_us=80 submit_us=48238 skipped=0
-frust_shell_common::perf: frust-perf raw n=39 total_us=47864 rebuild_us=107 layout_us=0 paint_us=241 encode_us=223 acquire_us=112 submit_us=47178 skipped=0
-frust_shell_common::perf: frust-perf raw n=40 total_us=48735 rebuild_us=265 layout_us=1 paint_us=662 encode_us=264 acquire_us=153 submit_us=47388 skipped=0
-frust_shell_common::perf: frust-perf raw n=41 total_us=49094 rebuild_us=259 layout_us=399 paint_us=410 encode_us=227 acquire_us=137 submit_us=47660 skipped=0
-frust_shell_common::perf: frust-perf frame n=41 total_p50_ms=48 total_p95_ms=54 total_p99_ms=89 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=53 over_60hz=41 over_120hz=41 skipped=0 total_frames=41
-frust_shell_common::perf: frust-perf raw n=42 total_us=48329 rebuild_us=200 layout_us=2 paint_us=513 encode_us=225 acquire_us=125 submit_us=47262 skipped=0
-frust_shell_common::perf: frust-perf raw n=43 total_us=48249 rebuild_us=81 layout_us=0 paint_us=154 encode_us=315 acquire_us=92 submit_us=47604 skipped=0
-frust_shell_common::perf: frust-perf raw n=44 total_us=48345 rebuild_us=205 layout_us=1 paint_us=517 encode_us=229 acquire_us=123 submit_us=47268 skipped=0
-frust_shell_common::perf: frust-perf raw n=45 total_us=49218 rebuild_us=210 layout_us=2 paint_us=529 encode_us=221 acquire_us=106 submit_us=48147 skipped=0
-frust_shell_common::perf: frust-perf raw n=46 total_us=48855 rebuild_us=254 layout_us=2 paint_us=786 encode_us=258 acquire_us=160 submit_us=47394 skipped=0
-frust_shell_common::perf: frust-perf raw n=47 total_us=48760 rebuild_us=197 layout_us=2 paint_us=569 encode_us=220 acquire_us=105 submit_us=47665 skipped=0
-frust_shell_common::perf: frust-perf raw n=48 total_us=49123 rebuild_us=294 layout_us=3 paint_us=739 encode_us=209 acquire_us=82 submit_us=47794 skipped=0
-frust_shell_common::perf: frust-perf raw n=49 total_us=48536 rebuild_us=200 layout_us=2 paint_us=520 encode_us=236 acquire_us=130 submit_us=47445 skipped=0
-frust_shell_common::perf: frust-perf raw n=50 total_us=48330 rebuild_us=430 layout_us=3 paint_us=991 encode_us=272 acquire_us=263 submit_us=46370 skipped=0
-frust_shell_common::perf: frust-perf raw n=51 total_us=48332 rebuild_us=82 layout_us=0 paint_us=155 encode_us=238 acquire_us=109 submit_us=47746 skipped=0
-frust_shell_common::perf: frust-perf raw n=52 total_us=47986 rebuild_us=93 layout_us=0 paint_us=169 encode_us=208 acquire_us=92 submit_us=47422 skipped=0
-frust_shell_common::perf: frust-perf raw n=53 total_us=47827 rebuild_us=85 layout_us=0 paint_us=161 encode_us=218 acquire_us=103 submit_us=47257 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=240 expected_present_us=0 acquire_us=113 period_us=11124
-frust_shell_common::perf: frust-perf raw n=54 total_us=48381 rebuild_us=98 layout_us=0 paint_us=177 encode_us=223 acquire_us=92 submit_us=47788 skipped=0
-frust_shell_common::perf: frust-perf raw n=55 total_us=47347 rebuild_us=103 layout_us=0 paint_us=198 encode_us=256 acquire_us=164 submit_us=46623 skipped=0
-frust_shell_common::perf: frust-perf raw n=56 total_us=47851 rebuild_us=81 layout_us=0 paint_us=153 encode_us=213 acquire_us=96 submit_us=47304 skipped=0
-frust_shell_common::perf: frust-perf raw n=57 total_us=48336 rebuild_us=84 layout_us=0 paint_us=157 encode_us=210 acquire_us=85 submit_us=47796 skipped=0
-frust_shell_common::perf: frust-perf raw n=58 total_us=48215 rebuild_us=114 layout_us=0 paint_us=155 encode_us=211 acquire_us=97 submit_us=47635 skipped=0
-frust_shell_common::perf: frust-perf raw n=59 total_us=48086 rebuild_us=207 layout_us=1 paint_us=537 encode_us=256 acquire_us=177 submit_us=46905 skipped=0
-frust_shell_common::perf: frust-perf raw n=60 total_us=48932 rebuild_us=204 layout_us=2 paint_us=520 encode_us=246 acquire_us=140 submit_us=47818 skipped=0
-frust_shell_common::perf: frust-perf raw n=61 total_us=47943 rebuild_us=227 layout_us=1 paint_us=566 encode_us=251 acquire_us=160 submit_us=46736 skipped=0
-frust_shell_common::perf: frust-perf raw n=62 total_us=48232 rebuild_us=79 layout_us=0 paint_us=152 encode_us=210 acquire_us=102 submit_us=47686 skipped=0
-frust_shell_common::perf: frust-perf raw n=63 total_us=47764 rebuild_us=85 layout_us=0 paint_us=164 encode_us=211 acquire_us=110 submit_us=47192 skipped=0
-frust_shell_common::perf: frust-perf raw n=64 total_us=48074 rebuild_us=85 layout_us=0 paint_us=167 encode_us=217 acquire_us=114 submit_us=47488 skipped=0
-frust_shell_common::perf: frust-perf raw n=65 total_us=49114 rebuild_us=278 layout_us=2 paint_us=588 encode_us=234 acquire_us=118 submit_us=47891 skipped=0
-frust_shell_common::perf: frust-perf raw n=66 total_us=48137 rebuild_us=224 layout_us=1 paint_us=599 encode_us=247 acquire_us=146 submit_us=46917 skipped=0
-frust_shell_common::perf: frust-perf raw n=67 total_us=48467 rebuild_us=277 layout_us=2 paint_us=838 encode_us=261 acquire_us=205 submit_us=46882 skipped=0
-frust_shell_common::perf: frust-perf raw n=68 total_us=49336 rebuild_us=196 layout_us=1 paint_us=504 encode_us=229 acquire_us=110 submit_us=48294 skipped=0
-frust_shell_common::perf: frust-perf raw n=69 total_us=48721 rebuild_us=598 layout_us=3 paint_us=833 encode_us=265 acquire_us=159 submit_us=46860 skipped=0
-frust_shell_common::perf: frust-perf raw n=70 total_us=48839 rebuild_us=192 layout_us=2 paint_us=504 encode_us=237 acquire_us=131 submit_us=47770 skipped=0
-frust_shell_common::perf: frust-perf raw n=71 total_us=48490 rebuild_us=207 layout_us=67 paint_us=572 encode_us=225 acquire_us=120 submit_us=47297 skipped=0
-frust_shell_common::perf: frust-perf raw n=72 total_us=48692 rebuild_us=235 layout_us=2 paint_us=606 encode_us=209 acquire_us=94 submit_us=47545 skipped=0
-frust_shell_common::perf: frust-perf raw n=73 total_us=48658 rebuild_us=246 layout_us=2 paint_us=572 encode_us=267 acquire_us=286 submit_us=47282 skipped=0
-frust_shell_common::perf: frust-perf raw n=74 total_us=47767 rebuild_us=230 layout_us=2 paint_us=554 encode_us=247 acquire_us=144 submit_us=46588 skipped=0
-frust_shell_common::perf: frust-perf raw n=75 total_us=49712 rebuild_us=200 layout_us=1 paint_us=509 encode_us=232 acquire_us=116 submit_us=48652 skipped=0
-frust_shell_common::perf: frust-perf raw n=76 total_us=48268 rebuild_us=281 layout_us=2 paint_us=522 encode_us=235 acquire_us=125 submit_us=47101 skipped=0
-frust_shell_common::perf: frust-perf raw n=77 total_us=48311 rebuild_us=203 layout_us=2 paint_us=509 encode_us=207 acquire_us=96 submit_us=47291 skipped=0
-frust_shell_common::perf: frust-perf raw n=78 total_us=48014 rebuild_us=89 layout_us=0 paint_us=172 encode_us=204 acquire_us=104 submit_us=47443 skipped=0
-frust_shell_common::perf: frust-perf raw n=79 total_us=47866 rebuild_us=78 layout_us=0 paint_us=152 encode_us=205 acquire_us=101 submit_us=47327 skipped=0
-frust_shell_common::perf: frust-perf raw n=80 total_us=47909 rebuild_us=95 layout_us=34 paint_us=174 encode_us=421 acquire_us=212 submit_us=46970 skipped=0
-frust_shell_common::perf: frust-perf raw n=81 total_us=48154 rebuild_us=80 layout_us=0 paint_us=153 encode_us=209 acquire_us=91 submit_us=47618 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=360 expected_present_us=0 acquire_us=122 period_us=11143
-frust_shell_common::perf: frust-perf raw n=82 total_us=48554 rebuild_us=240 layout_us=2 paint_us=564 encode_us=224 acquire_us=107 submit_us=47415 skipped=0
-frust_shell_common::perf: frust-perf raw n=83 total_us=48698 rebuild_us=198 layout_us=1 paint_us=510 encode_us=228 acquire_us=111 submit_us=47647 skipped=0
-frust_shell_common::perf: frust-perf frame n=83 total_p50_ms=48 total_p95_ms=53 total_p99_ms=89 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=53 over_60hz=83 over_120hz=83 skipped=0 total_frames=83
-frust_shell_common::perf: frust-perf raw n=84 total_us=48461 rebuild_us=350 layout_us=2 paint_us=601 encode_us=390 acquire_us=168 submit_us=46947 skipped=0
-frust_shell_common::perf: frust-perf raw n=85 total_us=49374 rebuild_us=218 layout_us=2 paint_us=555 encode_us=245 acquire_us=144 submit_us=48207 skipped=0
-frust_shell_common::perf: frust-perf raw n=86 total_us=48648 rebuild_us=201 layout_us=2 paint_us=529 encode_us=220 acquire_us=105 submit_us=47588 skipped=0
-frust_shell_common::perf: frust-perf raw n=87 total_us=48533 rebuild_us=250 layout_us=2 paint_us=676 encode_us=232 acquire_us=122 submit_us=47249 skipped=0
-frust_shell_common::perf: frust-perf raw n=88 total_us=48666 rebuild_us=301 layout_us=3 paint_us=897 encode_us=228 acquire_us=107 submit_us=47128 skipped=0
-frust_shell_common::perf: frust-perf raw n=89 total_us=48589 rebuild_us=105 layout_us=0 paint_us=197 encode_us=264 acquire_us=167 submit_us=47853 skipped=0
-frust_shell_common::perf: frust-perf raw n=90 total_us=48512 rebuild_us=79 layout_us=0 paint_us=151 encode_us=182 acquire_us=96 submit_us=48002 skipped=0
-frust_shell_common::perf: frust-perf raw n=91 total_us=48130 rebuild_us=88 layout_us=0 paint_us=164 encode_us=208 acquire_us=93 submit_us=47575 skipped=0
-frust_shell_common::perf: frust-perf raw n=92 total_us=47338 rebuild_us=80 layout_us=0 paint_us=155 encode_us=213 acquire_us=95 submit_us=46792 skipped=0
-frust_shell_common::perf: frust-perf raw n=93 total_us=48625 rebuild_us=96 layout_us=0 paint_us=180 encode_us=180 acquire_us=83 submit_us=48084 skipped=0
-frust_shell_common::perf: frust-perf raw n=94 total_us=48375 rebuild_us=187 layout_us=2 paint_us=498 encode_us=221 acquire_us=181 submit_us=47283 skipped=0
-frust_shell_common::perf: frust-perf raw n=95 total_us=48287 rebuild_us=287 layout_us=2 paint_us=644 encode_us=254 acquire_us=138 submit_us=46960 skipped=0
-frust_shell_common::perf: frust-perf raw n=96 total_us=48637 rebuild_us=226 layout_us=1 paint_us=572 encode_us=249 acquire_us=153 submit_us=47433 skipped=0
-frust_shell_common::perf: frust-perf raw n=97 total_us=48437 rebuild_us=439 layout_us=1 paint_us=563 encode_us=229 acquire_us=116 submit_us=47087 skipped=0
-frust_shell_common::perf: frust-perf raw n=98 total_us=49358 rebuild_us=195 layout_us=2 paint_us=512 encode_us=233 acquire_us=118 submit_us=48297 skipped=0
-frust_shell_common::perf: frust-perf raw n=99 total_us=48541 rebuild_us=198 layout_us=2 paint_us=516 encode_us=252 acquire_us=157 submit_us=47414 skipped=0
-frust_shell_common::perf: frust-perf raw n=100 total_us=48583 rebuild_us=218 layout_us=1 paint_us=550 encode_us=207 acquire_us=92 submit_us=47513 skipped=0
-frust_shell_common::perf: frust-perf raw n=101 total_us=48702 rebuild_us=188 layout_us=1 paint_us=500 encode_us=221 acquire_us=110 submit_us=47680 skipped=0
-frust_shell_common::perf: frust-perf raw n=102 total_us=48236 rebuild_us=80 layout_us=0 paint_us=154 encode_us=240 acquire_us=96 submit_us=47663 skipped=0
-frust_shell_common::perf: frust-perf raw n=103 total_us=47794 rebuild_us=81 layout_us=0 paint_us=151 encode_us=407 acquire_us=222 submit_us=46930 skipped=0
-frust_shell_common::perf: frust-perf raw n=104 total_us=47891 rebuild_us=84 layout_us=0 paint_us=157 encode_us=212 acquire_us=99 submit_us=47336 skipped=0
-frust_shell_common::perf: frust-perf raw n=105 total_us=48555 rebuild_us=226 layout_us=2 paint_us=564 encode_us=229 acquire_us=119 submit_us=47413 skipped=0
-frust_shell_common::perf: frust-perf raw n=106 total_us=48736 rebuild_us=225 layout_us=1 paint_us=658 encode_us=251 acquire_us=142 submit_us=47456 skipped=0
-frust_shell_common::perf: frust-perf raw n=107 total_us=48206 rebuild_us=205 layout_us=2 paint_us=521 encode_us=235 acquire_us=124 submit_us=47117 skipped=0
-frust_shell_common::perf: frust-perf raw n=108 total_us=48392 rebuild_us=353 layout_us=2 paint_us=559 encode_us=226 acquire_us=116 submit_us=47135 skipped=0
-frust_shell_common::perf: frust-perf raw n=109 total_us=49397 rebuild_us=204 layout_us=2 paint_us=530 encode_us=239 acquire_us=132 submit_us=48289 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=480 expected_present_us=0 acquire_us=138 period_us=11136
-frust_shell_common::perf: frust-perf raw n=110 total_us=48354 rebuild_us=245 layout_us=2 paint_us=584 encode_us=319 acquire_us=174 submit_us=47028 skipped=0
-frust_shell_common::perf: frust-perf raw n=111 total_us=48717 rebuild_us=222 layout_us=2 paint_us=559 encode_us=254 acquire_us=159 submit_us=47519 skipped=0
-frust_shell_common::perf: frust-perf raw n=112 total_us=47777 rebuild_us=100 layout_us=0 paint_us=183 encode_us=220 acquire_us=101 submit_us=47171 skipped=0
-frust_shell_common::perf: frust-perf raw n=113 total_us=48898 rebuild_us=327 layout_us=3 paint_us=625 encode_us=255 acquire_us=116 submit_us=47569 skipped=0
-frust_shell_common::perf: frust-perf raw n=114 total_us=48521 rebuild_us=202 layout_us=2 paint_us=516 encode_us=223 acquire_us=122 submit_us=47453 skipped=0
-frust_shell_common::perf: frust-perf raw n=115 total_us=48452 rebuild_us=190 layout_us=1 paint_us=505 encode_us=227 acquire_us=118 submit_us=47408 skipped=0
-frust_shell_common::perf: frust-perf raw n=116 total_us=48320 rebuild_us=256 layout_us=2 paint_us=851 encode_us=288 acquire_us=121 submit_us=46799 skipped=0
-frust_shell_common::perf: frust-perf raw n=117 total_us=48526 rebuild_us=199 layout_us=1 paint_us=511 encode_us=227 acquire_us=118 submit_us=47468 skipped=0
-frust_shell_common::perf: frust-perf raw n=118 total_us=48718 rebuild_us=190 layout_us=1 paint_us=502 encode_us=221 acquire_us=107 submit_us=47695 skipped=0
-frust_shell_common::perf: frust-perf raw n=119 total_us=48456 rebuild_us=260 layout_us=2 paint_us=552 encode_us=253 acquire_us=196 submit_us=47191 skipped=0
-frust_shell_common::perf: frust-perf raw n=120 total_us=48640 rebuild_us=183 layout_us=2 paint_us=497 encode_us=221 acquire_us=111 submit_us=47624 skipped=0
-frust_shell_common::perf: frust-perf raw n=121 total_us=49246 rebuild_us=305 layout_us=2 paint_us=620 encode_us=209 acquire_us=84 submit_us=48025 skipped=0
-frust_shell_common::perf: frust-perf raw n=122 total_us=48054 rebuild_us=229 layout_us=1 paint_us=561 encode_us=252 acquire_us=166 submit_us=46842 skipped=0
-frust_shell_common::perf: frust-perf raw n=123 total_us=48461 rebuild_us=219 layout_us=1 paint_us=528 encode_us=231 acquire_us=130 submit_us=47350 skipped=0
-frust_shell_common::perf: frust-perf raw n=124 total_us=48465 rebuild_us=229 layout_us=2 paint_us=595 encode_us=242 acquire_us=226 submit_us=47167 skipped=0
-frust_shell_common::perf: frust-perf raw n=125 total_us=48255 rebuild_us=218 layout_us=2 paint_us=542 encode_us=246 acquire_us=135 submit_us=47108 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=54 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=125 over_120hz=125 skipped=0 total_frames=125
-frust_shell_common::perf: frust-perf raw n=126 total_us=47953 rebuild_us=197 layout_us=2 paint_us=502 encode_us=227 acquire_us=118 submit_us=46905 skipped=0
-frust_shell_common::perf: frust-perf raw n=127 total_us=49142 rebuild_us=435 layout_us=1 paint_us=866 encode_us=219 acquire_us=121 submit_us=47497 skipped=0
-frust_shell_common::perf: frust-perf raw n=128 total_us=49122 rebuild_us=199 layout_us=2 paint_us=520 encode_us=227 acquire_us=110 submit_us=48061 skipped=0
-frust_shell_common::perf: frust-perf raw n=129 total_us=48163 rebuild_us=236 layout_us=3 paint_us=582 encode_us=270 acquire_us=189 submit_us=46880 skipped=0
-frust_shell_common::perf: frust-perf raw n=130 total_us=48324 rebuild_us=208 layout_us=1 paint_us=533 encode_us=312 acquire_us=142 submit_us=47124 skipped=0
-frust_shell_common::perf: frust-perf raw n=131 total_us=49180 rebuild_us=214 layout_us=2 paint_us=536 encode_us=239 acquire_us=127 submit_us=48061 skipped=0
-frust_shell_common::perf: frust-perf raw n=132 total_us=49119 rebuild_us=216 layout_us=4 paint_us=533 encode_us=223 acquire_us=107 submit_us=48035 skipped=0
-frust_shell_common::perf: frust-perf raw n=133 total_us=47987 rebuild_us=211 layout_us=2 paint_us=562 encode_us=244 acquire_us=138 submit_us=46829 skipped=0
-frust_shell_common::perf: frust-perf raw n=134 total_us=48397 rebuild_us=414 layout_us=2 paint_us=552 encode_us=233 acquire_us=125 submit_us=47069 skipped=0
-frust_shell_common::perf: frust-perf raw n=135 total_us=48945 rebuild_us=175 layout_us=2 paint_us=477 encode_us=225 acquire_us=110 submit_us=47953 skipped=0
-frust_shell_common::perf: frust-perf raw n=136 total_us=48795 rebuild_us=236 layout_us=2 paint_us=979 encode_us=213 acquire_us=92 submit_us=47271 skipped=0
-frust_shell_common::perf: frust-perf raw n=137 total_us=48855 rebuild_us=190 layout_us=1 paint_us=509 encode_us=221 acquire_us=108 submit_us=47823 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=600 expected_present_us=0 acquire_us=129 period_us=11130
-frust_shell_common::perf: frust-perf raw n=138 total_us=48846 rebuild_us=314 layout_us=3 paint_us=900 encode_us=384 acquire_us=177 submit_us=47066 skipped=0
-frust_shell_common::perf: frust-perf raw n=139 total_us=47220 rebuild_us=83 layout_us=0 paint_us=157 encode_us=208 acquire_us=96 submit_us=46674 skipped=0
-frust_shell_common::perf: frust-perf raw n=140 total_us=48125 rebuild_us=87 layout_us=0 paint_us=160 encode_us=208 acquire_us=92 submit_us=47576 skipped=0
-frust_shell_common::perf: frust-perf raw n=141 total_us=47977 rebuild_us=81 layout_us=0 paint_us=159 encode_us=212 acquire_us=129 submit_us=47393 skipped=0
-frust_shell_common::perf: frust-perf raw n=142 total_us=47789 rebuild_us=80 layout_us=0 paint_us=155 encode_us=210 acquire_us=92 submit_us=47249 skipped=0
-frust_shell_common::perf: frust-perf raw n=143 total_us=48809 rebuild_us=97 layout_us=0 paint_us=178 encode_us=192 acquire_us=110 submit_us=48229 skipped=0
-frust_shell_common::perf: frust-perf raw n=144 total_us=48633 rebuild_us=200 layout_us=2 paint_us=514 encode_us=231 acquire_us=122 submit_us=47562 skipped=0
-frust_shell_common::perf: frust-perf raw n=145 total_us=48450 rebuild_us=377 layout_us=2 paint_us=667 encode_us=252 acquire_us=153 submit_us=46998 skipped=0
-frust_shell_common::perf: frust-perf raw n=146 total_us=48039 rebuild_us=95 layout_us=0 paint_us=178 encode_us=214 acquire_us=93 submit_us=47456 skipped=0
-frust_shell_common::perf: frust-perf raw n=147 total_us=47946 rebuild_us=90 layout_us=0 paint_us=176 encode_us=221 acquire_us=131 submit_us=47326 skipped=0
-frust_shell_common::perf: frust-perf raw n=148 total_us=48473 rebuild_us=216 layout_us=2 paint_us=539 encode_us=242 acquire_us=132 submit_us=47341 skipped=0
-frust_shell_common::perf: frust-perf raw n=149 total_us=48998 rebuild_us=242 layout_us=2 paint_us=655 encode_us=236 acquire_us=123 submit_us=47738 skipped=0
-frust_shell_common::perf: frust-perf raw n=150 total_us=48375 rebuild_us=215 layout_us=1 paint_us=534 encode_us=247 acquire_us=157 submit_us=47217 skipped=0
-frust_shell_common::perf: frust-perf raw n=151 total_us=49058 rebuild_us=237 layout_us=2 paint_us=649 encode_us=258 acquire_us=154 submit_us=47755 skipped=0
-frust_shell_common::perf: frust-perf raw n=152 total_us=48751 rebuild_us=211 layout_us=2 paint_us=548 encode_us=211 acquire_us=89 submit_us=47688 skipped=0
-frust_shell_common::perf: frust-perf raw n=153 total_us=48737 rebuild_us=210 layout_us=2 paint_us=739 encode_us=248 acquire_us=143 submit_us=47392 skipped=0
-frust_shell_common::perf: frust-perf raw n=154 total_us=48305 rebuild_us=228 layout_us=2 paint_us=568 encode_us=246 acquire_us=212 submit_us=47048 skipped=0
-frust_shell_common::perf: frust-perf raw n=155 total_us=48307 rebuild_us=204 layout_us=1 paint_us=520 encode_us=233 acquire_us=128 submit_us=47218 skipped=0
-frust_shell_common::perf: frust-perf raw n=156 total_us=49178 rebuild_us=431 layout_us=2 paint_us=579 encode_us=216 acquire_us=93 submit_us=47854 skipped=0
-frust_shell_common::perf: frust-perf raw n=157 total_us=48469 rebuild_us=212 layout_us=1 paint_us=540 encode_us=353 acquire_us=103 submit_us=47257 skipped=0
-frust_shell_common::perf: frust-perf raw n=158 total_us=48290 rebuild_us=234 layout_us=2 paint_us=680 encode_us=244 acquire_us=134 submit_us=46995 skipped=0
-frust_shell_common::perf: frust-perf raw n=159 total_us=48773 rebuild_us=214 layout_us=2 paint_us=531 encode_us=231 acquire_us=124 submit_us=47670 skipped=0
-frust_shell_common::perf: frust-perf raw n=160 total_us=49571 rebuild_us=339 layout_us=3 paint_us=742 encode_us=256 acquire_us=150 submit_us=48079 skipped=0
-frust_shell_common::perf: frust-perf raw n=161 total_us=48273 rebuild_us=194 layout_us=2 paint_us=503 encode_us=222 acquire_us=112 submit_us=47237 skipped=0
-frust_shell_common::perf: frust-perf raw n=162 total_us=48567 rebuild_us=214 layout_us=2 paint_us=717 encode_us=269 acquire_us=327 submit_us=47036 skipped=0
-frust_shell_common::perf: frust-perf raw n=163 total_us=47958 rebuild_us=90 layout_us=0 paint_us=165 encode_us=210 acquire_us=108 submit_us=47382 skipped=0
-frust_shell_common::perf: frust-perf raw n=164 total_us=48338 rebuild_us=219 layout_us=2 paint_us=746 encode_us=246 acquire_us=156 submit_us=46967 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=720 expected_present_us=0 acquire_us=145 period_us=11129
-frust_shell_common::perf: frust-perf raw n=165 total_us=48647 rebuild_us=198 layout_us=2 paint_us=515 encode_us=223 acquire_us=109 submit_us=47598 skipped=0
-frust_shell_common::perf: frust-perf raw n=166 total_us=49061 rebuild_us=204 layout_us=2 paint_us=526 encode_us=271 acquire_us=209 submit_us=47847 skipped=0
-frust_shell_common::perf: frust-perf raw n=167 total_us=48417 rebuild_us=225 layout_us=2 paint_us=560 encode_us=244 acquire_us=147 submit_us=47238 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=167 over_120hz=167 skipped=0 total_frames=167
-frust_shell_common::perf: frust-perf raw n=168 total_us=48561 rebuild_us=189 layout_us=1 paint_us=499 encode_us=219 acquire_us=107 submit_us=47544 skipped=0
-frust_shell_common::perf: frust-perf raw n=169 total_us=48760 rebuild_us=602 layout_us=2 paint_us=658 encode_us=279 acquire_us=185 submit_us=47032 skipped=0
-frust_shell_common::perf: frust-perf raw n=170 total_us=48507 rebuild_us=186 layout_us=1 paint_us=498 encode_us=218 acquire_us=104 submit_us=47498 skipped=0
-frust_shell_common::perf: frust-perf raw n=171 total_us=47918 rebuild_us=221 layout_us=1 paint_us=535 encode_us=251 acquire_us=171 submit_us=46736 skipped=0
-frust_shell_common::perf: frust-perf raw n=172 total_us=48017 rebuild_us=205 layout_us=2 paint_us=529 encode_us=228 acquire_us=104 submit_us=46947 skipped=0
-frust_shell_common::perf: frust-perf raw n=173 total_us=48223 rebuild_us=149 layout_us=0 paint_us=211 encode_us=183 acquire_us=83 submit_us=47594 skipped=0
-frust_shell_common::perf: frust-perf raw n=174 total_us=48535 rebuild_us=153 layout_us=0 paint_us=176 encode_us=188 acquire_us=100 submit_us=47916 skipped=0
-frust_shell_common::perf: frust-perf raw n=175 total_us=47608 rebuild_us=75 layout_us=0 paint_us=147 encode_us=141 acquire_us=71 submit_us=47173 skipped=0
-frust_shell_common::perf: frust-perf raw n=176 total_us=48142 rebuild_us=76 layout_us=0 paint_us=137 encode_us=194 acquire_us=101 submit_us=47632 skipped=0
-frust_shell_common::perf: frust-perf raw n=177 total_us=48143 rebuild_us=88 layout_us=0 paint_us=164 encode_us=215 acquire_us=108 submit_us=47566 skipped=0
-frust_shell_common::perf: frust-perf raw n=178 total_us=48149 rebuild_us=93 layout_us=0 paint_us=170 encode_us=221 acquire_us=99 submit_us=47563 skipped=0
-frust_shell_common::perf: frust-perf raw n=179 total_us=47809 rebuild_us=102 layout_us=0 paint_us=188 encode_us=225 acquire_us=100 submit_us=47191 skipped=0
-frust_shell_common::perf: frust-perf raw n=180 total_us=49549 rebuild_us=237 layout_us=2 paint_us=636 encode_us=266 acquire_us=103 submit_us=48303 skipped=0
-frust_shell_common::perf: frust-perf raw n=181 total_us=48775 rebuild_us=219 layout_us=1 paint_us=563 encode_us=223 acquire_us=107 submit_us=47659 skipped=0
-frust_shell_common::perf: frust-perf raw n=182 total_us=48163 rebuild_us=230 layout_us=1 paint_us=484 encode_us=243 acquire_us=143 submit_us=47059 skipped=0
-frust_shell_common::perf: frust-perf raw n=183 total_us=48897 rebuild_us=205 layout_us=2 paint_us=520 encode_us=224 acquire_us=109 submit_us=47835 skipped=0
-frust_shell_common::perf: frust-perf raw n=184 total_us=48418 rebuild_us=238 layout_us=2 paint_us=562 encode_us=346 acquire_us=172 submit_us=47097 skipped=0
-frust_shell_common::perf: frust-perf raw n=185 total_us=48068 rebuild_us=202 layout_us=2 paint_us=522 encode_us=236 acquire_us=126 submit_us=46978 skipped=0
-frust_shell_common::perf: frust-perf raw n=186 total_us=48404 rebuild_us=76 layout_us=0 paint_us=154 encode_us=186 acquire_us=86 submit_us=47898 skipped=0
-frust_shell_common::perf: frust-perf raw n=187 total_us=47885 rebuild_us=84 layout_us=0 paint_us=155 encode_us=268 acquire_us=103 submit_us=47273 skipped=0
-frust_shell_common::perf: frust-perf raw n=188 total_us=47884 rebuild_us=81 layout_us=0 paint_us=190 encode_us=207 acquire_us=95 submit_us=47308 skipped=0
-frust_shell_common::perf: frust-perf raw n=189 total_us=48597 rebuild_us=188 layout_us=2 paint_us=498 encode_us=221 acquire_us=108 submit_us=47577 skipped=0
-frust_shell_common::perf: frust-perf raw n=190 total_us=48461 rebuild_us=190 layout_us=1 paint_us=682 encode_us=224 acquire_us=109 submit_us=47253 skipped=0
-frust_shell_common::perf: frust-perf raw n=191 total_us=48399 rebuild_us=199 layout_us=1 paint_us=507 encode_us=225 acquire_us=113 submit_us=47352 skipped=0
-frust_shell_common::perf: frust-perf raw n=192 total_us=48691 rebuild_us=223 layout_us=2 paint_us=557 encode_us=247 acquire_us=127 submit_us=47533 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=840 expected_present_us=0 acquire_us=130 period_us=11138
-frust_shell_common::perf: frust-perf raw n=193 total_us=50253 rebuild_us=281 layout_us=3 paint_us=1067 encode_us=264 acquire_us=186 submit_us=48449 skipped=0
-frust_shell_common::perf: frust-perf raw n=194 total_us=47923 rebuild_us=255 layout_us=2 paint_us=717 encode_us=269 acquire_us=181 submit_us=46496 skipped=0
-frust_shell_common::perf: frust-perf raw n=195 total_us=48662 rebuild_us=304 layout_us=2 paint_us=575 encode_us=99 acquire_us=68 submit_us=47613 skipped=0
-frust_shell_common::perf: frust-perf raw n=196 total_us=48761 rebuild_us=192 layout_us=2 paint_us=797 encode_us=420 acquire_us=176 submit_us=47172 skipped=0
-frust_shell_common::perf: frust-perf raw n=197 total_us=48439 rebuild_us=196 layout_us=1 paint_us=495 encode_us=221 acquire_us=109 submit_us=47414 skipped=0
-frust_shell_common::perf: frust-perf raw n=198 total_us=48300 rebuild_us=225 layout_us=1 paint_us=594 encode_us=290 acquire_us=139 submit_us=47049 skipped=0
-frust_shell_common::perf: frust-perf raw n=199 total_us=48430 rebuild_us=244 layout_us=3 paint_us=796 encode_us=232 acquire_us=113 submit_us=47040 skipped=0
-frust_shell_common::perf: frust-perf raw n=200 total_us=48234 rebuild_us=82 layout_us=0 paint_us=157 encode_us=207 acquire_us=93 submit_us=47693 skipped=0
-frust_shell_common::perf: frust-perf raw n=201 total_us=48960 rebuild_us=259 layout_us=2 paint_us=813 encode_us=240 acquire_us=182 submit_us=47462 skipped=0
-frust_shell_common::perf: frust-perf raw n=202 total_us=47972 rebuild_us=234 layout_us=2 paint_us=563 encode_us=249 acquire_us=153 submit_us=46770 skipped=0
-frust_shell_common::perf: frust-perf raw n=203 total_us=48784 rebuild_us=209 layout_us=2 paint_us=905 encode_us=223 acquire_us=108 submit_us=47335 skipped=0
-frust_shell_common::perf: frust-perf raw n=204 total_us=49253 rebuild_us=252 layout_us=2 paint_us=637 encode_us=246 acquire_us=142 submit_us=47972 skipped=0
-frust_shell_common::perf: frust-perf raw n=205 total_us=48526 rebuild_us=245 layout_us=2 paint_us=578 encode_us=239 acquire_us=135 submit_us=47326 skipped=0
-frust_shell_common::perf: frust-perf raw n=206 total_us=49022 rebuild_us=214 layout_us=2 paint_us=659 encode_us=238 acquire_us=133 submit_us=47773 skipped=0
-frust_shell_common::perf: frust-perf raw n=207 total_us=48534 rebuild_us=285 layout_us=2 paint_us=892 encode_us=279 acquire_us=156 submit_us=46918 skipped=0
-frust_shell_common::perf: frust-perf raw n=208 total_us=48900 rebuild_us=248 layout_us=2 paint_us=641 encode_us=245 acquire_us=145 submit_us=47618 skipped=0
-frust_shell_common::perf: frust-perf raw n=209 total_us=48399 rebuild_us=200 layout_us=2 paint_us=508 encode_us=230 acquire_us=107 submit_us=47351 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=209 over_120hz=209 skipped=0 total_frames=209
-frust_shell_common::perf: frust-perf raw n=210 total_us=47528 rebuild_us=82 layout_us=0 paint_us=155 encode_us=207 acquire_us=103 submit_us=46978 skipped=0
-frust_shell_common::perf: frust-perf raw n=211 total_us=48791 rebuild_us=189 layout_us=2 paint_us=495 encode_us=235 acquire_us=146 submit_us=47721 skipped=0
-frust_shell_common::perf: frust-perf raw n=212 total_us=48095 rebuild_us=237 layout_us=1 paint_us=878 encode_us=332 acquire_us=188 submit_us=46456 skipped=0
-frust_shell_common::perf: frust-perf raw n=213 total_us=48663 rebuild_us=357 layout_us=2 paint_us=661 encode_us=271 acquire_us=180 submit_us=47190 skipped=0
-frust_shell_common::perf: frust-perf raw n=214 total_us=48319 rebuild_us=175 layout_us=0 paint_us=323 encode_us=217 acquire_us=91 submit_us=47509 skipped=0
-frust_shell_common::perf: frust-perf raw n=215 total_us=48376 rebuild_us=218 layout_us=2 paint_us=552 encode_us=245 acquire_us=130 submit_us=47228 skipped=0
-frust_shell_common::perf: frust-perf raw n=216 total_us=48234 rebuild_us=182 layout_us=1 paint_us=412 encode_us=214 acquire_us=90 submit_us=47332 skipped=0
-frust_shell_common::perf: frust-perf raw n=217 total_us=48305 rebuild_us=83 layout_us=0 paint_us=155 encode_us=210 acquire_us=102 submit_us=47751 skipped=0
-frust_shell_common::perf: frust-perf raw n=218 total_us=48315 rebuild_us=262 layout_us=2 paint_us=858 encode_us=266 acquire_us=159 submit_us=46766 skipped=0
-frust_shell_common::perf: frust-perf raw n=219 total_us=48693 rebuild_us=229 layout_us=2 paint_us=577 encode_us=236 acquire_us=119 submit_us=47527 skipped=0
-frust_shell_common::perf: frust-perf raw n=220 total_us=48814 rebuild_us=259 layout_us=1 paint_us=897 encode_us=249 acquire_us=153 submit_us=47251 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=960 expected_present_us=0 acquire_us=126 period_us=11136
-frust_shell_common::perf: frust-perf raw n=221 total_us=48224 rebuild_us=196 layout_us=1 paint_us=498 encode_us=225 acquire_us=109 submit_us=47192 skipped=0
-frust_shell_common::perf: frust-perf raw n=222 total_us=48690 rebuild_us=201 layout_us=2 paint_us=508 encode_us=233 acquire_us=114 submit_us=47631 skipped=0
-frust_shell_common::perf: frust-perf raw n=223 total_us=48945 rebuild_us=459 layout_us=1 paint_us=706 encode_us=253 acquire_us=137 submit_us=47386 skipped=0
-frust_shell_common::perf: frust-perf raw n=224 total_us=48474 rebuild_us=269 layout_us=2 paint_us=711 encode_us=258 acquire_us=153 submit_us=47079 skipped=0
-frust_shell_common::perf: frust-perf raw n=225 total_us=48695 rebuild_us=189 layout_us=1 paint_us=673 encode_us=222 acquire_us=107 submit_us=47499 skipped=0
-frust_shell_common::perf: frust-perf raw n=226 total_us=48851 rebuild_us=187 layout_us=2 paint_us=502 encode_us=225 acquire_us=107 submit_us=47827 skipped=0
-frust_shell_common::perf: frust-perf raw n=227 total_us=48986 rebuild_us=487 layout_us=1 paint_us=801 encode_us=305 acquire_us=179 submit_us=47211 skipped=0
-frust_shell_common::perf: frust-perf raw n=228 total_us=48423 rebuild_us=208 layout_us=1 paint_us=544 encode_us=231 acquire_us=138 submit_us=47299 skipped=0
-frust_shell_common::perf: frust-perf raw n=229 total_us=47708 rebuild_us=199 layout_us=2 paint_us=515 encode_us=223 acquire_us=112 submit_us=46655 skipped=0
-frust_shell_common::perf: frust-perf raw n=230 total_us=48453 rebuild_us=81 layout_us=0 paint_us=156 encode_us=175 acquire_us=93 submit_us=47945 skipped=0
-frust_shell_common::perf: frust-perf raw n=231 total_us=48179 rebuild_us=89 layout_us=0 paint_us=164 encode_us=211 acquire_us=96 submit_us=47615 skipped=0
-frust_shell_common::perf: frust-perf raw n=232 total_us=47288 rebuild_us=82 layout_us=0 paint_us=153 encode_us=211 acquire_us=98 submit_us=46741 skipped=0
-frust_shell_common::perf: frust-perf raw n=233 total_us=48849 rebuild_us=287 layout_us=2 paint_us=734 encode_us=265 acquire_us=164 submit_us=47394 skipped=0
-frust_shell_common::perf: frust-perf raw n=234 total_us=47749 rebuild_us=84 layout_us=0 paint_us=165 encode_us=217 acquire_us=107 submit_us=47175 skipped=0
-frust_shell_common::perf: frust-perf raw n=235 total_us=48824 rebuild_us=191 layout_us=2 paint_us=500 encode_us=222 acquire_us=112 submit_us=47795 skipped=0
-frust_shell_common::perf: frust-perf raw n=236 total_us=48440 rebuild_us=200 layout_us=2 paint_us=652 encode_us=294 acquire_us=119 submit_us=47172 skipped=0
-frust_shell_common::perf: frust-perf raw n=237 total_us=48579 rebuild_us=189 layout_us=2 paint_us=494 encode_us=221 acquire_us=118 submit_us=47552 skipped=0
-frust_shell_common::perf: frust-perf raw n=238 total_us=48970 rebuild_us=434 layout_us=2 paint_us=566 encode_us=240 acquire_us=132 submit_us=47594 skipped=0
-frust_shell_common::perf: frust-perf raw n=239 total_us=48158 rebuild_us=210 layout_us=2 paint_us=527 encode_us=242 acquire_us=133 submit_us=47042 skipped=0
-frust_shell_common::perf: frust-perf raw n=240 total_us=48230 rebuild_us=211 layout_us=2 paint_us=528 encode_us=273 acquire_us=178 submit_us=47037 skipped=0
-frust_shell_common::perf: frust-perf raw n=241 total_us=48429 rebuild_us=238 layout_us=2 paint_us=676 encode_us=243 acquire_us=146 submit_us=47121 skipped=0
-frust_shell_common::perf: frust-perf raw n=242 total_us=48056 rebuild_us=97 layout_us=0 paint_us=254 encode_us=217 acquire_us=132 submit_us=47354 skipped=0
-frust_shell_common::perf: frust-perf raw n=243 total_us=47785 rebuild_us=82 layout_us=0 paint_us=155 encode_us=208 acquire_us=106 submit_us=47232 skipped=0
-frust_shell_common::perf: frust-perf raw n=244 total_us=48784 rebuild_us=244 layout_us=2 paint_us=704 encode_us=242 acquire_us=130 submit_us=47461 skipped=0
-frust_shell_common::perf: frust-perf raw n=245 total_us=48032 rebuild_us=277 layout_us=2 paint_us=678 encode_us=316 acquire_us=158 submit_us=46600 skipped=0
-frust_shell_common::perf: frust-perf raw n=246 total_us=48817 rebuild_us=206 layout_us=2 paint_us=519 encode_us=233 acquire_us=117 submit_us=47738 skipped=0
-frust_shell_common::perf: frust-perf raw n=247 total_us=48278 rebuild_us=206 layout_us=2 paint_us=677 encode_us=234 acquire_us=148 submit_us=47009 skipped=0
-frust_shell_common::perf: frust-perf raw n=248 total_us=49352 rebuild_us=195 layout_us=2 paint_us=499 encode_us=224 acquire_us=116 submit_us=48313 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1080 expected_present_us=0 acquire_us=138 period_us=11132
-frust_shell_common::perf: frust-perf raw n=249 total_us=48173 rebuild_us=248 layout_us=2 paint_us=625 encode_us=248 acquire_us=166 submit_us=46883 skipped=0
-frust_shell_common::perf: frust-perf raw n=250 total_us=48524 rebuild_us=209 layout_us=1 paint_us=568 encode_us=248 acquire_us=152 submit_us=47343 skipped=0
-frust_shell_common::perf: frust-perf raw n=251 total_us=48704 rebuild_us=257 layout_us=2 paint_us=684 encode_us=253 acquire_us=148 submit_us=47359 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=251 over_120hz=251 skipped=0 total_frames=251
-frust_shell_common::perf: frust-perf raw n=252 total_us=49451 rebuild_us=209 layout_us=1 paint_us=520 encode_us=237 acquire_us=144 submit_us=48338 skipped=0
-frust_shell_common::perf: frust-perf raw n=253 total_us=48411 rebuild_us=212 layout_us=2 paint_us=528 encode_us=209 acquire_us=90 submit_us=47368 skipped=0
-frust_shell_common::perf: frust-perf raw n=254 total_us=48944 rebuild_us=198 layout_us=2 paint_us=509 encode_us=230 acquire_us=114 submit_us=47888 skipped=0
-frust_shell_common::perf: frust-perf raw n=255 total_us=48209 rebuild_us=231 layout_us=2 paint_us=731 encode_us=243 acquire_us=180 submit_us=46821 skipped=0
-frust_shell_common::perf: frust-perf raw n=256 total_us=48598 rebuild_us=193 layout_us=1 paint_us=500 encode_us=230 acquire_us=112 submit_us=47559 skipped=0
-frust_shell_common::perf: frust-perf raw n=257 total_us=48405 rebuild_us=208 layout_us=2 paint_us=669 encode_us=225 acquire_us=112 submit_us=47187 skipped=0
-frust_shell_common::perf: frust-perf raw n=258 total_us=48481 rebuild_us=198 layout_us=2 paint_us=504 encode_us=223 acquire_us=111 submit_us=47441 skipped=0
-frust_shell_common::perf: frust-perf raw n=259 total_us=48574 rebuild_us=195 layout_us=2 paint_us=501 encode_us=224 acquire_us=114 submit_us=47535 skipped=0
-frust_shell_common::perf: frust-perf raw n=260 total_us=48390 rebuild_us=236 layout_us=2 paint_us=750 encode_us=265 acquire_us=158 submit_us=46978 skipped=0
-frust_shell_common::perf: frust-perf raw n=261 total_us=48498 rebuild_us=191 layout_us=2 paint_us=499 encode_us=220 acquire_us=107 submit_us=47477 skipped=0
-frust_shell_common::perf: frust-perf raw n=262 total_us=48086 rebuild_us=248 layout_us=2 paint_us=568 encode_us=242 acquire_us=136 submit_us=46887 skipped=0
-frust_shell_common::perf: frust-perf raw n=263 total_us=48678 rebuild_us=199 layout_us=1 paint_us=511 encode_us=229 acquire_us=126 submit_us=47609 skipped=0
-frust_shell_common::perf: frust-perf raw n=264 total_us=48267 rebuild_us=327 layout_us=1 paint_us=507 encode_us=223 acquire_us=110 submit_us=47095 skipped=0
-frust_shell_common::perf: frust-perf raw n=265 total_us=48835 rebuild_us=219 layout_us=2 paint_us=544 encode_us=267 acquire_us=95 submit_us=47706 skipped=0
-frust_shell_common::perf: frust-perf raw n=266 total_us=48807 rebuild_us=261 layout_us=2 paint_us=895 encode_us=244 acquire_us=139 submit_us=47263 skipped=0
-frust_shell_common::perf: frust-perf raw n=267 total_us=48334 rebuild_us=326 layout_us=1 paint_us=585 encode_us=252 acquire_us=175 submit_us=46992 skipped=0
-frust_shell_common::perf: frust-perf raw n=268 total_us=48980 rebuild_us=244 layout_us=2 paint_us=836 encode_us=254 acquire_us=150 submit_us=47492 skipped=0
-frust_shell_common::perf: frust-perf raw n=269 total_us=48800 rebuild_us=196 layout_us=2 paint_us=506 encode_us=229 acquire_us=124 submit_us=47741 skipped=0
-frust_shell_common::perf: frust-perf raw n=270 total_us=48164 rebuild_us=286 layout_us=2 paint_us=626 encode_us=373 acquire_us=161 submit_us=46714 skipped=0
-frust_shell_common::perf: frust-perf raw n=271 total_us=48917 rebuild_us=176 layout_us=2 paint_us=487 encode_us=208 acquire_us=91 submit_us=47952 skipped=0
-frust_shell_common::perf: frust-perf raw n=272 total_us=48253 rebuild_us=221 layout_us=2 paint_us=610 encode_us=222 acquire_us=109 submit_us=47086 skipped=0
-frust_shell_common::perf: frust-perf raw n=273 total_us=48954 rebuild_us=201 layout_us=1 paint_us=706 encode_us=301 acquire_us=152 submit_us=47591 skipped=0
-frust_shell_common::perf: frust-perf raw n=274 total_us=48285 rebuild_us=232 layout_us=2 paint_us=807 encode_us=241 acquire_us=156 submit_us=46845 skipped=0
-frust_shell_common::perf: frust-perf raw n=275 total_us=48590 rebuild_us=363 layout_us=2 paint_us=505 encode_us=221 acquire_us=109 submit_us=47388 skipped=0
-frust_shell_common::perf: frust-perf raw n=276 total_us=49146 rebuild_us=228 layout_us=1 paint_us=568 encode_us=299 acquire_us=150 submit_us=47898 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1200 expected_present_us=0 acquire_us=137 period_us=11130
-frust_shell_common::perf: frust-perf raw n=277 total_us=48781 rebuild_us=248 layout_us=2 paint_us=748 encode_us=246 acquire_us=149 submit_us=47386 skipped=0
-frust_shell_common::perf: frust-perf raw n=278 total_us=48798 rebuild_us=211 layout_us=2 paint_us=524 encode_us=226 acquire_us=115 submit_us=47718 skipped=0
-frust_shell_common::perf: frust-perf raw n=279 total_us=48974 rebuild_us=264 layout_us=2 paint_us=830 encode_us=249 acquire_us=161 submit_us=47466 skipped=0
-frust_shell_common::perf: frust-perf raw n=280 total_us=48164 rebuild_us=83 layout_us=0 paint_us=155 encode_us=183 acquire_us=95 submit_us=47645 skipped=0
-frust_shell_common::perf: frust-perf raw n=281 total_us=48808 rebuild_us=218 layout_us=2 paint_us=681 encode_us=224 acquire_us=127 submit_us=47554 skipped=0
-frust_shell_common::perf: frust-perf raw n=282 total_us=49568 rebuild_us=414 layout_us=2 paint_us=992 encode_us=235 acquire_us=127 submit_us=47795 skipped=0
-frust_shell_common::perf: frust-perf raw n=283 total_us=48838 rebuild_us=249 layout_us=2 paint_us=580 encode_us=302 acquire_us=108 submit_us=47596 skipped=0
-frust_shell_common::perf: frust-perf raw n=284 total_us=48833 rebuild_us=224 layout_us=1 paint_us=564 encode_us=247 acquire_us=164 submit_us=47630 skipped=0
-frust_shell_common::perf: frust-perf raw n=285 total_us=48321 rebuild_us=261 layout_us=2 paint_us=601 encode_us=248 acquire_us=135 submit_us=47071 skipped=0
-frust_shell_common::perf: frust-perf raw n=286 total_us=48804 rebuild_us=194 layout_us=2 paint_us=566 encode_us=223 acquire_us=106 submit_us=47711 skipped=0
-frust_shell_common::perf: frust-perf raw n=287 total_us=48388 rebuild_us=242 layout_us=2 paint_us=757 encode_us=248 acquire_us=144 submit_us=46993 skipped=0
-frust_shell_common::perf: frust-perf raw n=288 total_us=48138 rebuild_us=219 layout_us=2 paint_us=526 encode_us=236 acquire_us=134 submit_us=47018 skipped=0
-frust_shell_common::perf: frust-perf raw n=289 total_us=48783 rebuild_us=209 layout_us=2 paint_us=546 encode_us=254 acquire_us=144 submit_us=47627 skipped=0
-frust_shell_common::perf: frust-perf raw n=290 total_us=48018 rebuild_us=224 layout_us=2 paint_us=531 encode_us=240 acquire_us=150 submit_us=46869 skipped=0
-frust_shell_common::perf: frust-perf raw n=291 total_us=49976 rebuild_us=574 layout_us=1 paint_us=1557 encode_us=270 acquire_us=188 submit_us=47383 skipped=0
-frust_shell_common::perf: frust-perf raw n=292 total_us=49016 rebuild_us=332 layout_us=2 paint_us=619 encode_us=251 acquire_us=127 submit_us=47682 skipped=0
-frust_shell_common::perf: frust-perf raw n=293 total_us=48942 rebuild_us=194 layout_us=1 paint_us=503 encode_us=237 acquire_us=143 submit_us=47861 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=293 over_120hz=293 skipped=0 total_frames=293
-frust_shell_common::perf: frust-perf raw n=294 total_us=48102 rebuild_us=413 layout_us=3 paint_us=862 encode_us=262 acquire_us=181 submit_us=46378 skipped=0
-frust_shell_common::perf: frust-perf raw n=295 total_us=48101 rebuild_us=81 layout_us=0 paint_us=156 encode_us=210 acquire_us=90 submit_us=47560 skipped=0
-frust_shell_common::perf: frust-perf raw n=296 total_us=48145 rebuild_us=99 layout_us=0 paint_us=173 encode_us=210 acquire_us=95 submit_us=47566 skipped=0
-frust_shell_common::perf: frust-perf raw n=297 total_us=48808 rebuild_us=207 layout_us=2 paint_us=648 encode_us=317 acquire_us=170 submit_us=47462 skipped=0
-frust_shell_common::perf: frust-perf raw n=298 total_us=48454 rebuild_us=207 layout_us=1 paint_us=535 encode_us=248 acquire_us=156 submit_us=47304 skipped=0
-frust_shell_common::perf: frust-perf raw n=299 total_us=48767 rebuild_us=203 layout_us=2 paint_us=528 encode_us=238 acquire_us=147 submit_us=47647 skipped=0
-frust_shell_common::perf: frust-perf raw n=300 total_us=48572 rebuild_us=229 layout_us=2 paint_us=958 encode_us=260 acquire_us=173 submit_us=46948 skipped=0
-frust_shell_common::perf: frust-perf raw n=301 total_us=48370 rebuild_us=262 layout_us=2 paint_us=598 encode_us=252 acquire_us=175 submit_us=47079 skipped=0
-frust_shell_common::perf: frust-perf raw n=302 total_us=48773 rebuild_us=288 layout_us=1 paint_us=727 encode_us=258 acquire_us=154 submit_us=47342 skipped=0
-frust_shell_common::perf: frust-perf raw n=303 total_us=48152 rebuild_us=141 layout_us=0 paint_us=176 encode_us=210 acquire_us=93 submit_us=47530 skipped=0
-frust_shell_common::perf: frust-perf raw n=304 total_us=47955 rebuild_us=191 layout_us=2 paint_us=512 encode_us=249 acquire_us=149 submit_us=46851 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1320 expected_present_us=0 acquire_us=139 period_us=11134
-frust_shell_common::perf: frust-perf raw n=305 total_us=48473 rebuild_us=400 layout_us=2 paint_us=709 encode_us=246 acquire_us=139 submit_us=46975 skipped=0
-frust_shell_common::perf: frust-perf raw n=306 total_us=48561 rebuild_us=220 layout_us=2 paint_us=549 encode_us=242 acquire_us=207 submit_us=47338 skipped=0
-frust_shell_common::perf: frust-perf raw n=307 total_us=47991 rebuild_us=227 layout_us=2 paint_us=557 encode_us=263 acquire_us=150 submit_us=46790 skipped=0
-frust_shell_common::perf: frust-perf raw n=308 total_us=48273 rebuild_us=219 layout_us=1 paint_us=553 encode_us=257 acquire_us=148 submit_us=47092 skipped=0
-frust_shell_common::perf: frust-perf raw n=309 total_us=48368 rebuild_us=223 layout_us=1 paint_us=563 encode_us=259 acquire_us=153 submit_us=47166 skipped=0
-frust_shell_common::perf: frust-perf raw n=310 total_us=48461 rebuild_us=263 layout_us=1 paint_us=506 encode_us=223 acquire_us=114 submit_us=47351 skipped=0
-frust_shell_common::perf: frust-perf raw n=311 total_us=48345 rebuild_us=98 layout_us=0 paint_us=241 encode_us=262 acquire_us=166 submit_us=47575 skipped=0
-frust_shell_common::perf: frust-perf raw n=312 total_us=48236 rebuild_us=236 layout_us=2 paint_us=594 encode_us=251 acquire_us=149 submit_us=47001 skipped=0
-frust_shell_common::perf: frust-perf raw n=313 total_us=48107 rebuild_us=230 layout_us=2 paint_us=577 encode_us=264 acquire_us=169 submit_us=46862 skipped=0
-frust_shell_common::perf: frust-perf raw n=314 total_us=48068 rebuild_us=86 layout_us=0 paint_us=235 encode_us=179 acquire_us=107 submit_us=47459 skipped=0
-frust_shell_common::perf: frust-perf raw n=315 total_us=48103 rebuild_us=80 layout_us=0 paint_us=156 encode_us=210 acquire_us=90 submit_us=47564 skipped=0
-frust_shell_common::perf: frust-perf raw n=316 total_us=48609 rebuild_us=225 layout_us=1 paint_us=725 encode_us=259 acquire_us=146 submit_us=47250 skipped=0
-frust_shell_common::perf: frust-perf raw n=317 total_us=49246 rebuild_us=298 layout_us=2 paint_us=744 encode_us=321 acquire_us=333 submit_us=47546 skipped=0
-frust_shell_common::perf: frust-perf raw n=318 total_us=47844 rebuild_us=81 layout_us=0 paint_us=154 encode_us=206 acquire_us=139 submit_us=47261 skipped=0
-frust_shell_common::perf: frust-perf raw n=319 total_us=48152 rebuild_us=79 layout_us=0 paint_us=156 encode_us=217 acquire_us=108 submit_us=47589 skipped=0
-frust_shell_common::perf: frust-perf raw n=320 total_us=48119 rebuild_us=182 layout_us=1 paint_us=499 encode_us=241 acquire_us=132 submit_us=47060 skipped=0
-frust_shell_common::perf: frust-perf raw n=321 total_us=48745 rebuild_us=197 layout_us=2 paint_us=610 encode_us=220 acquire_us=109 submit_us=47605 skipped=0
-frust_shell_common::perf: frust-perf raw n=322 total_us=48573 rebuild_us=209 layout_us=2 paint_us=527 encode_us=238 acquire_us=126 submit_us=47469 skipped=0
-frust_shell_common::perf: frust-perf raw n=323 total_us=48034 rebuild_us=245 layout_us=2 paint_us=570 encode_us=261 acquire_us=159 submit_us=46795 skipped=0
-frust_shell_common::perf: frust-perf raw n=324 total_us=48202 rebuild_us=222 layout_us=2 paint_us=545 encode_us=336 acquire_us=225 submit_us=46870 skipped=0
-frust_shell_common::perf: frust-perf raw n=325 total_us=48268 rebuild_us=296 layout_us=2 paint_us=709 encode_us=262 acquire_us=150 submit_us=46848 skipped=0
-frust_shell_common::perf: frust-perf raw n=326 total_us=47607 rebuild_us=98 layout_us=0 paint_us=188 encode_us=207 acquire_us=103 submit_us=47009 skipped=0
-frust_shell_common::perf: frust-perf raw n=327 total_us=47705 rebuild_us=95 layout_us=0 paint_us=186 encode_us=212 acquire_us=94 submit_us=47115 skipped=0
-frust_shell_common::perf: frust-perf raw n=328 total_us=48911 rebuild_us=193 layout_us=1 paint_us=654 encode_us=233 acquire_us=137 submit_us=47690 skipped=0
-frust_shell_common::perf: frust-perf raw n=329 total_us=48761 rebuild_us=226 layout_us=2 paint_us=672 encode_us=229 acquire_us=113 submit_us=47517 skipped=0
-frust_shell_common::perf: frust-perf raw n=330 total_us=48075 rebuild_us=195 layout_us=2 paint_us=511 encode_us=231 acquire_us=130 submit_us=47004 skipped=0
-frust_shell_common::perf: frust-perf raw n=331 total_us=49692 rebuild_us=236 layout_us=2 paint_us=630 encode_us=303 acquire_us=139 submit_us=48380 skipped=0
-frust_shell_common::perf: frust-perf raw n=332 total_us=49072 rebuild_us=328 layout_us=2 paint_us=795 encode_us=266 acquire_us=168 submit_us=47512 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1440 expected_present_us=0 acquire_us=130 period_us=11133
-frust_shell_common::perf: frust-perf raw n=333 total_us=48271 rebuild_us=81 layout_us=0 paint_us=154 encode_us=216 acquire_us=105 submit_us=47712 skipped=0
-frust_shell_common::perf: frust-perf raw n=334 total_us=47315 rebuild_us=97 layout_us=0 paint_us=187 encode_us=265 acquire_us=190 submit_us=46573 skipped=0
-frust_shell_common::perf: frust-perf raw n=335 total_us=47755 rebuild_us=82 layout_us=0 paint_us=156 encode_us=210 acquire_us=101 submit_us=47203 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=335 over_120hz=335 skipped=0 total_frames=335
-frust_shell_common::perf: frust-perf raw n=336 total_us=48562 rebuild_us=226 layout_us=2 paint_us=576 encode_us=338 acquire_us=141 submit_us=47277 skipped=0
-frust_shell_common::perf: frust-perf raw n=337 total_us=48092 rebuild_us=212 layout_us=1 paint_us=532 encode_us=241 acquire_us=120 submit_us=46983 skipped=0
-frust_shell_common::perf: frust-perf raw n=338 total_us=48779 rebuild_us=188 layout_us=2 paint_us=498 encode_us=219 acquire_us=122 submit_us=47748 skipped=0
-frust_shell_common::perf: frust-perf raw n=339 total_us=48339 rebuild_us=191 layout_us=2 paint_us=504 encode_us=304 acquire_us=92 submit_us=47244 skipped=0
-frust_shell_common::perf: frust-perf raw n=340 total_us=48261 rebuild_us=210 layout_us=2 paint_us=739 encode_us=249 acquire_us=148 submit_us=46911 skipped=0
-frust_shell_common::perf: frust-perf raw n=341 total_us=48623 rebuild_us=223 layout_us=2 paint_us=542 encode_us=246 acquire_us=146 submit_us=47462 skipped=0
-frust_shell_common::perf: frust-perf raw n=342 total_us=48458 rebuild_us=334 layout_us=2 paint_us=626 encode_us=292 acquire_us=135 submit_us=47067 skipped=0
-frust_shell_common::perf: frust-perf raw n=343 total_us=48369 rebuild_us=224 layout_us=2 paint_us=599 encode_us=235 acquire_us=124 submit_us=47182 skipped=0
-frust_shell_common::perf: frust-perf raw n=344 total_us=47733 rebuild_us=217 layout_us=2 paint_us=558 encode_us=218 acquire_us=103 submit_us=46633 skipped=0
-frust_shell_common::perf: frust-perf raw n=345 total_us=48684 rebuild_us=84 layout_us=0 paint_us=171 encode_us=186 acquire_us=90 submit_us=48150 skipped=0
-frust_shell_common::perf: frust-perf raw n=346 total_us=48546 rebuild_us=225 layout_us=2 paint_us=692 encode_us=241 acquire_us=128 submit_us=47257 skipped=0
-frust_shell_common::perf: frust-perf raw n=347 total_us=48756 rebuild_us=219 layout_us=2 paint_us=551 encode_us=226 acquire_us=106 submit_us=47651 skipped=0
-frust_shell_common::perf: frust-perf raw n=348 total_us=48081 rebuild_us=220 layout_us=2 paint_us=559 encode_us=250 acquire_us=221 submit_us=46826 skipped=0
-frust_shell_common::perf: frust-perf raw n=349 total_us=48266 rebuild_us=217 layout_us=2 paint_us=541 encode_us=252 acquire_us=146 submit_us=47106 skipped=0
-frust_shell_common::perf: frust-perf raw n=350 total_us=48213 rebuild_us=192 layout_us=1 paint_us=499 encode_us=222 acquire_us=109 submit_us=47186 skipped=0
-frust_shell_common::perf: frust-perf raw n=351 total_us=48758 rebuild_us=202 layout_us=2 paint_us=620 encode_us=252 acquire_us=147 submit_us=47533 skipped=0
-frust_shell_common::perf: frust-perf raw n=352 total_us=48297 rebuild_us=198 layout_us=2 paint_us=598 encode_us=219 acquire_us=107 submit_us=47170 skipped=0
-frust_shell_common::perf: frust-perf raw n=353 total_us=49058 rebuild_us=417 layout_us=2 paint_us=648 encode_us=244 acquire_us=133 submit_us=47612 skipped=0
-frust_shell_common::perf: frust-perf raw n=354 total_us=48429 rebuild_us=273 layout_us=3 paint_us=657 encode_us=252 acquire_us=149 submit_us=47093 skipped=0
-frust_shell_common::perf: frust-perf raw n=355 total_us=48418 rebuild_us=194 layout_us=1 paint_us=515 encode_us=231 acquire_us=131 submit_us=47342 skipped=0
-frust_shell_common::perf: frust-perf raw n=356 total_us=48450 rebuild_us=227 layout_us=2 paint_us=587 encode_us=250 acquire_us=175 submit_us=47208 skipped=0
-frust_shell_common::perf: frust-perf raw n=357 total_us=48651 rebuild_us=247 layout_us=1 paint_us=752 encode_us=254 acquire_us=146 submit_us=47249 skipped=0
-frust_shell_common::perf: frust-perf raw n=358 total_us=47944 rebuild_us=97 layout_us=0 paint_us=171 encode_us=212 acquire_us=91 submit_us=47370 skipped=0
-frust_shell_common::perf: frust-perf raw n=359 total_us=47550 rebuild_us=86 layout_us=0 paint_us=210 encode_us=215 acquire_us=102 submit_us=46934 skipped=0
-frust_shell_common::perf: frust-perf raw n=360 total_us=48211 rebuild_us=102 layout_us=0 paint_us=186 encode_us=224 acquire_us=114 submit_us=47583 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1560 expected_present_us=0 acquire_us=118 period_us=11126
-frust_shell_common::perf: frust-perf raw n=361 total_us=48202 rebuild_us=202 layout_us=1 paint_us=525 encode_us=225 acquire_us=115 submit_us=47131 skipped=0
-frust_shell_common::perf: frust-perf raw n=362 total_us=47911 rebuild_us=134 layout_us=0 paint_us=164 encode_us=228 acquire_us=95 submit_us=47287 skipped=0
-frust_shell_common::perf: frust-perf raw n=363 total_us=47628 rebuild_us=79 layout_us=0 paint_us=155 encode_us=209 acquire_us=91 submit_us=47091 skipped=0
-frust_shell_common::perf: frust-perf raw n=364 total_us=47141 rebuild_us=83 layout_us=0 paint_us=170 encode_us=209 acquire_us=93 submit_us=46584 skipped=0
-frust_shell_common::perf: frust-perf raw n=365 total_us=48818 rebuild_us=194 layout_us=2 paint_us=502 encode_us=279 acquire_us=125 submit_us=47715 skipped=0
-frust_shell_common::perf: frust-perf raw n=366 total_us=48949 rebuild_us=450 layout_us=4 paint_us=770 encode_us=274 acquire_us=226 submit_us=47223 skipped=0
-frust_shell_common::perf: frust-perf raw n=367 total_us=47665 rebuild_us=80 layout_us=0 paint_us=159 encode_us=208 acquire_us=95 submit_us=47120 skipped=0
-frust_shell_common::perf: frust-perf raw n=368 total_us=48530 rebuild_us=86 layout_us=0 paint_us=158 encode_us=209 acquire_us=93 submit_us=47981 skipped=0
-frust_shell_common::perf: frust-perf raw n=369 total_us=47804 rebuild_us=87 layout_us=0 paint_us=163 encode_us=312 acquire_us=186 submit_us=47054 skipped=0
-frust_shell_common::perf: frust-perf raw n=370 total_us=48182 rebuild_us=210 layout_us=2 paint_us=539 encode_us=252 acquire_us=145 submit_us=47033 skipped=0
-frust_shell_common::perf: frust-perf raw n=371 total_us=48619 rebuild_us=270 layout_us=2 paint_us=695 encode_us=262 acquire_us=151 submit_us=47237 skipped=0
-frust_shell_common::perf: frust-perf raw n=372 total_us=48367 rebuild_us=221 layout_us=2 paint_us=556 encode_us=253 acquire_us=145 submit_us=47188 skipped=0
-frust_shell_common::perf: frust-perf raw n=373 total_us=48548 rebuild_us=256 layout_us=2 paint_us=802 encode_us=258 acquire_us=153 submit_us=47076 skipped=0
-frust_shell_common::perf: frust-perf raw n=374 total_us=48447 rebuild_us=203 layout_us=2 paint_us=529 encode_us=257 acquire_us=101 submit_us=47353 skipped=0
-frust_shell_common::perf: frust-perf raw n=375 total_us=47870 rebuild_us=99 layout_us=0 paint_us=191 encode_us=226 acquire_us=120 submit_us=47231 skipped=0
-frust_shell_common::perf: frust-perf raw n=376 total_us=47979 rebuild_us=82 layout_us=0 paint_us=166 encode_us=215 acquire_us=107 submit_us=47406 skipped=0
-frust_shell_common::perf: frust-perf raw n=377 total_us=48651 rebuild_us=194 layout_us=1 paint_us=677 encode_us=220 acquire_us=118 submit_us=47438 skipped=0
-frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=377 over_120hz=377 skipped=0 total_frames=377
-frust_shell_common::perf: frust-perf raw n=378 total_us=48017 rebuild_us=224 layout_us=2 paint_us=563 encode_us=243 acquire_us=153 submit_us=46829 skipped=0
-frust_shell_common::perf: frust-perf raw n=379 total_us=47382 rebuild_us=86 layout_us=0 paint_us=160 encode_us=217 acquire_us=106 submit_us=46811 skipped=0
-frust_shell_common::perf: frust-perf raw n=380 total_us=47970 rebuild_us=87 layout_us=0 paint_us=167 encode_us=184 acquire_us=101 submit_us=47428 skipped=0
-frust_shell_common::perf: frust-perf raw n=381 total_us=48600 rebuild_us=191 layout_us=2 paint_us=502 encode_us=221 acquire_us=107 submit_us=47575 skipped=0
-frust_shell_common::perf: frust-perf raw n=382 total_us=47976 rebuild_us=575 layout_us=2 paint_us=636 encode_us=240 acquire_us=134 submit_us=46388 skipped=0
-frust_shell_common::perf: frust-perf raw n=383 total_us=47858 rebuild_us=84 layout_us=0 paint_us=167 encode_us=212 acquire_us=94 submit_us=47298 skipped=0
-frust_shell_common::perf: frust-perf raw n=384 total_us=48355 rebuild_us=86 layout_us=0 paint_us=170 encode_us=211 acquire_us=95 submit_us=47790 skipped=0
-frust_shell_common::perf: frust-perf raw n=385 total_us=48049 rebuild_us=218 layout_us=2 paint_us=544 encode_us=242 acquire_us=161 submit_us=46880 skipped=0
-frust_shell_common::perf: frust-perf raw n=386 total_us=48973 rebuild_us=228 layout_us=2 paint_us=739 encode_us=207 acquire_us=102 submit_us=47693 skipped=0
-frust_shell_common::perf: frust-perf raw n=387 total_us=48335 rebuild_us=166 layout_us=2 paint_us=473 encode_us=210 acquire_us=102 submit_us=47379 skipped=0
-frust_shell_common::perf: frust-perf raw n=388 total_us=48397 rebuild_us=199 layout_us=2 paint_us=614 encode_us=235 acquire_us=132 submit_us=47213 skipped=0
-frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1680 expected_present_us=0 acquire_us=128 period_us=11128
-frust_shell_common::perf: frust-perf raw n=389 total_us=48253 rebuild_us=230 layout_us=1 paint_us=569 encode_us=255 acquire_us=164 submit_us=47030 skipped=0
-frust_shell_common::perf: frust-perf raw n=390 total_us=47980 rebuild_us=91 layout_us=0 paint_us=175 encode_us=306 acquire_us=136 submit_us=47269 skipped=0
-frust_shell_common::perf: frust-perf raw n=391 total_us=48114 rebuild_us=91 layout_us=0 paint_us=168 encode_us=225 acquire_us=125 submit_us=47502 skipped=0
-frust_shell_common::perf: frust-perf raw n=392 total_us=47744 rebuild_us=86 layout_us=0 paint_us=169 encode_us=220 acquire_us=109 submit_us=47157 skipped=0
-frust_shell_common::perf: frust-perf raw n=393 total_us=47596 rebuild_us=92 layout_us=0 paint_us=175 encode_us=266 acquire_us=125 submit_us=46934 skipped=0
-frust_shell_common::perf: frust-perf raw n=394 total_us=48069 rebuild_us=82 layout_us=0 paint_us=154 encode_us=174 acquire_us=84 submit_us=47573 skipped=0
-frust_shell_common::perf: frust-perf raw n=395 total_us=48562 rebuild_us=205 layout_us=2 paint_us=517 encode_us=209 acquire_us=93 submit_us=47533 skipped=0
-frust_shell_common::perf: frust-perf raw n=396 total_us=48155 rebuild_us=241 layout_us=1 paint_us=647 encode_us=271 acquire_us=114 submit_us=46878 skipped=0
-frust_shell_common::perf: frust-perf raw n=397 total_us=48974 rebuild_us=212 layout_us=2 paint_us=758 encode_us=261 acquire_us=91 submit_us=47648 skipped=0
-frust_shell_common::perf: frust-perf raw n=398 total_us=48317 rebuild_us=198 layout_us=2 paint_us=514 encode_us=230 acquire_us=116 submit_us=47254 skipped=0
-frust_shell_common::perf: frust-perf raw n=399 total_us=48936 rebuild_us=193 layout_us=2 paint_us=646 encode_us=224 acquire_us=163 submit_us=47706 skipped=0
-frust_shell_common::perf: frust-perf raw n=400 total_us=47624 rebuild_us=250 layout_us=2 paint_us=597 encode_us=260 acquire_us=207 submit_us=46308 skipped=0
-frust_shell_common::perf: frust-perf raw n=401 total_us=48428 rebuild_us=104 layout_us=0 paint_us=255 encode_us=220 acquire_us=110 submit_us=47736 skipped=0
-frust_shell_common::perf: frust-perf raw n=402 total_us=48510 rebuild_us=200 layout_us=2 paint_us=520 encode_us=222 acquire_us=121 submit_us=47442 skipped=0
-frust_shell_common::perf: frust-perf raw n=403 total_us=48249 rebuild_us=230 layout_us=2 paint_us=588 encode_us=265 acquire_us=174 submit_us=46988 skipped=0
-frust_shell_common::perf: frust-perf raw n=404 total_us=47695 rebuild_us=95 layout_us=0 paint_us=172 encode_us=221 acquire_us=99 submit_us=47105 skipped=0
-frust_shell_common::perf: frust-perf raw n=405 total_us=48457 rebuild_us=80 layout_us=0 paint_us=158 encode_us=207 acquire_us=91 submit_us=47920 skipped=0
-frust_shell_common::perf: frust-perf raw n=406 total_us=47838 rebuild_us=223 layout_us=2 paint_us=560 encode_us=233 acquire_us=121 submit_us=46696 skipped=0
-frust_shell_common::perf: frust-perf raw n=407 total_us=47449 rebuild_us=109 layout_us=0 paint_us=204 encode_us=208 acquire_us=89 submit_us=46836 skipped=0
-frust_shell_common::perf: frust-perf raw n=408 total_us=48356 rebuild_us=102 layout_us=0 paint_us=188 encode_us=176 acquire_us=82 submit_us=47806 skipped=0
-frust_shell_common::perf: frust-perf raw n=409 total_us=47851 rebuild_us=81 layout_us=0 paint_us=155 encode_us=240 acquire_us=93 submit_us=47278 skipped=0
-frust_shell_common::perf: frust-perf raw n=410 total_us=48250 rebuild_us=195 layout_us=1 paint_us=577 encode_us=232 acquire_us=115 submit_us=47127 skipped=0
-frust_shell_common::perf: frust-perf raw n=411 total_us=48247 rebuild_us=94 layout_us=0 paint_us=181 encode_us=217 acquire_us=89 submit_us=47663 skipped=0
-frust_shell_common::perf: frust-perf raw n=412 total_us=48351 rebuild_us=202 layout_us=2 paint_us=592 encode_us=269 acquire_us=123 submit_us=47160 skipped=0
-frust_shell_common::perf: frust-perf raw n=413 total_us=48238 rebuild_us=308 layout_us=2 paint_us=747 encode_us=251 acquire_us=130 submit_us=46799 skipped=0
+frust_shell_common::perf: frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=0ms preinit_started=0ms preinit_joined=0ms cache_loaded=0ms pipeline_cache_restored=0ms adapter_ready=48ms device_ready=48ms renderer_ready=48ms first_rebuild_done=61ms first_encode_done=61ms first_frame_presented=84ms
+frust_shell_common::perf: frust-perf raw n=1 total_us=22841 rebuild_us=59 layout_us=0 paint_us=149 encode_us=151 acquire_us=24 submit_us=22455 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=2 total_us=140080 rebuild_us=242 layout_us=0 paint_us=1554 encode_us=156 acquire_us=47 submit_us=138079 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=3 total_us=143001 rebuild_us=73 layout_us=0 paint_us=110 encode_us=124 acquire_us=43 submit_us=142648 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=4 total_us=119229 rebuild_us=115 layout_us=0 paint_us=200 encode_us=254 acquire_us=57 submit_us=118600 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=5 total_us=51654 rebuild_us=88 layout_us=0 paint_us=150 encode_us=147 acquire_us=50 submit_us=51216 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=6 total_us=50412 rebuild_us=150 layout_us=0 paint_us=171 encode_us=150 acquire_us=62 submit_us=49878 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=7 total_us=49957 rebuild_us=91 layout_us=0 paint_us=144 encode_us=148 acquire_us=57 submit_us=49513 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=8 total_us=48552 rebuild_us=68 layout_us=0 paint_us=124 encode_us=167 acquire_us=59 submit_us=48132 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=9 total_us=48673 rebuild_us=67 layout_us=0 paint_us=129 encode_us=145 acquire_us=108 submit_us=48223 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=10 total_us=48062 rebuild_us=67 layout_us=0 paint_us=123 encode_us=179 acquire_us=89 submit_us=47602 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=11 total_us=48882 rebuild_us=74 layout_us=0 paint_us=141 encode_us=154 acquire_us=88 submit_us=48422 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=12 total_us=48642 rebuild_us=79 layout_us=0 paint_us=151 encode_us=148 acquire_us=79 submit_us=48183 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=13 total_us=47706 rebuild_us=96 layout_us=0 paint_us=152 encode_us=156 acquire_us=88 submit_us=47212 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=14 total_us=49097 rebuild_us=180 layout_us=1 paint_us=305 encode_us=149 acquire_us=71 submit_us=48388 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=15 total_us=48377 rebuild_us=77 layout_us=0 paint_us=149 encode_us=148 acquire_us=73 submit_us=47928 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=16 total_us=47994 rebuild_us=60 layout_us=0 paint_us=129 encode_us=124 acquire_us=66 submit_us=47612 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=17 total_us=48300 rebuild_us=70 layout_us=0 paint_us=120 encode_us=146 acquire_us=69 submit_us=47892 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=18 total_us=48162 rebuild_us=75 layout_us=0 paint_us=138 encode_us=150 acquire_us=72 submit_us=47724 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=19 total_us=48003 rebuild_us=75 layout_us=0 paint_us=133 encode_us=151 acquire_us=83 submit_us=47557 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=20 total_us=48310 rebuild_us=83 layout_us=0 paint_us=141 encode_us=153 acquire_us=77 submit_us=47853 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=21 total_us=48160 rebuild_us=92 layout_us=0 paint_us=161 encode_us=169 acquire_us=97 submit_us=47638 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=120 expected_present_us=0 acquire_us=78 period_us=11132
+frust_shell_common::perf: frust-perf raw n=22 total_us=48318 rebuild_us=90 layout_us=0 paint_us=152 encode_us=151 acquire_us=76 submit_us=47846 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=23 total_us=48006 rebuild_us=95 layout_us=0 paint_us=168 encode_us=156 acquire_us=77 submit_us=47508 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=24 total_us=48232 rebuild_us=83 layout_us=0 paint_us=148 encode_us=164 acquire_us=79 submit_us=47756 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=25 total_us=48063 rebuild_us=86 layout_us=0 paint_us=144 encode_us=195 acquire_us=80 submit_us=47555 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=26 total_us=48317 rebuild_us=77 layout_us=0 paint_us=139 encode_us=165 acquire_us=79 submit_us=47854 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=27 total_us=47918 rebuild_us=86 layout_us=0 paint_us=156 encode_us=167 acquire_us=79 submit_us=47429 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=28 total_us=47801 rebuild_us=84 layout_us=0 paint_us=136 encode_us=162 acquire_us=78 submit_us=47338 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=29 total_us=47899 rebuild_us=88 layout_us=0 paint_us=150 encode_us=155 acquire_us=73 submit_us=47432 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=30 total_us=48235 rebuild_us=80 layout_us=0 paint_us=140 encode_us=129 acquire_us=68 submit_us=47815 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=31 total_us=47993 rebuild_us=112 layout_us=0 paint_us=183 encode_us=185 acquire_us=117 submit_us=47392 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=32 total_us=47800 rebuild_us=76 layout_us=0 paint_us=136 encode_us=148 acquire_us=73 submit_us=47365 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=33 total_us=48299 rebuild_us=69 layout_us=0 paint_us=122 encode_us=155 acquire_us=73 submit_us=47877 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=34 total_us=48280 rebuild_us=85 layout_us=0 paint_us=148 encode_us=149 acquire_us=72 submit_us=47824 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=35 total_us=48286 rebuild_us=98 layout_us=0 paint_us=188 encode_us=221 acquire_us=104 submit_us=47673 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=36 total_us=48010 rebuild_us=95 layout_us=0 paint_us=183 encode_us=217 acquire_us=93 submit_us=47418 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=37 total_us=49363 rebuild_us=223 layout_us=1 paint_us=799 encode_us=245 acquire_us=133 submit_us=47959 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=37 total_p50_ms=48 total_p95_ms=140 total_p99_ms=143 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=138 over_60hz=37 over_120hz=37 skipped=0 total_frames=37
+frust_shell_common::perf: frust-perf raw n=38 total_us=48104 rebuild_us=203 layout_us=1 paint_us=534 encode_us=297 acquire_us=108 submit_us=46958 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=39 total_us=48680 rebuild_us=188 layout_us=1 paint_us=505 encode_us=235 acquire_us=149 submit_us=47598 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=40 total_us=48852 rebuild_us=205 layout_us=1 paint_us=683 encode_us=223 acquire_us=126 submit_us=47610 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=41 total_us=48727 rebuild_us=257 layout_us=1 paint_us=675 encode_us=245 acquire_us=163 submit_us=47383 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=42 total_us=48558 rebuild_us=353 layout_us=1 paint_us=665 encode_us=244 acquire_us=127 submit_us=47166 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=43 total_us=48571 rebuild_us=110 layout_us=0 paint_us=189 encode_us=230 acquire_us=99 submit_us=47940 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=44 total_us=47911 rebuild_us=124 layout_us=0 paint_us=206 encode_us=219 acquire_us=94 submit_us=47265 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=45 total_us=48734 rebuild_us=265 layout_us=1 paint_us=644 encode_us=225 acquire_us=113 submit_us=47482 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=46 total_us=48406 rebuild_us=96 layout_us=0 paint_us=215 encode_us=232 acquire_us=140 submit_us=47721 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=47 total_us=48060 rebuild_us=101 layout_us=0 paint_us=191 encode_us=219 acquire_us=100 submit_us=47445 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=48 total_us=49044 rebuild_us=218 layout_us=2 paint_us=545 encode_us=233 acquire_us=110 submit_us=47935 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=49 total_us=48739 rebuild_us=371 layout_us=2 paint_us=672 encode_us=255 acquire_us=152 submit_us=47285 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=240 expected_present_us=0 acquire_us=130 period_us=11130
+frust_shell_common::perf: frust-perf raw n=50 total_us=49276 rebuild_us=235 layout_us=1 paint_us=671 encode_us=264 acquire_us=156 submit_us=47946 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=51 total_us=48332 rebuild_us=224 layout_us=1 paint_us=555 encode_us=235 acquire_us=136 submit_us=47178 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=52 total_us=48705 rebuild_us=230 layout_us=1 paint_us=561 encode_us=227 acquire_us=124 submit_us=47560 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=53 total_us=48601 rebuild_us=243 layout_us=1 paint_us=699 encode_us=237 acquire_us=129 submit_us=47289 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=54 total_us=48555 rebuild_us=228 layout_us=1 paint_us=554 encode_us=254 acquire_us=152 submit_us=47363 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=55 total_us=48957 rebuild_us=202 layout_us=1 paint_us=640 encode_us=208 acquire_us=107 submit_us=47795 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=56 total_us=48780 rebuild_us=231 layout_us=2 paint_us=562 encode_us=356 acquire_us=187 submit_us=47439 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=57 total_us=48277 rebuild_us=242 layout_us=1 paint_us=567 encode_us=257 acquire_us=148 submit_us=47059 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=58 total_us=48295 rebuild_us=221 layout_us=1 paint_us=563 encode_us=236 acquire_us=126 submit_us=47145 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=59 total_us=48117 rebuild_us=88 layout_us=0 paint_us=164 encode_us=286 acquire_us=104 submit_us=47472 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=60 total_us=49358 rebuild_us=266 layout_us=2 paint_us=618 encode_us=218 acquire_us=101 submit_us=48152 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=61 total_us=48374 rebuild_us=279 layout_us=2 paint_us=871 encode_us=324 acquire_us=178 submit_us=46718 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=62 total_us=48471 rebuild_us=92 layout_us=0 paint_us=171 encode_us=213 acquire_us=106 submit_us=47887 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=63 total_us=48357 rebuild_us=121 layout_us=0 paint_us=160 encode_us=211 acquire_us=96 submit_us=47767 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=64 total_us=48043 rebuild_us=105 layout_us=0 paint_us=190 encode_us=211 acquire_us=96 submit_us=47440 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=65 total_us=48666 rebuild_us=213 layout_us=2 paint_us=544 encode_us=223 acquire_us=110 submit_us=47572 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=66 total_us=49192 rebuild_us=249 layout_us=2 paint_us=573 encode_us=212 acquire_us=95 submit_us=48060 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=67 total_us=48644 rebuild_us=275 layout_us=1 paint_us=620 encode_us=254 acquire_us=143 submit_us=47349 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=68 total_us=47496 rebuild_us=107 layout_us=0 paint_us=192 encode_us=218 acquire_us=93 submit_us=46884 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=69 total_us=48527 rebuild_us=95 layout_us=0 paint_us=170 encode_us=180 acquire_us=93 submit_us=47986 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=70 total_us=49242 rebuild_us=211 layout_us=1 paint_us=525 encode_us=213 acquire_us=97 submit_us=48193 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=71 total_us=47654 rebuild_us=226 layout_us=1 paint_us=557 encode_us=353 acquire_us=168 submit_us=46346 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=72 total_us=48464 rebuild_us=122 layout_us=0 paint_us=238 encode_us=218 acquire_us=108 submit_us=47775 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=73 total_us=48400 rebuild_us=89 layout_us=0 paint_us=160 encode_us=209 acquire_us=106 submit_us=47834 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=74 total_us=48715 rebuild_us=200 layout_us=1 paint_us=508 encode_us=260 acquire_us=128 submit_us=47616 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=75 total_us=48713 rebuild_us=228 layout_us=1 paint_us=545 encode_us=242 acquire_us=121 submit_us=47572 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=76 total_us=48825 rebuild_us=286 layout_us=2 paint_us=745 encode_us=228 acquire_us=114 submit_us=47448 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=77 total_us=48286 rebuild_us=198 layout_us=1 paint_us=510 encode_us=225 acquire_us=114 submit_us=47235 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=360 expected_present_us=0 acquire_us=124 period_us=11128
+frust_shell_common::perf: frust-perf raw n=78 total_us=48386 rebuild_us=254 layout_us=1 paint_us=589 encode_us=261 acquire_us=153 submit_us=47125 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=79 total_us=48493 rebuild_us=114 layout_us=0 paint_us=186 encode_us=179 acquire_us=100 submit_us=47912 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=79 total_p50_ms=48 total_p95_ms=51 total_p99_ms=143 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=51 over_60hz=79 over_120hz=79 skipped=0 total_frames=79
+frust_shell_common::perf: frust-perf raw n=80 total_us=48074 rebuild_us=90 layout_us=0 paint_us=162 encode_us=205 acquire_us=96 submit_us=47518 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=81 total_us=48238 rebuild_us=114 layout_us=0 paint_us=193 encode_us=211 acquire_us=96 submit_us=47621 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=82 total_us=49140 rebuild_us=269 layout_us=1 paint_us=660 encode_us=264 acquire_us=152 submit_us=47790 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=83 total_us=48323 rebuild_us=274 layout_us=1 paint_us=679 encode_us=260 acquire_us=153 submit_us=46953 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=84 total_us=48342 rebuild_us=89 layout_us=0 paint_us=166 encode_us=212 acquire_us=98 submit_us=47773 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=85 total_us=48442 rebuild_us=86 layout_us=0 paint_us=220 encode_us=216 acquire_us=96 submit_us=47821 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=86 total_us=47927 rebuild_us=96 layout_us=0 paint_us=174 encode_us=219 acquire_us=101 submit_us=47334 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=87 total_us=48798 rebuild_us=91 layout_us=0 paint_us=165 encode_us=216 acquire_us=106 submit_us=48217 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=88 total_us=48116 rebuild_us=98 layout_us=0 paint_us=178 encode_us=238 acquire_us=106 submit_us=47494 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=89 total_us=47847 rebuild_us=100 layout_us=0 paint_us=179 encode_us=219 acquire_us=100 submit_us=47246 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=90 total_us=48384 rebuild_us=96 layout_us=0 paint_us=169 encode_us=212 acquire_us=106 submit_us=47799 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=91 total_us=48388 rebuild_us=87 layout_us=0 paint_us=160 encode_us=214 acquire_us=106 submit_us=47818 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=92 total_us=47930 rebuild_us=126 layout_us=0 paint_us=219 encode_us=264 acquire_us=154 submit_us=47164 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=93 total_us=48019 rebuild_us=86 layout_us=0 paint_us=160 encode_us=210 acquire_us=94 submit_us=47467 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=94 total_us=48513 rebuild_us=86 layout_us=0 paint_us=163 encode_us=280 acquire_us=117 submit_us=47865 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=95 total_us=48507 rebuild_us=262 layout_us=1 paint_us=640 encode_us=260 acquire_us=143 submit_us=47198 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=96 total_us=48298 rebuild_us=95 layout_us=0 paint_us=173 encode_us=219 acquire_us=102 submit_us=47706 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=97 total_us=48261 rebuild_us=110 layout_us=0 paint_us=208 encode_us=228 acquire_us=104 submit_us=47607 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=98 total_us=47863 rebuild_us=86 layout_us=0 paint_us=162 encode_us=104 acquire_us=62 submit_us=47447 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=99 total_us=48096 rebuild_us=99 layout_us=0 paint_us=184 encode_us=210 acquire_us=145 submit_us=47456 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=100 total_us=48219 rebuild_us=115 layout_us=0 paint_us=190 encode_us=216 acquire_us=108 submit_us=47588 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=101 total_us=48783 rebuild_us=243 layout_us=1 paint_us=635 encode_us=232 acquire_us=124 submit_us=47544 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=102 total_us=48903 rebuild_us=217 layout_us=1 paint_us=660 encode_us=245 acquire_us=131 submit_us=47646 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=103 total_us=48741 rebuild_us=235 layout_us=1 paint_us=562 encode_us=251 acquire_us=143 submit_us=47546 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=104 total_us=48170 rebuild_us=217 layout_us=2 paint_us=551 encode_us=299 acquire_us=129 submit_us=46971 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=105 total_us=48745 rebuild_us=226 layout_us=1 paint_us=564 encode_us=225 acquire_us=110 submit_us=47616 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=480 expected_present_us=0 acquire_us=120 period_us=11128
+frust_shell_common::perf: frust-perf raw n=106 total_us=48528 rebuild_us=201 layout_us=1 paint_us=512 encode_us=225 acquire_us=126 submit_us=47461 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=107 total_us=48495 rebuild_us=102 layout_us=1 paint_us=191 encode_us=249 acquire_us=110 submit_us=47840 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=108 total_us=48017 rebuild_us=94 layout_us=0 paint_us=173 encode_us=211 acquire_us=112 submit_us=47425 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=109 total_us=48201 rebuild_us=85 layout_us=0 paint_us=160 encode_us=211 acquire_us=95 submit_us=47648 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=110 total_us=48120 rebuild_us=92 layout_us=0 paint_us=173 encode_us=209 acquire_us=95 submit_us=47548 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=111 total_us=47974 rebuild_us=104 layout_us=0 paint_us=189 encode_us=105 acquire_us=59 submit_us=47514 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=112 total_us=48384 rebuild_us=85 layout_us=0 paint_us=157 encode_us=207 acquire_us=128 submit_us=47803 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=113 total_us=48475 rebuild_us=215 layout_us=1 paint_us=693 encode_us=240 acquire_us=131 submit_us=47193 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=114 total_us=49039 rebuild_us=199 layout_us=1 paint_us=514 encode_us=253 acquire_us=137 submit_us=47933 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=115 total_us=48349 rebuild_us=220 layout_us=1 paint_us=786 encode_us=245 acquire_us=147 submit_us=46947 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=116 total_us=48146 rebuild_us=86 layout_us=0 paint_us=169 encode_us=218 acquire_us=109 submit_us=47562 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=117 total_us=48459 rebuild_us=91 layout_us=0 paint_us=170 encode_us=216 acquire_us=105 submit_us=47874 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=118 total_us=48488 rebuild_us=214 layout_us=1 paint_us=527 encode_us=234 acquire_us=136 submit_us=47373 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=119 total_us=48578 rebuild_us=222 layout_us=2 paint_us=537 encode_us=226 acquire_us=108 submit_us=47481 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=120 total_us=48812 rebuild_us=225 layout_us=1 paint_us=542 encode_us=224 acquire_us=153 submit_us=47664 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=121 total_us=48823 rebuild_us=221 layout_us=1 paint_us=553 encode_us=234 acquire_us=135 submit_us=47676 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=140 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=121 over_120hz=121 skipped=0 total_frames=121
+frust_shell_common::perf: frust-perf raw n=122 total_us=48253 rebuild_us=89 layout_us=0 paint_us=165 encode_us=253 acquire_us=92 submit_us=47652 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=123 total_us=48251 rebuild_us=101 layout_us=0 paint_us=188 encode_us=221 acquire_us=100 submit_us=47639 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=124 total_us=48839 rebuild_us=202 layout_us=1 paint_us=510 encode_us=209 acquire_us=96 submit_us=47818 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=125 total_us=49877 rebuild_us=486 layout_us=1 paint_us=1681 encode_us=243 acquire_us=122 submit_us=47340 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=126 total_us=49015 rebuild_us=202 layout_us=1 paint_us=598 encode_us=224 acquire_us=119 submit_us=47868 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=127 total_us=49023 rebuild_us=207 layout_us=1 paint_us=653 encode_us=239 acquire_us=150 submit_us=47769 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=128 total_us=49181 rebuild_us=218 layout_us=1 paint_us=631 encode_us=238 acquire_us=139 submit_us=47951 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=129 total_us=48090 rebuild_us=220 layout_us=1 paint_us=528 encode_us=248 acquire_us=169 submit_us=46922 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=130 total_us=48529 rebuild_us=242 layout_us=1 paint_us=718 encode_us=241 acquire_us=154 submit_us=47171 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=131 total_us=48967 rebuild_us=196 layout_us=1 paint_us=509 encode_us=224 acquire_us=120 submit_us=47915 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=132 total_us=47983 rebuild_us=116 layout_us=0 paint_us=210 encode_us=212 acquire_us=120 submit_us=47321 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=133 total_us=48810 rebuild_us=86 layout_us=1 paint_us=158 encode_us=177 acquire_us=86 submit_us=48300 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=600 expected_present_us=0 acquire_us=125 period_us=11128
+frust_shell_common::perf: frust-perf raw n=134 total_us=48210 rebuild_us=375 layout_us=1 paint_us=845 encode_us=258 acquire_us=144 submit_us=46584 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=135 total_us=48203 rebuild_us=105 layout_us=0 paint_us=182 encode_us=217 acquire_us=113 submit_us=47584 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=136 total_us=48451 rebuild_us=105 layout_us=0 paint_us=188 encode_us=218 acquire_us=95 submit_us=47841 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=137 total_us=48688 rebuild_us=209 layout_us=1 paint_us=529 encode_us=236 acquire_us=128 submit_us=47582 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=138 total_us=48020 rebuild_us=208 layout_us=1 paint_us=531 encode_us=251 acquire_us=137 submit_us=46889 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=139 total_us=47630 rebuild_us=120 layout_us=0 paint_us=219 encode_us=225 acquire_us=102 submit_us=46961 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=140 total_us=48555 rebuild_us=93 layout_us=0 paint_us=173 encode_us=206 acquire_us=214 submit_us=47867 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=141 total_us=48399 rebuild_us=87 layout_us=0 paint_us=169 encode_us=221 acquire_us=105 submit_us=47814 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=142 total_us=48345 rebuild_us=227 layout_us=1 paint_us=553 encode_us=254 acquire_us=163 submit_us=47144 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=143 total_us=48716 rebuild_us=213 layout_us=1 paint_us=538 encode_us=231 acquire_us=111 submit_us=47619 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=144 total_us=47869 rebuild_us=101 layout_us=0 paint_us=195 encode_us=252 acquire_us=137 submit_us=47181 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=145 total_us=48306 rebuild_us=91 layout_us=0 paint_us=170 encode_us=241 acquire_us=97 submit_us=47704 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=146 total_us=48594 rebuild_us=90 layout_us=0 paint_us=168 encode_us=236 acquire_us=129 submit_us=47968 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=147 total_us=50036 rebuild_us=241 layout_us=1 paint_us=1165 encode_us=326 acquire_us=162 submit_us=48139 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=148 total_us=47948 rebuild_us=289 layout_us=1 paint_us=723 encode_us=252 acquire_us=152 submit_us=46529 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=149 total_us=48476 rebuild_us=98 layout_us=0 paint_us=178 encode_us=228 acquire_us=108 submit_us=47861 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=150 total_us=48328 rebuild_us=91 layout_us=0 paint_us=173 encode_us=212 acquire_us=110 submit_us=47739 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=151 total_us=48846 rebuild_us=82 layout_us=0 paint_us=161 encode_us=210 acquire_us=96 submit_us=48294 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=152 total_us=48983 rebuild_us=423 layout_us=2 paint_us=634 encode_us=232 acquire_us=122 submit_us=47568 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=153 total_us=48164 rebuild_us=242 layout_us=2 paint_us=582 encode_us=265 acquire_us=152 submit_us=46918 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=154 total_us=48181 rebuild_us=127 layout_us=0 paint_us=202 encode_us=215 acquire_us=105 submit_us=47529 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=155 total_us=47897 rebuild_us=97 layout_us=0 paint_us=177 encode_us=212 acquire_us=108 submit_us=47301 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=156 total_us=48213 rebuild_us=101 layout_us=0 paint_us=193 encode_us=195 acquire_us=101 submit_us=47621 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=157 total_us=48282 rebuild_us=88 layout_us=0 paint_us=170 encode_us=259 acquire_us=105 submit_us=47657 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=158 total_us=48140 rebuild_us=84 layout_us=0 paint_us=163 encode_us=210 acquire_us=95 submit_us=47586 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=159 total_us=48829 rebuild_us=179 layout_us=1 paint_us=678 encode_us=208 acquire_us=96 submit_us=47664 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=160 total_us=49169 rebuild_us=228 layout_us=2 paint_us=563 encode_us=252 acquire_us=157 submit_us=47965 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=161 total_us=48070 rebuild_us=260 layout_us=1 paint_us=668 encode_us=258 acquire_us=175 submit_us=46706 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=720 expected_present_us=0 acquire_us=131 period_us=11134
+frust_shell_common::perf: frust-perf raw n=162 total_us=48595 rebuild_us=211 layout_us=2 paint_us=522 encode_us=233 acquire_us=192 submit_us=47433 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=163 total_us=48001 rebuild_us=91 layout_us=0 paint_us=167 encode_us=210 acquire_us=96 submit_us=47434 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=163 over_120hz=163 skipped=0 total_frames=163
+frust_shell_common::perf: frust-perf raw n=164 total_us=48006 rebuild_us=84 layout_us=0 paint_us=163 encode_us=209 acquire_us=93 submit_us=47454 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=165 total_us=47927 rebuild_us=148 layout_us=0 paint_us=221 encode_us=238 acquire_us=98 submit_us=47220 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=166 total_us=48758 rebuild_us=113 layout_us=0 paint_us=186 encode_us=227 acquire_us=77 submit_us=48154 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=167 total_us=48146 rebuild_us=113 layout_us=0 paint_us=172 encode_us=215 acquire_us=97 submit_us=47548 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=168 total_us=48088 rebuild_us=84 layout_us=0 paint_us=162 encode_us=210 acquire_us=94 submit_us=47536 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=169 total_us=48032 rebuild_us=127 layout_us=0 paint_us=226 encode_us=212 acquire_us=95 submit_us=47370 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=170 total_us=48409 rebuild_us=90 layout_us=0 paint_us=165 encode_us=252 acquire_us=104 submit_us=47795 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=171 total_us=48164 rebuild_us=233 layout_us=1 paint_us=590 encode_us=227 acquire_us=108 submit_us=47001 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=172 total_us=48805 rebuild_us=87 layout_us=0 paint_us=165 encode_us=193 acquire_us=107 submit_us=48250 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=173 total_us=49329 rebuild_us=376 layout_us=3 paint_us=1065 encode_us=244 acquire_us=135 submit_us=47504 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=174 total_us=48782 rebuild_us=302 layout_us=1 paint_us=715 encode_us=266 acquire_us=158 submit_us=47338 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=175 total_us=48706 rebuild_us=93 layout_us=0 paint_us=173 encode_us=202 acquire_us=101 submit_us=48134 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=176 total_us=48433 rebuild_us=87 layout_us=0 paint_us=162 encode_us=211 acquire_us=97 submit_us=47873 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=177 total_us=48811 rebuild_us=225 layout_us=1 paint_us=566 encode_us=245 acquire_us=140 submit_us=47633 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=178 total_us=48768 rebuild_us=251 layout_us=2 paint_us=685 encode_us=279 acquire_us=181 submit_us=47368 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=179 total_us=49245 rebuild_us=200 layout_us=1 paint_us=506 encode_us=224 acquire_us=162 submit_us=48149 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=180 total_us=48436 rebuild_us=255 layout_us=1 paint_us=584 encode_us=214 acquire_us=101 submit_us=47278 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=181 total_us=48402 rebuild_us=113 layout_us=0 paint_us=216 encode_us=223 acquire_us=97 submit_us=47751 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=182 total_us=48298 rebuild_us=94 layout_us=0 paint_us=172 encode_us=214 acquire_us=108 submit_us=47708 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=183 total_us=49093 rebuild_us=268 layout_us=3 paint_us=804 encode_us=260 acquire_us=158 submit_us=47598 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=184 total_us=47959 rebuild_us=115 layout_us=0 paint_us=192 encode_us=256 acquire_us=137 submit_us=47257 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=185 total_us=48546 rebuild_us=85 layout_us=0 paint_us=161 encode_us=211 acquire_us=106 submit_us=47981 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=186 total_us=48513 rebuild_us=245 layout_us=1 paint_us=802 encode_us=306 acquire_us=144 submit_us=47013 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=187 total_us=48586 rebuild_us=203 layout_us=1 paint_us=515 encode_us=215 acquire_us=116 submit_us=47533 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=188 total_us=48686 rebuild_us=198 layout_us=1 paint_us=673 encode_us=228 acquire_us=110 submit_us=47473 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=840 expected_present_us=0 acquire_us=114 period_us=11129
+frust_shell_common::perf: frust-perf raw n=189 total_us=48293 rebuild_us=91 layout_us=0 paint_us=170 encode_us=262 acquire_us=94 submit_us=47674 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=190 total_us=48932 rebuild_us=203 layout_us=1 paint_us=517 encode_us=242 acquire_us=121 submit_us=47844 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=191 total_us=48130 rebuild_us=85 layout_us=0 paint_us=163 encode_us=212 acquire_us=123 submit_us=47545 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=192 total_us=48598 rebuild_us=196 layout_us=1 paint_us=510 encode_us=222 acquire_us=108 submit_us=47558 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=193 total_us=48207 rebuild_us=215 layout_us=1 paint_us=601 encode_us=230 acquire_us=112 submit_us=47045 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=194 total_us=48957 rebuild_us=279 layout_us=1 paint_us=660 encode_us=356 acquire_us=206 submit_us=47452 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=195 total_us=48338 rebuild_us=94 layout_us=0 paint_us=176 encode_us=212 acquire_us=102 submit_us=47751 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=196 total_us=48437 rebuild_us=193 layout_us=1 paint_us=502 encode_us=231 acquire_us=134 submit_us=47373 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=197 total_us=49403 rebuild_us=228 layout_us=1 paint_us=554 encode_us=263 acquire_us=161 submit_us=48193 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=198 total_us=48663 rebuild_us=270 layout_us=1 paint_us=642 encode_us=258 acquire_us=144 submit_us=47346 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=199 total_us=47843 rebuild_us=106 layout_us=0 paint_us=197 encode_us=212 acquire_us=106 submit_us=47220 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=200 total_us=48400 rebuild_us=103 layout_us=0 paint_us=186 encode_us=222 acquire_us=110 submit_us=47777 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=201 total_us=48434 rebuild_us=90 layout_us=0 paint_us=206 encode_us=210 acquire_us=142 submit_us=47783 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=202 total_us=48537 rebuild_us=295 layout_us=2 paint_us=679 encode_us=255 acquire_us=148 submit_us=47155 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=203 total_us=48866 rebuild_us=230 layout_us=1 paint_us=558 encode_us=244 acquire_us=129 submit_us=47701 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=204 total_us=47903 rebuild_us=114 layout_us=0 paint_us=219 encode_us=212 acquire_us=125 submit_us=47230 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=205 total_us=48621 rebuild_us=88 layout_us=0 paint_us=164 encode_us=213 acquire_us=101 submit_us=48052 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=205 over_120hz=205 skipped=0 total_frames=205
+frust_shell_common::perf: frust-perf raw n=206 total_us=48268 rebuild_us=347 layout_us=2 paint_us=607 encode_us=245 acquire_us=131 submit_us=46934 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=207 total_us=48665 rebuild_us=220 layout_us=1 paint_us=530 encode_us=240 acquire_us=126 submit_us=47545 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=208 total_us=48177 rebuild_us=106 layout_us=0 paint_us=192 encode_us=228 acquire_us=108 submit_us=47539 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=209 total_us=47967 rebuild_us=88 layout_us=0 paint_us=165 encode_us=209 acquire_us=92 submit_us=47410 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=210 total_us=48440 rebuild_us=106 layout_us=0 paint_us=193 encode_us=181 acquire_us=107 submit_us=47850 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=211 total_us=48705 rebuild_us=220 layout_us=1 paint_us=534 encode_us=248 acquire_us=128 submit_us=47570 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=212 total_us=48561 rebuild_us=229 layout_us=1 paint_us=653 encode_us=272 acquire_us=184 submit_us=47219 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=213 total_us=48328 rebuild_us=86 layout_us=0 paint_us=164 encode_us=179 acquire_us=89 submit_us=47807 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=214 total_us=48292 rebuild_us=89 layout_us=0 paint_us=207 encode_us=212 acquire_us=108 submit_us=47673 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=215 total_us=48300 rebuild_us=213 layout_us=1 paint_us=537 encode_us=249 acquire_us=140 submit_us=47156 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=216 total_us=49156 rebuild_us=269 layout_us=2 paint_us=650 encode_us=227 acquire_us=122 submit_us=47884 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=960 expected_present_us=0 acquire_us=117 period_us=11129
+frust_shell_common::perf: frust-perf raw n=217 total_us=48202 rebuild_us=81 layout_us=0 paint_us=159 encode_us=210 acquire_us=104 submit_us=47644 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=218 total_us=48312 rebuild_us=100 layout_us=0 paint_us=188 encode_us=216 acquire_us=96 submit_us=47710 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=219 total_us=48662 rebuild_us=259 layout_us=1 paint_us=582 encode_us=288 acquire_us=222 submit_us=47308 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=220 total_us=48101 rebuild_us=91 layout_us=0 paint_us=178 encode_us=214 acquire_us=96 submit_us=47520 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=221 total_us=48105 rebuild_us=82 layout_us=0 paint_us=163 encode_us=213 acquire_us=96 submit_us=47549 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=222 total_us=47332 rebuild_us=102 layout_us=0 paint_us=184 encode_us=215 acquire_us=95 submit_us=46733 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=223 total_us=48908 rebuild_us=107 layout_us=0 paint_us=194 encode_us=191 acquire_us=88 submit_us=48326 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=224 total_us=48041 rebuild_us=84 layout_us=1 paint_us=162 encode_us=210 acquire_us=93 submit_us=47488 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=225 total_us=48657 rebuild_us=196 layout_us=1 paint_us=526 encode_us=228 acquire_us=113 submit_us=47590 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=226 total_us=48757 rebuild_us=235 layout_us=1 paint_us=571 encode_us=240 acquire_us=129 submit_us=47578 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=227 total_us=48997 rebuild_us=266 layout_us=2 paint_us=655 encode_us=262 acquire_us=170 submit_us=47641 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=228 total_us=48794 rebuild_us=198 layout_us=1 paint_us=545 encode_us=267 acquire_us=181 submit_us=47599 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=229 total_us=48758 rebuild_us=247 layout_us=1 paint_us=599 encode_us=259 acquire_us=124 submit_us=47525 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=230 total_us=48836 rebuild_us=237 layout_us=1 paint_us=591 encode_us=251 acquire_us=162 submit_us=47591 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=231 total_us=48074 rebuild_us=196 layout_us=1 paint_us=511 encode_us=266 acquire_us=115 submit_us=46983 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=232 total_us=48921 rebuild_us=346 layout_us=1 paint_us=524 encode_us=230 acquire_us=119 submit_us=47699 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=233 total_us=48070 rebuild_us=249 layout_us=2 paint_us=638 encode_us=245 acquire_us=132 submit_us=46801 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=234 total_us=49571 rebuild_us=333 layout_us=1 paint_us=557 encode_us=232 acquire_us=120 submit_us=48326 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=235 total_us=49008 rebuild_us=231 layout_us=2 paint_us=568 encode_us=238 acquire_us=112 submit_us=47856 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=236 total_us=48845 rebuild_us=208 layout_us=1 paint_us=525 encode_us=265 acquire_us=115 submit_us=47727 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=237 total_us=48370 rebuild_us=224 layout_us=1 paint_us=641 encode_us=247 acquire_us=136 submit_us=47117 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=238 total_us=49285 rebuild_us=242 layout_us=1 paint_us=838 encode_us=249 acquire_us=134 submit_us=47818 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=239 total_us=48518 rebuild_us=221 layout_us=1 paint_us=638 encode_us=243 acquire_us=130 submit_us=47282 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=240 total_us=48726 rebuild_us=204 layout_us=1 paint_us=660 encode_us=227 acquire_us=110 submit_us=47521 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=241 total_us=48476 rebuild_us=254 layout_us=1 paint_us=595 encode_us=238 acquire_us=173 submit_us=47212 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=242 total_us=48311 rebuild_us=319 layout_us=3 paint_us=799 encode_us=279 acquire_us=146 submit_us=46763 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=243 total_us=48048 rebuild_us=129 layout_us=0 paint_us=203 encode_us=223 acquire_us=94 submit_us=47397 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=244 total_us=48345 rebuild_us=117 layout_us=0 paint_us=204 encode_us=225 acquire_us=104 submit_us=47692 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1080 expected_present_us=0 acquire_us=113 period_us=11124
+frust_shell_common::perf: frust-perf raw n=245 total_us=48069 rebuild_us=86 layout_us=0 paint_us=168 encode_us=227 acquire_us=92 submit_us=47492 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=246 total_us=48949 rebuild_us=214 layout_us=2 paint_us=542 encode_us=224 acquire_us=110 submit_us=47856 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=247 total_us=48526 rebuild_us=217 layout_us=1 paint_us=550 encode_us=235 acquire_us=99 submit_us=47422 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=247 over_120hz=247 skipped=0 total_frames=247
+frust_shell_common::perf: frust-perf raw n=248 total_us=48021 rebuild_us=215 layout_us=1 paint_us=548 encode_us=226 acquire_us=120 submit_us=46909 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=249 total_us=48928 rebuild_us=228 layout_us=1 paint_us=597 encode_us=236 acquire_us=126 submit_us=47736 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=250 total_us=48557 rebuild_us=199 layout_us=2 paint_us=526 encode_us=233 acquire_us=135 submit_us=47460 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=251 total_us=48422 rebuild_us=194 layout_us=1 paint_us=587 encode_us=225 acquire_us=110 submit_us=47302 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=252 total_us=48296 rebuild_us=203 layout_us=2 paint_us=518 encode_us=226 acquire_us=113 submit_us=47232 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=253 total_us=48863 rebuild_us=204 layout_us=1 paint_us=517 encode_us=229 acquire_us=115 submit_us=47794 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=254 total_us=48728 rebuild_us=204 layout_us=1 paint_us=791 encode_us=227 acquire_us=122 submit_us=47381 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=255 total_us=48982 rebuild_us=222 layout_us=1 paint_us=543 encode_us=341 acquire_us=119 submit_us=47753 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=256 total_us=48766 rebuild_us=223 layout_us=1 paint_us=810 encode_us=226 acquire_us=113 submit_us=47391 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=257 total_us=48359 rebuild_us=221 layout_us=1 paint_us=533 encode_us=234 acquire_us=129 submit_us=47238 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=258 total_us=48173 rebuild_us=97 layout_us=0 paint_us=179 encode_us=212 acquire_us=95 submit_us=47587 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=259 total_us=49118 rebuild_us=249 layout_us=2 paint_us=641 encode_us=261 acquire_us=142 submit_us=47821 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=260 total_us=48464 rebuild_us=308 layout_us=1 paint_us=637 encode_us=257 acquire_us=152 submit_us=47107 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=261 total_us=47362 rebuild_us=112 layout_us=0 paint_us=202 encode_us=212 acquire_us=97 submit_us=46736 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=262 total_us=48757 rebuild_us=86 layout_us=0 paint_us=168 encode_us=175 acquire_us=101 submit_us=48225 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=263 total_us=48588 rebuild_us=82 layout_us=0 paint_us=166 encode_us=212 acquire_us=96 submit_us=48029 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=264 total_us=48544 rebuild_us=202 layout_us=2 paint_us=521 encode_us=258 acquire_us=158 submit_us=47401 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=265 total_us=48447 rebuild_us=235 layout_us=2 paint_us=589 encode_us=239 acquire_us=199 submit_us=47182 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=266 total_us=48062 rebuild_us=82 layout_us=0 paint_us=158 encode_us=210 acquire_us=109 submit_us=47500 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=267 total_us=47919 rebuild_us=210 layout_us=1 paint_us=535 encode_us=229 acquire_us=138 submit_us=46803 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=268 total_us=48312 rebuild_us=197 layout_us=1 paint_us=524 encode_us=227 acquire_us=127 submit_us=47233 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=269 total_us=47928 rebuild_us=94 layout_us=0 paint_us=180 encode_us=218 acquire_us=114 submit_us=47319 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=270 total_us=48122 rebuild_us=87 layout_us=0 paint_us=164 encode_us=214 acquire_us=100 submit_us=47555 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=271 total_us=48904 rebuild_us=362 layout_us=1 paint_us=676 encode_us=249 acquire_us=136 submit_us=47477 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=272 total_us=48796 rebuild_us=192 layout_us=1 paint_us=757 encode_us=225 acquire_us=115 submit_us=47503 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1200 expected_present_us=0 acquire_us=126 period_us=11134
+frust_shell_common::perf: frust-perf raw n=273 total_us=49462 rebuild_us=203 layout_us=1 paint_us=551 encode_us=244 acquire_us=142 submit_us=48319 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=274 total_us=47446 rebuild_us=218 layout_us=1 paint_us=549 encode_us=270 acquire_us=162 submit_us=46243 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=275 total_us=49111 rebuild_us=155 layout_us=0 paint_us=171 encode_us=193 acquire_us=119 submit_us=48470 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=276 total_us=47741 rebuild_us=87 layout_us=0 paint_us=169 encode_us=217 acquire_us=159 submit_us=47106 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=277 total_us=48259 rebuild_us=93 layout_us=0 paint_us=234 encode_us=219 acquire_us=110 submit_us=47601 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=278 total_us=48023 rebuild_us=91 layout_us=0 paint_us=171 encode_us=219 acquire_us=100 submit_us=47439 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=279 total_us=48068 rebuild_us=83 layout_us=0 paint_us=159 encode_us=254 acquire_us=95 submit_us=47474 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=280 total_us=48743 rebuild_us=224 layout_us=2 paint_us=630 encode_us=239 acquire_us=136 submit_us=47510 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=281 total_us=48842 rebuild_us=244 layout_us=2 paint_us=882 encode_us=261 acquire_us=171 submit_us=47279 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=282 total_us=48809 rebuild_us=202 layout_us=1 paint_us=513 encode_us=233 acquire_us=118 submit_us=47739 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=283 total_us=48261 rebuild_us=191 layout_us=1 paint_us=510 encode_us=231 acquire_us=126 submit_us=47199 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=284 total_us=49061 rebuild_us=197 layout_us=1 paint_us=723 encode_us=212 acquire_us=91 submit_us=47834 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=285 total_us=48401 rebuild_us=258 layout_us=3 paint_us=1060 encode_us=266 acquire_us=152 submit_us=46660 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=286 total_us=48422 rebuild_us=83 layout_us=0 paint_us=166 encode_us=213 acquire_us=93 submit_us=47865 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=287 total_us=48177 rebuild_us=219 layout_us=1 paint_us=536 encode_us=271 acquire_us=122 submit_us=47024 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=288 total_us=48832 rebuild_us=203 layout_us=1 paint_us=514 encode_us=236 acquire_us=111 submit_us=47764 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=289 total_us=48397 rebuild_us=215 layout_us=1 paint_us=630 encode_us=237 acquire_us=120 submit_us=47191 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=289 over_120hz=289 skipped=0 total_frames=289
+frust_shell_common::perf: frust-perf raw n=290 total_us=48555 rebuild_us=192 layout_us=1 paint_us=505 encode_us=292 acquire_us=127 submit_us=47435 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=291 total_us=47852 rebuild_us=109 layout_us=0 paint_us=192 encode_us=221 acquire_us=98 submit_us=47229 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=292 total_us=48909 rebuild_us=231 layout_us=1 paint_us=815 encode_us=249 acquire_us=133 submit_us=47476 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=293 total_us=47975 rebuild_us=112 layout_us=0 paint_us=198 encode_us=223 acquire_us=106 submit_us=47334 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=294 total_us=48605 rebuild_us=84 layout_us=0 paint_us=162 encode_us=209 acquire_us=95 submit_us=48052 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=295 total_us=48627 rebuild_us=261 layout_us=1 paint_us=646 encode_us=357 acquire_us=172 submit_us=47186 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=296 total_us=48029 rebuild_us=191 layout_us=1 paint_us=510 encode_us=225 acquire_us=108 submit_us=46993 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=297 total_us=48906 rebuild_us=329 layout_us=1 paint_us=600 encode_us=237 acquire_us=144 submit_us=47591 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=298 total_us=48592 rebuild_us=210 layout_us=1 paint_us=543 encode_us=366 acquire_us=112 submit_us=47357 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=299 total_us=47921 rebuild_us=108 layout_us=0 paint_us=207 encode_us=260 acquire_us=150 submit_us=47192 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=300 total_us=48398 rebuild_us=97 layout_us=0 paint_us=185 encode_us=214 acquire_us=103 submit_us=47796 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1320 expected_present_us=0 acquire_us=116 period_us=11131
+frust_shell_common::perf: frust-perf raw n=301 total_us=47990 rebuild_us=156 layout_us=0 paint_us=166 encode_us=215 acquire_us=99 submit_us=47350 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=302 total_us=47946 rebuild_us=85 layout_us=0 paint_us=165 encode_us=209 acquire_us=97 submit_us=47387 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=303 total_us=48988 rebuild_us=209 layout_us=1 paint_us=737 encode_us=242 acquire_us=131 submit_us=47666 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=304 total_us=47961 rebuild_us=244 layout_us=1 paint_us=718 encode_us=254 acquire_us=154 submit_us=46587 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=305 total_us=48844 rebuild_us=83 layout_us=0 paint_us=166 encode_us=184 acquire_us=87 submit_us=48321 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=306 total_us=48271 rebuild_us=89 layout_us=0 paint_us=175 encode_us=326 acquire_us=114 submit_us=47565 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=307 total_us=48306 rebuild_us=199 layout_us=1 paint_us=528 encode_us=238 acquire_us=126 submit_us=47211 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=308 total_us=48597 rebuild_us=196 layout_us=104 paint_us=506 encode_us=222 acquire_us=112 submit_us=47454 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=309 total_us=49010 rebuild_us=194 layout_us=1 paint_us=514 encode_us=224 acquire_us=128 submit_us=47946 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=310 total_us=50055 rebuild_us=326 layout_us=1 paint_us=576 encode_us=261 acquire_us=162 submit_us=48727 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=311 total_us=47863 rebuild_us=84 layout_us=0 paint_us=162 encode_us=210 acquire_us=93 submit_us=47311 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=312 total_us=48349 rebuild_us=82 layout_us=0 paint_us=163 encode_us=210 acquire_us=95 submit_us=47796 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=313 total_us=48763 rebuild_us=250 layout_us=1 paint_us=636 encode_us=265 acquire_us=162 submit_us=47447 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=314 total_us=48161 rebuild_us=260 layout_us=1 paint_us=588 encode_us=252 acquire_us=141 submit_us=46916 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=315 total_us=48777 rebuild_us=213 layout_us=2 paint_us=534 encode_us=228 acquire_us=113 submit_us=47685 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=316 total_us=48526 rebuild_us=213 layout_us=1 paint_us=670 encode_us=245 acquire_us=164 submit_us=47231 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=317 total_us=48237 rebuild_us=240 layout_us=1 paint_us=578 encode_us=231 acquire_us=131 submit_us=47054 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=318 total_us=48356 rebuild_us=81 layout_us=0 paint_us=161 encode_us=210 acquire_us=93 submit_us=47809 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=319 total_us=49036 rebuild_us=225 layout_us=1 paint_us=564 encode_us=241 acquire_us=110 submit_us=47892 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=320 total_us=48391 rebuild_us=245 layout_us=1 paint_us=591 encode_us=276 acquire_us=200 submit_us=47075 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=321 total_us=48782 rebuild_us=270 layout_us=1 paint_us=615 encode_us=249 acquire_us=135 submit_us=47509 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=322 total_us=48233 rebuild_us=234 layout_us=2 paint_us=575 encode_us=261 acquire_us=162 submit_us=46997 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=323 total_us=48176 rebuild_us=92 layout_us=0 paint_us=176 encode_us=227 acquire_us=106 submit_us=47572 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=324 total_us=48434 rebuild_us=89 layout_us=0 paint_us=169 encode_us=175 acquire_us=91 submit_us=47907 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=325 total_us=48715 rebuild_us=251 layout_us=1 paint_us=572 encode_us=244 acquire_us=134 submit_us=47509 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=326 total_us=48560 rebuild_us=269 layout_us=1 paint_us=661 encode_us=326 acquire_us=165 submit_us=47135 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=327 total_us=48560 rebuild_us=246 layout_us=1 paint_us=792 encode_us=251 acquire_us=156 submit_us=47111 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=328 total_us=47855 rebuild_us=94 layout_us=0 paint_us=174 encode_us=209 acquire_us=95 submit_us=47279 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1440 expected_present_us=0 acquire_us=119 period_us=11132
+frust_shell_common::perf: frust-perf raw n=329 total_us=48374 rebuild_us=82 layout_us=0 paint_us=160 encode_us=209 acquire_us=95 submit_us=47825 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=330 total_us=48525 rebuild_us=223 layout_us=1 paint_us=560 encode_us=244 acquire_us=129 submit_us=47366 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=331 total_us=48857 rebuild_us=271 layout_us=1 paint_us=886 encode_us=277 acquire_us=158 submit_us=47262 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=331 over_120hz=331 skipped=0 total_frames=331
+frust_shell_common::perf: frust-perf raw n=332 total_us=47834 rebuild_us=92 layout_us=0 paint_us=174 encode_us=210 acquire_us=105 submit_us=47251 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=333 total_us=48156 rebuild_us=90 layout_us=0 paint_us=167 encode_us=211 acquire_us=95 submit_us=47590 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=334 total_us=48727 rebuild_us=284 layout_us=3 paint_us=856 encode_us=258 acquire_us=175 submit_us=47149 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=335 total_us=48839 rebuild_us=207 layout_us=1 paint_us=533 encode_us=244 acquire_us=149 submit_us=47702 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=336 total_us=48954 rebuild_us=248 layout_us=2 paint_us=578 encode_us=227 acquire_us=110 submit_us=47789 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=337 total_us=47800 rebuild_us=235 layout_us=1 paint_us=588 encode_us=235 acquire_us=151 submit_us=46588 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=338 total_us=47810 rebuild_us=106 layout_us=0 paint_us=185 encode_us=212 acquire_us=93 submit_us=47211 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=339 total_us=48071 rebuild_us=100 layout_us=0 paint_us=181 encode_us=232 acquire_us=112 submit_us=47443 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=340 total_us=48485 rebuild_us=124 layout_us=0 paint_us=166 encode_us=212 acquire_us=95 submit_us=47886 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=341 total_us=48257 rebuild_us=85 layout_us=0 paint_us=163 encode_us=210 acquire_us=95 submit_us=47702 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=342 total_us=48702 rebuild_us=237 layout_us=2 paint_us=676 encode_us=244 acquire_us=136 submit_us=47404 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=343 total_us=48260 rebuild_us=208 layout_us=1 paint_us=538 encode_us=253 acquire_us=108 submit_us=47150 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=344 total_us=49417 rebuild_us=437 layout_us=2 paint_us=1005 encode_us=246 acquire_us=154 submit_us=47571 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=345 total_us=48443 rebuild_us=242 layout_us=2 paint_us=621 encode_us=250 acquire_us=141 submit_us=47186 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=346 total_us=48247 rebuild_us=86 layout_us=0 paint_us=168 encode_us=232 acquire_us=103 submit_us=47655 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=347 total_us=47820 rebuild_us=89 layout_us=0 paint_us=174 encode_us=220 acquire_us=94 submit_us=47240 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=348 total_us=48825 rebuild_us=199 layout_us=1 paint_us=520 encode_us=219 acquire_us=103 submit_us=47781 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=349 total_us=48393 rebuild_us=293 layout_us=2 paint_us=567 encode_us=235 acquire_us=116 submit_us=47178 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=350 total_us=48349 rebuild_us=198 layout_us=1 paint_us=512 encode_us=229 acquire_us=132 submit_us=47275 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=351 total_us=48853 rebuild_us=208 layout_us=1 paint_us=520 encode_us=238 acquire_us=179 submit_us=47705 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=352 total_us=47808 rebuild_us=90 layout_us=0 paint_us=171 encode_us=214 acquire_us=96 submit_us=47234 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=353 total_us=48267 rebuild_us=87 layout_us=0 paint_us=179 encode_us=210 acquire_us=95 submit_us=47694 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=354 total_us=48377 rebuild_us=193 layout_us=1 paint_us=579 encode_us=212 acquire_us=95 submit_us=47294 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=355 total_us=49100 rebuild_us=229 layout_us=1 paint_us=789 encode_us=245 acquire_us=130 submit_us=47704 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=356 total_us=48329 rebuild_us=500 layout_us=1 paint_us=532 encode_us=224 acquire_us=112 submit_us=46956 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1560 expected_present_us=0 acquire_us=114 period_us=11133
+frust_shell_common::perf: frust-perf raw n=357 total_us=48365 rebuild_us=105 layout_us=0 paint_us=296 encode_us=228 acquire_us=118 submit_us=47616 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=358 total_us=48377 rebuild_us=264 layout_us=1 paint_us=531 encode_us=226 acquire_us=109 submit_us=47243 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=359 total_us=48609 rebuild_us=269 layout_us=1 paint_us=769 encode_us=274 acquire_us=158 submit_us=47135 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=360 total_us=48809 rebuild_us=309 layout_us=2 paint_us=624 encode_us=245 acquire_us=135 submit_us=47492 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=361 total_us=47752 rebuild_us=203 layout_us=1 paint_us=520 encode_us=237 acquire_us=123 submit_us=46664 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=362 total_us=48204 rebuild_us=239 layout_us=2 paint_us=570 encode_us=226 acquire_us=106 submit_us=47058 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=363 total_us=48223 rebuild_us=82 layout_us=0 paint_us=161 encode_us=210 acquire_us=97 submit_us=47671 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=364 total_us=47966 rebuild_us=139 layout_us=0 paint_us=174 encode_us=230 acquire_us=93 submit_us=47326 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=365 total_us=48413 rebuild_us=201 layout_us=1 paint_us=510 encode_us=228 acquire_us=110 submit_us=47360 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=366 total_us=48240 rebuild_us=203 layout_us=2 paint_us=596 encode_us=278 acquire_us=122 submit_us=47038 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=367 total_us=48632 rebuild_us=228 layout_us=1 paint_us=557 encode_us=250 acquire_us=137 submit_us=47456 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=368 total_us=48137 rebuild_us=90 layout_us=0 paint_us=173 encode_us=217 acquire_us=114 submit_us=47540 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=369 total_us=48014 rebuild_us=93 layout_us=0 paint_us=170 encode_us=252 acquire_us=97 submit_us=47400 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=370 total_us=47598 rebuild_us=84 layout_us=0 paint_us=162 encode_us=213 acquire_us=98 submit_us=47038 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=371 total_us=48276 rebuild_us=99 layout_us=0 paint_us=176 encode_us=188 acquire_us=86 submit_us=47724 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=372 total_us=48211 rebuild_us=86 layout_us=0 paint_us=160 encode_us=246 acquire_us=96 submit_us=47620 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=373 total_us=48472 rebuild_us=316 layout_us=1 paint_us=570 encode_us=238 acquire_us=133 submit_us=47212 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=49 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=48 over_60hz=373 over_120hz=373 skipped=0 total_frames=373
+frust_shell_common::perf: frust-perf raw n=374 total_us=47923 rebuild_us=150 layout_us=1 paint_us=361 encode_us=254 acquire_us=178 submit_us=46976 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=375 total_us=48609 rebuild_us=236 layout_us=1 paint_us=570 encode_us=269 acquire_us=124 submit_us=47406 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=376 total_us=48560 rebuild_us=212 layout_us=1 paint_us=519 encode_us=232 acquire_us=132 submit_us=47461 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=377 total_us=47985 rebuild_us=611 layout_us=3 paint_us=798 encode_us=270 acquire_us=165 submit_us=46136 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=378 total_us=48891 rebuild_us=103 layout_us=0 paint_us=185 encode_us=207 acquire_us=100 submit_us=48294 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=379 total_us=48363 rebuild_us=230 layout_us=1 paint_us=696 encode_us=225 acquire_us=106 submit_us=47101 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=380 total_us=48370 rebuild_us=203 layout_us=1 paint_us=515 encode_us=222 acquire_us=122 submit_us=47304 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=381 total_us=48885 rebuild_us=270 layout_us=2 paint_us=779 encode_us=390 acquire_us=126 submit_us=47315 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=382 total_us=47829 rebuild_us=92 layout_us=0 paint_us=162 encode_us=214 acquire_us=97 submit_us=47262 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=383 total_us=48291 rebuild_us=94 layout_us=0 paint_us=171 encode_us=217 acquire_us=99 submit_us=47709 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1680 expected_present_us=0 acquire_us=113 period_us=11134
+frust_shell_common::perf: frust-perf raw n=384 total_us=48776 rebuild_us=466 layout_us=2 paint_us=579 encode_us=240 acquire_us=122 submit_us=47365 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=385 total_us=48817 rebuild_us=220 layout_us=1 paint_us=767 encode_us=263 acquire_us=165 submit_us=47399 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=386 total_us=48313 rebuild_us=221 layout_us=1 paint_us=538 encode_us=229 acquire_us=113 submit_us=47208 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=387 total_us=48106 rebuild_us=233 layout_us=1 paint_us=554 encode_us=236 acquire_us=126 submit_us=46953 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=388 total_us=48777 rebuild_us=247 layout_us=1 paint_us=740 encode_us=212 acquire_us=108 submit_us=47466 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=389 total_us=48548 rebuild_us=201 layout_us=1 paint_us=504 encode_us=224 acquire_us=107 submit_us=47508 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=390 total_us=48953 rebuild_us=294 layout_us=2 paint_us=865 encode_us=236 acquire_us=109 submit_us=47444 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=391 total_us=48785 rebuild_us=315 layout_us=2 paint_us=735 encode_us=279 acquire_us=203 submit_us=47249 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=392 total_us=48469 rebuild_us=368 layout_us=1 paint_us=608 encode_us=228 acquire_us=111 submit_us=47150 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=393 total_us=48013 rebuild_us=92 layout_us=0 paint_us=165 encode_us=222 acquire_us=93 submit_us=47438 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=394 total_us=48253 rebuild_us=86 layout_us=0 paint_us=164 encode_us=212 acquire_us=95 submit_us=47695 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=395 total_us=48228 rebuild_us=194 layout_us=1 paint_us=500 encode_us=210 acquire_us=96 submit_us=47225 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=396 total_us=48845 rebuild_us=212 layout_us=1 paint_us=525 encode_us=243 acquire_us=153 submit_us=47708 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=397 total_us=48240 rebuild_us=274 layout_us=3 paint_us=700 encode_us=255 acquire_us=158 submit_us=46848 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=398 total_us=48604 rebuild_us=210 layout_us=1 paint_us=537 encode_us=231 acquire_us=115 submit_us=47508 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=399 total_us=48373 rebuild_us=88 layout_us=0 paint_us=162 encode_us=218 acquire_us=100 submit_us=47803 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=400 total_us=48868 rebuild_us=203 layout_us=1 paint_us=519 encode_us=223 acquire_us=109 submit_us=47810 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=401 total_us=48206 rebuild_us=255 layout_us=1 paint_us=841 encode_us=234 acquire_us=141 submit_us=46731 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=402 total_us=48946 rebuild_us=197 layout_us=1 paint_us=511 encode_us=223 acquire_us=106 submit_us=47905 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=403 total_us=48692 rebuild_us=239 layout_us=1 paint_us=722 encode_us=241 acquire_us=143 submit_us=47343 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=404 total_us=48418 rebuild_us=224 layout_us=1 paint_us=548 encode_us=240 acquire_us=128 submit_us=47274 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=405 total_us=49110 rebuild_us=216 layout_us=1 paint_us=1001 encode_us=233 acquire_us=112 submit_us=47545 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=406 total_us=48539 rebuild_us=237 layout_us=2 paint_us=565 encode_us=248 acquire_us=164 submit_us=47321 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=407 total_us=48561 rebuild_us=343 layout_us=1 paint_us=901 encode_us=236 acquire_us=125 submit_us=46953 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=408 total_us=48095 rebuild_us=86 layout_us=0 paint_us=165 encode_us=180 acquire_us=98 submit_us=47563 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=409 total_us=48652 rebuild_us=200 layout_us=1 paint_us=518 encode_us=227 acquire_us=125 submit_us=47577 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=410 total_us=48590 rebuild_us=278 layout_us=2 paint_us=752 encode_us=238 acquire_us=151 submit_us=47166 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=411 total_us=48641 rebuild_us=200 layout_us=1 paint_us=514 encode_us=226 acquire_us=110 submit_us=47587 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1800 expected_present_us=0 acquire_us=122 period_us=11133
+frust_shell_common::perf: frust-perf raw n=412 total_us=48890 rebuild_us=217 layout_us=1 paint_us=536 encode_us=273 acquire_us=117 submit_us=47743 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=413 total_us=47961 rebuild_us=247 layout_us=1 paint_us=583 encode_us=298 acquire_us=221 submit_us=46608 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=414 total_us=48475 rebuild_us=216 layout_us=1 paint_us=535 encode_us=224 acquire_us=111 submit_us=47384 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=415 total_us=48877 rebuild_us=282 layout_us=2 paint_us=708 encode_us=332 acquire_us=157 submit_us=47394 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=48 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=415 over_120hz=415 skipped=0 total_frames=415
+frust_shell_common::perf: frust-perf raw n=416 total_us=48487 rebuild_us=250 layout_us=1 paint_us=691 encode_us=228 acquire_us=109 submit_us=47205 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=417 total_us=47975 rebuild_us=91 layout_us=0 paint_us=165 encode_us=211 acquire_us=94 submit_us=47411 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=418 total_us=48527 rebuild_us=108 layout_us=0 paint_us=190 encode_us=275 acquire_us=104 submit_us=47847 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=419 total_us=48770 rebuild_us=223 layout_us=1 paint_us=554 encode_us=244 acquire_us=131 submit_us=47614 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=420 total_us=48274 rebuild_us=247 layout_us=1 paint_us=570 encode_us=234 acquire_us=165 submit_us=47054 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=421 total_us=48540 rebuild_us=242 layout_us=1 paint_us=576 encode_us=285 acquire_us=242 submit_us=47190 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=422 total_us=48480 rebuild_us=101 layout_us=0 paint_us=197 encode_us=216 acquire_us=118 submit_us=47845 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=423 total_us=48069 rebuild_us=206 layout_us=1 paint_us=518 encode_us=231 acquire_us=142 submit_us=46967 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=424 total_us=48924 rebuild_us=220 layout_us=1 paint_us=544 encode_us=263 acquire_us=144 submit_us=47748 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=425 total_us=48364 rebuild_us=202 layout_us=1 paint_us=510 encode_us=224 acquire_us=107 submit_us=47318 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=426 total_us=48884 rebuild_us=206 layout_us=1 paint_us=521 encode_us=228 acquire_us=112 submit_us=47813 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=427 total_us=48564 rebuild_us=383 layout_us=1 paint_us=673 encode_us=278 acquire_us=180 submit_us=47047 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=428 total_us=48273 rebuild_us=88 layout_us=0 paint_us=163 encode_us=176 acquire_us=87 submit_us=47757 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=429 total_us=48440 rebuild_us=90 layout_us=0 paint_us=163 encode_us=218 acquire_us=101 submit_us=47866 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=430 total_us=48419 rebuild_us=228 layout_us=1 paint_us=560 encode_us=218 acquire_us=102 submit_us=47307 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=431 total_us=48396 rebuild_us=241 layout_us=1 paint_us=580 encode_us=217 acquire_us=98 submit_us=47256 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=432 total_us=48261 rebuild_us=87 layout_us=0 paint_us=164 encode_us=211 acquire_us=109 submit_us=47687 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=433 total_us=48357 rebuild_us=257 layout_us=2 paint_us=591 encode_us=261 acquire_us=152 submit_us=47092 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=434 total_us=48265 rebuild_us=282 layout_us=2 paint_us=686 encode_us=272 acquire_us=169 submit_us=46851 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=435 total_us=48622 rebuild_us=182 layout_us=0 paint_us=214 encode_us=175 acquire_us=88 submit_us=47960 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=436 total_us=48051 rebuild_us=85 layout_us=0 paint_us=165 encode_us=212 acquire_us=110 submit_us=47477 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=437 total_us=47928 rebuild_us=104 layout_us=0 paint_us=191 encode_us=218 acquire_us=104 submit_us=47308 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=438 total_us=48779 rebuild_us=194 layout_us=1 paint_us=562 encode_us=208 acquire_us=113 submit_us=47698 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=439 total_us=48519 rebuild_us=264 layout_us=1 paint_us=668 encode_us=321 acquire_us=138 submit_us=47125 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1920 expected_present_us=0 acquire_us=120 period_us=11126
+frust_shell_common::perf: frust-perf raw n=440 total_us=48116 rebuild_us=214 layout_us=1 paint_us=712 encode_us=237 acquire_us=123 submit_us=46826 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=441 total_us=48540 rebuild_us=211 layout_us=1 paint_us=542 encode_us=241 acquire_us=124 submit_us=47418 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=442 total_us=48527 rebuild_us=212 layout_us=1 paint_us=646 encode_us=225 acquire_us=120 submit_us=47321 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=443 total_us=48397 rebuild_us=246 layout_us=1 paint_us=653 encode_us=263 acquire_us=149 submit_us=47081 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=444 total_us=48249 rebuild_us=211 layout_us=1 paint_us=543 encode_us=224 acquire_us=109 submit_us=47156 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=445 total_us=48645 rebuild_us=309 layout_us=1 paint_us=518 encode_us=232 acquire_us=124 submit_us=47458 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=446 total_us=48579 rebuild_us=297 layout_us=3 paint_us=1018 encode_us=269 acquire_us=162 submit_us=46828 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=447 total_us=48064 rebuild_us=98 layout_us=0 paint_us=186 encode_us=216 acquire_us=103 submit_us=47459 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=448 total_us=47839 rebuild_us=108 layout_us=0 paint_us=198 encode_us=223 acquire_us=100 submit_us=47207 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=449 total_us=48248 rebuild_us=92 layout_us=0 paint_us=179 encode_us=216 acquire_us=135 submit_us=47623 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=450 total_us=48266 rebuild_us=106 layout_us=0 paint_us=197 encode_us=215 acquire_us=97 submit_us=47649 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=451 total_us=48366 rebuild_us=194 layout_us=1 paint_us=513 encode_us=226 acquire_us=126 submit_us=47304 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=452 total_us=48420 rebuild_us=215 layout_us=1 paint_us=556 encode_us=247 acquire_us=128 submit_us=47271 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=453 total_us=48403 rebuild_us=209 layout_us=1 paint_us=703 encode_us=240 acquire_us=124 submit_us=47124 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=454 total_us=48406 rebuild_us=290 layout_us=2 paint_us=662 encode_us=260 acquire_us=160 submit_us=47030 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=455 total_us=47969 rebuild_us=109 layout_us=0 paint_us=206 encode_us=249 acquire_us=97 submit_us=47305 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=456 total_us=48425 rebuild_us=88 layout_us=0 paint_us=162 encode_us=211 acquire_us=94 submit_us=47868 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=457 total_us=48842 rebuild_us=304 layout_us=1 paint_us=874 encode_us=268 acquire_us=166 submit_us=47225 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=48 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=457 over_120hz=457 skipped=0 total_frames=457
+frust_shell_common::perf: frust-perf raw n=458 total_us=47729 rebuild_us=90 layout_us=0 paint_us=172 encode_us=272 acquire_us=161 submit_us=47032 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=459 total_us=47992 rebuild_us=91 layout_us=0 paint_us=180 encode_us=209 acquire_us=92 submit_us=47417 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=460 total_us=48424 rebuild_us=88 layout_us=0 paint_us=171 encode_us=212 acquire_us=94 submit_us=47856 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=461 total_us=48279 rebuild_us=287 layout_us=1 paint_us=681 encode_us=260 acquire_us=154 submit_us=46894 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=462 total_us=48994 rebuild_us=231 layout_us=2 paint_us=706 encode_us=242 acquire_us=155 submit_us=47655 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=463 total_us=48740 rebuild_us=265 layout_us=2 paint_us=618 encode_us=252 acquire_us=228 submit_us=47373 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=464 total_us=49020 rebuild_us=225 layout_us=1 paint_us=733 encode_us=239 acquire_us=133 submit_us=47687 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=465 total_us=48320 rebuild_us=258 layout_us=1 paint_us=647 encode_us=281 acquire_us=186 submit_us=46944 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=466 total_us=47539 rebuild_us=84 layout_us=0 paint_us=177 encode_us=212 acquire_us=97 submit_us=46968 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=467 total_us=49011 rebuild_us=273 layout_us=1 paint_us=686 encode_us=255 acquire_us=139 submit_us=47655 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2040 expected_present_us=0 acquire_us=129 period_us=11143
+frust_shell_common::perf: frust-perf raw n=468 total_us=47915 rebuild_us=100 layout_us=0 paint_us=186 encode_us=210 acquire_us=93 submit_us=47323 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=469 total_us=48690 rebuild_us=114 layout_us=0 paint_us=202 encode_us=274 acquire_us=127 submit_us=47970 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=470 total_us=48587 rebuild_us=226 layout_us=2 paint_us=579 encode_us=248 acquire_us=143 submit_us=47388 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=471 total_us=48545 rebuild_us=212 layout_us=1 paint_us=549 encode_us=255 acquire_us=215 submit_us=47310 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=472 total_us=48896 rebuild_us=217 layout_us=1 paint_us=691 encode_us=246 acquire_us=138 submit_us=47599 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=473 total_us=48682 rebuild_us=247 layout_us=1 paint_us=579 encode_us=249 acquire_us=141 submit_us=47463 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=474 total_us=47907 rebuild_us=254 layout_us=2 paint_us=598 encode_us=278 acquire_us=260 submit_us=46513 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=475 total_us=47600 rebuild_us=93 layout_us=0 paint_us=182 encode_us=183 acquire_us=103 submit_us=47035 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=476 total_us=47981 rebuild_us=85 layout_us=0 paint_us=172 encode_us=189 acquire_us=108 submit_us=47424 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=477 total_us=48141 rebuild_us=93 layout_us=0 paint_us=172 encode_us=193 acquire_us=96 submit_us=47586 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=478 total_us=47928 rebuild_us=92 layout_us=0 paint_us=168 encode_us=232 acquire_us=99 submit_us=47334 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=479 total_us=47856 rebuild_us=106 layout_us=0 paint_us=197 encode_us=215 acquire_us=113 submit_us=47222 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=480 total_us=48351 rebuild_us=102 layout_us=0 paint_us=193 encode_us=222 acquire_us=113 submit_us=47719 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=481 total_us=48698 rebuild_us=98 layout_us=0 paint_us=182 encode_us=223 acquire_us=134 submit_us=48058 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=482 total_us=48774 rebuild_us=271 layout_us=2 paint_us=913 encode_us=379 acquire_us=129 submit_us=47079 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=483 total_us=48215 rebuild_us=269 layout_us=1 paint_us=918 encode_us=252 acquire_us=139 submit_us=46634 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=484 total_us=48049 rebuild_us=81 layout_us=0 paint_us=160 encode_us=205 acquire_us=94 submit_us=47506 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=485 total_us=48056 rebuild_us=98 layout_us=0 paint_us=177 encode_us=213 acquire_us=94 submit_us=47471 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=486 total_us=48001 rebuild_us=87 layout_us=0 paint_us=170 encode_us=279 acquire_us=113 submit_us=47347 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=487 total_us=48620 rebuild_us=211 layout_us=2 paint_us=542 encode_us=228 acquire_us=116 submit_us=47519 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=488 total_us=48177 rebuild_us=222 layout_us=1 paint_us=550 encode_us=247 acquire_us=144 submit_us=47012 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=489 total_us=48623 rebuild_us=205 layout_us=1 paint_us=629 encode_us=279 acquire_us=124 submit_us=47382 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=490 total_us=48450 rebuild_us=200 layout_us=1 paint_us=513 encode_us=223 acquire_us=108 submit_us=47403 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=491 total_us=48343 rebuild_us=208 layout_us=1 paint_us=533 encode_us=245 acquire_us=135 submit_us=47218 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=492 total_us=48348 rebuild_us=337 layout_us=2 paint_us=810 encode_us=333 acquire_us=175 submit_us=46687 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=493 total_us=48483 rebuild_us=90 layout_us=0 paint_us=169 encode_us=211 acquire_us=107 submit_us=47903 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=494 total_us=47892 rebuild_us=100 layout_us=0 paint_us=181 encode_us=215 acquire_us=95 submit_us=47300 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=495 total_us=48180 rebuild_us=85 layout_us=0 paint_us=165 encode_us=244 acquire_us=108 submit_us=47575 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2160 expected_present_us=0 acquire_us=114 period_us=11137
+frust_shell_common::perf: frust-perf raw n=496 total_us=47690 rebuild_us=94 layout_us=0 paint_us=176 encode_us=209 acquire_us=111 submit_us=47097 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=497 total_us=48999 rebuild_us=292 layout_us=1 paint_us=571 encode_us=232 acquire_us=111 submit_us=47789 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=498 total_us=48188 rebuild_us=214 layout_us=1 paint_us=532 encode_us=239 acquire_us=150 submit_us=47050 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=499 total_us=48123 rebuild_us=219 layout_us=1 paint_us=571 encode_us=226 acquire_us=129 submit_us=46974 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=48 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=499 over_120hz=499 skipped=0 total_frames=499
+frust_shell_common::perf: frust-perf raw n=500 total_us=48374 rebuild_us=212 layout_us=1 paint_us=533 encode_us=230 acquire_us=123 submit_us=47272 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=501 total_us=49158 rebuild_us=258 layout_us=2 paint_us=870 encode_us=299 acquire_us=133 submit_us=47594 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=502 total_us=48133 rebuild_us=281 layout_us=2 paint_us=632 encode_us=275 acquire_us=178 submit_us=46763 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=503 total_us=48404 rebuild_us=206 layout_us=1 paint_us=673 encode_us=223 acquire_us=107 submit_us=47191 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=504 total_us=48414 rebuild_us=222 layout_us=1 paint_us=581 encode_us=238 acquire_us=170 submit_us=47200 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=505 total_us=47963 rebuild_us=124 layout_us=0 paint_us=223 encode_us=218 acquire_us=98 submit_us=47296 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=506 total_us=48605 rebuild_us=88 layout_us=0 paint_us=169 encode_us=189 acquire_us=109 submit_us=48047 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=507 total_us=48289 rebuild_us=96 layout_us=0 paint_us=178 encode_us=214 acquire_us=104 submit_us=47694 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=508 total_us=48011 rebuild_us=307 layout_us=1 paint_us=582 encode_us=251 acquire_us=153 submit_us=46714 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=509 total_us=48463 rebuild_us=225 layout_us=2 paint_us=554 encode_us=227 acquire_us=115 submit_us=47338 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=510 total_us=48506 rebuild_us=270 layout_us=1 paint_us=696 encode_us=309 acquire_us=154 submit_us=47074 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=511 total_us=48001 rebuild_us=94 layout_us=0 paint_us=179 encode_us=219 acquire_us=107 submit_us=47398 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=512 total_us=47164 rebuild_us=135 layout_us=0 paint_us=180 encode_us=219 acquire_us=123 submit_us=46504 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=513 total_us=48535 rebuild_us=93 layout_us=0 paint_us=176 encode_us=187 acquire_us=93 submit_us=47984 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=514 total_us=48614 rebuild_us=94 layout_us=0 paint_us=174 encode_us=212 acquire_us=93 submit_us=48038 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=515 total_us=48412 rebuild_us=290 layout_us=1 paint_us=727 encode_us=262 acquire_us=155 submit_us=46975 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=516 total_us=47993 rebuild_us=114 layout_us=0 paint_us=205 encode_us=278 acquire_us=103 submit_us=47291 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=517 total_us=48583 rebuild_us=269 layout_us=2 paint_us=618 encode_us=229 acquire_us=115 submit_us=47348 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=518 total_us=48391 rebuild_us=205 layout_us=1 paint_us=531 encode_us=226 acquire_us=113 submit_us=47313 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=519 total_us=47815 rebuild_us=173 layout_us=1 paint_us=347 encode_us=254 acquire_us=102 submit_us=46936 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=520 total_us=48373 rebuild_us=88 layout_us=0 paint_us=160 encode_us=179 acquire_us=90 submit_us=47853 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=521 total_us=47812 rebuild_us=85 layout_us=0 paint_us=161 encode_us=209 acquire_us=93 submit_us=47261 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=522 total_us=47914 rebuild_us=90 layout_us=0 paint_us=171 encode_us=251 acquire_us=95 submit_us=47306 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=523 total_us=48087 rebuild_us=91 layout_us=1 paint_us=172 encode_us=181 acquire_us=89 submit_us=47551 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2280 expected_present_us=0 acquire_us=106 period_us=11126
+frust_shell_common::perf: frust-perf raw n=524 total_us=48821 rebuild_us=246 layout_us=2 paint_us=606 encode_us=242 acquire_us=135 submit_us=47588 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=525 total_us=48610 rebuild_us=252 layout_us=2 paint_us=731 encode_us=230 acquire_us=126 submit_us=47268 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=526 total_us=48477 rebuild_us=208 layout_us=1 paint_us=537 encode_us=237 acquire_us=158 submit_us=47333 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=527 total_us=48209 rebuild_us=236 layout_us=2 paint_us=807 encode_us=245 acquire_us=146 submit_us=46771 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=528 total_us=48477 rebuild_us=200 layout_us=2 paint_us=523 encode_us=234 acquire_us=184 submit_us=47333 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=529 total_us=47871 rebuild_us=215 layout_us=1 paint_us=541 encode_us=247 acquire_us=139 submit_us=46725 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=530 total_us=48380 rebuild_us=104 layout_us=0 paint_us=175 encode_us=203 acquire_us=87 submit_us=47809 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=531 total_us=48816 rebuild_us=196 layout_us=1 paint_us=506 encode_us=208 acquire_us=93 submit_us=47810 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=532 total_us=48489 rebuild_us=398 layout_us=2 paint_us=719 encode_us=227 acquire_us=110 submit_us=47030 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=533 total_us=48670 rebuild_us=230 layout_us=1 paint_us=556 encode_us=252 acquire_us=141 submit_us=47487 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=534 total_us=48432 rebuild_us=251 layout_us=2 paint_us=569 encode_us=320 acquire_us=152 submit_us=47136 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=535 total_us=48288 rebuild_us=233 layout_us=1 paint_us=629 encode_us=233 acquire_us=130 submit_us=47059 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=536 total_us=47557 rebuild_us=261 layout_us=2 paint_us=609 encode_us=248 acquire_us=157 submit_us=46278 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=537 total_us=48588 rebuild_us=120 layout_us=0 paint_us=193 encode_us=208 acquire_us=88 submit_us=47976 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=538 total_us=47868 rebuild_us=96 layout_us=0 paint_us=160 encode_us=215 acquire_us=106 submit_us=47288 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=539 total_us=48368 rebuild_us=87 layout_us=0 paint_us=173 encode_us=210 acquire_us=95 submit_us=47800 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=540 total_us=48439 rebuild_us=223 layout_us=1 paint_us=554 encode_us=256 acquire_us=157 submit_us=47245 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=541 total_us=48472 rebuild_us=203 layout_us=1 paint_us=519 encode_us=227 acquire_us=111 submit_us=47407 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=48 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=541 over_120hz=541 skipped=0 total_frames=541
+frust_shell_common::perf: frust-perf raw n=542 total_us=48668 rebuild_us=207 layout_us=1 paint_us=533 encode_us=240 acquire_us=131 submit_us=47553 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=543 total_us=48807 rebuild_us=220 layout_us=2 paint_us=557 encode_us=294 acquire_us=148 submit_us=47585 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=544 total_us=48765 rebuild_us=265 layout_us=1 paint_us=1031 encode_us=258 acquire_us=157 submit_us=47050 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=545 total_us=48765 rebuild_us=297 layout_us=1 paint_us=554 encode_us=238 acquire_us=124 submit_us=47548 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=546 total_us=47378 rebuild_us=108 layout_us=0 paint_us=203 encode_us=210 acquire_us=108 submit_us=46745 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=547 total_us=47921 rebuild_us=108 layout_us=0 paint_us=191 encode_us=192 acquire_us=93 submit_us=47333 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=548 total_us=47445 rebuild_us=85 layout_us=0 paint_us=162 encode_us=210 acquire_us=101 submit_us=46884 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=549 total_us=49234 rebuild_us=162 layout_us=0 paint_us=210 encode_us=227 acquire_us=88 submit_us=48544 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=550 total_us=48124 rebuild_us=109 layout_us=0 paint_us=188 encode_us=219 acquire_us=97 submit_us=47508 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=551 total_us=47824 rebuild_us=118 layout_us=0 paint_us=210 encode_us=217 acquire_us=105 submit_us=47172 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2400 expected_present_us=0 acquire_us=103 period_us=11135
+frust_shell_common::perf: frust-perf raw n=552 total_us=48164 rebuild_us=214 layout_us=1 paint_us=540 encode_us=252 acquire_us=105 submit_us=47050 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=553 total_us=48828 rebuild_us=235 layout_us=1 paint_us=565 encode_us=275 acquire_us=152 submit_us=47596 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=554 total_us=48233 rebuild_us=217 layout_us=1 paint_us=665 encode_us=231 acquire_us=122 submit_us=46996 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=555 total_us=48597 rebuild_us=208 layout_us=1 paint_us=523 encode_us=261 acquire_us=111 submit_us=47490 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=556 total_us=48570 rebuild_us=238 layout_us=2 paint_us=561 encode_us=220 acquire_us=95 submit_us=47452 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=557 total_us=48460 rebuild_us=212 layout_us=1 paint_us=535 encode_us=258 acquire_us=178 submit_us=47272 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=558 total_us=48032 rebuild_us=106 layout_us=0 paint_us=192 encode_us=249 acquire_us=150 submit_us=47331 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=559 total_us=47891 rebuild_us=197 layout_us=1 paint_us=506 encode_us=233 acquire_us=142 submit_us=46809 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=560 total_us=48067 rebuild_us=227 layout_us=1 paint_us=569 encode_us=236 acquire_us=137 submit_us=46895 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=561 total_us=48963 rebuild_us=95 layout_us=0 paint_us=173 encode_us=183 acquire_us=97 submit_us=48412 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=562 total_us=48356 rebuild_us=280 layout_us=3 paint_us=895 encode_us=255 acquire_us=149 submit_us=46771 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=563 total_us=48370 rebuild_us=223 layout_us=1 paint_us=552 encode_us=238 acquire_us=127 submit_us=47226 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=564 total_us=48103 rebuild_us=103 layout_us=0 paint_us=188 encode_us=260 acquire_us=121 submit_us=47428 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=565 total_us=48190 rebuild_us=209 layout_us=1 paint_us=517 encode_us=241 acquire_us=154 submit_us=47065 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=566 total_us=47909 rebuild_us=262 layout_us=2 paint_us=613 encode_us=240 acquire_us=121 submit_us=46668 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=567 total_us=47701 rebuild_us=222 layout_us=1 paint_us=395 encode_us=231 acquire_us=142 submit_us=46708 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=568 total_us=48956 rebuild_us=289 layout_us=2 paint_us=634 encode_us=229 acquire_us=163 submit_us=47637 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=569 total_us=47709 rebuild_us=94 layout_us=0 paint_us=180 encode_us=216 acquire_us=111 submit_us=47106 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=570 total_us=48564 rebuild_us=259 layout_us=1 paint_us=522 encode_us=232 acquire_us=126 submit_us=47421 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=571 total_us=48355 rebuild_us=216 layout_us=1 paint_us=537 encode_us=299 acquire_us=138 submit_us=47161 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=572 total_us=48865 rebuild_us=201 layout_us=1 paint_us=518 encode_us=225 acquire_us=125 submit_us=47791 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=573 total_us=49281 rebuild_us=276 layout_us=1 paint_us=1120 encode_us=266 acquire_us=158 submit_us=47456 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=574 total_us=48680 rebuild_us=279 layout_us=2 paint_us=642 encode_us=240 acquire_us=131 submit_us=47385 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=575 total_us=47267 rebuild_us=128 layout_us=0 paint_us=169 encode_us=219 acquire_us=102 submit_us=46646 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=576 total_us=48381 rebuild_us=90 layout_us=0 paint_us=170 encode_us=211 acquire_us=108 submit_us=47799 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=577 total_us=47978 rebuild_us=221 layout_us=1 paint_us=547 encode_us=295 acquire_us=121 submit_us=46791 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=578 total_us=48915 rebuild_us=218 layout_us=1 paint_us=629 encode_us=246 acquire_us=132 submit_us=47686 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=579 total_us=48116 rebuild_us=231 layout_us=1 paint_us=559 encode_us=254 acquire_us=149 submit_us=46920 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2520 expected_present_us=0 acquire_us=132 period_us=11128
+frust_shell_common::perf: frust-perf raw n=580 total_us=48072 rebuild_us=332 layout_us=1 paint_us=563 encode_us=298 acquire_us=142 submit_us=46733 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=581 total_us=47944 rebuild_us=106 layout_us=0 paint_us=194 encode_us=213 acquire_us=97 submit_us=47331 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=582 total_us=48371 rebuild_us=95 layout_us=0 paint_us=169 encode_us=185 acquire_us=93 submit_us=47825 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=583 total_us=48692 rebuild_us=263 layout_us=1 paint_us=665 encode_us=320 acquire_us=158 submit_us=47282 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf frame n=120 total_p50_ms=48 total_p95_ms=48 total_p99_ms=49 rebuild_p95_ms=0 layout_p95_ms=0 paint_p95_ms=0 encode_p95_ms=0 acquire_p95_ms=0 submit_p95_ms=47 over_60hz=583 over_120hz=583 skipped=0 total_frames=583
+frust_shell_common::perf: frust-perf raw n=584 total_us=47837 rebuild_us=249 layout_us=1 paint_us=588 encode_us=271 acquire_us=178 submit_us=46547 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=585 total_us=49355 rebuild_us=115 layout_us=0 paint_us=210 encode_us=223 acquire_us=105 submit_us=48699 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=586 total_us=47908 rebuild_us=90 layout_us=0 paint_us=167 encode_us=226 acquire_us=123 submit_us=47300 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=587 total_us=47714 rebuild_us=88 layout_us=0 paint_us=167 encode_us=216 acquire_us=101 submit_us=47139 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=588 total_us=47980 rebuild_us=97 layout_us=0 paint_us=176 encode_us=218 acquire_us=103 submit_us=47384 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=589 total_us=48589 rebuild_us=200 layout_us=1 paint_us=514 encode_us=219 acquire_us=100 submit_us=47552 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=590 total_us=48405 rebuild_us=216 layout_us=2 paint_us=538 encode_us=222 acquire_us=107 submit_us=47318 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=591 total_us=49595 rebuild_us=433 layout_us=1 paint_us=742 encode_us=264 acquire_us=164 submit_us=47988 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=592 total_us=48413 rebuild_us=229 layout_us=2 paint_us=555 encode_us=241 acquire_us=151 submit_us=47234 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=593 total_us=48074 rebuild_us=95 layout_us=0 paint_us=180 encode_us=216 acquire_us=104 submit_us=47476 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=594 total_us=48052 rebuild_us=106 layout_us=0 paint_us=186 encode_us=211 acquire_us=102 submit_us=47444 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=595 total_us=48032 rebuild_us=90 layout_us=0 paint_us=167 encode_us=232 acquire_us=120 submit_us=47420 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=596 total_us=48679 rebuild_us=207 layout_us=1 paint_us=527 encode_us=224 acquire_us=108 submit_us=47609 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=597 total_us=48358 rebuild_us=218 layout_us=1 paint_us=546 encode_us=239 acquire_us=131 submit_us=47220 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=598 total_us=48631 rebuild_us=240 layout_us=1 paint_us=571 encode_us=274 acquire_us=164 submit_us=47379 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=599 total_us=47837 rebuild_us=124 layout_us=0 paint_us=234 encode_us=210 acquire_us=95 submit_us=47171 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=600 total_us=48267 rebuild_us=83 layout_us=0 paint_us=159 encode_us=211 acquire_us=107 submit_us=47705 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=601 total_us=47934 rebuild_us=89 layout_us=0 paint_us=168 encode_us=212 acquire_us=107 submit_us=47356 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=602 total_us=48429 rebuild_us=83 layout_us=0 paint_us=159 encode_us=211 acquire_us=128 submit_us=47846 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=603 total_us=48401 rebuild_us=285 layout_us=3 paint_us=701 encode_us=250 acquire_us=142 submit_us=47019 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=604 total_us=48459 rebuild_us=198 layout_us=2 paint_us=677 encode_us=244 acquire_us=131 submit_us=47204 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=605 total_us=48511 rebuild_us=302 layout_us=1 paint_us=527 encode_us=273 acquire_us=111 submit_us=47294 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=606 total_us=49478 rebuild_us=204 layout_us=1 paint_us=667 encode_us=270 acquire_us=155 submit_us=48179 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=607 total_us=49506 rebuild_us=252 layout_us=2 paint_us=598 encode_us=279 acquire_us=124 submit_us=48248 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2640 expected_present_us=0 acquire_us=132 period_us=11129
+frust_shell_common::perf: frust-perf raw n=608 total_us=47327 rebuild_us=131 layout_us=0 paint_us=194 encode_us=237 acquire_us=148 submit_us=46615 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=609 total_us=50056 rebuild_us=269 layout_us=2 paint_us=632 encode_us=226 acquire_us=109 submit_us=48817 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=610 total_us=48627 rebuild_us=212 layout_us=1 paint_us=527 encode_us=225 acquire_us=114 submit_us=47546 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=611 total_us=49724 rebuild_us=246 layout_us=1 paint_us=629 encode_us=280 acquire_us=179 submit_us=48386 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=612 total_us=48957 rebuild_us=259 layout_us=1 paint_us=817 encode_us=250 acquire_us=142 submit_us=47486 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=613 total_us=48152 rebuild_us=202 layout_us=1 paint_us=511 encode_us=266 acquire_us=112 submit_us=47058 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=614 total_us=47979 rebuild_us=141 layout_us=0 paint_us=180 encode_us=187 acquire_us=100 submit_us=47369 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=615 total_us=47982 rebuild_us=82 layout_us=0 paint_us=159 encode_us=213 acquire_us=94 submit_us=47431 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=616 total_us=48229 rebuild_us=117 layout_us=0 paint_us=234 encode_us=214 acquire_us=94 submit_us=47567 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=617 total_us=47851 rebuild_us=83 layout_us=0 paint_us=160 encode_us=215 acquire_us=113 submit_us=47277 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=618 total_us=48504 rebuild_us=214 layout_us=1 paint_us=522 encode_us=209 acquire_us=111 submit_us=47443 skipped=0 gpu_q=0

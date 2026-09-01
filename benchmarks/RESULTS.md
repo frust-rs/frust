@@ -1967,11 +1967,11 @@ format) and `benchmarks/harness/ab_matrix.sh`'s `--tier` axis exist to
 answer — not a re-statement of the "Engine vs classic — Phase 4" section's
 own CPU-only comparison above, but its GPU-timed successor, backed by
 `gpu_total_us` (immune to the encode/submit arm-remap below) rather than
-`encode_us`/`submit_us` read raw. **No device has run this matrix pass
-yet.** Per this file's own discipline (see the top of this file): a
-scenario or device with no completed runs is omitted here, not filled with
-placeholder numbers — so the table below carries its header only, no rows,
-until a device gate captures one.
+`encode_us`/`submit_us` read raw. Per this file's own discipline (see the
+top of this file): a scenario or device with no completed runs is omitted
+here, not filled with placeholder numbers. **Pixel 5 captured 2026-09-01**
+(p7-06 device gate, phase branch `e65759dc`); other devices' rows await
+their own passes.
 
 Driven by `ab_matrix.sh`'s own canonical invocation — no `--runs`/
 `--duration` override needed now that the script's own default IS
@@ -1985,6 +1985,14 @@ bash benchmarks/harness/ab_matrix.sh --device <serial> --device-name <slug> \
 
 | Backend | Scenario | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | (encode+submit) p50 (ms) | gpu_total p50 (ms) | gpu_total p95 (ms) | Graphics avg (MB) | Note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| classic | S1 | 48.40 | 49.42 | 50.21 | 154.87 | 6173/6173 | 6173/6173 | 47.68 | n/a | n/a | 52.44 | Pixel 5, area/1.0 |
+| classic | S2 | 42.96 | 45.30 | 46.20 | 144.50 | 7324/7324 | 7324/7324 | 40.14 | n/a | n/a | 53.53 | Pixel 5, area/1.0 |
+| classic | S5 | 95.56 | 99.81 | 102.39 | 197.88 | 3248/3248 | 3248/3248 | 94.76 | n/a | n/a | 54.94 | Pixel 5, area/1.0 |
+| classic | S6 | 23.23 | 24.35 | 25.03 | 104.82 | 13056/13056 | 13056/13056 | 22.47 | n/a | n/a | 52.83 | Pixel 5, area/1.0 |
+| engine | S1 | 15.19 | 18.11 | 21.69 | 121.97 | 3916/19579 | 19579/19579 | 14.56 | 13.90 | 14.12 | 54.70 | Pixel 5 |
+| engine | S2 | 11.67 | 12.75 | 13.92 | 125.94 | 130/26484 | 26484/26484 | 5.91 | 8.38 | 8.61 | 53.35 | Pixel 5 |
+| engine | S5 | 13.23 | 14.06 | 14.99 | 148.15 | 121/23274 | 23274/23274 | 11.80 | 12.31 | 12.56 | 55.43 | Pixel 5 |
+| engine | S6 | 11.57 | 12.25 | 12.67 | 137.70 | 116/26554 | 26554/26554 | 5.93 | 9.20 | 9.46 | 53.04 | Pixel 5 |
 
 Column basis, matching PROTOCOL §7's v4 note and `ab_matrix.sh`'s own
 `gpu_graphics_stats`: `p50`/`p95`/`p99`/`worst`/`missed @*` are `stats.py`'s
@@ -2013,18 +2021,41 @@ on the former and preceding it on the latter. Compare arms only on `p50`/
 `p95` (`total_us`, the summed column) or `gpu_total`, or force every arm
 onto the identical blit path with `--define FRUST_NO_DIRECT_SURFACE=1`.
 
-Once a pass is captured, this section gains:
+### Pixel 5 — 2026-09-01 (p7-06 device gate, phase branch `e65759dc`)
 
-- One row per backend x scenario cell actually run (never a placeholder
-  row for a cell not run).
-- A "Methodology deviations" subsection, same discipline as every device
-  block above — naming the run/duration convention used (PROTOCOL §4's own
-  ≥10x30s, or `--quick`'s 3x20s, with `ab_matrix.sh`'s own emitted
-  deviation note quoted) and anything else that departs from PROTOCOL.md.
-- The raw-series path backing every row:
-  `benchmarks/raw/<device>/tier/<cell>/<scenario>/` (`run-NN.log` +
-  `stats.txt` + `run-NN.pss_before.txt`/`run-NN.pss_after.txt`, sanitized
-  by `run.sh`/`ab_matrix.sh` at capture time).
+Convention: PROTOCOL §4's own defaults (12 runs x 30 s per scenario, first
+2 discarded, 10 kept), `ab_matrix.sh --tier classic,engine --aa area
+--scale 1.0 --scenarios s1,s2,s5,s6`. Raw series:
+`benchmarks/raw/pixel5/tier/{classic-area-1.0,engine}/<scenario>/` plus
+the nav logcats under `.../nav/`. The engine build carries `perf-trace`;
+the Adreno 620 offers `TIMESTAMP_QUERY`, so the `gpu_total` columns are
+real GPU-clock readings (`gpu_q=1`; per-span split: main-only on the
+s-scenarios; nav transition frames split main ~5 ms / composite ~6.4 ms).
+
+Threshold scorecard (ratified set):
+
+- nav `total_p50` ≤ 16.7 ms — **PASS**: 12.29 ms inline (engine nav pass,
+  166 frames; transition frames' `gpu_total` p50 11.41 ms).
+- s-scenario p95 ≤ 1.15x classic — **PASS** everywhere (engine p95 is
+  0.25-0.53x classic's own p95).
+- Graphics ≤ classic + 10% — **PASS** (worst delta +4.3%, S1).
+- full-screen quad `gpu_main` ≤ 3 ms — **SUPERSEDED** (Ed, 2026-09-01):
+  Phase 0's GO already recorded this row unmet by S5 (~9.7 ms GPU), and the
+  Phase-4 inline-no-cache arbitration deleted the compositor-quad path the
+  threshold was written against. Measured for the record: S5 `gpu_main`
+  p50 12.31 ms. The operative transition budget is the nav gate above.
+- cold page ≤ 8 ms — **approximated only** (no ratified recipe; Phase 0
+  also recorded it not-measured). Upper bound: the nav pass's worst full
+  transition frame, 27.2 ms.
+
+Methodology deviations: (1) the classic cell's nav pass emitted no
+`frust-perf` lines this round (engine's worked; Phase-4's classic nav
+numbers — 8 ms cached / 36 ms uncached — stand for comparison); (2) the
+device ran over wireless adb (`adb connect`, Tailscale) after the USB
+link proved flaky — orchestration-only, measurement is on-device; (3) the
+engine's `missed @8.33ms` columns read all-frames because the Pixel 5
+paces these scenarios near 90 Hz with p50 > 8.33 ms — the 120 Hz budget
+is not a target on this device.
 
 ---
 
