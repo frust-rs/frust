@@ -2836,6 +2836,12 @@ the accepted, unresolved cost this whole mechanism is chasing; the framework has
 to lower the floor itself — `FRUST_RENDER_SCALE` measures that floor's cost per pixel rather than
 lowering it (see `render-measurement-knobs-not-shipping-modes` below).
 
+**Trigger for removal (not yet closed)**: the engine-tier swap phase is the candidate retirement
+point for this whole mechanism — the `render-hybrid-spike-outcome` entry below already found the
+cache/compositor "not provably deletable" on Phase 0's evidence alone, and no card since has closed
+the question either way. Until the swap phase decides it, `frust-render`'s classic path keeps this
+mechanism exactly as shipped.
+
 Memory: a cached page and the trailing scratch are each one 1080×2400 `Rgba8Unorm` texture (≈10.4
 MB); a page lives only while its bracket is still in use and both it and the scratch are released
 after `MAX_UNUSED_FRAMES` (2) consecutive unused frames (`SnapshotCache::evict`,
@@ -3798,22 +3804,24 @@ increments, and a rate-limited log names the reason — and since the shape is
 a property of the layer tree, a shape that refuses once refuses every frame,
 freezing the surface on its last presented image while the app keeps running.
 
-The served set is much wider than it was when this entry was written: the
-opaque pass now runs once per frame ahead of every round and a stream can be
-cut into several rounds (with a LOAD continuation), so isolated sibling fans
-of any width, a nested isolated pair, and same-parity sequential page reuse
-are all served within two live pages — and a single-primitive Gaussian blur
-or a shadow-only drop shadow is planned and executed as a filter-round
-sequence, sized by `filter_page_size` (coverage plus the filter padding,
-quantized, refusing with `IntermediateTextureTooLarge` past the adapter
-ceiling and `IntermediateTextureLimitReached` past the pool's own budget).
-What still refuses: a chain deeper than the chain bound; a layer needing two
-page groups of its own beside a page an isolated ancestor already holds
-(concretely, a chain hanging off an isolated parent's second child, and a
-sibling pair nested inside a sibling pair); a filter that is not one of the
-two served kinds (flood and the composite-original drop shadow are reserved
-— the latter needs a third live page); a filter layer recorded inside
-another layer; and non-default blend or mask layers.
+The served set is wider still since the bounded third (spill) page landed
+(p7-f2): isolated sibling fans of any width, a nested isolated chain of any
+depth up to the chain bound, same-parity sequential page reuse, and — the one
+shape the spill page exists for — a chain hanging off an isolated ancestor's
+later child (a full-screen layer at fractional opacity holding a chip that
+itself carries a nested chip, the navigation-scrub shape) are all served
+within `MAX_LIVE_PAGES` (3) live pages; a single-primitive Gaussian blur or a
+shadow-only drop shadow is planned and executed as a filter-round sequence,
+sized by `filter_page_size` (coverage plus the filter padding, quantized,
+refusing with `IntermediateTextureTooLarge` past the adapter ceiling and
+`IntermediateTextureLimitReached` past the pool's own budget). What still
+refuses: a chain deeper than the chain bound; a layer whose own round would
+need to sample two live pages while a third is still owed to a round above it
+— a fourth live page, past what the one bounded spill page extends to; a
+filter that is not one of the two served kinds (flood and the
+composite-original drop shadow are reserved — the latter needs a third live
+page); a filter layer recorded inside another layer; and non-default blend or
+mask layers.
 
 **Accepted because**: the engine tier is an opt-in measurement tier this
 phase; skipping loudly beats rendering the shape wrong, and per-frame
@@ -3822,8 +3830,8 @@ surface — machinery the measured tier deliberately omits.
 
 **Trigger for removal**: the swap phase making the engine the only tier, at
 which point the served set must cover the widget tree's real shapes — the
-opaque-pass hoist this entry previously named as its trigger has landed and
-narrowed the class rather than closing it.
+opaque-pass hoist and the bounded spill page have each narrowed the refused
+class in turn rather than closed it.
 
 ### `engine-glifo-atlas-experimental` — the engine's glyph atlas is built on a cache upstream labels experimental, wrapped in frust-owned policy
 
@@ -3920,3 +3928,145 @@ every oracle, and the dedicated hinted-vs-unhinted stability tests).
 **Trigger for removal**: an `EngineRenderer` hint override letting parity
 gates compare unhinted-vs-unhinted (tracked as an open action item), or a
 DPR-aware policy replacing the binary device-class switch.
+
+### `engine-metal-postmultiplied-truth-bug` — wgpu-hal's Metal `PostMultiplied` composites premultiplied regardless of its name
+
+**Observed** (evidence: `crates/frust-render/src/context.rs`'s
+`compositor_expects_premultiplied` doc comment, citing
+`wgpu-hal-29.0.4/src/metal/adapter.rs:422-425` and
+`.../metal/surface.rs:81-85`): wgpu-hal's Metal adapter advertises
+`CompositeAlphaMode::PostMultiplied` but implements it as nothing beyond
+`render_layer.setOpaque(false)` — it never asks Core Animation for straight
+alpha, and a `CAMetalLayer` has no such mode; Core Animation only ever
+composites premultiplied. A Metal `PostMultiplied` swapchain therefore reads
+back exactly like a premultiplied one even though the mode's name and wgpu's
+advertised contract say straight — the same family of upstream truth-bug as
+the iOS Simulator's missing `INDIRECT_EXECUTION` (`docs/DEVELOPMENT.md`'s
+"iOS Simulator cannot render" Known Issue): a real capability wgpu-hal
+misreports, not a Frust defect. The engine tier's `choose_engine_render_path`
+corrects for it: Metal + `PostMultiplied` (iOS's sole translucent mode)
+routes to `RenderPathKind::EngineDirect` — the engine's already-premultiplied
+output served as-is — rather than the spec-correct straight-alpha conversion,
+which would double-correct (over-brighten every partial-alpha pixel; an
+indigo/navy wash near a translucent split). Every other `PostMultiplied`
+backend (e.g. Vulkan's genuinely-straight `POST_MULTIPLIED` flag) keeps the
+ordinary conversion.
+
+**Accepted because**: fixing the misreport belongs to wgpu-hal, not this
+workspace; the workaround is a pure `(backend, mode)` predicate with no
+per-frame cost and no user-visible caveat.
+
+**Trigger for removal**: an upstream wgpu-hal fix that makes Metal's
+`PostMultiplied` genuinely straight-alpha (or documents the mode as
+premultiplied-only), at which point `compositor_expects_premultiplied`
+collapses to nothing.
+
+### `engine-metal-timestamp-drawless-pass-gap` — a Metal render pass with no draw can leave its GPU-timestamp pair unwritten
+
+**Observed** (evidence: `crates/frust-gpu/src/diag.rs`'s `TimestampRing`
+module doc, "A pass that draws nothing may measure nothing"): Metal samples a
+render pass's counters at the vertex/fragment stage boundaries, so a pass
+that runs neither stage — a pure clear, an empty pass — can leave its query
+pair unwritten; `TimestampRing` drops the pair rather than reporting a
+garbage span. A measurement gap only: the untimed pass still draws (or
+doesn't draw) exactly what it always did, and every reported span
+(`gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us`) is
+ordinarily several passes, which absorbs it.
+
+**Accepted because**: it degrades to a smaller sample, never a wrong number,
+and every shipping span is normally a mix of drawing and non-drawing passes.
+
+### `engine-punch-straddles-layer-composite` — an isolated layer whose content straddles a `ClearRect` composites whole after the punch
+
+**Observed** (evidence: `crates/frust-engine/src/compile/clear.rs`'s module
+doc, point 3's "One shape the cut cannot express"): the renderer orders a
+`ClearRect`'s destination-out punch against the frame's own rounds by cutting
+the surface round at the punch's painter-order depth (p7-f3). An isolated
+layer reaches the surface as one composite carrying its deepest instance's
+depth, so a layer holding content recorded both before and after a clear
+composites AFTER the punch as a whole — the half recorded before the clear
+survives, where a reference renderer that closes and reopens the bracket
+around the punch erases it. The engine's one-composite-per-layer model, not
+the punch pass's own ordering.
+
+**Accepted because**: the shape frust's own widget tree does not record —
+`ClearRect` comes from `platform_view`, never mid-animation inside an
+isolated layer; serving it exactly needs per-sub-range layer compositing,
+which the scheduler's one-pass-per-layer design deliberately does not carry.
+
+**Trigger for removal**: the swap phase's full scheduler, if it composites a
+layer in more than one pass.
+
+### `engine-wasm-single-thread` — the pipeline warm-up queue has no worker thread on `wasm32`, so warm-up drains synchronously there
+
+**Observed** (evidence: `crates/frust-gpu/src/pipeline.rs`'s
+`VariantCache::warm_up` — `std::thread::Builder::spawn` and its existing
+`Err(err)` fallback that drains the queue inline instead;
+`crates/frust-engine/tests/{present,atlas_render,encode_contract,
+desktop_stress,scrub_served}.rs`'s `#![cfg(not(target_arch = "wasm32"))]`
+gates, which already anticipate a wasm target for this crate):
+`PipelineCache::warm_up` normally spawns one background OS thread to compile
+a frame's variant descriptors ahead of first use, so a request still queued
+when needed is stolen and built inline rather than waited on (the
+"eager-steal" design `docs/RENDER_ARCHITECTURE.md`'s `frust-gpu::pipeline`
+row describes). `std::thread::Builder::spawn` returns `Err` wherever real OS
+threads are unavailable — `wasm32-unknown-unknown` without the unstable
+`atomics`/`bulk-memory` target features and a Worker pool — and that path
+already falls back to draining the queue synchronously on the calling
+thread. Correct, but on wasm every "warm-up" call is a blocking compile with
+no background overlap; the mechanism buys nothing there, it only avoids
+silently skipping the work.
+
+**Accepted because**: the fallback is already correct by construction (no
+thread, no crash, no silently-skipped compile), and no wasm target exists yet
+to measure the synchronous cost against — see `engine-webgl2-unhosted` below.
+
+**Trigger for removal**: the Web Shell plan reaching a wasm target, either
+accepting the synchronous warm-up cost as measured or adding a
+Worker-backed pool.
+
+### `engine-dx12-cold-start` — the engine's pipeline warm-up pays its whole cost inside the first-ever DX12 launch; every later launch is cheap (MEASURED)
+
+**Observed** (evidence: `benchmarks/RESULTS.md`'s "Windows DX12" section,
+p7-08, Dell mini PC/Intel UHD 730/i5, `material3-demo` release build, 5 cold
+launches per arm via schtasks): wgpu's persisted `PipelineCache` is
+Vulkan-only, but the DX12 driver-level shader cache persists across
+processes, so run 1 after a fresh build is the true first-ever-launch cost
+and runs 2-5 are the everyday warm-cache cost. Measured: **first-ever
+launch** 588 ms TTFF on the engine (188.6 ms of it the in-frame
+pipeline-warm-up compile) vs 1066 ms classic (~972 ms in adapter/device
+init, 1.8x the engine's); **warm launches** are process-bound and
+near-identical across arms (~200 ms TTFF), but warm first frames are
+1.3-1.7 ms on the engine vs 18.8-27.1 ms classic (~14x), steady frames ~4x.
+The GL/ANGLE fallback arm is not measurable on this rig (`WGPU_BACKEND=gl`
+fails to create a surface — the backend is not compiled into the desktop
+build); no toggle exists in shipped code to measure the eager-steal-off arm
+separately.
+
+**Accepted because**: this is a recorded number, not a defect — the engine's
+warm-up-in-first-frame design costs more up front than nothing, but still
+lands the first-ever launch faster than classic's, and every launch after
+the first is markedly cheaper on the engine.
+
+### `engine-webgl2-unhosted` — no browser/WebGL2 measurement exists, and none is planned inside the engine plan
+
+**Observed** (evidence: `benchmarks/harness/webgl2_arm.md`,
+`benchmarks/RESULTS.md`'s "Arm 7 — Browser WebGL2: NO-GO"; no `p7-07` commit
+ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — this
+plan adds no wgpu `gles`/`webgpu` feature and hosts no wasm shell; the
+target-gated `wasm32` browser section belongs to the Web Shell plan instead
+(`engine-wasm-single-thread` above is the one engine-side fact already on
+record for that future target). The desktop stand-in this plan DID land is
+`FRUST_ENGINE_DOWNLEVEL=1` (`crates/frust-gpu/src/caps.rs`), rehearsing
+`downlevel_webgl2_defaults()`'s limit profile against the desktop Metal
+backend — it answers the WebGL2 *limits* question without a browser, but a
+`p7-07` card that would have used it for a browser frame-time number was
+cancelled once OPEN #1 closed as out of this plan's scope.
+
+**Accepted because**: the decision that WebGL2/wasm belongs to the Web Shell
+plan was made deliberately, not defaulted into; `FRUST_ENGINE_DOWNLEVEL=1`
+already gives the downlevel design rules a desktop-measurable proxy for the
+limits half of the question.
+
+**Trigger for removal**: the Web Shell plan reaching its own wasm/browser
+measurement pass.

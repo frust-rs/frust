@@ -203,6 +203,29 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
   hit-test/dispatch seam for a hosted view; don't add pointer handling to
   `PlatformViewWidget`.
 
+## GPU / Render-Engine Rules
+
+Downlevel design rules (E1-E18, `crates/frust-gpu/src/lint.rs`) bind `frust-gpu`/`frust-engine`
+— the frust-owned strip pipeline behind the non-default `engine-tier` feature. Four bind every
+change to either crate:
+
+- **WGSL lives in a `.wgsl` file under `crates/frust-engine/shaders/`, reached via
+  `include_str!` — never an inline string literal.** The downlevel lint
+  (`frust_gpu::lint::lint_wgsl_dir`) only scans that directory; an inline shader string
+  compiles but escapes the scan unseen.
+- **No compute shaders, no storage buffers/textures, anywhere on the frame path (E1/E2).**
+  The tier's whole downlevel posture assumes a WebGL2/GLES3.0 ceiling that offers neither —
+  even a present-side format conversion (`frust-engine::gpu::present::UnpremultiplyPass`) is an
+  ordinary `RENDER_ATTACHMENT` fragment write, never a compute dispatch.
+- **Every draw pipeline blends and writes premultiplied alpha; convert only at present, never
+  in a draw pass.** A pass emitting straight alpha belongs in `gpu::present` alone — converting
+  anywhere else double-corrects a Metal `PostMultiplied` swapchain (`docs/LIMITATIONS.md`'s
+  `engine-metal-postmultiplied-truth-bug`).
+- **A render-path error returns `EngineError`; it never panics (E17).** Every module on the
+  frame path — compile, schedule, cache, filters, the renderer itself — treats a refused frame
+  as a value the caller skips cleanly, never an `unwrap`/`expect`/`panic!` (a source-scan test
+  greps `cache/`, `compile/`, `filters/`, `gpu/`, `text/`, `schedule/`, and `renderer.rs` for it).
+
 ## Anti-patterns
 
 ### Shelling out directly instead of through `ProcessRunner`
