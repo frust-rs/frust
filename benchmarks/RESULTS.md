@@ -1997,10 +1997,18 @@ bash benchmarks/harness/ab_matrix.sh --device <serial> --device-name <slug> \
 | classic | S2 | 11.62 | 18.31 | 20.39 | 51.12 | see raw | see raw | n/a | n/a | n/a | 5.03 | Xiaomi 12, area/1.0 |
 | classic | S5 | 12.69 | 17.12 | 19.28 | 53.37 | see raw | see raw | n/a | n/a | n/a | 6.51 | Xiaomi 12, area/1.0 |
 | classic | S6 | 5.97 | 9.34 | 9.91 | 58.22 | see raw | see raw | n/a | n/a | n/a | 3.45 | Xiaomi 12, area/1.0 |
-| engine | S1 | 8.00 | 9.06 | 9.95 | 70.24 | see raw | see raw | n/a | 5.25 | 5.37 | 10.32 | Xiaomi 12 |
-| engine | S2 | 9.38 | 19.70 | 21.32 | 59.65 | see raw | see raw | n/a | 3.13 | 3.31 | 3.03 | Xiaomi 12 |
-| engine | S5 | 15.36 | 21.14 | 23.42 | 61.04 | see raw | see raw | n/a | 2.06 | 5.64 | 5.24 | Xiaomi 12 |
-| engine | S6 | 11.59 | 22.77 | 24.06 | 64.97 | see raw | see raw | n/a | 1.28 | 1.54 | 9.12 | Xiaomi 12 |
+| engine | S1 | 8.06 | 9.05 | see raw | see raw | see raw | see raw | n/a | 5.25 | 5.36 | 10.62 | Xiaomi 12, refresh pinned 120 |
+| engine | S2 | 7.43 | 9.02 | see raw | see raw | see raw | see raw | n/a | 3.08 | 3.18 | 3.37 | Xiaomi 12, refresh pinned 120 |
+| engine | S5 | 6.95 | 7.66 | see raw | see raw | see raw | see raw | n/a | 3.45 | 5.62 | 3.81 | Xiaomi 12, refresh pinned 120 |
+| engine | S6 | 7.74 | 8.75 | see raw | see raw | see raw | see raw | n/a | 1.19 | 1.27 | 10.11 | Xiaomi 12, refresh pinned 120 |
+| classic | S1 | 14.84 | 16.03 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 53.49 | OnePlus 9, area/1.0 |
+| classic | S2 | 17.99 | 19.85 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 54.29 | OnePlus 9, area/1.0 |
+| classic | S5 | 22.07 | 23.37 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 56.22 | OnePlus 9, area/1.0 |
+| classic | S6 | 8.19 | 8.78 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 53.63 | OnePlus 9, area/1.0 |
+| engine | S1 | 8.43 | 9.84 | see raw | see raw | see raw | see raw | n/a | 6.43 | 6.65 | 59.40 | OnePlus 9 |
+| engine | S2 | 9.29 | 11.24 | see raw | see raw | see raw | see raw | n/a | 4.79 | 4.98 | 54.51 | OnePlus 9 |
+| engine | S5 | 8.59 | 9.38 | see raw | see raw | see raw | see raw | n/a | 5.03 | 6.72 | 54.78 | OnePlus 9 |
+| engine | S6 | 9.08 | 9.52 | see raw | see raw | see raw | see raw | n/a | 1.74 | 1.84 | 60.01 | OnePlus 9 |
 | classic | S1 | 16.85 | 17.11 | 17.30 | 39.46 | 15124/16803 | 16803/16803 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
 | classic | S2 | 19.40 | 20.78 | 20.96 | 39.68 | 14982/15051 | 15051/15051 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
 | classic | S6 | 17.10 | 17.39 | 17.54 | 39.33 | 14869/15012 | 15012/15012 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
@@ -2073,18 +2081,47 @@ is not a target on this device.
 
 ### Xiaomi 12 — 2026-09-01 (context rows; thresholds are Pixel-5-gated)
 
-Same convention and command over adb-over-TLS wireless. The known
-Adreno-730 pattern (Phase 5's s6 note) fully quantified: classic's
-compute pipeline shines on the flagship (S1 5.36 / S6 5.97) and the
-engine is slower at p50 on S1/S5/S6 (S6 1.9x) while WINNING S2; the
-engine's `gpu_total` is tiny (1.3-5.3 ms) — its frames there are
-CPU/pacing-bound, not GPU-bound. 730-class tuning remains a recorded
-future-arc candidate. Deviations: MIUI thermal/scheduler uncontrolled;
-`missed` columns in the raw stats.txt; the nav pass emitted no
-`frust-perf` lines on EITHER tier (likely MIUI logcat filtering — same
-class as the Pixel's classic-nav skip); Graphics-PSS accounting on MIUI
-reads 3-10 MB (not comparable to the Pixel's 52-55 MB scale — different
-HWC attribution), recorded as-is.
+LineageOS, Adreno 730, 120 Hz panel, adb-over-TLS wireless. The engine
+rows above are the **refresh-pinned replacement pass** (`settings put
+system min/peak_refresh_rate 120.0` for the cell, restored after;
+Choreographer period 8209-8220 µs verified on EVERY run in the raw
+logs). An earlier unpinned engine pass recorded S5 15.36 / S6 11.59 /
+S2 9.38 — those rows were **display-policy measurements, not engine
+measurements**: AOSP DisplayModeDirector demoted the untouched session's
+cheapest-frame cells to 60 Hz (period 16.4 ms in-log) while classic's
+heavier frames self-promoted; the engine's actual work was ≤1.3 ms CPU +
+1.2-3.5 ms GPU. Mechanism established by a same-day live matrix (Ed,
+refresh overlay): promotion via touch OR sufficient render load, sticky
+both directions; an interactively-started session holds 120 hands-off
+indefinitely; OxygenOS (OnePlus 9 below) never demotes. Follow-ups
+filed: a `Surface.setFrameRate` vote from the Android shell (the shell
+currently casts none), and harness recording/pinning of the refresh
+class for tier passes. At the honest matched 120 Hz: engine WINS S2
+(7.43 vs 11.62) and S5 (6.95 vs 12.69), sits 2.7/1.8 ms behind classic's
+ultra-cheap p50 on S1/S6 with comparable-or-tighter tails (S6 p95 8.75
+vs 9.34) at equal 120 fps throughput. Other deviations: the nav pass
+emitted no `frust-perf` lines on any Xiaomi arm (nav logcat capture
+flakiness, also seen per-arm on the Pixel and OnePlus — harness
+follow-up filed); Graphics-PSS on this ROM reads 3-11 MB (different HWC
+attribution, not comparable to the Pixel scale), recorded as-is.
+
+### OnePlus 9 — 2026-09-01 (context rows; Adreno 660, OxygenOS, 120 Hz)
+
+Same convention, wired. Engine cells held a locked 120 Hz on every
+scenario including the cheapest (period 8258-8266 µs, 3600 frames/run) —
+**no idle demotion on OxygenOS**, isolating the governing behavior to
+the Lineage device. Engine wins S1 (8.43 vs 14.84), S2 (9.29 vs 17.99)
+and S5 (8.59 vs 22.07, 2.6x); S6 is near-parity (9.08 vs 8.19 at p50,
+engine `gpu_total` 1.74 ms — cheap-frame span accounting, tails
+comparable). Notes: engine Graphics runs +11-12% over classic on S1/S6
+(59.40/60.01 vs 53.49/53.63) — marginally past the +10% guideline if
+applied off the gate device (the Pixel 5, which passes at worst +4.3%);
+plausibly the engine's depth/atlas footprint at this resolution, from
+n=10 snapshots — recorded, not gated. The classic nav pass ran (6 ms
+p50); the ENGINE nav pass skipped (no perf lines — the same capture
+flakiness class, third device).
+
+Devices not measured this pass: Pixel 5a (not at the rig).
 
 ### iPhone SE — 2026-09-01 (context rows; 60 Hz panel, A13)
 
