@@ -75,7 +75,14 @@
 //!    one of those.
 //! 4. **The hole punch**, destination-out, when the frame recorded a
 //!    `ClearRect` — see [`crate::compile::clear`] for the whole contract this
-//!    pass implements.
+//!    pass implements. It is issued at the punch's own painter-order position,
+//!    not at the end of the frame: a surface round is *cut* where the punch
+//!    was recorded, the punch pass goes into that cut, and the round's
+//!    remaining ops resume in a pass of their own after it. Everything drawn
+//!    over the slot is therefore recorded after the erase and survives it,
+//!    whether or not it wrote depth. A punch past every op of the frame — the
+//!    ordinary case, a `ClearRect` recorded last — cuts nothing and lands after
+//!    the last round exactly as it always did.
 //!
 //! With depth unavailable — no attachment, or `FRUST_ENGINE_NO_DEPTH` set —
 //! pass 2 disappears and every instance travels through the surface rounds,
@@ -159,7 +166,7 @@ use crate::cache::{
     AtlasBudget, BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, ResidentImage,
 };
 use crate::compile::paint::resolve_lut_request;
-use crate::compile::{CompiledFrame, SceneCompiler};
+use crate::compile::{ClearPunch, CompiledFrame, SceneCompiler};
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
@@ -987,7 +994,7 @@ impl EngineRenderer {
                     .clone(),
             );
         }
-        if self.scratch.punch.1 > 0 {
+        if self.scratch.punches() {
             frame.punch = Some((
                 punch_variant,
                 self.pipelines
@@ -1130,6 +1137,20 @@ impl EngineRenderer {
                 },
             );
         }
+
+        // The destination-out pass's own recording state, resolved once for the
+        // frame: a punch can now land at any of the walk's cuts, and every one
+        // of them erases the same target through the same pipeline.
+        let punch_pass = pipelines.punch.as_ref().and_then(|(variant, pipeline)| {
+            Some(PunchPass {
+                view: target.view,
+                depth: depth_view,
+                pipeline,
+                groups: self.resources.bind_groups.get(variant)?,
+                instances,
+                base,
+            })
+        });
 
         // The frame's live pages — the two ping-pong groups and the one spill
         // page beside them — each holding the finished page a later round
@@ -1325,48 +1346,50 @@ impl EngineRenderer {
                 ),
             };
 
-            record_pass(
-                encoder,
-                &PassPlan {
-                    label,
-                    view,
-                    load,
-                    depth,
-                    pipeline,
-                    groups,
-                    resources,
-                    composites: &composites,
-                    instances,
-                    base,
-                    segments,
-                    timestamps: timestamps.writes(span),
-                },
-            );
+            // A surface plan with nothing of its own to draw records no pass:
+            // loading and storing the target unchanged is exactly nothing. A
+            // punch cut falling at the very start of a round — a `ClearRect`
+            // recorded before anything the round draws — is how one arises. A
+            // *page* plan with no segments still records its pass, because that
+            // is what clears the pooled page.
+            if !segments.is_empty() || own.is_some() {
+                record_pass(
+                    encoder,
+                    &PassPlan {
+                        label,
+                        view,
+                        load,
+                        depth,
+                        pipeline,
+                        groups,
+                        resources,
+                        composites: &composites,
+                        instances,
+                        base,
+                        segments,
+                        timestamps: timestamps.writes(span),
+                    },
+                );
+            }
 
             settle_pages(&mut self.targets, &mut live, plan.released, own);
+
+            // The cut this plan ends at, erased once the ops before it have
+            // been recorded and before the plan after it draws a thing. Inert
+            // on every plan the walk did not cut, which is every plan of a
+            // frame that punches nothing.
+            if let Some(punch) = punch_pass.as_ref() {
+                punch.record(encoder, plan.punch, timestamps.writes(EngineSpan::Main));
+            }
         }
 
-        let (punch_first, punch_count) = self.scratch.punch;
-        if punch_count > 0
-            && let Some((variant, pipeline)) = pipelines.punch.as_ref()
-            && let Some(groups) = self.resources.bind_groups.get(variant)
-        {
-            record_pass(
+        // The punches past every op of the frame, in the position the pass held
+        // unconditionally before painter order was restored.
+        if let Some(punch) = punch_pass.as_ref() {
+            punch.record(
                 encoder,
-                &PassPlan {
-                    label: "frust-engine hole punch",
-                    view: target.view,
-                    load: wgpu::LoadOp::Load,
-                    depth: depth_view,
-                    pipeline,
-                    groups,
-                    resources: &groups.resources,
-                    composites: &[],
-                    instances,
-                    base,
-                    segments: &[Segment::Strips(punch_first, punch_count)],
-                    timestamps: timestamps.writes(EngineSpan::Main),
-                },
+                self.scratch.punch,
+                timestamps.writes(EngineSpan::Main),
             );
         }
 
@@ -1469,6 +1492,62 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
         };
         plan.groups.bind_with(&mut pass, group);
         pass.draw(GpuStrip::vertex_range(), range);
+    }
+}
+
+/// Everything the frame's hole-punch passes are recorded with, resolved once
+/// before the round walk begins.
+///
+/// A frame can now record several: the punches are issued at the painter-order
+/// positions they were hoisted from, so a surface round carrying two of them is
+/// cut twice and each cut erases through this same pipeline and these same
+/// groups (see [`crate::compile::clear`]). Resolving them once is what keeps
+/// that from becoming a per-cut lookup, and holding the borrows in one value is
+/// what keeps them out of the page pool's way — the walk holds that mutably
+/// throughout.
+struct PunchPass<'a> {
+    view: &'a wgpu::TextureView,
+    depth: Option<&'a wgpu::TextureView>,
+    pipeline: &'a wgpu::RenderPipeline,
+    /// The destination-out variant's own groups 1-3.
+    groups: &'a StripBindGroups,
+    instances: &'a wgpu::Buffer,
+    /// The instance index the punch's own `(first, count)` is relative to — the
+    /// alpha region's start, the same one every round's segments use.
+    base: u32,
+}
+
+impl PunchPass<'_> {
+    /// Records `punch`'s instances as one destination-out pass, or nothing at
+    /// all when the cut issued none — which is every cut of every frame that
+    /// records no `ClearRect`.
+    fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        punch: (u32, u32),
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let (first, count) = punch;
+        if count == 0 {
+            return;
+        }
+        record_pass(
+            encoder,
+            &PassPlan {
+                label: "frust-engine hole punch",
+                view: self.view,
+                load: wgpu::LoadOp::Load,
+                depth: self.depth,
+                pipeline: self.pipeline,
+                groups: self.groups,
+                resources: &self.groups.resources,
+                composites: &[],
+                instances: self.instances,
+                base: self.base,
+                segments: &[Segment::Strips(first, count)],
+                timestamps,
+            },
+        );
     }
 }
 
@@ -1858,6 +1937,11 @@ enum Segment {
 }
 
 /// One scheduled round, resolved to the instances and target it draws with.
+///
+/// One *plan* rather than one scheduled round: a surface round carrying a hole
+/// punch is cut into a plan per span between its punches, so the punch pass can
+/// be recorded at the painter-order position it was hoisted from (see
+/// [`Scratch::cut_for_punches`]).
 #[derive(Debug, Clone)]
 struct RoundPlan {
     /// The page this round renders into, or `None` for the frame's own target.
@@ -1870,6 +1954,15 @@ struct RoundPlan {
     /// The filter pass this round runs, on a filter round — which draws no
     /// strip and composites nothing, so its `segments` range is empty.
     filter: Option<FilterPlan>,
+    /// The hole punches to erase with once this plan's own pass has been
+    /// recorded, as `(first, count)` into the alpha region — the cut this plan
+    /// ends at.
+    ///
+    /// Only a *surface* plan ever carries one: a punch recorded inside an
+    /// isolated layer was hoisted out of it to the frame root (see
+    /// [`crate::compile::clear`]), so a page round is never cut and a filter
+    /// round — which draws nothing of the frame's own — never is either.
+    punch: (u32, u32),
 }
 
 /// One filter pass, resolved to the instance slot it draws and the page group
@@ -1921,9 +2014,16 @@ struct Scratch {
     /// The frame's rounds, each layer's before the round that composites it and
     /// the surface's last round last.
     rounds: Vec<RoundPlan>,
-    /// The hole punch's own instances, as `(first, count)` into the alpha
-    /// region — past every round's segments, so dropping the punch pass leaves
-    /// the frame exactly as the display list would read without the clear.
+    /// The instances of the punches no cut reached — those recorded past every
+    /// op of the frame — as `(first, count)` into the alpha region.
+    ///
+    /// Their pass is the last thing the frame records, which is where a
+    /// `ClearRect` recorded last belongs in painter order anyway. Punches the
+    /// walk *did* cut at are held on their own [`RoundPlan::punch`] instead.
+    ///
+    /// No round's segments name a punch instance, wherever it sits in the
+    /// buffer, so dropping the punch passes leaves the frame exactly as the
+    /// display list would read without the clear.
     punch: (u32, u32),
     /// The deepest painter's-order index inside each recorded layer, which is
     /// the depth its composite carries. Filled as the rounds are walked, which
@@ -1974,6 +2074,13 @@ impl Scratch {
 
         let draws = frame.draws();
         let strips = frame.strip_buf();
+        // The punches still to be issued, in the order the compiler hoisted
+        // them — which is depth order, since each took its own index from the
+        // frame's monotonic painter-order counter. Empty on a frame with no
+        // clear and on a target that disregards alpha (`punches`), and then
+        // nothing below ever cuts: a non-punching frame is planned exactly as
+        // it always was.
+        let mut pending: &[ClearPunch] = if punches { &frame.clears } else { &[] };
 
         for round in rounds {
             let page = round.page();
@@ -1982,8 +2089,12 @@ impl Scratch {
             // instance of the round is shifted by the layer's bounds.
             let origin = page.map_or((0, 0), |page| (page.bounds.x0, page.bounds.y0));
             let split_opaque = page.is_none() && depth_active;
+            // Only the frame's own target is punched — a punch inside an
+            // isolated layer was hoisted out of it — so only a surface round is
+            // ever cut.
+            let cuts = page.is_none();
 
-            let first_segment = self.segments.len();
+            let mut first_segment = self.segments.len();
             let mut deepest = 0_u32;
             let mut run_start = self.alpha.len() as u32;
 
@@ -1995,6 +2106,19 @@ impl Scratch {
                             .unwrap_or(&[]);
                         for draw in batch {
                             deepest = deepest.max(draw.depth);
+                            // Ahead of the paint lookup rather than after it, so
+                            // the cut follows the order the display list was
+                            // recorded in rather than the subset of it that
+                            // survived lowering.
+                            if cuts && !pending.is_empty() {
+                                self.cut_for_punches(
+                                    &mut pending,
+                                    strips,
+                                    draw.depth,
+                                    &mut first_segment,
+                                    &mut run_start,
+                                );
+                            }
                             let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots)
                             else {
                                 continue;
@@ -2014,6 +2138,26 @@ impl Scratch {
                         }
                     }
                     RoundOp::Composite(composite) => {
+                        let depth = self
+                            .layer_depth
+                            .get(composite.layer as usize)
+                            .copied()
+                            .unwrap_or(0);
+                        // A composite carries the deepest index inside its
+                        // layer, so a layer recorded after a punch is cut
+                        // against it exactly like a draw would be — which is
+                        // what keeps a translucent layer over the slot from
+                        // being erased by it.
+                        if cuts && !pending.is_empty() {
+                            self.cut_for_punches(
+                                &mut pending,
+                                strips,
+                                depth,
+                                &mut first_segment,
+                                &mut run_start,
+                            );
+                        }
+
                         // Consecutive draw batches merge into one segment; a
                         // composite is what breaks the run, because it binds a
                         // different page as its colour source.
@@ -2023,11 +2167,6 @@ impl Scratch {
                                 .push(Segment::Strips(run_start, end - run_start));
                         }
 
-                        let depth = self
-                            .layer_depth
-                            .get(composite.layer as usize)
-                            .copied()
-                            .unwrap_or(0);
                         deepest = deepest.max(depth);
                         self.segments
                             .push(Segment::Composite(end, composite.parity));
@@ -2069,25 +2208,86 @@ impl Scratch {
                 segments: first_segment..self.segments.len(),
                 released,
                 filter,
+                // The round's last plan draws to its own end; a punch past
+                // every op of the frame is issued after the whole walk instead.
+                punch: (0, 0),
             });
         }
 
-        if punches {
-            self.build_punches(frame);
+        // Whatever no op was recorded after: a `ClearRect` recorded last, which
+        // is the ordinary shape of a platform-view slot.
+        if !pending.is_empty() {
+            self.punch = self.push_punches(pending, strips);
         }
     }
 
-    /// Turns the frame's hoisted punches into the destination-out pass's own
-    /// instances, appended past every round's.
+    /// Closes the open span of a surface round at `depth`, issuing every punch
+    /// recorded before it as a pass of its own.
+    ///
+    /// This is the whole painter-order restoration: the ops recorded before the
+    /// punch become a plan that ends here, the punch's own instances follow
+    /// them in the buffer, and the ops recorded after it start a plan of their
+    /// own — so the erase lands between the two rather than after both. A punch
+    /// pass is a pass of its own because it draws through a different pipeline
+    /// (destination-out) than the strips around it, not because of what it
+    /// covers.
+    ///
+    /// Does nothing when no pending punch is shallower than `depth`, which is
+    /// every op of every frame that records no clear.
+    fn cut_for_punches(
+        &mut self,
+        pending: &mut &[ClearPunch],
+        strips: &[Strip],
+        depth: u32,
+        first_segment: &mut usize,
+        run_start: &mut u32,
+    ) {
+        let cut = pending
+            .iter()
+            .take_while(|punch| punch.depth < depth)
+            .count();
+        if cut == 0 {
+            return;
+        }
+        let (issued, rest) = pending.split_at(cut);
+        *pending = rest;
+
+        // Close the run this cut interrupts, so the plan's segments name only
+        // what was recorded before the punch.
+        let end = self.alpha.len() as u32;
+        if end > *run_start {
+            self.segments
+                .push(Segment::Strips(*run_start, end - *run_start));
+        }
+
+        let punch = self.push_punches(issued, strips);
+        self.rounds.push(RoundPlan {
+            page: None,
+            segments: *first_segment..self.segments.len(),
+            // The pages a cut round consumed are handed back when its LAST plan
+            // ends: nothing between two plans of one round acquires a page, and
+            // a composite in an earlier plan still has to sample the page it
+            // names.
+            released: [false; MAX_LIVE_PAGES],
+            filter: None,
+            punch,
+        });
+        *first_segment = self.segments.len();
+        *run_start = self.alpha.len() as u32;
+    }
+
+    /// Turns `punches` into destination-out instances, appended to the alpha
+    /// region and named by no round's segments, as `(first, count)`.
     ///
     /// Each punch is a strip run like any other, drawn with an opaque source so
     /// the blend state's `1 − src.a` reaches zero exactly where the coverage is
-    /// full, and carrying the painter-order depth it was hoisted from.
-    fn build_punches(&mut self, frame: &CompiledFrame) {
+    /// full, and carrying the painter-order depth it was hoisted from — which
+    /// still orders it against the frame's one depth-writing pass, whose opaque
+    /// coverage is recorded once ahead of every round and so cannot be cut.
+    fn push_punches(&mut self, punches: &[ClearPunch], strips: &[Strip]) -> (u32, u32) {
         let first = self.alpha.len() as u32;
-        let strips = frame.strip_buf();
 
-        for punch in &frame.clears {
+        for punch in punches {
             let paint = PackedPaint {
                 payload: PaintPayload::Solid(PUNCH_SOURCE),
                 paint: SOLID_PAINT,
@@ -2104,7 +2304,7 @@ impl Scratch {
             }
         }
 
-        self.punch = (first, (self.alpha.len() as u32).saturating_sub(first));
+        (first, (self.alpha.len() as u32).saturating_sub(first))
     }
 
     /// Emits the instances the `strip`/`next` pair describes: the strip's own
@@ -2202,6 +2402,16 @@ impl Scratch {
         u32::try_from(index)
             .ok()?
             .checked_mul(GpuFilterData::SIZE_TEXELS)
+    }
+
+    /// Whether this frame records a hole-punch pass at all — at a cut inside a
+    /// surface round, or after every round of the frame.
+    ///
+    /// Derived rather than counted alongside the instances: the two places a
+    /// punch can land are the two places its instances are recorded from, and
+    /// one answer read off both is one fewer field to keep in step.
+    fn punches(&self) -> bool {
+        self.punch.1 > 0 || self.rounds.iter().any(|plan| plan.punch.1 > 0)
     }
 
     /// How many of this frame's rounds render *strips* into a pooled page, and
@@ -3309,6 +3519,8 @@ fn resources_bind_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust_gpu::DownlevelProfile;
+    use kurbo::Rect;
     use peniko::color::palette::css::{BLUE, RED};
     use vello_common::paint::IndexedPaint;
 
@@ -3423,5 +3635,196 @@ mod tests {
             wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
         );
         assert!(MIN_RESOURCE_TEXTURE_DIM.is_power_of_two());
+    }
+
+    // -----------------------------------------------------------------
+    // Where the hole punch lands in the pass plan
+    //
+    // What a frame's pass plan COSTS, and where the erase sits inside it,
+    // is a decision over the recording's shape — no device, no pixels.
+    // The pixel half of the same contract is
+    // `frust-testing`'s `tests/aa_over_punch.rs`, against `vello_cpu`.
+    // -----------------------------------------------------------------
+
+    /// Viewport every plan below is built against.
+    const PLAN_VIEWPORT: (u16, u16) = (64, 48);
+
+    /// The slot, and a chip straddling its right edge — so a chip drawn over
+    /// the punch is half inside it and half over the backdrop.
+    const PLAN_SLOT: Rect = Rect::new(4.0, 4.0, 32.0, 44.0);
+    const PLAN_CHIP: Rect = Rect::new(16.0, 12.0, 56.0, 32.0);
+
+    /// The plan `Scratch::build` produces for `scene`, alongside the rounds it
+    /// was scheduled from, under a target that carries alpha.
+    fn plan_of(scene: &Scene) -> (Scratch, Vec<Round>) {
+        let frame = SceneCompiler::new(PLAN_VIEWPORT.0, PLAN_VIEWPORT.1)
+            .compile(scene, Affine::IDENTITY, PLAN_VIEWPORT)
+            .expect("an in-range scene compiles");
+        let rounds = Schedule::build(
+            &frame.recorder,
+            &TierCaps::fake(DownlevelProfile::Full),
+            &PageConfig::default(),
+        )
+        .expect("a scene of solid fills schedules");
+
+        let mut scratch = Scratch::default();
+        // Depth on and punching on: the shape a translucent presentation
+        // carrying a platform-view slot is planned under.
+        scratch.build(&frame, &rounds, true, !frame.clears.is_empty(), &[]);
+        (scratch, rounds)
+    }
+
+    /// A scene recorded through the public builder.
+    fn plan_scene(record: impl FnOnce(&mut SceneBuilder<'_>)) -> Scene {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        record(&mut builder);
+        scene
+    }
+
+    fn plan_backdrop(builder: &mut SceneBuilder<'_>) {
+        builder.fill_rect(
+            Rect::new(
+                0.0,
+                0.0,
+                f64::from(PLAN_VIEWPORT.0),
+                f64::from(PLAN_VIEWPORT.1),
+            ),
+            Brush::Solid(RED),
+        );
+    }
+
+    #[test]
+    fn a_frame_that_punches_nothing_is_planned_exactly_as_its_rounds() {
+        let (scratch, rounds) = plan_of(&plan_scene(|builder| {
+            plan_backdrop(builder);
+            builder.fill_rect(PLAN_CHIP, Brush::Solid(BLUE));
+        }));
+
+        assert_eq!(
+            scratch.rounds.len(),
+            rounds.len(),
+            "a frame with no clear is cut nowhere, so it costs exactly its \
+             scheduled rounds' passes"
+        );
+        assert!(!scratch.punches(), "and records no punch pass at all");
+    }
+
+    #[test]
+    fn a_clear_recorded_last_keeps_its_pass_after_every_round() {
+        let (scratch, rounds) = plan_of(&plan_scene(|builder| {
+            plan_backdrop(builder);
+            builder.clear_rect(PLAN_SLOT);
+        }));
+
+        assert_eq!(
+            scratch.rounds.len(),
+            rounds.len(),
+            "nothing is recorded after the clear, so nothing is cut"
+        );
+        assert!(
+            scratch.rounds.iter().all(|plan| plan.punch.1 == 0),
+            "no round carries the punch"
+        );
+        assert!(
+            scratch.punch.1 > 0,
+            "it is issued after the last round instead — the position an \
+             unconditionally-trailing pass would have put it in, which is why \
+             a frame shaped like this renders byte-identically"
+        );
+    }
+
+    #[test]
+    fn a_draw_over_a_clear_cuts_the_surface_round_and_the_punch_goes_in_the_cut() {
+        let (scratch, rounds) = plan_of(&plan_scene(|builder| {
+            plan_backdrop(builder);
+            builder.clear_rect(PLAN_SLOT);
+            builder.fill_rect(PLAN_CHIP, Brush::Solid(BLUE));
+        }));
+
+        assert_eq!(
+            scratch.rounds.len(),
+            rounds.len() + 1,
+            "the surface round is cut in two — one extra pass, and one only"
+        );
+        assert_eq!(
+            scratch.punch,
+            (0, 0),
+            "with nothing left over for a trailing pass"
+        );
+
+        let cut = scratch
+            .rounds
+            .iter()
+            .position(|plan| plan.punch.1 > 0)
+            .expect("the cut plan carries the punch");
+        assert_eq!(cut, scratch.rounds.len() - 2, "and it is the cut plan");
+
+        // The buffer says the same thing the plan does: the backdrop's
+        // instances precede the punch's, and the chip's follow them.
+        let before = scratch.rounds[cut].segments.clone();
+        let after = scratch.rounds[cut + 1].segments.clone();
+        let end_of = |range: Range<usize>| {
+            scratch.segments[range]
+                .iter()
+                .map(|segment| match *segment {
+                    Segment::Strips(first, count) => first + count,
+                    Segment::Composite(first, _) => first + 1,
+                })
+                .max()
+                .expect("a plan of this frame draws something")
+        };
+        let (punch_first, punch_count) = scratch.rounds[cut].punch;
+        assert!(
+            end_of(before) <= punch_first,
+            "everything recorded before the clear is erased by the punch"
+        );
+        assert!(
+            scratch.segments[after]
+                .iter()
+                .all(|segment| match *segment {
+                    Segment::Strips(first, _) => first >= punch_first + punch_count,
+                    Segment::Composite(first, _) => first >= punch_first + punch_count,
+                }),
+            "and everything recorded after it lands on top of the erase"
+        );
+    }
+
+    #[test]
+    fn a_translucent_layer_over_a_clear_is_composited_after_the_punch() {
+        let (scratch, rounds) = plan_of(&plan_scene(|builder| {
+            plan_backdrop(builder);
+            builder.clear_rect(PLAN_SLOT);
+            builder.push_layer(PLAN_CHIP, 0.5);
+            builder.fill_rect(PLAN_CHIP, Brush::Solid(BLUE));
+            builder.pop_layer();
+        }));
+
+        assert_eq!(
+            scratch.rounds.len(),
+            rounds.len() + 1,
+            "the layer's page round, then the surface round cut in two"
+        );
+        let cut = scratch
+            .rounds
+            .iter()
+            .position(|plan| plan.punch.1 > 0)
+            .expect("the cut plan carries the punch");
+        // The composite is what the cut has to fall before: a layer recorded
+        // after the clear carries a deeper index than the punch, and the
+        // composite writes no depth for the test to save it by.
+        let composited = scratch.segments[scratch.rounds[cut + 1].segments.clone()]
+            .iter()
+            .any(|segment| matches!(segment, Segment::Composite(..)));
+        assert!(
+            composited,
+            "the layer composites in the plan AFTER the punch, not before it"
+        );
+        assert!(
+            !scratch.segments[scratch.rounds[cut].segments.clone()]
+                .iter()
+                .any(|segment| matches!(segment, Segment::Composite(..))),
+            "and nothing composites into the plan the punch closes"
+        );
     }
 }

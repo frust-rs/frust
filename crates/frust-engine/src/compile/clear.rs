@@ -37,10 +37,17 @@
 //! depth it was hoisted from. Issuing them is the renderer's, and is specified
 //! here so the pass that grows it has one place to read:
 //!
-//! 1. **One pass, after the root round.** The punches are issued together,
-//!    into the frame's own target, once every draw of the root round has been
-//!    recorded. They never touch an intermediate page: a punch inside an
-//!    isolated layer was hoisted out of it.
+//! 1. **One pass, at the punch's own painter-order position.** A punch is
+//!    issued into the frame's own target once everything recorded *before* the
+//!    clear has been recorded, and before anything recorded after it is. The
+//!    renderer does that by cutting the surface round at the punch's depth —
+//!    the ops before it end one pass, the punch pass follows, the ops after it
+//!    resume in the next — so punches at one position are issued together and
+//!    punches at different positions each get a pass. A punch past every op of
+//!    the frame, which is what a `ClearRect` recorded last is, therefore lands
+//!    after the last round exactly as an unconditionally-trailing pass would.
+//!    They never touch an intermediate page: a punch inside an isolated layer
+//!    was hoisted out of it.
 //! 2. **Fixed-function destination-out, over the strip program.** A punch is a
 //!    strip run like any other, so it goes through the same strip program and
 //!    instance layout; only the blend state differs — `src_factor: Zero`,
@@ -52,28 +59,37 @@
 //!    `textureLoad`, and the frame's own target is not readable inside the
 //!    pass that writes it. `shaders/blend.wgsl` remains the route for a
 //!    composite *between* intermediate textures.
-//! 3. **Depth-tested against opaque coverage, and against nothing else.** A
-//!    punch carries the depth it was hoisted from, and the ordinary `LessEqual`
-//!    test against the frame's depth attachment is what keeps content painted
-//!    over the slot from being erased along with what is under it. That test
-//!    can only order the punch against paint that *wrote* the depth
-//!    attachment, and one pass writes it: the root round's opaque pass, fed the
-//!    fully covered spans of opaque draws. So the contract is narrower than the
-//!    recorded paint order restored — it is:
+//! 3. **Ordered by the cut, and depth-tested against the one pass the cut
+//!    cannot order it against.** Point 1's cut is what orders the punch against
+//!    everything drawn into the surface *in a round*: recorded before the
+//!    clear, it is erased; recorded after it, it lands on top of the erase.
+//!    That holds whether or not the content wrote depth, so an anti-aliased
+//!    fringe, a translucent paint's spans and a layer's composite all survive a
+//!    punch they were recorded over.
 //!
-//!    - opaque root-round coverage recorded *before* the clear is erased;
-//!    - opaque root-round coverage recorded *after* it survives, because it
-//!      wrote a nearer depth the punch fails against;
-//!    - everything else recorded after it is erased anyway. A layer's composite,
-//!      an anti-aliased edge, any span of a translucent paint, the punch of
-//!      another `ClearRect` — none of them write depth, so the depth under them
-//!      is whatever the opaque pass left, and the punch passes over it.
+//!    One pass escapes the cut, and it is why the punch still carries the depth
+//!    it was hoisted from: the frame's opaque strips are recorded *once, ahead
+//!    of every round* (see [`crate::renderer`]), so they hold post-clear
+//!    coverage that no cut can put after the punch. The ordinary `LessEqual`
+//!    test against the frame's depth attachment restores exactly that ordering
+//!    — opaque coverage recorded after the clear wrote a nearer depth and the
+//!    punch fails against it, opaque coverage recorded before it is erased —
+//!    and it is the only ordering the test is asked for. Everything else in the
+//!    frame writes no depth, and needs none: the cut already put it on the
+//!    correct side.
 //!
-//!    A translucent widget drawn over a platform-view slot is therefore punched
-//!    through, not composited over the hole. Without a depth attachment at all
-//!    the pass erases everything under the punch rectangle, the same
-//!    correctness/ordering trade the frame's two draw passes already make when
-//!    they collapse into one.
+//!    Without a depth attachment at all there is no separate opaque pass to
+//!    order against: every instance travels through the surface rounds in
+//!    painter order, so the cut alone is the whole contract and nothing is
+//!    erased that was recorded after the clear.
+//!
+//!    One shape the cut cannot express is a bracket that *straddles* the clear.
+//!    An isolated layer reaches the surface as a single composite carrying the
+//!    deepest index inside it, so a layer holding content recorded both before
+//!    and after the clear composites after the punch as a whole — the half of
+//!    it recorded before the clear survives where the reference renderer, which
+//!    closes and reopens the bracket around the punch, erases it. That is the
+//!    engine's one-composite-per-layer model, not this pass's ordering.
 //! 4. **Skipped whole on a target that disregards alpha.** Destination-out
 //!    darkens colour as well as erasing alpha, so on an opaque presentation —
 //!    where the erased alpha is disregarded — issuing the pass would leave a
@@ -106,10 +122,10 @@ pub struct ClearPunch {
     /// The painter-order depth the punch was hoisted from.
     ///
     /// A depth of its own rather than the depth of a neighbouring draw, so
-    /// every draw recorded after the clear sits strictly in front of it. Which
-    /// of those draws the depth test then actually saves is narrower than that
-    /// ordering suggests — only depth-writing opaque coverage — for the reason
-    /// the module header's wiring contract gives.
+    /// every draw recorded after the clear sits strictly in front of it. It is
+    /// read twice: the renderer cuts the surface round at it (contract point 1)
+    /// and the depth test uses it against the frame's one depth-writing pass
+    /// (contract point 3).
     pub depth: u32,
 }
 
