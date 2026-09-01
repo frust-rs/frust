@@ -1870,6 +1870,309 @@ and `benchmarks/raw/xiaomi12/tier/{classic-area-1.0,engine}/s6/`
 
 ---
 
+## Desktop stress (macOS Metal) — engine design rules E12-E18
+
+Not a `PROTOCOL.md` scenario pass and not comparable to the device tables
+above: this is the engine's own desktop gate, an `#[ignore]`d suite driving
+`EngineRenderer` headlessly rather than an app through `ab_matrix.sh`. It
+exists because the pressures a laptop or a 5K display applies — an
+intermediate wider than any texture the engine allocates, a window edge
+dragged through hundreds of extents, two windows on one device, a GPU that
+goes away, a fractional display scale, a surface whose alpha the compositor
+reads — appear on no phone in the matrix.
+
+```
+cargo test -p frust-engine --test desktop_stress -- --ignored
+```
+
+- Rig: Apple M4 (integrated, Metal), macOS, wgpu 29.0.4, headless
+  `frust_gpu::HeadlessTarget` at `Rgba8Unorm`, `transient_saves_memory = true`.
+- Timings are from a `--release` run; the allocation counters are build
+  independent (pure pool logic) and read identically under `cargo test`'s
+  default debug profile.
+- Expected pixels are computed analytically (solid, pixel-aligned rectangles
+  sampled well inside their interiors), not taken from `vello_cpu`:
+  `frust-engine` does not depend on the oracle crate, and the pixel-level
+  corpus in `frust-testing` is where engine-vs-`vello_cpu` comparison lives.
+
+### Resize storm — 400 extents through `EngineRenderer::resize` (E13)
+
+Four hundred pseudo-random surface extents between 800x800 and 5120x2880
+(deterministic xorshift, seed `0x5eed1234`), one frame rendered at each, with
+a **fixed-size** half-opacity layer in the scene — the shape a fading card or
+a dismissing sheet records, whose page extent does not change when the window
+does. Frame time is measured around encode → submit → wait, with the step's
+own target allocation excluded (a real surface hands its swapchain texture
+over rather than creating one).
+
+| Arm | Pool `created` | `reused` | `evicted` | Peak parked keys | Frame p50 (ms) | p95 (ms) | max (ms) |
+|---|---|---|---|---|---|---|---|
+| Before (`drop_parked` emptied the pool per resize) | 400 | 0 | 399 | 1 | 5.17 | 9.78 | 18.12 |
+| After (`RESIZE_KEEP_ALIVE_FRAMES = 2`) | **1** | **399** | 0 | 1 | **3.08** | **3.44** | 12.15 |
+
+The gate found a real E13 violation. `EngineRenderer::resize` called
+`IntermediateTargets::drop_parked`, which emptied the whole intermediate pool;
+a drag produces a resize *per frame*, so the fixed-size layer's page was
+evicted between every pair of frames that wanted it and the pool degenerated
+into a plain allocator — one allocation per resize, zero reuse, exactly the
+failure `frust_gpu::pool`'s aging slack exists to prevent. `drop_parked` now
+collapses the keep-alive window to the last two frames instead of emptying the
+pool: entries the frames immediately behind the resize used survive (they are
+what the next frame asks for), everything older goes at once as before. The
+storm's own p50 falls 40% and its p95 65% — allocation, not rendering, was the
+cost.
+
+### The rest of the automated suite
+
+| Case | Rule | Result |
+|---|---|---|
+| 5120x2880 target, root layer inside the page ceiling, 4x4 sample grid | E18 | **pass** |
+| 5120x2880 target, **root opacity layer over the whole frame** | E14 | **pass** — banded into two 2560x3072 pages |
+| Two headless targets on one device, 100 alternating frames | E12 | **pass** — each renderer's own pool `created=1`, `reused=49`, `in_use=0` |
+| `Device::destroy()` mid-session, then a fresh renderer | E17 / R8 | **pass** — see the note below |
+| DPR 1.5 and 2.25, scale in the root `Affine`, whole-pixel target | E15 | **pass** |
+| Translucent destination (base colour alpha 0.5) | E16 | **pass** |
+| Manual macOS window session — `material3-demo` fullscreen + drag-resize storm on the attached external display, no validation errors, no black frame | frame p50 16.41 ms (display-paced, 60 Hz panel), p95 19.64, worst 72.52 (resize reconfigure); `gpu_total` p50 0.99 ms / p95 2.45 (live ring); 4065 frames, 0 validation/error lines | **done 2026-09-01 (Ed)** — smooth, no black frames, no artifacts. Deviation: run on a Samsung M70C 4K (3840x2160) — the only display at the rig, continuing Phase 0's unmeasured-5K note; `FRUST_WINDOW_SIZE=5120x2880` was requested and clamped by macOS to the panel, so the live-window drawable stayed ≤4K; the 5120x2880 coverage incl. band tiling stands in the headless (a)/(e)/(f) cases above |
+
+The 5K root-layer cell, previously the suite's one open engineering item, is
+now closed: `Schedule::build` reaches for `schedule::pages::page_bands` itself
+for a *regular* layer wider than the page ceiling (a cut ancestor already
+holding its page, or a nested isolated child of its own, are the two shapes
+this still refuses rather than bands — neither is a shape this case records),
+emitting one page round and one composite per band instead of the single
+oversized request `page_size` used to refuse. The 5120-wide root layer here
+splits into the same two 2560x3072-page bands the host-only plan
+(`a_5k_root_layer_plans_column_bands_that_tile_it_exactly`) already predicted,
+and the sample grid reads the reference colour at every cell. Confirmed on
+the same M4 rig the rest of this section runs on: `cargo test -p frust-engine
+--test desktop_stress -- --ignored` reports 7/7, this case included.
+
+Two findings ride along on the device-loss case. First, a destroyed device is
+**silent**: the engine returned `Ok(())`, the validation scope caught nothing,
+the poll answered `QueueEmpty` and `DeviceHandle::first_uncaptured_error`
+latched nothing. That is WebGPU behaving to specification — operations on a
+lost device are no-ops that raise no error — so a host must recover on the
+*surface's* signal (a `Lost` acquire driving `frust_gpu::lifecycle` to
+`SurfacePhase::SurfaceLost`), never on the engine's return value. Second,
+recovery is clean: a renderer built on a fresh device renders the same scene
+to the same pixels, the pool having gone with the renderer that owned it.
+
+---
+
+## Engine vs classic A/B — Phase 7 (GPU-timed, `--tier classic,engine`)
+
+Skeleton for the canonical classic-vs-engine A/B this phase's GPU
+pass-timestamp work (`gpu_q`/`gpu_total_us` et al., PROTOCOL §7's v4 raw
+format) and `benchmarks/harness/ab_matrix.sh`'s `--tier` axis exist to
+answer — not a re-statement of the "Engine vs classic — Phase 4" section's
+own CPU-only comparison above, but its GPU-timed successor, backed by
+`gpu_total_us` (immune to the encode/submit arm-remap below) rather than
+`encode_us`/`submit_us` read raw. Per this file's own discipline (see the
+top of this file): a scenario or device with no completed runs is omitted
+here, not filled with placeholder numbers. **Pixel 5 captured 2026-09-01**
+(p7-06 device gate, phase branch `e65759dc`); other devices' rows await
+their own passes.
+
+Driven by `ab_matrix.sh`'s own canonical invocation — no `--runs`/
+`--duration` override needed now that the script's own default IS
+PROTOCOL §4's convention (`--quick` restores the old quick pass for a fast
+local check; see the script's own `--quick`/`--runs`/`--duration` docs):
+
+```
+bash benchmarks/harness/ab_matrix.sh --device <serial> --device-name <slug> \
+    --tier classic,engine --scenarios s1,s2,s5,s6
+```
+
+| Backend | Scenario | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | (encode+submit) p50 (ms) | gpu_total p50 (ms) | gpu_total p95 (ms) | Graphics avg (MB) | Note |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| classic | S1 | 48.40 | 49.42 | 50.21 | 154.87 | 6173/6173 | 6173/6173 | 47.68 | n/a | n/a | 52.44 | Pixel 5, area/1.0 |
+| classic | S2 | 42.96 | 45.30 | 46.20 | 144.50 | 7324/7324 | 7324/7324 | 40.14 | n/a | n/a | 53.53 | Pixel 5, area/1.0 |
+| classic | S5 | 95.56 | 99.81 | 102.39 | 197.88 | 3248/3248 | 3248/3248 | 94.76 | n/a | n/a | 54.94 | Pixel 5, area/1.0 |
+| classic | S6 | 23.23 | 24.35 | 25.03 | 104.82 | 13056/13056 | 13056/13056 | 22.47 | n/a | n/a | 52.83 | Pixel 5, area/1.0 |
+| engine | S1 | 15.19 | 18.11 | 21.69 | 121.97 | 3916/19579 | 19579/19579 | 14.56 | 13.90 | 14.12 | 54.70 | Pixel 5 |
+| engine | S2 | 11.67 | 12.75 | 13.92 | 125.94 | 130/26484 | 26484/26484 | 5.91 | 8.38 | 8.61 | 53.35 | Pixel 5 |
+| engine | S5 | 13.23 | 14.06 | 14.99 | 148.15 | 121/23274 | 23274/23274 | 11.80 | 12.31 | 12.56 | 55.43 | Pixel 5 |
+| engine | S6 | 11.57 | 12.25 | 12.67 | 137.70 | 116/26554 | 26554/26554 | 5.93 | 9.20 | 9.46 | 53.04 | Pixel 5 |
+| classic | S1 | 5.36 | 8.90 | 10.56 | 69.21 | see raw | see raw | n/a | n/a | n/a | 3.91 | Xiaomi 12, area/1.0 |
+| classic | S2 | 11.62 | 18.31 | 20.39 | 51.12 | see raw | see raw | n/a | n/a | n/a | 5.03 | Xiaomi 12, area/1.0 |
+| classic | S5 | 12.69 | 17.12 | 19.28 | 53.37 | see raw | see raw | n/a | n/a | n/a | 6.51 | Xiaomi 12, area/1.0 |
+| classic | S6 | 5.97 | 9.34 | 9.91 | 58.22 | see raw | see raw | n/a | n/a | n/a | 3.45 | Xiaomi 12, area/1.0 |
+| engine | S1 | 8.06 | 9.05 | see raw | see raw | see raw | see raw | n/a | 5.25 | 5.36 | 10.62 | Xiaomi 12, refresh pinned 120 |
+| engine | S2 | 7.43 | 9.02 | see raw | see raw | see raw | see raw | n/a | 3.08 | 3.18 | 3.37 | Xiaomi 12, refresh pinned 120 |
+| engine | S5 | 6.95 | 7.66 | see raw | see raw | see raw | see raw | n/a | 3.45 | 5.62 | 3.81 | Xiaomi 12, refresh pinned 120 |
+| engine | S6 | 7.74 | 8.75 | see raw | see raw | see raw | see raw | n/a | 1.19 | 1.27 | 10.11 | Xiaomi 12, refresh pinned 120 |
+| classic | S1 | 14.84 | 16.03 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 53.49 | OnePlus 9, area/1.0 |
+| classic | S2 | 17.99 | 19.85 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 54.29 | OnePlus 9, area/1.0 |
+| classic | S5 | 22.07 | 23.37 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 56.22 | OnePlus 9, area/1.0 |
+| classic | S6 | 8.19 | 8.78 | see raw | see raw | see raw | see raw | n/a | n/a | n/a | 53.63 | OnePlus 9, area/1.0 |
+| engine | S1 | 8.43 | 9.84 | see raw | see raw | see raw | see raw | n/a | 6.43 | 6.65 | 59.40 | OnePlus 9 |
+| engine | S2 | 9.29 | 11.24 | see raw | see raw | see raw | see raw | n/a | 4.79 | 4.98 | 54.51 | OnePlus 9 |
+| engine | S5 | 8.59 | 9.38 | see raw | see raw | see raw | see raw | n/a | 5.03 | 6.72 | 54.78 | OnePlus 9 |
+| engine | S6 | 9.08 | 9.52 | see raw | see raw | see raw | see raw | n/a | 1.74 | 1.84 | 60.01 | OnePlus 9 |
+| classic | S1 | 16.85 | 17.11 | 17.30 | 39.46 | 15124/16803 | 16803/16803 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| classic | S2 | 19.40 | 20.78 | 20.96 | 39.68 | 14982/15051 | 15051/15051 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| classic | S6 | 17.10 | 17.39 | 17.54 | 39.33 | 14869/15012 | 15012/15012 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S1 | 16.71 | 18.16 | 18.52 | 26.42 | 9988/18582 | 18582/18582 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S2 | 19.53 | 21.09 | 21.81 | 24.53 | 18232/18272 | 18272/18272 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S6 | 16.86 | 17.92 | 18.71 | 24.66 | 10571/18189 | 18189/18189 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+
+Column basis, matching PROTOCOL §7's v4 note and `ab_matrix.sh`'s own
+`gpu_graphics_stats`: `p50`/`p95`/`p99`/`worst`/`missed @*` are `stats.py`'s
+ordinary `total_us`-based `format_table` output (the "summed column" the
+arm-remap caveat below points at — unaffected by which CPU call the GPU
+render happens inside); `(encode+submit) p50` sums each kept frame's
+`encode_us`+`submit_us` before the percentile step (`stats.py`'s own
+`load_run_frames`/`discard_first_runs`/`_nearest_rank_percentile`,
+imported and reused — the same derivation the "Pixel 5 — classic baseline
+for the engine plan" section above already established by hand);
+`gpu_total p50`/`gpu_total p95` are `stats.py`'s `gpu_spans` percentiles
+over each kept run's `gpu_total_us` field, `n/a` when no kept frame
+carries a `gpu_q=1` reading (the ordinary case for a build with no GPU
+timer — classic/CPU tier, a non-`perf-trace` build, or an adapter without
+`TIMESTAMP_QUERY`; never a failure); `Graphics avg (MB)` averages the kept
+runs' post-run `dumpsys meminfo` Graphics PSS (`stats.py`'s own
+`mean_graphics_mb`, over `run-NN.pss_after.txt`).
+
+**Encode/submit arm-remap caveat, restated (PROTOCOL §7's v4 note;
+`docs/RENDER_ARCHITECTURE.md`'s Data Flow "Render-path A/B caveat"):**
+`encode_us` and `submit_us` are not the same instrument on
+the blit arm and the direct-to-surface arm (every engine-tier arm, and any
+classic arm not forced onto blit) — the GPU render lands in `encode_us` on
+the former and `submit_us` on the latter, with `acquire_us` following it
+on the former and preceding it on the latter. Compare arms only on `p50`/
+`p95` (`total_us`, the summed column) or `gpu_total`, or force every arm
+onto the identical blit path with `--define FRUST_NO_DIRECT_SURFACE=1`.
+
+### Pixel 5 — 2026-09-01 (p7-06 device gate, phase branch `e65759dc`)
+
+Convention: PROTOCOL §4's own defaults (12 runs x 30 s per scenario, first
+2 discarded, 10 kept), `ab_matrix.sh --tier classic,engine --aa area
+--scale 1.0 --scenarios s1,s2,s5,s6`. Raw series:
+`benchmarks/raw/pixel5/tier/{classic-area-1.0,engine}/<scenario>/` plus
+the nav logcats under `.../nav/`. The engine build carries `perf-trace`;
+the Adreno 620 offers `TIMESTAMP_QUERY`, so the `gpu_total` columns are
+real GPU-clock readings (`gpu_q=1`; per-span split: main-only on the
+s-scenarios; nav transition frames split main ~5 ms / composite ~6.4 ms).
+
+Threshold scorecard (ratified set):
+
+- nav `total_p50` ≤ 16.7 ms — **PASS**: 12.29 ms inline (engine nav pass,
+  166 frames; transition frames' `gpu_total` p50 11.41 ms).
+- s-scenario p95 ≤ 1.15x classic — **PASS** everywhere (engine p95 is
+  0.25-0.53x classic's own p95).
+- Graphics ≤ classic + 10% — **PASS** (worst delta +4.3%, S1).
+- full-screen quad `gpu_main` ≤ 3 ms — **SUPERSEDED** (Ed, 2026-09-01):
+  Phase 0's GO already recorded this row unmet by S5 (~9.7 ms GPU), and the
+  Phase-4 inline-no-cache arbitration deleted the compositor-quad path the
+  threshold was written against. Measured for the record: S5 `gpu_main`
+  p50 12.31 ms. The operative transition budget is the nav gate above.
+- cold page ≤ 8 ms — **approximated only** (no ratified recipe; Phase 0
+  also recorded it not-measured). Upper bound: the nav pass's worst full
+  transition frame, 27.2 ms.
+
+Methodology deviations: (1) the classic cell's nav pass emitted no
+`frust-perf` lines this round (engine's worked; Phase-4's classic nav
+numbers — 8 ms cached / 36 ms uncached — stand for comparison); (2) the
+device ran over wireless adb (`adb connect`, Tailscale) after the USB
+link proved flaky — orchestration-only, measurement is on-device; (3) the
+engine's `missed @8.33ms` columns read all-frames because the Pixel 5
+paces these scenarios near 90 Hz with p50 > 8.33 ms — the 120 Hz budget
+is not a target on this device.
+
+### Xiaomi 12 — 2026-09-01 (context rows; thresholds are Pixel-5-gated)
+
+LineageOS, Adreno 730, 120 Hz panel, adb-over-TLS wireless. The engine
+rows above are the **refresh-pinned replacement pass** (`settings put
+system min/peak_refresh_rate 120.0` for the cell, restored after;
+Choreographer period 8209-8220 µs verified on EVERY run in the raw
+logs). An earlier unpinned engine pass recorded S5 15.36 / S6 11.59 /
+S2 9.38 — those rows were **display-policy measurements, not engine
+measurements**: AOSP DisplayModeDirector demoted the untouched session's
+cheapest-frame cells to 60 Hz (period 16.4 ms in-log) while classic's
+heavier frames self-promoted; the engine's actual work was ≤1.3 ms CPU +
+1.2-3.5 ms GPU. Mechanism established by a same-day live matrix (Ed,
+refresh overlay): promotion via touch OR sufficient render load, sticky
+both directions; an interactively-started session holds 120 hands-off
+indefinitely; OxygenOS (OnePlus 9 below) never demotes. Follow-ups
+filed: a `Surface.setFrameRate` vote from the Android shell (the shell
+currently casts none), and harness recording/pinning of the refresh
+class for tier passes. At the honest matched 120 Hz: engine WINS S2
+(7.43 vs 11.62) and S5 (6.95 vs 12.69), sits 2.7/1.8 ms behind classic's
+ultra-cheap p50 on S1/S6 with comparable-or-tighter tails (S6 p95 8.75
+vs 9.34) at equal 120 fps throughput. Other deviations: the nav pass
+emitted no `frust-perf` lines on any Xiaomi arm (nav logcat capture
+flakiness, also seen per-arm on the Pixel and OnePlus — harness
+follow-up filed); Graphics-PSS on this ROM reads 3-11 MB (different HWC
+attribution, not comparable to the Pixel scale), recorded as-is.
+
+### OnePlus 9 — 2026-09-01 (context rows; Adreno 660, OxygenOS, 120 Hz)
+
+Same convention, wired. Engine cells held a locked 120 Hz on every
+scenario including the cheapest (period 8258-8266 µs, 3600 frames/run) —
+**no idle demotion on OxygenOS**, isolating the governing behavior to
+the Lineage device. Engine wins S1 (8.43 vs 14.84), S2 (9.29 vs 17.99)
+and S5 (8.59 vs 22.07, 2.6x); S6 is near-parity (9.08 vs 8.19 at p50,
+engine `gpu_total` 1.74 ms — cheap-frame span accounting, tails
+comparable). Notes: engine Graphics runs +11-12% over classic on S1/S6
+(59.40/60.01 vs 53.49/53.63) — marginally past the +10% guideline if
+applied off the gate device (the Pixel 5, which passes at worst +4.3%);
+plausibly the engine's depth/atlas footprint at this resolution, from
+n=10 snapshots — recorded, not gated. The classic nav pass ran (6 ms
+p50); the ENGINE nav pass skipped (no perf lines — the same capture
+flakiness class, third device).
+
+Devices not measured this pass: Pixel 5a (not at the rig).
+
+### Windows DX12 — 2026-09-01 (p7-08; Dell mini PC, Intel UHD 730, i5)
+
+Cold-start / pipeline-compile measurement (R6): material3-demo release
+build (`--features engine-tier,frust/perf-trace`), `FRUST_TRACE=1
+FRUST_TRACE_RAW=1`, tier via runtime `FRUST_RENDER_TIER`; 5 cold
+launches per arm via schtasks into the interactive session, ~12 s each,
+raw logs under `benchmarks/raw/dell_dx12/p7-08/`. wgpu's persisted
+`PipelineCache` is Vulkan-only, but the **DX12 driver-level shader cache
+persists across processes**, so run 1 after a fresh build is the true
+first-ever-launch cost and runs 2-5 are the everyday warm-cache cost:
+
+| Arm | first-ever launch TTFF | first-ever f1 | warm TTFF (4 runs) | warm f1 | warm f2/f3 |
+|---|---|---|---|---|---|
+| engine (engine-direct) | 588 ms | 188.6 ms | 196-223 ms | 1.3-1.7 ms | 2.1-7.0 ms |
+| classic (direct) | 1066 ms | 31.7 ms | 197-210 ms | 18.8-27.1 ms | 9.2-14.7 ms |
+
+Reading: the engine's ~8-pipeline warm-up list compiles inside the
+first-ever launch (188.6 ms lands in frame 1's submit; startup spans put
+first_encode_done at 400 ms and present at 588 ms), and the driver cache
+then makes every later launch's first frame 1.3-1.7 ms — the warm-up
+list is effective from the second launch onward. Classic's first-ever
+launch pays ~972 ms in adapter/device init (vello shader setup) for a
+1066 ms TTFF, 1.8x the engine's. Warm TTFF is process-bound and
+identical across arms (~200 ms); warm first frames are ~14x cheaper on
+the engine and steady frames ~4x. The eager-steal/warm-up-off arm is
+**not measured**: no toggle exists in the shipped code and the card
+forbids code changes; the warm-up cost is visible instead as run 1's
+in-frame compile above. GL/ANGLE fallback: **not measurable** —
+`WGPU_BACKEND=gl` fails with "Failed to create surface for any enabled
+backend: {}" (the gl backend is not compiled into the desktop build).
+
+### iPhone SE — 2026-09-01 (context rows; 60 Hz panel, A13)
+
+`run.sh --platform ios` (devicectl), 12x30s kept-10 per scenario, one
+signed profile build per tier (`frust build ios --profile
+[--features engine-tier] --define FRUST_TRACE_RAW=1 [--define
+FRUST_RENDER_TIER=engine]`), s1/s2/s6. **Engine == classic within noise**
+(p50 16.71/19.53/16.86 vs 16.85/19.40/17.10; p95 ratios 1.01-1.06x, all
+inside the <=1.15x criterion). s1/s6 are display-paced at the 60 Hz vsync
+on both tiers; **s2 exceeds the 60 Hz budget on BOTH tiers identically**
+— a device/scenario characteristic, not an engine regression. gpu_q=0
+throughout (no GPU-timer readings on this pass); Graphics PSS is
+Android-only, n/a. iOS environmental controls uncontrolled per the
+harness's own iOS note. The separately-observed Mode-B playground
+sluggishness on this device (engine==classic Mode-A parity proven here)
+is tracked as a Mode-B/platform-view compositing investigation, not a
+tier finding.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB

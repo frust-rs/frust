@@ -17,9 +17,13 @@
 //!   will ask a driver for.
 //! - **An over-ceiling request is a value, not an error.** A layer larger than
 //!   that ceiling is answered with [`IntermediateTexture::TooLarge`] carrying
-//!   the extent that was refused. Splitting such a layer into bands is later
-//!   work; until it exists a caller can see exactly what it asked for and skip
-//!   the layer rather than take a device error mid-frame.
+//!   the extent that was refused, so a caller sees exactly what it asked for
+//!   and skips the layer rather than taking a device error mid-frame. A caller
+//!   that instead splits the layer into
+//!   [bands](crate::schedule::pages::page_bands) never reaches this arm: every
+//!   band is sized inside the same ceiling, and all of a layer's bands share
+//!   one extent, so a banded layer draws one texture out of this pool and
+//!   reuses it band after band.
 //!
 //! Like the substrate pool this type is generic over the texture and view
 //! types, so its keying, reuse and aging are exercised against a counting fake
@@ -64,6 +68,17 @@ use super::pipelines::INTERMEDIATE_FORMAT;
 /// capability one, which is why it is pinned here instead of taken from the
 /// adapter.
 pub const MAX_INTERMEDIATE_DIMENSION: u32 = 8192;
+
+/// How many of the most recent frames' parked entries a surface resize keeps
+/// (see [`IntermediateTargets::drop_parked`]).
+///
+/// Two: the frame that just ran and the one before it. One is not enough — a
+/// resize arrives *between* frames, so the page the last frame released is
+/// already a frame behind by the time the resize is handled, and a window
+/// being dragged would evict it on every step. Three or more starts holding
+/// pages across frames that stopped asking for them, which is what the pool's
+/// own aging is for.
+pub const RESIZE_KEEP_ALIVE_FRAMES: u64 = 2;
 
 /// The usage every intermediate is created with: drawn into by a strip pass,
 /// then sampled by the pass that composites it.
@@ -226,6 +241,10 @@ pub enum IntermediateTexture<T = wgpu::Texture, V = wgpu::TextureView> {
     Texture(PooledTexture<T, V>),
     /// The request exceeded [`IntermediateTargets::max_texture_size`] on at
     /// least one axis and nothing was allocated.
+    ///
+    /// A layer too wide for one page has an answer that renders it —
+    /// [`page_bands`](crate::schedule::pages::page_bands) — so reaching this
+    /// arm means the extent was asked for whole rather than by band.
     TooLarge {
         /// Requested width in texels.
         width: u32,
@@ -349,19 +368,41 @@ impl<T, V> IntermediateTargets<T, V> {
         self.pool.age(self.frame);
     }
 
-    /// Drops every parked entry, keeping the pool itself and its counters.
+    /// Drops the parked entries the last [`RESIZE_KEEP_ALIVE_FRAMES`] frames
+    /// did not use, keeping the pool itself and its counters.
     ///
-    /// This is what a surface resize needs: every parked entry is keyed on an
-    /// extent nothing will ask for again, so holding them to the end of the
-    /// keep-alive window is pure waste. The clock is advanced past that window
-    /// rather than the entries being reached into directly, which is the same
-    /// eviction the pool would perform on its own a second later. Entries still
-    /// checked out are untouched — the pool does not hold those.
+    /// This is what a surface resize calls. A page keyed on the *old* surface
+    /// extent is dead weight the moment the surface changes size, and holding
+    /// it for the pool's full keep-alive window is waste — so a resize
+    /// collapses that window to the frames immediately behind it instead of
+    /// waiting a second for the ordinary aging to reach them.
+    ///
+    /// It collapses the window rather than emptying the pool, and the
+    /// difference is the whole point. Not every page is keyed on the surface:
+    /// a fading card, a dismissing sheet, a menu at its own size all ask for
+    /// the same page extent whatever the window does, and a window edge being
+    /// dragged produces a resize *per frame*. Dropping everything on each of
+    /// them would evict that page between every pair of frames that wants it
+    /// and turn the pool back into a plain allocator for the whole drag —
+    /// exactly the failure the substrate pool's aging slack exists to prevent
+    /// (see `frust_gpu::pool`'s module header). Keeping what the frames right
+    /// behind this resize actually used is bounded by what one frame can hold
+    /// live at once and is precisely the set the next frame asks for again.
+    ///
+    /// Implemented by aging against a clock far enough ahead to expire
+    /// everything older, without moving this pool's own clock: the frame
+    /// counter still advances once per [`Self::end_frame`], so a resize does
+    /// not age unrelated entries by a second every time a window edge moves.
+    /// Entries still checked out are untouched — the pool does not hold those.
     pub fn drop_parked(&mut self) {
-        self.frame = self
+        // `TexturePool::age(f)` drops an entry when `f - last_used` exceeds the
+        // keep-alive window, so a horizon this far ahead expires exactly the
+        // entries last used before the retained frames.
+        let horizon = self
             .frame
-            .saturating_add(self.pool.max_unused_frames().saturating_add(1));
-        self.pool.age(self.frame);
+            .saturating_add(self.pool.max_unused_frames())
+            .saturating_sub(RESIZE_KEEP_ALIVE_FRAMES.saturating_sub(1));
+        self.pool.age(horizon);
     }
 }
 
@@ -574,10 +615,13 @@ mod tests {
     }
 
     #[test]
-    fn dropping_parked_entries_clears_the_pool_at_once() {
+    fn a_resize_drops_the_parked_entries_the_recent_frames_did_not_use() {
         let allocator = FakeAllocator::default();
         let mut targets = targets();
 
+        // Three pages parked on this frame, then a few frames of nothing —
+        // the shape of a surface whose layers went away well before the drag
+        // started.
         for size in [256_u32, 512, 768] {
             match targets.acquire(&allocator, size, size, "layer") {
                 IntermediateTexture::Texture(texture) => targets.release(texture),
@@ -586,12 +630,18 @@ mod tests {
         }
         assert_eq!(targets.stats().free, 3);
         assert_eq!(targets.stats().keys, 3);
+        for _ in 0..RESIZE_KEEP_ALIVE_FRAMES {
+            targets.end_frame();
+        }
 
         targets.drop_parked();
 
         assert_eq!(targets.stats().free, 0);
         assert_eq!(targets.stats().keys, 0);
         assert_eq!(targets.stats().evicted, 3);
+        // Well inside the pool's own keep-alive window, so ordinary aging
+        // would not have reached them yet — the resize is what dropped them.
+        assert!(targets.frame() < targets.pool.max_unused_frames());
         // The pool itself survives: a fresh acquire still works, and the
         // lifetime counters are not reset by the eviction.
         assert_eq!(targets.stats().created, 3);
@@ -602,6 +652,55 @@ mod tests {
                 .is_some()
         );
         assert_eq!(targets.stats().created, 4);
+    }
+
+    #[test]
+    fn a_resize_storm_reuses_the_page_a_fixed_size_layer_keeps_asking_for() {
+        let allocator = FakeAllocator::default();
+        let mut targets = targets();
+
+        // One layer at one size under a surface being resized every frame:
+        // resize, render, end frame, over and over. Its page never changes
+        // extent, so the pool must hand back the same texture every time
+        // rather than allocating one per resize (E13).
+        for _ in 0..200 {
+            targets.drop_parked();
+            match targets.acquire(&allocator, 640, 480, "layer") {
+                IntermediateTexture::Texture(texture) => targets.release(texture),
+                IntermediateTexture::TooLarge { .. } => unreachable!("inside the ceiling"),
+            }
+            targets.end_frame();
+        }
+
+        assert_eq!(
+            targets.stats().created,
+            1,
+            "a resize per frame must not turn the pool back into a plain allocator"
+        );
+        assert_eq!(targets.stats().reused, 199);
+        assert_eq!(targets.stats().evicted, 0);
+        assert_eq!(allocator.allocations.get(), 1);
+    }
+
+    #[test]
+    fn a_resize_does_not_age_the_pool_by_a_second_every_time_a_window_edge_moves() {
+        let allocator = FakeAllocator::default();
+        let mut targets = targets();
+
+        // A page parked on this frame, then a drag's worth of resizes with no
+        // frames between them: the clock is the frame counter's to advance, so
+        // none of these may age anything out on their own.
+        match targets.acquire(&allocator, 256, 256, "layer") {
+            IntermediateTexture::Texture(texture) => targets.release(texture),
+            IntermediateTexture::TooLarge { .. } => unreachable!("inside the ceiling"),
+        }
+        for _ in 0..100 {
+            targets.drop_parked();
+        }
+
+        assert_eq!(targets.frame(), 0, "a resize is not a frame");
+        assert_eq!(targets.stats().free, 1);
+        assert_eq!(targets.stats().evicted, 0);
     }
 
     #[test]

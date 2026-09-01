@@ -1,0 +1,8 @@
+=== RUN Tue 09/01/2026 21:58:32.37 ===
+[frust INFO] frust-shell-desktop: logger initialized
+[frust INFO] frust-shell-desktop window size=800x600 logical maximized=false source=default
+frust: frust: failed to create render surface: frust-render: failed to create surface: Failed to create surface for any enabled backend: {}
+=== RUN Tue 09/01/2026 21:58:50.26 ===
+[frust INFO] frust-shell-desktop: logger initialized
+[frust INFO] frust-shell-desktop window size=800x600 logical maximized=false source=default
+frust: frust: failed to create render surface: frust-render: failed to create surface: Failed to create surface for any enabled backend: {}

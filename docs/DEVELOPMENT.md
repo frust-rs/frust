@@ -377,10 +377,10 @@ The iOS compile gate above is also the only check of the `accesskit_ios` adapter
 uncompiled on any host in this repo's history. Screen-reader verification
 (TalkBack/VoiceOver) and the `cpu-tier` tier's visual behavior on real hardware are
 unverified — both need a device/Simulator or physical GPU this headless host cannot provide.
-**Running, not just type-checking, `frust-iap`'s iOS tests** needs a booted Simulator as the
-test runner — currently the only way this repo executes a target-gated mobile test at all:
+**Running, not just type-checking, an iOS test** needs a booted Simulator as the runner:
 `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn booted" cargo test --target
-aarch64-apple-ios-sim -p frust-iap --lib`.
+aarch64-apple-ios-sim -p <crate> [--lib | --test <name>]` — `frust-iap` (`--lib`) and the
+engine's Simulator gate (`-p frust-testing --test ios_sim`; *Known Issues* below) use it.
 
 **Neither compile gate above touches Kotlin or Swift.** `cargo check --target
 aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph —
@@ -572,15 +572,15 @@ An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
 limitation, not a Frust bug). Use a physical device, or boot with `-gpu swiftshader`
 (software Vulkan; slower but correct).
 
-### iOS Simulator cannot render (vello 0.9 / wgpu 29)
+### iOS Simulator cannot render — classic tier only (vello 0.9 / wgpu 29)
 
 The iOS Simulator's GPU only exposes the Apple2 Metal feature family, lacking
-`wgpu::DownlevelFlags::INDIRECT_EXECUTION`, which vello 0.9's renderer unconditionally
-requires — a wgpu-hal-29/vello-0.9 limitation, not fixable under the version pin.
-`frust-render` detects it and fails fast with a clear diagnostic instead of a per-frame
-panic; `frust run` still builds/installs/launches, but the window stays black.
-**Physical iOS devices are unaffected** (verified on an iPhone 13 mini and iPhone SE)
-— use one for a pixel-accurate check until a future wgpu/vello upgrade closes the gap.
+`wgpu::DownlevelFlags::INDIRECT_EXECUTION`, which vello 0.9 unconditionally requires — a
+wgpu-hal-29/vello-0.9 limitation, not fixable under the pin. `frust-render` fails fast instead
+of a per-frame panic; `frust run` still builds/installs/launches with a black window.
+**Classic-tier only** — `engine-tier` needs neither flag (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
+deliberately empty) and renders correctly here (gate `engine-p6-ios-simulator-renders`, *Test*
+above). **Physical devices are unaffected on either tier** (iPhone 13 mini, iPhone SE).
 
 ### Android release build may not pick up `--define`
 

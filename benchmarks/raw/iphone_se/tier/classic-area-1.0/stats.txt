@@ -1,0 +1,20 @@
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== frust s1 ==
+frames: 18735 total, 18735 active, 0 skipped
+p50=16.85ms  p95=17.11ms  p99=17.30ms  worst=39.46ms
+missed_60hz=15124 (budget 16.67ms)  missed_120hz=16803 (budget 8.33ms)
+=== s2 ===
+--
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== frust s2 ==
+frames: 18803 total, 18803 active, 0 skipped
+p50=19.40ms  p95=20.78ms  p99=20.96ms  worst=39.68ms
+missed_60hz=14982 (budget 16.67ms)  missed_120hz=15051 (budget 8.33ms)
+=== s6 ===
+--
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== frust s6 ==
+frames: 19334 total, 19334 active, 0 skipped
+p50=17.10ms  p95=17.39ms  p99=17.54ms  worst=39.33ms
+missed_60hz=14869 (budget 16.67ms)  missed_120hz=15012 (budget 8.33ms)
+=== iphone bench series complete ===

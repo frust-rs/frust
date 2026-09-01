@@ -53,11 +53,29 @@ follows it, so account for that remap before comparing timings across arms
 | `FRUST_NO_DIRECT_SURFACE` / `FRUST_NO_SHADER_EFFECTS` / `FRUST_NO_SNAPSHOT_LAYERS` | Render-path A/B kill switches, one per GPU pre-pass ([RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s Data Flow): `FRUST_NO_DIRECT_SURFACE` pins a direct-capable surface onto the blit fallback arm; `FRUST_NO_SHADER_EFFECTS` disables the shader-quad pre-pass, so `Command::ShaderQuad` falls back to its placeholder fill; `FRUST_NO_SNAPSHOT_LAYERS` disables the snapshot-layer cache, so every `PushSnapshot` bracket lowers through `convert.rs`'s inline emulation. | off (path auto-probed) / off (pre-pass active) / off (cache active) |
 | `FRUST_AA_MODE` / `FRUST_RENDER_SCALE` | Render-cost measurement instruments — not policy: both exist to A/B vello's fine-stage cost on device ([RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s Data Flow), and nothing selects either automatically. `FRUST_AA_MODE` picks vello's anti-aliasing method (`area`/`msaa8`/`msaa16`, case-insensitive; an unrecognised value warns once and falls back to `area`), requested at every render-params site including cached snapshot pages, with the vello renderer built for exactly that one mode's pipelines; msaa8/msaa16 render corrupted on Adreno 620, unusable there (see [LIMITATIONS.md](LIMITATIONS.md)). `FRUST_RENDER_SCALE` renders the whole frame into an intermediate that fraction of the surface (`0.25..=1.0`; out of range clamps, unparsable/non-finite falls back to `1.0`, each with one warn) and lets the blit pass upscale it — while it is below `1.0` the surface is pinned onto the blit arm and the snapshot-layer cache is refused (see [LIMITATIONS.md](LIMITATIONS.md)). Each logs its effective value once per process in any build, no `perf-trace` needed (`frust-render aa-mode=<mode>`, `frust-render render-scale=<s> blit-target=<w>x<h>`), and a non-default value additionally emits one `log::warn!` naming the knob in effect, so a capture read hours later does not have to infer it. **Both are vello-classic instruments the engine tier ignores** (`context::parse_aa_mode` feeds vello's `AaSupport`; the scale knob forces vello's blit arm) — an engine-tier build logs a one-time warning if either is set, and renders at full surface resolution regardless (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s Data Flow). | `area` (byte-identical to an untouched build) / `1.0` (full surface resolution) |
 | `FRUST_RENDER_TIER=engine` | Selects the frust-owned `frust-engine` render tier (`engine-tier`-featured builds only) — override-only, exactly like `cpu`/`gpu`: no probe ever selects it (`tier.rs`'s `select_render_tier`; `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is deliberately empty). Compile-time via `frust build|run --define FRUST_RENDER_TIER=engine` (the only path into an Android app process) or a runtime env var for a desktop `cargo run`/`frust run --render-tier engine`; runtime wins when both are set (`tier.rs`'s `render_tier_override_from_sources`, via `context::env_str`'s shared precedence). A build **without** the `engine-tier` feature refuses the override with a diagnosis naming the missing feature, rather than silently running vello under an engine label. | override-only (unset ⇒ GPU-probed as usual) |
+| GPU timestamps (`gpu_q`, `gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us` — `FRUST_TRACE_RAW`'s v4 fields) | Real per-pass GPU time via pass-boundary `timestamp_writes` (`wgpu::Features::TIMESTAMP_QUERY`), engine-tier only (`frust_gpu::diag::TimestampRing`, spans named by `frust_engine::diag::EngineSpan`). `gpu_q=1` only on a `perf-trace` build whose adapter actually offers the feature; every other case — no `perf-trace`, no adapter feature, or a frame ahead of the ring's first completed readback — reports the ordinary `gpu_q=0`, not a failure; a refused frame abandons its ring slot rather than mapping it. Full raw-line field format: `benchmarks/PROTOCOL.md`. | `gpu_q=0` (no reading) |
 
-**Shipped in `frust-gpu`, absent in `frust-render`.** `FRUST_ENGINE_DOWNLEVEL=1` now exists as
-`frust-gpu`'s WebGL2 rehearsal knob (clamped `TierCaps` + clamped device request — see the GPU
-Substrate section below); the vello-classic tier documented in this table ignores it, and the
-browser/wasm measurement arm (`benchmarks/harness/webgl2_arm.md`) remains unimplemented.
+**`FRUST_ENGINE_*` knobs (`frust-gpu`/`frust-engine`-owned, distinct from the render-path table
+above — none touch the classic vello tier):**
+
+| Variable | Purpose | Status |
+|---|---|---|
+| `FRUST_ENGINE_NO_DEPTH` | Disables the engine's depth attachment/test (`config::depth_disabled`); the two draw passes collapse into one blended painter-order pass. | Wired |
+| `FRUST_ENGINE_NO_ATLAS` | Routes every glyph/image atlas resolution to a logged skip instead. | Wired |
+| `FRUST_ENGINE_ATLAS_SIZE=<W>x<H>` | Overrides the capability-chosen per-layer atlas extent (e.g. `2048x2048`); runtime wins over compile-time. | Wired |
+| `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below); the classic vello tier ignores it, and no browser/wasm measurement exists — the arm was cancelled, not merely unimplemented (`engine-webgl2-unhosted` in LIMITATIONS.md). | Wired |
+| `FRUST_ENGINE_NO_LAYERS` / `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the layer-cache/resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
+
+Each follows `FRUST_TRACE`'s compile-time-`option_env!`-or-runtime-`std::env::var` shape, runtime
+winning.
+
+**Adaptive-refresh devices can demote an untouched session's refresh class mid-A/B.** An
+Android `DisplayModeDirector` can drop an idle/cheap-frame cell to 60 Hz while a heavier arm
+self-promotes to its panel's peak rate, so an unpinned tier A/B measures the display-policy
+decision, not the render tier — pin `min`/`peak_refresh_rate` for the cell under measurement
+(`adb shell settings put system min_refresh_rate <hz>` / `peak_refresh_rate <hz>`, restored after)
+and verify the Choreographer period in the raw logs; see `benchmarks/RESULTS.md`'s Xiaomi 12
+section for the measured before/after.
 
 ## GPU Substrate (`frust-gpu`, `frust-engine`)
 
@@ -148,6 +166,15 @@ bounds so the two arms compare pixel-for-pixel. `cpu`-class baselines are commit
 inspection; the pinned T400 rig's engine class is recording-only until a reviewed baseline is
 promoted. Each case's measured engine-vs-`vello_cpu` tolerance is documented in
 `engine_goldens.rs`.
+
+**iOS Simulator engine gate** (gate: `engine-p6-ios-simulator-renders`;
+`crates/frust-testing/tests/ios_sim.rs`, `#![cfg(target_os = "ios")]`): the one automated proof
+that the engine tier renders correct, non-black pixels on exactly the adapter classic vello is
+black on by construction (the Simulator's Apple2 Metal feature set lacks `INDIRECT_EXECUTION`).
+Drives `EngineRenderer` directly against the Simulator's own real adapter and compares seven
+unit-corpus cases against the embedded `testing/goldens/cpu/` baseline (`include_bytes!`, not a
+filesystem read — the Simulator process has no path back to this checkout); no new golden class.
+Run recipe: [DEVELOPMENT.md](DEVELOPMENT.md)'s Manual/gated tests.
 
 `docs/TESTING.md` is the canonical golden-image/oracle/class runbook; the commands above are the
 render-stack-specific reproduction recipes for the pins and knobs this spoke owns.

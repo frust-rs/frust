@@ -234,12 +234,73 @@ pub struct FramePasses {
     /// [`SurfaceRenderer::submit`]: https://docs.rs/frust-render
     pub submit: Duration,
     pub skipped: bool,
+    /// This frame's real GPU time per pass, when the renderer measured it —
+    /// see [`GpuPasses`]. `None` is the ordinary case and is what the raw line
+    /// reports as `gpu_q=0`.
+    ///
+    /// Deliberately outside [`Self::total`]: GPU passes run *concurrently*
+    /// with the CPU spans above, so adding them would double-count the frame.
+    /// It is also not carried by [`RenderSpans`] — a shell attaches it with
+    /// [`Self::with_gpu`] after folding its two measured halves together,
+    /// which keeps the split's own reassembly about the spans it measured.
+    pub gpu: Option<GpuPasses>,
+}
+
+/// One frame's real GPU time, split by the spans the frust-owned render engine
+/// names — the counterpart of the CPU spans in [`FramePasses`], measured on the
+/// GPU's own clock rather than inferred from CPU wall time around a submit.
+///
+/// Only the engine tier produces one, and only in a build whose device asked
+/// for GPU timestamps; every other frame carries `None` and reports `gpu_q=0`.
+/// A span may legitimately read zero — a frame with no off-screen layer does no
+/// composite work — so a zero is a measurement, not a gap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuPasses {
+    /// Work recorded ahead of the frame's own passes (the glyph-atlas replay).
+    pub prepass: Duration,
+    /// The frame's own surface passes: clear, opaque strips, alpha strips, and
+    /// the hole punch.
+    pub main: Duration,
+    /// Off-screen layer pages and filter passes.
+    pub composite: Duration,
+    /// The present-side conversion or blit into the swapchain.
+    pub blit: Duration,
+}
+
+impl GpuPasses {
+    /// The sum of the four spans — the frame's *attributed* GPU pass time.
+    ///
+    /// Queue and driver gaps between passes belong to no pass and are not
+    /// folded in, so this is a lower bound on the frame's whole GPU cost
+    /// rather than an estimate of it.
+    pub fn total(&self) -> Duration {
+        self.prepass
+            .saturating_add(self.main)
+            .saturating_add(self.composite)
+            .saturating_add(self.blit)
+    }
 }
 
 impl FramePasses {
     /// The sum of all six pass durations — the frame's total wall time.
+    ///
+    /// The GPU spans in [`Self::gpu`] are deliberately excluded; see that
+    /// field.
     pub fn total(&self) -> Duration {
         self.rebuild + self.layout + self.paint + self.encode + self.acquire + self.submit
+    }
+
+    /// Attaches this frame's measured GPU pass times.
+    ///
+    /// A builder rather than a field on [`RenderSpans`]: every shell already
+    /// builds its `RenderSpans` by struct literal, and the GPU reading is
+    /// optional per frame and per tier, so `FramePasses::from_split(ui,
+    /// render).with_gpu(gpu)` adds it without touching the spans a shell
+    /// measured itself.
+    #[must_use]
+    pub fn with_gpu(mut self, gpu: GpuPasses) -> Self {
+        self.gpu = Some(gpu);
+        self
     }
 
     /// Recombine a render-thread-split frame's two half-measurements into the
@@ -265,6 +326,10 @@ impl FramePasses {
             acquire: render.acquire,
             submit: render.submit,
             skipped: ui.skipped,
+            // Not a measured span either half carries: the render thread reads
+            // it off the renderer after the fact and attaches it with
+            // [`FramePasses::with_gpu`].
+            gpu: None,
         }
     }
 }
@@ -407,8 +472,11 @@ impl FrameStats {
             // Disabled: never reserve — nothing will ever be formatted into
             // it, mirroring the ring buffer's own no-reserve-when-disabled
             // reasoning below.
+            // Sized for the longest line the formatter writes — the v4 shape
+            // with every `gpu_*_us` field present — so even a GPU-timed frame
+            // never grows the allocation after the first one.
             raw_buf: if raw {
-                String::with_capacity(160)
+                String::with_capacity(288)
             } else {
                 String::new()
             },
@@ -619,8 +687,18 @@ const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 /// `String` per call (see `docs/CODE_STANDARDS.md`'s Instrumentation
 /// conventions — formatting only, no allocation growth on the hot path).
 /// Field order: `n`, `total_us`, `rebuild_us`, `layout_us`, `paint_us`,
-/// `encode_us`, `acquire_us`, `submit_us`, `skipped` (`0`/`1`) — microsecond
-/// resolution so a sub-millisecond pass still shows nonzero.
+/// `encode_us`, `acquire_us`, `submit_us`, `skipped` (`0`/`1`), `gpu_q`
+/// (`0`/`1`), then — only when `gpu_q=1` — `gpu_total_us`, `gpu_prepass_us`,
+/// `gpu_main_us`, `gpu_composite_us`, `gpu_blit_us`. Microsecond resolution so
+/// a sub-millisecond pass still shows nonzero.
+///
+/// **Format v4 (2026-09-01):** real GPU time per pass ([`GpuPasses`]) is
+/// appended after `skipped`, additively — every v3 field keeps its name,
+/// meaning and position, so a v3 parser reads a v4 line unchanged and a v4
+/// parser reads a v3 line as `gpu_q=0`. `gpu_q` states whether this frame
+/// carries a GPU reading at all; the five `gpu_*_us` fields are **omitted
+/// entirely** when it is `0`, rather than written as zeros, so a series with no
+/// GPU timing never produces a column of zeros that reads like a measurement.
 ///
 /// **Format v3 (2026-07-22):** the single `present_us` field of v2
 /// was split into separate `acquire_us` + `submit_us` fields (no combined field
@@ -637,7 +715,7 @@ fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
     let _ = write!(
         buf,
         "{RAW_FRAME_PREFIX} n={n} total_us={} rebuild_us={} layout_us={} paint_us={} \
-         encode_us={} acquire_us={} submit_us={} skipped={}",
+         encode_us={} acquire_us={} submit_us={} skipped={} gpu_q={}",
         passes.total().as_micros(),
         passes.rebuild.as_micros(),
         passes.layout.as_micros(),
@@ -646,7 +724,20 @@ fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
         passes.acquire.as_micros(),
         passes.submit.as_micros(),
         u8::from(passes.skipped),
+        u8::from(passes.gpu.is_some()),
     );
+    if let Some(gpu) = passes.gpu {
+        let _ = write!(
+            buf,
+            " gpu_total_us={} gpu_prepass_us={} gpu_main_us={} gpu_composite_us={} \
+             gpu_blit_us={}",
+            gpu.total().as_micros(),
+            gpu.prepass.as_micros(),
+            gpu.main.as_micros(),
+            gpu.composite.as_micros(),
+            gpu.blit.as_micros(),
+        );
+    }
 }
 
 /// Which edge of a benchmark scenario window [`mark_scenario_start`]/
@@ -1031,6 +1122,7 @@ mod tests {
             acquire: Duration::ZERO,
             submit: Duration::ZERO,
             skipped: false,
+            gpu: None,
         }
     }
 
@@ -1111,6 +1203,7 @@ mod tests {
             acquire: Duration::from_millis(9),
             submit: Duration::from_millis(3),
             skipped: false,
+            gpu: None,
         });
         let s = stats.summary();
         assert_eq!(
@@ -1159,6 +1252,7 @@ mod tests {
             acquire: Duration::from_millis(9),
             submit: Duration::from_millis(3),
             skipped: false,
+            gpu: None,
         };
         assert_eq!(split, whole, "split reassembly must equal the whole frame");
         assert_eq!(split.total(), Duration::from_millis(22));
@@ -1190,6 +1284,7 @@ mod tests {
             acquire: Duration::from_millis(9),
             submit: Duration::from_millis(3),
             skipped: false,
+            gpu: None,
         };
         let mut split_line = String::new();
         let mut whole_line = String::new();
@@ -1249,6 +1344,46 @@ mod tests {
         assert!(!stats.should_emit(), "emit_log resets the accumulator");
     }
 
+    #[test]
+    fn a_reassembled_split_frame_carries_no_gpu_reading_until_one_is_attached() {
+        let split = FramePasses::from_split(
+            UiSpans {
+                rebuild: Duration::from_millis(2),
+                ..Default::default()
+            },
+            RenderSpans {
+                encode: Duration::from_millis(6),
+                acquire: Duration::from_millis(9),
+                submit: Duration::from_millis(3),
+            },
+        );
+        assert_eq!(split.gpu, None, "neither half measures GPU time");
+
+        let gpu = GpuPasses {
+            prepass: Duration::from_micros(10),
+            main: Duration::from_micros(20),
+            composite: Duration::from_micros(30),
+            blit: Duration::from_micros(40),
+        };
+        let timed = split.with_gpu(gpu);
+        assert_eq!(timed.gpu, Some(gpu));
+        assert_eq!(timed.total(), split.total(), "GPU time is not frame time");
+        assert_eq!(gpu.total(), Duration::from_micros(100));
+        // Every other field is untouched by the attachment.
+        assert_eq!(FramePasses { gpu: None, ..timed }, split);
+    }
+
+    #[test]
+    fn an_all_zero_gpu_reading_is_still_a_reading() {
+        // A frame that drew nothing off-screen genuinely spent no composite
+        // time; the distinction between "measured zero" and "not measured" is
+        // the `Option`, never a zero value.
+        let timed = FramePasses::default().with_gpu(GpuPasses::default());
+        assert_eq!(timed.gpu, Some(GpuPasses::default()));
+        assert_eq!(timed.gpu.map(|gpu| gpu.total()), Some(Duration::ZERO));
+        assert_eq!(FramePasses::default().gpu, None);
+    }
+
     // ---------------------------------------------------------------
     // Raw per-frame export + scenario markers
     // ---------------------------------------------------------------
@@ -1270,6 +1405,10 @@ mod tests {
         acquire_us: u128,
         submit_us: u128,
         skipped: bool,
+        /// v4's `gpu_q` marker, plus every `gpu_*_us` field it gates, in the
+        /// order the line wrote them — absent as a group whenever `gpu_q=0`.
+        gpu_q: bool,
+        gpu: Vec<(String, u128)>,
     }
 
     #[cfg(feature = "perf-trace")]
@@ -1284,6 +1423,8 @@ mod tests {
         let mut acquire_us = None;
         let mut submit_us = None;
         let mut skipped = None;
+        let mut gpu_q = None;
+        let mut gpu = Vec::new();
         for field in rest.split_whitespace() {
             let (key, value) = field.split_once('=')?;
             match key {
@@ -1296,6 +1437,10 @@ mod tests {
                 "acquire_us" => acquire_us = value.parse().ok(),
                 "submit_us" => submit_us = value.parse().ok(),
                 "skipped" => skipped = value.parse::<u8>().ok().map(|v| v != 0),
+                "gpu_q" => gpu_q = value.parse::<u8>().ok().map(|v| v != 0),
+                other if other.starts_with("gpu_") => {
+                    gpu.push((other.to_string(), value.parse().ok()?));
+                }
                 _ => {}
             }
         }
@@ -1309,6 +1454,8 @@ mod tests {
             acquire_us: acquire_us?,
             submit_us: submit_us?,
             skipped: skipped?,
+            gpu_q: gpu_q?,
+            gpu,
         })
     }
 
@@ -1324,6 +1471,7 @@ mod tests {
             acquire: Duration::from_micros(80),
             submit: Duration::from_micros(40),
             skipped: false,
+            gpu: None,
         };
         format_raw_frame_line(&mut buf, 42, &p);
         assert!(buf.starts_with(RAW_FRAME_PREFIX));
@@ -1338,6 +1486,103 @@ mod tests {
         assert_eq!(parsed.acquire_us, 80);
         assert_eq!(parsed.submit_us, 40);
         assert!(!parsed.skipped);
+        assert!(!parsed.gpu_q, "a frame with no GPU reading reports gpu_q=0");
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_frame_without_a_gpu_reading_writes_gpu_q_zero_and_no_gpu_columns() {
+        // The no-TIMESTAMP_QUERY shape: the marker says there is no reading,
+        // and the five `gpu_*_us` fields are absent rather than written as
+        // zeros — a column of zeros in a raw series reads like a measured
+        // result, which is exactly what this must not produce.
+        let mut buf = String::new();
+        format_raw_frame_line(&mut buf, 3, &passes(10, 2, 2, 2));
+
+        assert!(buf.contains(" gpu_q=0"));
+        assert!(
+            !buf.contains("gpu_total_us"),
+            "no gpu_* column may be emitted without a reading: {buf}"
+        );
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert!(!parsed.gpu_q);
+        assert!(parsed.gpu.is_empty());
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_gpu_timed_frame_appends_every_span_in_the_declared_order() {
+        let gpu = GpuPasses {
+            prepass: Duration::from_micros(120),
+            main: Duration::from_micros(2400),
+            composite: Duration::from_micros(650),
+            blit: Duration::from_micros(75),
+        };
+        let mut buf = String::new();
+        format_raw_frame_line(&mut buf, 9, &passes(4, 1, 1, 2).with_gpu(gpu));
+
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert!(parsed.gpu_q);
+        assert_eq!(
+            parsed.gpu,
+            vec![
+                ("gpu_total_us".to_string(), 3245),
+                ("gpu_prepass_us".to_string(), 120),
+                ("gpu_main_us".to_string(), 2400),
+                ("gpu_composite_us".to_string(), 650),
+                ("gpu_blit_us".to_string(), 75),
+            ],
+            "field order is wire contract: {buf}"
+        );
+        assert_eq!(gpu.total(), Duration::from_micros(3245));
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn the_v3_prefix_of_a_v4_line_is_byte_identical() {
+        // v4 is additive: appending the GPU fields must not perturb one byte
+        // of what a v3 parser reads, so every series already captured stays
+        // comparable against one captured after this change.
+        let base = passes(4, 1, 1, 2);
+        let mut v3_line = String::new();
+        let mut v4_line = String::new();
+        format_raw_frame_line(&mut v3_line, 11, &base);
+        format_raw_frame_line(
+            &mut v4_line,
+            11,
+            &base.with_gpu(GpuPasses {
+                main: Duration::from_micros(1),
+                ..GpuPasses::default()
+            }),
+        );
+
+        let (v3_head, v3_marker) = v3_line
+            .rsplit_once(" gpu_q=")
+            .expect("every v4 line carries the marker");
+        assert_eq!(v3_marker, "0");
+        assert!(
+            v4_line.starts_with(v3_head),
+            "the v3 field set must be byte-identical:\n{v3_line}\n{v4_line}"
+        );
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_gpu_timed_frames_total_excludes_the_gpu_spans() {
+        // GPU passes run concurrently with the CPU spans, so folding them into
+        // `total_us` would double-count the frame and break every percentile
+        // computed off it.
+        let base = passes(4, 1, 1, 2);
+        let timed = base.with_gpu(GpuPasses {
+            main: Duration::from_millis(50),
+            ..GpuPasses::default()
+        });
+        assert_eq!(timed.total(), base.total());
+
+        let mut buf = String::new();
+        format_raw_frame_line(&mut buf, 1, &timed);
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert_eq!(parsed.total_us, base.total().as_micros());
     }
 
     #[cfg(feature = "perf-trace")]

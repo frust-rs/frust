@@ -18,6 +18,7 @@
 pub mod arena;
 pub mod caps;
 pub mod context;
+pub mod diag;
 pub mod encoder;
 pub mod headless;
 pub mod lifecycle;
@@ -32,6 +33,7 @@ pub mod texture;
 pub use arena::{BufferSlice, BufferUploader, HostBuffer};
 pub use caps::{DownlevelProfile, TierCaps};
 pub use context::{Context, ContextOptions, DeviceHandle};
+pub use diag::{GpuFrameSpans, TimestampRing};
 pub use encoder::CommandBuffer;
 pub use headless::HeadlessTarget;
 pub use lifecycle::{

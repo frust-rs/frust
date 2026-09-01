@@ -29,31 +29,39 @@
 //! frames contain no layer at all and schedule to a single round. Opacity
 //! layers exist but are rare and shallow.
 //!
-//! The scheduler serves every layer tree two pooled pages are enough for:
+//! The scheduler serves every layer tree [`MAX_LIVE_PAGES`] pooled pages are
+//! enough for:
 //!
 //! - isolated layers nested at most [`MAX_CHAIN_DEPTH`] deep;
 //! - isolated layers *beside* each other under one parent, a fan of any width —
 //!   two widgets fading at once is the commonest sibling shape a frust screen
 //!   records, and a staggered list entrance fading five rows at once is served
 //!   on the same two pages;
-//! - any mixture of the two that stays inside [`MAX_LIVE_PAGES`] live pages;
+//! - a chain hanging off an isolated ancestor's later child, which is what a
+//!   navigation transition records for the whole of a scrub: a full-screen page
+//!   layer holding a chip that carries a translucent chip of its own. This is
+//!   the shape the [spill page](PageParity::Spill) exists for — see *The spill
+//!   page* below;
+//! - any mixture of the above that stays inside [`MAX_LIVE_PAGES`] live pages;
 //! - a Gaussian-blur or shadow-only drop-shadow [filter](crate::filters) layer
 //!   recorded directly under the frame's own surface, which takes *both*
-//!   groups for the length of its pass sequence (see *Filter rounds* below).
+//!   ping-pong groups for the length of its pass sequence (see *Filter rounds*
+//!   below).
 //!
 //! A fan of any width fits because a parent does not have to composite *all* of
 //! its isolated children in one pass. When both groups are taken, the parent's
 //! round is [cut](cut_at): the ops accumulated so far are emitted as a round of
 //! their own, the pages that batch composites go back to the pool, and the next
-//! sibling is rendered into one of them. What the two-page bound really limits
-//! is a single layer needing two groups *of its own* — a chain — beside a page
-//! an isolated ancestor is already holding.
+//! sibling is rendered into one of them. What a cut cannot pay for is a layer
+//! whose own round samples a live page while an isolated ancestor is holding
+//! another — three pages really are live at that point — and that is where the
+//! spill page comes in.
 //!
-//! Everything else — a layer that finds no group even after a cut, a deeper
-//! chain, a filter this engine does not render, a filter layer nested inside
-//! another recorded layer, a non-default blend mode, a layer mask or layer clip
-//! path — is refused with [`EngineError::SchedulerEscalation`] carrying a reason
-//! that names what was found.
+//! Everything else — a layer that finds no page even after a cut and the spill,
+//! a deeper chain, a filter this engine does not render, a filter layer nested
+//! inside another recorded layer, a non-default blend mode, a layer mask or
+//! layer clip path — is refused with [`EngineError::SchedulerEscalation`]
+//! carrying a reason that names what was found.
 //!
 //! ## A refusal is a skipped frame, not a fallback
 //!
@@ -98,9 +106,47 @@
 //! descent would hold one group for the whole traversal and defeat the
 //! ping-pong. The one exception is a layer whose round has to be cut: a cut
 //! renders into the layer's own page, so that layer takes its group at its first
-//! cut and keeps it until its last round. This is why an isolated parent's
-//! *second* isolated child is served while a chain hanging off it is not — the
-//! parent's page is one of the two groups from its first cut onwards.
+//! cut and keeps it until its last round. That is what makes a cut ancestor
+//! expensive for everything below it — from its first cut onwards it is holding
+//! one of the two groups, so a chain hanging off its later child has only one
+//! group left to ping-pong in.
+//!
+//! ## The spill page
+//!
+//! One page beside the pair ([`PageParity::Spill`]), taken only where the walk
+//! would otherwise refuse the frame: after [`make_room`] has cut everything it
+//! could and both groups are still holding pages later rounds composite, a
+//! *regular* layer takes the spill page instead of escalating. It is acquired
+//! and released exactly as a parity page is — it goes back to the pool the
+//! moment the round whose composite sampled it ends — so it is one more live
+//! intermediate at a peak, not a page held for the frame.
+//!
+//! It exists for one shape, and that shape is a navigation transition: a
+//! full-screen layer at a fractional opacity (the page being scrubbed) holding
+//! a chip beside a chip that carries a translucent chip of its own. The outer
+//! layer takes a group at the cut its first chip forces, the nested chip takes
+//! the other, and the chip hosting it — whose own round has to sample the
+//! nested page while the outer page is still owed upwards — has none. Because
+//! the opacity is fractional for the whole gesture, refusing it refuses *every*
+//! frame of the gesture: the surface holds its last presented image until the
+//! transition ends, which is a frozen scrub rather than a dropped frame (see *A
+//! refusal is a skipped frame* above). The identical content at the root
+//! schedules on two pages, which is what made the shape a transition-only
+//! defect.
+//!
+//! Bounded at one, deliberately. A second layer wanting the spill while it is
+//! held is refused exactly as before, which is what keeps a frame's live
+//! intermediates at [`MAX_LIVE_PAGES`] and keeps this a narrowing of the
+//! refused set rather than a step towards the general scheduler. Two callers do
+//! not reach for it at all: a [cut](cut_at) never takes it (a cut that cannot
+//! find a group is skipped, and the walk carries on to the acquire that can
+//! spill), and neither does a [filter layer](filter_rounds), whose passes
+//! ping-pong between two groups of their own and so are held to the pair.
+//!
+//! Everything the pair already served schedules exactly as it did:
+//! [`LivePages::free`] counts only the two groups, so the cutting decisions
+//! that serve fans and chains are made against the state they were tuned
+//! against, and the spill is reached only at the site that used to escalate.
 //!
 //! ## Inlined and dropped layers
 //!
@@ -171,12 +217,21 @@ use crate::filters::{FilterStep, ServedFilter, blur, drop_shadow, served_filter}
 /// of growing this module to serve them.
 pub const MAX_CHAIN_DEPTH: usize = 4;
 
+/// The page groups the depth-parity ping-pong alternates between.
+///
+/// Two is what the even/odd alternation guarantees for a chain of any depth,
+/// and what a fan of any width is served on by cutting its parent's round. It
+/// is the *pair*, not the frame's page budget — see [`MAX_LIVE_PAGES`].
+pub const PING_PONG_GROUPS: usize = 2;
+
 /// The most intermediate pages this scheduler keeps live at one time.
 ///
-/// Two is what the even/odd ping-pong guarantees for a chain. A shape needing a
-/// third — after cutting an open round has been tried and could not hand one
-/// back — is a shape this scheduler does not serve.
-pub const MAX_LIVE_PAGES: usize = 2;
+/// The [two ping-pong groups](PING_PONG_GROUPS) plus one: a single spill page
+/// ([`PageParity::Spill`]) for the shape that needs a third live page and
+/// cannot be cut into needing fewer. A shape needing a *fourth* — after cutting
+/// an open round has been tried and could not hand one back — is a shape this
+/// scheduler does not serve.
+pub const MAX_LIVE_PAGES: usize = PING_PONG_GROUPS + 1;
 
 /// Where the reference renderer's general scheduler is ported.
 ///
@@ -198,14 +253,21 @@ pub struct PageTarget {
     pub layer: u32,
     /// The layer's depth counted over isolated layers only, one-based.
     pub depth: usize,
-    /// The group the page comes from, derived from [`depth`](Self::depth).
+    /// The group the page comes from — [`depth`](Self::depth)'s parity when
+    /// either of the pair was free, the other of the pair when it was not, and
+    /// the [spill page](PageParity::Spill) when neither was.
     pub parity: PageParity,
     /// The extent to acquire the page at.
     pub size: PageSize,
-    /// The layer's tile-aligned device-space bounds.
+    /// The tile-aligned device-space bounds this page holds — the layer's own
+    /// for a layer that fits one page, and one column [band](pages::page_bands)
+    /// of them for a layer wider than any page is.
     ///
-    /// The layer is rendered at the page's origin, so every strip drawn into
-    /// this round is offset by `-(bounds.x0, bounds.y0)`.
+    /// The contents are rendered at the page's origin, so every strip drawn
+    /// into this round is offset by `-(bounds.x0, bounds.y0)` *and clipped to
+    /// this rectangle*: a banded layer's rounds are all handed the same ops, so
+    /// this is what selects the part of them each band actually holds. The
+    /// renderer's `PageWindow` is where both halves are applied.
     pub bounds: RectU16,
     /// Whether an earlier round of this same layer already rendered into this
     /// page, so this one loads its contents instead of clearing them.
@@ -563,6 +625,38 @@ fn finish<'a>(
 
     let bounds = layer.bbox;
     let depth = stream.depth;
+
+    // A regular layer wider than any single page is banded into column
+    // pages (E14) rather than refused — but only while nothing has claimed
+    // its page ahead of time (a cut ancestor reserves one this way, see
+    // `cut_at`) and its own accumulated ops hold no composite of a nested
+    // isolated child: a band's ops are replayed once per band, and
+    // replaying a child's composite would read a page a later band has
+    // already reused. Both are shapes banding does not reach, and a layer
+    // whose height alone exceeds the ceiling is still refused by `page_size`
+    // below exactly as it always was — bands are columns, so height has no
+    // split to be served by.
+    if matches!(layer.kind, RecordedLayerKind::Regular)
+        && stream.page.is_none()
+        && u32::from(bounds.width()) > page_ceiling(config, caps)
+        && !holds_composite(&stream.ops)
+    {
+        return band_rounds(
+            BandedLayer {
+                id,
+                layer,
+                bounds,
+                depth,
+            },
+            stream.ops,
+            stack,
+            rounds,
+            pages,
+            caps,
+            config,
+        );
+    }
+
     // A filter layer's page is sized with the extra atlas margin
     // (`filter_page_size`) its kernel taps can reach past: both this
     // contents round and every filter-pass round the layer costs share this
@@ -612,18 +706,14 @@ fn finish<'a>(
             // Acquired before the children's pages are freed, never after: a
             // child's page is live for the whole of the pass that samples it,
             // so the group this round renders into can never be one of theirs.
+            // With both groups still held after `make_room` has cut everything
+            // it could, a regular layer takes the one spill page rather than
+            // refusing the frame — see the module header's *The spill page*.
+            let spills = matches!(layer.kind, RecordedLayerKind::Regular);
             let parity = pages
                 .acquire(PageParity::from_depth(depth))
-                .ok_or_else(|| {
-                    escalate(format!(
-                        "layer {id} would need a third live intermediate page: both of the \
-                     {MAX_LIVE_PAGES} groups the simple scheduler ping-pongs between are already \
-                     holding a page a later round composites, and no open round could be cut to \
-                     hand one back. A nested chain of any depth fits, and so does a fan of \
-                     siblings of any width; what does not is a layer needing two groups of its \
-                     own beside a page an isolated ancestor is already holding"
-                    ))
-                })?;
+                .or_else(|| spills.then(|| pages.acquire_spill()).flatten())
+                .ok_or_else(|| escalate(out_of_pages(id, spills)))?;
             let released = released_pages(&stream.ops);
             for parity in &released {
                 pages.release(*parity);
@@ -732,9 +822,9 @@ fn filter_rounds(
     }
     let scratch = pages.acquire(scratch).ok_or_else(|| {
         escalate(format!(
-            "filter layer {id} would need both of the {MAX_LIVE_PAGES} page groups at once — one \
-             for its contents and one for its passes to write — and the second is holding a page \
-             a later round composites that no open round could be cut to hand back"
+            "filter layer {id} would need both of the {PING_PONG_GROUPS} page groups at once — \
+             one for its contents and one for its passes to write — and the second is holding a \
+             page a later round composites that no open round could be cut to hand back"
         ))
     })?;
 
@@ -783,6 +873,129 @@ fn filter_rounds(
     }
 
     Ok(dest)
+}
+
+/// A regular layer wider than [`page_ceiling`] can size a single page to,
+/// ready for its column bands to be planned.
+struct BandedLayer<'a> {
+    /// The layer, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    id: u32,
+    /// The recorded layer, for its opacity.
+    layer: &'a RecordedLayer,
+    /// The layer's tile-aligned device-space bounds — wider than
+    /// [`page_ceiling`], which is why it is here rather than sized by
+    /// [`page_size`] like every other regular layer.
+    bounds: RectU16,
+    /// The layer's depth counted over isolated layers only, one-based.
+    depth: usize,
+}
+
+/// Emits the rounds a banded layer's column pages render as: one page and
+/// one composite per [band](pages::page_bands), the layer's own draws
+/// replayed into each.
+///
+/// A band is rendered and composited one at a time rather than the whole split
+/// acquired up front, because a live page is scarce here: each band's composite
+/// is spliced straight onto `stack`'s own innermost accumulator (exactly where
+/// an ordinary single-page layer's composite would land), `make_room` is asked
+/// again before the next band's page is acquired, and the same cutting it
+/// already does for a wide sibling fan is what hands a finished band's page
+/// back — a banded layer is, from the pool's point of view, a fan of same-depth
+/// siblings that happen to share one layer id. See the [`pages`] module
+/// header's *A fourth decision* section for why this is a page decision rather
+/// than a new kind of target.
+///
+/// `ops` is `banded`'s stream's own accumulated ops — verified by the caller
+/// to hold no [`RoundOp::Composite`] — replayed unchanged into every band's
+/// content round; only the page each round targets and the rectangle its
+/// composite lands at differ band to band.
+///
+/// Replayed unchanged, and *clipped* on the way to the GPU: every band is
+/// offered the whole layer's draws, and each band's own
+/// [`PageTarget::bounds`] is what selects the strips that belong to it — a
+/// strip left of the band's column contributes no instance to it, and one
+/// straddling the column's edge is advanced into it rather than clamped onto
+/// it. That is what makes compositing the bands in order paint exactly what one
+/// whole-layer page would have; the clip itself is the renderer's, at instance
+/// emission, since the ops here are draw ranges rather than geometry.
+///
+/// A band takes a ping-pong group or nothing: the [spill
+/// page](PageParity::Spill) is deliberately not offered here. It exists for a
+/// layer whose own round samples a live page while an ancestor holds another,
+/// and a banded layer is reached only when its ops hold no composite at all —
+/// so the previous band's composite is always sitting in an open round
+/// `make_room` can cut, and a third page is never what a band is short of.
+///
+/// # Errors
+///
+/// Whatever [`pages::page_bands`] itself refuses `banded.bounds` with: taller
+/// than [`page_ceiling`] (bands are columns, so height has no split to be
+/// served by), or wider than [`pages::MAX_PAGE_BANDS`] bands can cover. Both
+/// are the refusal a single page gives an over-ceiling layer, unchanged by
+/// banding. [`EngineError::SchedulerEscalation`] when a band's own page
+/// cannot be found even one at a time.
+fn band_rounds(
+    banded: BandedLayer<'_>,
+    ops: Vec<RoundOp>,
+    stack: &mut [Stream<'_>],
+    rounds: &mut Vec<Round>,
+    pages: &mut LivePages,
+    caps: &TierCaps,
+    config: &PageConfig,
+) -> Result<Vec<RoundOp>, EngineError> {
+    let bands = pages::page_bands(banded.bounds, config, caps)?;
+
+    for band in bands {
+        make_room(stack, rounds, pages, caps, config)?;
+        // Acquired before anything of this band is released, never after —
+        // the same ordering a single-page layer's own acquisition keeps.
+        let parity = pages
+            .acquire(PageParity::from_depth(banded.depth))
+            .ok_or_else(|| {
+                escalate(format!(
+                    "layer {} would need a third live intermediate page to render one of its own \
+                     column bands: both of the {PING_PONG_GROUPS} groups the simple scheduler \
+                     ping-pongs between are already holding a page a later round composites, and \
+                     no open round could be cut to hand one back",
+                    banded.id
+                ))
+            })?;
+
+        rounds.push(Round {
+            target: RoundTarget::Page(PageTarget {
+                layer: banded.id,
+                depth: banded.depth,
+                parity,
+                size: band.size,
+                bounds: band.bounds,
+                // Every band is a page of its own rather than a continuation
+                // of the one before it: two bands never share a texture at
+                // once, so there is nothing here for a later band to load.
+                continued: false,
+            }),
+            ops: ops.clone(),
+            released: Vec::new(),
+            filter: None,
+        });
+
+        // Spliced onto the enclosing stream's own accumulator directly,
+        // rather than returned for the caller to append: a later band still
+        // has to acquire a group, and `make_room`'s own cutting is what finds
+        // this composite and hands the group back — exactly the mechanism a
+        // page-hungry sibling already relies on, so nothing here needs to
+        // wait for this function to return before a round can use it.
+        if let Some(parent) = stack.last_mut() {
+            parent.ops.push(RoundOp::Composite(Composite {
+                layer: banded.id,
+                parity,
+                bounds: band.bounds,
+                opacity: banded.layer.props.opacity,
+            }));
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 /// Frees a page group for a layer about to take one, by cutting an ancestor's
@@ -1082,26 +1295,39 @@ enum StreamOwner<'a> {
     },
 }
 
-/// Which of the two ping-pong groups is holding a finished page.
+/// Which groups are holding a finished page.
 ///
-/// A group holds one page at a time, so two booleans are this scheduler's whole
-/// page allocator: acquiring is finding a group no round still needs, releasing
-/// is the round that sampled a page ending. Nothing here allocates a texture —
-/// the pool does that at execute time, keyed on the parity this hands out.
+/// A group holds one page at a time, so three booleans are this scheduler's
+/// whole page allocator: acquiring is finding a group no round still needs,
+/// releasing is the round that sampled a page ending. Nothing here allocates a
+/// texture — the pool does that at execute time, keyed on the extent the round
+/// carries.
+///
+/// The [ping-pong pair](PING_PONG_GROUPS) and the [spill page](Self::spill) are
+/// kept apart deliberately. [`free`](Self::free) counts only the pair, so
+/// [`make_room`]'s decisions — when to cut ahead of a shortage, when to cut at
+/// one — are made against exactly the state they were tuned against and every
+/// shape this scheduler already served schedules unchanged. The spill is only
+/// ever reached through [`acquire_spill`](Self::acquire_spill), at the one site
+/// that would otherwise refuse the frame.
 #[derive(Debug, Default)]
 struct LivePages {
-    held: [bool; MAX_LIVE_PAGES],
+    held: [bool; PING_PONG_GROUPS],
+    /// Whether the one spill page is holding a page a later round composites.
+    spill: bool,
 }
 
 impl LivePages {
-    /// The group to render into, preferring `preferred` and falling back to the
-    /// other, or `None` when both are holding a page a later round still
-    /// composites.
+    /// The ping-pong group to render into, preferring `preferred` and falling
+    /// back to the other, or `None` when both are holding a page a later round
+    /// still composites.
     ///
     /// The preference is what keeps a chain alternating exactly as its depths'
     /// parities say; the fallback is what lets a second sibling, which shares
     /// its predecessor's depth and so its preference, take the free group
-    /// instead of overwriting the page beside it.
+    /// instead of overwriting the page beside it. Never answers the spill page:
+    /// that is [`acquire_spill`](Self::acquire_spill)'s, so the fallback to a
+    /// third page is a decision a caller makes rather than one this hides.
     fn acquire(&mut self, preferred: PageParity) -> Option<PageParity> {
         let parity = if !self.holds(preferred) {
             preferred
@@ -1115,24 +1341,50 @@ impl LivePages {
         Some(parity)
     }
 
+    /// The spill page, or `None` when it is already holding one.
+    ///
+    /// The whole of the bound: one page, so a second layer wanting it while it
+    /// is held finds nothing and the frame is refused exactly as it was before
+    /// the spill existed.
+    fn acquire_spill(&mut self) -> Option<PageParity> {
+        if self.spill {
+            return None;
+        }
+        self.set(PageParity::Spill, true);
+        Some(PageParity::Spill)
+    }
+
     /// Hand a group's page back, once the round that sampled it has ended.
     fn release(&mut self, parity: PageParity) {
         self.set(parity, false);
     }
 
-    /// How many groups are holding no page.
+    /// How many of the ping-pong groups are holding no page.
+    ///
+    /// The spill page is deliberately not counted: it is a last resort rather
+    /// than a group in the rotation, and counting it would make [`make_room`]
+    /// stop cutting one shortage early — which would change how every already
+    /// served shape schedules.
     fn free(&self) -> usize {
         self.held.iter().filter(|held| !**held).count()
     }
 
     /// Whether `parity`'s group is holding a page.
     fn holds(&self, parity: PageParity) -> bool {
-        self.held.get(parity.index()).copied().unwrap_or(false)
+        match parity {
+            PageParity::Spill => self.spill,
+            group => self.held.get(group.index()).copied().unwrap_or(false),
+        }
     }
 
     fn set(&mut self, parity: PageParity, held: bool) {
-        if let Some(slot) = self.held.get_mut(parity.index()) {
-            *slot = held;
+        match parity {
+            PageParity::Spill => self.spill = held,
+            group => {
+                if let Some(slot) = self.held.get_mut(group.index()) {
+                    *slot = held;
+                }
+            }
         }
     }
 }
@@ -1209,6 +1461,35 @@ fn released_pages(ops: &[RoundOp]) -> Vec<PageParity> {
     }
 
     pages
+}
+
+/// Why layer `id` is refused when every page it could have rendered into is
+/// holding one a later round still composites.
+///
+/// Two reasons, because two different bounds are reached. `spills` is whether
+/// the layer was offered the [spill page](PageParity::Spill) — every regular
+/// layer is — and so whether what ran out was all three of this scheduler's
+/// live pages or only the ping-pong pair a filter layer is held to.
+fn out_of_pages(id: u32, spills: bool) -> String {
+    if spills {
+        format!(
+            "layer {id} would need a fourth live intermediate page: both of the \
+             {PING_PONG_GROUPS} groups the simple scheduler ping-pongs between and the one spill \
+             page beside them are already holding a page a later round composites, and no open \
+             round could be cut to hand one back. A nested chain of any depth fits, a fan of \
+             siblings of any width fits, and so does a chain hanging off an isolated ancestor's \
+             later child; what does not is a layer whose own round samples two live pages while a \
+             third is still owed to a round above it"
+        )
+    } else {
+        format!(
+            "filter layer {id} would need a third live intermediate page for its contents: both \
+             of the {PING_PONG_GROUPS} groups the simple scheduler ping-pongs between are already \
+             holding a page a later round composites, and no open round could be cut to hand one \
+             back. The spill page a regular layer falls back on is not offered here — a filter \
+             layer's passes ping-pong between the two groups themselves, so it is held to them"
+        )
+    }
 }
 
 /// The escalation error carrying `reason`.

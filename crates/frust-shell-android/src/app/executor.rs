@@ -21,7 +21,7 @@ use frust_shell_common::{
     FrameMeta, RenderCommand, RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize,
 };
 
-use super::render::{RenderSignals, render_scene};
+use super::render::{RenderSignals, gpu_passes, render_scene};
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
 /// split: the painted [`Scene`] plus the clear color it was
@@ -128,11 +128,20 @@ impl InlineExecutor {
 
     /// Record a gate-skipped frame (all-zero pass durations) so the skip counter
     /// accumulates in the perf line, mirroring the pre-split inline behavior.
+    ///
+    /// Still asks for this surface's real GPU pass timing: the reading lags
+    /// the calling frame by design (see [`SurfaceRenderer::gpu_pass_timings`]),
+    /// so a run of gate-skipped ticks would otherwise show `gpu_q=0` gaps in
+    /// the log even while the ring keeps a perfectly good recent reading.
     fn record_skip(&mut self) {
-        self.frame_stats.record(FramePasses {
+        let mut passes = FramePasses {
             skipped: true,
             ..FramePasses::default()
-        });
+        };
+        if let Some(gpu) = gpu_passes(&self.renderer) {
+            passes = passes.with_gpu(gpu);
+        }
+        self.frame_stats.record(passes);
         if self.frame_stats.should_emit() {
             self.frame_stats.emit_log();
         }

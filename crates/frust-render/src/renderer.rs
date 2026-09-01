@@ -23,7 +23,16 @@
 //! the acquired swapchain view and its surface-owned depth attachment
 //! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
 //! `end_frame`. No intermediate, no blit, no vello, no shader pre-pass and no
-//! snapshot cache.
+//! snapshot cache. A swapchain whose compositor genuinely reads it as STRAIGHT
+//! alpha takes the same shape with one pass appended and one indirection
+//! added: the frame is encoded into a surface-owned intermediate and
+//! un-premultiplied into the acquired view from there, in the same encoder
+//! ([`crate::context::RenderPath::EngineDirectUnpremultiply`]). iOS's sole
+//! translucent mode (`PostMultiplied`) does NOT take that arm: it is backed
+//! by Metal, whose compositor reads a `PostMultiplied` swapchain premultiplied
+//! regardless of the mode's name (an upstream wgpu-hal truth bug — see
+//! [`crate::context::choose_engine_render_path`]), so it stays on the
+//! `EngineDirect` arm above with no conversion pass at all.
 //!
 //! This arm remaps the v3 present spans — see [`SurfaceRenderer::submit`].
 //!
@@ -42,6 +51,7 @@ use anyhow::{Result, anyhow};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use frust_scene::Command;
 use kurbo::Affine;
@@ -190,7 +200,52 @@ enum TierBackend {
         /// once, and the running total keeps surfacing on the periodic debug
         /// bump afterwards.
         refused_frames: u32,
+        /// This surface's GPU timestamp ring — real per-pass GPU time, rather
+        /// than the CPU wall-clock spans around `encode`/`submit`.
+        ///
+        /// Created for every engine surface and *inert* unless the device was
+        /// created with `wgpu::Features::TIMESTAMP_QUERY`, which is the only
+        /// thing that decides whether a frame line reports `gpu_q=1`. Inert
+        /// costs one empty `Vec` and a branch per pass — no query set, no
+        /// buffers, no map — so there is nothing to feature-gate at this
+        /// level.
+        timestamps: frust_gpu::diag::TimestampRing,
     },
+}
+
+/// One frame's real GPU time, split by the spans `frust-engine` names
+/// ([`frust_engine::EngineSpan`]).
+///
+/// The value [`SurfaceRenderer::gpu_pass_timings`] hands a shell so it can put
+/// GPU cost on the frame line beside the CPU spans it measured itself. Plain
+/// `Duration`s — no `wgpu` type crosses this crate's boundary
+/// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
+///
+/// [`Self::total`] is the sum of the four, which is the frame's *attributed*
+/// GPU pass time: the queue and driver gaps between passes belong to no pass
+/// and are deliberately not folded in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuPassTimings {
+    /// Work recorded ahead of the frame's own passes — the glyph-atlas replay.
+    pub prepass: Duration,
+    /// The frame's own surface passes: clear, opaque strips, alpha strips and
+    /// the hole punch.
+    pub main: Duration,
+    /// Off-screen layer pages and filter passes.
+    pub composite: Duration,
+    /// The present-side conversion pass a straight-alpha swapchain needs.
+    pub blit: Duration,
+}
+
+impl GpuPassTimings {
+    /// The sum of every span.
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        self.prepass
+            .saturating_add(self.main)
+            .saturating_add(self.composite)
+            .saturating_add(self.blit)
+    }
 }
 
 /// The surface half of the lifecycle machine, parallel to [`SurfacePhase`].
@@ -473,6 +528,45 @@ impl SurfaceRenderer {
         }
     }
 
+    /// The most recent frame's real GPU time per pass, or `None` when this
+    /// surface produces no such measurement.
+    ///
+    /// `None` — the `gpu_q=0` case a shell reports — for every reason there is:
+    /// a tier other than the engine one, a build without the `engine-tier`
+    /// feature, a device created without `wgpu::Features::TIMESTAMP_QUERY`
+    /// (which a build that did not compile `perf-trace` in never asks for), and
+    /// the first few frames of a surface, before the ring's first readback has
+    /// landed.
+    ///
+    /// The reading lags the calling frame: a frame's queries are mapped
+    /// without ever blocking the frame path, so what comes back is a recent
+    /// frame's GPU cost rather than the one being recorded. In steady state one
+    /// fresh reading lands per frame, so the series is complete and offset,
+    /// not sparse — see [`frust_gpu::diag::TimestampRing`].
+    pub fn gpu_pass_timings(&self) -> Option<GpuPassTimings> {
+        #[cfg(feature = "engine-tier")]
+        {
+            let SurfaceState::Ready(ready) = &self.state else {
+                return None;
+            };
+            let TierBackend::Engine { timestamps, .. } = &ready.backend else {
+                return None;
+            };
+            let reading = timestamps.latest()?;
+            let span = |which: frust_engine::EngineSpan| reading.span(which.index());
+            Some(GpuPassTimings {
+                prepass: span(frust_engine::EngineSpan::Prepass),
+                main: span(frust_engine::EngineSpan::Main),
+                composite: span(frust_engine::EngineSpan::Composite),
+                blit: span(frust_engine::EngineSpan::Blit),
+            })
+        }
+        #[cfg(not(feature = "engine-tier"))]
+        {
+            None
+        }
+    }
+
     /// The current lifecycle phase.
     pub fn phase(&self) -> SurfacePhase {
         match self.state {
@@ -707,14 +801,15 @@ impl SurfaceRenderer {
                     RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
                         surface.config.format
                     }
-                    // Unreachable in this arm: the engine path is configured
+                    // Unreachable in this arm: the engine paths are configured
                     // for the engine tier alone
                     // (`context::choose_engine_render_path`), which has no
                     // compositor. Answered with the swapchain's own format
                     // rather than left to a catch-all, so a future arm cannot
                     // fall through this match silently.
                     #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. } => surface.config.format,
+                    RenderPath::EngineDirect { .. }
+                    | RenderPath::EngineDirectUnpremultiply { .. } => surface.config.format,
                 };
                 let compositor = Compositor::new(device, composite_format, pipeline_cache.as_ref());
                 // A translucent surface whose swapchain stores STRAIGHT alpha
@@ -784,10 +879,12 @@ impl SurfaceRenderer {
             #[cfg(feature = "engine-tier")]
             crate::RenderTier::Engine => {
                 let device = &ctx.device_handle().device;
-                // Built for the format the swapchain was CONFIGURED with (the
-                // surface's own, `RENDER_ATTACHMENT` — see
-                // `context::choose_engine_render_path`), because the engine
-                // warms its strip pipelines for exactly one target format.
+                // Built for the format this surface's FRAMES will target,
+                // because the engine warms its strip pipelines for exactly one
+                // of them: the swapchain's own on the direct arm, the engine's
+                // off-screen format on the un-premultiplying one, whose frames
+                // land in a surface-owned intermediate instead
+                // ([`engine_target_format`]).
                 //
                 // A resize keeps that format (`RenderContext::resize_surface`
                 // rewrites only the dimensions), so `on_surface_changed`
@@ -798,10 +895,11 @@ impl SurfaceRenderer {
                 // vello, so a re-warm after a format change is a driver-cache
                 // hit rather than a cold compile.
                 let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
+                let engine_format = engine_target_format(&surface.path, surface.config.format);
                 let engine = frust_engine::EngineRenderer::new(
                     device,
                     &caps,
-                    surface.config.format,
+                    engine_format,
                     pipeline_cache.as_ref(),
                 )
                 .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
@@ -811,8 +909,9 @@ impl SurfaceRenderer {
                 static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
                 ENGINE_LOGGED.get_or_init(|| {
                     log::info!(
-                        "frust-render tier=engine (frust-engine strip pipeline, format={:?} \
-                         {}x{}, adapter `{}`)",
+                        "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
+                         a {:?} swapchain, {}x{}, adapter `{}`)",
+                        engine_format,
                         surface.config.format,
                         surface.config.width,
                         surface.config.height,
@@ -831,9 +930,22 @@ impl SurfaceRenderer {
                         );
                     }
                 });
+                // Built from the LIVE device rather than from `caps`: the
+                // adapter offering `TIMESTAMP_QUERY` is not the same statement
+                // as the device having been created with it, and creating a
+                // query set the device never enabled is a validation error
+                // rather than a missing measurement. The ring asks the device
+                // itself and goes inert when the answer is no.
+                let timestamps = frust_gpu::diag::TimestampRing::new(
+                    device,
+                    &ctx.device_handle().queue,
+                    frust_engine::EngineSpan::COUNT,
+                    frust_engine::diag::TIMESTAMP_RING_LABEL,
+                );
                 TierBackend::Engine {
                     engine: Box::new(engine),
                     refused_frames: 0,
+                    timestamps,
                 }
             }
             #[cfg(not(feature = "engine-tier"))]
@@ -934,14 +1046,20 @@ impl SurfaceRenderer {
                     // never changes one — `resize_surface` rewrites the
                     // dimensions alone. Asserted rather than assumed, since a
                     // silent divergence would compile a fresh pipeline on the
-                    // frame path for every frame that followed.
-                    if engine.format() != ready.surface.config.format {
+                    // frame path for every frame that followed. Compared
+                    // against the format the ARM implies, not the swapchain's
+                    // own, so the un-premultiplying arm (whose frames target
+                    // the engine's off-screen format) is not reported as drift
+                    // on every resize.
+                    let expected =
+                        engine_target_format(&ready.surface.path, ready.surface.config.format);
+                    if engine.format() != expected {
                         log::warn!(
-                            "frust-render: engine renderer warmed for {:?} but the surface now \
-                             reports {:?} — a format change must arrive as a fresh surface, not \
-                             a resize",
+                            "frust-render: engine renderer warmed for {:?} but this surface's \
+                             frames now target {:?} — a format change must arrive as a fresh \
+                             surface, not a resize",
                             engine.format(),
-                            ready.surface.config.format
+                            expected
                         );
                     }
                     engine.resize(&ctx.device_handle().device, width, height);
@@ -979,7 +1097,9 @@ impl SurfaceRenderer {
                 // Nothing to release ahead of time: every texture this
                 // backend holds (resource textures, the intermediate pool, its
                 // own depth attachment) dies with the renderer below, and the
-                // surface's depth attachment dies with the surface beside it.
+                // surface's own depth attachment — plus, on the
+                // un-premultiplying arm, its intermediate — dies with the
+                // surface beside it.
                 #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { .. } => {}
             }
@@ -1180,12 +1300,15 @@ impl SurfaceRenderer {
                     RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
                         (width, height, Affine::IDENTITY)
                     }
-                    // Unreachable inside the Gpu arm: the engine path belongs
+                    // Unreachable inside the Gpu arm: the engine paths belong
                     // to the engine tier alone. Answered with the direct arms'
                     // values rather than a catch-all, so a path added later
                     // cannot fall through this match silently.
                     #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. } => (width, height, Affine::IDENTITY),
+                    RenderPath::EngineDirect { .. }
+                    | RenderPath::EngineDirectUnpremultiply { .. } => {
+                        (width, height, Affine::IDENTITY)
+                    }
                 };
                 let params =
                     |base_color, (target_width, target_height): (u32, u32)| vello::RenderParams {
@@ -1386,12 +1509,13 @@ impl SurfaceRenderer {
                         }
                     }
                     // Unreachable inside the Gpu arm, for the `pass_*`
-                    // binding's reason: the engine path belongs to the engine
+                    // binding's reason: the engine paths belong to the engine
                     // tier alone. Reported rather than rendered, since a vello
-                    // frame reaching it would be a wiring bug with no correct
+                    // frame reaching one would be a wiring bug with no correct
                     // arm to take.
                     #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. } => {
+                    RenderPath::EngineDirect { .. }
+                    | RenderPath::EngineDirectUnpremultiply { .. } => {
                         return Err(anyhow!(
                             "frust-render: the engine render path requires the engine tier"
                         ));
@@ -1439,12 +1563,17 @@ impl SurfaceRenderer {
             }
             #[cfg(feature = "engine-tier")]
             TierBackend::Engine { .. } => {
-                // This tier renders in `submit`, into the acquired swapchain
-                // view — the direct arm's split, which is why its surface is
-                // configured `RenderPath::EngineDirect`
-                // (`context::choose_engine_render_path`). Any other path here
-                // is a wiring bug, reported rather than rendered.
-                if !matches!(&ready.surface.path, RenderPath::EngineDirect { .. }) {
+                // This tier renders in `submit` — the direct arm's split, which
+                // is why its surface is configured on one of the two engine
+                // paths (`context::choose_engine_render_path`): straight into
+                // the acquired swapchain view, or into a surface-owned
+                // intermediate the same `submit` un-premultiplies from. Any
+                // other path here is a wiring bug, reported rather than
+                // rendered.
+                if !matches!(
+                    &ready.surface.path,
+                    RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. }
+                ) {
                     return Err(anyhow!(
                         "frust-render: engine-tier requires the engine render path"
                     ));
@@ -1802,6 +1931,7 @@ impl SurfaceRenderer {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
+                    timestamps,
                 } = backend
                 else {
                     return Err(anyhow!(
@@ -1817,7 +1947,11 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine"),
                         });
-                let result = engine.encode(
+                // Opens this frame's ring slot and harvests whatever an earlier
+                // frame left mapped in it — the one place a reading becomes
+                // visible to `gpu_pass_timings`. A no-op on an inert ring.
+                timestamps.begin_frame(&device_handle.device);
+                let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
                     &mut encoder,
@@ -1835,9 +1969,14 @@ impl SurfaceRenderer {
                         // The engine's strip pipelines write premultiplied
                         // alpha, which is what this surface's swapchain
                         // expects — an opaque one ignores alpha, and a
-                        // straight-alpha translucent one had its translucency
-                        // refused at configure time
-                        // (`context::engine_translucency_refused`).
+                        // premultiplied-expecting translucent one takes it
+                        // as-is. A swapchain whose compositor genuinely
+                        // stores STRAIGHT alpha is the other arm below
+                        // (`context::choose_engine_render_path`); a Metal
+                        // `PostMultiplied` swapchain (iOS included) lands
+                        // HERE despite its name, because Metal's own
+                        // compositor reads that mode premultiplied regardless
+                        // (`context::compositor_expects_premultiplied`).
                         output: frust_engine::OutputAlpha::Premultiplied,
                     },
                     base_color,
@@ -1845,10 +1984,17 @@ impl SurfaceRenderer {
                     // `FRUST_RENDER_SCALE` is a vello instrument that sizes
                     // the blit arm's intermediate, and this arm has none.
                     Affine::IDENTITY,
+                    frust_engine::FrameTimestamps::new(timestamps),
                 );
                 match result {
                     Ok(()) => {
+                        // Recorded into the frame's own encoder, after every
+                        // pass that wrote a query and before the one submit —
+                        // a resolve in a second command buffer would race the
+                        // passes it reads.
+                        timestamps.resolve(&mut encoder);
                         device_handle.queue.submit([encoder.finish()]);
+                        timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
                     }
                     Err(error) => {
@@ -1858,6 +2004,115 @@ impl SurfaceRenderer {
                         // would show undefined content. The frame is dropped
                         // instead (the texture goes with this `None`), and the
                         // refusal is counted rather than logged per vsync.
+                        // The ring's slot is abandoned for the same reason
+                        // nothing is presented: no pass ran, so there is no
+                        // measurement to map.
+                        timestamps.abandon_frame();
+                        *refused_frames = refused_frames.saturating_add(1);
+                        log_engine_refusal(*refused_frames, &error);
+                        engine.end_frame(&device_handle.queue);
+                        return Ok((FrameOutcome::Skipped, None));
+                    }
+                }
+            }
+            // The engine tier's straight-alpha arm: the same one-encoder frame
+            // as above with one pass appended — `engine.encode` into the
+            // surface's own intermediate, then the un-premultiplying fragment
+            // pass from that intermediate into the acquired swapchain texture,
+            // recorded into the SAME encoder so the conversion can never
+            // execute against a frame that was not submitted with it. One
+            // submit, then the engine's end-of-frame maintenance.
+            //
+            // The deferred-present contract is untouched: this is still
+            // `submit_impl`, so a caller that hands the frame back
+            // un-presented (`Self::submit_deferred`) gets a fully converted
+            // swapchain texture to present inside its own transaction. (iOS
+            // itself never reaches this arm — its sole translucent mode is a
+            // Metal `PostMultiplied` swapchain, which
+            // `context::choose_engine_render_path` now routes onto
+            // `EngineDirect` above instead; this arm serves a genuinely
+            // straight-alpha, non-Metal `PostMultiplied` compositor.)
+            #[cfg(feature = "engine-tier")]
+            RenderPath::EngineDirectUnpremultiply {
+                depth,
+                intermediate_view,
+                present,
+            } => {
+                let TierBackend::Engine {
+                    engine,
+                    refused_frames,
+                    timestamps,
+                } = backend
+                else {
+                    return Err(anyhow!(
+                        "frust-render: engine render path requires the engine tier"
+                    ));
+                };
+                let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frust-render engine unpremultiply"),
+                        });
+                timestamps.begin_frame(&device_handle.device);
+                let result = engine.encode_traced(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine_scene,
+                    frust_engine::EngineTarget {
+                        // The frame lands in the intermediate, never in the
+                        // swapchain: what the swapchain receives is the
+                        // conversion's output.
+                        view: intermediate_view,
+                        format: engine_target_format(&surface.path, surface.config.format),
+                        width: surface.config.width,
+                        height: surface.config.height,
+                        depth: Some(depth.view()),
+                        // The INTERMEDIATE's own convention, which is
+                        // premultiplied like every other engine target — the
+                        // strip pipelines are fixed premultiplied, so this is
+                        // what keeps the frame's base colour in the same space
+                        // as everything drawn over it. The SURFACE's straight
+                        // alpha is what selected this arm
+                        // (`UnpremultiplyPass::selected_by`) and is served by
+                        // the pass below, not by relabelling this target.
+                        output: frust_engine::OutputAlpha::Premultiplied,
+                    },
+                    base_color,
+                    Affine::IDENTITY,
+                    frust_engine::FrameTimestamps::new(timestamps),
+                );
+                match result {
+                    Ok(()) => {
+                        // The conversion pass itself: charged to `blit` with a
+                        // fresh pair from the same ring `encode_traced` just
+                        // recorded the frame's other spans into — `None` on an
+                        // inert ring (no `perf-trace`, or the device never got
+                        // `TIMESTAMP_QUERY`), exactly like every other pass.
+                        present.record(
+                            &device_handle.device,
+                            &mut encoder,
+                            intermediate_view,
+                            &swapchain_view,
+                            frust_engine::FrameTimestamps::new(timestamps)
+                                .writes(frust_engine::EngineSpan::Blit),
+                        );
+                        timestamps.resolve(&mut encoder);
+                        device_handle.queue.submit([encoder.finish()]);
+                        timestamps.end_frame();
+                        engine.end_frame(&device_handle.queue);
+                    }
+                    Err(error) => {
+                        // Identical to the direct arm's refusal, and for the
+                        // same reason — with one extra consequence worth
+                        // stating: the conversion pass is NOT recorded either,
+                        // so the intermediate's stale contents are never
+                        // converted onto the acquired texture. Nothing is
+                        // submitted, the frame is dropped, and the previously
+                        // presented content persists.
+                        timestamps.abandon_frame();
                         *refused_frames = refused_frames.saturating_add(1);
                         log_engine_refusal(*refused_frames, &error);
                         engine.end_frame(&device_handle.queue);
@@ -1937,6 +2192,40 @@ impl SurfaceRenderer {
             }
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
+    }
+}
+
+/// The target format a surface's [`frust_engine::EngineRenderer`] must be
+/// warmed for, given the arm it was configured on and the format its swapchain
+/// reports.
+///
+/// The engine warms its strip pipelines for exactly one colour format, and a
+/// pipeline whose colour target disagrees with its attachment is a validation
+/// error rather than a mis-render. On [`RenderPath::EngineDirect`] the frame's
+/// attachment IS the swapchain, so that is the format; on
+/// [`RenderPath::EngineDirectUnpremultiply`] the frame's attachment is the
+/// intermediate instead, whose format is the engine's own off-screen one
+/// (`context::create_engine_intermediate` creates it with exactly this), and
+/// only the conversion pass speaks the swapchain's format.
+///
+/// One answer for both the install site and the resize-time drift check below,
+/// so the two cannot disagree about which format this surface's renderer was
+/// built for. A non-engine path answers the swapchain's format: it is not
+/// reachable with an engine backend, and answering rather than panicking keeps
+/// the wiring check that follows the reporting one.
+#[cfg(feature = "engine-tier")]
+fn engine_target_format(
+    path: &RenderPath,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::TextureFormat {
+    match path {
+        RenderPath::EngineDirectUnpremultiply { .. } => {
+            frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT
+        }
+        RenderPath::EngineDirect { .. }
+        | RenderPath::Direct
+        | RenderPath::DirectPremultiplied { .. }
+        | RenderPath::Blit { .. } => surface_format,
     }
 }
 

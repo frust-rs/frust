@@ -40,12 +40,22 @@ cpu-tier = ["dep:vello_cpu"]
 engine-tier = ["dep:frust-engine", "dep:frust-gpu"]
 # Opt-in perf-tracing probes: gates the
 # `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
-# `context.rs`. NOT default — a build without this feature compiles neither
-# the probe bodies nor their `"frust-perf ..."` string literals. The
-# `FRUST_NO_DIRECT_SURFACE`/`FRUST_NO_SHADER_EFFECTS` kill switches and the
-# uncaptured-error handler are deliberately NOT behind this feature — they
-# must keep working in a release build with no features enabled.
-perf-trace = []
+# `context.rs`, plus this crate's own device request asking for
+# `wgpu::Features::TIMESTAMP_QUERY` (also `context.rs`, when the adapter
+# offers it) — what makes the engine tier's GPU-timestamp ring
+# (`frust_gpu::diag::TimestampRing`) live rather than permanently inert. NOT
+# default — a build without this feature compiles neither the probe bodies
+# nor their `"frust-perf ..."` string literals, and never asks for the
+# feature. The `FRUST_NO_DIRECT_SURFACE`/`FRUST_NO_SHADER_EFFECTS` kill
+# switches and the uncaptured-error handler are deliberately NOT behind this
+# feature — they must keep working in a release build with no features
+# enabled. `frust-engine`/`frust-gpu` are both optional (`engine-tier`) —
+# `?` forwards this crate's own `perf-trace` to theirs only when
+# `engine-tier` has already activated them, never activating either on its
+# own, so an ordinary (non-`engine-tier`) `perf-trace` build (every app's
+# Debug/Profile build — see `docs/DEVELOPMENT.md`) stays exactly as lean as
+# before.
+perf-trace = ["frust-engine?/perf-trace"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true

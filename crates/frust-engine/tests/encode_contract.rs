@@ -1031,25 +1031,32 @@ fn punch_under_translucent_layer_scene() -> Scene {
 
 #[test]
 #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
-fn a_translucent_composite_recorded_after_a_clear_rect_is_erased_by_the_trailing_punch() {
-    // Pins today's behaviour rather than arguing for it. `ClearRect` is hoisted
-    // to the frame root and issued as ONE destination-out pass after every
-    // draw, layer composites included — so a layer recorded after the clear is
-    // erased inside the cleared rectangle even though the display list draws it
-    // on top. Outside that rectangle the same composite lands normally, which
-    // is what distinguishes "the punch runs last" from "the layer was dropped".
+fn a_translucent_composite_recorded_after_a_clear_rect_lands_on_top_of_the_punch() {
+    // `ClearRect` is hoisted to the frame root and issued as a destination-out
+    // pass at the painter-order position it was hoisted FROM, so a layer
+    // recorded after the clear composites onto the erased region rather than
+    // being erased by it — which is what the display list says and what the
+    // reference renderer does. A composite writes no depth, so nothing but that
+    // ordering protects it: this is the case that distinguishes a punch issued
+    // in place from one issued at the end of the frame.
     let _serialized = render_lock();
     let pixels = rendered(&punch_under_translucent_layer_scene(), Color::TRANSPARENT);
 
-    assert_eq!(
-        pixel(&pixels, 96, 128),
-        [0, 0, 0, 0],
-        "inside both the layer and the punch, the trailing punch wins outright"
-    );
+    // Half-opacity white over the erased (fully transparent) region, in the
+    // premultiplied convention the engine's pipelines blend in.
+    let over_the_hole = pixel(&pixels, 96, 128);
+    for channel in 0..4 {
+        assert!(
+            (i32::from(over_the_hole[channel]) - 128).abs() <= 2,
+            "inside both the layer and the punch, the composite lands on the erase at about \
+             half alpha, got {over_the_hole:?}"
+        );
+    }
     assert_eq!(
         pixel(&pixels, 32, 32),
         [0, 0, 0, 0],
-        "and the rest of the punched half is erased as it always was"
+        "and the rest of the punched half — which nothing was drawn over — is erased as it \
+         always was"
     );
 
     // The same composite, one probe to the right of the punch edge: half-white

@@ -34,6 +34,29 @@ pub(crate) fn vello_optional_features() -> wgpu::Features {
     wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
 }
 
+/// The `wgpu::Features` a `perf-trace` build should additionally ask for,
+/// given what `adapter_features` the live adapter actually offers and
+/// whether this build compiled the `perf-trace` feature in.
+///
+/// Mirrors `frust_gpu::context`'s own `required_features` — the identical
+/// policy, applied to this crate's own hand-rolled device request rather than
+/// `frust-gpu`'s: **empty** by default, and even under `perf_trace`,
+/// `TIMESTAMP_QUERY` only when the adapter offers it. A required feature is a
+/// hard device-creation failure on an adapter lacking it, so this can never
+/// turn a working adapter into no adapter at all — the engine tier's
+/// GPU-timestamp ring (`frust_gpu::diag::TimestampRing`) simply stays inert
+/// (`gpu_q=0`) on a device that did not get the feature, exactly as it does
+/// in a build that did not compile `perf-trace` in. A plain `bool` parameter
+/// rather than reading `cfg!` internally, so both branches are unit-testable
+/// regardless of which features this crate was compiled with.
+fn perf_trace_features(adapter_features: wgpu::Features, perf_trace: bool) -> wgpu::Features {
+    if perf_trace && adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        wgpu::Features::TIMESTAMP_QUERY
+    } else {
+        wgpu::Features::empty()
+    }
+}
+
 /// Whether a `FRUST_*` boolean env flag is set to a non-zero value, checking
 /// both the compile-time (`option_env!`) and runtime (`std::env::var`) halves —
 /// the compile-time-or-runtime parsing every shipping flag (`FRUST_TRACE`,
@@ -393,58 +416,76 @@ pub(crate) enum RenderPathKind {
     /// direct-to-surface probe nor `force_blit` participates.
     #[cfg(feature = "engine-tier")]
     EngineDirect,
+    /// `frust-engine` renders into an intermediate of the surface's own and a
+    /// full-screen fragment pass un-premultiplies it into the acquired
+    /// swapchain texture ([`RenderPath::EngineDirectUnpremultiply`]) — the
+    /// engine arm for a swapchain that stores STRAIGHT alpha and whose
+    /// compositor genuinely reads it that way, which the engine's
+    /// premultiplied output cannot be handed directly. `PostMultiplied` on
+    /// `wgpu::Backend::Metal` (iOS's translucent mode included) is the one
+    /// exception: [`compositor_expects_premultiplied`] answers true for it —
+    /// an upstream wgpu-hal truth bug — so it takes [`EngineDirect`] instead,
+    /// skipping this conversion entirely.
+    ///
+    /// [`EngineDirect`]: RenderPathKind::EngineDirect
+    ///
+    /// Still the engine family and still `RENDER_ATTACHMENT`-only on both
+    /// textures: the conversion is an ordinary render pass into the swapchain
+    /// (never the compute/storage shape [`PremultiplyPass`] uses for vello's
+    /// arm), so nothing about this arm needs a capability the tier refuses.
+    #[cfg(feature = "engine-tier")]
+    EngineDirectUnpremultiply,
 }
 
-/// What [`choose_engine_render_path`] decided about a surface's resolved alpha
-/// mode: either the engine arm applies, or this build's engine has no path for
-/// that surface.
-///
-/// A two-variant answer rather than a bare [`RenderPathKind`] because
-/// "unsupported" is a real outcome on this tier and must not be spelled as
-/// some other path: the engine owns no intermediate to blit from and no stage
-/// to un-premultiply in, so there is nothing to silently degrade to.
-#[cfg(feature = "engine-tier")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EngineRenderPath {
-    /// The engine arm applies, at this [`RenderPathKind`].
-    Supported(RenderPathKind),
-    /// The engine has no arm for this surface's resolved alpha mode. The
-    /// surface still renders through the engine, with its translucency
-    /// refused — see [`engine_translucency_refused`].
-    Unsupported,
-}
-
-/// The engine tier's render path for a surface whose resolved alpha mode is
-/// `alpha_mode`: [`RenderPathKind::EngineDirect`], or
-/// [`EngineRenderPath::Unsupported`] — never [`RenderPathKind::Blit`].
+/// The engine tier's render path for a surface on `backend` whose resolved
+/// alpha mode is `alpha_mode` — one of the two engine arms, never
+/// [`RenderPathKind::Blit`].
 ///
 /// A sibling of [`choose_render_path`] rather than a branch inside it: the
 /// engine targets an ordinary render attachment in the surface's own format,
 /// so the `Rgba8Unorm`/`STORAGE_BINDING` probe that decides vello's arm has
 /// nothing to say here, and `force_blit` has no blit arm to force it onto.
-/// Unlike that sibling it does take an argument, because the engine's output
-/// convention makes one alpha mode genuinely unserveable:
+/// Unlike that sibling it does take arguments, because the engine's output
+/// convention is what splits the two arms apart:
 ///
-/// - `Opaque`/`Auto` ignore alpha entirely — served.
+/// - `Opaque`/`Auto` ignore alpha entirely — [`RenderPathKind::EngineDirect`].
 /// - `Inherit` (Android's translucent mode) and `PreMultiplied` expect
 ///   PREMULTIPLIED alpha, which is what the engine's strip pipelines already
-///   write ([`crate::compositor`]'s premultiplied convention). Served as-is:
-///   no [`PremultiplyPass`], which would darken every partial-alpha pixel by
-///   a second factor of `a`.
-/// - `PostMultiplied` (iOS's translucent mode) expects STRAIGHT alpha and
-///   would read `(C·a, a)` as `(C, a)` — every partial-alpha pixel too dark.
-///   The engine draws into the acquired view itself, so there is no
-///   intermediate to un-premultiply in, and an un-premultiplying engine output
-///   arm does not exist yet. Answered [`EngineRenderPath::Unsupported`] rather
-///   than served wrong.
+///   write ([`crate::compositor`]'s premultiplied convention). Served as-is on
+///   the same arm: no [`PremultiplyPass`], which would darken every
+///   partial-alpha pixel by a second factor of `a`.
+/// - `PostMultiplied` expects STRAIGHT alpha and would read `(C·a, a)` as
+///   `(C, a)` — every partial-alpha pixel too dark. It takes
+///   [`RenderPathKind::EngineDirectUnpremultiply`], where the frame lands in
+///   an intermediate first and one fragment pass converts it on the way to
+///   the swapchain — **except** on `wgpu::Backend::Metal`, where
+///   [`compositor_expects_premultiplied`] answers true: the backend's own
+///   `PostMultiplied` swapchain composites premultiplied regardless of its
+///   name (an upstream wgpu-hal truth bug, documented on that predicate), so
+///   handing it the straight-alpha conversion would double-correct. That
+///   combination alone takes [`RenderPathKind::EngineDirect`] too — the same
+///   arm `Inherit`/`PreMultiplied` take, and for the identical reason: the
+///   engine's premultiplied output already matches what the compositor reads.
+///   This also answers iOS, whose sole translucent mode is a Metal
+///   `PostMultiplied` surface, removing the conversion pass's per-frame cost
+///   there entirely.
 ///
-/// Pure and mode-only, so it is host-testable without a surface.
+/// Every resolved (backend, alpha mode) pair therefore has an engine arm:
+/// there is no unserveable answer here and no translucency for this tier to
+/// refuse.
+///
+/// Pure and (backend, mode)-only, so it is host-testable without a surface.
 #[cfg(feature = "engine-tier")]
-pub(crate) fn choose_engine_render_path(alpha_mode: wgpu::CompositeAlphaMode) -> EngineRenderPath {
-    if alpha_mode_is_straight_translucent(alpha_mode) {
-        EngineRenderPath::Unsupported
+pub(crate) fn choose_engine_render_path(
+    backend: wgpu::Backend,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> RenderPathKind {
+    if alpha_mode_is_straight_translucent(alpha_mode)
+        && !compositor_expects_premultiplied(backend, alpha_mode)
+    {
+        RenderPathKind::EngineDirectUnpremultiply
     } else {
-        EngineRenderPath::Supported(RenderPathKind::EngineDirect)
+        RenderPathKind::EngineDirect
     }
 }
 
@@ -701,6 +742,13 @@ fn log_render_path(
                  surface-reported format, surface-owned depth)"
                     .to_string(),
             ),
+            #[cfg(feature = "engine-tier")]
+            RenderPathKind::EngineDirectUnpremultiply => (
+                "engine-direct-unpremultiply",
+                "frust-engine into a surface-owned intermediate, un-premultiplied into the \
+                 swapchain by one fragment pass (straight-alpha translucent surface)"
+                    .to_string(),
+            ),
         };
         log::info!("frust-perf render-path {name} ({reason})");
     });
@@ -866,6 +914,46 @@ fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
     alpha_mode_is_translucent(mode) && !alpha_mode_needs_premultiply(mode)
 }
 
+/// Whether `backend`'s compositor actually composites `mode` premultiplied,
+/// **despite** [`alpha_mode_is_straight_translucent`] answering true for it —
+/// an upstream wgpu-hal truth bug specific to one backend/mode pair, not a
+/// property of the mode alone.
+///
+/// True for `wgpu::Backend::Metal` with `CompositeAlphaMode::PostMultiplied`
+/// alone. wgpu-hal's Metal adapter advertises `PostMultiplied`
+/// (`wgpu-hal-29.0.4/src/metal/adapter.rs:422-425`,
+/// `composite_alpha_modes: [Opaque, PostMultiplied]`) but its surface
+/// configuration implements the mode as nothing beyond
+/// `render_layer.setOpaque(false)` (`wgpu-hal-29.0.4/src/metal/surface.rs:81-85`)
+/// — it never asks Core Animation to treat the layer's content as straight
+/// alpha, and Core Animation has no such mode: a `CAMetalLayer` ONLY
+/// composites premultiplied (MoltenVK's own equivalent exposes
+/// `OPAQUE | PRE_MULTIPLIED` for the identical layer, never a straight
+/// option). So a Metal `PostMultiplied` swapchain reads back exactly like a
+/// premultiplied one — `display = C·a + BG·(1−a)` — even though the mode's
+/// name and wgpu's advertised contract say straight. Handing it the
+/// spec-correct straight-alpha conversion
+/// ([`RenderPathKind::EngineDirectUnpremultiply`]) therefore double-corrects:
+/// the frame is un-premultiplied for a compositor that was going to
+/// premultiply-composite it anyway, over-brightening every partial-alpha
+/// pixel — device-visible only at fractional alpha (an indigo/navy wash,
+/// black frames near a translucent split).
+///
+/// Every other backend keeps the ordinary reading: a genuinely-straight
+/// `PostMultiplied` compositor exists on at least one other backend (e.g.
+/// Vulkan's own `POST_MULTIPLIED` composite-alpha flag), so this predicate is
+/// Metal-specific rather than blanket-disbelieving the mode everywhere.
+///
+/// Pure and (backend, mode)-only, so the decision is host-testable without a
+/// live adapter.
+#[cfg(feature = "engine-tier")]
+fn compositor_expects_premultiplied(
+    backend: wgpu::Backend,
+    mode: wgpu::CompositeAlphaMode,
+) -> bool {
+    backend == wgpu::Backend::Metal && mode == wgpu::CompositeAlphaMode::PostMultiplied
+}
+
 /// Whether a configured surface must **refuse** translucency because its
 /// chosen render path cannot deliver the premultiplied output the resolved
 /// alpha mode expects (following on the resolved-translucency seam above).
@@ -909,45 +997,18 @@ fn blit_translucency_refused(
         && tier == crate::tier::RenderTier::Gpu
 }
 
-/// Whether a configured surface must **refuse** translucency because the
-/// engine tier has no arm for its resolved alpha mode — the mirror image of
-/// [`blit_translucency_refused`], and the same remedy.
-///
-/// `frust-engine`'s strip pipelines write premultiplied alpha, so
-/// `Inherit`/`PreMultiplied` are correct as-is and `Opaque`/`Auto` ignore
-/// alpha entirely; only iOS's straight-alpha `PostMultiplied` is unserveable,
-/// which is exactly what [`choose_engine_render_path`] answers
-/// [`EngineRenderPath::Unsupported`] for. Rather than a second predicate that
-/// could drift from that one, this asks it: an `Unsupported` surface refuses
-/// translucency and degrades the app to Mode A (opaque base, no platform-view
-/// punch), staying on the engine arm — the tier is being measured, and
-/// swapping it for vello on one surface would put the wrong renderer's number
-/// into the comparison.
-///
-/// Takes `path_kind` rather than assuming it, so the predicate cannot be
-/// misapplied to a vello arm. No `tier` parameter is needed:
-/// [`RenderPathKind::EngineDirect`] is reachable from the
-/// [`Engine`](crate::RenderTier::Engine) tier alone.
-#[cfg(feature = "engine-tier")]
-fn engine_translucency_refused(
-    path_kind: RenderPathKind,
-    alpha_mode: wgpu::CompositeAlphaMode,
-) -> bool {
-    path_kind == RenderPathKind::EngineDirect
-        && choose_engine_render_path(alpha_mode) == EngineRenderPath::Unsupported
-}
-
 /// Whether a `width` x `height` target fits the device's own
 /// `max_texture_dimension_2d`.
 ///
-/// The engine arm is the caller: its swapchain is a plain `RENDER_ATTACHMENT`
-/// texture and it is paired with a depth attachment of the identical extent
-/// ([`RenderPath::EngineDirect`]), so an over-ceiling surface would be two
-/// texture creations wgpu refuses — a validation error mid-configure rather
-/// than a diagnosis. Asked once, up front, against the limits the device was
-/// actually requested with ([`effective_limits`], which is what
-/// `wgpu::Device::limits` reports back), so the surface is refused with a
-/// message naming the ceiling instead.
+/// The engine arms are the callers: the swapchain is a plain
+/// `RENDER_ATTACHMENT` texture paired with a depth attachment of the identical
+/// extent ([`RenderPath::EngineDirect`]) and, on the un-premultiplying arm, an
+/// intermediate of that extent as well — so an over-ceiling surface would be
+/// two or three texture creations wgpu refuses, a validation error
+/// mid-configure rather than a diagnosis. Asked once, up front, against the
+/// limits the device was actually requested with ([`effective_limits`], which
+/// is what `wgpu::Device::limits` reports back), so the surface is refused with
+/// a message naming the ceiling instead.
 ///
 /// Pure and host-testable. Compiled with the engine arm alone, which is its
 /// only caller: vello's own arms are sized from the same surface extent and
@@ -1313,6 +1374,40 @@ pub(crate) enum RenderPath {
         /// not pre-cleared — nothing else writes it).
         depth: frust_engine::DepthTexture,
     },
+    /// The engine tier's arm for a **straight-alpha translucent** swapchain
+    /// (`PostMultiplied`, iOS's translucent mode —
+    /// [`alpha_mode_is_straight_translucent`]): the engine renders the frame
+    /// into `intermediate_view` and `present` un-premultiplies it into the
+    /// acquired swapchain texture, `(rgb / max(a, ε), a)` in one full-screen
+    /// fragment pass recorded into the frame's own encoder.
+    ///
+    /// The engine's counterpart to [`Self::DirectPremultiplied`], and the exact
+    /// mirror of it: that arm premultiplies vello's straight output for a
+    /// premultiplied-expecting swapchain through a compute dispatch, this one
+    /// un-premultiplies the engine's premultiplied output for a
+    /// straight-expecting one through a *render* pass — this tier runs where
+    /// compute does not, and its swapchain carries no `STORAGE_BINDING` to
+    /// write through.
+    ///
+    /// The intermediate is `Rgba8Unorm` (`frust_engine`'s own off-screen
+    /// format, which is what the renderer's pipelines are warmed for on this
+    /// arm) with `RENDER_ATTACHMENT | TEXTURE_BINDING`: a colour attachment for
+    /// the frame, a sampled source for the pass. Only its view is stored, for
+    /// [`Self::DirectPremultiplied`]'s reason — a `TextureView` refcounts its
+    /// texture alive and nothing here needs the texture handle.
+    #[cfg(feature = "engine-tier")]
+    EngineDirectUnpremultiply {
+        /// The depth attachment, exactly as [`Self::EngineDirect`] carries it —
+        /// sized to the swapchain and recreated with it, since the intermediate
+        /// the frame targets has the swapchain's own extent.
+        depth: frust_engine::DepthTexture,
+        /// The premultiplied intermediate the engine renders the frame into,
+        /// recreated on resize like the blit arm's target.
+        intermediate_view: wgpu::TextureView,
+        /// The conversion, built once per surface configure for the
+        /// swapchain's own format.
+        present: frust_engine::gpu::present::UnpremultiplyPass,
+    },
 }
 
 /// A configured swapchain surface plus the render-path resources for the arm it
@@ -1328,11 +1423,12 @@ pub(crate) struct ConfiguredSurface {
     /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
     /// computed once at configure time (the mode never changes for a live
     /// surface; a resize reconfigures with the same `config`), *except* when
-    /// either arm-specific refusal forces it to `false`: a GPU-tier
-    /// blit-fallback surface cannot deliver the premultiplied output such an
-    /// alpha mode expects ([`blit_translucency_refused`] — `cpu-tier` is
-    /// exempt), and the engine tier cannot deliver the straight output
-    /// `PostMultiplied` expects ([`engine_translucency_refused`]).
+    /// the blit arm's refusal forces it to `false`: a GPU-tier blit-fallback
+    /// surface cannot deliver the premultiplied output such an alpha mode
+    /// expects ([`blit_translucency_refused`] — `cpu-tier` is exempt). The
+    /// engine tier has no such refusal: every resolved alpha mode has an engine
+    /// arm ([`choose_engine_render_path`]), straight-alpha translucency
+    /// included.
     ///
     /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
     /// at each read so the value a shell observes through
@@ -1347,11 +1443,9 @@ impl ConfiguredSurface {
     /// stores STRAIGHT alpha — iOS's `PostMultiplied` translucent mode.
     ///
     /// Reads [`Self::resolved_translucent`] rather than the raw alpha mode, so
-    /// a surface whose translucency was REFUSED (by either
-    /// [`blit_translucency_refused`] or, for this mode specifically, the engine
-    /// tier's [`engine_translucency_refused`]) answers `false`: it presents
-    /// opaque, and an opaque destination is exactly what the straight blend is
-    /// exact for.
+    /// a surface whose translucency was REFUSED
+    /// ([`blit_translucency_refused`]) answers `false`: it presents opaque, and
+    /// an opaque destination is exactly what the straight blend is exact for.
     ///
     /// [`crate::renderer::SurfaceRenderer`] folds this into the snapshot
     /// cache's enable decision (`renderer::snapshot_cache_enabled`): the
@@ -1376,10 +1470,12 @@ impl ConfiguredSurface {
         let blit_target = match &self.path {
             RenderPath::Blit { target_size, .. } => Some(*target_size),
             RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => None,
-            // The engine arm renders at the surface's own resolution: the
-            // scale knob is a vello instrument (`effective_render_scale`).
+            // Both engine arms render at the surface's own resolution — the
+            // un-premultiplying arm's intermediate is the swapchain's size, not
+            // a scaled one. The scale knob is a vello instrument
+            // (`effective_render_scale`).
             #[cfg(feature = "engine-tier")]
-            RenderPath::EngineDirect { .. } => None,
+            RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. } => None,
         };
         path_render_scaled((self.config.width, self.config.height), blit_target)
     }
@@ -1561,6 +1657,40 @@ fn create_targets(
     });
     let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
     (target_texture, target_view)
+}
+
+/// Creates the intermediate the engine renders a frame into on
+/// [`RenderPath::EngineDirectUnpremultiply`], returning its view alone (the
+/// view refcounts the texture alive, and nothing on this arm needs the texture
+/// handle).
+///
+/// Deliberately NOT [`create_targets`]: that target carries `STORAGE_BINDING`
+/// for vello's compute write, and this tier has neither a compute stage nor a
+/// storage texture anywhere in it (its downlevel design rules refuse both). The
+/// usage here is exactly what the two consumers need — `RENDER_ATTACHMENT` for
+/// the frame's own passes, `TEXTURE_BINDING` for the un-premultiplying pass to
+/// sample it — so the arm asks a downlevel adapter for nothing it lacks.
+///
+/// The format is the engine's own off-screen format rather than the surface's:
+/// the renderer on this arm is warmed for it (`renderer::engine_target_format`),
+/// and only the final pass has to speak the swapchain's format.
+#[cfg(feature = "engine-tier")]
+fn create_engine_intermediate(width: u32, height: u32, device: &wgpu::Device) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust-render engine intermediate"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        format: frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl RenderContext {
@@ -1807,7 +1937,8 @@ impl RenderContext {
         }
         self.selected_tier = tier;
 
-        let required_features = adapter.features() & vello_optional_features();
+        let required_features = (adapter.features() & vello_optional_features())
+            | perf_trace_features(adapter.features(), cfg!(feature = "perf-trace"));
         let required_limits = effective_limits(adapter.limits(), is_ios_simulator());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1936,18 +2067,15 @@ impl RenderContext {
         // The engine tier decides its path on its own terms
         // ([`choose_engine_render_path`]) — it shares neither the probe nor
         // the valve `choose_render_path` weighs. Every other tier takes the
-        // untouched vello decision.
-        //
-        // An engine surface whose alpha mode has no engine arm still lands on
-        // `EngineDirect`: the tier owns no intermediate to degrade onto, so
-        // the refusal is spent on the surface's translucency instead
-        // ([`engine_translucency_refused`]) rather than on its render path.
+        // untouched vello decision. The backend is read here rather than
+        // inside `choose_engine_render_path` itself so that function stays a
+        // pure value decision, host-testable with no live adapter
+        // ([`compositor_expects_premultiplied`]).
         #[cfg(feature = "engine-tier")]
         let path_kind = match tier {
-            crate::tier::RenderTier::Engine => match choose_engine_render_path(alpha_mode) {
-                EngineRenderPath::Supported(kind) => kind,
-                EngineRenderPath::Unsupported => RenderPathKind::EngineDirect,
-            },
+            crate::tier::RenderTier::Engine => {
+                choose_engine_render_path(handle.adapter.get_info().backend, alpha_mode)
+            }
             _ => choose_render_path(has_rgba8unorm, has_storage_binding, force_blit),
         };
         #[cfg(not(feature = "engine-tier"))]
@@ -1979,21 +2107,24 @@ impl RenderContext {
                     })?;
                 (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
             }
-            // Engine arm: `frust-engine` builds its strip pipelines for the
+            // Engine arms: `frust-engine` builds its strip pipelines for the
             // format it is handed and draws through ordinary render passes, so
             // the swapchain needs `RENDER_ATTACHMENT` and nothing else, in
             // whichever supported format the surface reports first —
             // duplicated rather than shared with the blit arm above because
             // the two lists are free to diverge: this tier's pipelines are
-            // not bound by vello's `render_to_texture` target format.
+            // not bound by vello's `render_to_texture` target format. The
+            // un-premultiplying arm asks for exactly the same swapchain: its
+            // extra texture is the intermediate BEHIND the swapchain, and the
+            // pass that writes the swapchain is an ordinary render pass.
             //
-            // The extent is checked here, once, for both this texture and the
-            // depth attachment sized against it below: an over-ceiling surface
-            // is refused with a diagnosis naming the limit, rather than
-            // handed to wgpu as two texture creations it rejects
-            // ([`extent_within_limits`]).
+            // The extent is checked here, once, for every texture sized
+            // against it below (the depth attachment, and the intermediate on
+            // the un-premultiplying arm): an over-ceiling surface is refused
+            // with a diagnosis naming the limit, rather than handed to wgpu as
+            // texture creations it rejects ([`extent_within_limits`]).
             #[cfg(feature = "engine-tier")]
-            RenderPathKind::EngineDirect => {
+            RenderPathKind::EngineDirect | RenderPathKind::EngineDirectUnpremultiply => {
                 let max_dimension_2d = handle.device.limits().max_texture_dimension_2d;
                 if !extent_within_limits(width, height, max_dimension_2d) {
                     return Err(anyhow!(
@@ -2064,44 +2195,56 @@ impl RenderContext {
                     root: blit_root((width, height), (target_width, target_height)),
                 }
             }
-            // The engine arm carries exactly one per-surface resource: the
-            // depth attachment its opaque pass establishes and its alpha pass
-            // tests against, sized to the swapchain that was just configured
-            // (the extent was checked against the device ceiling above).
+            // The engine's direct arm carries exactly one per-surface resource:
+            // the depth attachment its opaque pass establishes and its alpha
+            // pass tests against, sized to the swapchain that was just
+            // configured (the extent was checked against the device ceiling
+            // above).
             //
             // Deliberately NOT reachable from the premultiply arm, and
             // deliberately needing nothing from it: that arm premultiplies
             // vello's straight output for a premultiplied-expecting swapchain,
             // whereas `frust-engine` already writes premultiplied, so
-            // `Inherit`/`PreMultiplied` land here correct and untouched. The
-            // one combination this tier cannot serve is the opposite one —
-            // [`engine_translucency_refused`] refuses it below.
+            // `Inherit`/`PreMultiplied` land here correct and untouched. A
+            // Metal `PostMultiplied` swapchain (iOS included) lands here too,
+            // for the identical reason: `compositor_expects_premultiplied`
+            // answers true for it, since Metal's own compositor reads that
+            // mode's swapchain premultiplied regardless of its name (upstream
+            // wgpu-hal truth bug — see that predicate's doc).
             #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirect => RenderPath::EngineDirect {
                 depth: frust_engine::DepthTexture::new(&handle.device, width, height),
             },
+            // The opposite combination — a swapchain that stores STRAIGHT
+            // alpha AND whose compositor genuinely reads it that way (every
+            // `PostMultiplied` backend except Metal, `choose_engine_render_path`'s
+            // one exception) — takes the same depth attachment plus the two
+            // resources the conversion needs: the intermediate the frame is
+            // rendered into, and the pass that un-premultiplies it into the
+            // swapchain, built for the swapchain's own format.
+            //
+            // No persisted driver cache is threaded into that build: a
+            // `wgpu::PipelineCache` exists on Vulkan alone, and this arm never
+            // serves a Metal surface (Metal's `PostMultiplied` takes the arm
+            // above instead) — the one pipeline it compiles is paid once per
+            // surface configure either way.
+            #[cfg(feature = "engine-tier")]
+            RenderPathKind::EngineDirectUnpremultiply => RenderPath::EngineDirectUnpremultiply {
+                depth: frust_engine::DepthTexture::new(&handle.device, width, height),
+                intermediate_view: create_engine_intermediate(width, height, &handle.device),
+                present: frust_engine::gpu::present::UnpremultiplyPass::new(
+                    &handle.device,
+                    format,
+                    None,
+                ),
+            },
         };
-        // The engine arm's refusal, resolved before the chain so the arm that
-        // is compiled out contributes a plain `false` rather than a `#[cfg]`
-        // inside the expression (same shape as `path_kind` above).
-        #[cfg(feature = "engine-tier")]
-        let engine_refused = engine_translucency_refused(path_kind, alpha_mode);
-        #[cfg(not(feature = "engine-tier"))]
-        let engine_refused = false;
         let resolved_translucent =
             if blit_translucency_refused(path_kind, alpha_mode, self.selected_tier()) {
                 log::warn!(
                     "frust-render: GPU-tier blit-fallback surface cannot deliver premultiplied \
                  output (alpha_mode={alpha_mode:?}) — refusing translucency, app degrades to \
                  Mode A"
-                );
-                false
-            } else if engine_refused {
-                log::warn!(
-                    "frust-render: the engine tier writes premultiplied alpha and has no \
-                 un-premultiplying output arm, which a straight-alpha translucent surface \
-                 (alpha_mode={alpha_mode:?}) would read as straight — refusing translucency, app \
-                 degrades to Mode A"
                 );
                 false
             } else {
@@ -2213,6 +2356,34 @@ impl RenderContext {
                     *depth = frust_engine::DepthTexture::new(device, width, height);
                 }
             }
+            // The un-premultiplying arm recreates its intermediate alongside
+            // that same depth attachment, both under the same ceiling: the
+            // frame renders into the intermediate and the conversion writes the
+            // swapchain, so all three have to agree on one extent. The pass
+            // itself survives — it holds a pipeline built for the surface's
+            // format, which a resize never changes, and its bind group names
+            // the source view per frame rather than at build time.
+            #[cfg(feature = "engine-tier")]
+            RenderPath::EngineDirectUnpremultiply {
+                depth,
+                intermediate_view,
+                ..
+            } => {
+                let device = &self.device_handle().device;
+                let max_dimension_2d = device.limits().max_texture_dimension_2d;
+                if !extent_within_limits(width, height, max_dimension_2d) {
+                    log::warn!(
+                        "frust-render: engine tier cannot resize to {width}x{height} — the \
+                         device's max_texture_dimension_2d is {max_dimension_2d}; keeping the \
+                         previous depth attachment and intermediate"
+                    );
+                } else {
+                    if !depth.matches(width, height) {
+                        *depth = frust_engine::DepthTexture::new(device, width, height);
+                    }
+                    *intermediate_view = create_engine_intermediate(width, height, device);
+                }
+            }
             RenderPath::Direct => {}
         }
         self.configure_surface(surface);
@@ -2257,6 +2428,33 @@ mod tests {
         // honours a baked-in compile-time value, and vice versa.
         assert!(env_flag_enabled(Some("1"), Some("0".to_string())));
         assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
+    }
+
+    #[test]
+    fn perf_trace_features_off_asks_for_nothing() {
+        assert_eq!(
+            perf_trace_features(wgpu::Features::TIMESTAMP_QUERY, false),
+            wgpu::Features::empty()
+        );
+    }
+
+    #[test]
+    fn perf_trace_features_on_with_the_adapter_offering_it_asks_for_timestamp_query() {
+        assert_eq!(
+            perf_trace_features(wgpu::Features::TIMESTAMP_QUERY, true),
+            wgpu::Features::TIMESTAMP_QUERY
+        );
+    }
+
+    #[test]
+    fn perf_trace_features_on_without_the_adapter_offering_it_asks_for_nothing() {
+        // Never asks for a feature the adapter does not have, even under
+        // `perf_trace` — a required feature the adapter lacks is a hard
+        // device-creation failure.
+        assert_eq!(
+            perf_trace_features(wgpu::Features::empty(), true),
+            wgpu::Features::empty()
+        );
     }
 
     #[test]
@@ -2567,34 +2765,129 @@ mod tests {
         );
     }
 
+    /// Every composite alpha mode a surface can resolve to, so a routing claim
+    /// is made across the whole space rather than the modes it was written for.
+    #[cfg(feature = "engine-tier")]
+    const EVERY_ALPHA_MODE: [wgpu::CompositeAlphaMode; 5] = [
+        wgpu::CompositeAlphaMode::Auto,
+        wgpu::CompositeAlphaMode::Opaque,
+        wgpu::CompositeAlphaMode::Inherit,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::PostMultiplied,
+    ];
+
     #[cfg(feature = "engine-tier")]
     #[test]
     fn engine_render_path_is_never_blit() {
-        // The R10 trap on this tier: the engine owns no intermediate, so no
-        // alpha mode — served or refused — may route it through the blit arm.
-        // Asserted across EVERY mode rather than the served ones only, because
-        // the refusal is the arm most likely to reach for a fallback.
-        for mode in [
-            wgpu::CompositeAlphaMode::Auto,
-            wgpu::CompositeAlphaMode::Opaque,
-            wgpu::CompositeAlphaMode::Inherit,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::PostMultiplied,
-        ] {
-            assert_ne!(
-                choose_engine_render_path(mode),
-                EngineRenderPath::Supported(RenderPathKind::Blit),
-                "engine path resolved to Blit for {mode:?}"
-            );
+        // The R10 trap on this tier: the engine owns no blit arm, so no
+        // (backend, alpha mode) pair may route it onto vello's. Asserted
+        // across EVERY pair, since a pair this tier has to work for is the
+        // one most likely to reach for a fallback.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                assert_ne!(
+                    choose_engine_render_path(backend, mode),
+                    RenderPathKind::Blit,
+                    "engine path resolved to Blit for {backend:?}/{mode:?}"
+                );
+                assert_ne!(
+                    choose_engine_render_path(backend, mode),
+                    RenderPathKind::Direct,
+                    "engine path resolved to vello's direct arm for {backend:?}/{mode:?}"
+                );
+            }
         }
     }
 
     #[cfg(feature = "engine-tier")]
     #[test]
-    fn engine_serves_opaque_and_premultiplied_modes() {
+    fn every_alpha_mode_routes_to_an_engine_arm() {
+        // The completeness claim: this tier serves the whole space, with no
+        // (backend, mode) pair left unserveable and no translucency refused.
+        // A mode added to `wgpu` later would land on one of the two arms
+        // rather than on a refusal, and this is where a wrong answer for it
+        // shows up.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                let kind = choose_engine_render_path(backend, mode);
+                assert!(
+                    matches!(
+                        kind,
+                        RenderPathKind::EngineDirect | RenderPathKind::EngineDirectUnpremultiply
+                    ),
+                    "{backend:?}/{mode:?} routed to {kind:?}, which is not an engine arm"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn engine_serves_opaque_and_premultiplied_modes_directly() {
         // Premultiplied output meets a premultiplied-expecting swapchain, and
-        // an opaque one ignores alpha entirely: all three are served with no
-        // premultiply pass in between.
+        // an opaque one ignores alpha entirely: all four are served straight
+        // into the swapchain, with no conversion pass in between — on every
+        // backend, since `compositor_expects_premultiplied` only ever fires
+        // for `PostMultiplied`.
+        for backend in wgpu::Backend::ALL {
+            for mode in [
+                wgpu::CompositeAlphaMode::Auto,
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ] {
+                assert_eq!(
+                    choose_engine_render_path(backend, mode),
+                    RenderPathKind::EngineDirect,
+                    "{mode:?} on {backend:?} took a conversion it does not need"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn straight_alpha_translucency_routes_through_the_unpremultiply_arm() {
+        // Off Metal, a straight-alpha translucent mode (`PostMultiplied`
+        // alone) disagrees with the engine's output convention exactly as
+        // advertised, and is the only mode that does.
+        for backend in wgpu::Backend::ALL {
+            if backend == wgpu::Backend::Metal {
+                continue;
+            }
+            for mode in EVERY_ALPHA_MODE {
+                assert_eq!(
+                    choose_engine_render_path(backend, mode)
+                        == RenderPathKind::EngineDirectUnpremultiply,
+                    alpha_mode_is_straight_translucent(mode),
+                    "the conversion arm must be exactly the straight-alpha translucent modes on \
+                     {backend:?}, not {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn metal_post_multiplied_skips_the_unpremultiply_arm() {
+        // The upstream wgpu-hal truth bug this predicate corrects for: Metal's
+        // `PostMultiplied` composites premultiplied despite advertising
+        // straight alpha (wgpu-hal-29.0.4's metal/adapter.rs advertises the
+        // mode, metal/surface.rs implements it as nothing beyond
+        // `setOpaque(false)`, and `CAMetalLayer` only ever composites
+        // premultiplied), so handing it the straight-alpha conversion would
+        // double-correct. It must take the same arm as `Inherit`/
+        // `PreMultiplied` instead — this also answers iOS, whose sole
+        // translucent mode is Metal `PostMultiplied`.
+        assert_eq!(
+            choose_engine_render_path(
+                wgpu::Backend::Metal,
+                wgpu::CompositeAlphaMode::PostMultiplied
+            ),
+            RenderPathKind::EngineDirect,
+        );
+        // Every other Metal mode is unaffected by the exception — same answer
+        // as any other backend.
         for mode in [
             wgpu::CompositeAlphaMode::Auto,
             wgpu::CompositeAlphaMode::Opaque,
@@ -2602,36 +2895,69 @@ mod tests {
             wgpu::CompositeAlphaMode::PreMultiplied,
         ] {
             assert_eq!(
-                choose_engine_render_path(mode),
-                EngineRenderPath::Supported(RenderPathKind::EngineDirect),
-                "engine refused {mode:?}"
+                choose_engine_render_path(wgpu::Backend::Metal, mode),
+                RenderPathKind::EngineDirect,
+                "{mode:?} on Metal took a conversion it does not need"
             );
         }
     }
 
     #[cfg(feature = "engine-tier")]
     #[test]
-    fn engine_refuses_straight_alpha_translucency() {
-        // iOS's translucent mode is the one the engine has no arm for; the
-        // surface still renders through the engine, with its translucency
-        // refused.
-        assert_eq!(
-            choose_engine_render_path(wgpu::CompositeAlphaMode::PostMultiplied),
-            EngineRenderPath::Unsupported
-        );
-        assert!(engine_translucency_refused(
-            RenderPathKind::EngineDirect,
-            wgpu::CompositeAlphaMode::PostMultiplied
-        ));
-        assert!(!engine_translucency_refused(
-            RenderPathKind::EngineDirect,
-            wgpu::CompositeAlphaMode::Inherit
-        ));
-        // Never misapplied to a vello arm.
-        assert!(!engine_translucency_refused(
-            RenderPathKind::Blit,
-            wgpu::CompositeAlphaMode::PostMultiplied
-        ));
+    fn non_metal_post_multiplied_keeps_the_unpremultiply_arm() {
+        // Genuinely-straight `PostMultiplied` compositors exist off Metal
+        // (e.g. Vulkan's own `POST_MULTIPLIED` composite-alpha flag), so the
+        // Metal exception above must not spread to any other backend.
+        for backend in wgpu::Backend::ALL {
+            if backend == wgpu::Backend::Metal {
+                continue;
+            }
+            assert_eq!(
+                choose_engine_render_path(backend, wgpu::CompositeAlphaMode::PostMultiplied),
+                RenderPathKind::EngineDirectUnpremultiply,
+                "{backend:?} PostMultiplied must keep the unpremultiply conversion"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn compositor_expects_premultiplied_is_metal_post_multiplied_only() {
+        // Direct guard on the predicate itself, across the whole (backend,
+        // mode) space — the two routing tests above exercise it only through
+        // `choose_engine_render_path`.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                let expected = backend == wgpu::Backend::Metal
+                    && mode == wgpu::CompositeAlphaMode::PostMultiplied;
+                assert_eq!(
+                    compositor_expects_premultiplied(backend, mode),
+                    expected,
+                    "compositor_expects_premultiplied({backend:?}, {mode:?})"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine-tier")]
+    #[test]
+    fn the_engine_tier_refuses_no_surfaces_translucency() {
+        // The blit arm's refusal is a GPU-tier rule and stays one: an engine
+        // surface keeps the translucency it resolved, whichever arm or
+        // backend it took, so a Mode B iOS app is composited rather than
+        // degraded to Mode A.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                assert!(
+                    !blit_translucency_refused(
+                        choose_engine_render_path(backend, mode),
+                        mode,
+                        crate::tier::RenderTier::Engine
+                    ),
+                    "an engine surface had its translucency refused for {backend:?}/{mode:?}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "engine-tier")]

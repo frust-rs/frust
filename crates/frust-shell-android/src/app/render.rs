@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use frust_render::{AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfaceRenderer};
 use frust_scene::Scene;
-use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
+use frust_shell_common::perf::{
+    self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
+};
 
 /// What the render side publishes about the frames it renders, read by the UI
 /// thread — one instance shared by both sides through an `Arc`, the same
@@ -79,6 +81,23 @@ impl RenderSignals {
     pub(super) fn acquire_ewma_us(&self) -> u64 {
         self.acquire_ewma_us.load(Ordering::Relaxed)
     }
+}
+
+/// This surface's most recent real GPU pass timing, folded into the
+/// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
+/// surface produces no such measurement (every tier but the engine one, an
+/// `engine-tier` build whose device never got `TIMESTAMP_QUERY`, or simply no
+/// reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+///
+/// `pub(crate)` so both this module's [`render_scene`] and
+/// [`super::executor`]'s gate-skip record share the one conversion.
+pub(crate) fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
+    renderer.gpu_pass_timings().map(|timings| GpuPasses {
+        prepass: timings.prepass,
+        main: timings.main,
+        composite: timings.composite,
+        blit: timings.blit,
+    })
 }
 
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
@@ -186,15 +205,21 @@ pub(crate) fn render_scene(
         Err(err) => log::error!("frust-shell-android: render error: {err:#}"),
     }
 
-    // One folded frame record through the single emitter.
-    frame_stats.record(FramePasses::from_split(
+    // One folded frame record through the single emitter, with this surface's
+    // real GPU pass timing attached when it produces one (engine tier,
+    // `perf-trace`, a device that offered `TIMESTAMP_QUERY`).
+    let mut passes = FramePasses::from_split(
         ui,
         RenderSpans {
             encode: encode_time,
             acquire: acquire_time,
             submit: submit_time,
         },
-    ));
+    );
+    if let Some(gpu) = gpu_passes(renderer) {
+        passes = passes.with_gpu(gpu);
+    }
+    frame_stats.record(passes);
     if frame_stats.should_emit() {
         frame_stats.emit_log();
     }

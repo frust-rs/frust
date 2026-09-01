@@ -15,15 +15,21 @@
 //!   the parent's pass and freed the moment that pass ends, and the grandchild
 //!   reuses it. Depth here is counted over *isolated* layers only, because an
 //!   inlined layer never occupies a page and so never consumes a level (see the
-//!   [`schedule`](super) module header).
+//!   [`schedule`](super) module header). [`PageParity::Spill`] is the one group
+//!   this rule does not name: it is the single bounded page a regular layer
+//!   falls back on when both parity groups are held and no round could be cut
+//!   to hand one back, and the [`schedule`](super) header's *The spill page*
+//!   section is where the shapes that need it live.
 //! - **Coverage-sized, quantized, capped.** A page is sized to the layer's own
 //!   tile-aligned bounds rather than to the viewport, floored at
 //!   [`PageConfig::min_page_size`] and quantized to the substrate pool's key
 //!   grid so a resizing layer reuses one texture instead of churning a new one
 //!   per frame. It is capped at the smaller of [`PageConfig::max_page_size`]
 //!   and what the adapter will allocate; a layer larger than that is refused
-//!   with [`EngineError::IntermediateTextureTooLarge`] rather than clipped to
-//!   the cap, which would silently drop the layer's outer pixels.
+//!   by [`page_size`] with [`EngineError::IntermediateTextureTooLarge`] rather
+//!   than clipped to the cap, which would silently drop the layer's outer
+//!   pixels — or split into [bands](page_bands), which is the answer that
+//!   renders it.
 //!
 //! The default bounds mirror the reference renderer's own guidance for mobile:
 //! keeping intermediate textures small matters more than saving render passes,
@@ -72,6 +78,60 @@
 //! Both errors, like [`page_size`]'s own, are values rather than panics
 //! (E17), and the padded width/height are computed in `u32` so a `bounds`
 //! near the `u16` ceiling grows into headroom instead of wrapping.
+//!
+//! ## A fourth decision: a layer wider than any page
+//!
+//! A 5K desktop surface under one root opacity layer asks for an intermediate
+//! wider than the ceiling above — 5120 texels against a 4096 default — and
+//! refusing it freezes the surface for as long as the layer is recorded (see
+//! the [`schedule`](super) module header on what a refused frame costs). The
+//! reference sparse-strips renderer takes exactly that refusal: its
+//! `LayersConfig::required_intermediate_texture_size` answers
+//! `IntermediateTextureError::TooLarge` for a scene past the device limit
+//! (`vello_hybrid`'s `render/common.rs:147-161`), and a root-level blend asks
+//! it for the *whole scene's* size (`:181-183`), so a wide enough window has
+//! no intermediate it can be served from at all.
+//!
+//! [`page_bands`] is the answer instead: the layer is cut into full-height
+//! **column bands** no wider than the ceiling, each an ordinary page rendered
+//! at its own origin and composited back at its own rectangle (E14). Three
+//! properties make that a page decision rather than a new kind of target.
+//!
+//! - **Columns only.** A band spans the layer's whole height, so a layer
+//!   *taller* than the ceiling is still refused. That is deliberate rather
+//!   than pending: bands multiply passes over the layer's own draw list, and
+//!   splitting one axis is what covers a display — which is wide before it is
+//!   tall — at one pass per band instead of one per tile.
+//! - **Evenly split, so the bands share one page.** The band count is what the
+//!   ceiling forces (`width.div_ceil(ceiling)`), but the width is then divided
+//!   *evenly* across that many bands rather than filling each to the ceiling
+//!   and leaving a narrow tail. Every band therefore asks for one extent, which
+//!   quantizes to one substrate-pool key (E13), so a banded layer costs the
+//!   pool a single texture reused band after band instead of one wide entry
+//!   plus an odd-sized tail — and its peak intermediate memory is the even
+//!   band's, not the ceiling's.
+//! - **Bounded.** [`MAX_PAGE_BANDS`] bands is where a split stops being cheaper
+//!   than a refusal, and past it the layer is refused exactly as an
+//!   over-ceiling one always was.
+//!
+//! The tiling this module computes is only half of what makes the split
+//! invisible. The scheduler replays the layer's whole draw list into every
+//! band, so a band renders what one page would have *only* while each band's
+//! contents are clipped to [`PageBand::bounds`] — a strip left of the band's
+//! own column contributing no instance rather than a clamped one. That clip
+//! lives at instance emission in the renderer (`PageWindow`), which is the one
+//! place a strip's geometry, its alpha columns and the band's own width are all
+//! known; a rectangle that tiles is what this module owes it.
+//!
+//! What this module does not do is decide *when* a layer is banded: that call
+//! belongs to the scheduler (`schedule::band_rounds`), reached only for a
+//! *regular* layer that has not already been handed a page ahead of time (a
+//! cut ancestor reserves one this way) and whose own accumulated ops hold no
+//! composite of a nested isolated child — a band replays the layer's own
+//! draws once per band, and replaying a child's composite would read a page
+//! a later band has already reused. Every other over-ceiling shape, and a
+//! layer taller than the ceiling on any axis, still refuses the frame exactly
+//! as [`page_size`] always has.
 
 use frust_gpu::TierCaps;
 use vello_common::geometry::RectU16;
@@ -91,17 +151,47 @@ pub const DEFAULT_MIN_PAGE_SIZE: u32 = 512;
 /// ceiling is applied.
 pub const DEFAULT_MAX_PAGE_SIZE: u32 = 4096;
 
-/// Which of the two ping-pong texture groups a page comes from.
+/// The most column bands one layer is split into by [`page_bands`].
 ///
-/// The scheduler keeps at most one page live per group, so a parity *is* a page
+/// Eight bands at the default ceiling span 32768 device pixels — half the
+/// widest device grid the strip pipeline can address at all (`u16`
+/// coordinates, E18) and several times any surface a shell configures. The
+/// count is bounded because each band costs a render pass over the layer's own
+/// draw list: an unbounded split would turn one pathological layer into an
+/// unbounded number of passes, which is a worse answer than the refusal it
+/// replaced.
+pub const MAX_PAGE_BANDS: usize = 8;
+
+/// Which texture group a page comes from: one of the two ping-pong groups, or
+/// the single spill page beside them.
+///
+/// The scheduler keeps at most one page live per group, so a group *is* a page
 /// identity for the shapes it serves; a schedule that would need two pages of
-/// the same parity is escalated rather than given a second index.
+/// the same group is escalated rather than given a second index.
+///
+/// The name is the pair's: [`Even`](Self::Even) and [`Odd`](Self::Odd) are what
+/// a layer's own depth parity names, and they carry every page of every chain
+/// and every fan. [`Spill`](Self::Spill) is not a parity and is never derived
+/// from a depth — it is the bounded third page the scheduler falls back on for
+/// the one shape the pair cannot hold, kept in this enum rather than beside it
+/// because what the renderer needs from all three is the same thing: an index
+/// naming which live page a round writes, samples and hands back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageParity {
     /// The group even-depth layers render into.
     Even,
     /// The group odd-depth layers render into.
     Odd,
+    /// The one spill page, taken only when both parity groups are held and no
+    /// open round could be cut to hand one back.
+    ///
+    /// One page, never a group of its own: a second layer wanting it while it
+    /// is held is refused, which is what keeps a frame's live intermediates at
+    /// [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES). It is released exactly as a
+    /// parity page is — by the round whose composite sampled it — and only a
+    /// regular layer is ever handed one (see [`schedule`](super)'s *The spill
+    /// page*).
+    Spill,
 }
 
 impl PageParity {
@@ -109,7 +199,9 @@ impl PageParity {
     ///
     /// Depths are one-based (the outermost isolated layer is depth 1), matching
     /// the recorder's own numbering, so the outermost layer takes the odd group
-    /// and the surface it composites onto is not a page at all.
+    /// and the surface it composites onto is not a page at all. Never answers
+    /// [`Spill`](Self::Spill): the spill page is a fallback the scheduler
+    /// reaches for explicitly, not a group any depth prefers.
     #[must_use]
     pub const fn from_depth(depth: usize) -> Self {
         if depth.is_multiple_of(2) {
@@ -119,21 +211,32 @@ impl PageParity {
         }
     }
 
-    /// The other group.
+    /// The other of the ping-pong pair.
+    ///
+    /// [`Spill`](Self::Spill) is not one of the pair and so has no other: it
+    /// answers itself, which keeps this total without inventing a third
+    /// ping-pong partner. Nothing asks: the one caller that ping-pongs between
+    /// two groups of its own is a filter layer's pass sequence, and a filter
+    /// layer is never handed the spill page.
     #[must_use]
     pub const fn opposite(self) -> Self {
         match self {
             Self::Even => Self::Odd,
             Self::Odd => Self::Even,
+            Self::Spill => Self::Spill,
         }
     }
 
-    /// The group's index, `0` for even and `1` for odd.
+    /// The group's index: `0` for even, `1` for odd, `2` for the spill page.
+    ///
+    /// This is what indexes the renderer's live-page slots, so the values are
+    /// dense and stay inside [`MAX_LIVE_PAGES`](super::MAX_LIVE_PAGES).
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Even => 0,
             Self::Odd => 1,
+            Self::Spill => 2,
         }
     }
 }
@@ -149,6 +252,29 @@ pub struct PageSize {
     pub width: u32,
     /// Height in texels.
     pub height: u32,
+}
+
+/// One full-height column of a layer, and the page it renders into.
+///
+/// A band is an ordinary page in every respect but its width: its contents are
+/// rendered at the page's own origin (so every strip in it is offset by
+/// `-(bounds.x0, bounds.y0)`, exactly as an unbanded layer's are) and it
+/// composites back at [`bounds`](Self::bounds) in the parent's own
+/// coordinates. A layer that fits one page is one band covering the whole of
+/// it, so a caller has no second shape to handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageBand {
+    /// The band's own tile-aligned device-space rectangle — a full-height
+    /// column of the layer's bounds, what the band composites at, and what its
+    /// contents are clipped to on the way into the page (see the module
+    /// header's *A fourth decision*).
+    pub bounds: RectU16,
+    /// The extent this band's page is acquired at.
+    ///
+    /// One value for every band of a layer, the narrower last one included:
+    /// the bands are split evenly and sized from the widest of them, so they
+    /// share one substrate-pool key and reuse one texture (E13).
+    pub size: PageSize,
 }
 
 /// The bounds page sizing works between.
@@ -192,9 +318,11 @@ pub fn page_ceiling(config: &PageConfig, caps: &TierCaps) -> u32 {
 /// # Errors
 ///
 /// [`EngineError::IntermediateTextureTooLarge`] when either axis of `bounds`
-/// exceeds [`page_ceiling`]. Splitting such a layer into bands is later work,
-/// and shrinking it to the ceiling would drop its outer pixels without saying
-/// so, which is why the frame is refused (and skipped by the caller) instead.
+/// exceeds [`page_ceiling`]. Shrinking such a layer to the ceiling would drop
+/// its outer pixels without saying so, which is why the frame is refused (and
+/// skipped by the caller) instead; [`page_bands`] is the answer that renders
+/// an over-wide layer rather than refusing it, and this function is the
+/// single-page sizing it falls back on for a band.
 pub fn page_size(
     bounds: RectU16,
     config: &PageConfig,
@@ -216,6 +344,89 @@ pub fn page_size(
         frust_gpu::pool::quantize_extent(width.max(floor), height.max(floor), ceiling);
 
     Ok(PageSize { width, height })
+}
+
+/// The column bands `bounds` renders as, and the page extent each is acquired
+/// at.
+///
+/// One band holding the whole layer whenever it fits a single page — which is
+/// every layer a phone or a laptop surface records — and otherwise the
+/// narrowest even split of its width that stays inside [`page_ceiling`]. The
+/// bands tile `bounds` exactly: they abut, none overlaps, and their union is
+/// the layer's own rectangle, so compositing them in order paints precisely
+/// what one page would have (E14) — provided each band's contents are clipped
+/// to its own [`PageBand::bounds`], which is the renderer's half of the same
+/// property and not something this function can enforce. See the module
+/// header's *A fourth decision* section for why the split is by column, why it
+/// is even rather than greedy, and what still has to happen for a banded layer
+/// to reach a device.
+///
+/// # Errors
+///
+/// [`EngineError::IntermediateTextureTooLarge`] when the layer is *taller*
+/// than [`page_ceiling`] — bands are columns, so height has no split to be
+/// served by — and when its width would need more than [`MAX_PAGE_BANDS`]
+/// bands. Both are the refusal [`page_size`] gives an over-ceiling layer, kept
+/// for the cases banding does not reach rather than replaced by a partial
+/// answer, and neither is a panic (E17).
+pub fn page_bands(
+    bounds: RectU16,
+    config: &PageConfig,
+    caps: &TierCaps,
+) -> Result<Vec<PageBand>, EngineError> {
+    let ceiling = page_ceiling(config, caps);
+    let width = u32::from(bounds.width());
+
+    if u32::from(bounds.height()) > ceiling {
+        return Err(EngineError::IntermediateTextureTooLarge);
+    }
+    if width <= ceiling {
+        return Ok(vec![PageBand {
+            bounds,
+            size: page_size(bounds, config, caps)?,
+        }]);
+    }
+
+    // `width > ceiling >= 0` here, so the ceiling is at least one and the
+    // division below is well defined however a caller configured this pool.
+    let count = width.div_ceil(ceiling.max(1));
+    if count > u32::try_from(MAX_PAGE_BANDS).unwrap_or(u32::MAX) {
+        return Err(EngineError::IntermediateTextureTooLarge);
+    }
+
+    // Even rather than greedy: `count` bands of this width cover the layer and
+    // none of them exceeds the ceiling, and sizing every page from the widest
+    // one gives the whole split a single pool key.
+    let band_width = width.div_ceil(count);
+    let size = page_size(
+        RectU16::new(
+            0,
+            0,
+            u16::try_from(band_width).unwrap_or(u16::MAX),
+            bounds.height(),
+        ),
+        config,
+        caps,
+    )?;
+
+    let end = u32::from(bounds.x1);
+    let mut bands = Vec::with_capacity(count as usize);
+    let mut x0 = u32::from(bounds.x0);
+    while x0 < end {
+        let x1 = end.min(x0.saturating_add(band_width));
+        bands.push(PageBand {
+            bounds: RectU16::new(
+                u16::try_from(x0).unwrap_or(u16::MAX),
+                bounds.y0,
+                u16::try_from(x1).unwrap_or(u16::MAX),
+                bounds.y1,
+            ),
+            size,
+        });
+        x0 = x1;
+    }
+
+    Ok(bands)
 }
 
 /// The extent to acquire a filter layer's page at.
@@ -292,6 +503,23 @@ mod tests {
         assert_eq!(PageParity::Odd.opposite(), PageParity::Even);
         assert_eq!(PageParity::Even.index(), 0);
         assert_eq!(PageParity::Odd.index(), 1);
+    }
+
+    #[test]
+    fn the_spill_page_is_no_depths_group_and_indexes_past_the_ping_pong_pair() {
+        // A depth never names it — it is reached by falling back, not by
+        // preferring — and its index is the third live-page slot, which is
+        // what keeps the renderer's own array indexable by this value alone.
+        for depth in 0..=16 {
+            assert_ne!(PageParity::from_depth(depth), PageParity::Spill);
+        }
+        assert_eq!(PageParity::Spill.index(), 2);
+        assert!(PageParity::Spill.index() < crate::schedule::MAX_LIVE_PAGES);
+        assert_eq!(
+            PageParity::Spill.opposite(),
+            PageParity::Spill,
+            "the spill page is not one of the ping-pong pair, so it has no other"
+        );
     }
 
     #[test]
@@ -372,6 +600,174 @@ mod tests {
 
         caps.max_texture_dimension_2d = 16384;
         assert_eq!(page_ceiling(&config, &caps), DEFAULT_MAX_PAGE_SIZE);
+    }
+
+    /// The bands cover `bounds` exactly: they start at its left edge, abut
+    /// with no gap and no overlap, end at its right edge, and every one of
+    /// them spans its full height.
+    fn assert_tiles(bands: &[PageBand], bounds: RectU16) {
+        let mut x = bounds.x0;
+        for band in bands {
+            assert_eq!(band.bounds.x0, x, "bands abut with no gap and no overlap");
+            assert!(band.bounds.x1 > band.bounds.x0, "no band is degenerate");
+            assert_eq!(band.bounds.y0, bounds.y0, "a band spans the full height");
+            assert_eq!(band.bounds.y1, bounds.y1, "a band spans the full height");
+            x = band.bounds.x1;
+        }
+        assert_eq!(x, bounds.x1, "the bands end exactly at the layer's edge");
+    }
+
+    #[test]
+    fn a_layer_that_fits_one_page_is_a_single_band_holding_all_of_it() {
+        let bounds = RectU16::new(0, 0, 900, 700);
+        let config = PageConfig::default();
+        let bands = page_bands(bounds, &config, &caps()).expect("900x700 fits one page");
+
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].bounds, bounds);
+        assert_eq!(
+            bands[0].size,
+            page_size(bounds, &config, &caps()).expect("the same layer sizes as one page"),
+            "an unbanded layer's band is sized exactly as `page_size` sizes it"
+        );
+        assert_tiles(&bands, bounds);
+    }
+
+    #[test]
+    fn a_5k_layer_splits_into_two_equal_bands_sharing_one_page_extent() {
+        // The desktop case: a 5120x2880 surface under one root opacity layer,
+        // 1024 texels past the default 4096 ceiling.
+        let bounds = RectU16::new(0, 0, 5120, 2880);
+        let bands =
+            page_bands(bounds, &PageConfig::default(), &caps()).expect("a 5K layer is banded");
+
+        assert_eq!(bands.len(), 2, "5120 needs two bands under a 4096 ceiling");
+        assert_tiles(&bands, bounds);
+        assert_eq!(bands[0].bounds, RectU16::new(0, 0, 2560, 2880));
+        assert_eq!(bands[1].bounds, RectU16::new(2560, 0, 5120, 2880));
+
+        // Split evenly rather than greedily, so both bands quantize to one
+        // pool key — 2560 is already on the 256 grid, 2880 rounds up to 3072.
+        assert_eq!(
+            bands[0].size,
+            PageSize {
+                width: 2560,
+                height: 3072
+            }
+        );
+        assert_eq!(
+            bands[0].size, bands[1].size,
+            "every band of a layer asks the pool for one extent"
+        );
+    }
+
+    #[test]
+    fn an_uneven_width_gives_a_narrower_last_band_at_the_same_page_extent() {
+        // Three bands under a 1024 ceiling, and 2500 does not divide by three:
+        // the first two take 834 and the last one 832.
+        let config = PageConfig {
+            min_page_size: 256,
+            max_page_size: 1024,
+        };
+        let bounds = RectU16::new(0, 0, 2500, 600);
+        let bands = page_bands(bounds, &config, &caps()).expect("2500 needs three bands");
+
+        assert_eq!(bands.len(), 3);
+        assert_tiles(&bands, bounds);
+        assert_eq!(bands[0].bounds.width(), 834);
+        assert_eq!(bands[1].bounds.width(), 834);
+        assert_eq!(bands[2].bounds.width(), 832, "the last band takes the rest");
+        assert!(
+            bands
+                .iter()
+                .all(|band| band.size == bands[0].size && band.size.width <= config.max_page_size),
+            "the short band is still sized from the widest one, and none exceeds the ceiling"
+        );
+    }
+
+    #[test]
+    fn bands_are_offset_by_the_layers_own_origin_rather_than_starting_at_zero() {
+        let config = PageConfig {
+            min_page_size: 256,
+            max_page_size: 512,
+        };
+        let bounds = RectU16::new(100, 40, 1100, 300);
+        let bands = page_bands(bounds, &config, &caps()).expect("a 1000-wide layer needs two");
+
+        assert_eq!(bands.len(), 2);
+        assert_tiles(&bands, bounds);
+        assert_eq!(bands[0].bounds, RectU16::new(100, 40, 600, 300));
+        assert_eq!(bands[1].bounds, RectU16::new(600, 40, 1100, 300));
+    }
+
+    #[test]
+    fn a_layer_taller_than_the_ceiling_is_still_refused_because_bands_are_columns() {
+        let config = PageConfig {
+            min_page_size: 256,
+            max_page_size: 1024,
+        };
+
+        assert!(page_bands(RectU16::new(0, 0, 512, 1024), &config, &caps()).is_ok());
+        assert!(matches!(
+            page_bands(RectU16::new(0, 0, 512, 1025), &config, &caps()),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
+        // Width past the ceiling is served; height past it is not, and a layer
+        // over on both axes takes the height refusal.
+        assert!(matches!(
+            page_bands(RectU16::new(0, 0, 4096, 1025), &config, &caps()),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
+    }
+
+    #[test]
+    fn a_width_needing_more_than_the_band_bound_is_refused_rather_than_split_further() {
+        let config = PageConfig {
+            min_page_size: 256,
+            max_page_size: 1024,
+        };
+        let ceiling = page_ceiling(&config, &caps());
+        let at_bound = ceiling * MAX_PAGE_BANDS as u32;
+
+        let bands = page_bands(RectU16::new(0, 0, at_bound as u16, 64), &config, &caps())
+            .expect("exactly the bound is served");
+        assert_eq!(bands.len(), MAX_PAGE_BANDS);
+
+        assert!(matches!(
+            page_bands(
+                RectU16::new(0, 0, (at_bound + 1) as u16, 64),
+                &config,
+                &caps()
+            ),
+            Err(EngineError::IntermediateTextureTooLarge)
+        ));
+    }
+
+    #[test]
+    fn every_band_of_a_layer_is_a_page_the_pool_would_accept() {
+        // Whatever the split, no band may ask for an extent `page_size` itself
+        // would refuse — that is what makes a band an ordinary page.
+        let config = PageConfig::default();
+        let caps = caps();
+        let ceiling = page_ceiling(&config, &caps);
+
+        for width in [4097_u32, 5120, 6000, 8192, 12288, 32768] {
+            let bounds = RectU16::new(0, 0, width as u16, 2880);
+            let bands = page_bands(bounds, &config, &caps).expect("inside the band bound");
+            assert_tiles(&bands, bounds);
+            for band in &bands {
+                assert!(band.bounds.width() as u32 <= ceiling);
+                assert_eq!(
+                    band.size,
+                    page_size(
+                        RectU16::new(0, 0, bands[0].bounds.width(), bounds.height()),
+                        &config,
+                        &caps
+                    )
+                    .expect("a band is inside the ceiling by construction")
+                );
+            }
+        }
     }
 
     #[test]

@@ -226,20 +226,27 @@ Store independent baselines for:
 - `cpu/`: deterministic `vello_cpu` 0.2.0 reference images — the committed,
   baseline-required class (`testing/goldens/cpu/`).
 - `vulkan-nvidia-t400/`: real Vello/wgpu output on the pinned T400 runner (the
-  plan's single reference adapter for GPU goldens). Currently recording-only:
-  the GPU arm renders and probes on every ignored run but a baseline is
-  promoted deliberately via `UPDATE_GOLDENS=1`. The Mac Metal runner (Apple
-  M-series) routes to `metal-macos/`; an unknown adapter lands in the
-  non-promotable `classic-unclassified` staging class
+  plan's single reference adapter for GPU goldens). Currently recording-only
+  (classic, non-engine arm): the GPU arm renders and probes on every ignored
+  run but no classic baseline has been promoted yet — a baseline is promoted
+  deliberately via `UPDATE_GOLDENS=1`. The Mac Metal runner (Apple M-series)
+  routes to `metal-macos/`, same recording-only status; an unknown adapter
+  lands in the non-promotable `classic-unclassified` staging class
   (`crates/frust-testing/src/oracle_classic.rs`'s `golden_class`). Engine
-  classes reuse the classic class name under an `engine-` prefix
-  (`engine-vulkan-nvidia-t400/`, recording-only, promoted the same way), so one
+  classes reuse the classic class name under an `engine-` prefix, so one
   adapter table routes both arms; an unreviewed adapter lands in
   `engine-unclassified`.
-- `engine-metal-macos/`: the Mac Metal runner's engine class (Apple M4,
-  recording-only, promoted via `UPDATE_GOLDENS=1` exactly like the T400
-  classes; its classic-side `metal-macos/` twin is routable but not yet
-  recorded).
+- `engine-vulkan-nvidia-t400/`: the T400 rig's engine class — base-corpus
+  baselines promoted since Phase 4; the filter sub-family remains
+  recording-only there pending review ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)
+  § Golden / Oracle Tests).
+- `engine-metal-macos/`: the Mac M4 rig's engine class — baselines promoted
+  across the unit/widget/page/text corpus and, since the p6-d1 verification
+  round, the filter family too; its classic-side `metal-macos/` twin above is
+  routable but not yet recorded.
+- No browser/WebGL2 golden class exists — that arm was cancelled before
+  landing, not merely unimplemented (`docs/LIMITATIONS.md`'s
+  `engine-webgl2-unhosted`); do not document one as shipping.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the
@@ -602,11 +609,20 @@ must not replace T2/T3 headless rendering.
 ### iOS
 
 Linux can only run host logic and Android target gates. macOS must run iOS
-compile/scaffold gates. The current Vello 0.9/wgpu 29 stack cannot render on
-the iOS Simulator because its Metal feature set lacks Vello's required
-indirect execution capability; do not classify a black Simulator surface as a
-golden result. Physical iOS devices remain required for rendered pixels,
-VoiceOver, IME, lifecycle, refresh-rate, and secure-storage/biometric gates.
+compile/scaffold gates. The classic (vello) render tier cannot render on the
+iOS Simulator — its Metal feature set lacks vello's required indirect
+execution capability; do not classify a black Simulator surface as a golden
+result on that tier (`docs/DEVELOPMENT.md`'s "iOS Simulator cannot render"
+Known Issue). **The engine tier renders there.** `frust-testing`'s
+`#[cfg(target_os = "ios")]` suite (`crates/frust-testing/tests/ios_sim.rs`,
+gate `engine-p6-ios-simulator-renders`, recipe in `docs/DEVELOPMENT.md`'s
+Manual/gated tests) drives `EngineRenderer` directly against the booted
+Simulator's own adapter and compares seven unit-corpus cases against the
+embedded `testing/goldens/cpu/` baseline (compiled in via `include_bytes!`,
+since the Simulator process has no filesystem path back to this checkout) —
+this is a device-run comparison, not a new committed golden class. Physical
+iOS devices remain required for classic-tier rendered pixels, VoiceOver, IME,
+lifecycle, refresh-rate, and secure-storage/biometric gates.
 
 ### Physical Android
 

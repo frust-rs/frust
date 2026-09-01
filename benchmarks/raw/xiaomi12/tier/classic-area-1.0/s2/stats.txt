@@ -1,0 +1,5 @@
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== frust s2 ==
+frames: 32394 total, 32394 active, 0 skipped
+p50=11.62ms  p95=18.31ms  p99=20.39ms  worst=51.12ms
+missed_60hz=3365 (budget 16.67ms)  missed_120hz=31086 (budget 8.33ms)

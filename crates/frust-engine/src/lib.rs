@@ -24,6 +24,7 @@
 pub mod cache;
 pub mod compile;
 pub mod config;
+pub mod diag;
 pub mod error;
 pub mod filters;
 pub mod gpu;
@@ -41,6 +42,7 @@ pub use compile::paint::{
     encode_image_command,
 };
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
+pub use diag::{EngineSpan, FrameTimestamps};
 pub use error::EngineError;
 pub use gpu::{
     ATLAS_FORMAT, AtlasArray, DepthAttachment, DepthTexture, EnginePipeline, EngineShaderModule,

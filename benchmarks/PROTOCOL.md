@@ -201,8 +201,72 @@ table). One line per recorded frame, microsecond resolution, in this exact
 field order (`format_raw_frame_line`):
 
 ```
-frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_us=<u128> encode_us=<u128> acquire_us=<u128> submit_us=<u128> skipped=<0|1>
+frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_us=<u128> encode_us=<u128> acquire_us=<u128> submit_us=<u128> skipped=<0|1> gpu_q=<0|1> [gpu_total_us=<u128> gpu_prepass_us=<u128> gpu_main_us=<u128> gpu_composite_us=<u128> gpu_blit_us=<u128>]
 ```
+
+> **Raw-format change — v4, 2026-09-01.** Real **GPU** time per pass is
+> appended after `skipped`, so a frame's cost is no longer inferred from CPU
+> wall-clock spans around calls that only record and queue work. `gpu_q` is a
+> marker, always present: `1` when this frame carries a GPU reading, `0` when
+> it does not. The five `gpu_*_us` fields appear **only when `gpu_q=1`** —
+> deliberately omitted rather than written as zeros, so a capture with no GPU
+> timing never grows a column of zeros that reads like a measurement (a *zero*
+> `gpu_composite_us` on a `gpu_q=1` line is a real reading: that frame
+> composited no off-screen layer). **Cross-device comparability:** every v3
+> field keeps its name, meaning and position, so a v3 log and a v4 log compare
+> directly with no conversion, a v3 parser reads a v4 line unchanged, and every
+> series already committed under `benchmarks/raw` (all v3) still parses —
+> `stats.py`'s `CommittedSeriesRegressionTests` pins that.
+>
+> The spans are the frust-owned engine's own pass groups: `gpu_prepass_us` is
+> work recorded ahead of the frame (the glyph-atlas replay), `gpu_main_us` the
+> frame's own surface passes (clear, opaque strips, alpha strips, hole punch),
+> `gpu_composite_us` its off-screen layer pages and filter passes, and
+> `gpu_blit_us` the present-side conversion into the swapchain. `gpu_total_us`
+> is their **sum** — the frame's *attributed* GPU pass time, not a
+> first-begin-to-last-end wall span: the queue and driver gaps between passes
+> belong to no pass and are not folded in, so the total is a lower bound on
+> whole-frame GPU cost rather than an estimate of it.
+>
+> **`gpu_q=0` is the ordinary case, and it is not a failure.** The timestamps
+> come from `wgpu::Features::TIMESTAMP_QUERY`, which a build asks for only
+> under `perf-trace` and only when the adapter offers it, so `gpu_q=0` covers:
+> the classic (vello) and CPU tiers, which take no timestamps at all; a build
+> without `perf-trace`; an adapter without the feature; and the first frames of
+> a surface, before the ring's first readback has landed.
+>
+> **Do not add the GPU fields to `total_us`.** GPU passes execute
+> *concurrently* with the CPU spans on the same line, so summing the two
+> double-counts the frame. `total_us` is unchanged v3 arithmetic
+> (`rebuild+layout+paint+encode+acquire+submit`), and every percentile in this
+> document is still computed from it alone.
+>
+> **The reading lags its own line.** A frame's queries are mapped without ever
+> blocking the frame path, so the `gpu_*_us` values on frame *n*'s line are a
+> recent frame's cost, not frame *n*'s — in steady state one fresh reading
+> lands per frame, making the series complete but offset by a few frames.
+> Read them as a distribution over a scenario window, never as a per-frame
+> pairing against that same line's `encode_us`/`submit_us`.
+>
+> **Encode/submit arm remap, restated once more.** The CPU columns are not
+> attributed the same way on every render path, and comparing them across arms
+> without accounting for it produces a difference that is pure bookkeeping.
+> On the **blit** arm the GPU render happens inside `encode`, so it lands in
+> `encode_us`, and `acquire_us` follows it. On the **direct-to-surface** arm —
+> which includes both engine-tier arms, and any classic arm not forced onto
+> blit by `FRUST_NO_DIRECT_SURFACE`, `FRUST_NO_SHADER_EFFECTS`,
+> `FRUST_NO_SNAPSHOT_LAYERS` or `FRUST_RENDER_SCALE < 1` — the render moves
+> into `submit_us` and `acquire_us` *precedes* it instead. So `encode_us` and
+> `submit_us` mean different things on the two arms; only their sum with
+> `acquire_us`, and `total_us`, are directly comparable.
+> `docs/RENDER_ARCHITECTURE.md`'s Data Flow and `SurfaceRenderer::submit`'s
+> own doc comment carry the full field mapping.
+>
+> The `gpu_*_us` columns are immune to that remap — they measure passes on the
+> GPU's own clock, so which CPU call the recording happened inside cannot move
+> them. That is what makes them the right basis for a classic-vs-engine A/B:
+> compare the arms on `gpu_*_us` and `total_us`, and read `encode_us` /
+> `submit_us` only after accounting for the remap above.
 
 > **Raw-format change — v3, 2026-07-22.** The single `present_us`
 > field of v2 was split into separate `acquire_us` + `submit_us` fields so the
@@ -236,6 +300,30 @@ frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_
   fields are near-zero and should be excluded from percentile math the
   same way a scenario harness excludes idle/no-op frames on the Flutter
   side.
+- `gpu_q` — `1` if this frame carries a GPU-timestamp reading, else `0`
+  (v4; see the change note above for every reason it is `0`).
+- `gpu_total_us` / `gpu_prepass_us` / `gpu_main_us` / `gpu_composite_us` /
+  `gpu_blit_us` — real GPU time per pass group, microseconds, **present only
+  when `gpu_q=1`**. `gpu_total_us` is the sum of the other four. Never added
+  to `total_us` (see the change note).
+
+`stats.py` reads the GPU fields through `gpu_spans(record)`, which answers
+`None` for a frame with no reading and a dict for one with it — the same
+"not measured" vs "measured zero" distinction the wire format draws.
+
+**Graphics memory.** `run.sh` snapshots `dumpsys meminfo <pkg>` before and
+after every run (`run-NN.pss_before.txt` / `run-NN.pss_after.txt`, committed
+alongside the run logs). `stats.py`'s `extract_graphics_kb` /
+`mean_graphics_mb` read the App Summary `Graphics:` PSS row out of those
+snapshots and average it across a run set — `RESULTS.md`'s `Graphics avg (MB)`
+column, computed by the shared script rather than by hand. The pre-run snapshot is
+always empty (the app is force-stopped immediately before each run), so the
+figure averages the **kept** runs' post-run snapshots:
+
+```
+python3 benchmarks/harness/stats.py --graphics --label "<app> <scenario>" \
+    <out-dir>/run-{03,04,05}.pss_after.txt
+```
 
 Scenario boundaries (`mark_scenario_start`/`mark_scenario_end`, same
 `FRUST_TRACE`+`FRUST_TRACE_RAW` gating) stamp:
