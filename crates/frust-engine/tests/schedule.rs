@@ -19,8 +19,8 @@
 //! reason a log can be read from rather than rendered incorrectly.
 
 use frust_engine::schedule::{
-    MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PING_PONG_GROUPS, PageConfig, PageParity, Round, RoundOp,
-    Schedule, pages,
+    Composite, MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PING_PONG_GROUPS, PageConfig, PageParity, Round,
+    RoundOp, Schedule, pages,
 };
 use frust_engine::{EngineDraw, EngineError};
 use frust_gpu::{DownlevelProfile, TierCaps};
@@ -1210,6 +1210,65 @@ fn a_layer_wider_than_the_ceiling_is_banded_into_column_pages_rather_than_refuse
             .collect::<Vec<_>>(),
         "the composites land in band order, at each band's own rectangle: {rounds:?}"
     );
+}
+
+#[test]
+fn every_band_composites_exactly_the_column_its_own_page_holds() {
+    // What the *contents* of a band are is not a question this file can ask:
+    // a round's ops are draw ranges into the recording, deliberately identical
+    // for every band of a layer, and which pixels of those draws land in which
+    // band is decided at instance emission — asserted there by
+    // `renderer`'s own plan tests, and pixel-exact against a reference by
+    // `tests/desktop_stress.rs`'s 5K cases.
+    //
+    // What the scheduler owes those sites is asserted here, and it is what
+    // makes the split expressible at all: each band's page carries the band's
+    // own rectangle (the origin its contents are shifted to and the column
+    // they are clipped against), its composite lands at that same rectangle,
+    // and the region that composite samples back out of the page is exactly
+    // the band's own extent — so nothing a band renders outside its column can
+    // reach the surface, and the sampled regions tile the layer once over.
+    let mut recorder = recorder();
+    recorder.push_layer(layer(HALF), None);
+    draw(&mut recorder, 0, 0, 200);
+    recorder.pop_layer();
+
+    let config = PageConfig {
+        min_page_size: 64,
+        max_page_size: 64,
+    };
+    let rounds = Schedule::build(&recorder, &caps(), &config).expect("a wide layer bands");
+
+    let composites: Vec<&Composite> = rounds.iter().flat_map(Round::composites).collect();
+    let bands: Vec<RectU16> = rounds
+        .iter()
+        .filter_map(|round| round.page().map(|page| page.bounds))
+        .collect();
+    assert_eq!(
+        composites.len(),
+        bands.len(),
+        "one composite per band: {rounds:?}"
+    );
+
+    let mut x = 0_u16;
+    for (composite, band) in composites.iter().zip(&bands) {
+        assert_eq!(
+            composite.bounds, *band,
+            "a band composites at the very rectangle its page holds"
+        );
+        assert_eq!(
+            composite.source(),
+            RectU16::new(0, 0, band.width(), band.height()),
+            "and samples exactly that column of the page, not the whole page: \
+             {rounds:?}"
+        );
+        assert_eq!(
+            band.x0, x,
+            "the sampled columns abut with no gap or overlap"
+        );
+        x = band.x1;
+    }
+    assert_eq!(x, 200, "and cover the layer's own width exactly");
 }
 
 #[test]

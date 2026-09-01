@@ -114,6 +114,15 @@
 //!   than a refusal, and past it the layer is refused exactly as an
 //!   over-ceiling one always was.
 //!
+//! The tiling this module computes is only half of what makes the split
+//! invisible. The scheduler replays the layer's whole draw list into every
+//! band, so a band renders what one page would have *only* while each band's
+//! contents are clipped to [`PageBand::bounds`] — a strip left of the band's
+//! own column contributing no instance rather than a clamped one. That clip
+//! lives at instance emission in the renderer (`PageWindow`), which is the one
+//! place a strip's geometry, its alpha columns and the band's own width are all
+//! known; a rectangle that tiles is what this module owes it.
+//!
 //! What this module does not do is decide *when* a layer is banded: that call
 //! belongs to the scheduler (`schedule::band_rounds`), reached only for a
 //! *regular* layer that has not already been handed a page ahead of time (a
@@ -256,7 +265,9 @@ pub struct PageSize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageBand {
     /// The band's own tile-aligned device-space rectangle — a full-height
-    /// column of the layer's bounds, and what the band composites at.
+    /// column of the layer's bounds, what the band composites at, and what its
+    /// contents are clipped to on the way into the page (see the module
+    /// header's *A fourth decision*).
     pub bounds: RectU16,
     /// The extent this band's page is acquired at.
     ///
@@ -343,9 +354,12 @@ pub fn page_size(
 /// narrowest even split of its width that stays inside [`page_ceiling`]. The
 /// bands tile `bounds` exactly: they abut, none overlaps, and their union is
 /// the layer's own rectangle, so compositing them in order paints precisely
-/// what one page would have (E14). See the module header's *A fourth decision*
-/// section for why the split is by column, why it is even rather than greedy,
-/// and what still has to happen for a banded layer to reach a device.
+/// what one page would have (E14) — provided each band's contents are clipped
+/// to its own [`PageBand::bounds`], which is the renderer's half of the same
+/// property and not something this function can enforce. See the module
+/// header's *A fourth decision* section for why the split is by column, why it
+/// is even rather than greedy, and what still has to happen for a banded layer
+/// to reach a device.
 ///
 /// # Errors
 ///

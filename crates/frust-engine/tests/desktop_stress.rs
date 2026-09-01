@@ -10,12 +10,18 @@
 //! integer, and a compositor that reads the surface's alpha. Each is a design
 //! rule this file holds the engine to:
 //!
-//! - **A layer wider than a page is banded, not refused** (E14). The planning
-//!   half is host-only and runs in the ordinary workspace gate:
+//! - **A layer wider than a page is banded, not refused** (E14), and each band
+//!   renders its own column and nothing else. The planning half is host-only
+//!   and runs in the ordinary workspace gate:
 //!   [`schedule::pages::page_bands`](frust_engine::schedule::pages::page_bands)
 //!   cuts a 5120-wide layer into equal column bands that tile it exactly. The
-//!   rendering half is the `#[ignore]`d 5K case, and it is the gate that says
-//!   whether the scheduler asks for those bands.
+//!   rendering half is the `#[ignore]`d 5K case — the gate that says whether
+//!   the scheduler asks for those bands — plus the two banded cases beside it,
+//!   which say whether a band paints only what its own column covers. Those
+//!   are separate because the 5K checkerboard is self-masking: it paints every
+//!   column of the layer, so content wrongly replayed into a band is covered
+//!   by the content that really belongs there and the frame still reads
+//!   correctly.
 //! - **Quantized, pooled intermediates survive a resize storm** (E13). Four
 //!   hundred extents through `EngineRenderer::resize` must not turn the
 //!   intermediate pool back into a plain allocator.
@@ -353,6 +359,15 @@ fn a_5k_root_layer_plans_column_bands_that_tile_it_exactly() {
 // (a) 5120x2880 with a root opacity layer.
 // ---------------------------------------------------------------------------
 
+/// The widest allocation the engine is asked for anywhere, under the layer
+/// shape a 5K desktop actually records — and the gate that says the scheduler
+/// bands it rather than refusing the frame.
+///
+/// A secondary case for *which column* a band holds, deliberately: the
+/// checkerboard covers every column of the layer, so a band that also replayed
+/// the columns left of it would have its ghosts overpainted by the blocks that
+/// really belong there. The two banded cases below are the ones that see that,
+/// and they render a surface that is as wide and far shorter.
 #[test]
 #[ignore = "requires a GPU (Metal/Vulkan) and a 5K-sized allocation; run with `cargo test -p frust-engine --test desktop_stress -- --ignored`"]
 fn a_5k_frame_under_a_root_opacity_layer_matches_the_reference_on_a_sample_grid() {
@@ -378,10 +393,13 @@ fn a_5k_frame_under_a_root_opacity_layer_matches_the_reference_on_a_sample_grid(
         Ok(pixels) => pixels,
         Err(error) => panic!(
             "a {width}x{height} frame under one root opacity layer was refused with {error:?}. \
-             The layer is wider than a single page, and `schedule::pages::page_bands` plans the \
-             column bands that render it; `Schedule::build` still sizes the layer through \
-             `page_size` and emits one page and one composite for it, so the band plan reaches \
-             no round. Wiring the plan into the scheduler is what closes this gate."
+             The layer is wider than a single page, so `Schedule::build` bands it into column \
+             pages rather than sizing it through `page_size`. An \
+             `IntermediateTextureTooLarge` here is `page_bands` refusing the split itself — a \
+             layer taller than the page ceiling (bands are columns, so height has no split to be \
+             served by), or one needing more than `MAX_PAGE_BANDS` bands to cover. A \
+             `SchedulerEscalation` is `band_rounds` finding no page group for a band, which it \
+             asks `make_room` to cut an open round for before each one."
         ),
     };
 
@@ -443,6 +461,177 @@ fn a_5k_target_renders_a_layer_that_fits_one_page_and_leaves_the_rest_of_the_fra
             assert_pixel(&pixels, width, x, y, expected, "a 5K target");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// (a3) A banded layer renders each column band from its own column alone.
+// ---------------------------------------------------------------------------
+
+/// The narrowest surface wide enough to band a layer drawn over all of it.
+///
+/// A band is a full-height *column*, so a case about which column a band holds
+/// buys nothing from a 5K-tall attachment — [`FIVE_K`]'s own two cases above
+/// are what prove the widest allocation. These are as wide as a 5K display and
+/// as short as a page's floor, which keeps a case that renders several bands
+/// cheap enough to sample densely.
+const BANDED: (u32, u32) = (5120, 64);
+
+/// Rows every banded case samples at: one in each strip row of the surface's
+/// own tile grid, so a band that shifted a strip vertically as well as
+/// horizontally cannot pass by reading one row twice.
+const BANDED_ROWS: [u32; 2] = [8, 56];
+
+/// A [`BANDED`] scene: an opaque backdrop, then one isolated layer over all of
+/// it holding each `(x0, x1, colour)` as a full-height opaque fill.
+///
+/// Full-height and pixel-aligned deliberately — the case is about which
+/// *column* a band paints, so every sample lands in a rectangle's interior
+/// where source-over at [`LAYER_ALPHA`] has one arithmetic answer.
+fn banded_scene(rects: &[(f64, f64, Color)]) -> Scene {
+    let (width, height) = BANDED;
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(
+        Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+        Brush::Solid(BACKDROP),
+    );
+    builder.push_layer(
+        Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+        LAYER_ALPHA,
+    );
+    for (x0, x1, color) in rects {
+        builder.fill_rect(
+            Rect::new(*x0, 0.0, *x1, f64::from(height)),
+            Brush::Solid(*color),
+        );
+    }
+    builder.pop_layer();
+    scene
+}
+
+/// What a sample at device `x` has to hold: the last rectangle covering it,
+/// composited at [`LAYER_ALPHA`], and the bare backdrop where none does.
+///
+/// The reference this file computes rather than renders (see the module
+/// header): every rectangle is opaque and pixel-aligned, so the last one to
+/// cover a pixel is the only one that can be seen through the layer.
+fn banded_expectation(rects: &[(f64, f64, Color)], x: u32) -> [u8; 4] {
+    rects
+        .iter()
+        .rev()
+        .find(|(x0, x1, _)| f64::from(x) >= *x0 && f64::from(x) < *x1)
+        .map_or(premultiplied(BACKDROP), |(_, _, color)| {
+            over(*color, BACKDROP, LAYER_ALPHA)
+        })
+}
+
+/// Renders [`banded_scene`] and asserts every sample `samples` asks for against
+/// [`banded_expectation`], failing first if the layer is not actually banded.
+///
+/// `samples` is handed the live adapter's own band plan, so a case can sample
+/// around a band edge without hardcoding where the split falls.
+fn assert_banded_columns(
+    rects: &[(f64, f64, Color)],
+    samples: impl FnOnce(&[PageBand]) -> Vec<u32>,
+    what: &str,
+) {
+    let _guard = render_lock();
+    let mut context = gpu_context();
+    let (device, queue, caps) = handle(&mut context);
+    let (width, height) = BANDED;
+
+    let bounds = RectU16::new(
+        0,
+        0,
+        u16::try_from(width).expect("5120 is inside the device grid"),
+        u16::try_from(height).expect("64 is inside the device grid"),
+    );
+    let bands = page_bands(bounds, &PageConfig::default(), &caps)
+        .expect("a layer over a 5K-wide surface bands");
+    assert!(
+        bands.len() > 1,
+        "{what}: the case only means anything while the layer really is split \
+         into columns"
+    );
+
+    let scene = banded_scene(rects);
+    let pixels = match render(
+        &device,
+        &queue,
+        &caps,
+        &scene,
+        BANDED,
+        BACKDROP,
+        Affine::IDENTITY,
+    ) {
+        Ok(pixels) => pixels,
+        Err(error) => panic!("{what}: a {width}x{height} banded frame was refused with {error:?}"),
+    };
+
+    for x in samples(&bands) {
+        for row in BANDED_ROWS {
+            assert_pixel(&pixels, width, x, row, banded_expectation(rects, x), what);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU (Metal/Vulkan) and a 5K-wide allocation; run with `cargo test -p frust-engine --test desktop_stress -- --ignored`"]
+fn a_banded_layer_leaves_the_columns_its_own_geometry_never_covered_untouched() {
+    // Deliberately NOT self-masking: the checkerboard case above paints every
+    // column of the layer, so a band that also replayed the columns left of it
+    // is overpainted by the content that really belongs there and the frame
+    // still reads correctly. Here the layer's two rectangles are at its far
+    // ends with nothing between them, so a band replaying the whole layer has
+    // nothing to hide behind — the left rectangle would land at the second
+    // band's own origin, in columns the scene drew nothing in.
+    let rects = [(0.0, 240.0, BLOCKS[0]), (4880.0, 5120.0, BLOCKS[1])];
+    assert_banded_columns(
+        &rects,
+        |bands| {
+            let edge = u32::from(bands[1].bounds.x0);
+            let mut samples = vec![120, 600, 1600, 2400, 5000];
+            // The band's own first columns and the ones a clamped replay of
+            // the left rectangle would reach, all of which the scene left
+            // empty.
+            samples.extend((0..8).map(|step| edge + step * 30));
+            samples.extend([edge + 300, edge + 600, edge + 1200, edge + 2000]);
+            samples
+        },
+        "a banded layer's empty columns",
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU (Metal/Vulkan) and a 5K-wide allocation; run with `cargo test -p frust-engine --test desktop_stress -- --ignored`"]
+fn a_rect_straddling_a_band_edge_renders_continuously_across_it() {
+    // One rectangle crossing the split, sampled pixel by pixel either side of
+    // it: the half in each band has to land at the same device columns it
+    // would have on one whole-layer page, so the seam is invisible. The two
+    // markers at the surface's edges are what carries the layer past the page
+    // ceiling, so the middle rectangle is banded at all.
+    //
+    // The alpha-column half of the same straddle — a strip cut by a band edge
+    // that falls *inside* a coverage tile — is asserted host-side, in
+    // `renderer`'s own plan tests: a band edge here lands on the tile grid, so
+    // no strip's coverage is cut in two at 5K.
+    let rects = [
+        (0.0, 40.0, BLOCKS[1]),
+        (1280.0, 3840.0, BLOCKS[0]),
+        (5080.0, 5120.0, BLOCKS[1]),
+    ];
+    assert_banded_columns(
+        &rects,
+        |bands| {
+            let edge = u32::from(bands[1].bounds.x0);
+            let mut samples: Vec<u32> = (edge.saturating_sub(8)..edge + 8).collect();
+            // Both of the rectangle's own edges, the columns outside it that
+            // a clamped replay would reach, and the far marker.
+            samples.extend([20, 600, 1279, 1280, 2000, 3839, 3840, 4000, 4600, 5100]);
+            samples
+        },
+        "a rect straddling a band edge",
+    );
 }
 
 // ---------------------------------------------------------------------------

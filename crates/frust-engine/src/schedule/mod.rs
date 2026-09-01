@@ -259,10 +259,15 @@ pub struct PageTarget {
     pub parity: PageParity,
     /// The extent to acquire the page at.
     pub size: PageSize,
-    /// The layer's tile-aligned device-space bounds.
+    /// The tile-aligned device-space bounds this page holds — the layer's own
+    /// for a layer that fits one page, and one column [band](pages::page_bands)
+    /// of them for a layer wider than any page is.
     ///
-    /// The layer is rendered at the page's origin, so every strip drawn into
-    /// this round is offset by `-(bounds.x0, bounds.y0)`.
+    /// The contents are rendered at the page's origin, so every strip drawn
+    /// into this round is offset by `-(bounds.x0, bounds.y0)` *and clipped to
+    /// this rectangle*: a banded layer's rounds are all handed the same ops, so
+    /// this is what selects the part of them each band actually holds. The
+    /// renderer's `PageWindow` is where both halves are applied.
     pub bounds: RectU16,
     /// Whether an earlier round of this same layer already rendered into this
     /// page, so this one loads its contents instead of clearing them.
@@ -905,6 +910,15 @@ struct BandedLayer<'a> {
 /// to hold no [`RoundOp::Composite`] — replayed unchanged into every band's
 /// content round; only the page each round targets and the rectangle its
 /// composite lands at differ band to band.
+///
+/// Replayed unchanged, and *clipped* on the way to the GPU: every band is
+/// offered the whole layer's draws, and each band's own
+/// [`PageTarget::bounds`] is what selects the strips that belong to it — a
+/// strip left of the band's column contributes no instance to it, and one
+/// straddling the column's edge is advanced into it rather than clamped onto
+/// it. That is what makes compositing the bands in order paint exactly what one
+/// whole-layer page would have; the clip itself is the renderer's, at instance
+/// emission, since the ops here are draw ranges rather than geometry.
 ///
 /// A band takes a ping-pong group or nothing: the [spill
 /// page](PageParity::Spill) is deliberately not offered here. It exists for a

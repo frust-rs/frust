@@ -55,14 +55,18 @@
 //! 3. **One pass per [round](crate::schedule).** A page round renders one
 //!    isolated layer into a pooled intermediate
 //!    [page](crate::schedule::pages) it clears to transparent, at the page's
-//!    own origin — so every instance is shifted by the layer's tile-aligned
-//!    bounds — and through the page's own viewport uniform; a round continuing a
-//!    page an earlier round of the same layer opened loads it instead. A surface
-//!    round draws **alpha strips**, premultiplied-blended, in painter order:
-//!    depth-tested but not depth-writing when a depth attachment is in play, a
-//!    plain painter's-algorithm pass when it is not. A round's ops run in the
-//!    order [`Schedule::build`] listed them, so a finished child page composites
-//!    into its parent exactly where the recording entered it.
+//!    own origin — so every instance is shifted by the page's tile-aligned
+//!    bounds, and clipped to them, which is what makes a
+//!    [banded](crate::schedule::pages::page_bands) layer's column pages tile
+//!    their layer instead of each holding a clamped copy of it (see
+//!    [`PageWindow`]) — and through the page's own viewport uniform; a round
+//!    continuing a page an earlier round of the same layer opened loads it
+//!    instead. A surface round draws **alpha strips**, premultiplied-blended,
+//!    in painter order: depth-tested but not depth-writing when a depth
+//!    attachment is in play, a plain painter's-algorithm pass when it is not.
+//!    A round's ops run in the order [`Schedule::build`] listed them, so a
+//!    finished child page composites into its parent exactly where the
+//!    recording entered it.
 //!
 //!    A **filter round** is the one round that draws no strip at all: it runs
 //!    one pass of a [filter](crate::filters)'s sequence, one instanced quad
@@ -186,7 +190,9 @@ use crate::gpu::targets::{
 };
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::schedule::pages::{PageConfig, PageSize};
-use crate::schedule::{Composite, MAX_LIVE_PAGES, PageParity, Round, RoundOp, Schedule};
+use crate::schedule::{
+    Composite, MAX_LIVE_PAGES, PageParity, PageTarget, Round, RoundOp, Schedule,
+};
 use crate::{EngineTarget, OutputAlpha};
 use vello_common::geometry::SizeU16;
 use vello_common::record::RecordedLayerKind;
@@ -2085,9 +2091,10 @@ impl Scratch {
         for round in rounds {
             let page = round.page();
             let filter = self.plan_filter(frame, round);
-            // A page holds its layer at the page's own origin, so every
-            // instance of the round is shifted by the layer's bounds.
-            let origin = page.map_or((0, 0), |page| (page.bounds.x0, page.bounds.y0));
+            // A page holds its layer — or one column band of it — at the page's
+            // own origin, so every instance of the round is shifted into that
+            // column and clipped to it (see `PageWindow`).
+            let window = page.map_or(PageWindow::ROOT, PageWindow::of);
             let split_opaque = page.is_none() && depth_active;
             // Only the frame's own target is punched — a punch inside an
             // isolated layer was hoisted out of it — so only a surface round is
@@ -2133,7 +2140,7 @@ impl Scratch {
                             // every instance comes from a pair, and the
                             // sentinel itself never becomes one.
                             for pair in run.windows(2) {
-                                self.push_span(&pair[0], &pair[1], paint, to_opaque, origin);
+                                self.push_span(&pair[0], &pair[1], paint, to_opaque, window);
                             }
                         }
                     }
@@ -2171,7 +2178,7 @@ impl Scratch {
                         self.segments
                             .push(Segment::Composite(end, composite.parity));
                         self.alpha
-                            .push(composite_instance(composite, origin, depth));
+                            .push(composite_instance(composite, window.origin(), depth));
                         run_start = self.alpha.len() as u32;
                     }
                 }
@@ -2300,7 +2307,9 @@ impl Scratch {
                 continue;
             };
             for pair in run.windows(2) {
-                self.push_span(&pair[0], &pair[1], paint, false, (0, 0));
+                // Only the frame's own target is punched, so a punch's
+                // instances are never shifted and never clipped.
+                self.push_span(&pair[0], &pair[1], paint, false, PageWindow::ROOT);
             }
         }
 
@@ -2311,37 +2320,37 @@ impl Scratch {
     /// alpha-sampled span, plus the solid span filling the gap to `next` when
     /// the winding between them says there is one.
     ///
-    /// `origin` shifts the instance's *geometry* into the round's target while
-    /// its paint is still sampled at the scene position the strip was
-    /// rasterized at — a layer's contents move into its page, the gradient or
-    /// image painting them does not.
+    /// `window` shifts each instance's *geometry* into the round's target and
+    /// clips it to the column that target holds, while the paint is still
+    /// sampled at the scene position the strip was rasterized at — a layer's
+    /// contents move into its page, the gradient or image painting them does
+    /// not. An instance the window culls entirely is not emitted at all.
     fn push_span(
         &mut self,
         strip: &Strip,
         next: &Strip,
         paint: PackedPaint,
         to_opaque: bool,
-        origin: (u16, u16),
+        window: PageWindow,
     ) {
         let values = paint.values_at(strip.x, strip.y);
         let mut span = GpuStrip::from_strip_pair(strip, next, values);
-        if span.width > 0 {
-            span.x = span.x.saturating_sub(origin.0);
-            span.y = span.y.saturating_sub(origin.1);
+        if window.place(&mut span, paint) {
             self.alpha.push(span);
         }
         // A gap starts where the strip ends rather than where it begins, so a
         // position-sampled paint is re-evaluated at the gap's own origin — the
         // gap is a different piece of the scene, not a continuation of the
-        // span's sampling.
+        // span's sampling. `place` re-evaluates it once more if the window's
+        // own left edge moves the instance again.
         if let Some(mut gap) = GpuStrip::gap_fill(strip, next, values) {
             gap.payload = paint.payload_at(gap.x, gap.y);
-            gap.x = gap.x.saturating_sub(origin.0);
-            gap.y = gap.y.saturating_sub(origin.1);
-            if to_opaque {
-                self.opaque.push(gap);
-            } else {
-                self.alpha.push(gap);
+            if window.place(&mut gap, paint) {
+                if to_opaque {
+                    self.opaque.push(gap);
+                } else {
+                    self.alpha.push(gap);
+                }
             }
         }
     }
@@ -2434,6 +2443,128 @@ impl Scratch {
             bytemuck::cast_slice(&self.opaque),
             bytemuck::cast_slice(&self.alpha),
         )
+    }
+}
+
+/// The column of device space one round's target holds: the origin its
+/// instances are shifted to, and the edges they are clipped against.
+///
+/// A page holds its layer at the page's own origin, and its composite samples
+/// exactly `(0, 0)`-to-its-own-extent back out
+/// ([`Composite::source`](crate::schedule::Composite::source)). For a layer
+/// [banded](crate::schedule::pages::page_bands) into column pages that makes
+/// the band's own rectangle two things at once: the shift, and the *clip*. The
+/// scheduler replays the layer's whole op list into every band — a band differs
+/// only in which page it writes and where that page lands — so this is the site
+/// that decides which part of each replayed strip belongs to the band at hand.
+/// Emission is where the decision lives because it is the one place that knows
+/// both the origin and the width; the alternative, clipping the ops
+/// scheduler-side, would have to re-rasterize geometry the scheduler only holds
+/// as draw ranges.
+///
+/// Two rules, and both halves of each matter:
+///
+/// - a span entirely outside the column contributes **no instance** — shifting
+///   it by a saturating subtraction instead would clamp it onto the page's own
+///   edge, stretching a span the scene drew elsewhere across content this band
+///   really holds;
+/// - a span straddling an edge has its geometry **and** its first alpha column
+///   ([`GpuStrip::col_idx_or_rect_frac`]) advanced by the same amount, because
+///   the shader reads that column unshifted and steps one column per pixel of
+///   the instance (`shaders/strip.wgsl`'s `col_offset`): advancing the x
+///   without the column would sample another pixel's coverage.
+///
+/// The frame's own surface is [`ROOT`](Self::ROOT), a window over the whole
+/// device grid that shifts nothing and clips nothing. A layer that fits one
+/// page is one band covering all of it, and a layer's bounds are the
+/// tile-aligned union of its own draws' bounds, so the clip is a no-op for
+/// every layer that is not banded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PageWindow {
+    /// Left edge of the column in device space — what every instance's `x` is
+    /// shifted by, and what one left of it is culled against.
+    x0: u16,
+    /// Right edge of the column in device space, exclusive.
+    x1: u16,
+    /// Top edge of the column in device space — what every instance's `y` is
+    /// shifted by. A band spans its layer's whole height, so the vertical axis
+    /// is shifted and never clipped.
+    y0: u16,
+}
+
+impl PageWindow {
+    /// The whole device grid: the window a surface round carries.
+    const ROOT: Self = Self {
+        x0: 0,
+        x1: u16::MAX,
+        y0: 0,
+    };
+
+    /// The window `page` renders through — its own tile-aligned bounds, which
+    /// are one column band's for a banded layer and the whole layer's for
+    /// every other.
+    fn of(page: &PageTarget) -> Self {
+        Self {
+            x0: page.bounds.x0,
+            x1: page.bounds.x1,
+            y0: page.bounds.y0,
+        }
+    }
+
+    /// The origin instances are shifted by.
+    fn origin(self) -> (u16, u16) {
+        (self.x0, self.y0)
+    }
+
+    /// Clips `span` — a strip instance still carrying its scene coordinates —
+    /// to this window and shifts it into the target, answering whether any of
+    /// it survived.
+    ///
+    /// `paint` is the draw's own paint, needed because a left-clipped instance
+    /// starts at a different scene position than the one it was rasterized at:
+    /// a position-sampled paint (a gradient, an image) is re-evaluated there,
+    /// exactly as a gap fill is at its own origin, so the paint keeps landing
+    /// where the scene put it rather than being squeezed into the clipped span.
+    fn place(self, span: &mut GpuStrip, paint: PackedPaint) -> bool {
+        let end = span.x.saturating_add(span.width);
+        if span.width == 0 || end <= self.x0 || span.x >= self.x1 {
+            return false;
+        }
+
+        let cut = self.x0.saturating_sub(span.x);
+        if cut > 0 {
+            span.x = self.x0;
+            span.width = span.width.saturating_sub(cut);
+            // The dense part of an instance starts at its left edge, so the
+            // columns cut off the geometry are cut off the coverage too.
+            let dense = cut.min(span.dense_width_or_rect_height);
+            span.dense_width_or_rect_height = span.dense_width_or_rect_height.saturating_sub(dense);
+            // A sparse instance names no column at all: the fragment stage
+            // reads `col + dense_width` as "does this instance sample
+            // coverage", so leaving a non-zero column on one whose dense part
+            // is gone would send it to the alpha texture for coverage it never
+            // wrote.
+            span.col_idx_or_rect_frac = if span.dense_width_or_rect_height == 0 {
+                0
+            } else {
+                span.col_idx_or_rect_frac.saturating_add(u32::from(dense))
+            };
+            span.payload = paint.payload_at(span.x, span.y);
+        }
+
+        // Past the right edge is outside the region the composite samples, so
+        // it reaches no pixel of the parent either way; clipping it keeps a
+        // band's instances inside the band's own rectangle rather than relying
+        // on the page's quantized extent to swallow the overhang.
+        let over = end.saturating_sub(self.x1);
+        if over > 0 {
+            span.width = span.width.saturating_sub(over);
+            span.dense_width_or_rect_height = span.dense_width_or_rect_height.min(span.width);
+        }
+
+        span.x = span.x.saturating_sub(self.x0);
+        span.y = span.y.saturating_sub(self.y0);
+        span.width > 0
     }
 }
 
@@ -3522,6 +3653,8 @@ mod tests {
     use frust_gpu::DownlevelProfile;
     use kurbo::Rect;
     use peniko::color::palette::css::{BLUE, RED};
+    use std::collections::BTreeMap;
+    use vello_common::geometry::RectU16;
     use vello_common::paint::IndexedPaint;
 
     #[test]
@@ -3788,6 +3921,289 @@ mod tests {
                 }),
             "and everything recorded after it lands on top of the erase"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // A banded layer's column pages hold their own column, and only it
+    //
+    // The scheduler hands every band of a layer the same op list, so the
+    // instances a band emits are where a column split is made or lost. Every
+    // case here is host-only: the plan is built with no device, and the pixel
+    // half of the same contract is `tests/desktop_stress.rs`'s 5K cases.
+    // -----------------------------------------------------------------
+
+    /// Viewport the band plans below are built against: wide enough that one
+    /// layer over all of it needs several column pages under [`BAND_PAGES`],
+    /// and one tile row tall, so a draw costs one strip row per column.
+    const BAND_VIEWPORT: (u16, u16) = (200, 8);
+
+    /// A page ceiling small enough to band a test-sized layer, so no case here
+    /// has to allocate — or even name — a 5K one.
+    const BAND_PAGES: PageConfig = PageConfig {
+        min_page_size: 64,
+        max_page_size: 64,
+    };
+
+    /// The plan `scene` produces under `config`, alongside the rounds it was
+    /// scheduled into.
+    ///
+    /// Depth is off, so every instance of the frame lands in the one blended
+    /// buffer in painter order and a case can read the whole plan out of it;
+    /// the split into the depth-writing pass is a surface-round decision and a
+    /// page round never takes it.
+    fn band_plan_of(scene: &Scene, config: &PageConfig) -> (Scratch, Vec<Round>) {
+        let frame = SceneCompiler::new(BAND_VIEWPORT.0, BAND_VIEWPORT.1)
+            .compile(scene, Affine::IDENTITY, BAND_VIEWPORT)
+            .expect("an in-range scene compiles");
+        let rounds = Schedule::build(
+            &frame.recorder,
+            &TierCaps::fake(DownlevelProfile::Full),
+            config,
+        )
+        .expect("a layer wider than the ceiling bands rather than refusing");
+
+        let mut scratch = Scratch::default();
+        scratch.build(&frame, &rounds, false, false, &[]);
+        assert_eq!(
+            scratch.rounds.len(),
+            rounds.len(),
+            "a frame with no clear is cut nowhere, so the plans and the rounds \
+             line up one for one"
+        );
+        (scratch, rounds)
+    }
+
+    /// A layer at half opacity — so it cannot be inlined and has to take a page
+    /// — holding one solid rectangle per entry of `rects`.
+    fn band_scene(rects: &[(Rect, Color)]) -> Scene {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_layer(
+            Rect::new(
+                0.0,
+                0.0,
+                f64::from(BAND_VIEWPORT.0),
+                f64::from(BAND_VIEWPORT.1),
+            ),
+            0.5,
+        );
+        for (rect, color) in rects {
+            builder.fill_rect(*rect, Brush::Solid(*color));
+        }
+        builder.pop_layer();
+        scene
+    }
+
+    /// The bounds of every page round, in order — one band's column each.
+    fn band_bounds(rounds: &[Round]) -> Vec<RectU16> {
+        rounds
+            .iter()
+            .filter_map(|round| round.page().map(|page| page.bounds))
+            .collect()
+    }
+
+    /// The strip instances one round plan issues, in execution order.
+    fn plan_strips(scratch: &Scratch, plan: &RoundPlan) -> Vec<GpuStrip> {
+        scratch.segments[plan.segments.clone()]
+            .iter()
+            .filter_map(|segment| match *segment {
+                Segment::Strips(first, count) => Some((first as usize, count as usize)),
+                Segment::Composite(..) => None,
+            })
+            .flat_map(|(first, count)| scratch.alpha[first..first + count].iter().copied())
+            .collect()
+    }
+
+    /// Every pixel column the frame's *page* rounds paint, mapped back out of
+    /// the pages they were shifted into, and valued by what the shader reads
+    /// there: the instance's paint payload, plus the exact alpha column that
+    /// pixel samples (`None` for a sparse instance, which samples none).
+    ///
+    /// Keyed by the draw's own depth as well as the position, so a page painted
+    /// by two different draws is not conflated — and so a *second* instance of
+    /// one draw covering a pixel it already covered, which is precisely what a
+    /// clamped band replay produces, is caught here rather than silently
+    /// overwriting the first.
+    fn painted_pixels(
+        scratch: &Scratch,
+        rounds: &[Round],
+    ) -> BTreeMap<(u32, u16, u16), (u32, Option<u32>)> {
+        let mut painted = BTreeMap::new();
+
+        for (plan, round) in scratch.rounds.iter().zip(rounds) {
+            let Some(page) = round.page() else {
+                continue;
+            };
+            for span in plan_strips(scratch, plan) {
+                for offset in 0..span.width {
+                    let x = page.bounds.x0 + span.x + offset;
+                    let y = page.bounds.y0 + span.y;
+                    let column = (offset < span.dense_width_or_rect_height)
+                        .then(|| span.col_idx_or_rect_frac + u32::from(offset));
+                    assert!(
+                        painted
+                            .insert((span.depth_index, y, x), (span.payload, column))
+                            .is_none(),
+                        "one draw covers a device pixel at most once, however the \
+                         layer holding it was split"
+                    );
+                }
+            }
+        }
+
+        painted
+    }
+
+    #[test]
+    fn a_banded_layer_paints_exactly_what_one_page_would_have() {
+        // The whole point of the split, asserted as an equality rather than as
+        // a rectangle property: the same scene planned onto one page and onto
+        // column bands has to paint the same device pixels, from the same
+        // paints, sampling the same alpha columns. A band replay that clamped
+        // a strip left of its own column onto the page's edge fails here twice
+        // over — once on the ghost pixel, once on the column it would sample.
+        let scene = band_scene(&[
+            (Rect::new(0.0, 0.0, 40.0, 8.0), RED),
+            // Straddles a band edge on a tile that is only partly covered, so
+            // the case exercises an alpha-sampled instance cut in two, not
+            // just a solid one.
+            (Rect::new(49.0, 0.0, 99.0, 8.0), BLUE),
+            (Rect::new(160.0, 0.0, 200.0, 8.0), RED),
+        ]);
+
+        let (one_page, one_page_rounds) = band_plan_of(&scene, &PageConfig::default());
+        let (banded, banded_rounds) = band_plan_of(&scene, &BAND_PAGES);
+
+        assert_eq!(
+            band_bounds(&one_page_rounds).len(),
+            1,
+            "the reference plan really does hold the layer on one page"
+        );
+        assert!(
+            band_bounds(&banded_rounds).len() > 1,
+            "and the case only means anything while the other one is banded"
+        );
+
+        assert_eq!(
+            painted_pixels(&banded, &banded_rounds),
+            painted_pixels(&one_page, &one_page_rounds),
+            "a banded layer paints what one whole-layer page would have"
+        );
+    }
+
+    #[test]
+    fn a_band_holds_no_instance_of_a_strip_outside_its_own_column() {
+        // The counterexample the equality above generalizes: content confined
+        // to the outer columns, and nothing at all in the middle. A band whose
+        // column the scene never drew in must render nothing — under a
+        // saturating shift it would render the leftmost content clamped onto
+        // its own edge instead.
+        let scene = band_scene(&[
+            (Rect::new(0.0, 0.0, 40.0, 8.0), RED),
+            (Rect::new(160.0, 0.0, 200.0, 8.0), BLUE),
+        ]);
+        let (scratch, rounds) = band_plan_of(&scene, &BAND_PAGES);
+        let bands = band_bounds(&rounds);
+        assert!(bands.len() > 2, "the layer bands: {bands:?}");
+
+        let mut empty = 0_usize;
+        for (plan, band) in scratch
+            .rounds
+            .iter()
+            .zip(&rounds)
+            .filter_map(|(plan, round)| round.page().map(|page| (plan, page.bounds)))
+        {
+            let strips = plan_strips(&scratch, plan);
+            if strips.is_empty() {
+                empty += 1;
+            }
+            for span in strips {
+                let end = span.x + span.width;
+                assert!(
+                    end <= band.width(),
+                    "an instance of {span:?} reaches past the {band:?} band's own \
+                     column, which its composite never samples"
+                );
+                // Mapped back to the scene, every instance lands where one of
+                // the two rectangles was actually drawn.
+                let x = band.x0 + span.x;
+                assert!(
+                    x < 44 || band.x0 + end > 160,
+                    "an instance covers device x {x}..{}, which neither \
+                     rectangle reaches",
+                    band.x0 + end
+                );
+            }
+        }
+
+        assert!(
+            empty > 0,
+            "a band whose column holds nothing renders nothing: {bands:?}"
+        );
+    }
+
+    #[test]
+    fn a_strip_straddling_a_band_edge_advances_its_alpha_column_with_its_geometry() {
+        // A pixel-aligned rectangle's left edge lands on a tile of its own, so
+        // a rectangle starting at 49 puts an alpha-sampled instance across
+        // 48..52 — and a band edge falls inside it. The two pieces together
+        // have to read the same coverage the whole instance would: neighbouring
+        // pixels of one strip row sampling neighbouring alpha columns, with no
+        // column repeated. The rectangles either side of it are what carries
+        // the layer past the ceiling, so the middle one is banded at all.
+        let scene = band_scene(&[
+            (Rect::new(0.0, 0.0, 40.0, 8.0), RED),
+            (Rect::new(49.0, 0.0, 99.0, 8.0), BLUE),
+            (Rect::new(160.0, 0.0, 200.0, 8.0), RED),
+        ]);
+        let (scratch, rounds) = band_plan_of(&scene, &BAND_PAGES);
+        let edges: Vec<u16> = band_bounds(&rounds)
+            .iter()
+            .map(|bounds| bounds.x0)
+            .collect();
+
+        // Every alpha-sampled pixel of every band, as (strip row, device x,
+        // the alpha column it samples) — a row at a time, because two rows of
+        // one draw sample different columns at the same x by construction.
+        let mut dense: Vec<(u16, u16, u32)> = Vec::new();
+        for (plan, band) in scratch
+            .rounds
+            .iter()
+            .zip(&rounds)
+            .filter_map(|(plan, round)| round.page().map(|page| (plan, page.bounds)))
+        {
+            for span in plan_strips(&scratch, plan) {
+                for offset in 0..span.dense_width_or_rect_height {
+                    dense.push((
+                        band.y0 + span.y,
+                        band.x0 + span.x + offset,
+                        span.col_idx_or_rect_frac + u32::from(offset),
+                    ));
+                }
+            }
+        }
+        dense.sort_unstable();
+
+        let neighbours = || {
+            dense
+                .windows(2)
+                .map(|pair| (pair[0], pair[1]))
+                .filter(|((row, x, _), (next_row, next_x, _))| row == next_row && x + 1 == *next_x)
+        };
+        assert!(
+            neighbours().any(|(_, (_, x, _))| edges.contains(&x)),
+            "the case only means anything while an alpha-sampled instance \
+             really is cut by a band edge {edges:?}: {dense:?}"
+        );
+
+        for ((_, _, column), (_, x, next_column)) in neighbours() {
+            assert_eq!(
+                next_column,
+                column + 1,
+                "neighbouring pixels of one strip row sample neighbouring alpha \
+                 columns, band edge at {x} or not: {dense:?}"
+            );
+        }
     }
 
     #[test]
