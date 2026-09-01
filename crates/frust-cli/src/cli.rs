@@ -120,10 +120,13 @@ pub enum Command {
         /// `frust-render` probes for at startup, by setting
         /// `FRUST_RENDER_TIER` for the launched process (see
         /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `cpu` and `engine` are
-        /// non-default tiers the app must have been BUILT with
-        /// (`frust-render`'s `cpu-tier`/`engine-tier`
-        /// features); otherwise the
+        /// / `RENDER_TIER_ENV_VAR`). `engine` is now the default tier
+        /// (`frust-render`'s `engine-tier` feature, on by default) — this
+        /// override is now equivalent to leaving the flag unset. `gpu` is
+        /// the vello-classic escape hatch for one release (unconditionally
+        /// compiled, no feature to opt into). `cpu` is a
+        /// non-default tier the app must have been BUILT with
+        /// (`frust-render`'s `cpu-tier` feature); otherwise the
         /// launched process refuses the override at startup and says so.
         /// **Desktop-preview only in v1**: the
         /// `cargo run` fallback gets the env var directly; plumbing an

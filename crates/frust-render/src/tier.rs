@@ -1,13 +1,16 @@
 //! Render-tier selection seam.
 //!
-//! [`RenderTier::Gpu`] is the vello 0.9 GPU compute path (the only tier a
-//! device is actually created for today); [`RenderTier::Cpu`] is the
-//! experimental `vello_cpu` fallback, selectable only when the `cpu-tier`
-//! feature is compiled in (not default — see `frust-render/Cargo.toml`)
-//! and not yet wired into device creation (that lands alongside the
-//! `cpu-tier` encode path). [`RenderTier::Engine`] is the frust-owned `frust-engine` strip pipeline
-//! behind the non-default `engine-tier` feature, override-only on exactly the
-//! same terms.
+//! [`RenderTier::Engine`] is the frust-owned `frust-engine` strip pipeline —
+//! the DEFAULT tier, behind the now-default `engine-tier` feature
+//! (`frust-render/Cargo.toml`): [`select_render_tier`] probes for it
+//! automatically, since `frust-engine` needs none of the vello GPU tier's
+//! downlevel flags (see [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]).
+//! [`RenderTier::Gpu`] is the vello 0.9 GPU compute path — the one-release
+//! classic escape hatch, reached only via an explicit `FRUST_RENDER_TIER=gpu`
+//! override. [`RenderTier::Cpu`] is the experimental `vello_cpu` fallback,
+//! selectable only when the `cpu-tier` feature is compiled in (not default —
+//! see `frust-render/Cargo.toml`) and not yet wired into device creation
+//! (that lands alongside the `cpu-tier` encode path).
 //!
 //! [`select_render_tier`] is pure decision logic over [`TierCaps`] (a plain
 //! struct a caller builds from a real `wgpu::Adapter`'s downlevel flags +
@@ -23,7 +26,6 @@
 pub enum RenderTier {
     /// GPU compute path (`vello` 0.9). Requires
     /// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`].
-    #[default]
     Gpu,
     /// Experimental CPU fallback (`vello_cpu` 0.0.9), only selectable when
     /// the `cpu-tier` feature is compiled in. Not yet wired
@@ -31,14 +33,19 @@ pub enum RenderTier {
     Cpu,
     /// The frust-owned render engine (`frust-engine`: a `frust_scene::Scene`
     /// compiled into sparse strips and drawn by ordinary render passes over
-    /// `frust-gpu`), only selectable when the `engine-tier` feature is
-    /// compiled in.
+    /// `frust-gpu`), selectable when the `engine-tier` feature is compiled
+    /// in — now the DEFAULT feature
+    /// (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`).
     ///
-    /// Never fallen back to: [`select_render_tier`] reaches this variant only
-    /// through an explicit override, because this tier is the subject of an
-    /// on-device comparison against vello, so which tier a capture ran must
-    /// be answerable from the command line rather than from the adapter.
-    /// [`select_render_tier`] never reaches it by probe.
+    /// **The default tier [`select_render_tier`] probes for** whenever the
+    /// `engine-tier` feature is compiled in: [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]
+    /// is deliberately empty, so an adapter that reaches the probe always
+    /// satisfies it. A build without the feature never sees this variant from
+    /// the probe path (falls through to `Gpu`/`Cpu` exactly as before this
+    /// default flipped); a build with it sees `Gpu` again only through an
+    /// explicit `FRUST_RENDER_TIER=gpu` override — the one-release
+    /// vello-classic escape hatch.
+    #[default]
     Engine,
 }
 
@@ -122,21 +129,29 @@ pub struct TierSelection {
 ///   adapter is **refused** — [`TierOutcome::Unavailable`] naming `Gpu` — since
 ///   an override cannot conjure a missing GPU capability; the caller then keeps
 ///   the same fail-fast behavior a failed probe produces (the override
-///   plumbing: `FRUST_RENDER_TIER` / `frust run --render-tier`).
-/// - Without an override: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]
-///   selects [`RenderTier::Gpu`]. Otherwise, if the `cpu-tier` feature is
-///   compiled in, falls back to [`RenderTier::Cpu`] (still experimental, and
-///   not yet wired into device creation — see this module's docs); without
-///   the feature, the result is [`TierOutcome::Unavailable`] naming `Cpu` as
-///   the tier that would apply, and the caller keeps today's fail-fast
-///   behavior using [`TierSelection::diagnosis`].
-/// - [`RenderTier::Engine`] is **override-only**: no probe ever selects it,
-///   so the fallback above still chooses between `Gpu` and `Cpu` exactly as
-///   before. An `Engine` override applies only in a build that compiled the
+///   plumbing: `FRUST_RENDER_TIER` / `frust run --render-tier`). An explicit
+///   `Gpu` override is now the ONLY way to reach the vello-classic tier — the
+///   one-release escape hatch.
+/// - Without an override: if the `engine-tier` feature is compiled in, `caps`
+///   satisfying [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] (deliberately empty, so
+///   always true) selects [`RenderTier::Engine`] — the default probed tier
+///   (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`). Only a build
+///   compiled WITHOUT the `engine-tier` feature falls through to the prior
+///   probe order: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] selects
+///   [`RenderTier::Gpu`];
+///   otherwise, if the `cpu-tier` feature is compiled in, falls back to
+///   [`RenderTier::Cpu`] (still experimental, and not yet wired into device
+///   creation — see this module's docs); without the feature, the result is
+///   [`TierOutcome::Unavailable`] naming `Cpu` as the tier that would apply,
+///   and the caller keeps today's fail-fast behavior using
+///   [`TierSelection::diagnosis`].
+/// - An `Engine` override applies only in a build that compiled the
 ///   `engine-tier` feature in, against [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`];
 ///   without it the override is refused ([`TierOutcome::Unavailable`] naming
 ///   `Engine`) rather than ignored, so a capture asked for on the engine tier
-///   can never be a vello frame wearing the wrong label.
+///   can never be a vello frame wearing the wrong label. With the feature
+///   compiled in, an explicit `Engine` override is equivalent to the
+///   no-override default described above.
 pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) -> TierSelection {
     let gpu_capable = caps.downlevel_flags.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS);
     // Always true today: [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is empty by
@@ -204,6 +219,27 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
                  the GPU tier's required downlevel flags)",
                 caps.adapter_name,
                 if gpu_capable { "supports" } else { "lacks" },
+            ),
+        };
+    }
+
+    // Default-tier swap: with the `engine-tier` feature compiled in, the
+    // engine tier is the probed default — checked BEFORE `gpu_capable` below,
+    // since `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is deliberately empty and
+    // `engine_capable` is therefore always true, so this arm always wins over
+    // the vello-classic one whenever the feature is compiled in. A build
+    // without the feature never reaches this arm and falls through to the
+    // pre-swap `Gpu`/`Cpu` order unchanged. `FRUST_RENDER_TIER=gpu` (the
+    // override branch above) remains the vello-classic escape hatch for one
+    // release.
+    if cfg!(feature = "engine-tier") && engine_capable {
+        return TierSelection {
+            outcome: TierOutcome::Available(RenderTier::Engine),
+            diagnosis: format!(
+                "frust-render: engine render tier selected by default (adapter `{}`; the \
+                 frust-engine tier requires none of the vello GPU tier's downlevel flags — set \
+                 {RENDER_TIER_ENV_VAR}=gpu for the vello-classic escape hatch)",
+                caps.adapter_name
             ),
         };
     }
@@ -340,15 +376,38 @@ mod tests {
     }
 
     #[test]
-    fn full_caps_select_gpu() {
+    fn full_caps_select_engine_by_default_else_gpu() {
+        // Default-tier swap: with `engine-tier` compiled in (the crate default),
+        // a fully-capable adapter now probes to `Engine`, not `Gpu` — the
+        // engine tier's requirement (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`,
+        // empty) is satisfied first. A build without the feature keeps the
+        // pre-swap `Gpu` result.
         let selection = select_render_tier(&caps(wgpu::DownlevelFlags::all()), None);
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Gpu));
+        if cfg!(feature = "engine-tier") {
+            assert_eq!(
+                selection.outcome,
+                TierOutcome::Available(RenderTier::Engine)
+            );
+        } else {
+            assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Gpu));
+        }
     }
 
     #[test]
-    fn missing_compute_shaders_falls_back_or_diagnoses() {
+    fn missing_compute_shaders_selects_engine_by_default_else_falls_back() {
+        // `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is empty, so a missing vello flag
+        // never disqualifies the engine tier: with `engine-tier` compiled in,
+        // this adapter still probes to `Engine`. Only a build without the
+        // feature exercises the pre-swap `Gpu`-incapable fallback.
         let missing_compute = wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::COMPUTE_SHADERS;
         let selection = select_render_tier(&caps(missing_compute), None);
+        if cfg!(feature = "engine-tier") {
+            assert_eq!(
+                selection.outcome,
+                TierOutcome::Available(RenderTier::Engine)
+            );
+            return;
+        }
         if cfg!(feature = "cpu-tier") {
             assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
         } else {
@@ -363,10 +422,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_indirect_execution_falls_back_or_diagnoses() {
+    fn missing_indirect_execution_selects_engine_by_default_else_falls_back() {
         let missing_indirect =
             wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION;
         let selection = select_render_tier(&caps(missing_indirect), None);
+        if cfg!(feature = "engine-tier") {
+            assert_eq!(
+                selection.outcome,
+                TierOutcome::Available(RenderTier::Engine)
+            );
+            return;
+        }
         if cfg!(feature = "cpu-tier") {
             assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
         } else {
@@ -456,9 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn engine_is_never_auto_probed() {
-        // The rule the whole on-device comparison rests on: no probe result
-        // may be `Engine`, however capable or incapable the adapter is.
+    fn engine_is_probed_by_default_iff_the_feature_is_compiled_in() {
+        // Default-tier swap: the probe selects `Engine` for every adapter,
+        // regardless of downlevel flags (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
+        // empty), whenever the `engine-tier` feature is compiled in — the
+        // default as of `frust-render/Cargo.toml`'s `default = ["engine-tier"]`.
+        // A build compiled WITHOUT the feature keeps the pre-swap invariant:
+        // no probe result may be `Engine`, however capable or incapable the
+        // adapter is.
         for flags in [
             wgpu::DownlevelFlags::all(),
             wgpu::DownlevelFlags::empty(),
@@ -466,11 +537,19 @@ mod tests {
             wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION,
         ] {
             let selection = select_render_tier(&caps(flags), None);
-            assert_ne!(
-                selection.outcome,
-                TierOutcome::Available(RenderTier::Engine),
-                "probe selected Engine for {flags:?}"
-            );
+            if cfg!(feature = "engine-tier") {
+                assert_eq!(
+                    selection.outcome,
+                    TierOutcome::Available(RenderTier::Engine),
+                    "probe did not select Engine for {flags:?} with engine-tier compiled in"
+                );
+            } else {
+                assert_ne!(
+                    selection.outcome,
+                    TierOutcome::Available(RenderTier::Engine),
+                    "probe selected Engine for {flags:?} without engine-tier compiled in"
+                );
+            }
         }
     }
 

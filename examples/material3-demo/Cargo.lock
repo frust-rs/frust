@@ -1375,6 +1375,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "vello_common",
  "vello_cpu",
  "wgpu",
 ]

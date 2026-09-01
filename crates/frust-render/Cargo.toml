@@ -28,15 +28,24 @@ frust-engine = { workspace = true, optional = true }
 frust-gpu = { workspace = true, optional = true }
 
 [features]
+# DEFAULT: `engine-tier` below. Vello classic (`Gpu`) survives one release
+# behind the `FRUST_RENDER_TIER=gpu` override (`tier::select_render_tier`);
+# it is never gated behind a Cargo feature of its own (the `vello`
+# dependency above is unconditional), only behind that runtime/compile-time
+# override.
+default = ["engine-tier"]
 # Experimental vello_cpu-backed CPU render tier.
 # NOT default — the GPU (vello) path is unaffected when this is off.
 cpu-tier = ["dep:vello_cpu"]
 # The frust-owned engine render tier (`frust-engine` over `frust-gpu`).
-# NOT default — the GPU (vello) path is unaffected when this is off, and a
-# build without this feature contains no `frust-engine` symbols at all
-# (`scripts/testing/engine-lean-check.sh`). Reachable only through an explicit
-# `FRUST_RENDER_TIER=engine` override, never by an adapter probe
-# (`tier::select_render_tier`).
+# DEFAULT: `tier::select_render_tier` now probes for and selects this tier
+# automatically (`frust-engine` needs none of the vello GPU tier's downlevel
+# flags — see `ENGINE_REQUIRED_DOWNLEVEL_FLAGS`), so a build that wants to
+# omit `frust-engine`/`frust-gpu` symbols
+# (`scripts/testing/engine-lean-check.sh`'s ON arm) now needs an explicit
+# `--no-default-features` opt-out rather than simply not asking for this
+# feature. `FRUST_RENDER_TIER=gpu` remains the vello-classic escape hatch for
+# one release; `FRUST_RENDER_TIER=engine` is now equivalent to the default.
 engine-tier = ["dep:frust-engine", "dep:frust-gpu"]
 # Opt-in perf-tracing probes: gates the
 # `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
