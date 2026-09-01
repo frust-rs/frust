@@ -2123,6 +2123,37 @@ flakiness class, third device).
 
 Devices not measured this pass: Pixel 5a (not at the rig).
 
+### Windows DX12 — 2026-09-01 (p7-08; Dell mini PC, Intel UHD 730, i5)
+
+Cold-start / pipeline-compile measurement (R6): material3-demo release
+build (`--features engine-tier,frust/perf-trace`), `FRUST_TRACE=1
+FRUST_TRACE_RAW=1`, tier via runtime `FRUST_RENDER_TIER`; 5 cold
+launches per arm via schtasks into the interactive session, ~12 s each,
+raw logs under `benchmarks/raw/dell_dx12/p7-08/`. wgpu's persisted
+`PipelineCache` is Vulkan-only, but the **DX12 driver-level shader cache
+persists across processes**, so run 1 after a fresh build is the true
+first-ever-launch cost and runs 2-5 are the everyday warm-cache cost:
+
+| Arm | first-ever launch TTFF | first-ever f1 | warm TTFF (4 runs) | warm f1 | warm f2/f3 |
+|---|---|---|---|---|---|
+| engine (engine-direct) | 588 ms | 188.6 ms | 196-223 ms | 1.3-1.7 ms | 2.1-7.0 ms |
+| classic (direct) | 1066 ms | 31.7 ms | 197-210 ms | 18.8-27.1 ms | 9.2-14.7 ms |
+
+Reading: the engine's ~8-pipeline warm-up list compiles inside the
+first-ever launch (188.6 ms lands in frame 1's submit; startup spans put
+first_encode_done at 400 ms and present at 588 ms), and the driver cache
+then makes every later launch's first frame 1.3-1.7 ms — the warm-up
+list is effective from the second launch onward. Classic's first-ever
+launch pays ~972 ms in adapter/device init (vello shader setup) for a
+1066 ms TTFF, 1.8x the engine's. Warm TTFF is process-bound and
+identical across arms (~200 ms); warm first frames are ~14x cheaper on
+the engine and steady frames ~4x. The eager-steal/warm-up-off arm is
+**not measured**: no toggle exists in the shipped code and the card
+forbids code changes; the warm-up cost is visible instead as run 1's
+in-frame compile above. GL/ANGLE fallback: **not measurable** —
+`WGPU_BACKEND=gl` fails with "Failed to create surface for any enabled
+backend: {}" (the gl backend is not compiled into the desktop build).
+
 ### iPhone SE — 2026-09-01 (context rows; 60 Hz panel, A13)
 
 `run.sh --platform ios` (devicectl), 12x30s kept-10 per scenario, one
