@@ -1993,6 +1993,20 @@ bash benchmarks/harness/ab_matrix.sh --device <serial> --device-name <slug> \
 | engine | S2 | 11.67 | 12.75 | 13.92 | 125.94 | 130/26484 | 26484/26484 | 5.91 | 8.38 | 8.61 | 53.35 | Pixel 5 |
 | engine | S5 | 13.23 | 14.06 | 14.99 | 148.15 | 121/23274 | 23274/23274 | 11.80 | 12.31 | 12.56 | 55.43 | Pixel 5 |
 | engine | S6 | 11.57 | 12.25 | 12.67 | 137.70 | 116/26554 | 26554/26554 | 5.93 | 9.20 | 9.46 | 53.04 | Pixel 5 |
+| classic | S1 | 5.36 | 8.90 | 10.56 | 69.21 | see raw | see raw | n/a | n/a | n/a | 3.91 | Xiaomi 12, area/1.0 |
+| classic | S2 | 11.62 | 18.31 | 20.39 | 51.12 | see raw | see raw | n/a | n/a | n/a | 5.03 | Xiaomi 12, area/1.0 |
+| classic | S5 | 12.69 | 17.12 | 19.28 | 53.37 | see raw | see raw | n/a | n/a | n/a | 6.51 | Xiaomi 12, area/1.0 |
+| classic | S6 | 5.97 | 9.34 | 9.91 | 58.22 | see raw | see raw | n/a | n/a | n/a | 3.45 | Xiaomi 12, area/1.0 |
+| engine | S1 | 8.00 | 9.06 | 9.95 | 70.24 | see raw | see raw | n/a | 5.25 | 5.37 | 10.32 | Xiaomi 12 |
+| engine | S2 | 9.38 | 19.70 | 21.32 | 59.65 | see raw | see raw | n/a | 3.13 | 3.31 | 3.03 | Xiaomi 12 |
+| engine | S5 | 15.36 | 21.14 | 23.42 | 61.04 | see raw | see raw | n/a | 2.06 | 5.64 | 5.24 | Xiaomi 12 |
+| engine | S6 | 11.59 | 22.77 | 24.06 | 64.97 | see raw | see raw | n/a | 1.28 | 1.54 | 9.12 | Xiaomi 12 |
+| classic | S1 | 16.85 | 17.11 | 17.30 | 39.46 | 15124/16803 | 16803/16803 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| classic | S2 | 19.40 | 20.78 | 20.96 | 39.68 | 14982/15051 | 15051/15051 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| classic | S6 | 17.10 | 17.39 | 17.54 | 39.33 | 14869/15012 | 15012/15012 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S1 | 16.71 | 18.16 | 18.52 | 26.42 | 9988/18582 | 18582/18582 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S2 | 19.53 | 21.09 | 21.81 | 24.53 | 18232/18272 | 18272/18272 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
+| engine | S6 | 16.86 | 17.92 | 18.71 | 24.66 | 10571/18189 | 18189/18189 | n/a | n/a | n/a | n/a | iPhone SE, 60 Hz |
 
 Column basis, matching PROTOCOL §7's v4 note and `ab_matrix.sh`'s own
 `gpu_graphics_stats`: `p50`/`p95`/`p99`/`worst`/`missed @*` are `stats.py`'s
@@ -2056,6 +2070,38 @@ link proved flaky — orchestration-only, measurement is on-device; (3) the
 engine's `missed @8.33ms` columns read all-frames because the Pixel 5
 paces these scenarios near 90 Hz with p50 > 8.33 ms — the 120 Hz budget
 is not a target on this device.
+
+### Xiaomi 12 — 2026-09-01 (context rows; thresholds are Pixel-5-gated)
+
+Same convention and command over adb-over-TLS wireless. The known
+Adreno-730 pattern (Phase 5's s6 note) fully quantified: classic's
+compute pipeline shines on the flagship (S1 5.36 / S6 5.97) and the
+engine is slower at p50 on S1/S5/S6 (S6 1.9x) while WINNING S2; the
+engine's `gpu_total` is tiny (1.3-5.3 ms) — its frames there are
+CPU/pacing-bound, not GPU-bound. 730-class tuning remains a recorded
+future-arc candidate. Deviations: MIUI thermal/scheduler uncontrolled;
+`missed` columns in the raw stats.txt; the nav pass emitted no
+`frust-perf` lines on EITHER tier (likely MIUI logcat filtering — same
+class as the Pixel's classic-nav skip); Graphics-PSS accounting on MIUI
+reads 3-10 MB (not comparable to the Pixel's 52-55 MB scale — different
+HWC attribution), recorded as-is.
+
+### iPhone SE — 2026-09-01 (context rows; 60 Hz panel, A13)
+
+`run.sh --platform ios` (devicectl), 12x30s kept-10 per scenario, one
+signed profile build per tier (`frust build ios --profile
+[--features engine-tier] --define FRUST_TRACE_RAW=1 [--define
+FRUST_RENDER_TIER=engine]`), s1/s2/s6. **Engine == classic within noise**
+(p50 16.71/19.53/16.86 vs 16.85/19.40/17.10; p95 ratios 1.01-1.06x, all
+inside the <=1.15x criterion). s1/s6 are display-paced at the 60 Hz vsync
+on both tiers; **s2 exceeds the 60 Hz budget on BOTH tiers identically**
+— a device/scenario characteristic, not an engine regression. gpu_q=0
+throughout (no GPU-timer readings on this pass); Graphics PSS is
+Android-only, n/a. iOS environmental controls uncontrolled per the
+harness's own iOS note. The separately-observed Mode-B playground
+sluggishness on this device (engine==classic Mode-A parity proven here)
+is tracked as a Mode-B/platform-view compositing investigation, not a
+tier finding.
 
 ---
 
