@@ -248,9 +248,7 @@ pub(crate) fn parse_render_scale(raw: Option<String>) -> f64 {
 /// surface's size and upscales it in the blit pass, so the cost per pixel of
 /// vello's fine stage (which is proportional to the pixels it sweeps) can be
 /// measured on device. It is a measurement instrument, not a shipping mode:
-/// while it is active the surface is pinned onto the blit arm and the
-/// snapshot-layer cache is refused outright (see
-/// [`crate::renderer::snapshot_cache_enabled`]).
+/// while it is active the surface is pinned onto the blit arm.
 pub(crate) fn render_scale() -> f64 {
     static SCALE: OnceLock<f64> = OnceLock::new();
     *SCALE.get_or_init(|| {
@@ -266,13 +264,12 @@ pub(crate) fn render_scale() -> f64 {
 /// configured ([`RenderContext::create_render_surface`]'s forced-blit
 /// decision, which has no surface to ask yet).
 ///
-/// Once a surface exists, "is this frame scaled?" is answered by the surface
-/// itself ([`ConfiguredSurface::render_scaled`]) and the root it carries
-/// ([`blit_root`], stored on [`RenderPath::Blit`]): both are derived from the
-/// intermediate's REAL size, so they stay true for a CPU-tier surface (pinned
-/// to full resolution whatever the knob says) and for the ceil'd target the
-/// knob actually produces. Deriving them a second time from this process
-/// global is how two answers about one frame start to disagree.
+/// Once a surface exists, "is this frame scaled?" is answered by the root it
+/// carries ([`blit_root`], stored on [`RenderPath::Blit`]): that is derived
+/// from the intermediate's REAL size, so it stays true for a CPU-tier surface
+/// (pinned to full resolution whatever the knob says) and for the ceil'd
+/// target the knob actually produces. Deriving it a second time from this
+/// process global is how two answers about one frame start to disagree.
 pub(crate) fn render_scaled() -> bool {
     render_scale() < MAX_RENDER_SCALE
 }
@@ -320,19 +317,6 @@ pub(crate) fn blit_root(surface: (u32, u32), target: (u32, u32)) -> Affine {
         f64::from(target.0) / f64::from(surface.0),
         f64::from(target.1) / f64::from(surface.1),
     )
-}
-
-/// Whether a surface of `surface` size renders BELOW its own resolution, given
-/// the intermediate it renders into (`None` on the direct arms, which have no
-/// intermediate and are therefore never scaled — a scale < 1 forces the blit
-/// arm, see [`RenderContext::create_render_surface`]).
-///
-/// The pure core of [`ConfiguredSurface::render_scaled`], and the same
-/// comparison [`blit_root`] turns into a transform: a blit intermediate is the
-/// surface's own size unless [`scaled_size`] shrank it, so "a different size"
-/// IS "scaled".
-fn path_render_scaled(surface: (u32, u32), blit_target: Option<(u32, u32)>) -> bool {
-    matches!(blit_target, Some(target) if target != surface)
 }
 
 /// The sampler filter the blit pass upscales with: linear while the
@@ -451,8 +435,8 @@ pub(crate) enum RenderPathKind {
 /// - `Opaque`/`Auto` ignore alpha entirely — [`RenderPathKind::EngineDirect`].
 /// - `Inherit` (Android's translucent mode) and `PreMultiplied` expect
 ///   PREMULTIPLIED alpha, which is what the engine's strip pipelines already
-///   write ([`crate::compositor`]'s premultiplied convention). Served as-is on
-///   the same arm: no [`PremultiplyPass`], which would darken every
+///   write (the premultiplied convention every frust GPU path uses). Served
+///   as-is on the same arm: no [`PremultiplyPass`], which would darken every
 ///   partial-alpha pixel by a second factor of `a`.
 /// - `PostMultiplied` expects STRAIGHT alpha and would read `(C·a, a)` as
 ///   `(C, a)` — every partial-alpha pixel too dark. It takes
@@ -572,31 +556,6 @@ pub(crate) fn shader_effects_disabled() -> bool {
         env_flag_enabled(
             option_env!("FRUST_NO_SHADER_EFFECTS"),
             std::env::var("FRUST_NO_SHADER_EFFECTS").ok(),
-        )
-    })
-}
-
-/// Whether the snapshot-layer cache (`crate::snapshot::SnapshotCache`) is
-/// force-disabled via the process-wide `FRUST_NO_SNAPSHOT_LAYERS` flag — the
-/// same unproven-render-path safety valve shape as
-/// [`shader_effects_disabled`]: the snapshot pre-pass drives real GPU work (an
-/// offscreen texture per cached subtree, an extra `render_to_texture` whenever
-/// a body changes, and — through [`crate::compositor`] — a quad pass and a
-/// possible second vello pass per composited frame), so this flag is the
-/// fallback-proof escape hatch that reverts every `Command::PushSnapshot` to
-/// the inline emulation the encode walk performed before the cache existed
-/// (`convert::encode_range_with_overrides`'s miss path), with zero pre-pass
-/// GPU work: a disabled cache yields an empty frame plan, so the compositor
-/// pass never runs and each arm is byte-identical to its pre-cache self. Same
-/// compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/RENDER_DEVELOPMENT.md`
-/// § Instrumentation (render path)). Cached: read once per process.
-pub(crate) fn snapshot_layers_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        env_flag_enabled(
-            option_env!("FRUST_NO_SNAPSHOT_LAYERS"),
-            std::env::var("FRUST_NO_SNAPSHOT_LAYERS").ok(),
         )
     })
 }
@@ -780,9 +739,9 @@ fn log_render_path(
 /// arm it ends up on (scale < 1 always forces the blit arm).
 ///
 /// A scale below full resolution ALSO emits one `log::warn!`: the knob rewires
-/// the render path (forced blit, snapshot cache off) and a capture taken
-/// hours later should not have to infer that from an `info` line — a default
-/// build logs nothing extra.
+/// the render path (forced blit) and a capture taken hours later should not
+/// have to infer that from an `info` line — a default build logs nothing
+/// extra.
 fn log_render_scale(width: u32, height: u32, scale: f64) {
     static LOGGED: OnceLock<()> = OnceLock::new();
     LOGGED.get_or_init(|| {
@@ -791,7 +750,7 @@ fn log_render_scale(width: u32, height: u32, scale: f64) {
         if scale < MAX_RENDER_SCALE {
             log::warn!(
                 "frust-render measurement knob in effect: render-scale={scale} \
-                 (blit forced, snapshot cache off)"
+                 (blit forced)"
             );
         }
     });
@@ -895,21 +854,20 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
 }
 
 /// Whether a **resolved** alpha mode means "translucent, and the swapchain
-/// stores STRAIGHT alpha" — the one combination the snapshot compositor has no
-/// exact arithmetic for.
+/// stores STRAIGHT alpha" — the combination the engine tier has to convert
+/// its premultiplied output for.
 ///
 /// True for `PostMultiplied` alone: it is translucent
 /// ([`alpha_mode_is_translucent`]) and expects straight alpha
 /// ([`alpha_mode_needs_premultiply`] is false), which is iOS's translucent
 /// mode. `Inherit`/`PreMultiplied` are translucent but premultiplied, so they
-/// take [`RenderPath::DirectPremultiplied`] and the compositor's premultiplied
-/// arm; `Opaque`/`Auto` ignore alpha entirely, which is the destination the
-/// straight arm's blend is exact for.
+/// take [`RenderPath::DirectPremultiplied`] on the vello arm and
+/// [`RenderPathKind::EngineDirect`] on the engine one; `Opaque`/`Auto` ignore
+/// alpha entirely.
 ///
-/// Pure and mode-only, so the decision is host-testable without a surface; the
-/// live per-surface answer is
-/// [`ConfiguredSurface::straight_alpha_translucent`], which additionally
-/// respects [`blit_translucency_refused`].
+/// Pure and mode-only, so the decision is host-testable without a surface. A
+/// surface whose translucency was REFUSED ([`blit_translucency_refused`])
+/// presents opaque whatever this answers of its mode.
 fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
     alpha_mode_is_translucent(mode) && !alpha_mode_needs_premultiply(mode)
 }
@@ -1337,10 +1295,9 @@ pub(crate) enum RenderPath {
         /// The intermediate's own pixel size, which is the surface's size
         /// unless `FRUST_RENDER_SCALE` shrank it ([`scaled_size`]) — the size
         /// every pass that targets this texture must use (vello's
-        /// `RenderParams`, the compositor's target and its trailing scratch),
-        /// as opposed to `ConfiguredSurface::config`'s swapchain size, which
-        /// stays the surface's. Stored rather than re-derived per frame so
-        /// one resolved answer feeds every consumer.
+        /// `RenderParams`), as opposed to `ConfiguredSurface::config`'s
+        /// swapchain size, which stays the surface's. Stored rather than
+        /// re-derived per frame so one resolved answer feeds every consumer.
         target_size: (u32, u32),
         /// The root transform every vello pass into this intermediate encodes
         /// under — [`blit_root`] of the swapchain size onto `target_size`,
@@ -1438,59 +1395,10 @@ pub(crate) struct ConfiguredSurface {
     pub(crate) resolved_translucent: bool,
 }
 
-impl ConfiguredSurface {
-    /// Whether this surface really came up translucent with a swapchain that
-    /// stores STRAIGHT alpha — iOS's `PostMultiplied` translucent mode.
-    ///
-    /// Reads [`Self::resolved_translucent`] rather than the raw alpha mode, so
-    /// a surface whose translucency was REFUSED
-    /// ([`blit_translucency_refused`]) answers `false`: it presents opaque, and
-    /// an opaque destination is exactly what the straight blend is exact for.
-    ///
-    /// [`crate::renderer::SurfaceRenderer`] folds this into the snapshot
-    /// cache's enable decision (`renderer::snapshot_cache_enabled`): the
-    /// compositor's straight arm computes `dst * (1 - a) + rgb * a`, the
-    /// straight-alpha `over` only at destination alpha 1, so such a surface
-    /// keeps every bracket on the inline path instead.
-    pub(crate) fn straight_alpha_translucent(&self) -> bool {
-        self.resolved_translucent && alpha_mode_is_straight_translucent(self.config.alpha_mode)
-    }
-
-    /// Whether THIS surface renders below its own resolution — the per-surface
-    /// answer every scale-dependent decision downstream of configuration reads
-    /// (the snapshot-cache refusal in
-    /// [`crate::renderer::snapshot_cache_enabled`]), so none of them can
-    /// disagree with the geometry the surface was actually configured with.
-    ///
-    /// Derived from the sizes the surface holds ([`path_render_scaled`]) rather
-    /// than from [`render_scaled`]'s process global: the same truth
-    /// [`RenderPath::Blit`]'s `root` is built from, so a scaled frame's encode
-    /// and the cache's refusal are answering one question, not two.
-    pub(crate) fn render_scaled(&self) -> bool {
-        let blit_target = match &self.path {
-            RenderPath::Blit { target_size, .. } => Some(*target_size),
-            RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => None,
-            // Both engine arms render at the surface's own resolution — the
-            // un-premultiplying arm's intermediate is the swapchain's size, not
-            // a scaled one. The scale knob is a vello instrument
-            // (`effective_render_scale`).
-            #[cfg(feature = "engine-tier")]
-            RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. } => None,
-        };
-        path_render_scaled((self.config.width, self.config.height), blit_target)
-    }
-}
-
 /// Every swapchain format [`RenderContext::create_render_surface`] can
 /// configure a surface with: the direct arm's mandatory `Rgba8Unorm` (vello's
 /// `render_to_texture` target format) and, on the blit arm, whichever of the
 /// two the platform reports first.
-///
-/// Named once so the compositor's own attachment-format predicate can be
-/// coupled to it by a test (`compositor::is_supported_target_format`): the
-/// composite pass draws onto the swapchain itself on both direct arms, so a
-/// format this list gained without the pass gaining its arithmetic would
-/// silently disable snapshot layers on that surface.
 pub(crate) const SURFACE_FORMATS: [wgpu::TextureFormat; 2] = [
     wgpu::TextureFormat::Rgba8Unorm,
     wgpu::TextureFormat::Bgra8Unorm,
@@ -1624,15 +1532,13 @@ fn create_targets(
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     // The GPU tier renders into this via a storage binding, then blits it to
-    // the swapchain. `RENDER_ATTACHMENT` is the snapshot compositor's
-    // (`crate::compositor`) write path: on the blit and direct-premultiplied
-    // arms this intermediate is the colour attachment its quad pass loads and
-    // draws onto, between vello and the blit/premultiply tail. `Rgba8Unorm` is
-    // renderable on every wgpu backend, so the combined usage is universally
-    // available. The CPU tier (`cpu-tier` feature) instead uploads its
-    // rasterized pixmap into it with `write_texture`, which needs `COPY_DST` —
-    // added only under the feature so default GPU-only builds keep the exact
-    // usage set they had before.
+    // the swapchain. `RENDER_ATTACHMENT` keeps the intermediate usable as a
+    // colour attachment — what the engine tier's own un-premultiplying arm
+    // needs of it. `Rgba8Unorm` is renderable on every wgpu backend, so the
+    // combined usage is universally available. The CPU tier (`cpu-tier`
+    // feature) instead uploads its rasterized pixmap into it with
+    // `write_texture`, which needs `COPY_DST` — added only under the feature
+    // so default GPU-only builds keep the exact usage set they had before.
     #[allow(unused_mut)]
     let mut usage = wgpu::TextureUsages::STORAGE_BINDING
         | wgpu::TextureUsages::TEXTURE_BINDING
@@ -2670,37 +2576,21 @@ mod tests {
     }
 
     #[test]
-    fn only_a_blit_arm_with_a_smaller_intermediate_is_scaled() {
-        // The three answers `ConfiguredSurface::render_scaled` delegates here
-        // for: a blit arm whose intermediate shrank, one at the surface's own
-        // size, and a direct arm, which has no intermediate at all (a scale
-        // below 1 forces the blit arm, so a direct surface is never scaled).
-        let surface = (1080, 2400);
-        assert!(path_render_scaled(
-            surface,
-            Some(scaled_size(surface.0, surface.1, 0.75))
-        ));
-        assert!(!path_render_scaled(
-            surface,
-            Some(scaled_size(surface.0, surface.1, 1.0))
-        ));
-        assert!(!path_render_scaled(surface, Some(surface)));
-        assert!(!path_render_scaled(surface, None));
-    }
-
-    #[test]
     fn a_scaled_surface_agrees_with_the_root_it_encodes_under() {
-        // The one-derivation contract: "scaled" and "the root" are two reads
-        // of the same pair of sizes, so they can never disagree about a frame.
+        // The one-derivation contract: "the intermediate shrank" and "the
+        // root" are two reads of the same pair of sizes, so they can never
+        // disagree about a frame.
         for (surface, scale) in [
             ((1080, 2400), 0.75),
             ((1179, 2556), 0.75),
             ((720, 1600), 1.0),
         ] {
             let target = scaled_size(surface.0, surface.1, scale);
-            let scaled = path_render_scaled(surface, Some(target));
             let root = blit_root(surface, target);
-            assert_eq!(scaled, root.as_coeffs() != Affine::IDENTITY.as_coeffs());
+            assert_eq!(
+                target != surface,
+                root.as_coeffs() != Affine::IDENTITY.as_coeffs()
+            );
         }
     }
 
@@ -3187,17 +3077,16 @@ mod tests {
         }
     }
 
-    /// The snapshot compositor's refusal case, over every mode
+    /// The straight-alpha translucency case, over every mode
     /// `resolve_alpha_mode` can produce: `PostMultiplied` alone is translucent
-    /// AND straight-alpha, so it is the only one that keeps brackets inline.
+    /// AND straight-alpha, so it is the only one the engine tier converts for.
     #[test]
     fn only_post_multiplied_is_translucent_with_straight_alpha() {
         assert!(alpha_mode_is_straight_translucent(
             wgpu::CompositeAlphaMode::PostMultiplied
         ));
-        // Translucent but premultiplied: `DirectPremultiplied` plus the
-        // compositor's premultiplied arm, whose algebra closes for every
-        // destination alpha.
+        // Translucent but premultiplied: `DirectPremultiplied` on the vello
+        // arm, and the engine's own premultiplied output served as-is.
         for mode in [
             wgpu::CompositeAlphaMode::PreMultiplied,
             wgpu::CompositeAlphaMode::Inherit,

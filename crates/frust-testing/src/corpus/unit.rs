@@ -1019,10 +1019,9 @@ fn shader_quad() -> CorpusCase {
 /// `snapshot_bracket_inline_emulation_matches_the_composite_arithmetic`,
 /// geometry and assertions verbatim.
 ///
-/// A `Command::PushSnapshot` bracket lowered INLINE — the arm a cache miss,
-/// an uncacheable body, the `cpu-tier` surface and the
-/// `FRUST_NO_SNAPSHOT_LAYERS` kill switch all produce, and the absolute
-/// arithmetic the composited arm is then required to reproduce:
+/// A `Command::PushSnapshot` bracket lowered INLINE — the only lowering this
+/// framework has for one, on every render path and every tier — and the
+/// absolute arithmetic it must hit:
 ///
 /// - the opaque red block composites at the bracket's 0.75 alpha to 191;
 /// - the half-alpha green band composites at `128 * 0.5 * 0.75` to 48 —

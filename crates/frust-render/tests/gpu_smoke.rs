@@ -212,18 +212,14 @@ async fn run_clear_probe() {
     }
 }
 
-/// The inline (MISS) lowering of a `Command::PushSnapshot` bracket, pixel for
-/// pixel — the arm the compositor is measured against.
+/// The inline lowering of a `Command::PushSnapshot` bracket, pixel for pixel
+/// — the only lowering this crate has for one.
 ///
-/// A cached bracket's pixels are drawn OUTSIDE vello now (`compositor.rs`'s
-/// quad pass, whose own parity smoke lives in-crate because the compositor is
-/// crate-private). What is reachable from here, through the public
-/// `encode_scene` seam alone, is the other half of that comparison: the
-/// bracket lowered inline, which is what a MISS, an uncacheable body, a
-/// `cpu-tier` surface and the `FRUST_NO_SNAPSHOT_LAYERS` kill switch all
-/// produce. This pins the absolute arithmetic that arm must hit — the numbers
-/// the composited arm is then required to reproduce — and the z-order of a
-/// command recorded after the bracket.
+/// Reached through the public `encode_scene` seam alone: the bracket's
+/// presentation scale as a transform correction and its sub-unity alpha as a
+/// layer, which is what every render path and every tier produces. This pins
+/// the absolute arithmetic that lowering must hit and the z-order of a command
+/// recorded after the bracket.
 ///
 /// The geometry keeps every content edge on a whole device pixel, so nothing
 /// here is measuring rasterizer subpixel coverage.

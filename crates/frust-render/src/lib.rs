@@ -23,14 +23,13 @@
 //! `Pixmap` is uploaded into the same intermediate target the GPU path blits
 //! from (see the `cpu_tier` module).
 //!
-//! Two Gpu-tier pre-passes run inside `encode` before the main scene is built.
-//! The fragment-shader pre-pass (`shader_effects`) renders each
+//! One Gpu-tier pre-pass runs inside `encode` before the main scene is built:
+//! the fragment-shader pre-pass (`shader_effects`) renders each
 //! `Command::ShaderQuad` into an offscreen texture registered with vello as an
-//! image override. The snapshot-layer cache (`snapshot`) rasterizes a stable
-//! subtree once into its own texture and hands back a frame plan; those
-//! textures never enter vello at all — `compositor` draws each of them as one
-//! alpha-blended quad in a wgpu render pass AFTER vello, on every render arm,
-//! while the bracket's `alpha`/`scale` animate for free.
+//! image override. A `Command::PushSnapshot` bracket needs no pre-pass of its
+//! own — it lowers inline through `convert`'s emulation (the presentation
+//! scale composed onto every inner command's transform, sub-unity alpha as a
+//! layer), the same lowering the engine tier's own compiler performs.
 //!
 //! [`HeadlessRenderer`] renders the same scenes with no surface at all — the
 //! offscreen oracle harness golden and pixel-regression tests compare against,
@@ -39,19 +38,13 @@
 //! Surface lifecycle is a first-class state machine: see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
-// The wgpu quad pass that draws `snapshot`'s cached page textures onto a
-// frame. Crate-private; runs after vello on every render arm (see
-// `SurfaceRenderer::encode`/`submit`), because a full-page image quad inside
-// vello costs ~100 ms/frame on a low-end mobile GPU and one blended quad
-// costs ~1-2 ms.
-mod compositor;
 mod context;
 mod convert;
 #[cfg(feature = "cpu-tier")]
 mod cpu_tier;
 // Offscreen (no surface, no swapchain) vello-classic rendering: the harness
 // the oracle/golden and pixel-regression tests render through. Reachable from
-// outside the crate, unlike the pre-pass modules, because those tests live
+// outside the crate, unlike the pre-pass module, because those tests live
 // outside it — and still leaking no `vello`/`wgpu` type (see its module docs).
 mod headless;
 mod lifecycle;
@@ -62,12 +55,6 @@ mod renderer;
 // which compiles/renders each `Command::ShaderQuad` program into an offscreen
 // texture and registers it as a vello image override before vello encoding.
 mod shader_effects;
-// Cached rasterizations of `Command::PushSnapshot` bodies. Crate-private;
-// wired into `SurfaceRenderer::encode`'s Gpu-tier snapshot pre-pass, which
-// rasterizes each outermost bracket's body into its own texture and returns
-// the frame plan the encode walk skips those bodies by and `compositor` draws
-// them from.
-mod snapshot;
 mod tier;
 
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
