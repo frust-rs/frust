@@ -2173,6 +2173,36 @@ tier finding.
 
 ---
 
+## muxr-app swap gate — Phase 8 (engine as the DEFAULT tier, p8-02)
+
+**2026-09-02, Ed at the desk.** First real-app pass with the engine as
+the *default* render tier (p8-01, frust `feature/frust-engine-p8` @
+`fee84055`): apps/muxr-app built from its `feature/muxr-pro` checkout
+(`a128ad02`) with **zero app-side changes** — the facade exposes no
+default features, so the app's `default-features = false` does not block
+`frust-render`'s new `engine-tier` default reaching it through the
+shells.
+
+| Device | Build | Verdict | Receipt |
+|---|---|---|---|
+| Pixel 5 (redfin, Adreno 620) | developRelease APK (develop.jks-signed) | **PASS** | logcat: `frust-render tier=engine (frust-engine strip pipeline, format=Rgba8Unorm into a Rgba8Unorm swapchain, 1080x2340, adapter Adreno (TM) 620)` |
+| iPhone SE (A13, wireless devicectl) | Release `Runner.app`, bundle `com.it.f0x.muxr` | **PASS** | engine markers in the shipped binary (`frust_engine`=5); devicectl console carries no app lines on this rig — verdict by eyes |
+
+Ed walked the app end to end on both phones (sessions, terminal,
+settings, dialogs/sheets, fonts, translucent chrome): **no visual
+regression on either device**, and on the Pixel 5 the app is
+**noticeably smoother than the vello build** ("muxr runs a lot smoother
+on the pixel than with vello").
+
+Methodology deviations: the card's side-by-side screenshot comparison
+against a vello arm was **waived by Ed at the desk** — the smoothness
+delta was evident without a control arm ("no point in a comparison").
+Until p8-04 lands, a vello comparison arm remains reachable via a
+`--define FRUST_RENDER_TIER=gpu` build (Android cannot set the runtime
+env var). No per-screen matrix was recorded; the sign-off is global.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB
