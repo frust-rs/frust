@@ -798,10 +798,24 @@ impl ModalWidget {
             return;
         }
         self.panel.take_exited();
-        if let Some(on_close) = &self.on_close
-            && on_close.fire()
-        {
+        let Some(on_close) = &self.on_close else {
+            return;
+        };
+        if on_close.fire() {
             self.closed = true;
+            ctx.request_frame();
+        } else {
+            // The stack moved under the staged pop, so it was refused (see
+            // [`StagedPop::fire`]). Left `staged` set, the host would latch
+            // itself un-dismissable — every later dismissal needs it clear —
+            // over a fully exited, input-transparent panel that no longer
+            // swallows anything and a page it never actually popped.
+            // Recoverable, not bricked: reopen the panel and the scrim, the
+            // same way [`ModalView::open`] flipping back on does, so a later
+            // dismissal arms a fresh exit against the stack as it now stands.
+            self.staged = false;
+            self.panel.set_open(true);
+            self.scrim.set_open(true);
             ctx.request_frame();
         }
     }
@@ -857,6 +871,18 @@ impl<State: 'static> View<State> for ModalView<State> {
             element.open = self.open;
             element.panel.set_open(self.open);
             element.scrim.set_open(self.open);
+            if self.open {
+                // The latches describe **one** open episode, not the widget's
+                // whole lifetime: a transition back into an open phase — after
+                // a prior exit settled (`closed`), or interrupting one still
+                // animating (`staged`) — starts a fresh episode. Left set, a
+                // reopened panel would stay permanently un-dismissable
+                // (`dismissable` requires both clear) and unannounced
+                // (`semantics` returns early on `staged`), latched over a panel
+                // that is visibly back and interactive.
+                element.staged = false;
+                element.closed = false;
+            }
             flags |= ChangeFlags::PAINT;
         }
         // Closures aren't comparable, so the dismiss adapter is reinstalled
@@ -915,6 +941,7 @@ impl Widget for ModalWidget {
         }
 
         let rect = self.rect + ctx.origin().to_vec2();
+        let mut layer_pushed = false;
         match self.config.mount {
             ModalMount::Center => {
                 // `{opacity, y, scale}` in, a shallower scale out — raw progress
@@ -928,7 +955,21 @@ impl Widget for ModalWidget {
                 let scale = from + (1.0 - from) * progress;
                 let lift = Vec2::new(0.0, (1.0 - progress) * PANEL_ENTER_LIFT);
                 let centre = rect.center();
-                scene.push_layer(rect.origin(), rect.size(), progress.clamp(0.0, 1.0) as f32);
+                let alpha = progress.clamp(0.0, 1.0) as f32;
+                // A pushed layer clips to its own rectangle, so a layer sized to
+                // the panel's *resting* `rect` cuts off whatever the transform
+                // below moves past it. `scale` never grows past `1.0` while
+                // `alpha` is under it — both `PANEL_ENTER_SCALE` and
+                // `PANEL_EXIT_SCALE` are under `1.0`, and `alpha < 1.0` is
+                // exactly the range this branch scales *toward* `1.0` over —
+                // so the lift is the only headroom the layer needs, inflated by
+                // its exact travel this frame; a fully open panel needs no
+                // layer at all, since nothing is moved out of its own rect.
+                if alpha < 1.0 {
+                    let layer = rect.inflate(0.0, lift.y.abs());
+                    scene.push_layer(layer.origin(), layer.size(), alpha);
+                    layer_pushed = true;
+                }
                 scene.push_transform(
                     Affine::translate(lift)
                         * Affine::translate(centre.to_vec2())
@@ -951,7 +992,7 @@ impl Widget for ModalWidget {
         }
         self.content.paint_child(ctx, scene);
         scene.pop_transform();
-        if matches!(self.config.mount, ModalMount::Center) {
+        if layer_pushed {
             scene.pop_layer();
         }
     }
@@ -1315,17 +1356,20 @@ mod tests {
     const EXIT_SPAN: u64 = 400;
 
     /// A recording scene: the filled rects in paint order (the scrim first, then
-    /// the panel), and the alpha of each composited layer.
+    /// the panel), the alpha of each composited layer, and each layer's own
+    /// recorded rectangle (origin, size) alongside it.
     #[derive(Default)]
     struct Recorder {
         rects: Vec<(Point, Size)>,
         alphas: Vec<f32>,
+        layers: Vec<(Point, Size)>,
         scrim_alpha: Option<f32>,
     }
 
     impl PaintScene for Recorder {
-        fn push_layer(&mut self, _origin: Point, _size: Size, alpha: f32) {
+        fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
             self.alphas.push(alpha);
+            self.layers.push((origin, size));
         }
         fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
             if size == WINDOW && self.rects.is_empty() {
@@ -1738,7 +1782,10 @@ mod tests {
         let mut h = Harness::build(ModalConfig::centered(), true, Some(theme));
         // Present on the frame it first paints.
         let first = h.paint(0);
-        assert_eq!(first.alphas, vec![1.0]);
+        assert!(
+            first.alphas.is_empty(),
+            "fully present needs no fade layer — nothing is moved out of its own rect"
+        );
         assert!((first.scrim_alpha.unwrap() - super::super::SCRIM_ALPHA).abs() < 1e-6);
         // A dismissal still stages, still settles, still pops — once.
         h.click(2.0, 2.0);
@@ -1746,6 +1793,104 @@ mod tests {
         assert_eq!(h.closed.get(), 1);
         h.paint(2);
         assert_eq!(h.closed.get(), 1);
+    }
+
+    #[test]
+    fn the_composited_layer_always_contains_the_lifted_scaled_panel() {
+        let mut h = Harness::new(ModalConfig::centered());
+        let rect = centred_rect();
+        let centre = rect.center();
+
+        // The layer a given `alpha` needs, mirroring the paint's own geometry:
+        // `lift` and `scale` both move monotonically with progress on
+        // `SPRING_PANEL` (overdamped — no overshoot), so while `alpha < 1.0`
+        // it equals the raw progress the transform used.
+        let assert_contains = |alpha: f32, origin: Point, size: Size| {
+            let layer = Rect::from_origin_size(origin, size);
+            let alpha = alpha as f64;
+            let lift_y = (1.0 - alpha) * PANEL_ENTER_LIFT;
+            let scale = PANEL_ENTER_SCALE + (1.0 - PANEL_ENTER_SCALE) * alpha;
+            let half_h = rect.height() * scale / 2.0;
+            let bottom = centre.y + half_h + lift_y;
+            let top = centre.y - half_h + lift_y;
+            assert!(
+                layer.y1 + 1e-6 >= bottom,
+                "layer bottom {} must reach the lifted panel's bottom {bottom}",
+                layer.y1
+            );
+            assert!(
+                layer.y0 - 1e-6 <= top,
+                "layer top {} must reach the lifted panel's top {top}",
+                layer.y0
+            );
+        };
+
+        // Progress 0 — the worked example: a 200px-tall panel
+        // lifted 20px against only a few px of scale pull-in, so a layer left
+        // at the resting rect clipped roughly the last 17px of it.
+        let first = h.paint(0);
+        assert_eq!(first.layers.len(), 1, "still fading, so still layered");
+        let (origin, size) = first.layers[0];
+        assert_contains(first.alphas[0], origin, size);
+
+        // Mid-ramp too, not only at the extremes.
+        let mid = h.paint(20);
+        assert_eq!(mid.layers.len(), 1);
+        assert!(
+            mid.alphas[0] > 0.0 && mid.alphas[0] < 1.0,
+            "actually mid-ramp"
+        );
+        let (origin, size) = mid.layers[0];
+        assert_contains(mid.alphas[0], origin, size);
+
+        // Settled: nothing left to fade, so no layer is pushed at all.
+        let settled = h.paint(SETTLED);
+        assert!(
+            settled.layers.is_empty(),
+            "a fully open panel needs no fade layer"
+        );
+
+        // An edge mount never fades the panel, so it never composites one
+        // either, at progress 0 or mid-slide.
+        let mut edge = Harness::new(ModalConfig::drawer(ModalEdge::Right));
+        assert!(edge.paint(0).layers.is_empty());
+        assert!(edge.paint(20).layers.is_empty());
+    }
+
+    #[test]
+    fn a_reopened_modal_is_dismissable_again_and_publishes_its_semantics_node() {
+        let mut h = Harness::staged(ModalConfig::centered());
+        h.settle();
+        h.click(2.0, 2.0);
+        assert_eq!(
+            h.state.dismissed, 1,
+            "the backdrop click staged a dismissal"
+        );
+        assert!(!h.state.open, "on_dismiss flipped the app's own flag");
+        // The flag change resyncs `open` onto the widget mid-exit, the way a
+        // real reactive rebuild would.
+        h.pass();
+        h.run_exit();
+        assert_eq!(h.closed.get(), 1, "the staged close settled and fired");
+
+        // The app reopens the same kept-mounted host.
+        h.state.open = true;
+        h.pass();
+        h.settle();
+
+        let open = h.root.semantics();
+        assert!(
+            open.nodes.iter().any(|(_, n)| n.role() == Role::Dialog),
+            "a reopened modal is announced again, not left latched from its prior exit"
+        );
+        // A press seats the focus the key routing needs.
+        let c = centred_rect().center();
+        h.click(c.x, c.y);
+        h.escape();
+        assert_eq!(
+            h.state.dismissed, 2,
+            "the reopened panel is dismissable again, not permanently latched"
+        );
     }
 
     // ---- the navigator seam -----------------------------------------------
@@ -1819,19 +1964,24 @@ mod tests {
                 .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
         }
 
+        /// One paint at `ms`, without a preceding rebuild — for driving a
+        /// single frame of an already-staged ramp by hand. Returns whether
+        /// another frame is wanted.
+        fn paint(&mut self, ms: u64) -> bool {
+            self.root
+                .paint(
+                    &mut Recorder::default(),
+                    FrameTime::from_nanos(ms * 1_000_000),
+                )
+                .needs_frame
+        }
+
         /// Rebuild → layout → paint until nothing asks for another frame
         /// (bounded), the shape a real shell's loop takes.
         fn drive(&mut self, from_ms: u64) {
             for i in 0..24u64 {
                 self.pass();
-                let needs_frame = self
-                    .root
-                    .paint(
-                        &mut Recorder::default(),
-                        FrameTime::from_nanos((from_ms + i * 100) * 1_000_000),
-                    )
-                    .needs_frame;
-                if !needs_frame {
+                if !self.paint(from_ms + i * 100) {
                     return;
                 }
             }
@@ -1894,6 +2044,66 @@ mod tests {
         h.drive(3_000);
         assert_eq!(h.controller.depth(), 2, "the barrier ate the click");
         assert!(h.state.results.is_empty());
+    }
+
+    /// The staged pop waits out a whole exit ramp, and a navigator pop always
+    /// takes the *top* page: a page the app pushes inside that window must not
+    /// be popped in the modal's place, and the modal must stay dismissable
+    /// afterwards rather than latching itself closed over a page it never
+    /// removed.
+    #[test]
+    fn a_page_pushed_during_the_exit_ramp_is_not_popped_in_the_modals_place() {
+        let mut h = NavHarness::new();
+        show_modal(
+            &h.controller,
+            || modal(Block(Size::new(200.0, 120.0)), ModalConfig::centered()),
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<i32>()),
+        );
+        h.drive(0);
+        assert_eq!(h.controller.depth(), 2, "the modal is up");
+
+        // A backdrop tap stages the exit…
+        h.click(5.0, 5.0);
+
+        // …and, one frame into the ramp, the app pushes a page of its own (a
+        // deep link, an async completion landing). Transparent, so the modal
+        // keeps painting underneath it and its ramp really does reach the
+        // settle that fires the staged pop; an opaque page would cull the
+        // modal's paint and the pop would never fire at all.
+        h.pass();
+        h.paint(3_000);
+        h.controller
+            .push_transparent(|| any::<NavState, _>(Block(Size::new(400.0, 100.0))));
+        h.drive(3_100);
+
+        assert_eq!(
+            h.controller.depth(),
+            3,
+            "the pushed page survives — the staged pop was refused, not aimed at it"
+        );
+        assert!(
+            h.state.results.is_empty(),
+            "and nothing reported a dismissal"
+        );
+
+        // Recoverable, not bricked: back out of the pushed page, then dismiss
+        // the modal again — the fresh exit is staged against the stack it
+        // actually pops.
+        h.controller.request_back();
+        h.drive(6_000);
+        assert_eq!(
+            h.controller.depth(),
+            2,
+            "the pushed page backs out normally"
+        );
+        h.controller.request_back();
+        h.drive(9_000);
+        assert_eq!(
+            h.state.results,
+            vec![None],
+            "the modal is still dismissible after the refused pop"
+        );
+        assert_eq!(h.controller.depth(), 1);
     }
 
     #[test]
