@@ -38,8 +38,12 @@ const MAX_TEXTURE_DIM: u32 = 8192;
 ///
 /// The caller warns once when a clamp actually changes the size, and hands the
 /// clamped pair to
-/// [`ShaderEffects::ensure_target`](frust_gpu::effects::ShaderEffects::ensure_target),
-/// which trusts it.
+/// [`ShaderEffects::ensure_target`](frust_gpu::effects::ShaderEffects::ensure_target).
+/// The layering is deliberate: this function is the *policy* cap (the 8192
+/// footgun bound ∧ the adapter's own ceiling), while `ensure_target` now
+/// enforces an independent device-validity floor of its own rather than
+/// trusting its caller — belt and suspenders, so both layers may warn on the
+/// same oversized request once this module is wired up.
 pub(crate) fn clamp_size(requested: (u32, u32), adapter_max: u32) -> (u32, u32) {
     let cap = MAX_TEXTURE_DIM.min(adapter_max);
     let clamp = |v: u32| v.clamp(1, cap.max(1));

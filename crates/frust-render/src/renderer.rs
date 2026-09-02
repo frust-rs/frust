@@ -325,6 +325,18 @@ impl SurfaceRenderer {
     /// without `PIPELINE_CACHE` (Metal/DX12): the blob is validated against
     /// the live adapter at install time and discarded on any mismatch. Passing
     /// `None` clears any restored blob (a cold start).
+    ///
+    /// **Caller contract (provenance):** `data` must be bytes this renderer
+    /// itself previously produced via
+    /// [`pipeline_cache_data`](Self::pipeline_cache_data) and the shell
+    /// persisted verbatim — never bytes from any other source. The framing
+    /// check downstream (`frust_gpu::pipeline_cache::unframe`) proves the
+    /// magic tag and the adapter fingerprint, which is provenance by
+    /// convention rather than integrity: a deliberately forged blob passing
+    /// that frame reaches `wgpu`'s `unsafe` pipeline-cache seam, whose
+    /// contract makes foreign data undefined behaviour. This method stays
+    /// safe because the obligation is a data-handling rule for the shell's
+    /// persistence layer, not something a signature can enforce.
     pub fn set_initial_pipeline_cache_data(&mut self, data: Option<Vec<u8>>) {
         self.initial_cache_data = data;
     }
@@ -582,13 +594,16 @@ impl SurfaceRenderer {
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
         // `PIPELINE_CACHE` (Metal/DX12). Created before the backend below so
         // it can be handed to `EngineRenderer::new`.
-        // SAFETY: `initial_cache_data` is exactly the blob
-        // `create_pipeline_cache`'s own `# Safety` section requires — a
-        // previously persisted `wgpu::PipelineCache::get_data()` output for
-        // this same adapter, round-tripped through `pipeline_cache_data`
-        // (which framed it under `frust_gpu::pipeline_cache`) and handed back
-        // here only via `set_initial_pipeline_cache_data`; `None` is a cold
-        // start, never a foreign blob.
+        // SAFETY: `initial_cache_data` arrives only via
+        // `set_initial_pipeline_cache_data`, whose documented caller contract
+        // requires bytes this renderer itself produced through
+        // `pipeline_cache_data` and the shell persisted verbatim — the
+        // provenance `create_pipeline_cache`'s `# Safety` section requires.
+        // This call site cannot itself prove that history; it relies on that
+        // documented contract plus `unframe`'s magic-tag/adapter-fingerprint
+        // check, which rejects every accidental mismatch (integrity against a
+        // deliberate forgery is out of scope — see the setter's doc). `None`
+        // is a cold start.
         let pipeline_cache =
             unsafe { ctx.create_pipeline_cache(self.initial_cache_data.as_deref()) };
 

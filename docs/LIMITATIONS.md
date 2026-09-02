@@ -3881,3 +3881,25 @@ wrong pixels while that is outstanding.
 **Trigger for removal**: the GPU-seam work wiring `Command::ShaderQuad`
 through to the engine renderer, at which point this entry, the corpus
 deferral, and the latched warning all come out together.
+
+### `wgpu30-dx12-smoke-owed` — the wgpu 30.0.1 pin shipped without a DX12 (Windows) device smoke
+
+**Observed** (evidence: `benchmarks/RESULTS.md` § "wgpu 30.0.1 device smoke —
+Phase 8"): the pin's per-backend device-smoke suite ran on Vulkan (Pixel 5
+matrix), Metal/iOS (iPhone SE PostMultiplied scrub + Simulator gate) and
+Metal/macOS (live window smoke) — DX12 did not, because the Windows rig was
+not connected during the bump window. wgpu 30.0.0 shipped backend-specific
+regressions (a Vulkan acquire fence, a Metal color-space bug) fixed only in
+30.0.1, which is exactly the risk class a per-backend smoke exists to catch,
+and Windows now has no fallback renderer.
+
+**Accepted because**: the owner's explicit call — the rig connects later, and
+holding the phase for it would gate ten merged waves on hardware
+availability. The exposure window is bounded: no Windows release ships from
+this branch before the smoke runs.
+
+**Trigger for removal**: the Windows rig reconnects → run the desktop smoke
+on the 30.0.1 pin (the Dell recipe: launch via `schtasks`, probe via
+screenshot) → record it as a fourth subsection of RESULTS.md's "wgpu 30.0.1
+device smoke" section → delete this entry and the pin-row citation
+(action item `act_000001a062ae0e2flvZBmVDR` tracks it).
