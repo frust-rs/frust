@@ -300,11 +300,9 @@ impl<'a> SceneBuilder<'a> {
     /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
     /// under the current transform (see [`Command::ShaderQuad`]).
     ///
-    /// **Currently paints nothing**: the engine renderer recognises the
-    /// command and drops it with a once-per-process warning — see
-    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` for the evidence
-    /// and the trigger that removes this caveat (the GPU-seam work wiring the
-    /// command through the engine).
+    /// The engine renders the fragment program in a pre-pass into an offscreen
+    /// target and draws it over `dest`. Output is treated as premultiplied
+    /// alpha. The rendering is disabled by `FRUST_ENGINE_NO_SHADER_EFFECTS`.
     ///
     /// `program` is cloned into the command — cheap, since [`ShaderProgram`]
     /// clones its id and its `Arc<str>` source handle, never the source

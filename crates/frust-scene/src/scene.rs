@@ -291,9 +291,11 @@ pub enum Command {
     /// a transform.
     ///
     /// `program` is compiled (and cache-keyed on [`ShaderProgram::id`]) by
-    /// `frust-render` — see [`ShaderProgram`]'s v1 opaque-output contract.
-    /// `time` is seconds, app-supplied (from `PaintCtx::frame_time` at the
-    /// widget layer), threaded into the shader's uniform buffer.
+    /// `frust-engine`'s effects module. Output is treated as premultiplied
+    /// alpha. `time` is seconds, app-supplied (from `PaintCtx::frame_time` at
+    /// the widget layer), threaded into the shader's uniform buffer. This
+    /// command lives at the scene layer to preserve purity: the render backend
+    /// interprets the compiled shader output.
     ShaderQuad {
         program: ShaderProgram,
         dest: Rect,

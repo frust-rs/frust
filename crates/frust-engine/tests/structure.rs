@@ -15,13 +15,13 @@
 //!   renders through ordinary render passes, never compute
 //!   (`crates/frust-gpu/src/headless.rs`'s own module doc states the same
 //!   rule; this guard pins it against silent drift).
-//! - **E17**: every rendering path under `src/{cache,compile,filters,gpu,
+//! - **E17**: every rendering path under `src/{cache,compile,effects,filters,gpu,
 //!   schedule,renderer,text}.rs` returns an error rather than panicking — no
 //!   bare `unwrap()`/`expect(`/`panic!(` outside a `#[cfg(test)]` module.
-//!   Currently scanned: `cache/`, `compile/`, `filters/`, `gpu/`, and `text/`.
-//!   Conditionally scanned when present: `renderer.rs` and `schedule/` — these
-//!   stay unscanned until merge, then the guard becomes load-bearing with no
-//!   edit needed here.
+//!   Currently scanned: `cache/`, `compile/`, `effects/`, `filters/`, `gpu/`,
+//!   and `text/`. Conditionally scanned when present: `renderer.rs` and
+//!   `schedule/` — these stay unscanned until merge, then the guard becomes
+//!   load-bearing with no edit needed here.
 
 use std::path::{Path, PathBuf};
 
@@ -195,21 +195,23 @@ fn rust_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The E17 grep scope:
-/// `src/{cache,compile,filters,gpu,text,schedule,renderer}.rs` — `cache/`,
-/// `compile/`, `filters/`, `gpu/`, and `text/` are trees that exist on this
-/// base; `renderer.rs` and `schedule/` are grepped only when present.
+/// `src/{cache,compile,effects,filters,gpu,text,schedule,renderer}.rs` —
+/// `cache/`, `compile/`, `effects/`, `filters/`, `gpu/`, and `text/` are
+/// trees that exist on this base; `renderer.rs` and `schedule/` are grepped
+/// only when present.
 ///
-/// `cache/`, `filters/` and `text/` all execute on the frame path: a gradient
-/// ramp is built, keyed and evicted during frame rendering (cache); a blurred
-/// layer's kernel is prepared and its pass sequence planned during frame
-/// rendering (filters); and glyphs are compiled and shaped during frame
+/// `cache/`, `effects/`, `filters/` and `text/` all execute on the frame path:
+/// a gradient ramp is built, keyed and evicted during frame rendering (cache);
+/// shader effects are compiled and rendered during frame rendering (effects);
+/// a blurred layer's kernel is prepared and its pass sequence planned during
+/// frame rendering (filters); and glyphs are compiled and shaped during frame
 /// rendering (text). Every directory the compiler and renderer call into on
 /// that path is in scope.
 fn e17_scanned_files() -> Vec<PathBuf> {
     let src = engine_root().join("src");
     let mut files = Vec::new();
 
-    for name in ["cache", "compile", "filters", "gpu", "text"] {
+    for name in ["cache", "compile", "effects", "filters", "gpu", "text"] {
         rust_files_recursive(&src.join(name), &mut files);
     }
 
@@ -275,15 +277,15 @@ fn e17_engine_render_paths_never_unwrap_expect_or_panic_outside_tests() {
 }
 
 #[test]
-fn e17_scan_currently_covers_at_least_cache_compile_filters_gpu_and_text() {
+fn e17_scan_currently_covers_at_least_cache_compile_effects_filters_gpu_and_text() {
     // Documents the scan's current floor so a future refactor that
     // accidentally empties `e17_scanned_files()` (e.g. a typo'd directory
     // name) fails loudly here rather than the main guard above silently
     // passing over nothing. Named per directory rather than merely counted:
-    // a scan that quietly stopped covering one of the five would otherwise
+    // a scan that quietly stopped covering one of the six would otherwise
     // still satisfy a non-empty assertion.
     let files = e17_scanned_files();
-    for name in ["cache", "compile", "filters", "gpu", "text"] {
+    for name in ["cache", "compile", "effects", "filters", "gpu", "text"] {
         assert!(
             files
                 .iter()
