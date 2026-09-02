@@ -48,7 +48,7 @@
 //! (outside this file's write scope), so rather than route around it with an
 //! out-of-scope edit, this file builds its OWN device the way
 //! [`ios_simulator_metal_context_forces_the_256_byte_uniform_alignment`]
-//! already does — through [`frust_gpu::Context`], whose device request is
+//! already does — through [`frust_gpu::RenderContext`], whose device request is
 //! built from the ADAPTER's own reported limits
 //! (`frust_gpu::context::create_device`) rather than a hard-coded default, so
 //! it never over-asks — and drives [`frust_engine::EngineRenderer`] over that
@@ -123,7 +123,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
-use frust_gpu::{Context, ContextOptions, HeadlessTarget};
+use frust_gpu::{HeadlessTarget, RenderContext};
 use frust_testing::diff::diff_images;
 use frust_testing::{
     AlphaKind, BackendMeta, RenderedImage, Tolerance, straighten_alpha, unit_cases,
@@ -253,7 +253,7 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 #[test]
 fn ios_simulator_metal_context_forces_the_256_byte_uniform_alignment() {
     let _serialized = render_lock();
-    let mut context = Context::new(ContextOptions::default());
+    let mut context = RenderContext::new();
     let handle = pollster::block_on(context.device()).expect(
         "frust-gpu must be able to create a device against the Simulator's own Metal adapter",
     );
@@ -293,7 +293,7 @@ fn ios_simulator_metal_context_forces_the_256_byte_uniform_alignment() {
 fn engine_renders_the_unit_corpus_matching_the_cpu_goldens_on_the_simulator() {
     let _serialized = render_lock();
 
-    let mut context = Context::new(ContextOptions::default());
+    let mut context = RenderContext::new();
     let handle = pollster::block_on(context.device()).expect(
         "frust-gpu must be able to create a device against the Simulator's own Metal adapter",
     );
