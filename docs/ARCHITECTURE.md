@@ -34,7 +34,7 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | Example | What it shows |
 |---------|---------------|
 | `examples/huddle` | clean-signals clean-architecture showcase; the sole full example app |
-| `examples/shadertoy` | Fragment-shader effects showcase |
+| `examples/shadertoy` | Fragment-shader effects showcase — currently renders nothing: `draw_shader` is a registered no-op until the GPU seam wires `ShaderQuad` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md) `engine-shader-quad-unwired`) |
 | `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
 | `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
 | `examples/design-system-sample` | Out-of-tree design-system proof, built on `frust`'s public API alone; standalone workspace |

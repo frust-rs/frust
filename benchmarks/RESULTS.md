@@ -2248,6 +2248,53 @@ group (it keys the raw path by `--tier`, not by pin/date) — the new files
 were moved to `tier-wgpu30/` and the Phase-7 files restored from git
 before this commit (filed as a harness follow-up).
 
+### iPhone SE + iOS Simulator (Metal) — 2026-09-02 (p8-07 device gates, phase branch `dfea9a67`)
+
+Recorded here as the evidence-trail true-up the phase-8 review asked for —
+both arms ran on gate day and were persisted as pipeline gates
+(`engine-p8-wgpu30-iphone-postmultiplied-scrub`,
+`engine-p8-wgpu30-ios-simulator-renders`); this file simply did not carry
+them until now.
+
+- **iPhone SE (physical, live `CAMetalLayer` swapchain):** material3-demo
+  release build in Mode B (the scene-delegate translucent override, the
+  never-committed scratch-worktree patch), i.e. the exact
+  `compositor_expects_premultiplied` PostMultiplied path, driven by a slow
+  manual scrub — verified by Ed, no issues, no artifacts. This is a live
+  swapchain re-verification of the Metal alpha-polarity carve-out on the
+  30.0.1 pin, not a headless render.
+- **iOS Simulator (iPhone 16 sim):** the engine Simulator gate run under
+  `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn <udid>"`,
+  2/2 pass — the 256-byte `effective_limits` clamp still applies (upstream
+  gfx-rs/wgpu#10189 not in 30.0.1).
+
+### macOS window session (Metal) — 2026-09-02 (conductor smoke, phase branch `e5d08a48`)
+
+Live-swapchain smoke of the 30.0.1 pin on the desktop shell — the
+re-verification arm the review flagged as missing (the previous macOS
+window session, p7-05 above, ran on wgpu 29.0.4). material3-demo desktop
+gallery, debug + `frust/perf-trace`, `FRUST_TRACE=1 FRUST_TRACE_RAW=1`,
+Apple M4 built-in panel:
+
+| Arm | Marker line | Frames | Validation/error lines |
+|---|---|---|---|
+| `FRUST_WINDOW_SIZE=1600x1200`, 150 s | `tier=engine … Bgra8Unorm swapchain, 3200x2016, adapter Apple M4` | 2464 raw | 0 |
+| `FRUST_WINDOW_SIZE=5120x2880` (clamped by macOS), 60 s | same, `3600x2016` drawable | 198 raw | 0 |
+
+`surface-caps: alpha_modes=[Opaque, PostMultiplied] chosen=Auto` — 30.0.1's
+Metal backend still advertises `PostMultiplied` (the truth-bug carve-out's
+trigger condition, unchanged from 29 as predicted by the pre-bump research;
+upstream #9922 is unreleased), and the opaque desktop window takes the
+plain `EngineDirect` path. Deviations from p7-05's session shape: idle
+gallery content (frame `total_us` p50 ≈ 0.11 ms is work-time on a mostly
+quiet scene, not a paced-frame figure), no drag-resize storm (the bare
+cargo binary exposes no AX window to script; reconfigure coverage came
+from the two window-size arms instead), and `gpu_q=0` in this invocation
+shape so no GPU-clock columns — the Pixel 5 matrix above remains the
+pin's GPU-timing evidence. Not a perf record; a liveness + validation +
+alpha-mode smoke. **DX12 (Windows) re-run on 30.0.1 is still owed** — to
+run when the Windows rig is next connected.
+
 ---
 
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
