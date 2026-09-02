@@ -3901,5 +3901,4 @@ this branch before the smoke runs.
 **Trigger for removal**: the Windows rig reconnects → run the desktop smoke
 on the 30.0.1 pin (the Dell recipe: launch via `schtasks`, probe via
 screenshot) → record it as a fourth subsection of RESULTS.md's "wgpu 30.0.1
-device smoke" section → delete this entry and the pin-row citation
-(action item `act_000001a062ae0e2flvZBmVDR` tracks it).
+device smoke" section → delete this entry and the pin-row citation.

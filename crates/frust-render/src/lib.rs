@@ -40,9 +40,11 @@
 //! ([`frust_gpu::context::RenderContext`], [`frust_gpu::surface`],
 //! [`frust_gpu::lifecycle`], [`frust_gpu::pipeline_cache`],
 //! [`frust_gpu::effects`]) — one copy, shared with every other consumer of that
-//! crate. This crate re-exports each of them under the name it has always had,
-//! so a shell keeps writing `frust_render::RenderContext` and never learns
-//! where any of it moved to. What is genuinely this crate's own is the
+//! crate. The context/surface/lifecycle types a shell touches are re-exported
+//! here under the names they have always had, so `frust_render::RenderContext`
+//! keeps working; the pipeline-cache framing and the shader-effect pipelines
+//! were never public under this crate and are reached as
+//! `frust_gpu::pipeline_cache`/`frust_gpu::effects` directly. What is genuinely this crate's own is the
 //! renderer: the render-path decision, the engine resources each arm owns, the
 //! engine's own capability gate, and [`SurfaceRenderer`] itself.
 

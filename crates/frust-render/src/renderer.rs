@@ -217,7 +217,7 @@ pub struct SurfaceRenderer {
     state: SurfaceState,
     /// Consecutive `AcquireStatus::Invalid` acquires retried via `Reconfigure`
     /// since the last successful acquire or surface (re)install — see
-    /// [`crate::lifecycle::decide_acquire`]/[`crate::lifecycle::MAX_INVALID_RECONFIGURES`].
+    /// `frust_gpu::lifecycle`'s `decide_acquire`/`MAX_INVALID_RECONFIGURES`.
     /// Reset on a successful acquire, on giving up (transitioning to
     /// `SurfaceLost`), and on installing a fresh surface.
     consecutive_invalid: u8,

@@ -197,8 +197,11 @@ pub struct ShaderEffects {
     last_seen: HashMap<u64, u64>,
     /// Requested extents for which we have already warned about clamping. Keyed
     /// by `(program id, requested width, requested height)` so the clamp warning
-    /// fires at most once per distinct oversized request, regardless of how many
-    /// times that target is created/evicted/recreated.
+    /// fires at most once per distinct oversized request, surviving the
+    /// frame-scoped [`Self::evict_stale_targets`] (an evicted-and-recreated
+    /// target does not re-warn). [`Self::reap`] drops an id's entries with the
+    /// rest of its state, which is both the "brand new again" contract and the
+    /// bound on this set's growth.
     warned_clamped: HashSet<(u64, u32, u32)>,
 }
 
@@ -458,12 +461,18 @@ impl ShaderEffects {
     /// Dropping `failed` alongside the rest means a program id that reappears
     /// after being reaped is treated as brand new: it recompiles cleanly rather
     /// than hitting a stale skip from a compile failure that happened frames
-    /// ago (or never happened at all).
+    /// ago (or never happened at all). The clamp-warning latch is dropped on
+    /// the same trigger: a reaped id that returns warns afresh on its first
+    /// oversized request, exactly like a brand-new program — and this reap is
+    /// also what bounds the latch set's growth, the same way it bounds every
+    /// other map here.
     pub fn reap(&mut self, stale_ids: &[u64]) {
         let stale_id_set: HashSet<u64> = stale_ids.iter().copied().collect();
         for key in reapable_target_keys(self.targets.keys().copied(), &stale_id_set) {
             self.targets.remove(&key);
         }
+        self.warned_clamped
+            .retain(|key| !stale_id_set.contains(&key.0));
         for &id in stale_ids {
             self.pipelines.remove(&id);
             self.failed.remove(&id);
@@ -1192,30 +1201,46 @@ mod tests {
                 "warned_clamped must track the oversized request"
             );
 
-            // Request the same oversized size again to verify the warning
-            // doesn't re-warn. The entry already exists, so ensure_target
-            // returns early without attempting to warn again. But to test
-            // the re-warn behavior fully, we'd need to evict and recreate,
-            // which the evict_stale_targets function handles. For this test,
-            // we just verify the warned_clamped tracking works as intended.
-            let warned_count_before_evict = fx.warned_clamped.len();
-            fx.evict_stale_targets(&HashSet::new()); // Evict all targets
+            // Evict the target under the frame-scoped policy it actually
+            // implements: the id must appear in the live set at a DIFFERENT
+            // size for its old size to count as stale (an id absent from
+            // `live` entirely is deliberately left intact — see
+            // `stale_target_keys` and its `..leaves_a_vanished_id_intact`
+            // sibling test).
+            let mut live = HashSet::new();
+            live.insert((1u64, 1u32, 1u32));
+            fx.evict_stale_targets(&live);
             assert!(
-                fx.targets.is_empty(),
-                "evict_stale_targets must remove all targets"
+                !fx.targets.contains_key(&(1, requested, requested)),
+                "the resized-out oversized target must be evicted"
             );
 
-            // Recreate the same oversized target. The warning should NOT fire
-            // again because (1, requested, requested) is still in warned_clamped.
-            fx.ensure_target(&device, 1, requested, requested);
-            let warned_count_after_recreate = fx.warned_clamped.len();
-            assert_eq!(
-                warned_count_before_evict, warned_count_after_recreate,
-                "clamp warning must not re-warn on recreation of same (id, requested_extent)"
-            );
+            // Recreate the same oversized request. The warn latch gates the
+            // warning on a fresh `HashSet::insert`, so while the key is still
+            // present a second warning is impossible by construction — the
+            // property under test is that eviction did NOT clear the latch.
             assert!(
-                fx.targets.contains_key(&(1, requested, requested)),
-                "target must be recreated"
+                fx.warned_clamped.contains(&(1, requested, requested)),
+                "the warn latch must survive frame-scoped eviction"
+            );
+            fx.ensure_target(&device, 1, requested, requested);
+            let entry_3 = fx
+                .targets
+                .get(&(1, requested, requested))
+                .expect("recreated");
+            assert_eq!(entry_3.used_w, CEILING, "recreation re-clamps");
+            assert!(
+                fx.warned_clamped.contains(&(1, requested, requested)),
+                "recreation must not disturb the latch"
+            );
+
+            // `reap` is the opposite contract: the id leaves with all of its
+            // state, latch included, so a reaped id that returns is brand new
+            // for warning purposes too — and this is what bounds the set.
+            fx.reap(&[1]);
+            assert!(
+                !fx.warned_clamped.contains(&(1, requested, requested)),
+                "reap must drop the id's warn-latch entries"
             );
         }
     }
