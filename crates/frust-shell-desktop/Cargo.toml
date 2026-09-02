@@ -63,3 +63,10 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
 # profile builds only).
 devtools = ["frust-shell-common/devtools"]
+# Reserved for the facade's `gpu` feature (`frust::gpu`, see
+# crates/frust/src/lib.rs) to forward into once a GPU-context accessor is
+# wired here. This shell already depends on `frust-render`, which
+# unconditionally carries `frust-gpu` (docs/RENDER_ARCHITECTURE.md), so
+# nothing needs gating behind a feature yet — empty until that accessor
+# lands.
+gpu = []

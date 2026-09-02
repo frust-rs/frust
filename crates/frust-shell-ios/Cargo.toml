@@ -83,3 +83,10 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # this targets only exists in the iOS-gated dependency block, so this is a no-op
 # off-iOS.
 devtools = ["frust-shell-common/devtools"]
+# Reserved for the facade's `gpu` feature (`frust::gpu`, see
+# crates/frust/src/lib.rs) to forward into once a GPU-context accessor is
+# wired here. This shell already depends on `frust-render`, which
+# unconditionally carries `frust-gpu` (docs/RENDER_ARCHITECTURE.md), so
+# nothing needs gating behind a feature yet — empty until that accessor
+# lands.
+gpu = []

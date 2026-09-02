@@ -49,6 +49,16 @@ frust-scene = { workspace = true }
 # frust-engine render path is what `frust-render` unconditionally is, so an
 # app opts into nothing and this edge carries no feature of its own.
 frust-render = { workspace = true }
+# The GPU device/texture substrate `frust-render` itself builds on, named
+# directly (not just transitively) and optionally so the non-default `gpu`
+# feature can re-export it flat through `frust::gpu` (see lib.rs) — an app,
+# or a future 3D-rendering crate sitting beside the facade, reaching the
+# render engine's texture seam without a direct `frust-render`/`frust-gpu`
+# dependency of its own. This is the one sanctioned exception to "nothing
+# above RENDER depends on `frust-gpu`" (docs/ARCHITECTURE.md's GPU-substrate
+# layer boundary) — optional and off by default, so an ordinary app build
+# still carries none of it.
+frust-gpu = { workspace = true, optional = true }
 # Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
 # can shape its own glyph runs without naming `frust-text`. Already in the
 # graph transitively via frust-widgets/frust-theme; named here (promoted from
@@ -164,4 +174,17 @@ devtools = [
     "frust-shell-desktop/devtools",
     "frust-shell-android/devtools",
     "frust-shell-ios/devtools",
+]
+# Opt-in GPU substrate seam: turns on the optional `frust-gpu` dependency
+# above and re-exports its device/texture/pipeline vocabulary flat through
+# `frust::gpu` (see lib.rs). Empty by default, same additive-unification
+# shape as `perf-trace`/`devtools`. The three shell forwards mirror those
+# two features' per-target shape; each shell's own `gpu` feature is
+# currently a placeholder (no shell-side accessor is wired yet — see each
+# shell's own Cargo.toml).
+gpu = [
+    "dep:frust-gpu",
+    "frust-shell-desktop/gpu",
+    "frust-shell-android/gpu",
+    "frust-shell-ios/gpu",
 ]
