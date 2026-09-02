@@ -987,21 +987,23 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
-/// `Command::ShaderQuad`, unrendered on both arms — see `docs/LIMITATIONS.md`
-/// `engine-shader-quad-unwired`.
+/// `Command::ShaderQuad`, rendered by the engine but scored by neither golden
+/// arm — see `docs/LIMITATIONS.md` `engine-shader-quad-goldens-uncomparable`.
 ///
-/// The engine's own compiler recognises and drops the command, so a compiled
-/// GPU frame of this case would legitimately be missing the very thing the
-/// case exists to pin; the golden gate holds it out of its scored set for
-/// exactly that reason rather than comparing against such a frame. There is
-/// also no shader pre-pass without a GPU, so the CPU arm has nothing
-/// equivalent to lower this to — its own opaque dark placeholder color exists
-/// for that gap, but this case names [`ORACLE_ID`] in its own skip set, so
-/// the placeholder is never even produced here, let alone compared. What this
-/// case pins, then, is narrower than a rendered frame on either arm: that
-/// recording a `Command::ShaderQuad` and handing the scene to a renderer does
-/// not panic. Coverage of the command actually painting anything waits on the
-/// GPU-seam work `engine-shader-quad-unwired` tracks.
+/// The engine renders the program in a pre-pass and draws the result as an
+/// external texture, but the engine oracle encodes straight through the
+/// renderer without driving that pre-pass, so a compiled GPU frame of this
+/// case would legitimately be missing the very thing the case exists to pin;
+/// the golden gate holds it out of its scored set for exactly that reason
+/// rather than comparing against such a frame. There is also no shader
+/// pre-pass without a GPU, so the CPU arm has nothing equivalent to lower
+/// this to — its own opaque dark placeholder color exists for that gap, but
+/// this case names [`ORACLE_ID`] in its own skip set, so the placeholder is
+/// never even produced here, let alone compared. What this case pins, then,
+/// is narrower than a rendered frame on either arm: that recording a
+/// `Command::ShaderQuad` and handing the scene to a renderer does not panic.
+/// Coverage of the command actually painting lives in the engine's own
+/// device-backed shader-quad tests.
 fn shader_quad() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let program = ShaderProgram::new(SOLID_MAGENTA_WGSL);
