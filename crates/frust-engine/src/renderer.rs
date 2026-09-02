@@ -28,6 +28,25 @@
 //! own*). The caller's encoder is still never submitted by the engine, and the
 //! frame's own passes still reach the queue only when the caller submits it.
 //!
+//! # Sharing the depth attachment
+//!
+//! A caller recording its own depth-writing passes into that encoder hands the
+//! same attachment in as `EngineTarget::depth`, and the two renderers then
+//! occlude each other correctly in either order. Three rules make that work,
+//! and [`crate::gpu::depth`] is where they are stated in full: the shared
+//! comparison and which end of the range is near
+//! ([`DEPTH_COMPARE`](crate::gpu::depth::DEPTH_COMPARE) over a buffer whose far
+//! plane is [`DEPTH_CLEAR`](crate::gpu::depth::DEPTH_CLEAR)); the depth
+//! attachment's extent matching the colour target's; and who owns the clear —
+//! whichever pass runs first in the encoder, which the caller states through
+//! [`EngineRenderer::set_depth_pre_cleared`].
+//!
+//! What that contract does *not* extend to is colour. The clear pass below
+//! clears the frame's colour target unconditionally, so content painted into
+//! that target before `encode` keeps its depth and loses its pixels: a host
+//! compositing over its own content records that content after the frame, or
+//! into a target of its own the frame composites.
+//!
 //! # The frame's passes
 //!
 //! A frame records into that encoder, in this order.
@@ -483,6 +502,17 @@ impl EngineRenderer {
     /// [`DepthAttachment::set_pre_cleared`].
     pub fn set_depth_pre_cleared(&mut self, pre_cleared: bool) {
         self.depth.set_pre_cleared(pre_cleared);
+    }
+
+    /// Whether a caller-supplied depth attachment is treated as already
+    /// populated.
+    ///
+    /// The statement is sticky and set once, so a host driving several
+    /// surfaces (or re-establishing one after a device loss) can read back
+    /// what this renderer is on rather than tracking it a second time.
+    #[must_use]
+    pub fn depth_pre_cleared(&self) -> bool {
+        self.depth.is_pre_cleared()
     }
 
     /// Registers `view` under `id` so a scene referencing that texture can
