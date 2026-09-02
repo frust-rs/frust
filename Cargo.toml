@@ -82,9 +82,10 @@ license = "MIT OR Apache-2.0"
 # additively across every target this workspace builds for (Android: vulkan;
 # iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
 # non-backend runtime plumbing, always needed). Deliberately dropped: `gles`
-# (no shell surfaces a GLES-only device today — the engine tier's own
-# downlevel design already covers the WebGL2/GLES3.0 ceiling without a
-# separate `gles` wgpu backend, see `docs/ARCHITECTURE.md`'s `RenderTier` row)
+# (no shipping shell surfaces a GLES-only device; the engine tier's own
+# downlevel design covers the WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL`
+# tested against a desktop adapter, per `docs/RENDER_DEVELOPMENT.md`; the web
+# arm is cancelled, `engine-webgl2-unhosted`)
 # and `webgpu` (wasm target only, Frust ships no wasm shell). Confirmed via
 # `cargo tree -e features`: these two (and their naga frontends/backends) are
 # absent from every target's dependency graph.

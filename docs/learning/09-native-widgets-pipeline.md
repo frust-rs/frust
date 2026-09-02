@@ -30,7 +30,7 @@ numbers: labs 1–8's line anchors drift, names don't.
 | The differ (paint frames → commands) | `crates/frust-shell-common/src/platform_view.rs` | `PlatformViewState::ingest`, `ViewCommand`, `EPSILON_PX`, `HIDE_AFTER_MISSING_FRAMES`, `DISPOSE_AFTER_MISSING_FRAMES`, `FramePairing` |
 | Declared vs resolved surface mode | `crates/frust-shell-common/src/surface_mode.rs` | `declare_host_translucent_surface`, `resolved_surface_mode`, `ResolvedSurfaceMode` |
 | Whether a surface actually resolved translucent | `crates/frust-gpu/src/surface.rs` | `resolve_alpha_mode`, `ConfiguredSurface::resolved_translucent` |
-| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-render/src/convert.rs` | `PlatformViewWidget::paint`, `PaintScene::clear_rect`, `shield` |
+| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
 | Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
 | The device-gate vehicle | `examples/playground/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
