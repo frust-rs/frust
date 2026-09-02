@@ -481,8 +481,14 @@ impl ShaderEffects {
     ///
     /// A no-op if program `id` has no compiled pipeline (never compiled, or
     /// compile-failed): a target is useless without the pipeline that owns its
-    /// bind-group layout, so the caller compiles first. `w`/`h` must already be
-    /// clamped to the adapter's own ceiling by the caller.
+    /// bind-group layout, so the caller compiles first. `w`/`h` are clamped to
+    /// the device's own `max_texture_dimension_2d` ceiling (floored at 1) — a
+    /// device-validity floor only, not the caller's size *policy*: a caller may
+    /// still apply a tighter policy cap of its own (e.g.
+    /// `frust-render::shader_effects`'s 8192) before calling, but an oversized
+    /// request that reaches here creates a texture at the device ceiling
+    /// instead of tripping `wgpu` validation, and warns once naming the
+    /// requested and used sizes.
     pub fn ensure_target(&mut self, device: &wgpu::Device, id: u64, w: u32, h: u32) {
         let key = (id, w, h);
         if self.targets.contains_key(&key) {
@@ -493,11 +499,21 @@ impl ShaderEffects {
             return;
         };
 
+        let ceiling = device.limits().max_texture_dimension_2d;
+        let used_w = w.min(ceiling).max(1);
+        let used_h = h.min(ceiling).max(1);
+        if used_w != w || used_h != h {
+            log::warn!(
+                "frust-gpu: shader-effect target {id} requested {w}x{h}, clamped to \
+                 {used_w}x{used_h} (the device's max_texture_dimension_2d ceiling {ceiling})",
+            );
+        }
+
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("frust shader-effect target"),
             size: wgpu::Extent3d {
-                width: w,
-                height: h,
+                width: used_w,
+                height: used_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -967,6 +983,61 @@ mod tests {
                 "a reaped id must recompile cleanly when redrawn"
             );
             assert!(fx.pipelines.contains_key(&1));
+        }
+    }
+
+    /// End-to-end (real device) confirmation of `ensure_target`'s own
+    /// device-validity clamp: a request larger than the device's real
+    /// `max_texture_dimension_2d` must create a texture at that ceiling
+    /// instead of tripping `wgpu` validation. `required_limits` downgrades the
+    /// device's ceiling to a small, fast-to-allocate value so the oversized
+    /// request stays cheap while still exercising the real clamp against a
+    /// real device.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-gpu -- --ignored`"]
+    fn ensure_target_clamps_an_oversized_request_to_the_device_ceiling() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            const CEILING: u32 = 256;
+            let (device, _queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-gpu effects ensure_target clamp test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: CEILING,
+                        ..wgpu::Limits::default()
+                    },
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            assert_eq!(device.limits().max_texture_dimension_2d, CEILING);
+
+            const FRAGMENT: &str = "@fragment fn fs_main(in: FrustVsOut) -> \
+                @location(0) vec4<f32> { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }";
+
+            let mut fx = ShaderEffects::new(None);
+            fx.ensure_pipeline(&device, 1, FRAGMENT);
+            assert!(!fx.needs_compile(1), "compile must have succeeded");
+
+            // Requested far past the device's ceiling: creating a texture
+            // this size without clamping would trip wgpu validation rather
+            // than produce a usable target.
+            let requested = CEILING * 4;
+            fx.ensure_target(&device, 1, requested, requested);
+            let texture = fx
+                .target_texture(1, requested, requested)
+                .expect("an oversized request must still create a (clamped) target");
+            assert_eq!(texture.width(), CEILING);
+            assert_eq!(texture.height(), CEILING);
         }
     }
 }

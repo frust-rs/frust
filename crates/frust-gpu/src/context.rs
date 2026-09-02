@@ -297,18 +297,23 @@ impl RenderContext {
     ///
     /// # Safety
     ///
-    /// This is the sole sanctioned unsafe site in this module. The wgpu contract
-    /// on [`wgpu::Device::create_pipeline_cache`] is that a non-`None` `data`
-    /// must have come from a prior `PipelineCache::get_data()` on a
-    /// `pipeline_cache_key`-compatible adapter. We uphold it two ways: (1) the
-    /// caller-supplied blob is `unframe`d against *this* adapter's fingerprint
-    /// **before** the unsafe call, so foreign or post-driver-update data never
-    /// reaches it; (2) `fallback: true` makes wgpu fall back to an empty cache
-    /// for any data it still rejects internally, rather than misbehaving.
-    /// Corrupt/mismatched data is therefore a silently-ignored cache miss, never
-    /// undefined behaviour.
+    /// This is the sole sanctioned unsafe site in this module, and the
+    /// obligation is the caller's, not something this method can fully close
+    /// on its own: `unframe`'s magic-tag-plus-adapter-fingerprint check proves
+    /// only that `blob` was framed by `frust-gpu`'s own framing for *this*
+    /// adapter — provenance by convention, not a proof of the actual wgpu
+    /// contract on [`wgpu::Device::create_pipeline_cache`], which requires a
+    /// non-`None` `data` to have come from a prior `PipelineCache::get_data()`
+    /// on a `pipeline_cache_key`-compatible adapter. The caller must ensure
+    /// `blob` is exactly that: a blob previously produced by this driver's own
+    /// pipeline-cache output for this adapter, as persisted by `frust-render`'s
+    /// caching layer (`SurfaceRenderer::pipeline_cache_data`/
+    /// `set_initial_pipeline_cache_data`). A forged blob that nonetheless
+    /// passes the framing/fingerprint check is undefined behaviour per wgpu's
+    /// contract — `fallback: true` only covers a residual *internal* mismatch
+    /// wgpu itself detects, not a blob that misleads it into misbehaving.
     #[doc(hidden)]
-    pub fn create_pipeline_cache(&self, blob: Option<&[u8]>) -> Option<wgpu::PipelineCache> {
+    pub unsafe fn create_pipeline_cache(&self, blob: Option<&[u8]>) -> Option<wgpu::PipelineCache> {
         if !self.pipeline_cache_supported() {
             return None;
         }

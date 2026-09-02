@@ -398,10 +398,7 @@ impl SurfaceRenderer {
         let SurfaceState::Ready(ready) = &self.state else {
             return None;
         };
-        #[allow(irrefutable_let_patterns)]
-        let TierBackend::Engine { timestamps, .. } = &ready.backend else {
-            return None;
-        };
+        let TierBackend::Engine { timestamps, .. } = &ready.backend;
         let reading = timestamps.latest()?;
         let span = |which: frust_engine::EngineSpan| reading.span(which.index());
         Some(GpuPassTimings {
@@ -585,7 +582,15 @@ impl SurfaceRenderer {
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
         // `PIPELINE_CACHE` (Metal/DX12). Created before the backend below so
         // it can be handed to `EngineRenderer::new`.
-        let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
+        // SAFETY: `initial_cache_data` is exactly the blob
+        // `create_pipeline_cache`'s own `# Safety` section requires — a
+        // previously persisted `wgpu::PipelineCache::get_data()` output for
+        // this same adapter, round-tripped through `pipeline_cache_data`
+        // (which framed it under `frust_gpu::pipeline_cache`) and handed back
+        // here only via `set_initial_pipeline_cache_data`; `None` is a cold
+        // start, never a foreign blob.
+        let pipeline_cache =
+            unsafe { ctx.create_pipeline_cache(self.initial_cache_data.as_deref()) };
 
         // Build the backend. There is exactly one renderer and no tier to
         // dispatch on: `context::create_engine_surface` has already refused an
@@ -852,16 +857,10 @@ impl SurfaceRenderer {
         // is why its surface is configured on one of the two engine paths
         // (`context::choose_engine_render_path`): straight into the acquired
         // swapchain view, or into a surface-owned intermediate the same
-        // `submit` un-premultiplies from. Any other path here is a wiring bug,
-        // reported rather than rendered.
-        if !matches!(
-            &ready.surface.path,
-            RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. }
-        ) {
-            return Err(anyhow!(
-                "frust-render: the engine requires an engine render path"
-            ));
-        }
+        // `submit` un-premultiplies from. `RenderPath` has no other variant to
+        // wire wrong — `submit_impl`'s own exhaustive match over `&surface.path`
+        // is where a future third arm must be handled, as a compile error
+        // rather than a runtime check here.
         // The frame's whole CPU-side encode on this arm: copy the display list
         // somewhere that outlives the borrow, since `EngineRenderer::encode`
         // compiles it itself in `submit`. `clone_from` reuses the buffer's
@@ -1110,17 +1109,11 @@ impl SurfaceRenderer {
             // this one command buffer, in order, against the texture about to
             // be presented.
             RenderPath::EngineDirect { depth } => {
-                #[allow(irrefutable_let_patterns)]
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
                     timestamps,
-                } = backend
-                else {
-                    return Err(anyhow!(
-                        "frust-render: an engine render path requires the engine backend"
-                    ));
-                };
+                } = backend;
                 // Set in `encode`; a well-formed frame always encoded first —
                 // the same fallback every other arm takes.
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1218,17 +1211,11 @@ impl SurfaceRenderer {
                 intermediate_view,
                 present,
             } => {
-                #[allow(irrefutable_let_patterns)]
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
                     timestamps,
-                } = backend
-                else {
-                    return Err(anyhow!(
-                        "frust-render: an engine render path requires the engine backend"
-                    ));
-                };
+                } = backend;
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
                 let mut encoder =
                     device_handle

@@ -81,6 +81,27 @@ impl std::fmt::Display for EngineUnsupported {
 
 impl std::error::Error for EngineUnsupported {}
 
+/// Whether `caps` reports every flag in `required`.
+///
+/// Factored out of [`engine_support`] so the refusal arm — otherwise
+/// unreachable in production, since [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is
+/// deliberately empty — stays exercised by a real call rather than a
+/// hand-built [`EngineUnsupported`] value: tests drive it with a non-empty
+/// injected `required` set instead.
+fn engine_support_with(
+    required: wgpu::DownlevelFlags,
+    caps: &TierCaps,
+) -> Result<(), EngineUnsupported> {
+    let missing_flags = required - caps.downlevel_flags;
+    if missing_flags.is_empty() {
+        return Ok(());
+    }
+    Err(EngineUnsupported {
+        adapter_name: caps.adapter_name.clone(),
+        missing_flags,
+    })
+}
+
 /// Whether `caps` can run the engine.
 ///
 /// `Ok(())` when the adapter reports every flag in
@@ -90,14 +111,7 @@ impl std::error::Error for EngineUnsupported {}
 /// is honoured here without a second edit, and so the diagnosis for an adapter
 /// that genuinely cannot run the engine lives in one place.
 pub fn engine_support(caps: &TierCaps) -> Result<(), EngineUnsupported> {
-    let missing_flags = ENGINE_REQUIRED_DOWNLEVEL_FLAGS - caps.downlevel_flags;
-    if missing_flags.is_empty() {
-        return Ok(());
-    }
-    Err(EngineUnsupported {
-        adapter_name: caps.adapter_name.clone(),
-        missing_flags,
-    })
+    engine_support_with(ENGINE_REQUIRED_DOWNLEVEL_FLAGS, caps)
 }
 
 #[cfg(test)]
@@ -143,18 +157,19 @@ mod tests {
 
     /// The refusal arm, exercised against a requirement the constant does not
     /// carry today: a flag added to [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] later
-    /// must refuse the adapter that lacks it rather than be assumed away, and
-    /// this is the diagnosis that refusal carries.
+    /// must refuse the adapter that lacks it rather than be assumed away.
+    /// Drives the refusal through [`engine_support_with`] itself (with a
+    /// non-empty injected `required` set — [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]
+    /// never exercises this arm in production) rather than hand-building an
+    /// [`EngineUnsupported`] value, and asserts the diagnosis names the
+    /// missing flag.
     #[test]
     fn a_missing_required_flag_is_refused_by_name() {
         let required = wgpu::DownlevelFlags::COMPUTE_SHADERS;
         let adapter = caps(wgpu::DownlevelFlags::all() - required);
-        let missing = required - adapter.downlevel_flags;
-        assert_eq!(missing, required);
-        let refusal = EngineUnsupported {
-            adapter_name: adapter.adapter_name.clone(),
-            missing_flags: missing,
-        };
+        let refusal = engine_support_with(required, &adapter)
+            .expect_err("an adapter missing a required flag must be refused");
+        assert_eq!(refusal.missing_flags, required);
         let diagnosis = refusal.to_string();
         assert!(diagnosis.contains("fake adapter"), "{diagnosis}");
         assert!(diagnosis.contains("COMPUTE_SHADERS"), "{diagnosis}");
