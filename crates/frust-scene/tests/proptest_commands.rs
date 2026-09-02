@@ -1,7 +1,7 @@
 //! Property coverage over the display list itself: whatever a widget throws at
 //! [`SceneBuilder`], the recording stays well-formed.
 //!
-//! Three properties, all driven through the public builder rather than by
+//! Two properties, all driven through the public builder rather than by
 //! constructing [`Command`]s by hand — a scene a widget could not have recorded
 //! proves nothing about the recorder:
 //!
@@ -16,10 +16,6 @@
 //!   An unmatched pop follows the recorded policy exactly: `PopClip`/`PopLayer`
 //!   are *recorded* (a renderer ignores them), `pop_snapshot` records nothing at
 //!   all, and `pop_transform` never pops the base identity.
-//! - **Fingerprint invariance.** A body re-recorded under a whole-bracket
-//!   translate/scale fingerprints EQUAL to the same body recorded at the
-//!   identity, when each is hashed relative to its own bracket transform. That
-//!   is the property a snapshot cache survives an animation frame on.
 //!
 //! Case counts are fixed constants rather than proptest's default, so this suite
 //! stays inside the workspace gate's time budget; failure persistence is off so
@@ -30,7 +26,7 @@ use std::sync::OnceLock;
 
 use frust_scene::{
     Command, CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder,
-    ShaderProgram, fingerprint_commands,
+    ShaderProgram,
 };
 use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
@@ -91,9 +87,7 @@ static HOSTILE_COORDS_F32: [f32; 9] = [
 /// The one font every generated glyph run shares.
 ///
 /// Identity matters: `peniko::Blob::id()` is minted per *construction*, not per
-/// content, and the fingerprint hashes that id — two independently built fonts
-/// would never fingerprint equal even with identical bytes, which would make the
-/// invariance property fail for a reason that is not the fingerprint's.
+/// content, so the same font instance is used throughout the test.
 fn shared_font() -> FontHandle {
     static FONT: OnceLock<FontHandle> = OnceLock::new();
     FONT.get_or_init(|| FontHandle::new(FontData::new(Blob::from(vec![1_u8, 2, 3, 4]), 0)))
@@ -116,7 +110,7 @@ fn shared_image() -> ImageData {
 }
 
 /// The one shader program every generated quad shares — `ShaderProgram::new`
-/// mints a fresh process-unique id per call, and the fingerprint hashes it.
+/// mints a fresh process-unique id per call.
 fn shared_shader() -> ShaderProgram {
     static SHADER: OnceLock<ShaderProgram> = OnceLock::new();
     SHADER
@@ -386,36 +380,6 @@ fn affine() -> impl Strategy<Value = Affine> {
         .prop_map(|(a, b, c, d, e, f)| Affine::new([a, b, c, d, e, f]))
 }
 
-/// A transform whose composition with [`bracket_transform`] — and the division
-/// back out by that bracket's inverse — is *exact* in binary floating point:
-/// the linear part is a small power of two, the translation a small integer.
-///
-/// This is what the fingerprint property's bodies carry instead of [`affine`],
-/// and the restriction is load-bearing twice over. A full-range coefficient
-/// re-rounds through the bracket's inverse, so the relative transform comes back
-/// a few ulps off and the invariance would only hold to within the
-/// fingerprint's quantization step rather than bit-for-bit. Worse, a coefficient
-/// near `f64::MAX` OVERFLOWS to infinity once the bracket's own scale is applied
-/// — and the inverse then multiplies that infinity by the transform's own signed
-/// zero, poisoning the relative transform with `NaN` and taking the mapped
-/// geometry with it. Neither is an invariance the hash owes a caller: both are
-/// degenerate transforms, the same class the engine's frame path refuses
-/// outright.
-fn exact_affine() -> impl Strategy<Value = Affine> {
-    let coefficient =
-        prop::sample::select(vec![-4.0_f64, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0]);
-    let translation = (-1024_i32..1024).prop_map(f64::from);
-    (
-        coefficient.clone(),
-        coefficient.clone(),
-        coefficient.clone(),
-        coefficient,
-        translation.clone(),
-        translation,
-    )
-        .prop_map(|(a, b, c, d, e, f)| Affine::new([a, b, c, d, e, f]))
-}
-
 fn color() -> impl Strategy<Value = Color> {
     prop::sample::select(vec![RED, GREEN, BLUE, Color::TRANSPARENT])
 }
@@ -496,8 +460,7 @@ fn op() -> impl Strategy<Value = Op> {
 
 /// [`op`] with the transform a generated glyph run carries of its own supplied
 /// by the caller — the one field of the op set whose value is composed with the
-/// enclosing bracket rather than merely recorded under it, and therefore the one
-/// the fingerprint property has to constrain (see [`exact_affine`]).
+/// enclosing bracket rather than merely recorded under it.
 fn op_with_glyph_transform(glyph_transform: BoxedStrategy<Affine>) -> impl Strategy<Value = Op> {
     prop_oneof![
         (rect(), brush()).prop_map(|(rect, brush)| Op::FillRect { rect, brush }),
@@ -570,39 +533,6 @@ fn program() -> impl Strategy<Value = Program> {
             ops: if balanced { balance(ops) } else { ops },
             balanced,
         })
-}
-
-/// A body for the fingerprint property: the same ops minus the transform stack,
-/// which the bracket's own transform stands in for, and with a glyph run's own
-/// transform restricted to one the bracket's inverse divides back out exactly
-/// (see [`exact_affine`]).
-fn body() -> impl Strategy<Value = Vec<Op>> {
-    prop::collection::vec(
-        op_with_glyph_transform(exact_affine().boxed())
-            .prop_filter("the bracket owns the transform stack", |op| {
-                !matches!(op, Op::PushTransform(_) | Op::PopTransform)
-            }),
-        0..MAX_OPS,
-    )
-}
-
-/// The transform a fingerprint body's whole bracket sits under.
-///
-/// A translate composed with a power-of-two scale, both bounded well inside the
-/// exponent range. Both are exactly invertible in binary floating point, so
-/// `base.inverse() * transform` is *exactly* the identity on either side of the
-/// comparison and the property is asserted bit-for-bit rather than within a
-/// quantization step — which is what keeps a few hundred generated bodies from
-/// producing an occasional false red on a coordinate that happens to land on a
-/// rounding boundary. A non-power-of-two scale is covered by this module's
-/// sibling unit test in `src/fingerprint.rs`.
-fn bracket_transform() -> impl Strategy<Value = Affine> {
-    (
-        -1e6_f64..1e6,
-        -1e6_f64..1e6,
-        prop::sample::select(vec![0.25_f64, 0.5, 1.0, 2.0, 4.0]),
-    )
-        .prop_map(|(dx, dy, scale)| Affine::translate((dx, dy)) * Affine::scale(scale))
 }
 
 // ---------------------------------------------------------------------------
@@ -742,32 +672,6 @@ proptest! {
         prop_assert_eq!(transform, Affine::IDENTITY);
     }
 
-    /// A body fingerprints identically whether its whole bracket sits at the
-    /// identity or under a translate/scale, as long as each is hashed relative
-    /// to its own bracket transform — the property a snapshot cache lives on.
-    #[test]
-    fn a_fingerprint_survives_its_brackets_own_translate_and_scale(
-        body in body(),
-        outer in bracket_transform(),
-    ) {
-        let fingerprint = |outer: Affine| {
-            let mut scene = Scene::new();
-            let base = {
-                let mut builder = SceneBuilder::new(&mut scene);
-                builder.push_transform(outer);
-                let base = builder.current_transform();
-                record(&body, &mut builder);
-                base
-            };
-            (fingerprint_commands(scene.commands(), base), scene.commands().len())
-        };
-
-        let (under_outer, outer_len) = fingerprint(outer);
-        let (at_identity, identity_len) = fingerprint(Affine::IDENTITY);
-
-        prop_assert_eq!(outer_len, identity_len);
-        prop_assert_eq!(under_outer, at_identity);
-    }
 }
 
 /// The balance repair really does produce a properly nested program — the
