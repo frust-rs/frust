@@ -106,6 +106,10 @@ static FONT_SKIP_WARNING: Once = Once::new();
 /// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
 static SHADER_QUAD_SKIP_WARNING: Once = Once::new();
 
+/// Raised the first time the compiler drops a [`Command::SceneTexture`], on
+/// the same once-per-process terms as [`SHADER_QUAD_SKIP_WARNING`].
+static SCENE_TEXTURE_SKIP_WARNING: Once = Once::new();
+
 /// Where one glyph an atlas-routed draw sampled lives in the atlas array.
 ///
 /// The image half of residency travels as an [`ImageUpload`], carrying pixels;
@@ -1048,6 +1052,11 @@ impl SceneCompiler {
             // docs/LIMITATIONS.md until the GPU-seam work wires this command
             // through; the drop itself is unchanged, just no longer silent.
             Command::ShaderQuad { .. } => note_shader_quad_skip(),
+            // Recognised but not yet compiled: resolving `id` against the GPU
+            // context's registered textures is a render-backend concern the
+            // compiler does not yet implement. Same once-per-process
+            // reporting as `ShaderQuad` above.
+            Command::SceneTexture { .. } => note_scene_texture_skip(),
         }
     }
 
@@ -1558,6 +1567,21 @@ fn note_shader_quad_skip() {
     });
 }
 
+/// Report that the compiler dropped a [`Command::SceneTexture`].
+///
+/// Latched to once per process, the same shape as [`note_shader_quad_skip`]:
+/// resolving an externally owned GPU texture against the render backend's
+/// registry is a standing, known gap rather than a per-frame refusal worth
+/// re-reporting at debug level on every later drop.
+fn note_scene_texture_skip() {
+    SCENE_TEXTURE_SKIP_WARNING.call_once(|| {
+        log::warn!(
+            "SceneTexture command dropped: the engine compiler does not resolve external \
+             textures yet (logged once per process)"
+        );
+    });
+}
+
 /// The transform a command carries, or `None` for one that carries none.
 fn command_transform(command: &Command) -> Option<Affine> {
     match command {
@@ -1572,6 +1596,7 @@ fn command_transform(command: &Command) -> Option<Affine> {
         | Command::ClearRect { transform, .. }
         | Command::Path { transform, .. }
         | Command::ShaderQuad { transform, .. }
+        | Command::SceneTexture { transform, .. }
         | Command::PushSnapshot { transform, .. } => Some(*transform),
         Command::GlyphRun(run) => Some(run.transform),
         Command::PopClip | Command::PopLayer | Command::PopSnapshot => None,
@@ -1714,6 +1739,7 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
             rect, alpha, scale, ..
         } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
         Command::Image { dest, .. } => dest.is_finite(),
+        Command::SceneTexture { dest, .. } => dest.is_finite(),
         Command::BlurredRoundedRect {
             rect,
             radii,

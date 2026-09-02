@@ -337,6 +337,18 @@ pub enum Command {
     /// Pop the most recently pushed snapshot bracket (see
     /// [`Command::PushSnapshot`]).
     PopSnapshot,
+    /// Draw an externally owned GPU texture scaled to fill `dest` under
+    /// `transform`.
+    ///
+    /// `id` is opaque scene-layer data (precedent: [`ShaderProgram`]'s opaque
+    /// id, `shader.rs`) — only the render backend resolves it against
+    /// textures registered with the GPU context; an unregistered id draws
+    /// nothing.
+    SceneTexture {
+        id: u64,
+        dest: Rect,
+        transform: Affine,
+    },
 }
 
 /// Renderer-agnostic, immediate-mode display list.

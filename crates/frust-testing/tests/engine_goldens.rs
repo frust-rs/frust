@@ -623,13 +623,15 @@ fn scoped_cases() -> Vec<CorpusCase> {
 /// `Command::GlyphRun` left this list in the text phase (p5): the compiler
 /// now lowers every glyph run in full, atlas or outline route alike, so a
 /// case that only draws glyph runs is no longer missing anything an engine
-/// frame of it would need to pin. `Command::ShaderQuad` remains the one
-/// command still recognised-and-skipped.
+/// frame of it would need to pin. `Command::ShaderQuad` and
+/// `Command::SceneTexture` are recognised-and-skipped while the engine does
+/// not yet resolve either against the GPU backend.
 fn engine_skipped_commands(scene: &frust_scene::Scene) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     for command in scene.commands() {
         let kind = match command {
             Command::ShaderQuad { .. } => "ShaderQuad",
+            Command::SceneTexture { .. } => "SceneTexture",
             _ => continue,
         };
         if !kinds.contains(&kind) {

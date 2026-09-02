@@ -1197,6 +1197,7 @@ mod tests {
             Command::ShaderQuad { .. } => "ShaderQuad",
             Command::PushSnapshot { .. } => "PushSnapshot",
             Command::PopSnapshot => "PopSnapshot",
+            Command::SceneTexture { .. } => "SceneTexture",
         }
     }
 
