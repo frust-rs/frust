@@ -28,6 +28,13 @@ perf-trace = []
 # cargo's feature unification keeps it off unless a build explicitly opts in
 # (the CLI turns it on for debug/profile builds — `BuildMode::cargo_features`).
 devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
+# Opt-in process-wide GPU-device slot (`gpu` module: `install_gpu_handle`/
+# `gpu_handle`). Adds NO dependency of its own — the slot is type-erased
+# (`Box<dyn Any + Send + Sync>`), so gating it costs nothing but the module's
+# own compilation; a concrete shell forwards its own `gpu` feature here and
+# installs its real device handle through the generic. Empty by default, the
+# same additive-unification shape as `perf-trace`/`devtools` above.
+gpu = []
 
 [dependencies]
 # Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate

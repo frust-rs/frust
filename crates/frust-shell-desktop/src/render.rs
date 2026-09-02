@@ -335,6 +335,7 @@ impl InlineExecutor {
             &mut self.renderer_spans_recorded,
             hit,
         );
+        publish_gpu_handle(&self.render_cx);
         Ok(())
     }
 
@@ -766,8 +767,31 @@ fn install_detached(
     ))
     .context("frust: failed to install render surface")?;
     persist_and_record(renderer, startup, renderer_spans_recorded, hit);
+    publish_gpu_handle(render_cx);
     Ok(())
 }
+
+/// Install this render context's live GPU device into the process-wide slot
+/// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
+/// through, once — the first time a surface (and so a device) exists. A
+/// no-op past the first successful call from either executor (the slot is
+/// install-once; see its own module docs), and compiled to nothing under a
+/// default (non-`gpu`) build of this crate.
+///
+/// `device_handle` is panic-free at both call sites
+/// ([`InlineExecutor::ensure_surface`], [`install_detached`]): both run this
+/// strictly after a successful `on_surface_created`/`on_surface_installed`,
+/// exactly the precondition `RenderContext::device_handle`'s own doc comment
+/// names. Cloning it is cheap — `DeviceHandle`'s wgpu resources are
+/// themselves `Arc`-backed, so this hands the slot another handle to the
+/// same device, never a second one.
+#[cfg(feature = "gpu")]
+fn publish_gpu_handle(render_cx: &RenderContext) {
+    frust_shell_common::gpu::install_gpu_handle(render_cx.device_handle().clone());
+}
+
+#[cfg(not(feature = "gpu"))]
+fn publish_gpu_handle(_render_cx: &RenderContext) {}
 
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the

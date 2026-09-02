@@ -179,11 +179,16 @@ devtools = [
 # above and re-exports its device/texture/pipeline vocabulary flat through
 # `frust::gpu` (see lib.rs). Empty by default, same additive-unification
 # shape as `perf-trace`/`devtools`. The three shell forwards mirror those
-# two features' per-target shape; each shell's own `gpu` feature is
-# currently a placeholder (no shell-side accessor is wired yet — see each
-# shell's own Cargo.toml).
+# two features' per-target shape. `frust-shell-common/gpu` is the process-wide
+# device-handle slot `frust::gpu::with_context` reads through (see
+# `frust_shell_common::gpu`'s module docs) — reachable here with no new
+# dependency edge since `frust-shell-common` is already a direct, unconditional
+# dependency above. The desktop shell's render executor installs into that slot
+# (`frust-shell-desktop/render.rs`); the Android/iOS shells forward the feature
+# but do not install yet — an accepted gap, see each shell's own crate docs.
 gpu = [
     "dep:frust-gpu",
+    "frust-shell-common/gpu",
     "frust-shell-desktop/gpu",
     "frust-shell-android/gpu",
     "frust-shell-ios/gpu",

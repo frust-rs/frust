@@ -24,7 +24,7 @@
 
 use frust::authoring::Rect;
 use frust::authoring::scene::{Command, Scene, SceneBuilder};
-use frust::gpu::{Context, Texture};
+use frust::gpu::{Context, DeviceHandle, Texture, with_context};
 
 /// Checked at compile time over any texture/view pair a caller supplies:
 /// `Texture::as_scene_texture()`'s minted id composes with
@@ -66,6 +66,22 @@ fn record_scene_texture_draw() {
 #[test]
 fn scene_texture_seam_compiles_and_records_through_facade_types_only() {
     record_scene_texture_draw();
+}
+
+/// `with_context` before any shell has installed a device answers `None` —
+/// the state every host unit test and this crate's own default (`--ignored`
+/// excluded) test run is in, since only the ignored test below ever calls
+/// `frust_shell_common::gpu::install_gpu_handle`, and cargo's default `cargo
+/// test` invocation runs the non-ignored set only (an `--ignored` run
+/// replaces it rather than adding to it), so this process never sees an
+/// install. Device-free: no GPU adapter needed.
+#[test]
+fn with_context_answers_none_before_any_shell_installs_a_device() {
+    let answer = with_context(|handle| handle.caps.adapter_name.clone());
+    assert!(
+        answer.is_none(),
+        "with_context must answer None until a shell installs a device"
+    );
 }
 
 /// A minimal, dependency-free `block_on`: this crate carries no async
@@ -135,4 +151,57 @@ fn scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context(
     });
 
     record_scene_texture_draw();
+}
+
+/// Brings up a real headless [`DeviceHandle`] and installs it through
+/// `frust_shell_common::gpu::install_gpu_handle` — the exact public seam a
+/// shell's own render executor calls (see `frust-shell-desktop`'s
+/// `render.rs`'s `publish_gpu_handle`), not a facade-internal shortcut — then
+/// reads it back purely through the facade's [`with_context`], proving the
+/// full shell-installs / app-reads round trip with no shell in the loop.
+///
+/// A separate device from `scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context`'s
+/// standalone [`Context`] above: that test proves an app can build its own
+/// throwaway device; this one proves it can reach the *installed* one back
+/// out through `with_context`. Both bring up a real adapter, so both are
+/// `--ignored`.
+#[test]
+#[ignore = "needs a real GPU adapter; run with `cargo test -p frust --features gpu --test \
+            gpu_seam -- --ignored` (WGPU_BACKEND/WGPU_ADAPTER_NAME pin the adapter; \
+            FRUST_GOLDEN_EXPECT_ADAPTER verifies it resolved)"]
+fn with_context_reaches_a_handle_installed_the_way_a_shell_would() {
+    let installed_adapter = block_on(async {
+        let mut context = Context::new();
+        context
+            .ensure_device_headless()
+            .await
+            .expect("frust::gpu::Context headless device creation");
+        let handle: DeviceHandle = context.device_handle().clone();
+        let adapter_name = handle.caps.adapter_name.clone();
+
+        if let Ok(expected) = std::env::var("FRUST_GOLDEN_EXPECT_ADAPTER") {
+            let expected = expected.trim();
+            if !expected.is_empty() {
+                assert!(
+                    adapter_name
+                        .to_lowercase()
+                        .contains(&expected.to_lowercase()),
+                    "expected an adapter matching `{expected}`, resolved `{adapter_name}` instead"
+                );
+            }
+        }
+
+        // The exact call a shell's render executor makes once its own device
+        // exists (`frust_shell_common::gpu::install_gpu_handle`) — never a
+        // facade-internal function, since installing is shell-glue's job and
+        // the facade only ever reads through `with_context`.
+        frust_shell_common::gpu::install_gpu_handle(handle);
+        adapter_name
+    });
+
+    let read_back_adapter = with_context(|handle| handle.caps.adapter_name.clone())
+        .expect("a device was installed just above");
+    assert_eq!(read_back_adapter, installed_adapter);
+
+    println!("frust::gpu::with_context resolved adapter: {read_back_adapter}");
 }

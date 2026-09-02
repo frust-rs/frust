@@ -64,6 +64,14 @@ pub use frust_gpu::{
     AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext,
     SurfaceAlphaRequest, SurfaceFactory, SurfacePhase,
 };
+// `DeviceHandle` (the cheap-to-clone device/queue/adapter pair a shell hands
+// off to `frust-shell-common`'s process-wide GPU slot — see that crate's
+// `gpu` module) stays behind this crate's own `gpu` feature rather than
+// joining the unconditional re-export above: `frust-gpu` itself is not
+// optional, so gating costs nothing but keeps a default build of this crate
+// (the only one most apps ever produce) at zero new public symbols.
+#[cfg(feature = "gpu")]
+pub use frust_gpu::DeviceHandle;
 pub use headless::{
     GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
     HeadlessOptions, HeadlessRenderer, HeadlessSpec,

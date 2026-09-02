@@ -570,12 +570,54 @@ pub mod authoring {
 ///     other => panic!("expected SceneTexture, got {other:?}"),
 /// }
 /// ```
+///
+/// # Reaching the shell's own live device: [`with_context`]
+///
+/// Everything above builds a *standalone* [`Context`] — useful for a
+/// headless harness, but a second device, not the one the running shell
+/// already created and is presenting frames through. [`with_context`] reaches
+/// that one instead: the shell's render executor installs its
+/// [`DeviceHandle`] (the device/queue/adapter pair, cheap to clone since
+/// wgpu's own types are `Arc`-backed) into a process-wide slot the first time
+/// a surface — and so a device — comes up
+/// (`frust_shell_common::gpu::install_gpu_handle`, see that module's docs),
+/// and [`with_context`] reads it back through the identical seam
+/// (`frust_shell_common::gpu::gpu_handle`). It answers `None` before that
+/// first surface exists (desktop's zero-config preview window, a mobile
+/// shell before its first frame) — check the `Option`, never assume `Some`.
+/// Never blocks: once installed, the read is a lock-free `OnceLock::get`, so
+/// calling this from the UI thread is always safe.
+///
+/// Only the desktop shell installs one today; the two mobile shells forward
+/// the `gpu` feature but do not install yet (an accepted gap — see
+/// `frust-shell-android`/`frust-shell-ios`'s own crate docs), so
+/// `with_context` always answers `None` there for now.
+///
+/// ```
+/// // No device exists in this doctest process, so `with_context` answers
+/// // `None` — exactly the state an app sees before its shell's first frame.
+/// let adapter_name = frust::gpu::with_context(|handle| handle.caps.adapter_name.clone());
+/// assert!(adapter_name.is_none());
+/// ```
 #[cfg(feature = "gpu")]
 pub mod gpu {
     pub use frust_gpu::{
-        CommandBuffer, RenderContext as Context, RenderPipelineDesc, RenderTarget, SceneTextureId,
-        ShaderLibrary, Texture, TextureDesc,
+        CommandBuffer, DeviceHandle, RenderContext as Context, RenderPipelineDesc, RenderTarget,
+        SceneTextureId, ShaderLibrary, Texture, TextureDesc,
     };
+
+    /// Run `f` against the shell-owned live [`DeviceHandle`], or `None` if no
+    /// shell has installed one yet (see the module docs' *Reaching the
+    /// shell's own live device* section).
+    ///
+    /// Distinct from [`Context`] (`frust-gpu`'s `RenderContext`), which an app
+    /// can build a *standalone* device from (`Context::new()` +
+    /// `ensure_device_headless`/a real surface) — that path always creates a
+    /// second device. `with_context` never creates one; it only reads back
+    /// the one the running shell already owns.
+    pub fn with_context<R>(f: impl FnOnce(&DeviceHandle) -> R) -> Option<R> {
+        frust_shell_common::gpu::gpu_handle::<DeviceHandle>().map(f)
+    }
 }
 
 /// The accessibility vocabulary crate, whole — the long-tail valve behind

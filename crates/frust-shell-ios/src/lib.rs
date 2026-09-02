@@ -20,6 +20,20 @@
 //! macro definition and the pure host-testable helpers ([`ffi_support`]) compile,
 //! so the crate is inert in a host `cargo test --workspace` and on Android.
 //!
+//! # GPU-device hand-back (`gpu` feature)
+//!
+//! This shell's `gpu` Cargo feature forwards into `frust-shell-common/gpu`
+//! and `frust-render/gpu` (the process-wide device slot and its
+//! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
+//! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
+//! `frust-shell-desktop`'s render executor installs its live device into.
+//! **This shell does not install one yet** — its render-thread device
+//! creation lives in `ffi_glue`'s render-loop bring-up and `app::executor`,
+//! wiring an install call there is a render-thread-split-aware change of
+//! its own, not a one-line addition — so `frust::gpu::with_context`
+//! currently answers `None` on iOS even with `--features gpu` on. An
+//! accepted, explicitly tracked gap rather than a half-built accessor.
+//!
 //! # Unsafe
 //!
 //! This crate is a sanctioned `unsafe` zone: the framework crates
