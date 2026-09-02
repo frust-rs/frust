@@ -2090,6 +2090,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-beui"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-core",
+ "frust-widgets",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-camera"
 version = "0.1.0"
 dependencies = [
