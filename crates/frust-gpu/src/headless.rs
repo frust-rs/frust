@@ -141,7 +141,9 @@ impl HeadlessTarget {
             .expect("frust-gpu headless: readback map channel closed before a result arrived")
             .expect("frust-gpu headless: readback buffer map failed");
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .expect("frust-gpu headless: the readback buffer is mapped after map_async succeeded");
         let pixels = strip_row_padding(&mapped, self.width, self.height, bytes_per_pixel);
         drop(mapped);
         buffer.unmap();

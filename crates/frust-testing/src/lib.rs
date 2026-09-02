@@ -5,13 +5,12 @@
 //! workspace depends on it outside `[dev-dependencies]` (enforced by
 //! `tests/deps.rs`'s guard), so nothing here ever reaches a production
 //! dependency graph. Both arms of the oracle PAIR ship here — the GPU-free
-//! [`oracle_cpu::CpuOracle`] and the `frust-render`-backed
-//! [`oracle_classic::ClassicOracle`] — because [`corpus`] hands the same
-//! case to both behind one [`render::SceneRenderer`]. That is why this crate
-//! carries a `frust-render` edge (at its DEFAULT feature set); see the
-//! manifest's comment for why it is sound. Only `oracle_classic` needs a GPU
-//! at run time: every other module, the CPU arm included, runs on a machine
-//! without one.
+//! [`oracle_cpu::CpuOracle`] and the GPU [`oracle_engine::EngineOracle`] —
+//! because [`corpus`] hands the same case to both behind one
+//! [`render::SceneRenderer`]. That is why this crate carries the engine-layer
+//! edges (`frust-engine`/`frust-gpu`/`wgpu`); see the manifest's comment for
+//! why they are sound. Only `oracle_engine` needs a GPU at run time: every
+//! other module, the CPU arm included, runs on a machine without one.
 //!
 //! - [`render`]: the renderer-agnostic [`render::SceneRenderer`] trait plus
 //!   its [`render::RenderSpec`]/[`render::RenderedImage`]/
@@ -30,14 +29,13 @@
 //!   that must not depend on whatever font the host happens to have
 //!   installed — see that module's docs.
 //! - [`oracle_cpu`]: [`oracle_cpu::CpuOracle`], the deterministic `vello_cpu`
-//!   0.2.0 reference renderer a golden case is compared against.
-//! - [`oracle_classic`]: [`oracle_classic::ClassicOracle`], the GPU arm of
-//!   that pair over `frust-render`'s offscreen vello-classic renderer, plus
-//!   the adapter-to-golden-class routing ([`oracle_classic::golden_class`]).
-//! - [`oracle_engine`]: [`oracle_engine::EngineOracle`], the sparse-strip
-//!   engine arm over `frust-engine` and a `frust-gpu` headless target, with
-//!   its own `engine-`-prefixed class routing
-//!   ([`oracle_engine::engine_golden_class`]).
+//!   0.2.0 reference renderer every golden case is measured against — the P1
+//!   correctness gate.
+//! - [`oracle_engine`]: [`oracle_engine::EngineOracle`], the GPU arm of that
+//!   pair — the sparse-strip engine over `frust-engine` and a `frust-gpu`
+//!   headless target — plus the adapter-to-golden-class routing
+//!   ([`oracle_engine::engine_golden_class`]) and the adapter provenance a
+//!   promoted baseline records ([`oracle_engine::AdapterMeta`]).
 //! - [`frame`]: GPU-free capture of a REAL widget tree as a scene
 //!   ([`frame::frame`]/[`frame::record_view`]) — a `RenderRoot` rebuild,
 //!   layout-with-text and paint into a `SceneBuilder`, with the device scale
@@ -57,7 +55,6 @@ pub mod fonts;
 pub mod frame;
 pub mod golden;
 pub mod meta;
-pub mod oracle_classic;
 pub mod oracle_cpu;
 pub mod oracle_engine;
 pub mod render;
@@ -79,9 +76,8 @@ pub use frame::{
 pub use frust_scene::Scene;
 pub use golden::{GoldenOutcome, compare_golden};
 pub use meta::GoldenMeta;
-pub use oracle_classic::{ClassicOracle, UNCLASSIFIED_CLASS, golden_class};
 pub use oracle_cpu::{CpuOracle, ORACLE_ID, SkipReport};
 pub use oracle_engine::{
-    ENGINE_UNCLASSIFIED_CLASS, EngineOracle, EngineOracleOptions, engine_golden_class,
+    AdapterMeta, ENGINE_UNCLASSIFIED_CLASS, EngineOracle, EngineOracleOptions, engine_golden_class,
 };
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};

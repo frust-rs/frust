@@ -74,27 +74,22 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# rendering stack — pins are LAW (vello 0.9 requires wgpu 29.0.3; do not bump independently)
+# rendering stack — pins are LAW (do not bump independently)
 #
-# Feature trim: the framework only ever drives vello
-# through wgpu (no CPU-side vello-only build), so `default-features = false`
-# + explicit `features = ["wgpu"]` drops vello's `wgpu_default` default
-# feature, which otherwise pulls in plain `wgpu/default` below it. `wgpu`
-# itself is trimmed to the backends Frust's three shells can actually
-# reach: `wgsl` is vello's own shader frontend (its `wgpu` feature already
-# requires it); `vulkan` + `metal` + `dx12` are the per-OS GPU backends,
-# unioned additively across every target this workspace builds for (Android:
-# vulkan; iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
-# non-backend runtime plumbing, always needed). Deliberately dropped:
-# `gles` (no shell ever surfaces a GLES-only device — vello requires compute
-# shaders GLES can't provide, so a GLES fallback was never a real path; the
-# `cpu-tier` `vello_cpu` feature is the documented CPU fallback story
-# instead, see `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm
-# target only, Frust ships no wasm shell). Confirmed via `cargo tree -e
-# features`: these two (and their naga frontends/backends) are absent from
-# every target's dependency graph.
-vello = { version = "0.9.0", default-features = false, features = ["wgpu"] }
-wgpu = { version = "29.0.3", default-features = false, features = [
+# Feature trim: `wgpu` is trimmed to the backends Frust's three shells can
+# actually reach: `wgsl` is the shader frontend `frust-engine`'s pipelines are
+# written in; `vulkan` + `metal` + `dx12` are the per-OS GPU backends, unioned
+# additively across every target this workspace builds for (Android: vulkan;
+# iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
+# non-backend runtime plumbing, always needed). Deliberately dropped: `gles`
+# (no shipping shell surfaces a GLES-only device; the engine tier's own
+# downlevel design covers the WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL`
+# tested against a desktop adapter, per `docs/RENDER_DEVELOPMENT.md`; the web
+# arm is cancelled, `engine-webgl2-unhosted`)
+# and `webgpu` (wasm target only, Frust ships no wasm shell). Confirmed via
+# `cargo tree -e features`: these two (and their naga frontends/backends) are
+# absent from every target's dependency graph.
+wgpu = { version = "30.0.1", default-features = false, features = [
     "std",
     "parking_lot",
     "wgsl",
@@ -121,7 +116,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # frust-tui terminal UI — ratatui 0.30 / crossterm 0.29, pinned to
 # minor per the Version-Pin Policy (pre-1.0 ratatui churn). These pins are used
 # ONLY by `frust-tui`, which is isolated from the framework render stack (it
-# depends on `frust-drive`, never on `frust-core`/`vello`/`wgpu`). `insta` is a
+# depends on `frust-drive`, never on `frust-core`/`frust-render`/`wgpu`). `insta` is a
 # dev-only snapshot harness for the TUI's TestBackend render tests.
 ratatui = "0.30"
 crossterm = "0.29"
@@ -262,25 +257,23 @@ accesskit = "0.24"
 accesskit_winit = "0.33"
 accesskit_android = "0.7"
 accesskit_ios = "=0.1.2"
-# experimental CPU render-tier fallback — optional, feature-gated
-# (`cpu-tier` on frust-render, NOT default), exact-pinned: pre-1.0 with an
-# unstable API, isolated behind the encode adapter so a breaking bump never
-# reaches the default GPU path.
-vello_cpu = "=0.0.9"
-# frust-engine's own sparse-strip core (`engine-tier` feature on
-# frust-render), exact-pinned (pre-1.0 experimental), NOT default build.
+# frust-engine's own sparse-strip core (a plain dependency of frust-render —
+# the only renderer it contains), exact-pinned (pre-1.0 experimental). The
+# only `vello_common`/`glifo` identity now — the legacy `vello_cpu =0.0.9`
+# CPU-tier fallback pin (and its own `vello_common 0.0.9`/`glifo 0.1.1`
+# identities) was retired alongside `frust-render`'s `cpu-tier` feature.
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
 glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
 # Dev-only oracle for `frust-testing`: the SAME engine core the engine
 # tier is built on (vello_common 0.2.0 + glifo 0.3.0), rasterized on the CPU
 # with no GPU in the loop, so a golden test compares the engine against its own
 # reference implementation rather than against a different renderer's. Renamed
-# (`vello_cpu_oracle`) rather than bumping the `vello_cpu = "=0.0.9"` row above:
-# the legacy `cpu-tier` fallback stays on 0.0.9, so BOTH `vello_common`
-# identities (0.0.9 and 0.2.0) coexist in the graph on purpose — the rename
-# makes that explicit at every use site, and
-# `crates/frust-testing/tests/dup_identities.rs` is the guard that asserts
-# exactly two of each (flipped to one when a later phase retires 0.0.9).
+# (`vello_cpu_oracle`, package `vello_cpu`) from the era when the retired
+# `cpu-tier` fallback's own `vello_cpu =0.0.9` row also lived here — the name
+# stays even now that it is the sole `vello_cpu` identity, since every use
+# site already spells it and `crates/frust-testing/tests/dup_identities.rs`
+# is the guard that pins the single `vello_common`/`glifo` identity this
+# pin resolves to.
 # Exact-pinned like every other pre-1.0 render-stack row (docs/DEVELOPMENT.md's
 # Version-Pin Policy). Feature trim: `std` + `text` (glyph runs) + exactly one
 # rasterization pipeline. `u8_pipeline` is NOT optional decoration — vello_cpu
@@ -612,7 +605,7 @@ frust-shell-linux = { path = "crates/frust-shell-linux" }
 frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. The app's own
@@ -628,15 +621,6 @@ frust = { path = "crates/frust" }
 # workspace dev workflow (building/testing the crates in this workspace
 # directly); the same override lands in `templates/app/Cargo.toml.tmpl`
 # (every generated app) and `examples/huddle/Cargo.toml`.
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -684,7 +668,7 @@ opt-level = 1
 # fat LTO + cgu=1 alone (opt-level 3, the default — no override needed) shrank the
 # prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
 # unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were
-# also measured, but only *with* a shader/render-stack (vello/wgpu*/naga)
+# also measured, but only *with* a shader/render-stack (wgpu*/naga)
 # carve-out back to `opt-level = 3` — the config that would actually ship,
 # since sacrificing encode-path CPU perf isn't acceptable — and under that
 # carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"

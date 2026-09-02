@@ -199,9 +199,9 @@ frame runs when something asks for one, and a paced request resolves its next wa
 that paint's outcome.
 
 The desktop shell persists a pipeline cache through `frust-paths`, so second-and-later launches
-skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 29 that is any
+skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 that is any
 Vulkan adapter (Linux, and Windows when the selected backend is Vulkan; verified in wgpu-hal
-29.0.4's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
+30.0.1's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
 Loading is unconditional file I/O at startup on every desktop OS, and reads through to a legacy
 macOS cache base when the current-location file is absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
 only on macOS, where a save never fires, so no legacy blob can exist); it survives purely as
@@ -293,8 +293,8 @@ the bare theme cap regardless of any longer per-request interval (see
   kill switch here — it skips starting the service even in a `devtools`-featured build. Full detail
   in [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Kill switches:** a set of additive, off-by-default env vars (`FRUST_NO_RENDER_THREAD`,
-  `FRUST_NO_FRAME_GATE`, `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`, `FRUST_NO_DIRECT_SURFACE`,
-  `FRUST_NO_SHADER_EFFECTS`) each revert one frame-pipeline seam independently.
+  `FRUST_NO_FRAME_GATE`, `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`) each revert one
+  frame-pipeline seam independently.
 
 ## Key Types
 

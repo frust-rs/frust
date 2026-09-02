@@ -1,7 +1,11 @@
 //! Guards G5 and G7: the engine-core version pins stay exact, and the
-//! engine-tier boundary (`docs/ARCHITECTURE.md`'s Cross-Unit Layer
+//! engine-tier LAYER boundary (`docs/ARCHITECTURE.md`'s Cross-Unit Layer
 //! Dependencies / `docs/RENDER_ARCHITECTURE.md`'s Layer Dependencies) stays a
-//! one-way edge no manifest can reopen silently.
+//! one-way edge no manifest can reopen silently. "Engine-tier" here is the
+//! name of that layer rule — the `frust-engine`/`frust-gpu` tier of the
+//! dependency graph — never a cargo feature: the feature of that name was
+//! retired when the engine became the only renderer, and this guard is about
+//! the direction of an edge, not about how one is switched on.
 //!
 //! Both are plain manifest scans run as ordinary `cargo test` (this repo has
 //! no lint-plugin tooling — see `docs/CODE_STANDARDS.md`; precedent:
@@ -9,9 +13,11 @@
 //! already cover this same directory's manifests for a different guard).
 //!
 //! - **G5**: the root `[workspace.dependencies]` rows for `vello_common`,
-//!   `glifo`, `vello_cpu`, and `vello_cpu_oracle` each carry a
+//!   `glifo`, and `vello_cpu_oracle` each carry a
 //!   literal `=` version — the engine-core render stack is exact-pinned,
 //!   pre-1.0 and unstable, per `docs/RENDER_DEVELOPMENT.md`'s Version Pins.
+//!   (The legacy `vello_cpu` row — the cpu-tier fallback's own pin — was
+//!   retired alongside `frust-render`'s `cpu-tier` feature.)
 //! - **G7**: `frust-engine` never depends on `vello`/`vello_cpu`/
 //!   `frust-render`/`parley`; `frust-gpu` never depends on
 //!   `frust-scene`/`frust-core`/`frust-widgets`/`frust-engine`; and no crate
@@ -47,8 +53,11 @@ fn parse_manifest(path: &Path) -> toml::Table {
 
 /// Every `[workspace.dependencies]` row this guard requires to carry a
 /// literal `=` version — the engine-core render stack's exact-pinned rows
-/// (`docs/RENDER_DEVELOPMENT.md`'s Version Pins).
-const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu", "vello_cpu_oracle"];
+/// (`docs/RENDER_DEVELOPMENT.md`'s Version Pins). The legacy `vello_cpu` row
+/// (the retired cpu-tier fallback's own pin) is gone, not merely renamed:
+/// `vello_cpu_oracle` predates its retirement and stays the CPU oracle's own
+/// row.
+const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu_oracle"];
 
 /// The version requirement string of `[workspace.dependencies].<name>`,
 /// whether the row is a bare string (`name = "=0.1.0"`) or a table
@@ -89,7 +98,7 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
         if !version.starts_with('=') {
             failures.push(format!(
                 "[workspace.dependencies].{name} = \"{version}\" is not exact-pinned — the \
-                 engine-core render stack (vello_common/glifo/vello_cpu/vello_cpu_oracle) \
+                 engine-core render stack (vello_common/glifo/vello_cpu_oracle) \
                  must carry a literal `=` version (docs/RENDER_DEVELOPMENT.md's \
                  Version Pins)"
             ));
@@ -104,7 +113,8 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
 }
 
 // ---------------------------------------------------------------------
-// G7: the engine-tier dependency-direction boundary
+// G7: the engine-tier LAYER's dependency-direction boundary
+// (the `frust-engine`/`frust-gpu` tier of the graph — not a cargo feature)
 // ---------------------------------------------------------------------
 
 /// The dependency-table names Cargo recognizes as ordinary (non-dev) edges —
@@ -166,8 +176,8 @@ fn assert_none_depend_on(manifest_path: &Path, forbidden: &[&str]) {
         assert!(
             !deps.contains(*name),
             "{}: [dependencies]/[build-dependencies] must not name `{name}` — the \
-             engine-tier boundary (docs/ARCHITECTURE.md's Cross-Unit Layer Dependencies) is a \
-             one-way edge",
+             engine-tier layer boundary (docs/ARCHITECTURE.md's Cross-Unit Layer Dependencies) \
+             is a one-way edge",
             relative.display()
         );
     }
@@ -192,7 +202,7 @@ fn g7_frust_gpu_never_depends_on_a_layer_above_it() {
 }
 
 #[test]
-fn g7_nothing_above_render_depends_on_the_engine_tier() {
+fn g7_nothing_above_render_depends_on_the_engine_tier_layer() {
     let root = repo_root();
 
     let mut manifests = vec![

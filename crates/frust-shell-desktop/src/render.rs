@@ -771,9 +771,8 @@ fn install_detached(
 
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
-/// surface produces no such measurement (every tier but the engine one, an
-/// `engine-tier` build whose device never got `TIMESTAMP_QUERY`, or simply no
-/// reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+/// surface produces no such measurement (a device that never offered
+/// `TIMESTAMP_QUERY`, or simply no reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
 fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
     renderer.gpu_pass_timings().map(|timings| GpuPasses {
         prepass: timings.prepass,

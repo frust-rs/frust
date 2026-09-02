@@ -10,9 +10,10 @@
 
 Frust is a Rust UI framework: a declarative `View` API over a retained
 widget tree, rendered through a renderer-agnostic vector scene into a GPU
-backend (Vello/wgpu), with first-class Android, iOS, and desktop shells —
-plus a `frust` CLI that scaffolds, builds, and drives apps on all three
-platforms, the way the Flutter CLI does for Flutter.
+backend (the frust-owned `frust-engine` strips-on-wgpu renderer), with
+first-class Android, iOS, and desktop shells — plus a `frust` CLI that
+scaffolds, builds, and drives apps on all three platforms, the way the
+Flutter CLI does for Flutter.
 
 ## Status
 
@@ -31,22 +32,21 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 >   the wider ecosystem today ([wgpu#2869](https://github.com/gfx-rs/wgpu/issues/2869),
 >   [xilem#789](https://github.com/linebender/xilem/issues/789)); every
 >   frame re-rasterizes the full surface.
-> - **iOS Simulator cannot render** under the pinned Vello 0.9 / wgpu 29
->   (the Simulator GPU lacks `INDIRECT_EXECUTION`); physical iOS devices
->   are unaffected — see `docs/DEVELOPMENT.md` Known Issues.
 > - **Back handling is single-navigator, process-wide** — concurrently-live
 >   navigators (per-tab stacks, multi-window) are unsupported until the
 >   back provider slot is widened to a stack.
 >
-> Frust also inherits Vello 0.9's alpha-state limitations, notably:
+> `frust-engine`, the frust-owned strips-on-wgpu renderer, carries its own
+> named alpha-state gaps, notably:
 >
-> - [Blur and filter effects are unimplemented](https://github.com/linebender/vello/issues/476)
->   (glass materials degrade to opaque fills).
-> - [Conflation artifacts](https://github.com/linebender/vello/issues/49).
-> - [GPU memory allocation strategy](https://github.com/linebender/vello/issues/366).
-> - [Glyph caching](https://github.com/linebender/vello/issues/204).
-> - [Bitmap color-emoji strikes that aren't RGBA8 are skipped](https://github.com/linebender/vello/issues/1031)
->   (Android CBDT emoji at risk; desktop sbix verified safe).
+> - Bitmap-strike color emoji (PNG/BGRA/Mask — e.g. Android's CBDT strikes)
+>   do not render; COLR-format color emoji do.
+> - A per-corner blurred shadow/glow rounds to its largest corner rather
+>   than each corner independently.
+> - The glyph atlas is built on a cache upstream itself labels
+>   experimental, wrapped in frust-owned policy.
+>
+> See `docs/LIMITATIONS.md` for the full, evidenced register.
 
 ## Quickstart
 
@@ -76,7 +76,7 @@ for the full command surface.
 |---|---|
 | `frust-core` | The declarative `View` trait, retained `Widget` trait, layout, event/focus/capture pass, animation vocabulary, and pull-based accessibility (semantics) pass. |
 | `frust-scene` | The renderer-agnostic vector scene / display list — the stable seam between widgets and the GPU backend. |
-| `frust-render` | The wgpu + Vello GPU backend that encodes a scene and presents it to a window surface. |
+| `frust-render` | The wgpu GPU backend, driving the frust-owned `frust-engine` strip renderer, that presents a scene to a window surface. |
 | `frust-text` | Text shaping (Parley/Fontique/HarfRust/Swash) and the `TextEditor` engine platform IME bridges drive. |
 | `frust-theme` | Design tokens: Material 3 and Cupertino baselines, color/type/shape/elevation/motion/glass scales. |
 | `frust-widgets` | The baseline + Material + Cupertino widget catalog, plus navigation (imperative navigator, declarative router, shared-element transitions). |
@@ -93,7 +93,7 @@ for the full command surface.
 [`docs/learning/`](docs/learning/README.md) is a hands-on, lab-based
 curriculum for understanding how Frust turns a `View` into pixels — from
 the display list through the widget paint seam, the frame loop, the
-Vello/wgpu encode-present path, text shaping, the mobile frame gate, and
+frust-engine/wgpu encode-present path, text shaping, the mobile frame gate, and
 the measurement tooling. Every chapter anchors to real files in this repo
 and ends with runnable experiments (build a scene by hand, break the S1
 bubble-chart benchmark scenario on purpose, trace a frame with

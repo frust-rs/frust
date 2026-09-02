@@ -40,7 +40,7 @@ use frust_engine::schedule::{MAX_LIVE_PAGES, PageConfig, PageParity, Round, Sche
 use frust_engine::{
     EngineError, EngineRenderer, EngineTarget, OutputAlpha, SceneCompiler, compile::CompiledFrame,
 };
-use frust_gpu::{Context, ContextOptions, DownlevelProfile, HeadlessTarget, TierCaps};
+use frust_gpu::{ContextOptions, DownlevelProfile, HeadlessTarget, RenderContext, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
 use peniko::{Brush, Color};
@@ -136,8 +136,8 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 }
 
 /// The device, queue and capabilities one GPU context hands out.
-fn gpu() -> (Context, wgpu::Device, wgpu::Queue, TierCaps) {
-    let mut context = Context::new(ContextOptions {
+fn gpu() -> (RenderContext, wgpu::Device, wgpu::Queue, TierCaps) {
+    let mut context = RenderContext::with_options(ContextOptions {
         device_label: "frust-engine scrub device".to_string(),
         backends: None,
     });

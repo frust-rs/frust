@@ -5,34 +5,40 @@
 //! # Why *this* CPU renderer
 //!
 //! The oracle deliberately rasterizes with the ENGINE'S OWN core — `vello_cpu`
-//! 0.2.0, which is built on the same `vello_common` 0.2.0 + `glifo` 0.3.0 the
-//! engine tier uses — rather than with the `vello_cpu = "=0.0.9"` pin
-//! `frust-render`'s legacy `cpu-tier` fallback carries. A golden diff is then a
+//! 0.2.0, built on the same `vello_common` 0.2.0 + `glifo` 0.3.0 `frust-engine`
+//! itself depends on, renamed `vello_cpu_oracle` at the workspace level so
+//! every use site says which identity it means. A golden diff is then a
 //! statement about *Frust's* lowering of a [`frust_scene::Scene`], not about
 //! the difference between two unrelated rasterizer generations.
 //!
-//! Both versions therefore live in the graph at once, which means two
-//! `vello_common` identities (0.0.9 and 0.2.0) and two `glifo` identities
-//! (0.1.1 and 0.3.0). That duplication is deliberate and *guarded*, not
-//! accidental drift: see `tests/dup_identities.rs`, which fails if the count of
-//! either ever changes. The dependency is renamed (`vello_cpu_oracle`) at the
-//! workspace level so every use site says which identity it means.
+//! Exactly one identity of `vello_common` (0.2.0) and `glifo` (0.3.0) resolves
+//! in the graph — `tests/dup_identities.rs` fails if a second one ever does.
+//! Before the swap phase, `frust-render`'s retired `cpu-tier` fallback pinned
+//! its own `vello_cpu = "=0.0.9"`, resolving a second identity of each
+//! alongside this crate's oracle pin; that fallback is gone, so this crate's
+//! `vello_cpu_oracle` pin is now the sole dev-facing route to the one
+//! remaining identity, the same one `frust-engine` depends on directly.
 //!
-//! # Relationship to `frust-render`'s command walk
+//! # Relationship to the engine compiler's command walk
 //!
-//! The command semantics below mirror `frust-render`'s `convert.rs` walk
-//! (its `SceneSink` seam) — the hoisted `ClearRect`, the per-corner rounded
-//! shapes, the pre-flattened dash segments, the largest-corner shadow
-//! downgrade, and the inline snapshot emulation are all reproduced here. They
-//! are *reproduced* rather than reused because that seam is `pub(crate)` to
-//! `frust-render` and shaped around `vello` types, and because this crate must
-//! stay a GPU-free leaf (no `frust-render`, no `vello`, no `wgpu` edge).
+//! The command semantics below mirror `frust-engine`'s own compiler
+//! ([`frust_engine::SceneCompiler::compile`], `frust-engine/src/compile`) walk
+//! over a [`frust_scene::Scene`]'s commands — the hoisted `ClearRect`, the
+//! per-corner rounded shapes, the pre-flattened dash segments, the
+//! largest-corner shadow downgrade, and the inline snapshot emulation are all
+//! reproduced here. They are *reproduced* rather than reused: the engine
+//! compiler only ever produces strip geometry for the GPU raster pipeline to
+//! turn into pixels, which is exactly the GPU dependency this crate's CPU arm
+//! exists to avoid, and calling into the engine's own compiler would stop this
+//! being an independent second implementation of the contract (the
+//! GPU-backed arm, [`crate::oracle_engine::EngineOracle`], already renders
+//! through the real compiler — see that module for why the pair needs both).
 //!
 //! That duplication is the point of an oracle — an independent second
-//! implementation of the same contract — but it also means a change to
-//! `convert.rs`'s semantics must be mirrored here, or a golden diff will blame
-//! the engine for a divergence that lives in this file. The
-//! [`SkipReport`]-carrying variants below are the only intentional
+//! implementation of the same [`frust_scene`] command contract — but it also
+//! means a change to the engine compiler's semantics must be mirrored here, or
+//! a golden diff will blame the engine for a divergence that lives in this
+//! file. The [`SkipReport`]-carrying variants below are the only intentional
 //! divergences.
 //!
 //! # Known fidelity gaps (reported, never silent)
@@ -42,12 +48,15 @@
 //! against a lie:
 //!
 //! - [`frust_scene::Command::ShaderQuad`] has no CPU equivalent — there is no
-//!   shader pre-pass without a GPU. It lowers to the same opaque dark
-//!   placeholder fill `convert.rs` uses on a shader miss, and increments
-//!   [`SkipReport::shader_quads`].
+//!   shader pre-pass without a GPU, and the engine compiler does not lower it
+//!   either yet (`compile/mod.rs` recognises the command and does nothing with
+//!   it). It lowers to the oracle's own opaque dark placeholder fill, reported
+//!   through [`SkipReport::shader_quads`] so a corpus knows this frame is not
+//!   a faithful reference.
 //! - An image *brush* handed to a fill (as opposed to the dedicated
-//!   [`frust_scene::Command::Image`]) paints transparent, matching the CPU
-//!   tier's own downgrade, and increments [`SkipReport::image_brush_fills`].
+//!   [`frust_scene::Command::Image`]) paints transparent, matching the
+//!   engine's own downgrade (`compile/paint.rs`'s `encode_brush`), and
+//!   increments [`SkipReport::image_brush_fills`].
 //! - A [`frust_scene::Command::GlyphRun`] whose font blob does not begin with a
 //!   recognizable sfnt tag is skipped and counted in
 //!   [`SkipReport::unrenderable_glyph_runs`] — `glifo` unwraps its font parse,
@@ -95,17 +104,19 @@ pub const ORACLE_ID: &str = "vello-cpu-0.2";
 /// Flattening tolerance (logical px) for the shapes handed to `vello_cpu` as
 /// `BezPath`s — its clip-layer and rounded-fill entry points take a path, not a
 /// `kurbo` shape. Well below a pixel, so corners stay crisp without exploding
-/// the segment count. Matches `frust-render`'s CPU tier so the two rasterize
-/// identical geometry.
+/// the segment count. Matches `frust-engine`'s own `FLATTEN_TOLERANCE`
+/// (`compile/mod.rs`) so the two rasterize identical geometry.
 const FLATTEN_TOLERANCE: f64 = 0.1;
 
 /// The transparent paint used where `vello_cpu` has no equivalent for a scene
 /// brush (an image brush handed to a fill; see the module docs' gap list).
 const FALLBACK_PAINT: Color = Color::new([0.0, 0.0, 0.0, 0.0]);
 
-/// The opaque dark placeholder a [`Command::ShaderQuad`] lowers to — the exact
-/// color `frust-render`'s `convert.rs` fills on a shader miss, so the oracle
-/// and the engine's own miss path agree pixel-for-pixel.
+/// The opaque dark placeholder a [`Command::ShaderQuad`] lowers to. The engine
+/// compiler does not lower this command yet (see the module docs' fidelity-gap
+/// list), so this color is the oracle's own deterministic stand-in — chosen
+/// dark and opaque so a case that hits it is visibly not a faithful reference
+/// rather than blending in.
 const SHADER_PLACEHOLDER: Color = Color::from_rgba8(16, 16, 16, 255);
 
 /// Fidelity gaps encountered during the most recent [`CpuOracle::render`].
@@ -345,7 +356,9 @@ impl SceneRenderer for CpuOracle {
 
         // `scale` is applied AHEAD of `root` (see `RenderSpec::scale`), and
         // both ahead of each command's own recorded transform — the same
-        // pre-multiplied-root shape `convert.rs`'s walk takes.
+        // shape `frust-engine`'s `SceneCompiler::compile` takes its own
+        // `root: Affine` parameter in (composed ahead of each command's
+        // transform, `compile/mod.rs`).
         let root = Affine::scale(spec.scale) * spec.root;
         {
             let mut painter = Painter {
@@ -603,8 +616,8 @@ enum Group {
 /// command's own recorded transform, and returns how many commands were
 /// dispatched (every command the walk sees, pops included).
 ///
-/// This is the oracle's copy of `frust-render`'s `convert.rs` command walk (see
-/// the module docs for why it is a copy). It always renders the WHOLE scene
+/// This is the oracle's copy of `frust-engine`'s own compiler command walk
+/// (see the module docs for why it is a copy). It always renders the WHOLE scene
 /// from its root: there is no segment/prefix split (that is the GPU path's
 /// snapshot-compositor concern) and no shader-override map or hole set, so
 /// every [`Command::ShaderQuad`] takes its miss path and every
@@ -617,7 +630,8 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     // bounded by the intersection of their clip bounds, then re-pushes them.
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
 
-    // `PushSnapshot`'s inline emulation, matching `convert.rs`: only the
+    // `PushSnapshot`'s inline emulation, matching `frust-engine`'s own
+    // `SnapshotStack` (`compile/layers.rs`): only the
     // OUTERMOST bracket is honoured, its `scale` becomes a correction affine
     // conjugated by the bracket's own transform (`M * S * M.inverse()`), and
     // its `alpha` an ordinary opacity layer on the same group stack. An
@@ -677,11 +691,11 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 painter.push_clip_rounded(transform, rect, radii);
             }
             Command::PopClip => {
-                // Guarded, unlike `convert.rs`'s unconditional pop: a
-                // `SceneBuilder` records a pop with no matching push happily,
-                // vello tolerates the imbalance, and `vello_cpu` panics on a
-                // layer-stack underflow. An oracle must not be the component
-                // that dies on a malformed scene.
+                // Guarded, the same way `frust-engine`'s own `GroupStack::pop`
+                // is (`close_group`, `compile/mod.rs`): a `SceneBuilder`
+                // records a pop with no matching push happily, and `vello_cpu`
+                // panics on a layer-stack underflow. An oracle must not be the
+                // component that dies on a malformed scene.
                 //
                 // The popped entry can be a `Group::SnapshotLayer` rather than
                 // a `Group::Clip` — all three `Group` kinds share one stack,
@@ -712,7 +726,8 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
             } => {
                 // Neither backend has a per-corner blurred primitive, so a
                 // per-corner shadow lowers to its LARGEST corner — the same
-                // downgrade `convert.rs` makes, for the reason
+                // downgrade `frust-engine`'s own blurred-rect lowering makes
+                // (`compile/blur_rrect.rs`), for the reason
                 // `CornerRadii::largest` documents.
                 painter.draw_blurred_rounded_rect(
                     combined * *transform,
@@ -786,10 +801,14 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     PathStyle::Stroke { width, dash } => match dash {
                         Some(dash) if dash.is_effective() => {
                             // Dashes are pre-flattened into sub-paths with
-                            // kurbo's own iterator, exactly as `convert.rs`
-                            // does: `vello_cpu`'s `set_stroke` ignores a
-                            // `Stroke`'s dash fields, so flattening at the
-                            // decode site is what keeps the two comparable.
+                            // kurbo's own iterator, the same lowering
+                            // `frust-engine`'s own `compile::dash_path`
+                            // performs (this crate keeps an independent copy,
+                            // cross-pinned by `tests/fuzz.rs`'s
+                            // `dash_path_lowers_identically_across_both_copies`):
+                            // `vello_cpu`'s `set_stroke` ignores a `Stroke`'s
+                            // dash fields, so flattening at the decode site is
+                            // what keeps the two comparable.
                             let dashed = dash_path(path, *dash);
                             painter.stroke_path(transform, brush, &dashed, *width);
                         }
@@ -804,9 +823,11 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 transform,
                 time: _,
             } => {
-                // No shader pre-pass exists without a GPU, so this always takes
-                // `convert.rs`'s MISS path: the same opaque dark placeholder
-                // fill, reported through `SkipReport` so a corpus knows this
+                // No shader pre-pass exists without a GPU, and the engine
+                // compiler does not lower this command yet either
+                // (`compile/mod.rs`), so this always takes the oracle's own
+                // placeholder fill, reported through `SkipReport` so a corpus
+                // knows this
                 // frame is not a faithful reference.
                 painter.skips.shader_quads += 1;
                 painter.fill_rect(

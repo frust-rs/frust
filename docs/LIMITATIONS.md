@@ -16,48 +16,6 @@ only.
 
 ---
 
-### `cam-blit-opaque` — forced-blit platform view is invisible (Android)
-
-**Observed**: a Mode B platform view (the plugin's native sibling, e.g. a
-camera preview) rendered above/behind an Android surface that takes the
-**blit** render path is completely invisible — the surface resolves opaque
-instead of translucent, so the native view sits behind an opaque frust
-surface. Measured: the preview slot's pixels are pure page background (std
-5.4, exactly `bg-surface`); every other chrome renders normally.
-
-**The app is now told** (`translucencyRefused` shipped):
-`frust::resolved_surface_mode()` answers
-`ResolvedSurfaceMode::RefusedTranslucent` on exactly this surface — a poll,
-read during rebuild like any other process-global shell state, never a
-reactive wake. The *degrade itself is unchanged*: frust still paints the
-opaque Mode A contract, and the host's native-sibling z-order is still fixed
-at build time, so the sibling stays behind the opaque surface (invisible and
-untappable) until the host is rebuilt in Mode A. What the signal buys is a
-deliberate app-side fallback (render your own content in the slot) instead of
-a dead rect.
-
-**Applies to**: Android, any surface that takes the blit path — a GPU-tier
-surface missing `Rgba8Unorm`+`STORAGE_BINDING` (no flag set by anyone; reach
-across real hardware is unmeasured), or any build compiled/run with
-`FRUST_NO_DIRECT_SURFACE` (a deliberate debug/safety valve). **Exempt**: the
-experimental `cpu-tier` (`vello_cpu`) fallback — its output is already
-premultiplied, so it stays translucent-capable and is never affected.
-
-**Why accepted, and why the refusal itself exists**: a blit target lacks
-`STORAGE_BINDING`, so the compute pass that premultiplies vello's straight-
-alpha output (the fix for the Direct path's over-bright fringing defect)
-cannot run there. Refusing translucency was chosen over shipping a silently
-fringing surface — the gap was the missing app-facing signal, not the refusal
-itself; do not remove the refusal to "fix" this. Accepted by Ed 2026-07-27 as
-a documented limitation rather than a merge blocker, binding before Mode B GA
-on Android. `translucencyRefused` has since shipped (above), so what remains
-here is the *invisible sibling* itself, not the silence.
-
-**Evidence**: on-device verification of the blit-path surface (Android); the
-app-facing signal shipped as `translucencyRefused`.
-
----
-
 ### `cam-gesture-onset-lead` — platform view leads at the start of a scroll (Android)
 
 **Observed**: over roughly the first 10 display frames (~85 ms at 120 Hz) of
@@ -2267,8 +2225,8 @@ stack: font metrics, DPI, and native text shaping can all differ from the deskto
 these tests exercise.
 
 **Why accepted**: the fallback only paints under `ResolvedSurfaceMode::RefusedTranslucent`, itself
-reached only via a blit-path surface (see `cam-blit-opaque` above) or a deliberate
-`FRUST_NO_DIRECT_SURFACE=1` build — an on-demand path, not mainline rendering — so a device gate
+reached only when the platform's own compositor offers no translucent alpha mode for the surface
+frust requested — an on-demand path, not mainline rendering — so a device gate
 confirming the warning text actually renders and clips on real hardware is owed, not blocking.
 Rides alongside `native-typeface-first-publish-latch`'s own owed device gate (above) for the same
 plugin's typeface ladder — both are NATIVE_WIDGETS text-rendering paths awaiting real Android/iOS
@@ -2738,9 +2696,9 @@ rationale (search `wiring_order_does_not_flip`).
 ### `render-blurred-shadow-corner-collapse` — a per-corner blurred shadow rounds to its largest corner
 
 **Observed**: `Command::BlurredRoundedRect` carries a per-corner `CornerRadii`, but both render
-backends' blurred-rect primitive (vello's `draw_blurred_rounded_rect`, `vello_cpu`'s
-`fill_blurred_rounded_rect`) accepts only one radius. The shared command walk collapses the four
-corners via `CornerRadii::largest()` before handing off to either sink, so a shadow behind geometry
+backends' blurred-rect primitive (the engine's `vello_common` 0.2.0 `BlurredRoundedRectangle`,
+`vello_cpu`'s `fill_blurred_rounded_rect`) accepts only one radius. Both arms collapse the four
+corners via `CornerRadii::largest()` before encoding, so a shadow behind geometry
 with mixed corner radii (e.g. two sharp corners, two rounded) renders with all four shadow corners at
 the largest configured radius instead of each corner independently.
 
@@ -2754,180 +2712,8 @@ mean hand-rolling the blur pass rather than composing the existing one. The visu
 to the soft, low-opacity shadow rather than the crisp geometry, so it shipped as a v1 approximation
 alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
-**Evidence**: `crates/frust-render/src/convert.rs`'s shared command-walk decode of
-`Command::BlurredRoundedRect` (`radii.largest()` call site and its regression test).
-
----
-
-### `render-snapshot-layer-tradeoffs` — the page-transition snapshot cache trades named fidelity gaps for its GPU-time win
-
-**Observed**: `frust-render`'s snapshot pre-pass (`snapshot.rs`/`compositor.rs`), which caches a
-page transition's `PushSnapshot`/`PopSnapshot` brackets as composited quad textures instead of
-drawing them through vello, carries several named costs and gaps:
-
-1. **Trailing-segment pass cost.** A drawing command after the first cached bracket that is not
-   itself composited forces one extra vello pass over the whole target — measured ~14.5 ms on an
-   Adreno 620, whatever it draws — since a vello pass pays the same fine-stage sweep of its target
-   whether or not it paints a pixel.
-2. **Cross-bracket z-order.** Content recorded BETWEEN two composited brackets draws above both:
-   the frame splits into one pre segment, the composited quads, and one trailing segment, so a
-   scene interleaving ordinary draws between two brackets loses that interleaving.
-3. **First-appearance cost.** A page's bracket rasterizes once the first time its fingerprint is
-   seen — one heavier frame, measured ~65-75 ms on a Pixel 5a — before settling into the
-   steady-state zero-rasterization case.
-4. **Hero-morph pages stay inline.** `NavigatorWidget::snapshot_eligible` requires this frame's
-   hero directives for the page to be empty; a page mid shared-element morph carries a directive
-   every frame and is never bracketed, always lowering through the ordinary vello path.
-5. **Body cropped to its declared rect.** The cached texture is sized from `PushSnapshot`'s `rect`
-   alone (`snapshot_size`) and the body is rasterized under a root that maps `rect` onto the
-   texture's own pixel grid (`raster_root`); anything the body paints outside that extent falls
-   outside the texture and is lost, not just clipped at the rect's visual bounds.
-6. **`ShaderQuad`/`ClearRect` bodies are never cached.** `is_cacheable_body` excludes both — the
-   command-slice rasterization path carries no shader-override map, and a rasterized `ClearRect`
-   (the platform-view hole punch) would erase texture pixels instead of the surface — so a body
-   containing either always lowers inline. A `ClearRect` recorded AFTER the first composited
-   bracket and outside every bracket escapes wider: `SnapshotCache::plan`'s
-   `punches_after_first_bracket` lowers the WHOLE frame inline that frame — no layers, no holes,
-   no trailing pass, the ordinary single-pass frame — since the trailing pass's hoist is scoped to
-   its own transparent scratch target, never the swapchain a hosted native view sits behind. The
-   reachable shape is a bracketed-but-uncacheable page hosting a platform view (its body carries
-   the hole punch, so `is_cacheable_body` refuses it) pushed OVER a composited page on a
-   translucent Android surface; that transition pays the pre-cache cost while the punch is in
-   flight rather than showing the composited page through the hole. A punch recorded BEFORE the
-   first composited bracket (the pre segment) still lands on the real target and keeps the cache.
-7. **Rounded enclosing clip cropped to its bbox.** A composited bracket is drawn as a quad outside
-   vello, scissored to the device-space intersection of every enclosing `PushClip`/
-   `PushClipRounded`/`PushLayer` rect (a `PushLayer` bounds its content exactly as a clip does, so
-   its rect joins the same intersection). A rounded enclosing clip still degrades to its bounding
-   rect within that intersection, since a scissor cannot round corners. A layer's opacity has
-   nowhere to go in a quad blend, so a bracket enclosed by a `PushLayer` with `alpha < 1.0` is not
-   composited at all — it yields no plan and no hole and lowers inline, where the layer applies to
-   it normally.
-8. **A skipped main pass still dispatches one `PremultiplyPass`.** On `DirectPremultiplied`, when
-   the pre segment draws nothing the intermediate texture holds stale content, but the submit-side
-   premultiply compute pass runs over it anyway; its output is discarded by the composite pass's
-   own `LoadOp::Clear`, so the visible result is still correct, but the GPU dispatch itself is not
-   skipped.
-9. **Straight-alpha translucent surfaces get no cache at all.** A surface whose resolved composite
-   alpha mode is translucent but not premultiplied (iOS's `PostMultiplied`) disables the snapshot
-   cache for its whole lifetime (`renderer::snapshot_cache_enabled`, fed by
-   `context::alpha_mode_is_straight_translucent`/`ConfiguredSurface::straight_alpha_translucent` —
-   a straight-alpha swapchain has no exact composite arithmetic for a blended quad) — every bracket
-   on that surface lowers inline, same as `FRUST_NO_SNAPSHOT_LAYERS`, logged once per process
-   naming the reason.
-10. **Per-bracket area budget.** A body whose texture would exceed `SNAPSHOT_AREA_BUDGET_FACTOR`
-    (2) times the surface's pixel area lowers inline (`SnapshotCache::plan`, fed the surface size
-    by `prepare`). A page texture is at most the surface's own physical size, so only an oversized
-    bracket — a scroll extent, a rotated raster's bounding box — ever reaches the budget.
-
-**Applies to**: any app relying on snapshot layers for page-transition performance — every point
-above is a behavior difference from the pre-cache inline path, not a bug. `FRUST_NO_SNAPSHOT_LAYERS`
-(`docs/DEVELOPMENT.md`'s Instrumentation table) reverts every bracket to that inline path exactly.
-
-**Why accepted**: the mechanism exists to dodge vello's ~100 ms/frame in-vello image-quad cost,
-measured on the same Adreno 620 hardware; every item above is a narrower, named, test-pinned
-tradeoff against that number, not a silent wrong-pixels bug. Items 5-9 are structural consequences
-of compositing a texture outside vello rather than gaps found later; item 4 is a deliberate v1
-scope line (a hero morph repaints every frame, so it is never an "ideal cache candidate"); item 10
-is a defensive ceiling added in the review cleanup round once the mechanism had shipped with none,
-and no shipped shell's page bracket reaches it. Item 1's
-fine-stage floor itself — ~14.5 ms to run a vello pass over any target regardless of content — is
-the accepted, unresolved cost this whole mechanism is chasing; the framework has not yet attempted
-to lower the floor itself — `FRUST_RENDER_SCALE` measures that floor's cost per pixel rather than
-lowering it (see `render-measurement-knobs-not-shipping-modes` below).
-
-**Trigger for removal (not yet closed)**: the engine-tier swap phase is the candidate retirement
-point for this whole mechanism — the `render-hybrid-spike-outcome` entry below already found the
-cache/compositor "not provably deletable" on Phase 0's evidence alone, and no card since has closed
-the question either way. Until the swap phase decides it, `frust-render`'s classic path keeps this
-mechanism exactly as shipped.
-
-Memory: a cached page and the trailing scratch are each one 1080×2400 `Rgba8Unorm` texture (≈10.4
-MB); a page lives only while its bracket is still in use and both it and the scratch are released
-after `MAX_UNUSED_FRAMES` (2) consecutive unused frames (`SnapshotCache::evict`,
-`Compositor::age_scratch`/`scratch_expired`) — the scratch exists at all only for a frame that had
-a trailing segment. A transition can therefore hold a transient peak of up to ~31 MB (two live
-pages plus the scratch) for a couple of frames — the typical figure, each page at the surface's
-own size, which is what every shipped shell's page brackets measure. The enforced ceiling is
-looser: the area budget (item 10) admits a page texture of up to 2× the surface's pixel area
-(≈20.7 MB), and the scratch is not budgeted but is always exactly the surface's size, so the worst
-case the budget permits is ≈52 MB (two ≈20.7 MB pages plus the ~10.4 MB scratch). The measured
-steady-state delta below is a post-eviction sample taken once the peak has already aged out, not
-the peak itself. Measured Pixel 5a snapshot GPU memory delta across a push/pop plus two tab
-switches: 43.6 MB → 45.0 MB (+1.4 MB; EGL `mtrack` unchanged at 40.9 MB) — small enough on
-device hardware not to itself be a limitation.
-
-**Evidence**: `crates/frust-render/src/snapshot.rs`'s module doc (fine-stage floor, first-render,
-"Enclosing clips and layers", and "what is never cached" sections) and its
-`outermost_brackets`/`is_cacheable_body`/`snapshot_size`/`raster_root`/`open_group_pushes`/
-`snapshot_depth_before`/`punches_after_first_bracket`/`SNAPSHOT_AREA_BUDGET_FACTOR`/
-`SnapshotCache::evict`, plus `frame_split`'s `FramePlan::trailing` (a `convert::Segment` — the
-command range plus the still-open group pushes); `crates/frust-render/src/compositor.rs`'s
-module doc (trailing-segment ordering, ~100 ms in-vello cost) and its
-`age_scratch`/`scratch_expired`/`MAX_UNUSED_FRAMES`; `crates/frust-render/src/convert.rs`'s
-`encode_range_with_overrides` doc comment (the range-scoped `ClearRect` hoist and the
-`Segment::prefix` re-open); `crates/frust-render/src/context.rs`'s
-`alpha_mode_is_straight_translucent`/`ConfiguredSurface::straight_alpha_translucent`;
-`crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled`, its
-`adopt_surface_state`/`clear_pending_frame` reset door (the one place a surface episode drops the
-in-flight frame's composite stash and its texture handles), and its
-`RenderPath::DirectPremultiplied` submit arm comment ("its output is discarded by
-the composite pass's own `LoadOp::Clear`"); `crates/frust-widgets/src/nav/navigator_tests/
-transition.rs`'s `hero_push_mid_transition_carries_no_snapshot_bracket_on_either_page`; on-device
-perfetto captures, Pixel 5a (SD765G/Adreno 620, 1080×2400@60Hz, `material3-demo --profile`, 3×
-push/pop, GPU-completion wait per frame): pre-cache baseline p50 60.7 ms/p90 74.0; in-vello
-image-quad attempt p50 96.9; compositor steady state p50 1.8 ms/p90 38.1 (one ~65-75 ms
-first-appearance raster per page, one ~35 ms settle frame); kill-switch control p50 63.9 on the
-same tree; `dumpsys meminfo Graphics` 43.6 MB → 45.0 MB across a push/pop and two tab switches.
-
----
-
-### `render-measurement-knobs-not-shipping-modes` — a scaled frame is soft and cacheless, and MSAA is unusable on Adreno
-
-**Observed**: `frust-render`'s two render-cost instruments (`docs/DEVELOPMENT.md`'s Instrumentation
-table) each degrade the frame in a named way at any non-default value:
-
-1. **`FRUST_RENDER_SCALE < 1` softens the image, text worst.** The frame renders into an
-   intermediate a fraction of the surface and the blit pass stretches it back over the swapchain
-   with a `Linear` sampler (`context::blit_filter`), so glyphs arrive resampled instead of shaped at
-   the surface's own resolution — a bilinear upscale of a coarser raster, not a crisp smaller one.
-2. **A scaled frame gets no snapshot-layer cache.** `renderer::snapshot_cache_enabled` refuses
-   outright on `ConfiguredSurface::render_scaled` (re-asked on every resize) — a cached page is
-   composited in the target's own device space — so every `PushSnapshot` bracket lowers inline
-   exactly as under `FRUST_NO_SNAPSHOT_LAYERS` (`render-snapshot-layer-tradeoffs` above), logged
-   once per process naming the reason. A scaled
-   surface is also pinned onto the blit arm, so `blit_translucency_refused` applies to it just as it
-   does under `FRUST_NO_DIRECT_SURFACE`.
-3. **MSAA renders corrupted on Adreno 620.** `FRUST_AA_MODE=msaa8`/`msaa16` builds vello with only
-   that mode's pipelines (`AaMode::support`) and requests it at every render-params site including
-   `SnapshotCache::render`; the knob applies cleanly (`frust-render aa-mode=msaa8` logs, direct
-   arm, no wgpu validation error, no panic), but the fine-stage output is wrong on device: the
-   first frames after launch present black, and once content appears every glyph, icon,
-   rounded-rect edge, and chevron shows horizontal tearing (strips of the shape duplicated/shifted
-   a few pixels; text unreadable at a glance). `area` on the same tree renders cleanly. vello
-   0.9.0's MSAA fine-stage path produces wrong coverage on Adreno 620, so msaa8 and msaa16 are
-   unusable on that GPU tier — `area` is the only mode with a valid on-device cell.
-
-**Applies to**: only a process handed a non-default value for either knob, at build or run time.
-The defaults are byte-identical to a build without them (`AaSupport::area_only`, `scaled_size`
-identity at `1.0`, a `Nearest`-sampled blitter), and the experimental cpu-tier ignores the scale
-entirely (`RenderContext::effective_render_scale` pins it at `1.0`).
-
-**Why accepted**: both knobs are measurement instruments, not shipping modes — they exist to
-produce the on-device A/B numbers a per-device-tier render policy would be decided from, and no
-such policy exists yet: nothing selects either knob automatically, and an out-of-range,
-unparsable, or unrecognised value is clamped or refused with a warn rather than honoured. Shipping
-a reduced render scale would need resolution-aware text rather than a bilinear upscale, and
-shipping an MSAA mode on Adreno is not an option at all — item 3's on-device result shows the
-fine-stage path itself producing wrong coverage there, not merely an unmeasured cost.
-
-**Evidence**: `crates/frust-render/src/context.rs`'s `parse_aa_mode`/`aa_mode`/`AaMode::support`/
-`AaMode::to_vello` and `parse_render_scale`/`render_scale`/`render_scaled`/`scaled_size`/
-`blit_filter`/`RenderContext::effective_render_scale` (each with host tests for the fallback,
-clamp, ceil, and filter cases); `crates/frust-render/src/renderer.rs`'s `snapshot_cache_enabled`
-`render_scaled` refusal and its scaled-root blit arm; `crates/frust-render/src/convert.rs`'s
-`encode_range_with_overrides` `root` doc comment; on-device smoke, Pixel 5 (redfin, Adreno 620),
-2026-08-28, `material3-demo` built with `--define FRUST_AA_MODE=msaa8` and `msaa16`.
+**Evidence**: `crates/frust-engine/src/compile/blur_rrect.rs`'s decode of
+`Command::BlurredRoundedRect` through `CornerRadii::largest` and its regression test.
 
 ---
 
@@ -2972,11 +2758,11 @@ cached classic path (7.39ms); full-screen-quad ≤ 3ms GPU is **not** met by S5 
 frame, ~9.7ms GPU-side remainder, partly display-paced); cold-page ≤ 8ms and Graphics ≤
 classic+10% were not measured on this pass.
 
-**Not provably deletable**: the snapshot-layer cache and compositor
-(`render-snapshot-layer-tradeoffs` above) cannot be retired on this evidence — the hybrid nav
-number is an inline (uncached) figure with no full-resolution classic inline number beside it, so
-whether an engine-tier page-snapshot cache is still needed, or the nav budget should be re-argued
-without one, is open before Phase 4.
+**Not provably deletable on this evidence** (historical, at the time of the Phase 0 spike): the
+snapshot-layer cache and compositor could not be retired on the hybrid nav number alone — an
+inline (uncached) figure with no full-resolution classic inline number beside it. Resolved since:
+p8-03 deleted the whole mechanism (cache, compositor, `FramePlan`/segment plumbing) once the engine
+became the sole renderer; the nav budget question this paragraph left open no longer applies.
 
 **Two hybrid-arm scope limits**: `vello_hybrid` itself outputs premultiplied alpha, so it is
 correct — and unwarned — on a premultiplied-expecting translucent surface (Android's
@@ -3737,7 +3523,7 @@ explicit 64 MiB thread (`run_on_oversized_stack`), documented inline.
 **Evidence**: `crates/frust-testing/src/corpus/adversarial.rs`'s `adv-5k-layers` case and
 `tests/adversarial.rs`'s `five_thousand_nested_layers_stay_within_a_bounded_memory_budget`.
 
-### `engine-invalid-geometry-refusal-diverges-from-classic` — the engine refuses non-finite geometry the classic tier still draws through fallbacks
+### `engine-invalid-geometry-refusal` — the engine refuses a frame with non-finite geometry rather than drawing it
 
 **Observed** (evidence: `crates/frust-engine/tests/proptest_strips.rs`'s
 documented reproducer sites and the measured numbers recorded there):
@@ -3749,24 +3535,22 @@ the phase reducible into it, since two individually finite lengths can
 overflow the period to `+inf` and spin kurbo's dash iterator forever) and
 refuses the frame with `EngineError::InvalidGeometry` otherwise — required for totality: a `NaN`
 corner radius on an unbounded rect made `compile` never return, and a `NaN`
-stroke width cost ~420 ms/4.8 MB producing zero strips. The vello-classic tier
-has no such gate; notably a `NaN` dash pattern falls back to a solid stroke
-(`DashPattern::is_effective`'s documented behaviour) where the engine refuses
-the frame.
+stroke width cost ~420 ms/4.8 MB producing zero strips. There is no other
+renderer to fall back to, so a scene that emits non-finite geometry (a `NaN`
+dash pattern included) simply refuses that frame rather than drawing
+anything.
 
-**Accepted because**: the diverging inputs are already erroneous (non-finite
-geometry describes nothing drawable); refusing loudly beats hanging, panicking
-in kurbo, or silently stroking malformed output, and the classic tier is
-scheduled for deletion at the engine swap. A magnitude-based hang class
-(`f64::MAX`-scale finite coordinates driving proportional flattening work)
-remains open and is tracked as its own action item; the up-front check cannot
-refuse finite values.
+**Accepted because**: the inputs a refusal fires on are already erroneous
+(non-finite geometry describes nothing drawable); refusing loudly beats
+hanging or panicking in kurbo. A magnitude-based hang class (`f64::MAX`-scale
+finite coordinates driving proportional flattening work) remains open and is
+tracked as its own action item; the up-front check cannot refuse finite
+values.
 
-**Trigger for removal**: the swap phase deletes the classic tier, at which
-point there is one behaviour; or a widget-visible need for the classic
-fallback semantics appears first.
+**Trigger for removal**: a widget-visible need for a drawn-anyway fallback
+semantics for non-finite input appears (none identified today).
 
-### `engine-image-minify-to-fit` — an image wider than one atlas layer renders minified where the classic tier renders it full-resolution
+### `engine-image-minify-to-fit` — an image wider than one atlas layer renders minified
 
 **Observed** (evidence: `crates/frust-engine/src/cache/images.rs`'s
 `fit_extent`/`minify` and `crates/frust-engine/tests/images.rs`): the engine's
@@ -3775,10 +3559,7 @@ image path is atlas-resident, and a source larger than one atlas layer
 via `FRUST_ENGINE_ATLAS_SIZE`) is downscaled to fit with an aspect-preserving
 box filter at upload time, logged once per image. The filter averages
 sRGB-encoded premultiplied bytes — exact for a uniform-colour source, very
-slightly dark on high-contrast content. The classic tier samples the
-full-resolution source with no such ceiling, so the two tiers' pixels around a
-minified image legitimately differ (the calibrated engine-vs-classic band
-carries a reviewed per-case widening for the corpus's over-ceiling case).
+slightly dark on high-contrast content.
 
 **Accepted because**: cross-frame residency is the engine image path's whole
 design, and refusing an oversized image outright would turn a working widget
@@ -3823,15 +3604,13 @@ composite-original drop shadow are reserved — the latter needs a third live
 page); a filter layer recorded inside another layer; and non-default blend or
 mask layers.
 
-**Accepted because**: the engine tier is an opt-in measurement tier this
-phase; skipping loudly beats rendering the shape wrong, and per-frame
-fallback to the classic renderer would require carrying both backends on one
-surface — machinery the measured tier deliberately omits.
+**Accepted because**: the engine carries no second renderer to fall back to on
+one surface; skipping loudly beats rendering the shape wrong.
 
-**Trigger for removal**: the swap phase making the engine the only tier, at
-which point the served set must cover the widget tree's real shapes — the
-opaque-pass hoist and the bounded spill page have each narrowed the refused
-class in turn rather than closed it.
+**Trigger for removal**: the served set must eventually cover the widget
+tree's real shapes — the opaque-pass hoist and the bounded spill page have
+each narrowed the refused class in turn rather than closed it; the general
+algorithm this narrows from is a stub behind the `full-scheduler` feature.
 
 ### `engine-glifo-atlas-experimental` — the engine's glyph atlas is built on a cache upstream labels experimental, wrapped in frust-owned policy
 
@@ -3903,7 +3682,7 @@ decoder rather than enabling a duplicate one.
 (or decoding BGRA/Mask), or a measured need for a bitmap-strike font on a
 target platform.
 
-### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; reference oracles never hint
+### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; the reference oracle never hints
 
 **Observed** (evidence: `crates/frust-engine/src/compile/mod.rs`'s
 `hint_text` from `for_caps`, `crates/frust-engine/src/text/mod.rs`'s
@@ -3913,12 +3692,11 @@ glifo to hint only when the device class is desktop
 autohinting, and only when the run's full transform is a positive uniform
 scale without vertical skew — any other transform falls back to unhinted.
 Mobile stays unhinted (≥2x DPR gains nothing and hinting doubles cache
-keys), and there is no LCD subpixel rendering on any tier — the same posture
-as the classic tier. Both golden oracles (`vello_cpu`, classic) never hint,
-so on a desktop-class adapter the engine's text pixels legitimately differ
-from the oracles' by a fraction-of-a-pixel grid snap per glyph edge; the
-text goldens carry per-case escalation rows measuring exactly that
-divergence rather than loosening the corpus budget.
+keys), and there is no LCD subpixel rendering on any tier. The `vello_cpu`
+golden oracle never hints, so on a desktop-class adapter the engine's text
+pixels legitimately differ from the oracle's by a fraction-of-a-pixel grid
+snap per glyph edge; the text goldens carry per-case escalation rows
+measuring exactly that divergence rather than loosening the corpus budget.
 
 **Accepted because**: hinted small text is measurably crisper on low-DPR
 desktop displays, the divergence is deterministic and byte-stable
@@ -3931,35 +3709,39 @@ DPR-aware policy replacing the binary device-class switch.
 
 ### `engine-metal-postmultiplied-truth-bug` — wgpu-hal's Metal `PostMultiplied` composites premultiplied regardless of its name
 
-**Observed** (evidence: `crates/frust-render/src/context.rs`'s
+**Observed** (evidence: `crates/frust-gpu/src/surface.rs`'s
 `compositor_expects_premultiplied` doc comment, citing
-`wgpu-hal-29.0.4/src/metal/adapter.rs:422-425` and
-`.../metal/surface.rs:81-85`): wgpu-hal's Metal adapter advertises
-`CompositeAlphaMode::PostMultiplied` but implements it as nothing beyond
-`render_layer.setOpaque(false)` — it never asks Core Animation for straight
-alpha, and a `CAMetalLayer` has no such mode; Core Animation only ever
-composites premultiplied. A Metal `PostMultiplied` swapchain therefore reads
-back exactly like a premultiplied one even though the mode's name and wgpu's
-advertised contract say straight — the same family of upstream truth-bug as
-the iOS Simulator's missing `INDIRECT_EXECUTION` (`docs/DEVELOPMENT.md`'s
-"iOS Simulator cannot render" Known Issue): a real capability wgpu-hal
-misreports, not a Frust defect. The engine tier's `choose_engine_render_path`
-corrects for it: Metal + `PostMultiplied` (iOS's sole translucent mode)
-routes to `RenderPathKind::EngineDirect` — the engine's already-premultiplied
-output served as-is — rather than the spec-correct straight-alpha conversion,
-which would double-correct (over-brighten every partial-alpha pixel; an
-indigo/navy wash near a translucent split). Every other `PostMultiplied`
-backend (e.g. Vulkan's genuinely-straight `POST_MULTIPLIED` flag) keeps the
-ordinary conversion.
+`wgpu-hal-30.0.1/src/metal/adapter.rs:468-471` and
+`.../metal/surface.rs:269-273`, re-checked against the 30.0.1 pin at p8-07):
+wgpu-hal's Metal adapter still advertises `CompositeAlphaMode::PostMultiplied`
+but implements it as nothing beyond `render_layer.setOpaque(false)` — it never
+asks Core Animation for straight alpha, and a `CAMetalLayer` has no such mode;
+Core Animation only ever composites premultiplied. A Metal `PostMultiplied`
+swapchain therefore reads back exactly like a premultiplied one even though
+the mode's name and wgpu's advertised contract say straight — the same family
+of upstream truth-bug as the iOS Simulator's missing `INDIRECT_EXECUTION`
+(pre-engine; `docs/DEVELOPMENT.md`'s iOS Simulator Known Issue): a real
+capability wgpu-hal misreports, not a Frust defect. `frust-render::context`'s
+`choose_engine_render_path` corrects for it: Metal + `PostMultiplied` (iOS's
+sole translucent mode) routes to `RenderPathKind::EngineDirect` — the
+engine's already-premultiplied output served as-is — rather than the
+spec-correct straight-alpha conversion, which would double-correct
+(over-brighten every partial-alpha pixel; an indigo/navy wash near a
+translucent split). Every other `PostMultiplied` backend (e.g. Vulkan's
+genuinely-straight `POST_MULTIPLIED` flag) keeps the ordinary conversion.
 
 **Accepted because**: fixing the misreport belongs to wgpu-hal, not this
 workspace; the workaround is a pure `(backend, mode)` predicate with no
 per-frame cost and no user-visible caveat.
 
-**Trigger for removal**: an upstream wgpu-hal fix that makes Metal's
-`PostMultiplied` genuinely straight-alpha (or documents the mode as
-premultiplied-only), at which point `compositor_expects_premultiplied`
-collapses to nothing.
+**Trigger for removal**: upstream trunk PR [gfx-rs/wgpu#9922](https://github.com/gfx-rs/wgpu/pull/9922)
+(merged 2026-08-18, CHANGELOG Unreleased) already fixes this — Metal will
+advertise `PreMultiplied` and reject `PostMultiplied` with `UnsupportedAlphaMode`
+— but it is not in the 30.0.1 pin. The next wgpu bump that carries it is the
+trigger: `compositor_expects_premultiplied` collapses to nothing (and, being a
+BREAKING wgpu-hal change, needs its own re-scrub of every backend/mode
+combination this predicate routes on). No upstream issue is filed by this
+workspace.
 
 ### `engine-metal-timestamp-drawless-pass-gap` — a Metal render pass with no draw can leave its GPU-timestamp pair unwritten
 
@@ -4070,3 +3852,32 @@ limits half of the question.
 
 **Trigger for removal**: the Web Shell plan reaching its own wasm/browser
 measurement pass.
+
+### `engine-shader-quad-unwired` — `draw_shader`/`Command::ShaderQuad` paints nothing on the only renderer
+
+**Observed** (evidence: `crates/frust-engine/src/compile/mod.rs`'s
+`Command::ShaderQuad { .. } => note_shader_quad_skip()` arm;
+`examples/shadertoy` shows a blank effect area on the engine tier): the
+vello-classic-era encode-time shader pre-pass died with vello's removal as a
+render tier, and `frust-render/src/shader_effects.rs` is explicitly
+documented `Currently UNWIRED` — nothing calls it. The compiler's own
+`ShaderQuad` arm recognises the command and still draws nothing, but the drop
+is no longer silent: it raises a `log::warn!` naming the command and this
+entry, latched to once per process so a scene that keeps recording shader
+quads does not repeat it every frame. `crates/frust-testing`'s
+`unit-shader-quad` corpus case is covered by neither golden arm: it sits in
+`engine_goldens.rs`'s `DEFERRED_CASES` rather than its scored set, because a
+compiled engine frame would legitimately omit its subject, and it also names
+itself in its own case spec's backend skip list for the CPU oracle, so
+`oracle_cpu.rs`'s own opaque placeholder stand-in color is never even
+produced for this case.
+
+**Accepted because**: this is an interim registration, not a fix — the
+GPU-seam work that would wire `Command::ShaderQuad` through the engine
+renderer needs `frust-render/src/shader_effects.rs` rebuilt against the
+engine's own pipeline, and drawing nothing stays strictly safer than drawing
+wrong pixels while that is outstanding.
+
+**Trigger for removal**: the GPU-seam work wiring `Command::ShaderQuad`
+through to the engine renderer, at which point this entry, the corpus
+deferral, and the latched warning all come out together.

@@ -986,8 +986,8 @@ fn limitations_id_extraction_finds_the_known_ids() {
         ids.len()
     );
     assert!(
-        ids.iter().any(|id| id == "cam-blit-opaque"),
-        "expected `cam-blit-opaque` among the parsed ids, got {ids:?}"
+        ids.iter().any(|id| id == "desktop-single-window"),
+        "expected `desktop-single-window` among the parsed ids, got {ids:?}"
     );
 }
 
@@ -1003,7 +1003,7 @@ fn scanner_flags_and_allows_the_documented_exemplars() {
         "Phase 1 of the frame — the **encode** span",
         "At clock phase 0.0, dot 0 …",
         "on the OP9",
-        "`cam-blit-opaque`",
+        "`desktop-single-window`",
         "R44-back",
         "clean-signals rev `910f626`",
         "a round-trip through the encoder",
@@ -1285,8 +1285,10 @@ mod scan_behavior {
 
     #[test]
     fn sanctioned_citation_spans() {
-        let ids = vec!["cam-blit-opaque".to_string()];
-        assert!(!limitations_id_spans("see `cam-blit-opaque` for the known gap", &ids).is_empty());
+        let ids = vec!["desktop-single-window".to_string()];
+        assert!(
+            !limitations_id_spans("see `desktop-single-window` for the known gap", &ids).is_empty()
+        );
         assert!(limitations_id_spans("no citation here", &ids).is_empty());
 
         assert!(!named_rule_spans("R44-back").is_empty());
@@ -1312,7 +1314,11 @@ mod scan_behavior {
             "a sanctioned citation must not launder a ledger number elsewhere on the line"
         );
         assert!(
-            scan_comment("`cam-blit-opaque`, first seen in (Phase 9.B step 1)", &ids).is_some(),
+            scan_comment(
+                "`desktop-single-window`, first seen in (Phase 9.B step 1)",
+                &ids
+            )
+            .is_some(),
             "same for a LIMITATIONS id"
         );
         assert!(
@@ -1407,7 +1413,7 @@ mod scan_behavior {
         assert_eq!(
             wrapped_violation(
                 "// The forced-blit gap this works around is",
-                "// `cam-blit-opaque`, and the blit arm still runs.",
+                "// `desktop-single-window`, and the second window never opens.",
                 &ids,
             ),
             None,

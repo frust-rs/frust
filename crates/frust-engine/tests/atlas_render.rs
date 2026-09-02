@@ -281,7 +281,9 @@ impl Harness {
             .expect("the readback channel must stay open")
             .expect("the readback buffer must map");
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .expect("the mapped readback range must be readable");
         let row = (PAGE * TEXEL_BYTES) as usize;
         let stride = bytes_per_row as usize;
         let mut pixels = Vec::with_capacity(row * PAGE as usize);

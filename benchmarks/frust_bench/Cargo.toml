@@ -112,11 +112,6 @@ reactive_graph = "0.2"
 # it (and enable `frust/perf-trace` instead). Mirrors
 # `templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
-# The frust-owned engine render tier, forwarded to the facade's own
-# `engine-tier` feature. Empty by default and selected by no build mode — a matrix
-# arm reaches it with an explicit `frust build --features engine-tier`,
-# paired with `--define FRUST_RENDER_TIER=engine` to actually select the tier.
-engine-tier = ["frust/engine-tier"]
 
 [profile.release]
 lto = "fat"
@@ -135,22 +130,13 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline translation runs at
+# wgpu/naga's shader-pipeline translation runs at
 # `opt-level = 0` by default, slow enough on a physical iOS device that the OS
 # SIGKILLs a debug `frust run` before the synchronous launch-time shader
 # compile finishes. This app's own code stays at the default dev opt-level
 # (fast incremental rebuilds) — only these dependencies are bumped. See
 # Frust's own root `Cargo.toml` for the full rationale (the same override,
 # kept in sync).
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

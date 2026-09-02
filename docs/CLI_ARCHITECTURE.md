@@ -158,10 +158,12 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
-  `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop. `--render-tier
-  <gpu|cpu|engine>` forces the desktop preview's tier (`FRUST_RENDER_TIER` env on the spawned
-  `cargo run`); `engine` needs an `engine-tier` build, refused with a diagnosis otherwise
-  (`frust-render`'s `tier.rs`, see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
+  `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop. There is no
+  render-tier flag: `--render-tier` is a rejected argument now (`crates/frust-cli/src/cli.rs`'s
+  `rejects_the_retired_render_tier_flag` test) — `frust-render` contains exactly one renderer, not a
+  choice (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)). `--define <KEY=VALUE>` remains the
+  general compile-time-constant passthrough onto the spawned `cargo run` (e.g. `FRUST_TRACE=1`),
+  unrelated to rendering specifically.
 - `--features <spec>` (`build apk`/`appbundle`/`ios`/`ipa`, and `run`): `BuildFlags` is a `clap`
   wrapper flattening `BuildArgs` plus this repeatable, comma/space-splittable passthrough
   (`BuildFlags::extra_features`, cargo's own `--features` syntax). Resolved at the handler boundary

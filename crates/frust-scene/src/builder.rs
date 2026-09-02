@@ -300,6 +300,12 @@ impl<'a> SceneBuilder<'a> {
     /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
     /// under the current transform (see [`Command::ShaderQuad`]).
     ///
+    /// **Currently paints nothing**: the engine renderer recognises the
+    /// command and drops it with a once-per-process warning — see
+    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` for the evidence
+    /// and the trigger that removes this caveat (the GPU-seam work wiring the
+    /// command through the engine).
+    ///
     /// `program` is cloned into the command — cheap, since [`ShaderProgram`]
     /// clones its id and its `Arc<str>` source handle, never the source
     /// text. `time` is seconds, app-supplied.

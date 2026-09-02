@@ -96,19 +96,10 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes.
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

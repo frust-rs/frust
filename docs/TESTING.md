@@ -14,7 +14,7 @@ collapsed into a single golden-image suite:
 
 1. **CPU/headless:** deterministic framework and raster coverage without a
    display or GPU.
-2. **Native GPU/headless:** Frust scene -> Vello -> wgpu -> Vulkan texture ->
+2. **Native GPU/headless:** Frust scene -> `frust-engine` -> wgpu -> Vulkan texture ->
    readback, with no X server, window, surface, or swapchain.
 3. **Platform end-to-end:** Android/iOS owns the window, compositor, lifecycle,
    input, accessibility, fonts, density, and system UI. Screenshots from this
@@ -34,7 +34,7 @@ authority for hardware-specific behavior.
 | T0 | Pure host process | Math, state machines, parsing, reconciliation, layout invariants | Every change |
 | T1 | Headless `RenderRoot`, no rasterizer | View/widget behavior, input, semantics, scene command construction | Every change |
 | T2 | `vello_cpu`, no GPU | Deterministic raster goldens and reference output | Every visual change |
-| T3 | Native Vulkan/Metal GPU, no display | Real Vello/wgpu encode, shader, texture, and readback behavior | GPU runner; every visual/render change |
+| T3 | Native Vulkan/Metal GPU, no display | Real `frust-engine`/wgpu encode, shader, texture, and readback behavior | GPU runner; every visual/render change |
 | T4 | Desktop window or virtual display | Surface lifecycle, DPI, IME, wake/redraw, presentation | Relevant changes; scheduled smoke |
 | T5 | Android emulator | APK/ABI/JNI, `ANativeWindow`, Vulkan/gfxstream, lifecycle, input, screenshots | Relevant changes; nightly full matrix |
 | T6 | Physical Android/iOS | Driver/OEM behavior, biometrics, accessibility, refresh rate, thermal/performance | Release candidate and platform changes |
@@ -58,14 +58,15 @@ The repository already contains substantial non-pixel coverage:
 - `crates/frust/tests/`: facade-level interaction and text-input integration.
 - `crates/frust-tui/tests/snapshots.rs`: terminal rendering snapshots using
   ratatui's `TestBackend` and `insta`.
-- `crates/frust-render`: scene-to-Vello conversion, surface lifecycle,
-  pipeline-cache, tier-selection, CPU-tier, and adapter-workaround tests.
+- `crates/frust-render`: render-path selection, the engine's adapter capability gate, and
+  adapter-workaround tests. `crates/frust-gpu`: device/surface lifecycle and pipeline-cache tests.
+  `crates/frust-engine`: scene-to-strip compile tests.
 - `crates/frust-render/tests/gpu_smoke.rs`: ignored real-GPU offscreen
   render/readback smoke tests over `frust_render::HeadlessRenderer`
-  (`crates/frust-render/src/headless.rs`).
+  (`crates/frust-render/src/headless.rs`), engine-backed.
 - `crates/frust-testing`: the versioned golden corpus and comparator — a
   renderer-agnostic `SceneRenderer` pair (`CpuOracle` over the dev-only
-  `vello_cpu` 0.2.0 pin, `ClassicOracle` over `HeadlessRenderer`), a 4-channel
+  `vello_cpu` 0.2.0 pin, `EngineOracle` over `frust-gpu`'s `HeadlessTarget`), a 4-channel
   diff with a separate alpha threshold and 1-px eroded-interior mask,
   triptych/JSON failure artifacts under `target/frust-testing/`, and the
   committed `testing/goldens/cpu/` class (unit, adversarial, widget, page, and
@@ -115,18 +116,12 @@ its public repo rather than a `../clean-signals-rs` sibling checkout (see
 Do not silently treat the root workspace as coverage for these — each is a
 standalone workspace excluded from it.
 
-The experimental CPU render tier is outside the default feature set:
+`frust-gpu` and `frust-engine` are plain dependencies of `frust-render` (not a cargo feature) —
+their host-only tests already ride the chain above; their real-GPU arms are separate, `--ignored`
+commands (adapter pin required on a multi-adapter host):
 
 ```bash
-cargo test -p frust-render --features cpu-tier
-```
-
-So is the opt-in engine render tier (host tests only — the device/GPU tests it
-also carries are `#[ignore]`d):
-
-```bash
-cargo test -p frust-render --features engine-tier
-cargo clippy -p frust-render --features engine-tier,perf-trace --all-targets -- -D warnings
+cargo clippy -p frust-render --features perf-trace --all-targets -- -D warnings
 ```
 
 Target compile gates and slow ignored scaffold/build tests remain listed in
@@ -138,18 +133,16 @@ Target compile gates and slow ignored scaffold/build tests remain listed in
 
 ### Why X Is Not Required
 
-Vello renders with compute shaders into a storage texture. A native headless
-test creates a wgpu instance and adapter without a compatible surface, renders
-to `Rgba8Unorm`, copies the texture into a map-readable buffer, removes row
-padding, and optionally encodes a PNG. It never creates a `wgpu::Surface` or
-swapchain.
+`frust-engine` renders with ordinary vertex/fragment render passes into a `RENDER_ATTACHMENT`
+texture — no compute pass, no storage buffer/texture, by downlevel design rule. A native headless
+test (`frust_gpu::HeadlessTarget`) creates a wgpu instance and adapter without a compatible
+surface, renders to `Rgba8Unorm`, copies the texture into a map-readable buffer, removes row
+padding, and optionally encodes a PNG. It never creates a `wgpu::Surface` or swapchain.
 
-This is the same architecture as Vello's
-[headless example](https://github.com/linebender/vello/blob/main/examples/headless/src/main.rs).
 wgpu provides
 [`InstanceDescriptor::new_without_display_handle_from_env`](https://docs.rs/wgpu/latest/wgpu/struct.InstanceDescriptor.html),
-and Vulkan compute does not require presentation machinery. A GPU, working
-kernel driver, Vulkan loader/ICD, and device-node permissions are required; a
+and an ordinary render pass into an offscreen texture does not require presentation machinery
+either. A GPU, working kernel driver, Vulkan loader/ICD, and device-node permissions are required; a
 monitor, desktop session, Xorg, and Xvfb are not.
 
 ### Preflight
@@ -206,13 +199,13 @@ Every promoted GPU baseline and failing artifact must record:
 
 - Git commit and dirty-state marker.
 - Rust toolchain, target triple, and build profile.
-- Vello, wgpu, and image-decoder versions.
+- `frust-engine`/`frust-gpu`, wgpu, and image-decoder versions.
 - GPU name, PCI ID, driver version, Vulkan API/driver IDs, and ICD path.
-- Image dimensions, pixel format, antialiasing mode, and render-tier choice.
+- Image dimensions and pixel format.
 - Font bundle identity, locale, theme, scale factor, and animation time.
 - Test name, golden schema version, and comparison thresholds.
 
-Do not silently refresh baselines after a driver, Vello, wgpu, shader, font, or
+Do not silently refresh baselines after a driver, wgpu, engine, shader, font, or
 color-space change. Review that migration as an intentional visual change.
 
 ---
@@ -224,26 +217,19 @@ color-space change. Review that migration as an intentional visual change.
 Store independent baselines for:
 
 - `cpu/`: deterministic `vello_cpu` 0.2.0 reference images — the committed,
-  baseline-required class (`testing/goldens/cpu/`).
-- `vulkan-nvidia-t400/`: real Vello/wgpu output on the pinned T400 runner (the
-  plan's single reference adapter for GPU goldens). Currently recording-only
-  (classic, non-engine arm): the GPU arm renders and probes on every ignored
-  run but no classic baseline has been promoted yet — a baseline is promoted
-  deliberately via `UPDATE_GOLDENS=1`. The Mac Metal runner (Apple M-series)
-  routes to `metal-macos/`, same recording-only status; an unknown adapter
-  lands in the non-promotable `classic-unclassified` staging class
-  (`crates/frust-testing/src/oracle_classic.rs`'s `golden_class`). Engine
-  classes reuse the classic class name under an `engine-` prefix, so one
-  adapter table routes both arms; an unreviewed adapter lands in
-  `engine-unclassified`.
+  baseline-required class (`testing/goldens/cpu/`), and the P1 reference every
+  `engine-`-prefixed class below is held against.
 - `engine-vulkan-nvidia-t400/`: the T400 rig's engine class — base-corpus
   baselines promoted since Phase 4; the filter sub-family remains
   recording-only there pending review ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)
-  § Golden / Oracle Tests).
+  § Golden / Oracle Tests). One reviewed adapter table
+  (`crates/frust-testing/src/oracle_engine.rs`'s `ENGINE_CLASSES`) routes to this class and
+  `engine-metal-macos/` below; an adapter with no reviewed entry lands in the non-promotable
+  `engine-unclassified` staging class — it renders and probes every ignored run but records
+  nothing to compare against.
 - `engine-metal-macos/`: the Mac M4 rig's engine class — baselines promoted
   across the unit/widget/page/text corpus and, since the p6-d1 verification
-  round, the filter family too; its classic-side `metal-macos/` twin above is
-  routable but not yet recorded.
+  round, the filter family too.
 - No browser/WebGL2 golden class exists — that arm was cancelled before
   landing, not merely unimplemented (`docs/LIMITATIONS.md`'s
   `engine-webgl2-unhosted`); do not document one as shipping.
@@ -252,26 +238,21 @@ Store independent baselines for:
 - Physical-device families only when a stable, owned device is part of the
   release fleet; never pretend one device represents every Android GPU/OEM.
 
-CPU and GPU output are not required to be byte-identical — by how much is
-measured, not guessed: `testing/goldens/CALIBRATION.md` records the
-classic-vs-`vello_cpu` divergence distribution over the whole corpus on the
-T400 (whole-corpus p95: mean absolute error ≤ 2.5, pixels over channel-8
-≤ 4.8%; the per-channel max is deliberately not gated — antialiasing
-conflation on diagonal/curved edges exceeds the 1-px erosion mask, see that
-file's Legitimate Disagreements). That calibrated band is no longer advisory:
-`crates/frust-testing/tests/engine_goldens.rs` asserts the engine-vs-classic
-divergence stays inside it as a hard per-case gate, with any per-case widening
-recorded as a reviewed row (`ESCALATIONS` for the engine-vs-CPU tolerance,
-`BAND_ESCALATIONS` for the band), each carrying its measured number and the
-reason the disagreement is two correct rasterizers rather than one wrong one —
-the threshold lives on the named test, never an ad hoc retry path. The
-engine-vs-`vello_cpu` pair, by contrast,
-shares one geometry core and is measured near-exact (threshold 2, alpha
-compared; whole-image max |Δ| ≤ 1 across the rect/path/gradient corpus). That comparison
-is made in premultiplied space: straightening divides by the pixel's own
-alpha, which amplifies a 1-level difference by up to 255× at hairline/dash
-coverage — a diff there measures the conversion's information loss, not the
-rasterizers.
+CPU and GPU output are not required to be byte-identical — by how much is measured, not guessed.
+`crates/frust-testing/tests/engine_goldens.rs` is the engine's primary correctness gate: every
+corpus case the engine can draw is rendered by `EngineOracle` and held against TWO references,
+both hard — `vello_cpu` 0.2.0 (P1) and the engine's own committed golden class above. Engine vs.
+`vello_cpu` is near-exact (both rasterize the same geometry through the same `vello_common` 0.2.0
+strip generator at the same flattening tolerance, only the fill differs): the bar is each case's
+own tolerance (corpus default channel 2, alpha 2, zero mismatched pixels for most cases), widened
+only through a reviewed `ESCALATIONS` row naming the measured number and the reason the
+disagreement is two correct rasterizers rather than one wrong one — the threshold lives on the
+named test, never an ad hoc retry path. That comparison is made in premultiplied space:
+straightening divides by the pixel's own alpha, which amplifies a 1-level difference by up to 255×
+at hairline/dash coverage — a diff there measures the conversion's information loss, not the
+rasterizers. `testing/goldens/CALIBRATION.md` (the classic-vs-`vello_cpu` divergence band a prior
+phase measured to size that tolerance) is history — its own recipe (`tests/calibration.rs`) was
+deleted alongside the classic (vello) oracle it measured against.
 
 Text has its own corpus family (`crates/frust-testing/src/corpus/text.rs`:
 Latin mixed sizes, RTL Arabic joining, CJK, stacked combining marks, COLRv1
@@ -282,8 +263,8 @@ subsets in `testing/fonts/` (Noto subsets; provenance in
 fails any case whose codepoints leak to host-font fallback — extend a subset
 rather than widening a case's text. Text is also the family where the two
 arms legitimately diverge most: the engine hints on desktop-class adapters
-(`SceneCompiler::for_caps`) while both reference oracles never hint, so the
-text cases carry per-case `ESCALATIONS`/`BAND_ESCALATIONS` rows whose measured
+(`SceneCompiler::for_caps`) while the `vello_cpu` reference oracle never
+hints, so the text cases carry per-case `ESCALATIONS` rows whose measured
 numbers document a hinted-vs-unhinted edge shift, not a rasterizer
 disagreement (see `engine-text-hinting-policy` in `docs/LIMITATIONS.md`).
 
@@ -319,7 +300,7 @@ A golden case must fix all inputs that can affect pixels:
 - Pointer/focus/pressed/disabled/error/loading state.
 - Safe-area and keyboard insets.
 - Font files and fallback order.
-- Base color, texture format, and Vello antialiasing configuration.
+- Base color and texture format.
 
 Text golden portability is enforced, not assumed: `testing/fonts/` bundles
 four subsetted OFL/Apache faces (Latin, Arabic, CJK, COLR emoji — provenance,
@@ -609,20 +590,20 @@ must not replace T2/T3 headless rendering.
 ### iOS
 
 Linux can only run host logic and Android target gates. macOS must run iOS
-compile/scaffold gates. The classic (vello) render tier cannot render on the
-iOS Simulator — its Metal feature set lacks vello's required indirect
-execution capability; do not classify a black Simulator surface as a golden
-result on that tier (`docs/DEVELOPMENT.md`'s "iOS Simulator cannot render"
-Known Issue). **The engine tier renders there.** `frust-testing`'s
+compile/scaffold gates. The Simulator's Metal feature set (`Apple2`) renders correctly under
+`frust-engine`, which needs neither `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION` — the pair the
+deleted vello-classic tier required and this GPU lacks (`docs/DEVELOPMENT.md`'s iOS Simulator
+Known Issue). `frust-testing`'s
 `#[cfg(target_os = "ios")]` suite (`crates/frust-testing/tests/ios_sim.rs`,
-gate `engine-p6-ios-simulator-renders`, recipe in `docs/DEVELOPMENT.md`'s
+gate `engine-p6-ios-simulator-renders`, re-verified on wgpu 30.0.1 by
+`engine-p8-wgpu30-ios-simulator-renders`; recipe in `docs/DEVELOPMENT.md`'s
 Manual/gated tests) drives `EngineRenderer` directly against the booted
 Simulator's own adapter and compares seven unit-corpus cases against the
 embedded `testing/goldens/cpu/` baseline (compiled in via `include_bytes!`,
 since the Simulator process has no filesystem path back to this checkout) —
 this is a device-run comparison, not a new committed golden class. Physical
-iOS devices remain required for classic-tier rendered pixels, VoiceOver, IME,
-lifecycle, refresh-rate, and secure-storage/biometric gates.
+iOS devices remain required for VoiceOver, IME, lifecycle, refresh-rate, and
+secure-storage/biometric gates.
 
 ### Physical Android
 
@@ -668,11 +649,10 @@ user content into golden artifacts or CI logs.
 
 Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
-`benchmarks/harness/ab_matrix.sh --tier classic,engine` drives the render-tier A/B
-matrix (classic vello vs. the opt-in `engine` tier) across a caller-chosen
-`--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` for the tier's
-feature/env knobs and `benchmarks/RESULTS.md` for recorded numbers (its retired
-spike section is history).
+`benchmarks/harness/ab_matrix.sh --tier engine` drives the render-arm gate (`engine` is a labelled
+synonym of the script's own `default` arm — there is only one renderer now) across a caller-chosen
+`--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` and `benchmarks/RESULTS.md` for
+recorded numbers (its retired spike/classic sections are history).
 
 Scheduled robustness work should include:
 
@@ -703,7 +683,7 @@ into an unreported pass.
 | Pure core/theme/scene math | Focused unit/property tests; CPU goldens if pixels change |
 | Text shaping/editor | Multiscript/IME tests, bundled-font CPU goldens, GPU text goldens |
 | Widget/layout/theme visuals | Semantic interaction tests plus CPU and T400 golden catalog |
-| Vello/wgpu/render lifecycle | CPU-tier tests, T400 headless suite, surface lifecycle smoke |
+| Engine/wgpu/render lifecycle | CPU-oracle tests, T400 headless suite, surface lifecycle smoke |
 | Desktop shell | Desktop presentation/resize/DPI/IME/manual visual gate |
 | Android shell/template/drive | Android target compile, emulator host-GPU matrix, relevant physical-device gate |
 | iOS shell/template/drive | macOS target/scaffold gate and relevant physical-iOS gate |
@@ -740,7 +720,7 @@ first debugging action.
 The GPU runner should use a dedicated unprivileged service account with only
 the device/group permissions it needs. Serialize T400 golden and emulator jobs
 initially: 4 GB of VRAM is sufficient for these suites, but parallel emulator,
-Vello, and benchmark jobs create avoidable memory and scheduling noise.
+engine, and benchmark jobs create avoidable memory and scheduling noise.
 
 Pin and record:
 

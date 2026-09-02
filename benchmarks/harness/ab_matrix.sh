@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# benchmarks/harness/ab_matrix.sh — Phase-3 fine-floor A/B device gate, one
-# command: drives the full FRUST_AA_MODE x FRUST_RENDER_SCALE matrix across
-# benchmarks/frust_bench's frame scenarios AND examples/material3-demo's
-# push/pop nav column, and emits the table benchmarks/RESULTS.md's "Fine-floor
-# A/B" section needs (plan fplan_000001a03fce41148yUkciag, phase
-# pph_000001a04171930dcLOuu2jm — the FRUST_AA_MODE and FRUST_RENDER_SCALE
-# knob cards).
+# benchmarks/harness/ab_matrix.sh — render-arm A/B device gate, one command:
+# drives one cell per render arm across benchmarks/frust_bench's frame
+# scenarios AND examples/material3-demo's push/pop nav column, and emits the
+# table benchmarks/RESULTS.md needs.
 #
-# For every (aa, scale) cell in the matrix, in this order:
+# The FRUST_AA_MODE x FRUST_RENDER_SCALE matrix this script was built around
+# is GONE: both knobs were vello-classic measurement instruments, and they
+# were deleted with vello itself when the engine tier became the only
+# renderer. What survives is the `--tier` axis plus the kept-run accounting,
+# sanitized capture, raw-copy and device wake/lock machinery below.
+#
+# For every cell in the matrix, in this order:
 #
 #   1. Build benchmarks/frust_bench (from its own directory — it is a
 #      standalone workspace, see the repo root CLAUDE.md):
-#        <frust> build apk --profile --define FRUST_TRACE_RAW=1 \
-#          --define FRUST_AA_MODE=<aa> --define FRUST_RENDER_SCALE=<scale>
+#        <frust> build apk --profile --define FRUST_TRACE_RAW=1 <arm args>
 #      `<frust>` is the frust CLI binary — `target/debug/frust` at the repo
 #      root, built by `cargo build -p frust-cli` there (this script never
 #      builds the CLI itself; see `--frust` below).
@@ -28,7 +30,7 @@
 #      lines before it touches disk, so this script never sees or copies an
 #      unfiltered logcat dump for a scenario.
 #   4. Build examples/material3-demo (its own standalone workspace) with the
-#      identical three defines, install it the same way, then drive ONE
+#      identical arm arguments, install it the same way, then drive ONE
 #      push/pop pass — the fine-floor research recipe: `am force-stop`,
 #      launch via `monkey -p it.f0x.material3demo -c
 #      android.intent.category.LAUNCHER 1`, three `input tap <x> <y>` /
@@ -83,8 +85,9 @@
 # column's sanitized `logcat-frust-perf.log` — is copied into
 # `benchmarks/raw/<device-name>/<group>/<cell>/<scenario>/`
 # (nav: `.../<cell>/nav/logcat-frust-perf.log`) — `<group>` is `fine-floor`
-# for a run without --tier and `tier` for one with it, `<cell>` is
-# `<aa>-<scale>` or the tier cell label above; `<device-name>` from
+# for a run without --tier and `tier` for one with it (the `fine-floor`
+# name is historical, kept so the already-committed raw tree is not
+# orphaned), `<cell>` is the arm label above; `<device-name>` from
 # `--device-name` (default raw root: `<repo>/benchmarks/raw`, overridable
 # via `--raw-root`), so RESULTS.md's Fine-floor A/B table can cite the
 # exact committed files backing each cell (PROTOCOL §10's "raw series
@@ -143,8 +146,8 @@
 # purpose — awake, no keyguard showing — is left alone), and never under
 # --dry-run.
 #
-# Emits a Markdown table — columns `aa`, `scale` (preceded by `tier` when
-# --tier was passed), one p50/p95 column pair per `--scenarios` entry (a
+# Emits a Markdown table — column `tier`, one p50/p95 column pair per
+# `--scenarios` entry (a
 # `--tier` run additionally carries that scenario's `gpu_total p50`/
 # `gpu_total p95`/`Graphics (MB)` columns — the v4 raw-format GPU-pass
 # percentiles and the post-run `dumpsys meminfo` Graphics-PSS mean,
@@ -160,11 +163,10 @@
 # table carries a "methodology deviation" note whenever the effective kept
 # run count is below 10 or the duration below 30s (see --quick below), and
 # its footer ALWAYS restates the encode_us/submit_us arm-remap caveat
-# (PROTOCOL §7's v4 note; RENDER_ARCHITECTURE.md's Data Flow "Render-path
-# A/B caveat") and recommends either `--define FRUST_NO_DIRECT_SURFACE=1`
-# (pins every arm onto the identical blit path) or comparing arms on the
-# columns immune to the remap: this table's own p50/p95 (total_us, the
-# summed column) and, when present, gpu_total.
+# (PROTOCOL §7's v4 note) — every arm here is direct-to-surface now, so a
+# comparison against a pre-engine blit-arm capture must read the columns
+# immune to the remap: this table's own p50/p95 (total_us, the summed
+# column) and, when present, gpu_total.
 # Ctrl-C/SIGTERM STOPS the matrix — no further cell is built, installed or
 # run — and exits 130/143. Transient build/install/command output
 # (including a nav run's `*.monkey.txt` launch capture — kept for
@@ -175,8 +177,7 @@
 # performs the device-lock step above.
 #
 # Usage: ab_matrix.sh --device <serial> [--device-name <slug>]
-#                      [--tier classic,engine]
-#                      [--aa area,msaa8,msaa16] [--scale 1.0,0.75,0.5]
+#                      [--tier engine]
 #                      [--scenarios s1,s2,s4] [--runs 12] [--duration 30]
 #                      [--quick] [--frust <path>] [--raw-root <dir>]
 #                      [--taps 540,472,540,734,540,996] [--out <dir>]
@@ -190,72 +191,38 @@
 #                      `benchmarks/raw/<slug>/fine-floor/...` — required
 #                      for a live run; may be omitted under --dry-run (a
 #                      placeholder is printed instead).
-#   --aa <csv>         FRUST_AA_MODE values to sweep (default:
-#                      area,msaa8,msaa16 — the three values
-#                      `frust-render/src/context.rs`'s `parse_aa_mode`
-#                      recognizes; case-insensitive, validated up front).
-#   --scale <csv>      FRUST_RENDER_SCALE values to sweep (default:
-#                      1.0,0.75,0.5). Each value must be a decimal in
-#                      0.25..=1.0 with at most 2 fractional digits,
-#                      validated up front (same posture as --aa). Under
-#                      scale<1 the snapshot-layer cache is disabled BY
-#                      DESIGN (a scaled intermediate would need every cached
-#                      page's quads/scissors/raster rescaled — see
-#                      `renderer.rs`'s `FRUST_RENDER_SCALE refuses on its
-#                      own` note), so the nav column's numbers at scale<1
-#                      measure the inline (uncached) path, not the cached
-#                      one — the emitted table repeats this in its footer.
-#   --tier <csv>       render tiers (arms) to sweep. Omitted entirely by
-#                      default — the matrix then behaves exactly as it did
-#                      before this axis existed (a single vello-classic arm,
-#                      the AA x scale matrix, raw series under
-#                      `<raw-root>/<device>/fine-floor/<aa>-<scale>/`).
-#                      Passing it turns on the tier axis and files that run's
-#                      raw series under `<raw-root>/<device>/tier/<cell>/`
-#                      instead, so a tier sweep never overwrites a fine-floor
-#                      cell. Values (validated up front, same posture as
-#                      --aa):
-#                        classic       stock vello — no --features, no
-#                                      FRUST_RENDER_TIER define; the AA and
-#                                      render-scale defines are passed exactly
-#                                      as they are without this axis. Cell
-#                                      label `classic-<aa>-<scale>`.
-#                        engine        the frust-owned `frust-engine` strip
-#                                      pipeline: `--features engine-tier
-#                                      --define FRUST_RENDER_TIER=engine` (the
-#                                      feature compiles the tier in, the define
-#                                      selects it — `RenderTier::Engine` is
-#                                      override-only AND build-gated, no probe
-#                                      ever picks it, and a define without the
-#                                      feature is REFUSED rather than quietly
-#                                      served by vello,
-#                                      `crates/frust-render/src/tier.rs`).
-#                                      Cell label `engine`. This needs the
-#                                      measured app to expose an `engine-tier`
-#                                      feature of its own forwarding to
-#                                      `frust-render`'s (the
-#                                      `engine-tier = ["frust/engine-tier"]`
-#                                      row in benchmarks/frust_bench and
-#                                      examples/material3-demo is the pattern);
-#                                      without it cargo rejects the arm's
-#                                      --features at build time rather than
-#                                      producing a mislabelled APK.
-#                      Every non-classic arm IGNORES --aa/--scale: `FRUST_AA_MODE`
-#                      and `FRUST_RENDER_SCALE` are vello-classic instruments
-#                      (`context.rs`'s `parse_aa_mode` feeds vello's
-#                      `AaSupport`; the scale knob sizes vello's blit-arm
-#                      intermediate), and
-#                      `frust-engine` reads neither — it logs a warning once when
-#                      a build carries them anyway (`renderer.rs`'s
-#                      `TierBackend` arms) — so those defines are NOT passed on
-#                      such an arm and its aa/scale table cells read `n/a`. Each
-#                      one therefore contributes exactly ONE cell to the matrix
-#                      however long --aa/--scale are, and the cell label records
-#                      the tier instead.
+#   --tier <csv>       render arms to sweep. Omitted entirely by default —
+#                      the matrix then runs ONE cell, the app's ordinary
+#                      default build (which is an engine build: `frust-render`
+#                      contains no other renderer), filed under
+#                      `<raw-root>/<device>/fine-floor/default/`. Passing it
+#                      turns on the tier axis: the run files its raw series
+#                      under `<raw-root>/<device>/tier/<cell>/` instead (so a
+#                      tier sweep never overwrites a default-arm cell) and the
+#                      table grows the per-scenario gpu_total/Graphics
+#                      columns. Values (validated up front):
+#                        default       the app's ordinary build, no arm-
+#                                      specific build args. Cell label
+#                                      `default`.
+#                        engine        a LABELLED SYNONYM of `default`: the
+#                                      frust-owned `frust-engine` strip
+#                                      pipeline is what an ordinary build
+#                                      already runs, so this arm passes the
+#                                      same (empty) build args and differs
+#                                      only in its cell label `engine`, kept
+#                                      so RESULTS.md's existing `engine` cell
+#                                      names stay stable. The feature +
+#                                      env-var define this arm used to pass
+#                                      named a tier selection that no longer
+#                                      exists and would now be rejected by
+#                                      cargo.
+#                      The vello-classic `classic` arm is GONE with the
+#                      renderer it named. The axis is kept, one renderer wide
+#                      today, as the seam a second arm plugs into.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
 #                      passed through to run.sh (default: s1,s2,s4). Each
 #                      value must be one of s1..s8, d1, d2, validated up
-#                      front (same posture as --aa).
+#                      front (same posture as --tier).
 #   --runs <n>         runs per scenario, passed to run.sh (default: 12 —
 #                      PROTOCOL §4's own >=10-kept-run convention at the
 #                      stock DISCARD_FIRST=2, i.e. 10 kept; see --quick
@@ -339,17 +306,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
 
 DEVICE=""
 DEVICE_NAME=""
-AA_LIST="area,msaa8,msaa16"
-SCALE_LIST="1.0,0.75,0.5"
-# The tier axis is OFF unless --tier is passed: TIER_AXIS gates the extra
-# table column, the `tier` raw-series group, the cell-label shape, the
-# gpu_total/Graphics columns and their pss_*.txt raw-series copy, so a
-# run without --tier is byte-identical to the pre-tier script on all of
-# those (see the header's --tier note). --quick and the PROTOCOL §4
-# default below, and the emitted table's deviation note and arm-remap
-# footer, are NOT gated by TIER_AXIS — they apply to every run (see the
-# --runs/--duration/--quick docs above).
-TIER_LIST="classic"
+# The tier axis is OFF unless --tier is passed: TIER_AXIS gates the
+# `tier` raw-series group, the gpu_total/Graphics columns and their
+# pss_*.txt raw-series copy. --quick and the PROTOCOL §4 default below, and
+# the emitted table's deviation note and arm-remap footer, are NOT gated by
+# TIER_AXIS — they apply to every run (see the --runs/--duration/--quick
+# docs above).
+TIER_LIST="default"
 TIER_AXIS=0
 SCENARIOS_LIST="s1,s2,s4"
 # RUNS/DURATION are resolved below (after DISCARD_FIRST is derived) from
@@ -425,24 +388,6 @@ while [ $# -gt 0 ]; do
       ;;
     --device-name=*)
       DEVICE_NAME="${1#--device-name=}"
-      shift
-      ;;
-    --aa)
-      [ $# -ge 2 ] || { echo "error: --aa requires a value" >&2; exit 2; }
-      AA_LIST="$2"
-      shift 2
-      ;;
-    --aa=*)
-      AA_LIST="${1#--aa=}"
-      shift
-      ;;
-    --scale)
-      [ $# -ge 2 ] || { echo "error: --scale requires a value" >&2; exit 2; }
-      SCALE_LIST="$2"
-      shift 2
-      ;;
-    --scale=*)
-      SCALE_LIST="${1#--scale=}"
       shift
       ;;
     --tier)
@@ -638,8 +583,6 @@ fi
 
 # --- Split CSV inputs into arrays --------------------------------------
 
-IFS=',' read -r -a AA_ARR <<<"${AA_LIST}"
-IFS=',' read -r -a SCALE_ARR <<<"${SCALE_LIST}"
 IFS=',' read -r -a SCENARIO_ARR <<<"${SCENARIOS_LIST}"
 IFS=',' read -r -a TIER_ARR <<<"${TIER_LIST}"
 
@@ -647,35 +590,28 @@ if [ "${#TIER_ARR[@]}" -eq 0 ]; then
   echo "error: --tier produced an empty list" >&2
   exit 2
 fi
-if [ "${#AA_ARR[@]}" -eq 0 ]; then
-  echo "error: --aa produced an empty list" >&2
-  exit 2
-fi
-if [ "${#SCALE_ARR[@]}" -eq 0 ]; then
-  echo "error: --scale produced an empty list" >&2
-  exit 2
-fi
 if [ "${#SCENARIO_ARR[@]}" -eq 0 ]; then
   echo "error: --scenarios produced an empty list" >&2
   exit 2
 fi
 
-# --tier: each value must be one of the arms the header documents. Unlike
-# --aa this is NOT case-folded: the value is used verbatim as a cell label
+# --tier: each value must be one of the arms the header documents.
+# Deliberately NOT case-folded: the value is used verbatim as a cell label
 # (and so as a committed raw-series directory name), and two spellings of
 # one arm would file two cells for the same build.
 for tier in "${TIER_ARR[@]}"; do
   case "${tier}" in
-    classic|engine) ;;
+    default|engine) ;;
     *)
-      echo "error: --tier value '${tier}' is not one of classic, engine" >&2
+      echo "error: --tier value '${tier}' is not one of default, engine" >&2
       exit 2
       ;;
   esac
 done
 
 # The raw-series group segment: a tier sweep files under `tier/`, a run
-# without --tier keeps writing the pre-existing `fine-floor/` tree. Only
+# without --tier keeps writing the pre-existing `fine-floor/` tree (a
+# historical name, kept so the committed tree is not orphaned). Only
 # ever one of these two literals — assert_raw_cell_dir builds the one
 # `rm -rf` this script performs out of it.
 if [ "${TIER_AXIS}" -eq 1 ]; then
@@ -683,30 +619,6 @@ if [ "${TIER_AXIS}" -eq 1 ]; then
 else
   RAW_GROUP="fine-floor"
 fi
-
-for aa in "${AA_ARR[@]}"; do
-  case "$(printf '%s' "${aa}" | tr '[:upper:]' '[:lower:]')" in
-    area|msaa8|msaa16) ;;
-    *)
-      echo "error: --aa value '${aa}' is not one of area, msaa8, msaa16" >&2
-      exit 2
-      ;;
-  esac
-done
-
-# --scale: each value must be a decimal in 0.25..=1.0 with at most 2
-# fractional digits (format check via regex, range check via awk — bash
-# has no floating-point comparison operator).
-for scale in "${SCALE_ARR[@]}"; do
-  if ! [[ "${scale}" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
-    echo "error: --scale value '${scale}' is not a decimal with at most 2 fractional digits (e.g. 0.75)" >&2
-    exit 2
-  fi
-  if ! awk -v s="${scale}" 'BEGIN { exit !(s >= 0.25 && s <= 1.0) }'; then
-    echo "error: --scale value '${scale}' is outside the supported range 0.25..=1.0" >&2
-    exit 2
-  fi
-done
 
 # --scenarios: each value must be a declared benchmarks/frust_bench
 # scenario id — PROTOCOL §8's s1..s8 frame-class ids or §9.1's d1/d2
@@ -884,28 +796,10 @@ print_cmd() {
   echo "  ${label}$*"
 }
 
-# tier_ignores_render_knobs <tier> — true for an arm that does not read
-# FRUST_AA_MODE/FRUST_RENDER_SCALE (every non-classic tier: they are vello
-# instruments, and `frust-engine` reads neither — see
-# the header's --tier note). Such an arm gets ONE cell per matrix run, not one
-# per (aa, scale).
-tier_ignores_render_knobs() {
-  [ "$1" != "classic" ]
-}
-
-# cell_label <tier> <aa> <scale> — the cell's directory name and table
-# identity. Without the tier axis this is the pre-existing `<aa>-<scale>`,
-# unchanged; with it, `classic-<aa>-<scale>` for the vello arm (whose knobs
-# still vary) and the bare tier name for an arm that ignores them.
+# cell_label <tier> — the cell's directory name and table identity: the arm
+# name itself, which is `default` for a run without --tier.
 cell_label() {
-  local tier="$1" aa="$2" scale="$3"
-  if [ "${TIER_AXIS}" -eq 0 ]; then
-    echo "${aa}-${scale}"
-  elif tier_ignores_render_knobs "${tier}"; then
-    echo "${tier}"
-  else
-    echo "${tier}-${aa}-${scale}"
-  fi
+  echo "$1"
 }
 
 # raw_cell_dir <cell> <sub> — echoes
@@ -966,7 +860,7 @@ assert_raw_cell_dir() {
   # Every segment from a conservative charset: no glob metacharacter, no
   # whitespace, nothing shell-special (parent traversal is already refused
   # by the `..` check above). The cell label is built from
-  # --tier/--aa/--scale and the device name, all validated up front, so
+  # --tier and the device name, both validated up front, so
   # this is belt-and-braces on the one path this script deletes.
   local IFS='/'
   for seg in ${rel}; do
@@ -1143,15 +1037,15 @@ copy_nav_raw() {
 #
 # gpu_p50_ms/gpu_p95_ms read "n/a" (gpu_n "0") when no kept frame carries a
 # gpu_q=1 reading — the ordinary case for a build with no GPU timer
-# (classic/CPU tier, a non-perf-trace build, or an adapter without
-# TIMESTAMP_QUERY; see PROTOCOL.md's v4 note), never treated as a failure.
+# (a non-perf-trace build, or an adapter without TIMESTAMP_QUERY; see
+# PROTOCOL.md's v4 note), never treated as a failure.
 # graphics_mb/graphics_n read "n/a"/"0" the same way when no kept run's
 # POST-run dumpsys meminfo snapshot (run-NN.pss_after.txt) parsed a
 # Graphics row (run.sh's own capture is best-effort).
 #
 # Computed via stats.py's OWN functions — load_run_frames/
 # discard_first_runs/gpu_spans/_nearest_rank_percentile/mean_graphics_mb,
-# imported and reused, exactly the convention RESULTS.md's classic-baseline
+# imported and reused, exactly the convention RESULTS.md's baseline
 # section already established for its by-hand encode+submit p50/
 # Graphics (MB) figures — never reimplemented here. Never fails the matrix
 # (see header): python3 itself is already a hard startup requirement (Tool
@@ -1217,13 +1111,8 @@ PYEOF
 # when the run ends early with rows already measured (see cleanup).
 emit_table() {
   local status="$1" header sep scenario upper row
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    header="| Tier | AA mode | Render scale |"
-    sep="|---|---|---|"
-  else
-    header="| AA mode | Render scale |"
-    sep="|---|---|"
-  fi
+  header="| Tier |"
+  sep="|---|"
   for scenario in "${SCENARIO_ARR[@]}"; do
     upper="$(printf '%s' "${scenario}" | tr '[:lower:]' '[:upper:]')"
     header="${header} ${upper} p50 (ms) | ${upper} p95 (ms) |"
@@ -1240,7 +1129,7 @@ emit_table() {
   if [ "${TIER_AXIS}" -eq 1 ]; then
     echo "## Render-tier A/B matrix (--tier ${TIER_LIST}) — device ${DEVICE}"
   else
-    echo "## Fine-floor A/B matrix — device ${DEVICE}"
+    echo "## Render A/B matrix (default arm) — device ${DEVICE}"
   fi
   echo
   if [ -n "${status}" ]; then
@@ -1263,21 +1152,12 @@ emit_table() {
     echo "${row}"
   done
   echo
-  echo "Note: under FRUST_RENDER_SCALE<1 the snapshot-layer cache is disabled"
-  echo "by design, so the nav column's numbers at scale<1 measure the inline"
-  echo "(uncached) path, not the cached one."
-  echo
   if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "Tier note: FRUST_AA_MODE and FRUST_RENDER_SCALE are vello-classic"
-    echo "instruments — a non-classic tier reads neither, so those two defines"
-    echo "are not passed on its build and its AA/scale cells read n/a. Each"
-    echo "such arm is ONE cell per run, whatever --aa/--scale hold."
-    echo
     echo "GPU/Graphics note: <SCEN> gpu_total p50/p95 are computed from each"
     echo "kept run's gpu_total_us field (stats.py's gpu_spans, the v4 raw"
     echo "format) and read n/a when no kept frame carries a gpu_q=1 reading —"
-    echo "the ordinary case off a build with no GPU timer (classic/CPU tiers,"
-    echo "a non-perf-trace build, or an adapter without TIMESTAMP_QUERY; see"
+    echo "the ordinary case off a build with no GPU timer (a non-perf-trace"
+    echo "build, or an adapter without TIMESTAMP_QUERY; see"
     echo "PROTOCOL.md's v4 note), not a failure. <SCEN> Graphics (MB) averages"
     echo "the Graphics PSS row of each kept run's POST-run dumpsys meminfo"
     echo "snapshot (run.sh's own pss_after capture; pss_before is always"
@@ -1299,46 +1179,41 @@ emit_table() {
   fi
   echo
   echo "Encode/submit arm-remap caveat (always stated here — PROTOCOL §7's v4"
-  echo "note; RENDER_ARCHITECTURE.md's Data Flow \"Render-path A/B caveat\"):"
-  echo "encode_us and submit_us are NOT the same instrument on every arm — on"
-  echo "the blit arm the GPU render lands in encode_us and acquire_us follows"
-  echo "it; on the direct-to-surface arm (every engine-tier arm, and any"
-  echo "classic arm not forced onto blit) it lands in submit_us instead and"
-  echo "acquire_us precedes it. Do not compare encode_us or submit_us alone"
-  echo "across arms. Either build every arm with"
-  echo "--define FRUST_NO_DIRECT_SURFACE=1 so all of them take the identical"
-  echo "blit path (the same knob RENDER_DEVELOPMENT.md documents as the A/B"
-  echo "kill switch), or compare arms on the columns already immune to the"
-  echo "remap: this table's own p50/p95 (total_us, the summed column — every"
-  echo "CPU pass plus acquire/submit) and, when present, the gpu_total"
-  echo "columns above (measured on the GPU's own clock, untouched by which"
-  echo "CPU call the recording happened inside)."
+  echo "note): encode_us and submit_us are NOT the same instrument on every"
+  echo "arm. Every arm this script drives is now direct-to-surface (the engine"
+  echo "records into the acquired swapchain view), so the GPU render lands in"
+  echo "submit_us and acquire_us precedes it, while encode_us carries only the"
+  echo "frame's scene copy. A capture taken before the engine became the only"
+  echo "renderer measured a blit arm, where the GPU render landed in encode_us"
+  echo "and acquire_us followed it — so do not compare encode_us or submit_us"
+  echo "alone against one. Compare on the columns immune to the remap: this"
+  echo "table's own p50/p95 (total_us, the summed column — every CPU pass plus"
+  echo "acquire/submit) and, when present, the gpu_total columns above"
+  echo "(measured on the GPU's own clock, untouched by which CPU call the"
+  echo "recording happened inside)."
 }
 
-# tier_build_args <tier> <aa> <scale> — echoes the tier-specific tail of
-# the `frust build apk` command line, one argument per line (the caller
-# reads it into an array, so a value never re-splits on whitespace):
+# tier_build_args <tier> — echoes the arm-specific tail of the `frust build
+# apk` command line, one argument per line (the caller reads it into an
+# array, so a value never re-splits on whitespace):
 #
-#   classic       --define FRUST_AA_MODE=<aa> --define FRUST_RENDER_SCALE=<scale>
-#   engine        --features engine-tier --define FRUST_RENDER_TIER=engine
+#   default       (nothing — the app's ordinary build)
+#   engine        (nothing — same build, kept only for its cell label)
 #
-# The AA/scale defines are deliberately absent from every non-classic arm
-# (see the header's --tier note): they are vello-classic instruments, so
-# passing them there would bake a knob into a build that cannot read it and
-# label the cell with a setting it never had. The feature and the define are
-# always passed together on such an arm — the define alone selects a tier the
-# build has no code for, which `frust-render` refuses outright rather than
-# serving through vello, so a half-specified arm would fail at startup instead
-# of measuring anything. `--define FRUST_TRACE_RAW=1` is common to every arm
-# and stays on the caller's line.
+# Both arms are empty today. The renderer is no longer selectable: the
+# frust-engine strip pipeline is the only one `frust-render` contains, so the
+# feature + env-var define the `engine` arm used to pass name a choice that
+# does not exist any more (cargo would reject the feature outright). The arm
+# survives as a labelled synonym so RESULTS.md's `engine` cells keep their
+# names, and this function stays the seam a genuinely different second arm
+# would plug its build args into. `--define FRUST_TRACE_RAW=1` is common to
+# every arm and stays on the caller's line.
 tier_build_args() {
-  local tier="$1" aa="$2" scale="$3"
+  local tier="$1"
   case "${tier}" in
-    classic)
-      printf '%s\n' "--define" "FRUST_AA_MODE=${aa}" "--define" "FRUST_RENDER_SCALE=${scale}"
+    default)
       ;;
     engine)
-      printf '%s\n' "--features" "engine-tier" "--define" "FRUST_RENDER_TIER=engine"
       ;;
     *)
       die "tier_build_args: unknown tier '${tier}'"
@@ -1346,27 +1221,25 @@ tier_build_args() {
   esac
 }
 
-# tier_build_desc <tier> <aa> <scale> — the human-readable knob summary the
-# per-build progress line carries, matching what tier_build_args passes.
+# tier_build_desc <tier> — the human-readable arm summary the per-build
+# progress line carries, matching what tier_build_args passes.
 tier_build_desc() {
-  local tier="$1" aa="$2" scale="$3"
-  case "${tier}" in
-    classic) echo "FRUST_AA_MODE=${aa} FRUST_RENDER_SCALE=${scale}" ;;
-    engine) echo "tier=engine, --features engine-tier; FRUST_AA_MODE/FRUST_RENDER_SCALE not applicable" ;;
-    *) die "tier_build_desc: unknown tier '${tier}'" ;;
+  case "$1" in
+    default) echo "default build (no arm flags)" ;;
+    engine) echo "engine arm — same default build, labelled cell" ;;
+    *) die "tier_build_desc: unknown tier '$1'" ;;
   esac
 }
 
-# build_apk <label> <app-dir> <tier> <aa> <scale> <log> — runs (or, under
-# --dry-run, only prints) `<frust> build apk --profile --define ...` from
-# <app-dir>, with the arm's own defines/features from tier_build_args. A
-# build failure is a hard, loud failure of the whole matrix — never a
-# SKIPPED cell (see header).
+# build_apk <label> <app-dir> <tier> <log> — runs (or, under --dry-run, only
+# prints) `<frust> build apk --profile --define ...` from <app-dir>, with the
+# arm's own defines/features from tier_build_args. A build failure is a hard,
+# loud failure of the whole matrix — never a SKIPPED cell (see header).
 build_apk() {
-  local label="$1" app_dir="$2" tier="$3" aa="$4" scale="$5" log="$6"
+  local label="$1" app_dir="$2" tier="$3" log="$4"
   local -a tier_args=()
-  mapfile -t tier_args < <(tier_build_args "${tier}" "${aa}" "${scale}")
-  echo "-- ${label}: build ($(tier_build_desc "${tier}" "${aa}" "${scale}")) --"
+  mapfile -t tier_args < <(tier_build_args "${tier}")
+  echo "-- ${label}: build ($(tier_build_desc "${tier}")) --"
   print_cmd "(cd ${app_dir} && " "${FRUST_BIN} build apk --profile --define FRUST_TRACE_RAW=1 ${tier_args[*]})"
   if [ "${DRY_RUN}" -eq 1 ]; then
     return 0
@@ -1374,7 +1247,7 @@ build_apk() {
   if ! ( cd "${app_dir}" && "${FRUST_BIN}" build apk --profile \
       --define "FRUST_TRACE_RAW=1" \
       "${tier_args[@]}" ) >"${log}" 2>&1; then
-    echo "error: ${label} build failed (tier=${tier} aa=${aa} scale=${scale}) — see ${log}" >&2
+    echo "error: ${label} build failed (tier=${tier}) — see ${log}" >&2
     exit 1
   fi
 }
@@ -1618,50 +1491,23 @@ wake_and_unlock_device() {
 
 # --- Cell enumeration ----------------------------------------------------
 #
-# One entry per matrix cell, `<tier>|<aa>|<scale>`, in the order the run
-# drives them: tier outermost, then aa, then scale — so without --tier
-# (a single `classic` tier) the order is exactly the pre-tier `for aa; for
-# scale` sweep. An arm that ignores the render knobs (see
-# tier_ignores_render_knobs) contributes exactly ONE cell, carrying the
-# first --aa/--scale values purely as placeholders that its build never
-# passes on (build_apk/tier_build_args drop them) and its table row
-# reports as `n/a`.
+# One entry per matrix cell — one per `--tier` arm, in the order given (a
+# run without --tier is the single `default` arm).
 declare -a CELL_SPECS=()
 for tier in "${TIER_ARR[@]}"; do
-  for aa in "${AA_ARR[@]}"; do
-    for scale in "${SCALE_ARR[@]}"; do
-      CELL_SPECS+=("${tier}|${aa}|${scale}")
-      if tier_ignores_render_knobs "${tier}"; then break; fi
-    done
-    if tier_ignores_render_knobs "${tier}"; then break; fi
-  done
+  CELL_SPECS+=("${tier}")
 done
 CELL_TOTAL="${#CELL_SPECS[@]}"
 
-# cell_banner <n> <tier> <aa> <scale> — the per-cell progress heading.
-# Without the tier axis it is the pre-tier wording, unchanged.
+# cell_banner <n> <tier> — the per-cell progress heading.
 cell_banner() {
-  local n="$1" tier="$2" aa="$3" scale="$4"
-  if [ "${TIER_AXIS}" -eq 0 ]; then
-    echo "=== cell ${n}: aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
-  elif tier_ignores_render_knobs "${tier}"; then
-    echo "=== cell ${n}: tier=${tier} (aa/scale n/a) (kept ${KEPT} of ${RUNS} runs) ==="
-  else
-    echo "=== cell ${n}: tier=${tier} aa=${aa} scale=${scale} (kept ${KEPT} of ${RUNS} runs) ==="
-  fi
+  echo "=== cell $1: tier=$2 (kept ${KEPT} of ${RUNS} runs) ==="
 }
 
-# table_row_prefix <tier> <aa> <scale> — the leading identity columns of a
-# table row, matching emit_table's header for this run.
+# table_row_prefix <tier> — the leading identity column of a table row,
+# matching emit_table's header.
 table_row_prefix() {
-  local tier="$1" aa="$2" scale="$3"
-  if [ "${TIER_AXIS}" -eq 0 ]; then
-    echo "| ${aa} | ${scale} |"
-  elif tier_ignores_render_knobs "${tier}"; then
-    echo "| ${tier} | n/a | n/a |"
-  else
-    echo "| ${tier} | ${aa} | ${scale} |"
-  fi
+  echo "| $1 |"
 }
 
 # --- Dry run: print every command for every cell, then exit -------------
@@ -1670,10 +1516,8 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   echo "== ab_matrix.sh --dry-run =="
   echo "device: ${DEVICE} (never queried — --dry-run touches no device)"
   echo "device-name: ${DEVICE_NAME_DISPLAY}  raw-root: ${RAW_ROOT}"
-  if [ "${TIER_AXIS}" -eq 1 ]; then
-    echo "tier: ${TIER_LIST}  (raw-series group: ${RAW_GROUP}; a non-classic tier ignores --aa/--scale — one cell per arm)"
-  fi
-  echo "aa: ${AA_LIST}  scale: ${SCALE_LIST}  scenarios: ${SCENARIOS_LIST}"
+  echo "tier: ${TIER_LIST}  (raw-series group: ${RAW_GROUP}; one cell per arm)"
+  echo "scenarios: ${SCENARIOS_LIST}"
   echo "runs: ${RUNS}  duration: ${DURATION}s  frust: ${FRUST_BIN}$( [ "${QUICK}" -eq 1 ] && echo '  (--quick)' )"
   echo "kept ${KEPT} of ${RUNS} runs per scenario (first ${DISCARD_FIRST} discarded as warm-up per PROTOCOL §4)"
   if [ "${PROTOCOL_COMPLIANT}" -eq 0 ]; then
@@ -1688,17 +1532,17 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   if [ "${TIER_AXIS}" -eq 1 ]; then
     echo "gpu_total/Graphics columns: computed per scenario from stats.py's gpu_spans/mean_graphics_mb over each cell's kept runs (n/a when no gpu_q=1 reading or no Graphics PSS snapshot parsed)"
   fi
-  echo "arm-remap caveat (always in the emitted table's footer): encode_us/submit_us swap meaning between the blit and direct-to-surface arms (PROTOCOL §7's v4 note; RENDER_ARCHITECTURE.md's Render-path A/B caveat) — compare arms via --define FRUST_NO_DIRECT_SURFACE=1 or via the p50/p95 (total_us) / gpu_total columns instead"
+  echo "arm-remap caveat (always in the emitted table's footer): every arm here is direct-to-surface, so the GPU render lands in submit_us and encode_us carries only the scene copy (PROTOCOL §7's v4 note) — against a pre-engine blit-arm capture, compare via the p50/p95 (total_us) / gpu_total columns instead"
   echo
   wake_and_unlock_device
   echo
   cell=0
   for spec in "${CELL_SPECS[@]}"; do
-    IFS='|' read -r tier aa scale <<<"${spec}"
+    tier="${spec}"
     cell=$((cell + 1))
-    label="$(cell_label "${tier}" "${aa}" "${scale}")"
-    cell_banner "${cell}" "${tier}" "${aa}" "${scale}"
-    build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "${aa}" "${scale}" "/dev/null"
+    label="$(cell_label "${tier}")"
+    cell_banner "${cell}" "${tier}"
+    build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "/dev/null"
     install_apk "frust_bench" "$(frust_bench_apk_path)" "/dev/null"
     for scenario in "${SCENARIO_ARR[@]}"; do
       run_scenario "${scenario}" "/dev/null" "/dev/null" >/dev/null
@@ -1707,7 +1551,7 @@ if [ "${DRY_RUN}" -eq 1 ]; then
         gpu_graphics_stats "${scenario}" "/dev/null" >/dev/null
       fi
     done
-    build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "${aa}" "${scale}" "/dev/null"
+    build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "/dev/null"
     install_apk "material3-demo" "$(material3_demo_apk_path)" "/dev/null"
     run_nav "/dev/null" >/dev/null
     copy_nav_raw "${label}" "/dev/null"
@@ -1725,18 +1569,18 @@ wake_and_unlock_device
 
 cell=0
 for spec in "${CELL_SPECS[@]}"; do
-  IFS='|' read -r tier aa scale <<<"${spec}"
+  tier="${spec}"
   cell=$((cell + 1))
-  label="$(cell_label "${tier}" "${aa}" "${scale}")"
+  label="$(cell_label "${tier}")"
   echo
-  cell_banner "${cell}" "${tier}" "${aa}" "${scale}"
+  cell_banner "${cell}" "${tier}"
 
-  build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" "${aa}" "${scale}" \
+  build_apk "frust_bench" "${FRUST_BENCH_DIR}" "${tier}" \
     "${OUT_DIR}/build/frust_bench-${label}.log"
   install_apk "frust_bench" "$(frust_bench_apk_path)" \
     "${OUT_DIR}/install/frust_bench-${label}.log"
 
-  row="$(table_row_prefix "${tier}" "${aa}" "${scale}")"
+  row="$(table_row_prefix "${tier}")"
   for scenario in "${SCENARIO_ARR[@]}"; do
     scen_out="${OUT_DIR}/scenarios/${scenario}-${label}"
     runsh_log="${OUT_DIR}/scenarios/${scenario}-${label}.runsh.log"
@@ -1766,7 +1610,7 @@ for spec in "${CELL_SPECS[@]}"; do
     fi
   done
 
-  build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" "${aa}" "${scale}" \
+  build_apk "material3-demo" "${MATERIAL3_DEMO_DIR}" "${tier}" \
     "${OUT_DIR}/build/material3demo-${label}.log"
   install_apk "material3-demo" "$(material3_demo_apk_path)" \
     "${OUT_DIR}/install/material3demo-${label}.log"

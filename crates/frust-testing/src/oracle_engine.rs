@@ -1,18 +1,16 @@
-//! The sparse-strip arm of the oracle set: [`EngineOracle`], a
-//! [`SceneRenderer`] over `frust-engine`'s [`EngineRenderer`] rendering into a
-//! `frust-gpu` [`HeadlessTarget`].
+//! The GPU arm of the oracle pair: [`EngineOracle`], a [`SceneRenderer`] over
+//! `frust-engine`'s [`EngineRenderer`] rendering into a `frust-gpu`
+//! [`HeadlessTarget`].
 //!
-//! # Why it lives here, beside the other two arms
+//! # Why it lives here, beside the other arm
 //!
-//! [`crate::oracle_cpu::CpuOracle`],
-//! [`crate::oracle_classic::ClassicOracle`] and this type are one *set*: the
-//! same [`crate::corpus`] case is handed to each of them behind one trait
-//! object, and the comparisons that matter are between arms. An adapter that
-//! only existed inside `frust-engine`'s own test binary could not be driven
-//! from a corpus that lives in this crate, so the adapter lives beside the
-//! corpus — the identical argument `oracle_classic` makes, applied to the
-//! engine tier (see the manifest's comment for why the edge is sound for a
-//! `publish = false`, dev-dependency-only crate).
+//! [`CpuOracle`](crate::oracle_cpu::CpuOracle) and this type are a *pair*:
+//! the same [`crate::corpus`] case is handed to both behind one trait object,
+//! and the whole point of the comparison is that one trait object can stand
+//! in for either. An adapter that only existed inside `frust-engine`'s own
+//! test binary could not be driven from a corpus that lives in this crate, so
+//! the adapter lives beside the corpus (see the manifest's comment for why
+//! the edge is sound for a `publish = false`, dev-dependency-only crate).
 //!
 //! # The encode contract, from the caller's side
 //!
@@ -32,41 +30,44 @@
 //! rather than the run silently landing on whichever adapter enumerates first.
 //! [`FRUST_GOLDEN_EXPECT_ADAPTER`](frust_render::GOLDEN_EXPECT_ADAPTER_ENV_VAR)
 //! / [`FRUST_GOLDEN_EXPECT_BACKEND`](frust_render::GOLDEN_EXPECT_BACKEND_ENV_VAR)
-//! then turn a wrong choice into a refusal *before any pixel is produced*,
-//! matching what `frust-render`'s headless renderer already does for the
-//! classic arm — the same two variables, matched the same way (adapter:
-//! case-insensitive substring, exactly as `WGPU_ADAPTER_NAME` selects;
-//! backend: whole name, case-insensitive).
+//! then turn a wrong choice into a refusal *before any pixel is produced* —
+//! two variables, each matched the way the thing it names is selected by
+//! (adapter: case-insensitive substring, exactly as `WGPU_ADAPTER_NAME`
+//! selects; backend: whole name, case-insensitive).
 //!
-//! The class an adapter routes to is deliberately derived from
-//! [`crate::oracle_classic::golden_class`] rather than from a second
-//! adapter table: one reviewed-runner list, one place to add a runner, and an
-//! engine class that can never drift away from the classic class captured on
-//! the same machine. The engine's own directories are that class under an
-//! `engine-` prefix ([`ENGINE_CLASSES`]), because
-//! `docs/TESTING.md`'s Golden Classes are per-*pipeline* as well as
-//! per-adapter: the engine and the classic pipeline are two different
-//! rasterizers and must never share a baseline. An adapter with no reviewed
-//! class resolves to [`ENGINE_UNCLASSIFIED_CLASS`], which is not a directory
-//! anyone promotes into.
+//! [`engine_golden_class`] is the step after that: mapping the *resolved*
+//! adapter onto a golden CLASS name, because `docs/TESTING.md`'s Golden
+//! Classes are per-adapter directories and a baseline captured on one GPU
+//! must never be compared against another's. [`ENGINE_CLASSES`] is the one
+//! table that mapping reads — one reviewed-runner list, one place to add a
+//! runner — and every class name in it is `engine-` prefixed because those
+//! Golden Classes are per-*pipeline* as well as per-adapter: an engine
+//! baseline must never be read as another rasterizer's capture of the same
+//! machine. An adapter with no reviewed class resolves to
+//! [`ENGINE_UNCLASSIFIED_CLASS`], which is deliberately not a directory
+//! anyone promotes into: a run on an unknown GPU records artifacts and
+//! compares nothing, rather than inventing a class name and inviting a
+//! baseline to be promoted from an unreviewed machine (`docs/TESTING.md`'s
+//! Baseline Updates: "never promote output from a machine that failed the
+//! adapter/font/environment preflight").
 //!
 //! # Alpha
 //!
 //! The engine renders with premultiplied-blended pipelines into a target
 //! declared [`OutputAlpha::Premultiplied`], so [`RenderedImage::rgba8`] is
 //! PREMULTIPLIED and tagged as such — set from the pipeline's stated
-//! convention, not assumed. That is the same shape [`CpuOracle`] reports and
-//! the opposite of [`ClassicOracle`]'s straight-alpha readback;
+//! convention, not assumed. That is the same shape
+//! [`CpuOracle`](crate::oracle_cpu::CpuOracle) reports, so the two arms are
+//! compared in the space both natively produce;
 //! [`crate::corpus::straighten_alpha`] is the one conversion site every image
-//! bound for a comparator or a stored PNG passes through.
+//! bound for a stored PNG — which is straight alpha — passes through.
 
 use anyhow::{Result, anyhow};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
-use frust_render::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessMeta};
+use frust_render::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR};
 use kurbo::Affine;
 
-use crate::oracle_classic::golden_class;
 use crate::render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};
 
 /// The golden class an adapter with no reviewed engine class resolves to.
@@ -78,16 +79,22 @@ use crate::render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRend
 /// preflight").
 pub const ENGINE_UNCLASSIFIED_CLASS: &str = "engine-unclassified";
 
-/// The engine golden class each reviewed *classic* class maps onto, as
-/// `(classic class, engine class)`.
+/// The reviewed GPU runners this repository keeps an engine golden class
+/// for, as `(backend, adapter-name substring, class)`.
 ///
-/// The adapter matching itself is not repeated here — that lives once in
-/// [`golden_class`] — so adding a runner is one edit there plus one row here,
-/// and the two class names for one machine can never disagree about which
-/// adapter they mean.
-const ENGINE_CLASSES: &[(&str, &str)] = &[
-    ("vulkan-nvidia-t400", "engine-vulkan-nvidia-t400"),
-    ("metal-macos", "engine-metal-macos"),
+/// Both the backend (matched whole and case-insensitively —
+/// [`AdapterMeta::backend`] already reports it lowercase) and the adapter
+/// substring (matched case-insensitively, the same shape
+/// `WGPU_ADAPTER_NAME` matches by) must hit, so
+/// `engine-vulkan-nvidia-t400` cannot be claimed by the same card running
+/// through a different backend.
+///
+/// Adding a runner is a deliberate act: it declares that the machine's
+/// baselines are reviewed and owned (`docs/TESTING.md`'s Golden Classes —
+/// "never pretend one device represents every GPU").
+const ENGINE_CLASSES: &[(&str, &str, &str)] = &[
+    ("vulkan", "t400", "engine-vulkan-nvidia-t400"),
+    ("metal", "apple", "engine-metal-macos"),
 ];
 
 /// The target format every engine frame is rendered into.
@@ -100,22 +107,46 @@ const ENGINE_CLASSES: &[(&str, &str)] = &[
 /// the renderer's.
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Which GPU actually produced an image — the provenance every promoted
+/// baseline and every failing artifact has to record (`docs/TESTING.md`'s
+/// GPU Run Metadata).
+///
+/// This crate's own type rather than a renderer crate's: these three strings
+/// are what golden-class routing and the `FRUST_GOLDEN_EXPECT_*` refusals
+/// read, and nothing about them belongs to one render tier. No `wgpu` type
+/// appears in it, so it crosses this crate's public API the same way
+/// [`BackendMeta`] does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterMeta {
+    /// The wgpu backend, lowercase (`vulkan`, `metal`, `dx12`, `gl`).
+    pub backend: String,
+    /// The adapter name as the driver reports it (e.g. `NVIDIA T400 4GB`).
+    pub adapter: String,
+    /// The driver name and, when the backend reports one, its version detail.
+    pub driver: String,
+}
+
+impl std::fmt::Display for AdapterMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "backend={} adapter={:?} driver={:?}",
+            self.backend, self.adapter, self.driver
+        )
+    }
+}
+
 /// The engine golden class for a resolved adapter, or
 /// [`ENGINE_UNCLASSIFIED_CLASS`].
 #[must_use]
 pub fn engine_golden_class(backend: &str, adapter: &str) -> &'static str {
-    let classic = golden_class(&HeadlessMeta {
-        backend: backend.to_string(),
-        adapter: adapter.to_string(),
-        // Not part of class routing (`golden_class` matches backend and
-        // adapter only); an empty string here states that rather than
-        // inventing a driver name to fill the field.
-        driver: String::new(),
-    });
+    let adapter = adapter.to_ascii_lowercase();
     ENGINE_CLASSES
         .iter()
-        .find(|(classic_class, _)| *classic_class == classic)
-        .map_or(ENGINE_UNCLASSIFIED_CLASS, |(_, engine_class)| *engine_class)
+        .find(|(known_backend, needle, _)| {
+            backend.eq_ignore_ascii_case(known_backend) && adapter.contains(needle)
+        })
+        .map_or(ENGINE_UNCLASSIFIED_CLASS, |(_, _, class)| *class)
 }
 
 /// Which adapter an [`EngineOracle`] insists on resolving.
@@ -153,9 +184,9 @@ pub struct EngineOracle {
     /// as [`SceneRenderer::id`] (see that method's contract: the id IS the
     /// golden-class routing key).
     class: &'static str,
-    /// The adapter this oracle resolved, in `frust-render`'s own vocabulary —
-    /// the provenance to print when a run reports which machine it ran on.
-    adapter: HeadlessMeta,
+    /// The adapter this oracle resolved — the provenance to print when a run
+    /// reports which machine it ran on.
+    adapter: AdapterMeta,
     /// Captured once at construction — [`SceneRenderer::meta`]'s contract is
     /// static backend identity, not per-render state.
     meta: BackendMeta,
@@ -168,7 +199,8 @@ impl EngineOracle {
     ///
     /// Blocking: wgpu's adapter and device requests are futures while
     /// [`SceneRenderer`] is sync, so they are driven to completion here with
-    /// `pollster`, the same minimal executor the other GPU arm uses.
+    /// `pollster`, the same minimal executor every GPU test in this
+    /// workspace uses.
     ///
     /// Pipeline warm-up is forced to completion before returning. Warm-up
     /// normally runs on a background worker holding its own handle on the
@@ -255,7 +287,7 @@ impl EngineOracle {
     /// The GPU this oracle resolved — the provenance to print when a run
     /// reports which machine it ran on.
     #[must_use]
-    pub fn adapter_meta(&self) -> &HeadlessMeta {
+    pub fn adapter_meta(&self) -> &AdapterMeta {
         &self.adapter
     }
 
@@ -383,13 +415,13 @@ impl SceneRenderer for EngineOracle {
     }
 }
 
-/// The adapter identity `frust-render` records for a headless run, built from
-/// wgpu's own report.
+/// The adapter identity recorded for a run, built from wgpu's own report.
 ///
-/// Reproduced rather than reused because `HeadlessMeta::from_info` is private
-/// to `frust-render`; the field mapping is kept identical so an engine run and
-/// a classic run on the same machine print (and route on) the same strings.
-fn adapter_meta(info: &wgpu::AdapterInfo) -> HeadlessMeta {
+/// The driver fold — name, version detail, or both — is the shape every GPU
+/// run in this repository has printed since the first golden class was
+/// promoted, so a re-run on the same machine prints (and routes on) the same
+/// strings a stored baseline's provenance recorded.
+fn adapter_meta(info: &wgpu::AdapterInfo) -> AdapterMeta {
     let driver = if info.driver_info.is_empty() {
         info.driver.clone()
     } else if info.driver.is_empty() {
@@ -397,7 +429,7 @@ fn adapter_meta(info: &wgpu::AdapterInfo) -> HeadlessMeta {
     } else {
         format!("{} ({})", info.driver, info.driver_info)
     };
-    HeadlessMeta {
+    AdapterMeta {
         backend: info.backend.to_str().to_string(),
         adapter: info.name.clone(),
         driver,
@@ -421,7 +453,7 @@ fn golden_env(name: &str) -> Option<String> {
 /// about what `T400` means); `expect_backend` matches the whole backend name,
 /// case-insensitively.
 fn check_expectations(
-    meta: &HeadlessMeta,
+    meta: &AdapterMeta,
     expect_adapter: Option<&str>,
     expect_backend: Option<&str>,
 ) -> Result<()> {
@@ -476,8 +508,8 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 mod tests {
     use super::*;
 
-    fn meta(backend: &str, adapter: &str) -> HeadlessMeta {
-        HeadlessMeta {
+    fn meta(backend: &str, adapter: &str) -> AdapterMeta {
+        AdapterMeta {
             backend: backend.to_string(),
             adapter: adapter.to_string(),
             driver: "test".to_string(),
@@ -506,19 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_class_is_never_the_classic_class_of_the_same_machine() {
-        // The two pipelines are different rasterizers; sharing one directory
-        // would compare an engine frame against a vello-classic baseline.
-        for (classic, engine) in ENGINE_CLASSES {
-            assert_ne!(classic, engine);
-        }
-        assert_ne!(
-            engine_golden_class("vulkan", "NVIDIA T400 4GB"),
-            golden_class(&meta("vulkan", "NVIDIA T400 4GB"))
-        );
-    }
-
-    #[test]
     fn an_unreviewed_adapter_is_unclassified_rather_than_slugified() {
         // Deliberately NOT `engine-intel-uhd-770`: a class is a reviewed,
         // owned runner, not whatever name a driver happened to report.
@@ -526,8 +545,8 @@ mod tests {
             engine_golden_class("vulkan", "Intel(R) UHD Graphics 770 (ADL-S GT1)"),
             ENGINE_UNCLASSIFIED_CLASS
         );
-        // The same card on another backend is not the Vulkan class either —
-        // the routing inherits that from `golden_class`.
+        // The class name states the backend, so a `gl`/`dx12` run on the very
+        // same card must not claim the Vulkan baselines.
         assert_eq!(
             engine_golden_class("gl", "NVIDIA T400 4GB"),
             ENGINE_UNCLASSIFIED_CLASS
@@ -536,9 +555,26 @@ mod tests {
 
     #[test]
     fn the_unclassified_class_is_not_a_promotable_directory_name() {
-        for (_, engine) in ENGINE_CLASSES {
-            assert_ne!(*engine, ENGINE_UNCLASSIFIED_CLASS);
+        // A guard on the constant itself: every entry in `ENGINE_CLASSES` is
+        // a directory under `testing/goldens/`, and the fallback must never
+        // collide with one.
+        for (_, _, class) in ENGINE_CLASSES {
+            assert_ne!(*class, ENGINE_UNCLASSIFIED_CLASS);
         }
+    }
+
+    #[test]
+    fn every_reviewed_class_is_engine_prefixed() {
+        // The engine's baselines share `testing/goldens/` with every other
+        // arm's, so the prefix is what keeps one machine's engine capture
+        // from ever being read as another rasterizer's.
+        for (_, _, class) in ENGINE_CLASSES {
+            assert!(
+                class.starts_with("engine-"),
+                "`{class}` is not prefixed as an engine class"
+            );
+        }
+        assert!(ENGINE_UNCLASSIFIED_CLASS.starts_with("engine-"));
     }
 
     #[test]

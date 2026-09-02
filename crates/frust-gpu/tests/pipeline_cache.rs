@@ -1,8 +1,9 @@
 //! Framing/validation tests for the persisted `wgpu::PipelineCache` blob.
 //!
 //! These ride the public `frust_gpu::pipeline_cache` surface (no device
-//! needed) and are the same body `frust-render` runs against its own copy of
-//! the framing, so a divergence between the two shows up as a failure here.
+//! needed). They are the whole of the framing's coverage: `frust-render` used
+//! to run an identical body against its own copy of the module, and now
+//! re-exports this one instead.
 
 use frust_gpu::pipeline_cache::{adapter_cache_key, frame, unframe};
 
@@ -88,7 +89,11 @@ fn adapter_key_includes_driver_info() {
         backend: wgpu::Backend::Vulkan,
         subgroup_min_size: 64,
         subgroup_max_size: 128,
-        transient_saves_memory: false,
+        // `Option<bool>` since wgpu 30 (`None` = the adapter does not say).
+        transient_saves_memory: Some(false),
+        // wgpu 30 reports the applied limit bucket here; frust never requests
+        // bucketing, and `adapter_cache_key` reads none of these fields.
+        limit_bucket: None,
     };
     let key_a = adapter_cache_key(&info);
     info.driver_info = "1.2.4".into();
@@ -98,89 +103,12 @@ fn adapter_key_includes_driver_info() {
 
 #[test]
 fn frame_layout_is_byte_stable() {
-    // The on-disk layout is shared with `frust-render`'s copy of this framing,
-    // so a blob written by either crate validates in the other. Pin the exact
-    // bytes: changing them silently invalidates every persisted blob and must
-    // be a deliberate magic-tag bump in both crates, not an accident.
+    // Every frust build that ever persisted a blob wrote this layout. Pin the
+    // exact bytes: changing them silently invalidates every persisted blob on
+    // disk and must be a deliberate magic-tag bump, not an accident.
     let framed = frame("ab", b"cd");
     assert_eq!(
         framed,
         b"FKPLCwg1\x02\x00\x00\x00ab\x02\x00\x00\x00cd".to_vec()
-    );
-}
-
-#[test]
-fn pipeline_cache_drift_guard() {
-    use std::fs;
-    use std::path::Path;
-
-    // Derive workspace root from CARGO_MANIFEST_DIR (frust-gpu crate directory).
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("frust-gpu is a crate")
-        .parent()
-        .expect("crates is a directory");
-
-    let gpu_cache = workspace_root.join("crates/frust-gpu/src/pipeline_cache.rs");
-    let render_cache = workspace_root.join("crates/frust-render/src/pipeline_cache.rs");
-
-    let gpu_content =
-        fs::read_to_string(&gpu_cache).expect("unable to read frust-gpu/src/pipeline_cache.rs");
-    let render_content = fs::read_to_string(&render_cache)
-        .expect("unable to read frust-render/src/pipeline_cache.rs");
-
-    // Normalize away the two copies' legitimate surface differences before
-    // comparing: doc comments (each copy describes itself), the item
-    // visibility (frust-gpu exports `pub` for its integration tests where
-    // frust-render keeps `pub(crate)`), `#[must_use]` attributes, and each
-    // file's `#[cfg(test)]` tail. Everything that remains is the framing
-    // logic itself, which must never diverge between the copies.
-    let normalize = |content: &str| -> String {
-        content
-            .lines()
-            .take_while(|line| !line.trim_start().starts_with("#[cfg(test)]"))
-            .filter(|line| {
-                let t = line.trim_start();
-                !t.starts_with("//!")
-                    && !t.starts_with("//")
-                    && !t.starts_with("#[must_use]")
-                    && !t.is_empty()
-            })
-            .map(|line| {
-                line.replace("pub(crate) fn ", "pub fn ")
-                    .replace("pub(crate) const ", "pub const ")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    let gpu_stripped = normalize(&gpu_content);
-    let render_stripped = normalize(&render_content);
-
-    assert_eq!(
-        gpu_stripped, render_stripped,
-        "crates/frust-gpu/src/pipeline_cache.rs must keep its framing logic identical to \
-         crates/frust-render/src/pipeline_cache.rs (compared with comments, `#[must_use]`, \
-         item visibility, and the test module normalized away). \
-         If the framing layout changes, bump MAGIC in both crates/frust-gpu/src/pipeline_cache.rs \
-         and crates/frust-render/src/pipeline_cache.rs, then rebuild both crates together."
-    );
-
-    // Verify MAGIC constant is identical in both files.
-    let extract_magic = |content: &str| -> String {
-        content
-            .lines()
-            .find(|line| line.contains("const MAGIC"))
-            .expect("MAGIC const not found")
-            .to_string()
-    };
-
-    let gpu_magic = extract_magic(&gpu_content);
-    let render_magic = extract_magic(&render_content);
-
-    assert_eq!(
-        gpu_magic, render_magic,
-        "MAGIC constant must be identical in both crates"
     );
 }

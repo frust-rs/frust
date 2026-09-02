@@ -58,8 +58,8 @@ impl DownlevelProfile {
 
 /// Whether the `FRUST_ENGINE_DOWNLEVEL` process-wide override is set to a
 /// non-zero value, checking both the compile-time (`option_env!`) and runtime
-/// (`std::env::var`) halves like `frust-render`'s `FRUST_TRACE`/
-/// `FRUST_NO_DIRECT_SURFACE` knobs. Cached: read once per process.
+/// (`std::env::var`) halves like `frust-render`'s `FRUST_TRACE` knob. Cached:
+/// read once per process.
 fn downlevel_override_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -123,9 +123,15 @@ pub struct TierCaps {
     /// Whether the adapter exposes `wgpu::Features::TIMESTAMP_QUERY`.
     pub has_timestamp_query: bool,
     /// The adapter's `wgpu::AdapterInfo::transient_saves_memory` — whether
-    /// adding `wgpu::TextureUsages::TRANSIENT` to a texture (which itself
-    /// requires `wgpu::StoreOp::Discard`) reduces memory usage on this
+    /// adding `wgpu::TextureUsages::TRANSIENT_ATTACHMENT` to a texture (which
+    /// itself requires `wgpu::StoreOp::Discard`) reduces memory usage on this
     /// adapter.
+    ///
+    /// `wgpu` reports this as `Option<bool>`, where `None` means "the adapter
+    /// does not say" (only the web backend, which no frust shell targets).
+    /// [`Self::probe`] folds `None` to `false`: an unknown answer must not buy
+    /// the transient flag, since it is a memory optimization with a hard
+    /// clear/discard precondition and no upside when the driver ignores it.
     pub transient_saves_memory: bool,
     /// The texture format a texture atlas is backed by.
     pub atlas_format: wgpu::TextureFormat,
@@ -149,7 +155,7 @@ impl TierCaps {
     /// When the resolved [`DownlevelProfile`] is [`DownlevelProfile::WebGl2`]
     /// — a real `wgpu::Backend::Gl` adapter, or `FRUST_ENGINE_DOWNLEVEL=1`
     /// rehearsing it against a desktop backend — the probed limits are run
-    /// through [`clamp_to_webgl2_defaults`] and storage buffers are forced
+    /// through `clamp_to_webgl2_defaults` and storage buffers are forced
     /// off, so the override actually rehearses the downlevel shape instead of
     /// only relabelling desktop values.
     pub fn probe(adapter: &wgpu::Adapter) -> Self {
@@ -173,7 +179,7 @@ impl TierCaps {
             has_storage_buffers: downlevel_profile == DownlevelProfile::Full
                 && limits.max_storage_buffers_per_shader_stage > 0,
             has_timestamp_query: features.contains(wgpu::Features::TIMESTAMP_QUERY),
-            transient_saves_memory: info.transient_saves_memory,
+            transient_saves_memory: info.transient_saves_memory.unwrap_or(false),
             atlas_format: ATLAS_FORMAT,
             resource_texture_dim: max_texture_dimension_2d.min(MAX_RESOURCE_TEXTURE_DIM),
             downlevel_profile,

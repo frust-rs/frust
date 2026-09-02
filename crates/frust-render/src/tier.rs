@@ -1,50 +1,31 @@
-//! Render-tier selection seam.
+//! The engine's adapter-capability gate.
 //!
-//! [`RenderTier::Gpu`] is the vello 0.9 GPU compute path (the only tier a
-//! device is actually created for today); [`RenderTier::Cpu`] is the
-//! experimental `vello_cpu` fallback, selectable only when the `cpu-tier`
-//! feature is compiled in (not default — see `frust-render/Cargo.toml`)
-//! and not yet wired into device creation (that lands alongside the
-//! `cpu-tier` encode path). [`RenderTier::Engine`] is the frust-owned `frust-engine` strip pipeline
-//! behind the non-default `engine-tier` feature, override-only on exactly the
-//! same terms.
+//! There is no render *tier* to select any more: `frust-engine`'s strip
+//! pipeline is the only renderer this crate contains, it is a plain dependency
+//! (`frust-render/Cargo.toml` declares no feature for it), and nothing chooses
+//! between renderers at build or run time. The tier enum, the env var that
+//! overrode it, the CLI flag that set that env var and the whole
+//! override/fallback vocabulary were retired with the choice they described:
+//! the vello-classic `Gpu` tier and the experimental `vello_cpu`-backed `Cpu`
+//! tier are both gone, so an override could only ever have named the renderer
+//! that was already running.
 //!
-//! [`select_render_tier`] is pure decision logic over [`TierCaps`] (a plain
-//! struct a caller builds from a real `wgpu::Adapter`'s downlevel flags +
-//! name), so it is unit-testable with fake caps and needs no GPU — mirroring
-//! `context.rs`'s split of pure decision vs. platform lookup (e.g.
-//! `effective_instance_flags`/`is_android_emulator`). [`RenderContext`](crate::RenderContext)
-//! is the one production call site, consulting it at device-init time and
-//! reusing [`TierSelection::diagnosis`] as its single fail-fast message
-//! (previously a bespoke check duplicated here and in `context.rs`).
+//! What survives is the one question an adapter can still answer "no" to:
+//! [`engine_support`] checks a real adapter's downlevel flags against
+//! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] and refuses one that cannot run the
+//! engine, with the diagnosis its caller fails fast on. It is pure decision
+//! logic over [`TierCaps`] (a plain struct a caller builds from a real
+//! `wgpu::Adapter`'s downlevel flags + name), so it is unit-testable with fake
+//! caps and needs no GPU — mirroring `context.rs`'s split of pure decision vs.
+//! platform lookup (e.g. `effective_instance_flags`/`is_android_emulator`).
+//! `context::create_engine_surface` is the production call site (once per
+//! surface creation), with [`HeadlessRenderer::new`](crate::HeadlessRenderer)
+//! asking the identical question of the adapter it resolved.
 
-/// Which Vello backend the renderer drives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum RenderTier {
-    /// GPU compute path (`vello` 0.9). Requires
-    /// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`].
-    #[default]
-    Gpu,
-    /// Experimental CPU fallback (`vello_cpu` 0.0.9), only selectable when
-    /// the `cpu-tier` feature is compiled in. Not yet wired
-    /// into device creation.
-    Cpu,
-    /// The frust-owned render engine (`frust-engine`: a `frust_scene::Scene`
-    /// compiled into sparse strips and drawn by ordinary render passes over
-    /// `frust-gpu`), only selectable when the `engine-tier` feature is
-    /// compiled in.
-    ///
-    /// Never fallen back to: [`select_render_tier`] reaches this variant only
-    /// through an explicit override, because this tier is the subject of an
-    /// on-device comparison against vello, so which tier a capture ran must
-    /// be answerable from the command line rather than from the adapter.
-    /// [`select_render_tier`] never reaches it by probe.
-    Engine,
-}
-
-/// Plain-data capability inputs [`select_render_tier`] probes. Built from a
-/// real `wgpu::Adapter` at [`RenderContext::ensure_device`](crate::RenderContext)'s
-/// call site, but constructible by hand in tests with no GPU.
+/// Plain-data capability inputs [`engine_support`] probes. Built from a real
+/// `wgpu::Adapter` at the surface-creation call site
+/// (`context::create_engine_surface`), but constructible by hand in tests with
+/// no GPU.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TierCaps {
     /// The adapter's `wgpu::DownlevelCapabilities::flags`.
@@ -53,279 +34,84 @@ pub struct TierCaps {
     pub adapter_name: String,
 }
 
-/// The [`wgpu::DownlevelFlags`] the GPU tier (vello 0.9) cannot run without:
-///
-/// - `COMPUTE_SHADERS`: vello's rendering pipeline is a compute shader.
-/// - `INDIRECT_EXECUTION`: vello unconditionally allocates its working
-///   buffers with `BufferUsages::INDIRECT` (see `wgpu_engine.rs` — "TODO:
-///   only some buffers will need indirect"), and wgpu rejects creating any
-///   INDIRECT-usage buffer on a device whose adapter lacks this flag.
-///
-/// The **iOS Simulator** is the known offender for the latter: wgpu-hal 29
-/// gates `INDIRECT_EXECUTION` on the `iOS_GPUFamily3_v1`/`macOS_GPUFamily1_v1`
-/// Metal feature sets, but the simulator only exposes the `Apple2` GPU
-/// family, so the flag is never set — a wgpu-29/vello-0.9-level limitation
-/// (a sibling of [wgpu #7057](https://github.com/gfx-rs/wgpu/issues/7057))
-/// that cannot be patched under the workspace's version pin.
-pub const GPU_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags =
-    wgpu::DownlevelFlags::COMPUTE_SHADERS.union(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
-
-/// The [`wgpu::DownlevelFlags`] the engine tier (`frust-engine`) cannot run
+/// The [`wgpu::DownlevelFlags`] the engine (`frust-engine`) cannot run
 /// without: **none of them**.
 ///
 /// Deliberately empty. `frust-engine` is built to the
 /// GLES-3.0/WebGL2 downlevel ceiling by design rule — no compute pass, no
 /// storage buffer, no indirect draw (`frust-gpu`'s `lint` module enforces that
-/// against the engine's own shaders) — so it runs on adapters where vello
-/// cannot: precisely the `COMPUTE_SHADERS`/`INDIRECT_EXECUTION` pair
-/// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] demands and the iOS Simulator's `Apple2`
-/// GPU family cannot supply. An adapter that fails the GPU probe therefore
-/// raises no capability objection here either; the only thing that can refuse
-/// this tier is a build without the `engine-tier` feature.
+/// against the engine's own shaders) — so it runs on adapters the deleted
+/// vello-classic renderer could not: it needed `COMPUTE_SHADERS` and
+/// `INDIRECT_EXECUTION`, precisely the pair the iOS Simulator's `Apple2` GPU
+/// family cannot supply. No adapter can raise a capability objection here.
 ///
 /// Named as a constant rather than left implicit so a flag the engine ever
-/// does need is honoured by [`select_render_tier`] without a second edit.
+/// does need is honoured by [`engine_support`] without a second edit.
 pub const ENGINE_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags = wgpu::DownlevelFlags::empty();
 
-/// What [`select_render_tier`] decided is actually usable in this build.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TierOutcome {
-    /// `tier` is usable — either it probed capable, or an explicit override
-    /// selected it. An override wins **among available tiers**: a `Cpu` override
-    /// always applies, but a `Gpu` override still requires the adapter to support
-    /// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] — an incapable `Gpu` override is
-    /// [`TierOutcome::Unavailable`], not `Available`.
-    Available(RenderTier),
-    /// No tier is usable in this build. `would_be` names the tier that
-    /// *would* have been selected had it been compiled in — a diagnosed
-    /// failure naming the tier that would apply, e.g. `Cpu` when the adapter
-    /// lacks the GPU tier's flags but the `cpu-tier` feature is off.
-    Unavailable { would_be: RenderTier },
-}
-
-/// The result of [`select_render_tier`]: the decided [`TierOutcome`] plus a
-/// human-readable diagnosis — the one message a failed GPU probe surfaces
-/// through (see [`RenderContext::ensure_device`](crate::RenderContext), the
-/// production call site).
+/// An adapter that cannot run the engine: the refusal [`engine_support`]
+/// returns, naming the adapter and the flags it is missing.
+///
+/// Carries its own diagnosis through [`std::fmt::Display`] — the one message a
+/// refused adapter surfaces through, shared by the surface path
+/// (`context::create_engine_surface`) and the headless harness
+/// ([`crate::HeadlessRenderer`]), so both refuse in the same words.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TierSelection {
-    pub outcome: TierOutcome,
-    pub diagnosis: String,
+pub struct EngineUnsupported {
+    /// The adapter that was refused, for the diagnosis.
+    pub adapter_name: String,
+    /// The subset of [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] this adapter does not
+    /// report. Never empty in a value that exists: an adapter missing nothing
+    /// is [`Ok`].
+    pub missing_flags: wgpu::DownlevelFlags,
 }
 
-/// Selects the render tier.
+impl std::fmt::Display for EngineUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "frust-render: adapter `{}` cannot drive the frust-engine renderer — it lacks the \
+             required downlevel flags ({:?}; the engine requires \
+             {ENGINE_REQUIRED_DOWNLEVEL_FLAGS:?}), and this build contains no other renderer to \
+             fall back to.",
+            self.adapter_name, self.missing_flags,
+        )
+    }
+}
+
+impl std::error::Error for EngineUnsupported {}
+
+/// Whether `caps` reports every flag in `required`.
 ///
-/// - An explicit `override_tier` wins **among available tiers**: a `Cpu`
-///   override always applies (the CPU tier has no adapter prerequisite), but a
-///   `Gpu` override applies only when `caps` actually support
-///   [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]. A `Gpu` override onto an incapable
-///   adapter is **refused** — [`TierOutcome::Unavailable`] naming `Gpu` — since
-///   an override cannot conjure a missing GPU capability; the caller then keeps
-///   the same fail-fast behavior a failed probe produces (the override
-///   plumbing: `FRUST_RENDER_TIER` / `frust run --render-tier`).
-/// - Without an override: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]
-///   selects [`RenderTier::Gpu`]. Otherwise, if the `cpu-tier` feature is
-///   compiled in, falls back to [`RenderTier::Cpu`] (still experimental, and
-///   not yet wired into device creation — see this module's docs); without
-///   the feature, the result is [`TierOutcome::Unavailable`] naming `Cpu` as
-///   the tier that would apply, and the caller keeps today's fail-fast
-///   behavior using [`TierSelection::diagnosis`].
-/// - [`RenderTier::Engine`] is **override-only**: no probe ever selects it,
-///   so the fallback above still chooses between `Gpu` and `Cpu` exactly as
-///   before. An `Engine` override applies only in a build that compiled the
-///   `engine-tier` feature in, against [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`];
-///   without it the override is refused ([`TierOutcome::Unavailable`] naming
-///   `Engine`) rather than ignored, so a capture asked for on the engine tier
-///   can never be a vello frame wearing the wrong label.
-pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) -> TierSelection {
-    let gpu_capable = caps.downlevel_flags.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS);
-    // Always true today: [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is empty by
-    // design. Asked of `caps` in the same shape `gpu_capable` is anyway, so
-    // the requirement lives in one named constant rather than in a comment —
-    // and a flag ever added to it is honoured here without a second edit.
-    let engine_capable = caps
-        .downlevel_flags
-        .contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS);
-
-    if let Some(tier) = override_tier {
-        // A `Gpu` override cannot conjure a capability the adapter lacks: an
-        // override selects among *available* tiers, so a `Gpu` override onto an
-        // incapable adapter is REFUSED (the same fail-fast the probe path takes),
-        // letting `ensure_device`'s `Unavailable` arm fire rather than handing
-        // vello a device that panics every frame. A `Cpu` override (no adapter
-        // prerequisite) and a `Gpu` override on a capable adapter are unchanged.
-        if tier == RenderTier::Gpu && !gpu_capable {
-            let missing = GPU_REQUIRED_DOWNLEVEL_FLAGS - caps.downlevel_flags;
-            return TierSelection {
-                outcome: TierOutcome::Unavailable {
-                    would_be: RenderTier::Gpu,
-                },
-                diagnosis: format!(
-                    "frust-render: GPU render tier explicitly requested via override, but \
-                     REFUSED — adapter `{}` lacks the downlevel flags the vello renderer requires \
-                     ({missing:?}); an override selects among available tiers and cannot supply a \
-                     missing GPU capability. Run on a physical device, or build with the \
-                     experimental `cpu-tier` feature for a CPU fallback.",
-                    caps.adapter_name
-                ),
-            };
-        }
-        // The engine tier is override-only AND build-gated, so this is the
-        // one thing that can refuse it: without the feature there is no
-        // renderer to select. REFUSED rather than quietly ignored, for the
-        // reason the whole tier exists — a run asked for on `engine` that
-        // rendered through vello instead would put a mislabelled number into
-        // the comparison the tier exists to produce.
-        if tier == RenderTier::Engine && !(cfg!(feature = "engine-tier") && engine_capable) {
-            return TierSelection {
-                outcome: TierOutcome::Unavailable {
-                    would_be: RenderTier::Engine,
-                },
-                diagnosis: format!(
-                    "frust-render: engine render tier explicitly requested via override, but \
-                     REFUSED — the `engine-tier` feature is {} and adapter `{}` {} the engine \
-                     tier's required downlevel flags \
-                     ({ENGINE_REQUIRED_DOWNLEVEL_FLAGS:?}). Rebuild with `--features \
-                     frust-render/engine-tier`.",
-                    if cfg!(feature = "engine-tier") {
-                        "compiled in"
-                    } else {
-                        "NOT compiled in"
-                    },
-                    caps.adapter_name,
-                    if engine_capable { "supports" } else { "lacks" },
-                ),
-            };
-        }
-        return TierSelection {
-            outcome: TierOutcome::Available(tier),
-            diagnosis: format!(
-                "frust-render: render tier explicitly overridden to {tier:?} (adapter `{}` {} \
-                 the GPU tier's required downlevel flags)",
-                caps.adapter_name,
-                if gpu_capable { "supports" } else { "lacks" },
-            ),
-        };
+/// Factored out of [`engine_support`] so the refusal arm — otherwise
+/// unreachable in production, since [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is
+/// deliberately empty — stays exercised by a real call rather than a
+/// hand-built [`EngineUnsupported`] value: tests drive it with a non-empty
+/// injected `required` set instead.
+fn engine_support_with(
+    required: wgpu::DownlevelFlags,
+    caps: &TierCaps,
+) -> Result<(), EngineUnsupported> {
+    let missing_flags = required - caps.downlevel_flags;
+    if missing_flags.is_empty() {
+        return Ok(());
     }
-
-    if gpu_capable {
-        return TierSelection {
-            outcome: TierOutcome::Available(RenderTier::Gpu),
-            diagnosis: format!(
-                "frust-render: GPU adapter `{}` supports the vello render pipeline",
-                caps.adapter_name
-            ),
-        };
-    }
-
-    let missing = GPU_REQUIRED_DOWNLEVEL_FLAGS - caps.downlevel_flags;
-    let reason = format!(
-        "frust-render: GPU adapter `{}` lacks downlevel flags required by the vello renderer \
-         ({missing:?}); this is the known wgpu-29/vello-0.9 iOS Simulator limitation \
-         (INDIRECT_EXECUTION is unavailable on the simulator's Apple2 GPU family) if that is the \
-         only missing flag, or a genuinely under-capable adapter otherwise.",
-        caps.adapter_name
-    );
-
-    if cfg!(feature = "cpu-tier") {
-        TierSelection {
-            outcome: TierOutcome::Available(RenderTier::Cpu),
-            diagnosis: format!(
-                "{reason} Falling back to the experimental CPU tier (vello_cpu, `cpu-tier` \
-                 feature)."
-            ),
-        }
-    } else {
-        TierSelection {
-            outcome: TierOutcome::Unavailable {
-                would_be: RenderTier::Cpu,
-            },
-            diagnosis: format!(
-                "{reason} Run on a physical device, or build with the experimental `cpu-tier` \
-                 feature for a CPU fallback — or with `engine-tier` plus \
-                 `{RENDER_TIER_ENV_VAR}=engine`, which requires none of these flags."
-            ),
-        }
-    }
+    Err(EngineUnsupported {
+        adapter_name: caps.adapter_name.clone(),
+        missing_flags,
+    })
 }
 
-/// The env var [`render_tier_override_from_env`] reads (the override
-/// plumbing) — a compile-time-or-runtime knob like every other `FRUST_*`
-/// knob (see `context::env_str`'s precedence: runtime wins when both are
-/// set, compile-time otherwise). Set directly at runtime, by `frust run
-/// --render-tier gpu|cpu|engine` for the spawned desktop process, or baked in
-/// at build time via `frust build|run --define FRUST_RENDER_TIER=<tier>` —
-/// the only way an override reaches an Android app process, which has no
-/// runtime env to set (mobile: `--render-tier` itself is not plumbed in v1,
-/// see `frust-cli`'s flag help text; `--define` is).
-pub const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
-
-/// Pure parse of a raw override string (`"gpu"`/`"cpu"`/`"engine"`,
-/// case-insensitive) into a [`RenderTier`], or `None` (with a logged warning)
-/// for anything else. Split out from the env lookup
-/// ([`render_tier_override_from_env`]) so it is unit-testable without mutating
-/// process-wide env state, mirroring `context.rs`'s pure-decision/
-/// platform-lookup split.
-pub fn parse_render_tier_override(raw: &str) -> Option<RenderTier> {
-    match raw.to_ascii_lowercase().as_str() {
-        "gpu" => Some(RenderTier::Gpu),
-        "cpu" => Some(RenderTier::Cpu),
-        // Ungated, exactly like `"cpu"`: the override vocabulary is the same
-        // string set in every build. A build without the `engine-tier`
-        // feature refuses the parsed override in [`select_render_tier`], with
-        // a diagnosis naming the missing feature — a far more useful answer
-        // than "invalid value, ignored" followed by a vello frame recorded as
-        // an engine measurement.
-        "engine" => Some(RenderTier::Engine),
-        other => {
-            log::warn!(
-                "frust-render: ignoring invalid {RENDER_TIER_ENV_VAR}={other:?} (expected \
-                 \"gpu\", \"cpu\" or \"engine\")"
-            );
-            None
-        }
-    }
-}
-
-/// Pure precedence resolution over the two `FRUST_RENDER_TIER` sources —
-/// `compile_time` (an `option_env!("FRUST_RENDER_TIER")` value baked in at
-/// build time) and `runtime` (a `std::env::var` read) — via
-/// [`crate::context::env_str`]'s documented precedence (a non-empty runtime
-/// value wins even when a compile-time value is also set; compile-time is
-/// honoured only when runtime is absent or empty; neither present is
-/// `None`), then [`parse_render_tier_override`] on whichever raw string that
-/// resolves to. Split out from [`render_tier_override_from_env`]'s thin env
-/// wrapper so the precedence itself is unit-testable without mutating
-/// process-wide env state — the same pure-decision/platform-lookup split
-/// this module already follows for [`select_render_tier`].
+/// Whether `caps` can run the engine.
 ///
-/// An invalid value in whichever source wins precedence is `None` (with the
-/// existing [`parse_render_tier_override`] warning) — it is not retried
-/// against the other source, matching `env_str`'s "runtime wins outright"
-/// precedence rather than a per-field fallback.
-fn render_tier_override_from_sources(
-    compile_time: Option<&'static str>,
-    runtime: Option<String>,
-) -> Option<RenderTier> {
-    crate::context::env_str(compile_time, runtime).and_then(|raw| parse_render_tier_override(&raw))
-}
-
-/// Reads and parses [`RENDER_TIER_ENV_VAR`] from both the compile-time
-/// (`option_env!`, baked in at build time) and runtime (`std::env::var`)
-/// sources — the compile-time-or-runtime shape `context.rs`'s `aa_mode()`/
-/// `render_scale()` knobs use, via [`render_tier_override_from_sources`]. An
-/// Android app process has no runtime env, so the compile-time half (`frust
-/// build --define FRUST_RENDER_TIER=<tier>`) is the only way an override
-/// reaches it; a desktop process may still set the runtime var directly, and
-/// runtime wins when both are present. Neither source present, or a
-/// set-but-invalid value in whichever wins, is `None` (a warning is logged by
-/// [`parse_render_tier_override`]) — an override is a convenience, never a
-/// hard config error.
-pub fn render_tier_override_from_env() -> Option<RenderTier> {
-    render_tier_override_from_sources(
-        option_env!("FRUST_RENDER_TIER"),
-        std::env::var(RENDER_TIER_ENV_VAR).ok(),
-    )
+/// `Ok(())` when the adapter reports every flag in
+/// [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] — which, that constant being
+/// deliberately empty, is every adapter that reaches the probe. The refusal
+/// arm is kept (rather than assumed away) so a flag ever added to the constant
+/// is honoured here without a second edit, and so the diagnosis for an adapter
+/// that genuinely cannot run the engine lives in one place.
+pub fn engine_support(caps: &TierCaps) -> Result<(), EngineUnsupported> {
+    engine_support_with(ENGINE_REQUIRED_DOWNLEVEL_FLAGS, caps)
 }
 
 #[cfg(test)]
@@ -340,218 +126,53 @@ mod tests {
     }
 
     #[test]
-    fn full_caps_select_gpu() {
-        let selection = select_render_tier(&caps(wgpu::DownlevelFlags::all()), None);
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Gpu));
+    fn full_caps_run_the_engine() {
+        assert_eq!(engine_support(&caps(wgpu::DownlevelFlags::all())), Ok(()));
     }
 
     #[test]
-    fn missing_compute_shaders_falls_back_or_diagnoses() {
-        let missing_compute = wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::COMPUTE_SHADERS;
-        let selection = select_render_tier(&caps(missing_compute), None);
-        if cfg!(feature = "cpu-tier") {
-            assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
-        } else {
-            assert_eq!(
-                selection.outcome,
-                TierOutcome::Unavailable {
-                    would_be: RenderTier::Cpu
-                }
-            );
-        }
-        assert!(selection.diagnosis.contains("lacks downlevel flags"));
-    }
-
-    #[test]
-    fn missing_indirect_execution_falls_back_or_diagnoses() {
-        let missing_indirect =
-            wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION;
-        let selection = select_render_tier(&caps(missing_indirect), None);
-        if cfg!(feature = "cpu-tier") {
-            assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
-        } else {
-            assert_eq!(
-                selection.outcome,
-                TierOutcome::Unavailable {
-                    would_be: RenderTier::Cpu
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_override_refused_on_incapable_caps() {
-        // A `Gpu` override cannot conjure a missing GPU capability: it is refused
-        // (Unavailable naming Gpu), so `ensure_device` fails fast instead of
-        // handing vello a device that panics every frame.
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::empty()), Some(RenderTier::Gpu));
-        assert_eq!(
-            selection.outcome,
-            TierOutcome::Unavailable {
-                would_be: RenderTier::Gpu
-            }
-        );
-        assert!(selection.diagnosis.contains("REFUSED"));
-    }
-
-    #[test]
-    fn gpu_override_wins_on_capable_caps() {
-        // A `Gpu` override on a capable adapter is honored.
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::all()), Some(RenderTier::Gpu));
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Gpu));
-    }
-
-    #[test]
-    fn cpu_override_wins_even_on_incapable_caps() {
-        // The CPU tier has no adapter prerequisite, so a `Cpu` override always
-        // applies — even onto an adapter with no downlevel flags at all.
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::empty()), Some(RenderTier::Cpu));
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
-    }
-
-    #[test]
-    fn cpu_override_wins_over_capable_caps_too() {
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::all()), Some(RenderTier::Cpu));
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
-    }
-
-    #[test]
-    fn engine_requires_no_downlevel_flags() {
-        // The engine tier's reason for existing on the adapters that refuse
-        // the GPU tier: an adapter with NO downlevel flags at all satisfies
-        // its requirement, while failing the GPU one.
-        let none = wgpu::DownlevelFlags::empty();
-        assert!(none.contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS));
-        assert!(!none.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS));
-    }
-
-    #[test]
-    fn engine_override_is_build_gated() {
-        // Refused without the feature (nothing to select), honoured with it —
-        // on an adapter with no downlevel flags at all, since the engine tier
-        // requires none.
-        let selection = select_render_tier(
-            &caps(wgpu::DownlevelFlags::empty()),
-            Some(RenderTier::Engine),
-        );
-        if cfg!(feature = "engine-tier") {
-            assert_eq!(
-                selection.outcome,
-                TierOutcome::Available(RenderTier::Engine)
-            );
-        } else {
-            assert_eq!(
-                selection.outcome,
-                TierOutcome::Unavailable {
-                    would_be: RenderTier::Engine
-                }
-            );
-            assert!(selection.diagnosis.contains("REFUSED"));
-            assert!(selection.diagnosis.contains("engine-tier"));
-        }
-    }
-
-    #[test]
-    fn engine_is_never_auto_probed() {
-        // The rule the whole on-device comparison rests on: no probe result
-        // may be `Engine`, however capable or incapable the adapter is.
+    fn a_downlevel_adapter_still_runs_the_engine() {
+        // The engine's reason for existing on the adapters the deleted
+        // vello-classic renderer refused: `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
+        // empty, so no missing flag disqualifies it — including the
+        // `COMPUTE_SHADERS`/`INDIRECT_EXECUTION` pair the iOS Simulator lacks.
         for flags in [
-            wgpu::DownlevelFlags::all(),
             wgpu::DownlevelFlags::empty(),
             wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::COMPUTE_SHADERS,
             wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION,
         ] {
-            let selection = select_render_tier(&caps(flags), None);
-            assert_ne!(
-                selection.outcome,
-                TierOutcome::Available(RenderTier::Engine),
-                "probe selected Engine for {flags:?}"
+            assert_eq!(
+                engine_support(&caps(flags)),
+                Ok(()),
+                "the engine was refused on {flags:?}, which requires no flag at all"
             );
         }
     }
 
     #[test]
-    fn parses_gpu_and_cpu_case_insensitively() {
-        assert_eq!(parse_render_tier_override("gpu"), Some(RenderTier::Gpu));
-        assert_eq!(parse_render_tier_override("GPU"), Some(RenderTier::Gpu));
-        assert_eq!(parse_render_tier_override("cpu"), Some(RenderTier::Cpu));
-        assert_eq!(parse_render_tier_override("Cpu"), Some(RenderTier::Cpu));
+    fn engine_requires_no_downlevel_flags() {
+        let none = wgpu::DownlevelFlags::empty();
+        assert!(none.contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS));
     }
 
+    /// The refusal arm, exercised against a requirement the constant does not
+    /// carry today: a flag added to [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] later
+    /// must refuse the adapter that lacks it rather than be assumed away.
+    /// Drives the refusal through [`engine_support_with`] itself (with a
+    /// non-empty injected `required` set — [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]
+    /// never exercises this arm in production) rather than hand-building an
+    /// [`EngineUnsupported`] value, and asserts the diagnosis names the
+    /// missing flag.
     #[test]
-    fn parses_engine_in_every_build() {
-        // Parsed in EVERY build, `cpu`-style: the string vocabulary does not
-        // move with the feature. A build without `engine-tier` refuses the
-        // override one level up (`engine_override_is_build_gated`) instead of
-        // dropping it here, so an override that cannot be honoured fails
-        // loudly rather than rendering vello under an engine label.
-        assert_eq!(
-            parse_render_tier_override("engine"),
-            Some(RenderTier::Engine)
-        );
-        assert_eq!(
-            parse_render_tier_override("Engine"),
-            Some(RenderTier::Engine)
-        );
-    }
-
-    #[test]
-    fn invalid_override_value_is_ignored() {
-        assert_eq!(parse_render_tier_override(""), None);
-        assert_eq!(parse_render_tier_override("vello"), None);
-    }
-
-    #[test]
-    fn override_sources_compile_time_only() {
-        // No runtime value: the compile-time half is honoured — the only way
-        // an override reaches an Android app process (no runtime env).
-        assert_eq!(
-            render_tier_override_from_sources(Some("engine"), None),
-            Some(RenderTier::Engine)
-        );
-    }
-
-    #[test]
-    fn override_sources_runtime_wins_over_compile_time() {
-        // Both set: runtime wins outright, per `env_str`'s precedence.
-        assert_eq!(
-            render_tier_override_from_sources(Some("gpu"), Some("cpu".to_string())),
-            Some(RenderTier::Cpu)
-        );
-    }
-
-    #[test]
-    fn override_sources_neither_present_is_none() {
-        assert_eq!(render_tier_override_from_sources(None, None), None);
-    }
-
-    #[test]
-    fn override_sources_empty_runtime_falls_back_to_compile_time() {
-        // An empty runtime value is treated as unset by `env_str`, so the
-        // compile-time half still applies rather than resolving to `None`.
-        assert_eq!(
-            render_tier_override_from_sources(Some("engine"), Some(String::new())),
-            Some(RenderTier::Engine)
-        );
-    }
-
-    #[test]
-    fn override_sources_invalid_runtime_is_none_even_with_valid_compile_time() {
-        // Runtime wins precedence outright, so an invalid runtime value is
-        // NOT retried against a (valid) compile-time fallback — it resolves
-        // to `None`, with `parse_render_tier_override`'s existing warning.
-        assert_eq!(
-            render_tier_override_from_sources(Some("gpu"), Some("vello".to_string())),
-            None
-        );
-    }
-
-    #[test]
-    fn override_sources_invalid_compile_time_with_no_runtime_is_none() {
-        assert_eq!(render_tier_override_from_sources(Some("vello"), None), None);
+    fn a_missing_required_flag_is_refused_by_name() {
+        let required = wgpu::DownlevelFlags::COMPUTE_SHADERS;
+        let adapter = caps(wgpu::DownlevelFlags::all() - required);
+        let refusal = engine_support_with(required, &adapter)
+            .expect_err("an adapter missing a required flag must be refused");
+        assert_eq!(refusal.missing_flags, required);
+        let diagnosis = refusal.to_string();
+        assert!(diagnosis.contains("fake adapter"), "{diagnosis}");
+        assert!(diagnosis.contains("COMPUTE_SHADERS"), "{diagnosis}");
+        assert!(diagnosis.contains("frust-engine"), "{diagnosis}");
     }
 }

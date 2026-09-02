@@ -1,46 +1,39 @@
-//! Guard G6: the render stack's DUPLICATE crate identities are exactly the
-//! ones we chose, and no others.
+//! Guard G6: the render stack resolves exactly ONE identity of `vello_common`
+//! and `glifo` — no others.
 //!
-//! `Cargo.lock` currently resolves two `vello_common`s and two `glifo`s at
-//! once, and that is deliberate:
+//! Before p8-06, `Cargo.lock` deliberately resolved two `vello_common`s and
+//! two `glifo`s at once:
 //!
-//! - `vello_common 0.0.9` / `glifo 0.1.1` arrive under `frust-render`'s
+//! - `vello_common 0.0.9` / `glifo 0.1.1` arrived under `frust-render`'s
 //!   feature-gated legacy CPU fallback (`vello_cpu = "=0.0.9"`);
-//! - `vello_common 0.2.0` / `glifo 0.3.0` are the ENGINE's own core — reached
+//! - `vello_common 0.2.0` / `glifo 0.3.0` were the ENGINE's own core — reached
 //!   through `frust-engine`'s own unconditional dependency on them and
 //!   through this crate's `vello_cpu_oracle` (`vello_cpu = "=0.2.0"`) oracle
 //!   pin, which is why the oracle rasterizes with the same code the engine
 //!   does (see `src/oracle_cpu.rs`).
 //!
+//! `frust-render`'s `cpu-tier` feature (and its `vello_cpu =0.0.9` pin) has
+//! since been retired, so only the 0.2.0/0.3.0 identity remains — this guard
+//! is flipped to assert exactly that, per the note this file used to carry:
+//! "When the swap phase retires the `=0.0.9` pin, this guard does not get
+//! deleted: flip each expectation to the single remaining version, so the
+//! file keeps asserting that exactly one identity is left."
+//!
 //! `docs/DEVELOPMENT.md`'s Version-Pin Policy asks for a `cargo tree -d` check
 //! after any manifest change; this test is that check, frozen into the gate so
-//! a third identity (or a silent collapse to one) fails CI rather than waiting
-//! for someone to run the command by hand. A plain lockfile scan, run as an
-//! ordinary `cargo test` — the same shape, and the same rationale, as this
-//! crate's `tests/deps.rs` guard.
-//!
-//! Note when reproducing this by hand: the 0.0.9 side is reached only through
-//! `frust-render`'s non-default `cpu-tier` feature, so a bare `cargo tree -d`
-//! (default features) shows just the 0.2.0/0.3.0 identities —
-//! `cargo tree -d --all-features` is the command whose output matches what
-//! this test asserts. The lockfile records every optional dependency
-//! regardless, which is why the scan below reads it directly.
-//!
-//! **When the swap phase retires the `=0.0.9` pin**, this guard does not get
-//! deleted: flip each expectation to the single remaining version, so the file
-//! keeps asserting that exactly one identity is left.
+//! a second identity (or a silent collapse to a *different* version) fails CI
+//! rather than waiting for someone to run the command by hand. A plain
+//! lockfile scan, run as an ordinary `cargo test` — the same shape, and the
+//! same rationale, as this crate's `tests/deps.rs` guard.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Every duplicated package this workspace sanctions, with the exact set of
-/// versions allowed for it. A version present here but absent from the lock is
-/// as much a failure as an unexpected one: both mean the graph moved.
-const SANCTIONED_DUPLICATES: &[(&str, &[&str])] = &[
-    ("vello_common", &["0.0.9", "0.2.0"]),
-    ("glifo", &["0.1.1", "0.3.0"]),
-];
+/// The one version sanctioned for each of these packages. A version present
+/// here but absent from the lock is as much a failure as an unexpected one:
+/// both mean the graph moved.
+const SANCTIONED_IDENTITIES: &[(&str, &str)] = &[("vello_common", "0.2.0"), ("glifo", "0.3.0")];
 
 /// The repository root, resolved from this crate's manifest dir
 /// (`crates/frust-testing`) so the scan is working-directory-independent —
@@ -91,23 +84,23 @@ fn versions_of(packages: &[(String, String)], name: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn sanctioned_duplicate_identities_are_exactly_as_declared() {
+fn sanctioned_identities_are_exactly_as_declared() {
     let packages = locked_packages(&repo_root());
     assert!(
         !packages.is_empty(),
         "Cargo.lock parsed to zero packages — the scan is not reading what it thinks it is"
     );
 
-    for (name, expected) in SANCTIONED_DUPLICATES {
+    for (name, expected) in SANCTIONED_IDENTITIES {
         let found = versions_of(&packages, name);
-        let expected: BTreeSet<String> = expected.iter().map(|v| (*v).to_string()).collect();
+        let expected: BTreeSet<String> = BTreeSet::from([(*expected).to_string()]);
         assert_eq!(
             found, expected,
             "`{name}` identities in Cargo.lock drifted: expected {expected:?}, found {found:?}. \
-             Two identities of the render core are sanctioned ONLY as the legacy-cpu-tier / \
-             engine split this file documents — if this change is intentional, update \
-             SANCTIONED_DUPLICATES and say why in the commit message; if it is not, a pin was \
-             bumped or a route added that unifies (or forks) the graph."
+             Exactly one identity of the render core is sanctioned now that the legacy cpu-tier \
+             fallback is retired — if this change is intentional, update SANCTIONED_IDENTITIES \
+             and say why in the commit message; if it is not, a pin was bumped or a route was \
+             added that forks the graph."
         );
     }
 }
@@ -115,23 +108,15 @@ fn sanctioned_duplicate_identities_are_exactly_as_declared() {
 #[test]
 fn the_oracle_pin_is_the_engine_side_identity() {
     // The oracle exists to rasterize with the ENGINE's core, so its own
-    // `vello_cpu` must be the 0.2.0 one — the whole point of the second
-    // identity above. A `vello_cpu` that ever collapsed to only 0.0.9 would
-    // leave the oracle silently comparing against the legacy rasterizer.
+    // `vello_cpu` must be the 0.2.0 one. A `vello_cpu` that ever drifted off
+    // 0.2.0 — or resolved a second identity again — would leave the oracle
+    // silently comparing against the wrong rasterizer.
     let packages = locked_packages(&repo_root());
     let vello_cpu = versions_of(&packages, "vello_cpu");
-    assert!(
-        vello_cpu.contains("0.2.0"),
-        "the CPU oracle's `vello_cpu =0.2.0` pin is missing from Cargo.lock, found {vello_cpu:?}"
-    );
-    assert!(
-        vello_cpu.contains("0.0.9"),
-        "`frust-render`'s legacy cpu-tier `vello_cpu =0.0.9` pin is missing from Cargo.lock, \
-         found {vello_cpu:?}"
-    );
     assert_eq!(
-        vello_cpu.len(),
-        2,
-        "exactly two `vello_cpu` identities are sanctioned, found {vello_cpu:?}"
+        vello_cpu,
+        BTreeSet::from(["0.2.0".to_string()]),
+        "exactly one `vello_cpu` identity (0.2.0, the CPU oracle's pin) is sanctioned now that \
+         the legacy cpu-tier fallback's `vello_cpu =0.0.9` pin is retired, found {vello_cpu:?}"
     );
 }

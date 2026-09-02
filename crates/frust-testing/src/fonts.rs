@@ -9,7 +9,7 @@
 //! and license text in `testing/fonts/LICENSES.md`) covering Latin +
 //! combining marks, Arabic (RTL + joining), CJK, and COLRv1 colour emoji —
 //! together enough to shape every script exercised by
-//! [`tests::shapes_every_bundled_script_with_no_system_font`] below with
+//! `tests::shapes_every_bundled_script_with_no_system_font` below with
 //! zero dependency on what the host happens to have installed.
 //!
 //! [`test_fonts`] exposes the raw bytes (e.g. for a caller that wants its own

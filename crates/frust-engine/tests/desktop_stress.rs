@@ -57,7 +57,7 @@ use frust_engine::schedule::PageConfig;
 use frust_engine::schedule::pages::{MAX_PAGE_BANDS, PageBand, page_bands, page_ceiling};
 use frust_engine::{EngineError, EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{
-    AcquireAction, AcquireStatus, Context, ContextOptions, HeadlessTarget, SurfaceEvent,
+    AcquireAction, AcquireStatus, ContextOptions, HeadlessTarget, RenderContext, SurfaceEvent,
     SurfacePhase, TierCaps,
 };
 use frust_scene::{Scene, SceneBuilder};
@@ -149,13 +149,13 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 /// A context whose device is already created, plus the capabilities its
 /// adapter reported.
 ///
-/// Through `frust_gpu::Context` rather than a bare `wgpu` request, because two
+/// Through `frust_gpu::RenderContext` rather than a bare `wgpu` request, because two
 /// of these cases are about the device itself: E12 needs two surfaces proven
 /// to be on *one* device, and the lost-device case needs
 /// [`DeviceHandle::first_uncaptured_error`](frust_gpu::DeviceHandle::first_uncaptured_error),
-/// which only the handler `Context` installs ever latches.
-fn gpu_context() -> Context {
-    let mut context = Context::new(ContextOptions {
+/// which only the handler `RenderContext` installs ever latches.
+fn gpu_context() -> RenderContext {
+    let mut context = RenderContext::with_options(ContextOptions {
         device_label: "frust-engine desktop stress device".to_string(),
         backends: None,
     });
@@ -168,7 +168,7 @@ fn gpu_context() -> Context {
 }
 
 /// The device, queue and capabilities of `context`'s already-created device.
-fn handle(context: &mut Context) -> (wgpu::Device, wgpu::Queue, TierCaps) {
+fn handle(context: &mut RenderContext) -> (wgpu::Device, wgpu::Queue, TierCaps) {
     let handle = block_on(context.device()).expect("the device was created already");
     (
         handle.device.clone(),

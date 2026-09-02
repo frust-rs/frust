@@ -29,8 +29,8 @@ numbers: labs 1–8's line anchors drift, names don't.
 | Theme L1, per platform | `plugins/native-widgets/src/android/theme.rs` · `apple/theme.rs` | `night_qualified_context` · `apply_user_interface_style` |
 | The differ (paint frames → commands) | `crates/frust-shell-common/src/platform_view.rs` | `PlatformViewState::ingest`, `ViewCommand`, `EPSILON_PX`, `HIDE_AFTER_MISSING_FRAMES`, `DISPOSE_AFTER_MISSING_FRAMES`, `FramePairing` |
 | Declared vs resolved surface mode | `crates/frust-shell-common/src/surface_mode.rs` | `declare_host_translucent_surface`, `resolved_surface_mode`, `ResolvedSurfaceMode` |
-| The refusal itself | `crates/frust-render/src/context.rs` | `blit_translucency_refused` |
-| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-render/src/convert.rs` | `PlatformViewWidget::paint`, `PaintScene::clear_rect`, `shield` |
+| Whether a surface actually resolved translucent | `crates/frust-gpu/src/surface.rs` | `resolve_alpha_mode`, `ConfiguredSurface::resolved_translucent` |
+| The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-engine/src/compile/` | `PlatformViewWidget::paint`, `clear::punch_rect`, `schedule::cut_at`, `shield` |
 | Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
 | The device-gate vehicle | `examples/playground/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
@@ -167,17 +167,16 @@ against each slot by the differ). Display-only slots (`Label`, `ProgressBar`,
 `Image`) never set `interactive`, ship an empty shield list, and never take a
 touch at all.
 
-**And Mode B can be refused.** [`docs/LIMITATIONS.md`](../LIMITATIONS.md)'s
-`cam-blit-opaque` entry is precisely this: `blit_translucency_refused` makes a
-**GPU-tier surface on the blit render path** resolve *not* translucent whenever
-the alpha mode expects premultiplied output — a blit target lacks
-`STORAGE_BINDING`, so the premultiplying compute pass can't run, and refusing
-beat shipping a silently fringing surface. That is a *different* path from the
-plain "platform advertises no translucent `CompositeAlphaMode`" fallback, yet
-both reach the app identically, as `ResolvedSurfaceMode::RefusedTranslucent`
-from `resolved_surface_mode()`. Every builder consults it and renders a
-labelled frust-drawn `placeholder` rather than an invisible, untappable slot;
-the refusal is logged **once**, crate-wide.
+**And Mode B can be refused.** The `frust-engine` render path itself never refuses a translucent
+surface — every backend/alpha-mode pair renders straight into the acquired swapchain or, on a
+straight-alpha compositor, through one un-premultiply pass on the way out
+(`choose_engine_render_path`, [RENDER_ARCHITECTURE.md](../RENDER_ARCHITECTURE.md)'s Data Flow).
+What can still refuse is the *platform*: when its own compositor offers no translucent alpha mode
+for the surface frust requested, the surface resolves opaque regardless of what the engine could
+have drawn — `ResolvedSurfaceMode::RefusedTranslucent` from `resolved_surface_mode()`
+(`crates/frust-shell-common/src/surface_mode.rs`). Every builder consults it and renders a
+labelled frust-drawn `placeholder` rather than an invisible, untappable slot; the refusal is
+logged **once**, crate-wide.
 
 ### 6. Events-as-signals
 
@@ -278,7 +277,8 @@ Frust self-draws everything like Flutter — but hosts native controls as OS
 **sibling views**, over the GPU surface (Mode A) or under it with a
 `DestOut`-punched hole (Mode B). No per-frame texture capture, no thread
 merging; the costs land elsewhere instead — surface-mode constraints
-(`cam-blit-opaque`), explicit input arbitration (shields), and stage 3's
+(`ResolvedSurfaceMode::RefusedTranslucent`, when the platform's own compositor
+offers no translucent mode), explicit input arbitration (shields), and stage 3's
 one-frame create-timing dance.
 
 | | React Native (Fabric) | Flutter | Frust |
@@ -349,20 +349,19 @@ lays out and publishes a `PlatformViewFrame` every paint that nobody consumes,
 so every native control renders *nothing*. `platform_view(…)`'s `debug_fill()`
 (debug builds only) paints translucent magenta so you can see where it went.
 
-### 9.4 — Force the translucency refusal (Android)
+### 9.4 — (Historical) Forcing the translucency refusal on demand
 
-```bash
-cd examples/glyph-catalog
-frust run -d <device-id> --define FRUST_NO_DIRECT_SURFACE=1
-```
-
-That forces the blit render path, `blit_translucency_refused` fires, and the
-surface resolves opaque despite the host having declared translucency. Every
-native control swaps to the frust-drawn `placeholder` banner, and logcat carries
-exactly one `translucency refused` warning (once crate-wide, not once per
-control per frame). That's `cam-blit-opaque` reproduced on demand — and the
-placeholder is what a plugin owes an app when the platform takes its surface
-away.
+This experiment used to force the deleted `FRUST_NO_DIRECT_SURFACE` render-path knob to make an
+Android surface resolve non-translucent on a capable platform, watch every native control swap to
+the frust-drawn `placeholder` banner, and confirm logcat carried exactly one `translucency
+refused` warning. That knob and the render path it forced are gone (Phase 8) — the
+`frust-engine` render path never itself refuses a translucent surface (stage 5 above). Refusal now
+depends only on a real platform fact — whether the compositor advertises a translucent alpha mode
+for the surface — which is not something to force on demand from a build flag; on a Pixel/iPhone
+that supports translucency you will not see `ResolvedSurfaceMode::RefusedTranslucent` fire at all.
+The `placeholder` fallback itself is still live and worth reading
+(`plugins/native-widgets/src/api/builders.rs`'s `placeholder()`) — it is just no longer something
+this lab can reproduce on a normal device.
 
 **The other failure mode**, if you want to watch the trust check: change
 Android's `VIEW_TYPE` in `api/builders.rs` to a name outside the `dev.frust.`

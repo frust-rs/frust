@@ -29,8 +29,8 @@
 	-->
 
 	<!--
-	JIT / dynamically-generated executable code. `frust`'s vello/wgpu render
-	pipeline compiles shaders through Metal, not JIT'd Rust, so this is not
+	JIT / dynamically-generated executable code. `frust`'s wgpu render
+	pipeline (frust-engine) compiles shaders through Metal, not JIT'd Rust, so this is not
 	needed by the framework itself — only by an app embedding something that
 	genuinely requires it.
 	<key>com.apple.security.cs.allow-jit</key>

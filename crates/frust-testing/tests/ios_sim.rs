@@ -1,22 +1,22 @@
-//! The iOS Simulator engine gate: the one automated test proving the engine
-//! tier draws correct, non-black pixels on exactly the adapter classic vello
-//! is black on BY CONSTRUCTION.
+//! The iOS Simulator engine gate (`engine-p6-ios-simulator-renders`): the one
+//! automated test proving the engine tier draws correct, non-black pixels on
+//! the Simulator's own Metal adapter.
 //!
 //! # Why this exists
 //!
 //! The iOS Simulator's Metal feature set is `Apple2` only — it never exposes
-//! [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`], which vello 0.9's compute
-//! renderer unconditionally requires
-//! (`frust-render/src/tier.rs`'s `GPU_REQUIRED_DOWNLEVEL_FLAGS` doc comment;
-//! `docs/DEVELOPMENT.md`'s "iOS Simulator cannot render (vello 0.9 / wgpu
-//! 29)" Known Issue; `docs/TESTING.md`'s iOS section — "do not classify a
-//! black Simulator surface as a golden result"). None of that has changed for
-//! the classic pipeline. What HAS changed is that `frust-engine`'s
-//! sparse-strip pipeline needs none of those downlevel flags at all
-//! (`tier.rs`'s `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` — deliberately empty), so it
-//! is the one pipeline that can actually draw on this adapter. This file is
-//! the proof, run for real against the Simulator's own Metal device rather
-//! than argued from adapter flags alone.
+//! [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`]. That flag is why this gate
+//! exists: the vello-classic renderer this workspace shipped through Phase 7
+//! required it unconditionally and rendered black on the Simulator BY
+//! CONSTRUCTION (`docs/TESTING.md`'s iOS section — "do not classify a black
+//! Simulator surface as a golden result"). Classic vello is gone now, but
+//! the Simulator adapter's constraint is unchanged, and it is still the
+//! reason this gate has to exist: `frust-engine`'s sparse-strip pipeline
+//! needs none of those downlevel flags at all (`tier.rs`'s
+//! `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` — deliberately empty), so it is the one
+//! pipeline that can actually draw on this adapter. This file is the proof,
+//! run for real against the Simulator's own Metal device rather than argued
+//! from adapter flags alone.
 //!
 //! # Why this is a separate, `target_os`-gated integration test
 //!
@@ -48,7 +48,7 @@
 //! (outside this file's write scope), so rather than route around it with an
 //! out-of-scope edit, this file builds its OWN device the way
 //! [`ios_simulator_metal_context_forces_the_256_byte_uniform_alignment`]
-//! already does — through [`frust_gpu::Context`], whose device request is
+//! already does — through [`frust_gpu::RenderContext`], whose device request is
 //! built from the ADAPTER's own reported limits
 //! (`frust_gpu::context::create_device`) rather than a hard-coded default, so
 //! it never over-asks — and drives [`frust_engine::EngineRenderer`] over that
@@ -123,7 +123,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
-use frust_gpu::{Context, ContextOptions, HeadlessTarget};
+use frust_gpu::{HeadlessTarget, RenderContext};
 use frust_testing::diff::diff_images;
 use frust_testing::{
     AlphaKind, BackendMeta, RenderedImage, Tolerance, straighten_alpha, unit_cases,
@@ -241,19 +241,20 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 /// that function's doc comment). This is the first time that mitigation runs
 /// against real Simulator hardware rather than only the fake-adapter host
 /// unit tests in `frust-gpu/src/context.rs`. [gfx-rs/wgpu PR
-/// #10189](https://github.com/gfx-rs/wgpu/pull/10189) (open, unmerged under
-/// this workspace's wgpu 29 pin) removes the need for the mitigation once a
-/// later pinned wgpu release contains it — this assertion (and
+/// #10189](https://github.com/gfx-rs/wgpu/pull/10189) (open, unmerged as of
+/// this workspace's current wgpu pin) removes the need for the mitigation
+/// once a later pinned wgpu release contains it — this assertion (and
 /// `effective_limits` itself) can drop then.
 ///
 /// Also confirms, straight off the resolved adapter, the premise the whole
 /// file exists to act on: this device lacks
-/// [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`] — the flag vello classic
-/// cannot run without and the engine tier never needs.
+/// [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`] — the flag the deleted
+/// vello-classic renderer could not run without, and the engine tier never
+/// needs.
 #[test]
 fn ios_simulator_metal_context_forces_the_256_byte_uniform_alignment() {
     let _serialized = render_lock();
-    let mut context = Context::new(ContextOptions::default());
+    let mut context = RenderContext::new();
     let handle = pollster::block_on(context.device()).expect(
         "frust-gpu must be able to create a device against the Simulator's own Metal adapter",
     );
@@ -267,9 +268,9 @@ fn ios_simulator_metal_context_forces_the_256_byte_uniform_alignment() {
             .caps
             .downlevel_flags
             .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
-        "the Simulator's adapter now reports INDIRECT_EXECUTION — vello classic's own \
-         black-Simulator limitation (docs/DEVELOPMENT.md's Known Issues) and this file's whole \
-         premise need revisiting, not just this assertion"
+        "the Simulator's adapter now reports INDIRECT_EXECUTION — the constraint this gate \
+         exists to work around is gone, and this file's whole premise (the engine renders \
+         where nothing else could) needs revisiting, not just this assertion"
     );
 
     let alignment = handle.device.limits().min_uniform_buffer_offset_alignment;
@@ -293,7 +294,7 @@ fn ios_simulator_metal_context_forces_the_256_byte_uniform_alignment() {
 fn engine_renders_the_unit_corpus_matching_the_cpu_goldens_on_the_simulator() {
     let _serialized = render_lock();
 
-    let mut context = Context::new(ContextOptions::default());
+    let mut context = RenderContext::new();
     let handle = pollster::block_on(context.device()).expect(
         "frust-gpu must be able to create a device against the Simulator's own Metal adapter",
     );

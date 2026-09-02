@@ -101,9 +101,9 @@ build from.
     resolved `Layer::alpha` is `0`, `paint_page_layer` (mirrored by `motion::switcher`'s
     `paint_staged_child`) still runs its paint pass — hero-rect capture through
     `PaintCtx::with_hero_registry`, other paint-time state — but redirects it into
-    `frust_core::DiscardScene` so no scene command is ever emitted: vello rasterizes a layer's
-    content in full before applying its alpha, and the invisible page was otherwise real, wasted
-    GPU work every such frame.
+    `frust_core::DiscardScene` so no scene command is ever emitted: the engine rasterizes a
+    layer's content in full before applying its alpha, and the invisible page was otherwise real,
+    wasted GPU work every such frame.
   - **Snapshot bracket eligibility:** the alpha-0 `DiscardScene` redirect above runs first; a
     surviving page then brackets its paint with `PaintScene::push_snapshot`/`pop_snapshot` when
     `snapshot_eligible` holds — the transition is programmatic (not an interactive edge-swipe) and

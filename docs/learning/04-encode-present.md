@@ -1,79 +1,63 @@
-# Lab 4 — Scene → GPU (`frust-render`)
+# Lab 4 — Scene → GPU (`frust-render` / `frust-gpu` / `frust-engine`)
 
-**Concept:** `frust-render` is the one crate allowed to speak vello/wgpu. It
-does four jobs, each in its own file: translate commands (`convert.rs`), run
-the surface lifecycle + per-frame encode/present (`renderer.rs` +
-`lifecycle.rs`), pick a render tier (`tier.rs` + `context.rs`), and persist
-compiled GPU pipelines (`pipeline_cache.rs`). This lab reads the seams and
-then flips them.
+**Concept:** Three crates now share the job `frust-render` alone used to do. `frust-gpu` owns the
+wgpu device/surface/pipeline-cache foundation; `frust-engine` compiles a scene into GPU strip data
+and records the GPU passes; `frust-render` decides which per-frame render path a surface takes and
+drives the whole thing per frame — it contains exactly one renderer (`frust-engine`'s strip
+pipeline), not a choice between several. This lab reads the seams and then flips them.
 
-## Where it lives (all under `crates/frust-render/src/`)
+## Where it lives
 
 | Thing | File | Anchor |
 |---|---|---|
-| `SceneSink` trait (12 methods — the backend abstraction) | `convert.rs` | ≈20–62 |
-| `encode_scene` / `encode_into` — the `Command` match | `convert.rs` | ≈64–128 |
-| `impl SceneSink for vello::Scene` | `convert.rs` | ≈130–242 |
-| `SurfacePhase` (`NoSurface`/`SurfaceReady`/`SurfaceLost`) | `lifecycle.rs` | ≈46–63 |
-| `FrameOutcome` / `EncodeOutcome` | `lifecycle.rs` | ≈204–235 |
-| `SurfaceRenderer::encode()` — reset vello scene, translate, `render_to_texture` | `renderer.rs` | ≈436–515 |
-| `SurfaceRenderer::present()` — acquire swapchain, blit, present | `renderer.rs` | ≈531–624 |
-| `TierBackend::Gpu(vello::Renderer) / Cpu(..)` | `renderer.rs` | ≈56–66 |
-| Device creation + tier probe | `context.rs` | ≈410–520 |
-| `RenderTier`, `GPU_REQUIRED_DOWNLEVEL_FLAGS` (`COMPUTE_SHADERS \| INDIRECT_EXECUTION`) | `tier.rs` | ≈23–60 |
-| `FRUST_RENDER_TIER` parsing | `tier.rs` | ≈187–216 |
-| CPU tier: `vello_cpu` behind the same `SceneSink` | `cpu_tier.rs` | ≈65–316 |
-| Pipeline-cache framing (`frame`/`unframe` + adapter fingerprint) | `pipeline_cache.rs` | ≈22–85 |
+| `RenderContext` — the wgpu instance/device, created lazily | `crates/frust-gpu/src/context.rs` | ≈130–260 |
+| `ConfiguredSurface` / `SurfaceFactory` / surface lifecycle | `crates/frust-gpu/src/surface.rs`, `lifecycle.rs` | — |
+| Persisted pipeline-cache framing (`frame`/`unframe` + adapter fingerprint) | `crates/frust-gpu/src/pipeline_cache.rs` | ≈30–96 |
+| `choose_engine_render_path` — which of the two engine arms a surface takes | `crates/frust-render/src/context.rs` | ≈152–163 |
+| `create_engine_surface` — configures a surface, checks capability, picks the arm | `crates/frust-render/src/context.rs` | ≈480–573 |
+| `engine_support`/`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` — the (empty) capability gate | `crates/frust-render/src/tier.rs` | ≈37–101 |
+| `SurfaceRenderer::on_surface_created()`/`submit()` — per-frame encode/present | `crates/frust-render/src/renderer.rs` | ≈435– |
+| `SceneCompiler::compile` — `Scene` → `CompiledFrame` (strips/draws/paints) | `crates/frust-engine/src/compile/mod.rs` | ≈276, ≈526 |
+| `EngineRenderer::encode`/`encode_traced` — records the frame's rounds into the caller's encoder | `crates/frust-engine/src/renderer.rs` | ≈581–680 |
 
 ## The three ideas
 
-1. **One trait, two backends.** `encode_into` walks `scene.commands()` and
-   calls `SceneSink` methods; `vello::Scene` implements the sink by calling
-   `self.fill(..)` / `self.stroke(..)` / `self.draw_glyphs(..)`
-   (`convert.rs` ≈130–242), and `CpuSink` implements the *same trait* over
-   `vello_cpu::RenderContext` (`cpu_tier.rs` ≈173). This is the
-   scene-purity rule paying rent: a whole second rasterizer cost one file.
-2. **Encode and present are split on purpose.** `encode()` does the real
-   work (translate + `Renderer::render_to_texture` into an intermediate
-   `Rgba8Unorm` target, `renderer.rs` ≈479); `present()` only acquires the
-   swapchain texture, blits, and presents. The split is what lets
-   `FrameStats` distinguish GPU work from vsync wait (chapter 3), and it's
-   the seam a future render thread would cut along.
-3. **Rendering is a state machine, not an assumption.** Surfaces die
-   (window close, Android rotation). Everything routes through
-   `SurfacePhase`; rendering outside `SurfaceReady` is a no-op, and
-   `FrameOutcome::SurfaceLost` triggers recreation. When you get a black
-   window someday, this enum is where you look first.
+1. **Foundation and renderer are different crates now.** `frust-gpu` knows nothing about scenes or
+   strips — it hands out a device, a configured surface, a persisted pipeline cache. `frust-engine`
+   knows nothing about surfaces or presentation — it compiles a `Scene` and records passes into a
+   caller-owned `wgpu::CommandEncoder`. `frust-render` is the seam: it decides the render path
+   (`choose_engine_render_path`) and owns `SurfaceRenderer`, the thing a shell actually drives.
+   This is the scene-purity rule from lab 1, one layer further down.
+2. **There is no tier to flip any more.** The old CPU tier and classic (vello) tier are both
+   gone; `frust-engine`'s strip pipeline is the only renderer `frust-render` contains, and it is
+   not a cargo feature. `SurfaceRenderer::submit` records the whole frame — compile, GPU passes,
+   `queue.submit` — in one caller-owned encoder, never opening a second one (two sanctioned
+   exceptions: growing the image atlas, and replaying a dirty glyph-atlas page, both strictly
+   ahead of the scene pass).
+3. **A refused frame is not a crash — it's a value.** `SceneCompiler::compile` returns
+   `Result<CompiledFrame, EngineError>`; malformed geometry (`NaN`/`inf`) refuses rather than
+   hangs. `EngineRenderer::encode` refusing anything mid-frame leaves the caller's encoder
+   untouched — nothing submits, and the previous frame's swapchain content simply persists. There
+   is no second renderer to retry through.
 
 ## Experiments
 
 ### 4.1 — Read one command's full journey
 
-Pick `Command::Path` (your chapter-2 sparkline emits these). Follow it:
-`convert.rs` ≈117–125 (match arm, `PathStyle::Fill`/`Stroke` split) →
-`fill_path`/`stroke_path` sink methods → the vello impl (≈130–242) calling
-`vello::Scene::fill(Fill::NonZero, transform, brush, None, &path)`. Total
-distance from widget to vello: two function calls. Now do the same for
-`GlyphRun` — note it becomes `draw_glyphs(font).font_size(..).brush(..).draw(..)`.
+Pick `Command::Path` (your chapter-2 sparkline emits these). Follow it into
+`crates/frust-engine/src/compile/mod.rs`'s `compile` match arm, through to the strip-generator call
+that turns it into `GpuStrip` instances (`crates/frust-engine/src/gpu/mod.rs`'s layouts). Now do
+the same for `GlyphRun` — note it routes through `crate::text::lower_glyph_run` instead
+(`crates/frust-engine/src/text/mod.rs`).
 
-### 4.2 — Run the whole pipeline with no GPU at all
+### 4.2 — Watch the capability gate refuse an adapter
 
-The CPU tier compiles behind a non-default feature:
-
-```bash
-cargo test -p frust-render --features cpu-tier
-```
-
-Then read `cpu_tier.rs::CpuTierRenderer::render` (≈113–145): resize pixmap →
-replay commands through `CpuSink` → `render_to_pixmap` → hand back raw
-`u8` pixels that `present()` uploads to the same intermediate texture the GPU
-path uses. Same `Scene`, same sink trait, zero shaders.
-
-Force it live (desktop preview, from a generated app or huddle with the
-feature enabled): `FRUST_RENDER_TIER=cpu cargo run` — or watch it *refuse*:
-`FRUST_RENDER_TIER=gpu` on a capable adapter is a no-op win, but the override
-never forces GPU onto an incapable adapter (`tier.rs::select_render_tier`
-≈106–181 — read the refusal branch).
+`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` (`tier.rs`) is deliberately empty — read `engine_support`'s
+refusal arm and its four unit tests (same file) to see the one question left: whether *any* flag is
+ever required. There is no override to force a renderer any more — `frust run --render-tier` was
+removed along with the last tier (`crates/frust-cli/src/cli.rs`'s
+`rejects_the_retired_render_tier_flag` test is the fossil that proves it: it asserts the flag is
+now a parse error).
 
 ### 4.3 — The GPU smoke test is your headless playground
 
@@ -81,24 +65,24 @@ never forces GPU onto an incapable adapter (`tier.rs::select_render_tier`
 cargo test -p frust-render -- --ignored
 ```
 
-Read `crates/frust-render/tests/gpu_smoke.rs`: it builds a scene, encodes,
-and reads pixels back with no window — test tier T3. This file is the
-smallest end-to-end harness in the repo; copy it whenever you want to ask
-"what does vello actually output for these commands?" without a shell in the
-way.
+Read `crates/frust-render/tests/gpu_smoke.rs`: it builds a scene, encodes through
+`frust_render::HeadlessRenderer` (engine-backed, `crates/frust-render/src/headless.rs`), and reads
+pixels back with no window — test tier T3. Its pixels are premultiplied alpha. Copy this file
+whenever you want to ask "what does the engine actually output for these commands?" without a
+shell in the way.
 
-### 4.4 — See vello's own noise
+### 4.4 — See the engine's own noise
 
-`FRUST_LOG=debug cargo run` (`benchmarks/frust_bench`) surfaces the vello/wgpu log lines
-the desktop logger normally suppresses (`crates/frust-shell-desktop/src/logger.rs`
-≈103). This is the dial you'll want turned when chapter 5 makes you
-curious what the renderer is complaining about.
+`FRUST_LOG=debug cargo run` (`benchmarks/frust_bench`) surfaces wgpu's own log lines the desktop
+logger normally passes through unfiltered (`crates/frust-shell-desktop/src/logger.rs`) — that
+logger's known-noisy-message carve-out was written for vello's own log target and is vestigial
+now: nothing logs under that target any more.
 
 ## What to notice before moving on
 
-- `renderer.rs` ≈479 — `renderer.render_to_texture(&device, &queue,
-  vello_scene, &target_view, &params)` — is the single line where this
-  entire repo hands control to vello. Everything below it is chapter 5.
-- The pipeline cache (`pipeline_cache.rs`) is Vulkan-only and fingerprinted
-  per adapter; on your Mac it's a silent no-op. File it away for Android
-  cold-start work.
+- `crates/frust-engine/src/renderer.rs`'s `EngineRenderer::encode` — the single function that
+  walks a `CompiledFrame` into GPU passes — is where this repo hands control to the strip
+  pipeline. `crates/frust-engine/shaders/` (nine WGSL files) is short enough to read cold from
+  here if you want to go straight to the GPU side.
+- The pipeline cache (`frust-gpu::pipeline_cache`) is Vulkan-only and fingerprinted per adapter; on
+  your Mac it's a silent no-op. File it away for Android cold-start work.

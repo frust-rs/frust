@@ -19,7 +19,7 @@
 //!
 //! # Coverage
 //!
-//! [`tests::every_command_variant_is_covered`] is the guard: it walks every
+//! `tests::every_command_variant_is_covered` is the guard: it walks every
 //! case's recorded scene and asserts all 16 `Command` variants appear. A new
 //! variant fails that test until a case exists for it.
 //!
@@ -428,11 +428,12 @@ fn checkerboard() -> ImageData {
 /// `Command::Image` scaled BOTH ways out of one source: a 16x16 checkerboard
 /// magnified into a 32x32 dest and minified into an 8x8 dest.
 ///
-/// `frust-render`'s `cpu_tier.rs` calls image drawing "best-effort" and the
-/// untested path; this is the case that stops it being untested. Magnifying
-/// and minifying the same bytes in one frame pins the paint-transform
-/// composition in both directions, which is where an off-by-one in the
-/// natural-size-to-dest mapping shows up.
+/// `frust-engine`'s image lowering (`compile/paint.rs`'s
+/// `encode_image_command`) composes the natural-pixel-to-dest transform once,
+/// used whichever direction the scale runs; this is the case that pins both
+/// directions together. Magnifying and minifying the same bytes in one frame
+/// pins the paint-transform composition in both directions, which is where an
+/// off-by-one in the natural-size-to-dest mapping shows up.
 fn image() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let data = checkerboard();
@@ -785,9 +786,9 @@ const PUNCH_EDGE: f64 = (SIZE / 2 + 1) as f64;
 ///    erase an opaque backdrop painted OUTSIDE the group. A group-local erase
 ///    would be sealed in by the group composite, so the encode walk hoists
 ///    the punch to root.
-/// 2. The erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge. vello
-///    0.9's `Compose::Clear` bleeds to whole boundary tiles, which is why the
-///    punch uses `Compose::DestOut` on every tier — the probes just past
+/// 2. The erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge.
+///    `vello_common`'s `Compose::Clear` bleeds to whole boundary tiles, which
+///    is why the punch uses `Compose::DestOut` instead — the probes just past
 ///    `PUNCH_EDGE` are inside the SAME 16-px tile as the punch edge, and they
 ///    must still be opaque red.
 ///
@@ -986,20 +987,21 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
-/// `Command::ShaderQuad`, SKIPPED on the CPU oracle.
+/// `Command::ShaderQuad`, unrendered on both arms — see `docs/LIMITATIONS.md`
+/// `engine-shader-quad-unwired`.
 ///
-/// There is no shader pre-pass without a GPU, so the CPU arm can only lower
-/// this to `convert.rs`'s opaque dark placeholder — a frame whose bytes are a
-/// statement about the MISS path, not about the command. Comparing it against
-/// a promoted baseline would be promoting a lie, so the case names
-/// [`ORACLE_ID`] in its skip set and is never rendered there at all (rather
-/// than rendered and ignored).
-///
-/// On a GPU arm the case renders through the same public `encode_scene` seam
-/// an app does. This corpus registers no shader override, so what it pins is
-/// the command reaching the renderer and taking its documented miss path
-/// without a panic; the override-hit path needs `ShaderOverrideSpec`, which
-/// belongs to a renderer-side case, not a scene-recorded one.
+/// The engine's own compiler recognises and drops the command, so a compiled
+/// GPU frame of this case would legitimately be missing the very thing the
+/// case exists to pin; the golden gate holds it out of its scored set for
+/// exactly that reason rather than comparing against such a frame. There is
+/// also no shader pre-pass without a GPU, so the CPU arm has nothing
+/// equivalent to lower this to — its own opaque dark placeholder color exists
+/// for that gap, but this case names [`ORACLE_ID`] in its own skip set, so
+/// the placeholder is never even produced here, let alone compared. What this
+/// case pins, then, is narrower than a rendered frame on either arm: that
+/// recording a `Command::ShaderQuad` and handing the scene to a renderer does
+/// not panic. Coverage of the command actually painting anything waits on the
+/// GPU-seam work `engine-shader-quad-unwired` tracks.
 fn shader_quad() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let program = ShaderProgram::new(SOLID_MAGENTA_WGSL);
@@ -1019,10 +1021,9 @@ fn shader_quad() -> CorpusCase {
 /// `snapshot_bracket_inline_emulation_matches_the_composite_arithmetic`,
 /// geometry and assertions verbatim.
 ///
-/// A `Command::PushSnapshot` bracket lowered INLINE — the arm a cache miss,
-/// an uncacheable body, the `cpu-tier` surface and the
-/// `FRUST_NO_SNAPSHOT_LAYERS` kill switch all produce, and the absolute
-/// arithmetic the composited arm is then required to reproduce:
+/// A `Command::PushSnapshot` bracket lowered INLINE — the only lowering this
+/// framework has for one, on every render path and every tier — and the
+/// absolute arithmetic it must hit:
 ///
 /// - the opaque red block composites at the bracket's 0.75 alpha to 191;
 /// - the half-alpha green band composites at `128 * 0.5 * 0.75` to 48 —

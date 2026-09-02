@@ -157,6 +157,12 @@ pub trait PaintScene {
     /// recorder scenes stay valid; the `SceneBuilder` implementation records a
     /// real shader-quad command.
     ///
+    /// **Currently paints nothing on the engine renderer** — the command is
+    /// recognised and dropped with a once-per-process warning; see
+    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` (removed when the
+    /// GPU-seam work wires the command through). The contract below still
+    /// binds: it is the correct usage the wiring will serve.
+    ///
     /// # Cache-once contract
     ///
     /// `program` must be a retained, already-created `ShaderProgram` handle

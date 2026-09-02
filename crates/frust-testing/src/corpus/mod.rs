@@ -38,14 +38,15 @@
 //!
 //! # Alpha
 //!
-//! The two oracle arms disagree about alpha representation — [`CpuOracle`]
-//! hands back its `vello_cpu` pixmap PREMULTIPLIED, while
-//! [`ClassicOracle`](crate::oracle_classic::ClassicOracle) hands back what
-//! vello writes, STRAIGHT — and golden IO refuses a premultiplied image
-//! outright ([`crate::golden::compare_golden`]). [`straighten_alpha`] is the
-//! single conversion site that closes that gap, and [`render_case`] is the
-//! only caller: every image that reaches a comparator or a stored PNG has
-//! passed through it.
+//! Both oracle arms hand their frames back PREMULTIPLIED —
+//! [`CpuOracle`](crate::oracle_cpu::CpuOracle) its `vello_cpu` pixmap,
+//! [`EngineOracle`](crate::oracle_engine::EngineOracle) the output of its
+//! premultiplied-blended strip pipelines — while golden IO refuses a
+//! premultiplied image outright ([`crate::golden::compare_golden`]), since a
+//! stored PNG is straight alpha. [`straighten_alpha`] is the single
+//! conversion site that closes that gap, and [`render_case`] is the only
+//! caller: every image that reaches a comparator or a stored PNG has passed
+//! through it.
 
 pub mod adversarial;
 pub mod filters;

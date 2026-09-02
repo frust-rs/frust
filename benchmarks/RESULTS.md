@@ -2173,6 +2173,149 @@ tier finding.
 
 ---
 
+## muxr-app swap gate — Phase 8 (engine as the DEFAULT tier, p8-02)
+
+**2026-09-02, Ed at the desk.** First real-app pass with the engine as
+the *default* render tier (p8-01, frust `feature/frust-engine-p8` @
+`fee84055`): apps/muxr-app built from its `feature/muxr-pro` checkout
+(`a128ad02`) with **zero app-side changes** — the facade exposes no
+default features, so the app's `default-features = false` does not block
+`frust-render`'s new `engine-tier` default reaching it through the
+shells.
+
+| Device | Build | Verdict | Receipt |
+|---|---|---|---|
+| Pixel 5 (redfin, Adreno 620) | developRelease APK (develop.jks-signed) | **PASS** | logcat: `frust-render tier=engine (frust-engine strip pipeline, format=Rgba8Unorm into a Rgba8Unorm swapchain, 1080x2340, adapter Adreno (TM) 620)` |
+| iPhone SE (A13, wireless devicectl) | Release `Runner.app`, bundle `com.it.f0x.muxr` | **PASS** | engine markers in the shipped binary (`frust_engine`=5); devicectl console carries no app lines on this rig — verdict by eyes |
+
+Ed walked the app end to end on both phones (sessions, terminal,
+settings, dialogs/sheets, fonts, translucent chrome): **no visual
+regression on either device**, and on the Pixel 5 the app is
+**noticeably smoother than the vello build** ("muxr runs a lot smoother
+on the pixel than with vello").
+
+Methodology deviations: the card's side-by-side screenshot comparison
+against a vello arm was **waived by Ed at the desk** — the smoothness
+delta was evident without a control arm ("no point in a comparison").
+Until p8-04 lands, a vello comparison arm remains reachable via a
+`--define FRUST_RENDER_TIER=gpu` build (Android cannot set the runtime
+env var). No per-screen matrix was recorded; the sign-off is global.
+
+---
+
+## wgpu 30.0.1 device smoke — Phase 8 (p8-07, the frust-owned pin)
+
+### Pixel 5 — 2026-09-02 (p8-07 device gate, phase branch `dfea9a67`)
+
+The engine arm re-measured on the wgpu **30.0.1** tree, after p8-03..p8-06
+deleted the snapshot cache, vello classic and the cpu-tier and p8-05 moved
+the device/surface foundation into `frust-gpu`. Same convention and command
+as the Phase-7 rows above (PROTOCOL §4: 12 runs x 30 s per scenario, first
+2 discarded, 10 kept; `ab_matrix.sh --tier engine --scenarios s1,s2,s5,s6`,
+`--aa`/`--scale` no longer exist); the build carries `perf-trace`, so the
+`gpu_total` columns are GPU-clock readings (`gpu_q=1`). Raw series:
+`benchmarks/raw/pixel5/tier-wgpu30/engine/<scenario>/` plus the nav logcat
+under `.../nav/` — a separate group so the Phase-7 `tier/engine/` series
+(the closed p7-06 gate's evidence) stays intact.
+
+| Backend | Scenario | p50 (ms) | p95 (ms) | gpu_total p50 (ms) | gpu_total p95 (ms) | Graphics (MB) | Phase-7 (wgpu 29.0.4) p50 / p95 / gpu p50 | Device |
+|---|---|---|---|---|---|---|---|---|
+| engine | S1 | 14.94 | 16.39 | 13.88 | 14.09 | 55.29 | 15.19 / 18.11 / 13.90 | Pixel 5 |
+| engine | S2 | 8.71 | 10.42 | 8.33 | 8.54 | 53.73 | 11.67 / 12.75 / 8.38 | Pixel 5 |
+| engine | S5 | 13.24 | 14.03 | 12.33 | 12.57 | 55.57 | 13.23 / 14.06 / 12.31 | Pixel 5 |
+| engine | S6 | 7.15 | 8.96 | 7.94 | 9.44 | 53.18 | 11.57 / 12.25 / 9.20 | Pixel 5 |
+
+Nav (one push/pop pass, material3-demo's own rolling percentiles):
+`total_p50` **12 ms** (Phase 7: 12.29 ms; gate ≤ 16.7 ms — **PASS**),
+`submit_p95` 16 ms.
+
+Verdict: **no regression beyond noise — PASS.** The GPU-clock columns
+match the wgpu-29 run within 0.1 ms on every scenario (the GPU work is
+unchanged by the pin), Graphics PSS is within +1.1 %, and the CPU totals
+are equal (S1, S5) or lower (S2 −25 %, S6 −38 %) — the drop on S2/S6
+lands with Phase 8's deletions (no snapshot pre-pass, no frame split, one
+tier), not with wgpu. The `gpu_total_us` field is non-zero in every one
+of the ~116k kept frames across the four scenarios, so the last-pass
+zero-span symptom seen once on Metal under load
+(`a_real_adapter_reports_plausible_per_pass_gpu_time`) does not occur on
+Vulkan here.
+
+Methodology deviations: (1) no classic arm exists any more, so the
+comparison column is the committed Phase-7 engine row rather than a
+same-day A/B; (2) wireless adb (Tailscale), orchestration-only as before;
+(3) the harness copied its raw series over the committed `tier/engine/`
+group (it keys the raw path by `--tier`, not by pin/date) — the new files
+were moved to `tier-wgpu30/` and the Phase-7 files restored from git
+before this commit (filed as a harness follow-up).
+
+### iPhone SE + iOS Simulator (Metal) — 2026-09-02 (p8-07 device gates, phase branch `dfea9a67`)
+
+Recorded here as the evidence-trail true-up the phase-8 review asked for —
+both arms ran on gate day and were persisted as pipeline gates
+(`engine-p8-wgpu30-iphone-postmultiplied-scrub`,
+`engine-p8-wgpu30-ios-simulator-renders`); this file simply did not carry
+them until now.
+
+- **iPhone SE (physical, live `CAMetalLayer` swapchain):** material3-demo
+  release build in Mode B (the scene-delegate translucent override, the
+  never-committed scratch-worktree patch), i.e. the exact
+  `compositor_expects_premultiplied` PostMultiplied path, driven by a slow
+  manual scrub — verified by Ed, no issues, no artifacts. This is a live
+  swapchain re-verification of the Metal alpha-polarity carve-out on the
+  30.0.1 pin, not a headless render.
+- **iOS Simulator (iPhone 16 sim):** the engine Simulator gate run under
+  `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn <udid>"`,
+  2/2 pass — the 256-byte `effective_limits` clamp still applies (upstream
+  gfx-rs/wgpu#10189 not in 30.0.1).
+
+### macOS window session (Metal) — 2026-09-02 (conductor smoke, phase branch `e5d08a48`)
+
+Live-swapchain smoke of the 30.0.1 pin on the desktop shell — the
+re-verification arm the review flagged as missing (the previous macOS
+window session, p7-05 above, ran on wgpu 29.0.4). material3-demo desktop
+gallery, debug + `frust/perf-trace`, `FRUST_TRACE=1 FRUST_TRACE_RAW=1`,
+Apple M4 built-in panel:
+
+| Arm | Marker line | Frames | Validation/error lines |
+|---|---|---|---|
+| `FRUST_WINDOW_SIZE=1600x1200`, 150 s | `tier=engine … Bgra8Unorm swapchain, 3200x2016, adapter Apple M4` | 2464 raw | 0 |
+| `FRUST_WINDOW_SIZE=5120x2880` (clamped by macOS), 60 s | same, `3600x2016` drawable | 198 raw | 0 |
+
+`surface-caps: alpha_modes=[Opaque, PostMultiplied] chosen=Auto` — 30.0.1's
+Metal backend still advertises `PostMultiplied` (the truth-bug carve-out's
+trigger condition, unchanged from 29 as predicted by the pre-bump research;
+upstream #9922 is unreleased), and the opaque desktop window takes the
+plain `EngineDirect` path. Deviations from p7-05's session shape: idle
+gallery content (frame `total_us` p50 ≈ 0.11 ms is work-time on a mostly
+quiet scene, not a paced-frame figure), no drag-resize storm (the bare
+cargo binary exposes no AX window to script; reconfigure coverage came
+from the two window-size arms instead), and `gpu_q=0` in this invocation
+shape so no GPU-clock columns — the Pixel 5 matrix above remains the
+pin's GPU-timing evidence. Not a perf record; a liveness + validation +
+alpha-mode smoke.
+
+### Windows DX12 (Dell mini, Intel UHD Graphics 730) — 2026-09-03 (conductor smoke, phase branch `214981d0`)
+
+The fourth and last shipping-backend arm, run once the rig reconnected.
+`shadcn-demo` release build (the same profile the earlier Windows gate
+cached; incremental rebuild 2 min 23 s, `--locked`), launched as a scheduled
+task on the rig's interactive desktop with `FRUST_TRACE=1`, stderr to a log:
+
+| Arm | Marker line | Uptime | Validation/error lines |
+|---|---|---|---|
+| default 800x600 window, interactive session | `tier=engine (frust-engine strip pipeline, format=Bgra8Unorm into a Bgra8Unorm swapchain, 800x580, adapter Intel(R) UHD Graphics 730)` | ~7 min, then `taskkill` | 0 |
+
+A full-desktop screenshot probe (the earlier gate's `AppActivate` +
+`CopyFromScreen` recipe) shows the gallery's Primitives page fully drawn —
+sidebar, button variants, avatars, keycap chips, spinner, skeleton, card,
+breadcrumb, native `muda` menu bar — with no black region or artifact. Not a
+perf record (no raw frame lines were requested; the gallery idles); a
+liveness + validation smoke matching the macOS arm above. With this the pin
+row's "device smoke on each shipping backend" holds for all four arms:
+Vulkan (Pixel 5), Metal/iOS (iPhone SE + Simulator), Metal/macOS, DX12.
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB

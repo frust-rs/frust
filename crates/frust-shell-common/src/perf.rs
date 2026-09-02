@@ -103,8 +103,9 @@ const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 ///   pass `FRUST_TRACE=1` by default; `option_env!` reads whatever a
 ///   build script/cargo-ndk env var set at compile time), or
 /// - the runtime `FRUST_TRACE` process environment variable is set to a
-///   non-`"0"` value (desktop dev: `FRUST_TRACE=1 cargo run -p ...`,
-///   mirroring `FRUST_RENDER_TIER`'s runtime-override convention).
+///   non-`"0"` value (desktop dev: `FRUST_TRACE=1 cargo run -p ...`) — the
+///   compile-time-or-runtime convention every shipping `FRUST_*` knob
+///   follows.
 ///
 /// Every recording API in this module (`FrameStats::record`,
 /// `StartupSpans::record`, both `emit_log`s) is a cheap no-op when this is
@@ -250,8 +251,8 @@ pub struct FramePasses {
 /// names — the counterpart of the CPU spans in [`FramePasses`], measured on the
 /// GPU's own clock rather than inferred from CPU wall time around a submit.
 ///
-/// Only the engine tier produces one, and only in a build whose device asked
-/// for GPU timestamps; every other frame carries `None` and reports `gpu_q=0`.
+/// Produced only in a build whose device asked for GPU timestamps; every
+/// other frame carries `None` and reports `gpu_q=0`.
 /// A span may legitimately read zero — a frame with no off-screen layer does no
 /// composite work — so a zero is a measurement, not a gap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

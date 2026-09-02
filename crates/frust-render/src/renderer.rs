@@ -1,107 +1,48 @@
 //! [`SurfaceRenderer`]: the surface-lifecycle state machine that
 //! renders a [`frust_scene::Scene`] into one window's swapchain each frame.
 //!
-//! Wraps the pure lifecycle logic in [`crate::lifecycle`] around the actual
-//! `wgpu`/vello resources: it starts in [`SurfacePhase::NoSurface`], becomes
+//! Wraps the pure lifecycle logic in [`frust_gpu::lifecycle`] around the
+//! actual `wgpu` resources: it starts in [`SurfacePhase::NoSurface`], becomes
 //! renderable on `on_surface_created`, resizes on `on_surface_changed`, tears
 //! down on `on_surface_destroyed`, and drops to [`SurfacePhase::SurfaceLost`]
 //! when the swapchain reports `Lost` mid-frame.
 //!
-//! vello 0.9 renders via compute into an `Rgba8Unorm` storage texture. Two
-//! render paths follow from that (chosen per surface, see
-//! [`crate::context::choose_render_path`]):
-//!
-//! - **Direct-to-surface** (surface supports `Rgba8Unorm` + `STORAGE_BINDING`):
-//!   acquire → `render_to_texture` straight into the acquired swapchain texture
-//!   → present. No intermediate, no blit.
-//! - **Blit fallback** (`Bgra8`-only surfaces, or the `cpu-tier` path): encode →
-//!   `render_to_texture` (intermediate) → acquire → blit (intermediate → acquired
-//!   swapchain view) → present.
-//!
-//! The `engine-tier` path takes the direct arm's shape with `frust-engine`: encode
-//! copies the frame's scene, then acquire → one `EngineRenderer::encode` into
-//! the acquired swapchain view and its surface-owned depth attachment
-//! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
-//! `end_frame`. No intermediate, no blit, no vello, no shader pre-pass and no
-//! snapshot cache. A swapchain whose compositor genuinely reads it as STRAIGHT
-//! alpha takes the same shape with one pass appended and one indirection
-//! added: the frame is encoded into a surface-owned intermediate and
-//! un-premultiplied into the acquired view from there, in the same encoder
-//! ([`crate::context::RenderPath::EngineDirectUnpremultiply`]). iOS's sole
+//! The frame — there is one renderer and one path family — is:
+//! encode copies the frame's scene, then acquire → one
+//! `EngineRenderer::encode` into the acquired swapchain view and its
+//! surface-owned depth attachment
+//! ([`RenderPath::EngineDirect`](crate::context::RenderPath::EngineDirect)) → submit → present →
+//! `end_frame`. No intermediate and no blit. A swapchain whose compositor
+//! genuinely reads it as STRAIGHT alpha takes the same shape with one pass
+//! appended and one indirection added: the frame is encoded into a
+//! surface-owned intermediate and un-premultiplied into the acquired view from
+//! there, in the same encoder
+//! ([`RenderPath::EngineDirectUnpremultiply`](crate::context::RenderPath::EngineDirectUnpremultiply)).
+//! iOS's sole
 //! translucent mode (`PostMultiplied`) does NOT take that arm: it is backed
 //! by Metal, whose compositor reads a `PostMultiplied` swapchain premultiplied
 //! regardless of the mode's name (an upstream wgpu-hal truth bug — see
 //! [`crate::context::choose_engine_render_path`]), so it stays on the
 //! `EngineDirect` arm above with no conversion pass at all.
 //!
-//! This arm remaps the v3 present spans — see [`SurfaceRenderer::submit`].
-//!
-//! On the Gpu tier every arm also runs [`crate::compositor`]'s quad pass after
-//! vello, drawing the snapshot cache's cached pages onto the frame; a frame
-//! that composites nothing (the common case, and every frame under the
-//! `FRUST_NO_SNAPSHOT_LAYERS` kill switch) records no such pass and is
-//! byte-identical to the arm above. When the composited frame's own vello
-//! segment paints nothing at all ([`skips_main_pass`]) that pass is skipped
-//! too and the quad pass clears the target instead — a page transition is then
-//! one pass, not two.
+//! This crate remaps the v3 present spans on the engine arm — see
+//! [`SurfaceRenderer::submit`].
 
 use core::ffi::c_void;
 
 use anyhow::{Result, anyhow};
 
-use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use frust_scene::Command;
 use kurbo::Affine;
-use peniko::ImageData;
 
-use crate::compositor::{CompositeTarget, Compositor, OutputAlpha};
-#[cfg(feature = "engine-tier")]
-use crate::context::render_scaled;
-use crate::context::{
-    AaMode, ConfiguredSurface, DetachedSurface, RenderContext, RenderPath, aa_mode,
-};
-use crate::convert;
-use crate::lifecycle::{
+use crate::context::{EngineSurface, RenderPath};
+use frust_gpu::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
-use crate::shader_effects::{ShaderEffects, clamp_size};
-use crate::snapshot::{CompositeLayer, SnapshotCache};
-
-/// Caller-requested alpha-compositing behavior for a surface configuration —
-/// the `frust-render` public seam a shell picks
-/// between an opaque (today's default) and a translucent-preferred surface;
-/// the resolved `wgpu::CompositeAlphaMode` itself never crosses this boundary
-/// (mirrors [`DetachedSurface`]'s opacity — see `docs/CODE_STANDARDS.md`'s
-/// wgpu-leak anti-pattern), so this type stays `kurbo`/`peniko`-free too.
-///
-/// Resolution (`crate::context::resolve_alpha_mode`) happens inside
-/// [`RenderContext::create_render_surface`](crate::context::RenderContext::create_render_surface),
-/// validated against the live surface's `SurfaceCapabilities::alpha_modes`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SurfaceAlphaRequest {
-    /// Today's behavior for every existing caller: `wgpu::CompositeAlphaMode::Auto`,
-    /// bit-for-bit unchanged.
-    Opaque,
-    /// Prefer a translucent alpha-compositing mode (Mode B platform views),
-    /// trying
-    /// `Inherit` (Android's only reported mode) then `PostMultiplied` (iOS's
-    /// translucent mode) then `PreMultiplied`, in that order, against the
-    /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
-    /// a `log::warn!`) when none of those three is available — translucency
-    /// is then unavailable on that surface.
-    ///
-    /// **This is a request, not an outcome.** Never key a paint contract off
-    /// it: read
-    /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
-    /// after the surface is installed instead — a fallback
-    /// must degrade to the opaque Mode A contract, or the hole punch presents
-    /// black rectangles on an opaque swapchain.
-    TranslucentPreferred,
-}
+use frust_gpu::{DetachedSurface, RenderContext, SurfaceAlphaRequest};
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
@@ -109,84 +50,36 @@ pub enum SurfaceAlphaRequest {
 /// `RenderSurface`, is dropped on every transition out of `SurfaceReady`,
 /// upholding the "no `SurfaceTexture`/surface outlives a transition" invariant.
 struct ReadySurface {
-    surface: ConfiguredSurface,
-    /// The tier-specific renderer that produces this frame's pixels. On the blit
-    /// arm it fills the intermediate `surface.path` target; on the direct arm the
-    /// GPU renderer targets the acquired swapchain texture in `submit`.
+    surface: EngineSurface,
+    /// The tier-specific renderer that produces this frame's pixels — on the
+    /// engine arms it targets the acquired swapchain texture in `submit`.
     backend: TierBackend,
-    /// The device's persisted `wgpu::PipelineCache` (handed to vello's
-    /// `RendererOptions` on the `Gpu` path) paired with the adapter fingerprint
+    /// The device's persisted `wgpu::PipelineCache` (handed to the engine's
+    /// pipeline build) paired with the adapter fingerprint
     /// its data is framed under, so [`SurfaceRenderer::pipeline_cache_data`] can
     /// hand back a validatable blob. `None` on adapters without
     /// `PIPELINE_CACHE` (Metal/DX12) — see
-    /// [`crate::context::RenderContext::create_pipeline_cache`].
+    /// [`frust_gpu::RenderContext::create_pipeline_cache`].
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
-    /// Offscreen WGSL fragment-shader effects (shader-showcase feature): the
-    /// per-`Command::ShaderQuad` pipelines/targets the Gpu-tier shader pre-pass
-    /// renders and registers as vello image overrides. Lives here so it is
-    /// dropped with the surface on `on_surface_destroyed` and survives an
-    /// `on_surface_changed` resize (its compiled pipelines persist like vello's
-    /// own). Constructed with a clone of the surface's `pipeline_cache` so shader
-    /// pipelines seed from the same persisted blob. Unused on the Cpu tier (that
-    /// path runs no shader pre-pass — `ShaderQuad`s take the miss placeholder).
-    shader_effects: ShaderEffects,
 }
 
-/// The per-surface renderer for the selected [`crate::RenderTier`].
+/// The per-surface renderer.
 ///
-/// On the blit arm both variants produce the same thing — pixels in the
-/// intermediate `Rgba8Unorm` target — which the shared tail then blits to the
-/// acquired swapchain texture. On the direct arm (GPU tier only) the `Gpu`
-/// variant instead renders straight into the acquired swapchain texture in
-/// [`SurfaceRenderer::submit`]. Without the `cpu-tier` feature this is
-/// effectively a one-variant enum.
-// The GPU variant holds a `vello::Renderer` inline (~1.2 KiB) while the CPU
-// variant is boxed; the whole `ReadySurface` already lives behind a `Box`
-// (`SurfaceState::Ready`), so the size asymmetry costs nothing on the hot path
-// and boxing the GPU renderer would only add an indirection to every frame.
-#[cfg_attr(
-    any(feature = "cpu-tier", feature = "engine-tier"),
-    allow(clippy::large_enum_variant)
-)]
+/// The engine variant records into the acquired swapchain view (or, on the
+/// un-premultiplying arm, into the surface's intermediate) in
+/// [`SurfaceRenderer::submit`]. A one-variant enum — the experimental
+/// `vello_cpu`-backed `Cpu` variant and its `cpu-tier` feature were retired
+/// alongside the vello-classic renderer's own removal, and the cargo feature
+/// that once gated this one went with the choice it described.
+// The renderer is boxed: the whole `ReadySurface` already lives behind a
+// `Box` (`SurfaceState::Ready`), so nothing on the hot path pays for its
+// size.
 enum TierBackend {
-    /// vello 0.9 GPU compute path: `render_to_texture` into the target view.
-    /// Reused across frames; its compiled shader pipelines survive resizes
-    /// (which recreate only the swapchain/target).
-    Gpu {
-        renderer: vello::Renderer,
-        /// Cached rasterizations of `Command::PushSnapshot` bodies, driven by
-        /// the snapshot pre-pass in [`SurfaceRenderer::encode`]. It lives in
-        /// this variant rather than beside it in [`ReadySurface`] so the
-        /// "GPU tier only" rule is structural: the `cpu-tier` path cannot
-        /// name a cache, let alone build one. Its bodies are rasterized by the
-        /// `renderer` next to it, which is why the two share a variant.
-        snapshots: SnapshotCache,
-        /// The quad pass that draws `snapshots`' cached pages onto the frame
-        /// after vello (`crate::compositor`), built once per surface for that
-        /// surface's composite attachment format.
-        ///
-        /// `None` only when the compositor refused that format, in which case
-        /// `snapshots` was constructed disabled — the two are built together
-        /// in [`SurfaceRenderer::install_surface`] precisely so a plan can
-        /// never carry layers no one would draw.
-        compositor: Option<Compositor>,
-    },
-    /// Experimental vello_cpu path (`cpu-tier` feature): rasterize headless
-    /// into a pixmap, then upload it into the target texture. Boxed because it
-    /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
-    #[cfg(feature = "cpu-tier")]
-    Cpu(Box<crate::cpu_tier::CpuTierRenderer>),
-    /// The frust-owned engine path (`engine-tier` feature): a
+    /// The frust-owned engine path: a
     /// `frust_scene::Scene` compiled into sparse strips and recorded into the
     /// frame's own `wgpu::CommandEncoder` by
     /// [`frust_engine::EngineRenderer`], which never submits — the encoder is
     /// created and submitted in [`SurfaceRenderer::submit`].
-    ///
-    /// Boxed for the CPU variant's reason. Carries no snapshot cache and no
-    /// compositor: both are vello-path machinery living in
-    /// [`TierBackend::Gpu`], and a tier being measured against vello is
-    /// measured without them.
-    #[cfg(feature = "engine-tier")]
     Engine {
         engine: Box<frust_engine::EngineRenderer>,
         /// How many of this surface's frames the engine has refused so far
@@ -194,7 +87,7 @@ enum TierBackend {
         ///
         /// Counted rather than logged per frame: a refusal that reproduces
         /// every frame would otherwise flood the log with one identical line
-        /// per vsync. The count feeds [`crate::context::decide_log_action`] —
+        /// per vsync. The count feeds [`frust_gpu::context::decide_log_action`] —
         /// the same latch the uncaptured-`wgpu`-error handler uses — so the
         /// first few refusals are reported in full, the latch is announced
         /// once, and the running total keeps surfacing on the periodic debug
@@ -261,13 +154,14 @@ enum SurfaceState {
 /// A frame that has been rendered and queue-submitted but **not yet
 /// presented** — the deferred half of [`SurfaceRenderer::submit_deferred`].
 ///
-/// Opaque by design: it wraps a `wgpu::SurfaceTexture` behind a private field
-/// with no accessor, exactly like [`DetachedSurface`](crate::DetachedSurface),
-/// so no `wgpu` type is nameable outside this crate
-/// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern). It is `Send` — a
-/// `wgpu::SurfaceTexture` owns its swapchain frame and borrows nothing — which
-/// is the whole point: a shell can hand it from the render thread to the thread
-/// that must issue the present.
+/// Opaque by design: it wraps a `wgpu::SurfaceTexture` (and the
+/// `wgpu::Queue` that presents it) behind private fields with no accessor,
+/// exactly like [`DetachedSurface`](crate::DetachedSurface), so no `wgpu` type
+/// is nameable outside this crate (`docs/CODE_STANDARDS.md`'s wgpu-leak
+/// anti-pattern). It is `Send` — a `wgpu::SurfaceTexture` owns its swapchain
+/// frame and borrows nothing, and a `wgpu::Queue` is a cheap `Send + Sync`
+/// handle — which is the whole point: a shell can hand it from the render
+/// thread to the thread that must issue the present.
 ///
 /// **Why deferring the present is a contract, not a micro-optimisation.** On
 /// iOS, a `CAMetalLayer` with `presentsWithTransaction = true` requires
@@ -288,6 +182,11 @@ enum SurfaceState {
 /// older one rather than blocking on it).
 pub struct DeferredPresent {
     texture: wgpu::SurfaceTexture,
+    /// The queue the present is scheduled on. Carried because wgpu 30 moved
+    /// the present from `SurfaceTexture::present(self)` onto
+    /// `Queue::present(texture)`, and this handle outlives the `RenderContext`
+    /// borrow that produced it.
+    queue: wgpu::Queue,
 }
 
 impl std::fmt::Debug for DeferredPresent {
@@ -305,44 +204,32 @@ impl DeferredPresent {
     /// other platform/configuration it is an ordinary present that happens to
     /// have been moved off the submit site.
     pub fn present(self) {
-        self.texture.present();
+        self.queue.present(self.texture);
     }
 }
 
 /// Per-surface renderer and lifecycle state machine.
 ///
-/// Holds a device-independent, reusable `vello::Scene` (so it survives surface
-/// transitions) plus the current [`SurfaceState`]. Constructed empty with
-/// [`SurfaceRenderer::new`]; the shell brings it online with
-/// [`on_surface_created`](Self::on_surface_created).
+/// Holds the current surface state plus the cross-call stashes one frame
+/// needs. Constructed empty with [`SurfaceRenderer::new`]; the shell brings it
+/// online with [`on_surface_created`](Self::on_surface_created).
 pub struct SurfaceRenderer {
-    /// Reused across frames; `reset()` each frame rather than reallocated.
-    /// Device-independent, so it outlives surface transitions.
-    scene: vello::Scene,
-    /// The second reusable scene, holding a frame's TRAILING segment — the
-    /// commands recorded after the first composited snapshot bracket (see
-    /// [`crate::snapshot::FramePlan`]). Kept beside [`Self::scene`] rather
-    /// than reset-and-reused as one buffer because both scenes are alive at
-    /// once on the direct arm, where the pre-segment's render happens in
-    /// `submit`. Untouched on frames with no trailing segment, which is the
-    /// common case.
-    trailing_scene: vello::Scene,
     state: SurfaceState,
     /// Consecutive `AcquireStatus::Invalid` acquires retried via `Reconfigure`
     /// since the last successful acquire or surface (re)install — see
-    /// [`crate::lifecycle::decide_acquire`]/[`crate::lifecycle::MAX_INVALID_RECONFIGURES`].
+    /// `frust_gpu::lifecycle`'s `decide_acquire`/`MAX_INVALID_RECONFIGURES`.
     /// Reset on a successful acquire, on giving up (transitioning to
     /// `SurfaceLost`), and on installing a fresh surface.
     consecutive_invalid: u8,
     /// Persisted, framed `wgpu::PipelineCache` blob (see
-    /// [`crate::pipeline_cache`]) a prior run wrote and the shell restored from
+    /// [`frust_gpu::pipeline_cache`]) a prior run wrote and the shell restored from
     /// disk via [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data),
-    /// consumed at the next surface install to seed vello's shader-pipeline
+    /// consumed at the next surface install to seed the engine's shader-pipeline
     /// compilation. `None` is a cold start. Only meaningful on adapters with
     /// `PIPELINE_CACHE` (any Vulkan adapter); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
-    /// [`Self::submit`] to blit into and present (the acquire/submit span split).
+    /// [`Self::submit`] to render into and present (the acquire/submit span split).
     /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
     /// [`AcquireOutcome::Acquired`] result, taken by the next [`Self::submit`].
     /// A `wgpu::SurfaceTexture` is owned (it does not borrow the surface), so
@@ -350,25 +237,12 @@ pub struct SurfaceRenderer {
     /// confined to `frust-render` while letting a shell time each span with its
     /// own clock (timing stays shell-owned — see `frust-shell-common::perf`).
     pending_present: Option<wgpu::SurfaceTexture>,
-    /// The `base_color` [`Self::encode`] was called with, stashed for the
-    /// **direct** render path only: there, the vello `render_to_texture` that
-    /// consumes `base_color` runs in [`Self::submit`] (it targets the acquired
-    /// swapchain texture, which does not exist until [`Self::acquire`]), so the
-    /// color must survive the gap between `encode` and `submit`. Unused on the
-    /// blit path (which renders inside `encode`, where `base_color` is a
-    /// parameter). `None` outside an in-flight direct-path frame.
+    /// The `base_color` [`Self::encode`] was called with, stashed since the
+    /// render that consumes `base_color` runs in [`Self::submit`] (it targets
+    /// the acquired swapchain texture, which does not exist until
+    /// [`Self::acquire`]), so the color must survive the gap between `encode`
+    /// and `submit`. `None` outside an in-flight engine frame.
     pending_base_color: Option<peniko::Color>,
-    /// This frame's composite work, stashed by [`Self::encode`] for
-    /// [`Self::submit`] on the two arms whose composite attachment is the
-    /// ACQUIRED swapchain texture (`Direct`, `DirectPremultiplied`), which
-    /// does not exist until [`Self::acquire`]. The blit arm composites onto
-    /// its intermediate inside `encode` and never sets this.
-    ///
-    /// Overwritten every `encode` and taken by every `submit`, so a frame
-    /// whose present was skipped holds its page handles no longer than until
-    /// the next one; [`Self::on_surface_destroyed`] clears it outright, since
-    /// those handles belong to the cache dying with the surface.
-    pending_composite: Option<PendingComposite>,
     /// The engine tier's owned copy of the frame's scene — its counterpart to
     /// [`Self::scene`], and reused across frames for the same reason.
     ///
@@ -383,22 +257,7 @@ pub struct SurfaceRenderer {
     /// (strip building, paint encoding) plus command recording lands in
     /// `submit_us`. Compare whole frames across tiers, never `encode_us`
     /// against `encode_us`.
-    #[cfg(feature = "engine-tier")]
     engine_scene: frust_scene::Scene,
-}
-
-/// The composite half of a frame, carried from [`SurfaceRenderer::encode`] to
-/// [`SurfaceRenderer::submit`]: the cached pages to draw, in scene order, and
-/// the trailing segment's already-rendered scratch (`None` when the frame has
-/// no trailing segment). Both are refcounted `wgpu` handles, not pixels.
-struct PendingComposite {
-    layers: Vec<CompositeLayer>,
-    trailing: Option<wgpu::TextureView>,
-    /// The frame's base colour when `encode` SKIPPED the main vello pass (its
-    /// segment painted nothing, see [`skips_main_pass`]), making the composite
-    /// pass the only thing that writes the target: it clears to this instead
-    /// of loading. `None` on an ordinary frame, where vello wrote the backdrop.
-    clear: Option<peniko::Color>,
 }
 
 impl Default for SurfaceRenderer {
@@ -415,34 +274,28 @@ impl SurfaceRenderer {
     /// exists (deferred window creation on desktop, `surfaceCreated` on Android).
     pub fn new() -> Self {
         Self {
-            scene: vello::Scene::new(),
-            trailing_scene: vello::Scene::new(),
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
             initial_cache_data: None,
             pending_present: None,
             pending_base_color: None,
-            pending_composite: None,
-            #[cfg(feature = "engine-tier")]
             engine_scene: frust_scene::Scene::default(),
         }
     }
 
-    /// Drops the in-flight frame's cross-call stashes: the direct arm's
-    /// `base_color` and this frame's composite work.
+    /// Drops the in-flight frame's cross-call stash: the engine arm's
+    /// `base_color`.
     ///
-    /// Both describe one frame of one surface — the composite one holds
-    /// refcounted handles on that surface's snapshot textures — so any event
-    /// that ends a surface's life (`on_surface_destroyed`) or replaces it
-    /// (`install_surface`) must drop them rather than let the next `submit`
-    /// consume a stale pair. Idempotent.
+    /// It describes one frame of one surface, so any event that ends a
+    /// surface's life (`on_surface_destroyed`) or replaces it
+    /// (`install_surface`) must drop it rather than let the next `submit`
+    /// consume a stale colour. Idempotent.
     fn clear_pending_frame(&mut self) {
         self.pending_base_color = None;
-        self.pending_composite = None;
     }
 
     /// Adopt `state` and reset everything else scoped to ONE surface: the
-    /// `Invalid`-reconfigure streak and the in-flight frame's stashes.
+    /// `Invalid`-reconfigure streak and the in-flight frame's stash.
     ///
     /// The one place a surface episode begins or ends. `install_surface`
     /// enters through it with the freshly built [`SurfaceState::Ready`];
@@ -451,9 +304,8 @@ impl SurfaceRenderer {
     /// through it with [`SurfaceState::Lost`] — so a reset can never be
     /// written into one of those paths and forgotten in another. Everything
     /// reset here describes the surface being replaced or torn down: the
-    /// streak belonged to it, and the stashes describe one of its frames (the
-    /// composite one holding refcounted handles on snapshot textures that die
-    /// with it). Nothing else may assign `self.state`.
+    /// streak belonged to it, and the stash describes one of its frames.
+    /// Nothing else may assign `self.state`.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
         self.state = state;
         self.consecutive_invalid = 0;
@@ -461,7 +313,7 @@ impl SurfaceRenderer {
     }
 
     /// Restores the persisted pipeline-cache blob a prior run produced via
-    /// [`pipeline_cache_data`](Self::pipeline_cache_data), to seed vello's
+    /// [`pipeline_cache_data`](Self::pipeline_cache_data), to seed the engine's
     /// shader-pipeline compilation at the next surface install and cut warm-start
     /// shader/pipeline compilation to near zero on Vulkan.
     ///
@@ -473,13 +325,25 @@ impl SurfaceRenderer {
     /// without `PIPELINE_CACHE` (Metal/DX12): the blob is validated against
     /// the live adapter at install time and discarded on any mismatch. Passing
     /// `None` clears any restored blob (a cold start).
+    ///
+    /// **Caller contract (provenance):** `data` must be bytes this renderer
+    /// itself previously produced via
+    /// [`pipeline_cache_data`](Self::pipeline_cache_data) and the shell
+    /// persisted verbatim — never bytes from any other source. The framing
+    /// check downstream (`frust_gpu::pipeline_cache::unframe`) proves the
+    /// magic tag and the adapter fingerprint, which is provenance by
+    /// convention rather than integrity: a deliberately forged blob passing
+    /// that frame reaches `wgpu`'s `unsafe` pipeline-cache seam, whose
+    /// contract makes foreign data undefined behaviour. This method stays
+    /// safe because the obligation is a data-handling rule for the shell's
+    /// persistence layer, not something a signature can enforce.
     pub fn set_initial_pipeline_cache_data(&mut self, data: Option<Vec<u8>>) {
         self.initial_cache_data = data;
     }
 
     /// The current pipeline-cache data to persist, framed with the adapter
     /// fingerprint so a later launch can validate it before reuse (see
-    /// [`crate::pipeline_cache`]).
+    /// [`frust_gpu::pipeline_cache`]).
     ///
     /// `None` when there is no live cache to read — no surface installed, or an
     /// adapter without `PIPELINE_CACHE` (Metal/DX12) — or when the driver has
@@ -493,7 +357,7 @@ impl SurfaceRenderer {
         };
         let (cache, key) = ready.pipeline_cache.as_ref()?;
         let data = cache.get_data()?;
-        Some(crate::pipeline_cache::frame(key, &data))
+        Some(frust_gpu::pipeline_cache::frame(key, &data))
     }
 
     /// Whether the **live** surface actually resolved to a translucent
@@ -523,7 +387,7 @@ impl SurfaceRenderer {
     /// anti-pattern).
     pub fn surface_resolved_translucent(&self) -> bool {
         match &self.state {
-            SurfaceState::Ready(ready) => ready.surface.resolved_translucent,
+            SurfaceState::Ready(ready) => ready.surface.resolved_translucent(),
             SurfaceState::NoSurface | SurfaceState::Lost => false,
         }
     }
@@ -532,11 +396,10 @@ impl SurfaceRenderer {
     /// surface produces no such measurement.
     ///
     /// `None` — the `gpu_q=0` case a shell reports — for every reason there is:
-    /// a tier other than the engine one, a build without the `engine-tier`
-    /// feature, a device created without `wgpu::Features::TIMESTAMP_QUERY`
-    /// (which a build that did not compile `perf-trace` in never asks for), and
-    /// the first few frames of a surface, before the ring's first readback has
-    /// landed.
+    /// no live surface, a device created without
+    /// `wgpu::Features::TIMESTAMP_QUERY` (which a build that did not compile
+    /// `perf-trace` in never asks for), and the first few frames of a surface,
+    /// before the ring's first readback has landed.
     ///
     /// The reading lags the calling frame: a frame's queries are mapped
     /// without ever blocking the frame path, so what comes back is a recent
@@ -544,27 +407,18 @@ impl SurfaceRenderer {
     /// fresh reading lands per frame, so the series is complete and offset,
     /// not sparse — see [`frust_gpu::diag::TimestampRing`].
     pub fn gpu_pass_timings(&self) -> Option<GpuPassTimings> {
-        #[cfg(feature = "engine-tier")]
-        {
-            let SurfaceState::Ready(ready) = &self.state else {
-                return None;
-            };
-            let TierBackend::Engine { timestamps, .. } = &ready.backend else {
-                return None;
-            };
-            let reading = timestamps.latest()?;
-            let span = |which: frust_engine::EngineSpan| reading.span(which.index());
-            Some(GpuPassTimings {
-                prepass: span(frust_engine::EngineSpan::Prepass),
-                main: span(frust_engine::EngineSpan::Main),
-                composite: span(frust_engine::EngineSpan::Composite),
-                blit: span(frust_engine::EngineSpan::Blit),
-            })
-        }
-        #[cfg(not(feature = "engine-tier"))]
-        {
-            None
-        }
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        let TierBackend::Engine { timestamps, .. } = &ready.backend;
+        let reading = timestamps.latest()?;
+        let span = |which: frust_engine::EngineSpan| reading.span(which.index());
+        Some(GpuPassTimings {
+            prepass: span(frust_engine::EngineSpan::Prepass),
+            main: span(frust_engine::EngineSpan::Main),
+            composite: span(frust_engine::EngineSpan::Composite),
+            blit: span(frust_engine::EngineSpan::Blit),
+        })
     }
 
     /// The current lifecycle phase.
@@ -577,7 +431,7 @@ impl SurfaceRenderer {
     }
 
     /// Brings the surface online (`surfaceCreated`/`resumed`): creates the
-    /// swapchain and a device-bound `vello::Renderer`, transitioning to
+    /// swapchain and a device-bound renderer, transitioning to
     /// [`SurfacePhase::SurfaceReady`].
     ///
     /// Valid from any phase — calling it in `SurfaceLost` is how the shell
@@ -595,16 +449,16 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
-        let surface = ctx
-            .create_surface(
-                window,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
+        let surface = crate::context::create_engine_surface_from_target(
+            ctx,
+            window,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -633,16 +487,16 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
-        let surface = ctx
-            .create_render_surface(
-                surface.into_surface(),
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            surface.into_surface(),
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -654,13 +508,13 @@ impl SurfaceRenderer {
     /// sanctioned unsafe entry points (see also
     /// [`on_surface_created_from_metal_layer`](Self::on_surface_created_from_metal_layer));
     /// the raw-pointer handling is isolated in
-    /// [`crate::lifecycle::create_android_surface`].
+    /// [`frust_gpu::lifecycle::create_android_surface`].
     ///
     /// # Safety
     ///
     /// `window_ptr` must be a valid, acquired `ANativeWindow*` that outlives the
     /// surface (and all its `SurfaceTexture`s). See
-    /// [`crate::lifecycle::create_android_surface`] for the full contract.
+    /// [`frust_gpu::lifecycle::create_android_surface`] for the full contract.
     pub async unsafe fn on_surface_created_from_android_window(
         &mut self,
         ctx: &mut RenderContext,
@@ -672,17 +526,18 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
         // the surface.
-        let raw = unsafe { crate::lifecycle::create_android_surface(&ctx.instance, window_ptr) }?;
-        let surface = ctx
-            .create_render_surface(
-                raw,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
+        let raw =
+            unsafe { frust_gpu::lifecycle::create_android_surface(ctx.instance(), window_ptr) }?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            raw,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -690,7 +545,7 @@ impl SurfaceRenderer {
     /// Swift shell surface creation), transitioning to
     /// [`SurfacePhase::SurfaceReady`].
     ///
-    /// Only compiled on Apple targets (mirrors [`crate::lifecycle::create_metal_surface`]'s
+    /// Only compiled on Apple targets (mirrors [`frust_gpu::lifecycle::create_metal_surface`]'s
     /// gating): the raw-pointer handling is isolated there, one of the
     /// framework's sanctioned unsafe boundaries alongside
     /// [`on_surface_created_from_android_window`](Self::on_surface_created_from_android_window).
@@ -703,7 +558,7 @@ impl SurfaceRenderer {
     ///
     /// `layer_ptr` must be a valid, live `CAMetalLayer*` that outlives the
     /// surface (and all its `SurfaceTexture`s). See
-    /// [`crate::lifecycle::create_metal_surface`] for the full contract.
+    /// [`frust_gpu::lifecycle::create_metal_surface`] for the full contract.
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     pub async unsafe fn on_surface_created_from_metal_layer(
         &mut self,
@@ -716,244 +571,110 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
-        let raw = unsafe { crate::lifecycle::create_metal_surface(&ctx.instance, layer_ptr) }?;
-        let surface = ctx
-            .create_render_surface(
-                raw,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::Fifo,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
+        let raw = unsafe { frust_gpu::lifecycle::create_metal_surface(ctx.instance(), layer_ptr) }?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            raw,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::Fifo,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
     /// Wraps a freshly created `RenderSurface` in a device-bound renderer and
     /// installs it as the live surface. Shared by the safe and Android paths.
-    fn install_surface(&mut self, ctx: &RenderContext, surface: ConfiguredSurface) -> Result<()> {
-        // Seed vello's shader-pipeline compilation from a persisted
+    fn install_surface(&mut self, ctx: &RenderContext, surface: EngineSurface) -> Result<()> {
+        // Seed the engine's shader-pipeline compilation from a persisted
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
-        // `PIPELINE_CACHE` (Metal/DX12) — the path is then byte-identical to
-        // before this existed. Created before the tier `match` so the `Gpu` arm
-        // can clone it into `RendererOptions`; the `Cpu` tier runs no GPU
-        // pipelines and leaves it unused (retained only so a later
-        // `pipeline_cache_data()` still has the handle).
-        let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
+        // `PIPELINE_CACHE` (Metal/DX12). Created before the backend below so
+        // it can be handed to `EngineRenderer::new`.
+        // SAFETY: `initial_cache_data` arrives only via
+        // `set_initial_pipeline_cache_data`, whose documented caller contract
+        // requires bytes this renderer itself produced through
+        // `pipeline_cache_data` and the shell persisted verbatim — the
+        // provenance `create_pipeline_cache`'s `# Safety` section requires.
+        // This call site cannot itself prove that history; it relies on that
+        // documented contract plus `unframe`'s magic-tag/adapter-fingerprint
+        // check, which rejects every accidental mismatch (integrity against a
+        // deliberate forgery is out of scope — see the setter's doc). `None`
+        // is a cold start.
+        let pipeline_cache =
+            unsafe { ctx.create_pipeline_cache(self.initial_cache_data.as_deref()) };
 
-        // Pick the tier backend the context's probe selected.
-        // Only `Gpu` is reachable without the `cpu-tier` feature (the probe
-        // never returns `Cpu` there, and `ensure_device` guards it), so the
-        // default build creates a `vello::Renderer` exactly as before.
-        let backend = match ctx.selected_tier() {
-            crate::RenderTier::Gpu => {
-                let device = &ctx.device_handle().device;
-                // Narrow the compiled AA pipeline set to the one mode the
-                // `FRUST_AA_MODE` knob selected (default: `Area`, the sole
-                // `AaConfig` every production `RenderParams` site requests —
-                // see the `antialiasing_method: aa_mode().to_vello()` sites in
-                // `encode`/`submit_impl` and `snapshot.rs`'s `SnapshotCache::render`):
-                // `RendererOptions::default()` compiles shader permutations
-                // for every `AaConfig` (`AaSupport::all()`), ~3x unnecessary
-                // pipeline compiles at init that contribute to the slow,
-                // synchronous, main-thread launch-time shader compile that can
-                // trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
-                // dev-profile shader-stack override note).
-                // Verified against the vello 0.9.0 source
-                // (`RendererOptions::antialiasing_support: AaSupport`,
-                // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
-                let mode = aa_mode();
-                // One line per process naming the effective mode, so a device
-                // capture proves which build ran (`docs/RENDER_DEVELOPMENT.md`
-                // § Instrumentation (render path)). Logged once regardless of surface
-                // recreation, mirroring `log_render_path`'s once-per-process
-                // shape.
-                // A non-default mode additionally warns: it is a measurement
-                // instrument that changes what every pass renders, and a
-                // capture read later should say so at a level that stands out
-                // from an ordinary startup line. A default build (`Area`)
-                // logs only the `info` line above, exactly as before.
-                static AA_MODE_LOGGED: OnceLock<()> = OnceLock::new();
-                AA_MODE_LOGGED.get_or_init(|| {
-                    log::info!("frust-render aa-mode={mode}");
-                    if mode != AaMode::Area {
-                        log::warn!("frust-render measurement knob in effect: aa-mode={mode}");
-                    }
-                });
-                let renderer_options = vello::RendererOptions {
-                    antialiasing_support: mode.support(),
-                    pipeline_cache: pipeline_cache.clone(),
-                    ..Default::default()
-                };
-                let renderer = vello::Renderer::new(device, renderer_options)
-                    .map_err(|e| anyhow!("frust-render: failed to create vello renderer: {e}"))?;
-                // The compositor is built for the attachment its quad pass
-                // actually draws onto, which is the arm's own vello target:
-                // the acquired swapchain texture on both direct arms (always
-                // `Rgba8Unorm` — the direct arm configures it so), the
-                // intermediate on the blit arm (likewise `Rgba8Unorm`, even
-                // when the swapchain behind it is `Bgra8Unorm`).
-                let composite_format = match &surface.path {
-                    RenderPath::Blit { .. } => wgpu::TextureFormat::Rgba8Unorm,
-                    RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
-                        surface.config.format
-                    }
-                    // Unreachable in this arm: the engine paths are configured
-                    // for the engine tier alone
-                    // (`context::choose_engine_render_path`), which has no
-                    // compositor. Answered with the swapchain's own format
-                    // rather than left to a catch-all, so a future arm cannot
-                    // fall through this match silently.
-                    #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. }
-                    | RenderPath::EngineDirectUnpremultiply { .. } => surface.config.format,
-                };
-                let compositor = Compositor::new(device, composite_format, pipeline_cache.as_ref());
-                // A translucent surface whose swapchain stores STRAIGHT alpha
-                // (iOS's `PostMultiplied`) gets no snapshot cache at all — see
-                // `snapshot_cache_enabled`. Logged once per process, naming
-                // the reason, because "snapshot layers silently off on this
-                // device" is otherwise indistinguishable from the kill switch.
-                let straight_alpha_translucent = surface.straight_alpha_translucent();
-                if straight_alpha_translucent {
-                    static LOGGED: OnceLock<()> = OnceLock::new();
-                    LOGGED.get_or_init(|| {
-                        log::info!(
-                            "frust-render: snapshot layers disabled on this surface — a \
-                             translucent swapchain storing straight alpha has no exact \
-                             composite arithmetic; brackets lower inline"
-                        );
-                    });
-                }
-                // The same one-per-process note for the other silent refusal:
-                // a scaled frame gets no snapshot cache either, and "off"
-                // would otherwise look identical to the kill switch in a
-                // device capture taken to compare the two.
-                //
-                // Asked of the SURFACE, not of the knob: this must be the same
-                // truth the frame is encoded under (`RenderPath::Blit`'s
-                // `root`), and only the surface knows whether its own
-                // intermediate ended up smaller — a cpu-tier surface is pinned
-                // to full resolution however the knob is set.
-                let render_scaled = surface.render_scaled();
-                if render_scaled {
-                    static LOGGED: OnceLock<()> = OnceLock::new();
-                    LOGGED.get_or_init(|| {
-                        log::info!(
-                            "frust-render: snapshot layers disabled on this surface — render \
-                             scale < 1: cached pages are composited in the target's device \
-                             space; brackets lower inline"
-                        );
-                    });
-                }
-                TierBackend::Gpu {
-                    renderer,
-                    // The four refusals are resolved here, per surface, and
-                    // held by the cache itself — so the pre-pass never
-                    // re-reads a process-global on the hot path and a test
-                    // can build either state directly. `on_surface_changed`
-                    // re-resolves them through the same
-                    // `snapshot_cache_enabled_for`: the scaled-frame refusal
-                    // is a function of the surface's live geometry, not a
-                    // constant of the process.
-                    snapshots: SnapshotCache::new(snapshot_cache_enabled_for(
-                        &surface,
-                        compositor.is_some(),
-                    )),
-                    compositor,
-                }
-            }
-            #[cfg(feature = "cpu-tier")]
-            crate::RenderTier::Cpu => TierBackend::Cpu(Box::new(
-                crate::cpu_tier::CpuTierRenderer::new(surface.config.width, surface.config.height),
-            )),
-            #[cfg(not(feature = "cpu-tier"))]
-            crate::RenderTier::Cpu => {
-                return Err(anyhow!(
-                    "frust-render: Cpu tier selected without the `cpu-tier` feature compiled in"
-                ));
-            }
-            #[cfg(feature = "engine-tier")]
-            crate::RenderTier::Engine => {
-                let device = &ctx.device_handle().device;
-                // Built for the format this surface's FRAMES will target,
-                // because the engine warms its strip pipelines for exactly one
-                // of them: the swapchain's own on the direct arm, the engine's
-                // off-screen format on the un-premultiplying one, whose frames
-                // land in a surface-owned intermediate instead
-                // ([`engine_target_format`]).
-                //
-                // A resize keeps that format (`RenderContext::resize_surface`
-                // rewrites only the dimensions), so `on_surface_changed`
-                // resizes the renderer in place; a FORMAT change arrives as a
-                // fresh surface and lands back here, building a renderer
-                // warmed for the new format — off the frame path, and seeded
-                // from the same persisted `wgpu::PipelineCache` blob handed to
-                // vello, so a re-warm after a format change is a driver-cache
-                // hit rather than a cold compile.
-                let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
-                let engine_format = engine_target_format(&surface.path, surface.config.format);
-                let engine = frust_engine::EngineRenderer::new(
-                    device,
-                    &caps,
+        // Build the backend. There is exactly one renderer and no tier to
+        // dispatch on: `context::create_engine_surface` has already refused an
+        // adapter the engine cannot drive, before any surface is configured.
+        let backend = {
+            let device = &ctx.device_handle().device;
+            // Built for the format this surface's FRAMES will target,
+            // because the engine warms its strip pipelines for exactly one
+            // of them: the swapchain's own on the direct arm, the engine's
+            // off-screen format on the un-premultiplying one, whose frames
+            // land in a surface-owned intermediate instead
+            // ([`engine_target_format`]).
+            //
+            // A resize keeps that format (`EngineSurface::resize`
+            // rewrites only the dimensions), so `on_surface_changed`
+            // resizes the renderer in place; a FORMAT change arrives as a
+            // fresh surface and lands back here, building a renderer
+            // warmed for the new format — off the frame path, and seeded
+            // from the same persisted `wgpu::PipelineCache` blob, so a
+            // re-warm after a format change is a driver-cache hit rather
+            // than a cold compile.
+            let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
+            let engine_format = engine_target_format(&surface.path, surface.config().format);
+            let engine = frust_engine::EngineRenderer::new(
+                device,
+                &caps,
+                engine_format,
+                pipeline_cache.as_ref(),
+            )
+            .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
+            // One line per process naming the renderer, next to the
+            // `render-path`/`aa-mode` lines, so a capture proves which
+            // renderer produced the frames it is timing.
+            //
+            // FIXED EVIDENCE MARKER: the `frust-render tier=engine (...)`
+            // text below is byte-for-byte load-bearing — every device gate
+            // greps logcat/console for it and `benchmarks/RESULTS.md`
+            // quotes it verbatim. It outlived the retirement of the tier
+            // *selection* deliberately (there is nothing left to select,
+            // but the receipts still have to match), so do not reword,
+            // re-case or re-punctuate it, and emit it unconditionally.
+            static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
+            ENGINE_LOGGED.get_or_init(|| {
+                log::info!(
+                    "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
+                     a {:?} swapchain, {}x{}, adapter `{}`)",
                     engine_format,
-                    pipeline_cache.as_ref(),
-                )
-                .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
-                // One line per process naming the tier, next to the
-                // `render-path`/`aa-mode` lines, so a capture proves which
-                // renderer produced the frames it is timing.
-                static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
-                ENGINE_LOGGED.get_or_init(|| {
-                    log::info!(
-                        "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
-                         a {:?} swapchain, {}x{}, adapter `{}`)",
-                        engine_format,
-                        surface.config.format,
-                        surface.config.width,
-                        surface.config.height,
-                        caps.adapter_name
-                    );
-                    // Both knobs instrument vello's own passes — the AA mode
-                    // is a `vello::AaConfig` and the scale sizes the blit
-                    // arm's intermediate — and this tier runs neither. Said
-                    // once, so a matrix run that sets them does not read the
-                    // resulting numbers as an answer about them.
-                    if aa_mode() != AaMode::Area || render_scaled() {
-                        log::warn!(
-                            "frust-render: FRUST_AA_MODE/FRUST_RENDER_SCALE are vello-only \
-                             instruments; the engine tier ignores both and renders at full \
-                             surface resolution"
-                        );
-                    }
-                });
-                // Built from the LIVE device rather than from `caps`: the
-                // adapter offering `TIMESTAMP_QUERY` is not the same statement
-                // as the device having been created with it, and creating a
-                // query set the device never enabled is a validation error
-                // rather than a missing measurement. The ring asks the device
-                // itself and goes inert when the answer is no.
-                let timestamps = frust_gpu::diag::TimestampRing::new(
-                    device,
-                    &ctx.device_handle().queue,
-                    frust_engine::EngineSpan::COUNT,
-                    frust_engine::diag::TIMESTAMP_RING_LABEL,
+                    surface.config().format,
+                    surface.config().width,
+                    surface.config().height,
+                    caps.adapter_name
                 );
-                TierBackend::Engine {
-                    engine: Box::new(engine),
-                    refused_frames: 0,
-                    timestamps,
-                }
-            }
-            #[cfg(not(feature = "engine-tier"))]
-            crate::RenderTier::Engine => {
-                return Err(anyhow!(
-                    "frust-render: Engine tier selected without the `engine-tier` feature \
-                     compiled in"
-                ));
+            });
+            // Built from the LIVE device rather than from `caps`: the
+            // adapter offering `TIMESTAMP_QUERY` is not the same statement
+            // as the device having been created with it, and creating a
+            // query set the device never enabled is a validation error
+            // rather than a missing measurement. The ring asks the device
+            // itself and goes inert when the answer is no.
+            let timestamps = frust_gpu::diag::TimestampRing::new(
+                device,
+                &ctx.device_handle().queue,
+                frust_engine::EngineSpan::COUNT,
+                frust_engine::diag::TIMESTAMP_RING_LABEL,
+            );
+            TierBackend::Engine {
+                engine: Box::new(engine),
+                refused_frames: 0,
+                timestamps,
             }
         };
         debug_assert_eq!(
@@ -961,12 +682,6 @@ impl SurfaceRenderer {
             SurfacePhase::SurfaceReady,
             "Created must reach SurfaceReady"
         );
-        // Seed the shader-showcase effects engine with a clone of the same
-        // pipeline cache handed to vello, so its per-program shader pipelines
-        // compile from the same persisted blob (a no-op `None` on adapters
-        // without `PIPELINE_CACHE`). Cloned before `pipeline_cache` is consumed
-        // into the fingerprint pair below.
-        let shader_effects = ShaderEffects::new(pipeline_cache.clone());
         // Pair the live pipeline cache with the adapter fingerprint its data is
         // framed under, so `pipeline_cache_data()` can hand back a validatable
         // blob without re-reading the adapter. `None` when the adapter lacks
@@ -988,7 +703,6 @@ impl SurfaceRenderer {
             surface,
             backend,
             pipeline_cache,
-            shader_effects,
         })));
         Ok(())
     }
@@ -996,55 +710,30 @@ impl SurfaceRenderer {
     /// Resizes the swapchain (`surfaceChanged`/`Resized`).
     ///
     /// Only acts in [`SurfacePhase::SurfaceReady`]; a resize with no surface is
-    /// dropped. The `vello::Renderer` (and its compiled pipelines) is preserved
-    /// — only the surface config and target texture are recreated, and the
-    /// snapshot cache's switch is re-resolved against the new geometry
-    /// ([`snapshot_cache_enabled_for`]). Zero dimensions are ignored (a
-    /// minimized window keeps its last valid size).
+    /// dropped. The renderer (and its compiled pipelines) is preserved — only
+    /// the surface config and its sized attachments are recreated. Zero
+    /// dimensions are ignored (a minimized window keeps its last valid size).
     pub fn on_surface_changed(&mut self, ctx: &RenderContext, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
-            ctx.resize_surface(&mut ready.surface, width, height);
+            ready
+                .surface
+                .resize(&ctx.device_handle().device, width, height);
             match &mut ready.backend {
-                // The snapshot cache's switch is re-resolved against the
-                // resized surface: the scaled-frame refusal compares the
-                // surface's size with its intermediate's, and the resize
-                // above recomputed both (`RenderContext::resize_surface`).
-                // Frozen at install it could disagree with the `root` the
-                // next frame is encoded under; `set_enabled` drops the
-                // entries on the way off, so a page rasterized for one
-                // device space is never composited in another.
-                TierBackend::Gpu {
-                    snapshots,
-                    compositor,
-                    ..
-                } => snapshots.set_enabled(snapshot_cache_enabled_for(
-                    &ready.surface,
-                    compositor.is_some(),
-                )),
-                #[cfg(feature = "cpu-tier")]
-                TierBackend::Cpu(cpu) => {
-                    // Keep the CPU pixmap's size in step with the swapchain;
-                    // the GPU renderer needs no resize (only the target
-                    // texture, done above), but the CPU tier's
-                    // `RenderContext`/`Pixmap` are sized.
-                    cpu.resize(width, height);
-                }
-                #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { engine, .. } => {
                     // The engine's own extent-sized resources (its intermediate
                     // pool's parked entries, and the depth attachment it would
                     // own if the surface did not) are re-established here,
                     // off the frame path. The surface's own depth attachment
-                    // was recreated by `resize_surface` above, in the same
-                    // step that reconfigured the swapchain.
+                    // was recreated by `EngineSurface::resize` above, in
+                    // the same step that reconfigured the swapchain.
                     //
                     // The pipelines survive: only a FORMAT change would need a
                     // renderer warmed for a different target, and a resize
-                    // never changes one — `resize_surface` rewrites the
-                    // dimensions alone. Asserted rather than assumed, since a
+                    // never changes one — `EngineSurface::resize` rewrites
+                    // the dimensions alone. Asserted rather than assumed, since a
                     // silent divergence would compile a fresh pipeline on the
                     // frame path for every frame that followed. Compared
                     // against the format the ARM implies, not the swapchain's
@@ -1052,7 +741,7 @@ impl SurfaceRenderer {
                     // the engine's off-screen format) is not reported as drift
                     // on every resize.
                     let expected =
-                        engine_target_format(&ready.surface.path, ready.surface.config.format);
+                        engine_target_format(&ready.surface.path, ready.surface.config().format);
                     if engine.format() != expected {
                         log::warn!(
                             "frust-render: engine renderer warmed for {:?} but this surface's \
@@ -1079,28 +768,20 @@ impl SurfaceRenderer {
             SurfacePhase::NoSurface,
             "Destroyed must reach NoSurface"
         );
-        // Release the in-flight frame's stashes, then the snapshot cache's
-        // textures, while the renderer that rasterized them is still alive:
-        // all of it dies with the state below, so this buys a deterministic
-        // order rather than fixing a leak. Both stashes go, not just the
-        // composite one: they describe a frame of the surface that is dying,
-        // and a stale `base_color` is as wrong to hand the next `submit` as a
-        // stale composite. Idempotent — a cleared cache and cleared stashes
-        // clear again to nothing, which is what the repeated-`Destroyed`
-        // contract needs.
+        // Release the in-flight frame's stash while the surface that produced
+        // it is still alive: it describes a frame of the surface that is
+        // dying, and a stale `base_color` is wrong to hand the next `submit`.
+        // Idempotent — a cleared stash clears again to nothing, which is what
+        // the repeated-`Destroyed` contract needs.
         self.clear_pending_frame();
         if let SurfaceState::Ready(ready) = &mut self.state {
             match &mut ready.backend {
-                TierBackend::Gpu { snapshots, .. } => snapshots.clear(),
-                #[cfg(feature = "cpu-tier")]
-                TierBackend::Cpu(_) => {}
                 // Nothing to release ahead of time: every texture this
                 // backend holds (resource textures, the intermediate pool, its
                 // own depth attachment) dies with the renderer below, and the
                 // surface's own depth attachment — plus, on the
                 // un-premultiplying arm, its intermediate — dies with the
                 // surface beside it.
-                #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { .. } => {}
             }
         }
@@ -1131,8 +812,7 @@ impl SurfaceRenderer {
     /// surface is dropped, the machine moves to [`SurfacePhase::SurfaceLost`],
     /// and [`FrameOutcome::SurfaceLost`] tells the shell to recreate it.
     ///
-    /// The internal `vello::Scene` is `reset()` and re-encoded every frame;
-    /// nothing accumulates across calls.
+    /// Nothing accumulates across calls: each frame re-encodes from `scene`.
     pub fn render(
         &mut self,
         ctx: &RenderContext,
@@ -1145,27 +825,21 @@ impl SurfaceRenderer {
         }
     }
 
-    /// Phase 1 of the frame — the **encode** span: reset the internal
-    /// `vello::Scene` and encode `scene` into it. It does **not** touch the
-    /// swapchain, so a caller timing this call in isolation measures encode cost
-    /// with no vsync wait folded in. What else happens here depends on the render
-    /// path (see [`Self::submit`]'s span mapping):
-    ///
-    /// - **Blit arm**: also renders (clearing to `base_color`) into the
-    ///   intermediate `Rgba8Unorm` target — so `encode_us` includes the GPU
-    ///   render, as it always has on this path — and composites this frame's
-    ///   cached snapshot pages onto that same target, before the blit.
-    /// - **Direct arm**: does ONLY the CPU-side scene build and stashes
-    ///   `base_color`; the GPU render moves to [`Self::submit`] (it needs the
-    ///   acquired swapchain texture), and so does the composite pass.
-    ///   `encode_us` is then just the CPU encode, plus the trailing segment's
-    ///   render on the frames that have one.
+    /// Phase 1 of the frame — the **encode** span: take the frame's scene. It
+    /// does **not** touch the swapchain, so a caller timing this call in
+    /// isolation measures encode cost with no vsync wait folded in. This copies
+    /// the display list and stashes `base_color`; the GPU render moves to
+    /// [`Self::submit`] (it needs the acquired swapchain texture), so
+    /// `encode_us` is a memcpy and nothing else.
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
     /// phase but [`SurfacePhase::SurfaceReady`]; otherwise
     /// [`EncodeOutcome::Encoded`], after which [`Self::present`] finishes the
-    /// frame. The internal scene is `reset()` every call; nothing accumulates
-    /// across frames.
+    /// frame. Nothing accumulates across frames.
+    // `ctx` is unused on this tier — all of its GPU work happens in `submit`
+    // — but the parameter stays in the public signature so a shell's call
+    // site does not have to special-case it.
+    #[allow(unused_variables)]
     pub fn encode(
         &mut self,
         ctx: &RenderContext,
@@ -1176,15 +850,11 @@ impl SurfaceRenderer {
         if !self.phase().can_render() {
             return Ok(EncodeOutcome::Skipped);
         }
-        // Disjoint field borrows: the reusable scene, the live surface, and the
-        // direct-path color stash; `consecutive_invalid` belongs to `present`.
+        // Disjoint field borrows: the live surface and the engine arms' colour
+        // stash; `consecutive_invalid` belongs to `present`.
         let Self {
-            scene: vello_scene,
-            trailing_scene,
             state,
             pending_base_color,
-            pending_composite,
-            #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
         } = self;
@@ -1198,401 +868,22 @@ impl SurfaceRenderer {
         // borrow checker only allows on a single deref.
         let ready: &mut ReadySurface = ready;
 
-        let device_handle = ctx.device_handle();
-
-        // Encode this frame's pixels, per tier and per render path.
-        match &mut ready.backend {
-            TierBackend::Gpu {
-                renderer,
-                snapshots,
-                compositor,
-            } => {
-                // Shader pre-pass (shader-showcase): compile/render each
-                // `Command::ShaderQuad` program into an offscreen texture and
-                // register it as a vello image override, producing the
-                // program-id → `ImageData` map `encode_into` lowers each quad
-                // against. Runs (and submits its own encoder) BEFORE vello's
-                // `render_to_texture` so the atlas copy reads a complete texture
-                // — wgpu serializes queue submissions in order.
-                //
-                // `adapter_max` is captured once and threaded into both the
-                // pre-pass (which keys the map by clamped physical size) and the
-                // encode lowering (which recomputes the identical key per quad),
-                // so the two derive the same `(id, w, h)` for every quad.
-                //
-                // `FRUST_NO_SHADER_EFFECTS` (`context::shader_effects_disabled`,
-                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
-                // is the kill switch for this still-unproven-on-device pre-pass:
-                // resolved once here and threaded into `run_shader_prepass`, which
-                // short-circuits to a zero-GPU-work no-op (skipping compile,
-                // targets, and the mark_seen/reap age tracking too) before
-                // touching `device`/`queue`/`renderer`/`shader_effects` at all —
-                // every `Command::ShaderQuad` this frame then falls through to
-                // `convert::encode_range_with_overrides`'s existing miss
-                // placeholder, exactly like a CPU-tier or no-prepass caller.
-                let adapter_max = device_handle.device.limits().max_texture_dimension_2d;
-                let shader_images = run_shader_prepass(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    renderer,
-                    &mut ready.shader_effects,
-                    scene,
-                    adapter_max,
-                    crate::context::shader_effects_disabled(),
-                );
-                // Snapshot pre-pass (snapshot layers): rasterize each
-                // outermost `Command::PushSnapshot` body whose content or size
-                // changed into its own cached texture, and take this frame's
-                // plan — the ordered pages to composite, the bracket keys the
-                // encode walk must skip as HOLES, and the two-segment split of
-                // the command list those two imply
-                // (`crate::snapshot::FramePlan`).
-                //
-                // Runs on EVERY render path (Direct, DirectPremultiplied,
-                // Blit) and before the main encode, for the same reason the
-                // shader pre-pass does: its `render_to_texture` calls submit
-                // their own work, and wgpu serializes queue submissions, so
-                // this frame's own passes see complete textures. An unchanged
-                // bracket performs no GPU work at all here — the steady state
-                // of an animating page transition is zero rasterizations and
-                // one blended quad.
-                //
-                // `FRUST_NO_SNAPSHOT_LAYERS` (resolved into the cache at
-                // surface install and on every resize,
-                // `docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path))
-                // makes this a zero-GPU-work no-op returning the
-                // whole-scene plan — no layers, no holes, no trailing segment
-                // — so every bracket falls through to the inline emulation
-                // `convert` performed before the cache existed and the
-                // compositor pass below never runs.
-                let width = ready.surface.config.width;
-                let height = ready.surface.config.height;
-                let plan = snapshots.prepare(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    renderer,
-                    scene,
-                    adapter_max,
-                    // The surface's own pixel size, the yardstick each
-                    // bracket's texture area is budgeted against: a page is a
-                    // subtree of THIS surface, so a texture much larger than
-                    // it is a bracket to lower inline, not to cache.
-                    (width, height),
-                );
-                // The size of the texture THIS frame's vello passes render
-                // into, and the root every one of them encodes under. They
-                // are one decision, and the blit arm made it when it sized its
-                // intermediate (`context::scaled_size`/`context::blit_root`):
-                // the passes targeting a shrunken intermediate must both be
-                // sized for it and be scaled into it — a `RenderParams` at the
-                // surface size would render into a target that cannot hold it,
-                // and an unscaled root would fill it with the frame's top-left
-                // corner. Both values are READ from the arm rather than
-                // re-derived here, so the frame is scaled by exactly the ratio
-                // its target has. The direct arms are never scaled (scale < 1
-                // forces the blit arm, `context::create_render_surface`), so
-                // they keep the surface size and the identity root exactly as
-                // before.
-                let (pass_width, pass_height, root) = match &ready.surface.path {
-                    RenderPath::Blit {
-                        target_size, root, ..
-                    } => (target_size.0, target_size.1, *root),
-                    RenderPath::Direct | RenderPath::DirectPremultiplied { .. } => {
-                        (width, height, Affine::IDENTITY)
-                    }
-                    // Unreachable inside the Gpu arm: the engine paths belong
-                    // to the engine tier alone. Answered with the direct arms'
-                    // values rather than a catch-all, so a path added later
-                    // cannot fall through this match silently.
-                    #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. }
-                    | RenderPath::EngineDirectUnpremultiply { .. } => {
-                        (width, height, Affine::IDENTITY)
-                    }
-                };
-                let params =
-                    |base_color, (target_width, target_height): (u32, u32)| vello::RenderParams {
-                        base_color,
-                        width: target_width,
-                        height: target_height,
-                        antialiasing_method: aa_mode().to_vello(),
-                    };
-                // A pre segment that paints nothing buys no vello pass: the
-                // compositor's own pass clears the frame to `base_color`
-                // instead (see `skips_main_pass`). The measured page
-                // transition lands here — its pre segment is the app root's
-                // `PushClip` and nothing else, and a vello pass over it still
-                // costs a full fine-stage sweep of the surface (~14.5 ms on an
-                // Adreno 620) to draw not one pixel.
-                let clear =
-                    skips_main_pass(plan.pre_draws, plan.layers.len()).then_some(base_color);
-
-                // The frame's MAIN vello pass: the commands before the first
-                // composited bracket, with every composited bracket skipped.
-                // That is the whole scene whenever nothing composited, so a
-                // frame with no cache hits builds exactly the scene it always
-                // did. Still encoded when the pass is skipped — a structural
-                // segment is a handful of commands, and keeping the CPU side
-                // unconditional keeps one scene-building path.
-                vello_scene.reset();
-                convert::encode_range_with_overrides(
-                    scene,
-                    // The pre segment starts at the scene root, so its own
-                    // prefix is empty: it opens every group it needs itself.
-                    &plan.pre,
-                    root,
-                    vello_scene,
-                    &shader_images,
-                    adapter_max,
-                    &plan.holes,
-                );
-
-                // The TRAILING segment, present only when the scene draws
-                // something after the first composited bracket that is not
-                // itself composited: one extra vello pass into the
-                // compositor's transparent scratch, which the quad pass then
-                // draws last so that content keeps its z-order above the
-                // pages. This is the only extra vello pass the mechanism can
-                // ever add — there is no third segment.
-                let trailing = match (&plan.trailing, compositor.as_mut()) {
-                    (Some(segment), Some(compositor)) => {
-                        let scratch = compositor
-                            .ensure_scratch(&device_handle.device, pass_width, pass_height)
-                            .clone();
-                        trailing_scene.reset();
-                        convert::encode_range_with_overrides(
-                            scene,
-                            // The segment carries BOTH its range and the
-                            // clips/layers still open where it starts — the
-                            // app root's clip around both pages, a scroll
-                            // viewport's around a switcher. Forwarding one
-                            // value is what makes forgetting the second
-                            // impossible; without them this pass would draw
-                            // unclipped and pop groups it never pushed.
-                            segment,
-                            // The SAME root as the pre segment: the two passes
-                            // are composited onto one another, so a different
-                            // root here would misplace this one against the
-                            // pixels it draws over.
-                            root,
-                            trailing_scene,
-                            &shader_images,
-                            adapter_max,
-                            &plan.holes,
-                        );
-                        renderer
-                            .render_to_texture(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                trailing_scene,
-                                &scratch,
-                                // Transparent, not the frame's base color:
-                                // everything this segment does not paint must
-                                // composite through to the pages under it.
-                                &params(
-                                    peniko::color::palette::css::TRANSPARENT,
-                                    (pass_width, pass_height),
-                                ),
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
-                        Some(scratch)
-                    }
-                    _ => None,
-                };
-                // Age the compositor's trailing scratch on EVERY frame, not
-                // only the ones that used it: a full-surface `Rgba8Unorm`
-                // texture is ~10 MB on a 1080x2400 phone, and a scene that
-                // has stopped drawing anything after its first composited
-                // bracket (the common page-transition shape) would otherwise
-                // hold it until the surface died. Costs a counter increment
-                // on a frame with no scratch at all.
-                if let Some(compositor) = compositor.as_mut() {
-                    compositor.age_scratch();
-                }
-
-                match &ready.surface.path {
-                    // Direct-to-surface: the vello render targets the
-                    // acquired swapchain texture, which does not exist until
-                    // `acquire`. So `encode` does ONLY the CPU-side scene build
-                    // here; the GPU `render_to_texture` — and, after it, the
-                    // composite pass onto that same texture — move to `submit`.
-                    // See `submit`'s span-mapping comment for how this remaps
-                    // the v3 spans.
-                    RenderPath::Direct => {
-                        // Carry `base_color` and this frame's pages to
-                        // `submit`, where both are consumed — including the
-                        // decision to skip the render there entirely.
-                        *pending_base_color = Some(base_color);
-                        *pending_composite = Some(PendingComposite {
-                            layers: plan.layers,
-                            trailing,
-                            clear,
-                        });
-                    }
-                    // Direct-premultiplied (translucent, premultiplied-expecting):
-                    // unlike the plain direct arm, the intermediate
-                    // already exists at encode time, so vello renders into it now
-                    // (like the blit arm); `submit`'s premultiply compute pass then
-                    // writes `(rgb*a, a)` into the acquired swapchain texture, and
-                    // the composite pass follows it there — onto premultiplied
-                    // pixels, which is why that arm draws its own pipeline variant.
-                    RenderPath::DirectPremultiplied {
-                        intermediate_view, ..
-                    } => {
-                        // Skipped exactly as on the other two arms. The
-                        // premultiply pass in `submit` then reads a stale
-                        // intermediate, but its output is discarded by the
-                        // composite pass's own `LoadOp::Clear` — the frame is
-                        // whatever this pass's clear plus its quads make it.
-                        if clear.is_none() {
-                            renderer
-                                .render_to_texture(
-                                    &device_handle.device,
-                                    &device_handle.queue,
-                                    vello_scene,
-                                    intermediate_view,
-                                    // Never scaled: this arm exists only at
-                                    // scale 1.0 (see the `pass_*` binding).
-                                    &params(base_color, (width, height)),
-                                )
-                                .map_err(|e| {
-                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
-                                })?;
-                        }
-                        *pending_composite = Some(PendingComposite {
-                            layers: plan.layers,
-                            trailing,
-                            clear,
-                        });
-                    }
-                    // Blit fallback: render into the intermediate `Rgba8Unorm` target
-                    // now and composite this frame's pages straight onto it, before
-                    // the acquire/blit/present tail (see `submit`) copies it to the
-                    // swapchain. Nothing crosses the encode/submit gap on this arm.
-                    RenderPath::Blit { target_view, .. } => {
-                        if clear.is_none() {
-                            renderer
-                                .render_to_texture(
-                                    &device_handle.device,
-                                    &device_handle.queue,
-                                    vello_scene,
-                                    target_view,
-                                    // The intermediate's own size, which is
-                                    // the surface's unless the scale knob
-                                    // shrank it — the pixels this pass sweeps
-                                    // are exactly what the knob measures.
-                                    &params(base_color, (pass_width, pass_height)),
-                                )
-                                .map_err(|e| {
-                                    anyhow!("frust-render: vello render_to_texture failed: {e}")
-                                })?;
-                        }
-                        if let Some(compositor) = compositor.as_mut() {
-                            compositor.composite(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                CompositeTarget {
-                                    view: target_view,
-                                    // The target the quads land in, not the
-                                    // swapchain behind it (unreachable while
-                                    // scaled — the cache is refused then — but
-                                    // the size must still name this target).
-                                    size: (pass_width, pass_height),
-                                    output: OutputAlpha::Straight,
-                                    clear,
-                                },
-                                &plan.layers,
-                                trailing.as_ref(),
-                            );
-                        }
-                    }
-                    // Unreachable inside the Gpu arm, for the `pass_*`
-                    // binding's reason: the engine paths belong to the engine
-                    // tier alone. Reported rather than rendered, since a vello
-                    // frame reaching one would be a wiring bug with no correct
-                    // arm to take.
-                    #[cfg(feature = "engine-tier")]
-                    RenderPath::EngineDirect { .. }
-                    | RenderPath::EngineDirectUnpremultiply { .. } => {
-                        return Err(anyhow!(
-                            "frust-render: the engine render path requires the engine tier"
-                        ));
-                    }
-                }
-            }
-            #[cfg(feature = "cpu-tier")]
-            TierBackend::Cpu(cpu) => {
-                // The CPU tier uploads its pixmap into the intermediate target, so
-                // it is always configured on the blit arm (see
-                // `context::choose_render_path`'s `force_blit`); a `Direct` path
-                // here is a wiring bug.
-                let RenderPath::Blit { target_texture, .. } = &ready.surface.path else {
-                    return Err(anyhow!(
-                        "frust-render: cpu-tier requires the blit render path"
-                    ));
-                };
-                let width = ready.surface.config.width;
-                let height = ready.surface.config.height;
-                // Rasterize headless into the reusable pixmap (premultiplied
-                // RGBA8), then upload it into the intermediate target the blit
-                // reads from. `write_texture` needs no row padding (unlike a
-                // buffer copy), so the tight `4 * width` stride is fine.
-                //
-                // The SURFACE's size, not a scaled one: this tier's
-                // intermediate is never scaled
-                // (`RenderContext::effective_render_scale`), because its
-                // rasterizer encodes at identity into a pixmap of exactly
-                // these dimensions.
-                let pixels = cpu.render(scene, base_color, width, height);
-                device_handle.queue.write_texture(
-                    target_texture.as_image_copy(),
-                    pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * width),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
-            #[cfg(feature = "engine-tier")]
-            TierBackend::Engine { .. } => {
-                // This tier renders in `submit` — the direct arm's split, which
-                // is why its surface is configured on one of the two engine
-                // paths (`context::choose_engine_render_path`): straight into
-                // the acquired swapchain view, or into a surface-owned
-                // intermediate the same `submit` un-premultiplies from. Any
-                // other path here is a wiring bug, reported rather than
-                // rendered.
-                if !matches!(
-                    &ready.surface.path,
-                    RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. }
-                ) {
-                    return Err(anyhow!(
-                        "frust-render: engine-tier requires the engine render path"
-                    ));
-                }
-                // The frame's whole CPU-side encode on this arm: copy the
-                // display list somewhere that outlives the borrow, since
-                // `EngineRenderer::encode` compiles it itself in `submit`.
-                // `clone_from` reuses the buffer's capacity, so a steady-state
-                // frame allocates nothing — see the field's measurement note.
-                engine_scene.clone_from(scene);
-                // Carried to `submit` for the direct arm's reason: the render
-                // that consumes it runs there. `pending_composite` stays
-                // `None` — the snapshot cache and compositor are GPU-tier
-                // machinery this tier bypasses entirely, as is the shader
-                // pre-pass (a `Command::ShaderQuad` keeps the placeholder
-                // lowering `convert` gives it).
-                *pending_base_color = Some(base_color);
-            }
-        }
+        // Encode this frame's pixels. The engine renders in `submit`, which
+        // is why its surface is configured on one of the two engine paths
+        // (`context::choose_engine_render_path`): straight into the acquired
+        // swapchain view, or into a surface-owned intermediate the same
+        // `submit` un-premultiplies from. `RenderPath` has no other variant to
+        // wire wrong — `submit_impl`'s own exhaustive match over `&surface.path`
+        // is where a future third arm must be handled, as a compile error
+        // rather than a runtime check here.
+        // The frame's whole CPU-side encode on this arm: copy the display list
+        // somewhere that outlives the borrow, since `EngineRenderer::encode`
+        // compiles it itself in `submit`. `clone_from` reuses the buffer's
+        // capacity, so a steady-state frame allocates nothing — see the
+        // field's measurement note.
+        engine_scene.clone_from(scene);
+        // Carried to `submit`, where the render that consumes it runs.
+        *pending_base_color = Some(base_color);
 
         Ok(EncodeOutcome::Encoded)
     }
@@ -1601,18 +892,18 @@ impl SurfaceRenderer {
     /// two-phase [`Self::acquire`] + [`Self::submit`] seam, kept for callers
     /// (and the [`Self::render`] convenience wrapper) that time present as one
     /// span. It acquires the swapchain texture (the blocking vsync/present
-    /// wait) and, on success, blits/submits/presents it.
+    /// wait) and, on success, renders/submits/presents it.
     ///
     /// A caller wanting the finer **acquire** (blocking vsync wait) vs
-    /// **submit** (blit + queue-submit + present) attribution — to separate
-    /// GPU saturation from blit cost — calls
+    /// **submit** (GPU render + queue-submit + present) attribution — to
+    /// separate GPU saturation from render cost — calls
     /// [`Self::acquire`] and [`Self::submit`] directly, timing each with its own
     /// clock (timing stays shell-owned; this crate reads no clock — see
     /// `frust-shell-common::perf`'s layering note). `present`'s combined span
     /// equals `acquire` + `submit` by construction.
     ///
-    /// Assumes [`Self::encode`] has already filled the intermediate target this
-    /// frame. In any phase but [`SurfacePhase::SurfaceReady`] the call is a
+    /// Assumes [`Self::encode`] has already copied this frame's display list.
+    /// In any phase but [`SurfacePhase::SurfaceReady`] the call is a
     /// no-op returning [`FrameOutcome::Skipped`]. On an `Outdated`
     /// acquire the surface is reconfigured and [`FrameOutcome::Redraw`] asks the
     /// shell to try again; on `Lost` the surface is dropped, the machine moves
@@ -1662,7 +953,7 @@ impl SurfaceRenderer {
         let ready: &mut ReadySurface = ready;
 
         use wgpu::CurrentSurfaceTexture as Cst;
-        let acquired = ready.surface.surface.get_current_texture();
+        let acquired = ready.surface.gpu.surface().get_current_texture();
         let status = match &acquired {
             Cst::Success(_) | Cst::Suboptimal(_) => AcquireStatus::Usable,
             Cst::Outdated => AcquireStatus::Outdated,
@@ -1702,7 +993,7 @@ impl SurfaceRenderer {
                 AcquireOutcome::Acquired
             }
             AcquireAction::Reconfigure => {
-                ctx.configure_surface(&ready.surface);
+                ready.surface.reconfigure(&ctx.device_handle().device);
                 AcquireOutcome::Reconfigured
             }
             AcquireAction::Lose => {
@@ -1720,14 +1011,12 @@ impl SurfaceRenderer {
             // so the shell can recreate cleanly — through the same door
             // `install_surface` and `on_surface_destroyed` use, once the field
             // borrows above have ended. That also drops the in-flight frame's
-            // stashes: a `pending_composite` holds refcounted handles on the
-            // dying cache's page textures (and the trailing scratch), and no
-            // `submit` will ever consume it now, so leaving it would keep those
-            // textures alive until the shell's next install. The streak was
-            // already reset above (`next_invalid_streak`, reset-on-give-up);
-            // the door zeroing it again is a no-op. The shell's own recovery
-            // path (recreate on resize/redraw/surfaceChanged) then starts a
-            // fresh episode.
+            // stash: no `submit` will ever consume it now, and a stale
+            // `base_color` describes a surface that no longer exists. The
+            // streak was already reset above (`next_invalid_streak`,
+            // reset-on-give-up); the door zeroing it again is a no-op. The
+            // shell's own recovery path (recreate on
+            // resize/redraw/surfaceChanged) then starts a fresh episode.
             self.adopt_surface_state(SurfaceState::Lost);
         }
         Ok(outcome)
@@ -1738,33 +1027,16 @@ impl SurfaceRenderer {
     /// Timing this call in isolation attributes the submit work separately from
     /// [`Self::acquire`]'s blocking vsync wait.
     ///
-    /// What the submit span contains depends on the render path (the v3 span
-    /// mapping):
+    /// What the submit span contains: the whole GPU render runs HERE,
+    /// targeting the acquired swapchain texture (which does not exist until
+    /// [`Self::acquire`]) or the surface's intermediate, then present. So the
+    /// frame's GPU cost lands in `submit_us`; `encode_us` is a memcpy.
     ///
-    /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`/`FRUST_RENDER_SCALE`):
-    ///   the intermediate target was already filled in [`Self::encode`], so
-    ///   `submit` = create the swapchain view + `TextureBlitter::copy` +
-    ///   queue-submit + present. This is the pre-direct-to-surface behavior,
-    ///   unchanged. At a render scale below 1 the mapping is unchanged too —
-    ///   `encode_us` still carries the GPU render, now over the reduced
-    ///   intermediate, and the blit in this span additionally upscales it —
-    ///   which is exactly what makes `encode_us` the field the fine-stage
-    ///   cost-per-pixel measurement reads.
-    /// - **Direct arm** (`Rgba8Unorm` + `STORAGE_BINDING`): the vello
-    ///   `render_to_texture` runs HERE, targeting the acquired swapchain texture
-    ///   directly (it does not exist until [`Self::acquire`]), then present — no
-    ///   blit. So the GPU render cost that the blit arm records in `encode_us`
-    ///   moves into `submit_us`; `encode_us` is then only the CPU scene build.
-    ///
-    /// **v3 wire mapping (unchanged fields, remapped work).** The
-    /// `acquire_us`/`submit_us` field names and the wire format are unchanged
-    /// (`perf.rs` is untouched). In the direct arm the swapchain **acquire** (the
-    /// blocking vsync wait) still happens in [`Self::acquire`] and is recorded in
-    /// `acquire_us` exactly as before — so acquire now precedes the GPU render
-    /// (which moved to this span) instead of following it as in the blit arm. A
-    /// benchmark comparing direct vs blit must account for this: the GPU render
-    /// migrates `encode_us` → `submit_us`, `submit_us` sheds the blit, and
-    /// `acquire_us` is unchanged but now sits *before* the render.
+    /// **v3 wire mapping.** The `acquire_us`/`submit_us` field names and the
+    /// wire format are unchanged (`perf.rs` is untouched). The swapchain
+    /// **acquire** (the blocking vsync wait) happens in [`Self::acquire`] and
+    /// is recorded in `acquire_us`, so acquire precedes the GPU render, which
+    /// lives entirely in this span.
     ///
     /// Must follow an [`AcquireOutcome::Acquired`] result from [`Self::acquire`]
     /// on the same frame — it consumes the stashed texture. With nothing stashed
@@ -1777,14 +1049,14 @@ impl SurfaceRenderer {
     pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
         let (outcome, presentable) = self.submit_impl(ctx)?;
         if let Some(surface_texture) = presentable {
-            surface_texture.present();
+            ctx.device_handle().queue.present(surface_texture);
         }
         Ok(outcome)
     }
 
     /// [`Self::submit`] with the final present step handed back to the caller
-    /// instead of issued here: identical GPU work (render/blit + queue-submit),
-    /// but the acquired swapchain frame is returned as an opaque, `Send`
+    /// instead of issued here: identical GPU work (render + queue-submit), but
+    /// the acquired swapchain frame is returned as an opaque, `Send`
     /// [`DeferredPresent`] the caller presents on a thread of its choosing.
     ///
     /// The iOS `presentsWithTransaction` contract is why this exists — see
@@ -1801,13 +1073,19 @@ impl SurfaceRenderer {
         let (outcome, presentable) = self.submit_impl(ctx)?;
         Ok((
             outcome,
-            presentable.map(|texture| DeferredPresent { texture }),
+            // The queue is read INSIDE the map, never before it: `ctx`'s device
+            // is created lazily by surface creation, and reading it eagerly
+            // would panic on the no-surface path that returns `None` here.
+            presentable.map(|texture| DeferredPresent {
+                texture,
+                queue: ctx.device_handle().queue.clone(),
+            }),
         ))
     }
 
     /// Shared body of [`Self::submit`]/[`Self::submit_deferred`]: everything up
-    /// to (but not including) `SurfaceTexture::present`, handing the acquired
-    /// frame back so each wrapper decides where the present happens.
+    /// to (but not including) `Queue::present`, handing the acquired frame
+    /// back so each wrapper decides where the present happens.
     fn submit_impl(
         &mut self,
         ctx: &RenderContext,
@@ -1816,23 +1094,16 @@ impl SurfaceRenderer {
         let Some(surface_texture) = self.pending_present.take() else {
             return Ok((FrameOutcome::Skipped, None));
         };
-        // The stashed texture is owned, but the encoded pixels (direct: the vello
-        // renderer + scene; blit: the intermediate target + blitter) live on
-        // `self` — if the surface vanished between `acquire` and `submit`, drop
-        // the texture and skip rather than present a stale frame.
+        // The stashed texture is owned, but the encoded frame (the engine's
+        // copied scene) lives on `self` — if the surface vanished between
+        // `acquire` and `submit`, drop the texture and skip rather than
+        // present a stale frame.
         let Self {
-            scene: vello_scene,
             state,
             pending_base_color,
-            pending_composite,
-            #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
         } = self;
-        // Taken unconditionally: a frame that reached `acquire` consumes its
-        // composite here or not at all, and holding cached-page handles past
-        // that would outlive the plan they came from.
-        let pending_composite = pending_composite.take();
         let SurfaceState::Ready(ready) = state else {
             return Ok((FrameOutcome::Skipped, None));
         };
@@ -1845,77 +1116,6 @@ impl SurfaceRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         match &surface.path {
-            // Direct-to-surface: render vello straight into the acquired swapchain
-            // texture, composite this frame's cached pages onto it, then present.
-            // No intermediate, no blit pass.
-            RenderPath::Direct => match backend {
-                TierBackend::Gpu {
-                    renderer,
-                    compositor,
-                    ..
-                } => {
-                    let params = vello::RenderParams {
-                        // Set in `encode`; a well-formed frame always encoded first.
-                        base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),
-                        width: surface.config.width,
-                        height: surface.config.height,
-                        antialiasing_method: aa_mode().to_vello(),
-                    };
-                    // `encode` decided this frame's pre segment paints
-                    // nothing, so the composite pass below clears the acquired
-                    // texture to the base colour and draws the pages onto it —
-                    // the whole frame, without a vello pass.
-                    let clear = pending_composite.as_ref().and_then(|pending| pending.clear);
-                    if clear.is_none() {
-                        renderer
-                            .render_to_texture(
-                                &device_handle.device,
-                                &device_handle.queue,
-                                vello_scene,
-                                &swapchain_view,
-                                &params,
-                            )
-                            .map_err(|e| {
-                                anyhow!("frust-render: vello render_to_texture failed: {e}")
-                            })?;
-                    }
-                    // Straight alpha: the swapchain this arm presents is
-                    // opaque (a premultiplied-expecting translucent surface
-                    // takes `DirectPremultiplied` below instead).
-                    if let Some(compositor) = compositor.as_mut()
-                        && let Some(pending) = pending_composite.as_ref()
-                    {
-                        compositor.composite(
-                            &device_handle.device,
-                            &device_handle.queue,
-                            CompositeTarget {
-                                view: &swapchain_view,
-                                size: (surface.config.width, surface.config.height),
-                                output: OutputAlpha::Straight,
-                                clear,
-                            },
-                            &pending.layers,
-                            pending.trailing.as_ref(),
-                        );
-                    }
-                }
-                // Unreachable: the direct arm is only ever configured for the GPU
-                // tier (`choose_render_path` forces blit for cpu-tier).
-                #[cfg(feature = "cpu-tier")]
-                TierBackend::Cpu(_) => {
-                    return Err(anyhow!(
-                        "frust-render: direct render path requires the GPU tier"
-                    ));
-                }
-                // Unreachable: the engine tier configures its own path
-                // (`context::choose_engine_render_path`), never this one.
-                #[cfg(feature = "engine-tier")]
-                TierBackend::Engine { .. } => {
-                    return Err(anyhow!(
-                        "frust-render: direct render path requires the GPU tier"
-                    ));
-                }
-            },
             // The engine tier's whole frame: one encoder, one
             // `EngineRenderer::encode` into the acquired swapchain view and
             // the surface's own depth attachment, one submit, then the
@@ -1923,21 +1123,12 @@ impl SurfaceRenderer {
             // encoder and never submits, so every pass of the frame lands in
             // this one command buffer, in order, against the texture about to
             // be presented.
-            //
-            // No compositor pass follows: cached snapshot pages are GPU-tier
-            // machinery, and `pending_composite` is never set on this arm.
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirect { depth } => {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
                     timestamps,
-                } = backend
-                else {
-                    return Err(anyhow!(
-                        "frust-render: engine render path requires the engine tier"
-                    ));
-                };
+                } = backend;
                 // Set in `encode`; a well-formed frame always encoded first —
                 // the same fallback every other arm takes.
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1958,9 +1149,9 @@ impl SurfaceRenderer {
                     engine_scene,
                     frust_engine::EngineTarget {
                         view: &swapchain_view,
-                        format: surface.config.format,
-                        width: surface.config.width,
-                        height: surface.config.height,
+                        format: surface.config().format,
+                        width: surface.config().width,
+                        height: surface.config().height,
                         // The surface's own attachment, recreated with the
                         // swapchain (`context::RenderPath::EngineDirect`).
                         // Nothing else writes it, so it is not pre-cleared:
@@ -1980,9 +1171,7 @@ impl SurfaceRenderer {
                         output: frust_engine::OutputAlpha::Premultiplied,
                     },
                     base_color,
-                    // The engine arm renders at the surface's own resolution:
-                    // `FRUST_RENDER_SCALE` is a vello instrument that sizes
-                    // the blit arm's intermediate, and this arm has none.
+                    // The engine arm renders at the surface's own resolution.
                     Affine::IDENTITY,
                     frust_engine::FrameTimestamps::new(timestamps),
                 );
@@ -2032,7 +1221,6 @@ impl SurfaceRenderer {
             // `context::choose_engine_render_path` now routes onto
             // `EngineDirect` above instead; this arm serves a genuinely
             // straight-alpha, non-Metal `PostMultiplied` compositor.)
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirectUnpremultiply {
                 depth,
                 intermediate_view,
@@ -2042,12 +1230,7 @@ impl SurfaceRenderer {
                     engine,
                     refused_frames,
                     timestamps,
-                } = backend
-                else {
-                    return Err(anyhow!(
-                        "frust-render: engine render path requires the engine tier"
-                    ));
-                };
+                } = backend;
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
                 let mut encoder =
                     device_handle
@@ -2066,9 +1249,9 @@ impl SurfaceRenderer {
                         // swapchain: what the swapchain receives is the
                         // conversion's output.
                         view: intermediate_view,
-                        format: engine_target_format(&surface.path, surface.config.format),
-                        width: surface.config.width,
-                        height: surface.config.height,
+                        format: engine_target_format(&surface.path, surface.config().format),
+                        width: surface.config().width,
+                        height: surface.config().height,
                         depth: Some(depth.view()),
                         // The INTERMEDIATE's own convention, which is
                         // premultiplied like every other engine target — the
@@ -2120,76 +1303,6 @@ impl SurfaceRenderer {
                     }
                 }
             }
-            // Direct-premultiplied: vello already rendered the
-            // straight-alpha frame into the intermediate in `encode`; premultiply
-            // it into the acquired swapchain texture so a premultiplied-expecting
-            // compositor (Android `Inherit`) blends it correctly. No blit, no
-            // intermediate→swapchain copy beyond this single compute dispatch.
-            RenderPath::DirectPremultiplied {
-                intermediate_view,
-                premultiply,
-                ..
-            } => {
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render premultiply"),
-                        });
-                premultiply.record(
-                    &device_handle.device,
-                    &mut encoder,
-                    intermediate_view,
-                    &swapchain_view,
-                    surface.config.width,
-                    surface.config.height,
-                );
-                device_handle.queue.submit([encoder.finish()]);
-                // The pages go on AFTER the premultiply pass, onto the
-                // premultiplied swapchain it just wrote — with the
-                // premultiplied output variant, so a composited page carries
-                // the same `(rgb*a, a)` convention every other pixel on that
-                // surface now does.
-                if let TierBackend::Gpu { compositor, .. } = backend
-                    && let Some(compositor) = compositor.as_mut()
-                    && let Some(pending) = pending_composite.as_ref()
-                {
-                    compositor.composite(
-                        &device_handle.device,
-                        &device_handle.queue,
-                        CompositeTarget {
-                            view: &swapchain_view,
-                            size: (surface.config.width, surface.config.height),
-                            output: OutputAlpha::Premultiplied,
-                            clear: pending.clear,
-                        },
-                        &pending.layers,
-                        pending.trailing.as_ref(),
-                    );
-                }
-            }
-            // Blit fallback: copy the intermediate target (filled — and
-            // composited onto — in `encode`) into the swapchain texture and
-            // submit.
-            RenderPath::Blit {
-                target_view,
-                blitter,
-                ..
-            } => {
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render blit"),
-                        });
-                blitter.copy(
-                    &device_handle.device,
-                    &mut encoder,
-                    target_view,
-                    &swapchain_view,
-                );
-                device_handle.queue.submit([encoder.finish()]);
-            }
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
@@ -2208,12 +1321,9 @@ impl SurfaceRenderer {
 /// (`context::create_engine_intermediate` creates it with exactly this), and
 /// only the conversion pass speaks the swapchain's format.
 ///
-/// One answer for both the install site and the resize-time drift check below,
-/// so the two cannot disagree about which format this surface's renderer was
-/// built for. A non-engine path answers the swapchain's format: it is not
-/// reachable with an engine backend, and answering rather than panicking keeps
-/// the wiring check that follows the reporting one.
-#[cfg(feature = "engine-tier")]
+/// One answer for both the install site and the resize-time drift check
+/// below, so the two cannot disagree about which format this surface's
+/// renderer was built for.
 fn engine_target_format(
     path: &RenderPath,
     surface_format: wgpu::TextureFormat,
@@ -2222,15 +1332,12 @@ fn engine_target_format(
         RenderPath::EngineDirectUnpremultiply { .. } => {
             frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT
         }
-        RenderPath::EngineDirect { .. }
-        | RenderPath::Direct
-        | RenderPath::DirectPremultiplied { .. }
-        | RenderPath::Blit { .. } => surface_format,
+        RenderPath::EngineDirect { .. } => surface_format,
     }
 }
 
 /// Reports the `count`-th frame this surface's engine renderer refused, under
-/// [`crate::context::decide_log_action`]'s latch.
+/// [`frust_gpu::context::decide_log_action`]'s latch.
 ///
 /// A refusal is a per-frame event on a path that can reproduce every vsync — a
 /// scheduler escalation on a layer shape the engine does not serve, or a
@@ -2241,21 +1348,20 @@ fn engine_target_format(
 /// total, and the periodic debug bump keeps the counter visible afterwards.
 /// Every line carries the count, so a capture read later says how many frames
 /// were lost, not merely that some were.
-#[cfg(feature = "engine-tier")]
 fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
-    match crate::context::decide_log_action(count) {
-        crate::context::LogAction::Log => {
+    match frust_gpu::context::decide_log_action(count) {
+        frust_gpu::context::LogAction::Log => {
             log::warn!(
                 "frust-render: engine refused frame {count} on this surface — {error}; the \
                  frame is dropped rather than presented"
             );
         }
-        crate::context::LogAction::SuppressionNotice => {
+        frust_gpu::context::LogAction::SuppressionNotice => {
             log::warn!(
                 "frust-render: further engine frame refusals suppressed (total so far: {count})"
             );
         }
-        crate::context::LogAction::Silent { debug_bump } => {
+        frust_gpu::context::LogAction::Silent { debug_bump } => {
             if debug_bump {
                 log::debug!(
                     "frust-render: engine frame refusals now {count} on this surface (still \
@@ -2264,224 +1370,6 @@ fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
             }
         }
     }
-}
-
-/// Whether a surface gets a live [`SnapshotCache`] at all, from the four
-/// facts that can refuse it — resolved once per surface at install and held by
-/// the cache itself, so the hot path re-reads none of them.
-///
-/// - `disabled`: the `FRUST_NO_SNAPSHOT_LAYERS` kill switch
-///   ([`crate::context::snapshot_layers_disabled`]);
-/// - `has_compositor`: the compositor refused this surface's attachment format
-///   ([`Compositor::new`]) — a composited page nothing draws is a missing
-///   page, so the bracket must lower inline instead;
-/// - `straight_alpha_translucent`: the surface came up TRANSLUCENT with a
-///   swapchain that stores straight alpha
-///   ([`ConfiguredSurface::straight_alpha_translucent`], iOS's
-///   `PostMultiplied`). The compositor's straight arm blends
-///   `dst * (1 - a) + rgb * a`, which is the straight-alpha `over` only when
-///   the destination alpha is 1; over a partly transparent destination it
-///   stores premultiplied colour into a straight-alpha swapchain and the
-///   platform composites it over-bright. The premultiplied arm's algebra
-///   closes for every destination alpha, but it is not what such a swapchain
-///   holds. Rather than composite wrong pixels on a surface frust cannot test
-///   on every device, that surface keeps the inline path outright — the same
-///   refusal shape `context::blit_translucency_refused` already takes.
-/// - `render_scaled`: the surface renders the frame into a smaller
-///   intermediate ([`ConfiguredSurface::render_scaled`]). A cached page
-///   leaves vello as a finished texture and the compositor places its quad in
-///   the TARGET's device space, so honouring a scaled root would mean
-///   rescaling every quad, every scissor rect and every page's own raster —
-///   for a measurement instrument, not a shipping mode. The knob's whole
-///   point is to time vello's fine stage over a known pixel count anyway,
-///   which a frame that composites cached pages instead of rendering them no
-///   longer measures. So brackets lower inline through the root-scaled encode,
-///   exactly as under `FRUST_NO_SNAPSHOT_LAYERS`. Unlike the other three this
-///   one can change while the surface lives — a resize recomputes the
-///   intermediate — so it is re-asked on every `on_surface_changed`.
-///
-/// Any one of the four is enough to refuse; a plain opaque, unscaled surface
-/// with a compositor is the only combination that composites.
-fn snapshot_cache_enabled(
-    disabled: bool,
-    has_compositor: bool,
-    straight_alpha_translucent: bool,
-    render_scaled: bool,
-) -> bool {
-    !disabled && has_compositor && !straight_alpha_translucent && !render_scaled
-}
-
-/// [`snapshot_cache_enabled`] asked of `surface` as it is configured RIGHT
-/// NOW — the one derivation both the install site and
-/// [`SurfaceRenderer::on_surface_changed`] call, so the cache's switch can
-/// never disagree with the geometry the surface was last configured with:
-/// `render_scaled` is the surface's live size against its intermediate's
-/// ([`ConfiguredSurface::render_scaled`]), which a resize recomputes.
-fn snapshot_cache_enabled_for(surface: &ConfiguredSurface, has_compositor: bool) -> bool {
-    snapshot_cache_enabled(
-        crate::context::snapshot_layers_disabled(),
-        has_compositor,
-        surface.straight_alpha_translucent(),
-        surface.render_scaled(),
-    )
-}
-
-/// Whether this frame can skip its MAIN vello pass altogether: its pre segment
-/// paints nothing (`crate::snapshot::FramePlan::pre_draws`) AND the compositor
-/// has at least one page to draw, so the composite pass can clear the target to
-/// the frame's base colour and compose the whole frame by itself.
-///
-/// Both halves matter. Without a page there is no compositor pass at all, so
-/// dropping the vello pass would present an undefined frame; and a pre segment
-/// that paints must be rendered whatever else the frame does. An ordinary
-/// frame (nothing composited, the kill switch, the cpu tier) therefore always
-/// answers `false` and behaves exactly as it did before this seam existed.
-fn skips_main_pass(pre_draws: bool, layers: usize) -> bool {
-    !pre_draws && layers > 0
-}
-
-/// The shader-showcase pre-pass (Gpu tier only): for every distinct
-/// `Command::ShaderQuad` in `scene`, compile its program, render it into an
-/// offscreen texture at the quad's physical size, register that texture with
-/// vello as an image override, and collect a `(program id, clamped physical
-/// size) → ImageData` map for [`convert::encode_range_with_overrides`] to lower
-/// each quad against.
-///
-/// The map is keyed by `(id, w, h)` — not `id` alone — so the same program drawn
-/// at two different physical sizes in one frame resolves each quad to its own
-/// size's texture; the encode side recomputes the identical `(w, h)` via
-/// [`physical_size`]/[`clamp_size`] (with the same `adapter_max`) to look each
-/// entry up.
-///
-/// Ordering: all quad passes share ONE command encoder,
-/// submitted BEFORE the caller's `render_to_texture`, so wgpu's in-order queue
-/// serialization guarantees each shader texture is complete before vello's
-/// atlas copy reads it. Registration happens once per target (via
-/// `ShaderEffects::ensure_registered`); the override is re-marked dirty every
-/// frame the quad is present (the intended per-frame texture→atlas copy cost).
-/// Eviction is frame-scoped ([`ShaderEffects::evict_stale_targets`], driven by
-/// this frame's live key set): a resized-away size is reclaimed and unregistered
-/// via `take_dropped_images`, but two sizes of one program live in the same
-/// frame both survive. Never panics — a failed compile is recorded/skipped
-/// inside `ShaderEffects` and simply yields no map entry (the quad then takes
-/// the miss placeholder).
-///
-/// Whole-id reap ([`ShaderEffects::mark_seen`]/[`ShaderEffects::reap`]) runs
-/// once per call, keyed on this frame's live *ids* (not just live keys) so a
-/// program absent from the scene entirely for `MAX_UNSEEN_FRAMES` consecutive
-/// frames has its pipeline, target(s), and `failed` record dropped instead of
-/// living until surface teardown — the whole-id counterpart to the
-/// frame-scoped resized-away-size reclaim above.
-///
-/// `disabled` is the resolved `FRUST_NO_SHADER_EFFECTS` kill switch
-/// ([`crate::context::shader_effects_disabled`]), threaded in by the caller so
-/// this stays unit-testable with a plain `bool` instead of reading the cached
-/// process-global itself. When `true` this is a **full no-op**, checked before
-/// any other work (the quad dedup, `ensure_pipeline`/`ensure_target`, and the
-/// `mark_seen`/`reap` age tracking all stay untouched): the flag means the
-/// pre-pass is off entirely, not merely "don't compile new programs", so a
-/// disabled run must not silently age out `last_seen` state a later re-enable
-/// would otherwise need. Returns an empty map either way, which is exactly
-/// the miss-everywhere input [`convert::encode_range_with_overrides`] already
-/// handles by falling through to the placeholder fill.
-fn run_shader_prepass(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    renderer: &mut vello::Renderer,
-    shader_effects: &mut ShaderEffects,
-    scene: &frust_scene::Scene,
-    adapter_max: u32,
-    disabled: bool,
-) -> HashMap<(u64, u32, u32), ImageData> {
-    if disabled {
-        return HashMap::new();
-    }
-
-    // Collect the distinct quads to render this frame, deduped by
-    // (program id, clamped physical size) so a program drawn twice at the same
-    // size is compiled/encoded once. `live` is this frame's full key set — what
-    // frame-scoped eviction preserves against.
-    let mut live: HashSet<(u64, u32, u32)> = HashSet::new();
-    let mut quads: Vec<(u64, &str, u32, u32, f32)> = Vec::new();
-    for command in scene.commands() {
-        if let Command::ShaderQuad {
-            program,
-            dest,
-            transform,
-            time,
-        } = command
-        {
-            let (w, h) = clamp_size(physical_size(*transform, *dest), adapter_max);
-            if live.insert((program.id(), w, h)) {
-                quads.push((program.id(), program.source(), w, h, *time));
-            }
-        }
-    }
-
-    let mut shader_images = HashMap::new();
-    if !quads.is_empty() {
-        // ONE encoder for every quad pass; submitted before the caller renders.
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frust shader-effect pre-pass"),
-        });
-        for (id, wgsl, w, h, time) in quads {
-            shader_effects.ensure_pipeline(device, id, wgsl);
-            shader_effects.ensure_target(device, id, w, h);
-            shader_effects.encode_pass(&mut encoder, queue, id, (w, h), time);
-            // Register on first use (stashed in the target entry) and mark dirty
-            // every frame so vello recopies the texture into its atlas.
-            if let Some(image) = shader_effects
-                .ensure_registered(id, w, h, |tex| renderer.register_texture(tex.clone()))
-            {
-                renderer.mark_override_image_dirty(&image);
-                shader_images.insert((id, w, h), image);
-            }
-        }
-        queue.submit([encoder.finish()]);
-    }
-
-    // Age out whole ids that have stopped being drawn entirely (screen
-    // navigation, a dynamic id, etc.) — computed from this frame's live ids
-    // regardless of whether `quads` was empty, so a scene that stops drawing
-    // shader quads altogether still ages out and reaps every previously-seen
-    // id rather than only ones still present. Reaping a stale id drops its
-    // real pipeline/target(s) and any `failed` record.
-    let live_ids: HashSet<u64> = live.iter().map(|&(id, _, _)| id).collect();
-    let reapable = shader_effects.mark_seen(&live_ids);
-    shader_effects.reap(&reapable);
-
-    // Reclaim the resized-away sizes of still-drawn programs (frame-scoped: two
-    // live sizes of one id both survive), then hand back any evicted target's
-    // image so vello stops treating its (now-dropped) texture as an override.
-    shader_effects.evict_stale_targets(&live);
-    for image in shader_effects.take_dropped_images() {
-        renderer.unregister_texture(image);
-    }
-
-    shader_images
-}
-
-/// The physical-pixel extent of a shader quad: the axis-aligned bounding box of
-/// `dest` mapped through `transform` (the root transform carries the DPI scale),
-/// as `(width, height)` rounded to whole pixels. Sizing the shader target in
-/// physical pixels keeps its rendered detail matched to the on-screen area. A
-/// degenerate/negative extent yields `0`, which `clamp_size` then floors to `1`.
-///
-/// `pub(crate)` so the encode-side lowering ([`convert::encode_into_with_shaders`])
-/// can recompute the identical `(w, h)` per quad — the shader-image map is keyed
-/// by `(program id, clamped physical size)`, so the lookup must derive the same
-/// size the pre-pass keyed the entry under.
-pub(crate) fn physical_size(transform: Affine, dest: kurbo::Rect) -> (u32, u32) {
-    let bbox = transform.transform_rect_bbox(dest);
-    let to_u32 = |v: f64| {
-        let v = v.round();
-        if v.is_finite() && v > 0.0 {
-            v as u32
-        } else {
-            0
-        }
-    };
-    (to_u32(bbox.width()), to_u32(bbox.height()))
 }
 
 #[cfg(test)]
@@ -2494,58 +1382,9 @@ mod tests {
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
     }
 
-    /// The main vello pass is skipped only when a composite pass will both
-    /// clear the target and cover it: a structure-only pre segment with pages
-    /// to draw. Every other frame renders exactly as it always did.
-    #[test]
-    fn only_a_structure_only_pre_segment_with_pages_skips_the_main_pass() {
-        assert!(
-            skips_main_pass(false, 1),
-            "a PushClip-only pre segment with a page to draw needs no vello pass"
-        );
-        assert!(
-            !skips_main_pass(false, 0),
-            "with no page there is no composite pass to clear the frame"
-        );
-        assert!(
-            !skips_main_pass(true, 2),
-            "a pre segment that paints must still be rendered"
-        );
-        assert!(!skips_main_pass(true, 0), "an ordinary frame is untouched");
-    }
-
-    /// The snapshot cache is live only for a surface all four refusals pass:
-    /// the kill switch off, a compositor for the attachment format, a
-    /// destination the straight blend is exact for, and an unscaled frame.
-    #[test]
-    fn the_snapshot_cache_is_enabled_only_for_a_surface_that_can_composite() {
-        assert!(snapshot_cache_enabled(false, true, false, false));
-        assert!(
-            !snapshot_cache_enabled(true, true, false, false),
-            "FRUST_NO_SNAPSHOT_LAYERS refuses on its own"
-        );
-        assert!(
-            !snapshot_cache_enabled(false, false, false, false),
-            "a composited page nothing draws is a missing page"
-        );
-        assert!(
-            !snapshot_cache_enabled(false, true, true, false),
-            "a translucent straight-alpha swapchain has no exact composite \
-             arithmetic — brackets lower inline"
-        );
-        assert!(
-            !snapshot_cache_enabled(false, true, false, true),
-            "FRUST_RENDER_SCALE refuses on its own: a cached page is \
-             composited in the target's device space, which a scaled root \
-             never reaches"
-        );
-        assert!(!snapshot_cache_enabled(true, false, true, true));
-    }
-
     /// One surface episode ending drops everything scoped to it: the
-    /// `Invalid`-reconfigure streak, the stashed base colour, and the
-    /// composite work (which holds handles on snapshot textures that died
-    /// with that surface).
+    /// `Invalid`-reconfigure streak and the stashed base colour, which
+    /// described a frame of the surface being replaced.
     ///
     /// Asserted through `adopt_surface_state` itself — the single door
     /// `install_surface` and `on_surface_destroyed` both go through — rather
@@ -2556,46 +1395,33 @@ mod tests {
     fn adopting_a_surface_state_drops_the_previous_frames_stashes() {
         let mut renderer = SurfaceRenderer::new();
         renderer.pending_base_color = Some(peniko::Color::WHITE);
-        renderer.pending_composite = Some(PendingComposite {
-            layers: Vec::new(),
-            trailing: None,
-            clear: Some(peniko::Color::BLACK),
-        });
         renderer.consecutive_invalid = 3;
 
         renderer.adopt_surface_state(SurfaceState::NoSurface);
 
         assert!(renderer.pending_base_color.is_none());
-        assert!(renderer.pending_composite.is_none());
         assert_eq!(renderer.consecutive_invalid, 0);
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
         // Idempotent, as the repeated-`Destroyed` contract needs.
         renderer.adopt_surface_state(SurfaceState::NoSurface);
-        assert!(renderer.pending_composite.is_none());
+        assert!(renderer.pending_base_color.is_none());
         assert_eq!(renderer.consecutive_invalid, 0);
     }
 
     /// The give-up arm of `acquire` leaves through the same door: adopting
-    /// [`SurfaceState::Lost`] drops both in-flight stashes, so a surface that
-    /// went away mid-frame does not keep its cached page textures alive (via
-    /// the composite stash's refcounted views) until the shell's next install.
+    /// [`SurfaceState::Lost`] drops the in-flight stash, so a surface that
+    /// went away mid-frame cannot hand its base colour to the next one.
     #[test]
     fn adopting_the_lost_state_drops_the_dying_surfaces_stashes() {
         let mut renderer = SurfaceRenderer::new();
         renderer.pending_base_color = Some(peniko::Color::WHITE);
-        renderer.pending_composite = Some(PendingComposite {
-            layers: Vec::new(),
-            trailing: None,
-            clear: None,
-        });
 
         renderer.adopt_surface_state(SurfaceState::Lost);
 
         assert_eq!(renderer.phase(), SurfacePhase::SurfaceLost);
-        assert!(renderer.pending_base_color.is_none());
         assert!(
-            renderer.pending_composite.is_none(),
-            "a lost surface's composite stash must not outlive it"
+            renderer.pending_base_color.is_none(),
+            "a lost surface's base colour must not outlive it"
         );
     }
 
@@ -2607,22 +1433,6 @@ mod tests {
         // punching holes it can't back.
         let renderer = SurfaceRenderer::new();
         assert!(!renderer.surface_resolved_translucent());
-    }
-
-    #[test]
-    fn physical_size_applies_the_dpi_scale_from_the_transform() {
-        // A 100x50 logical dest under a 2x DPI transform is a 200x100 physical
-        // target; the origin offset does not affect the extent.
-        let dest = kurbo::Rect::new(10.0, 20.0, 110.0, 70.0);
-        let transform = Affine::scale(2.0);
-        assert_eq!(physical_size(transform, dest), (200, 100));
-    }
-
-    #[test]
-    fn physical_size_rounds_and_floors_degenerate_extents_to_zero() {
-        // A zero-area dest yields (0, 0) — `clamp_size` later floors it to 1.
-        let dest = kurbo::Rect::new(5.0, 5.0, 5.0, 5.0);
-        assert_eq!(physical_size(Affine::IDENTITY, dest), (0, 0));
     }
 
     #[test]
@@ -2664,19 +1474,13 @@ mod tests {
         assert_eq!(outcome, FrameOutcome::Skipped);
     }
 
-    /// Destroy is idempotent, reaches `NoSurface`, and — the half that used
-    /// to be open-coded — drops BOTH in-flight stashes, not just the
-    /// composite one. A stale `base_color` describes the dead surface's frame
-    /// exactly as much as a stale composite does.
+    /// Destroy is idempotent, reaches `NoSurface`, and drops the in-flight
+    /// stash: a stale `base_color` describes the dead surface's frame, not
+    /// the next one's.
     #[test]
     fn destroy_is_idempotent_and_resets_to_no_surface() {
         let mut renderer = SurfaceRenderer::new();
         renderer.pending_base_color = Some(peniko::Color::WHITE);
-        renderer.pending_composite = Some(PendingComposite {
-            layers: Vec::new(),
-            trailing: None,
-            clear: Some(peniko::Color::BLACK),
-        });
 
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
@@ -2684,12 +1488,10 @@ mod tests {
             renderer.pending_base_color.is_none(),
             "the dying surface's base colour must not reach the next submit"
         );
-        assert!(renderer.pending_composite.is_none());
 
         renderer.on_surface_destroyed();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
         assert!(renderer.pending_base_color.is_none());
-        assert!(renderer.pending_composite.is_none());
     }
 
     #[test]
@@ -2721,77 +1523,6 @@ mod tests {
         assert_eq!(renderer.pipeline_cache_data(), None);
     }
 
-    /// End-to-end (real device) confirmation of the `FRUST_NO_SHADER_EFFECTS`
-    /// kill switch's full-no-op contract: `run_shader_prepass(.., disabled:
-    /// true)` returns zero map entries AND never calls `ensure_pipeline` — the
-    /// actual compiled-pipeline cache stays empty, not just "the caller
-    /// ignored the result" — confirming the kill switch is a true "zero GPU
-    /// work" no-op. `disabled` is passed directly rather than going through
-    /// `context::shader_effects_disabled()`'s process-cached `OnceLock`, so
-    /// this test needs no env-var mutation (the flag-parsing itself is
-    /// covered by `context::tests`' `env_flag_*` cases). The resulting empty
-    /// map is exactly the input `convert::tests::
-    /// shader_quad_miss_maps_to_placeholder_fill_rect_with_dest_and_transform`
-    /// (and the new kill-switch-labeled test beside it) confirm lowers every
-    /// `Command::ShaderQuad` to the placeholder fill via `RecordingSink`.
-    #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-    fn shader_prepass_is_a_full_no_op_when_disabled() {
-        pollster::block_on(run());
-
-        async fn run() {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions::default())
-                .await
-                .expect("no compatible GPU adapter");
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("frust renderer shader-disabled test"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                })
-                .await
-                .expect("failed to create device");
-            let mut vello_renderer =
-                vello::Renderer::new(&device, vello::RendererOptions::default())
-                    .expect("failed to create vello renderer");
-            let mut shader_effects = ShaderEffects::new(None);
-
-            let program = frust_scene::ShaderProgram::new(
-                "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> { \
-                 return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }",
-            );
-            let mut scene = frust_scene::Scene::new();
-            {
-                let mut builder = frust_scene::SceneBuilder::new(&mut scene);
-                builder.draw_shader(&program, kurbo::Rect::new(0.0, 0.0, 32.0, 32.0), 1.0);
-            }
-
-            let images = run_shader_prepass(
-                &device,
-                &queue,
-                &mut vello_renderer,
-                &mut shader_effects,
-                &scene,
-                4096,
-                true, // FRUST_NO_SHADER_EFFECTS forced on
-            );
-
-            assert!(
-                images.is_empty(),
-                "a disabled pre-pass must yield zero map entries"
-            );
-            assert!(
-                shader_effects.needs_compile(program.id()),
-                "a disabled pre-pass must never call ensure_pipeline — zero GPU work"
-            );
-        }
-    }
-
     /// The engine arm's real-device acceptance, headless.
     ///
     /// A windowed run is the arm's own acceptance and cannot happen on a box
@@ -2808,9 +1539,8 @@ mod tests {
     /// Run over BOTH surface formats, since which one a swapchain reports
     /// first is the platform's business and the engine warms its pipelines for
     /// exactly the one it is handed.
-    #[cfg(feature = "engine-tier")]
     #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render --features engine-tier -- --ignored`"]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
     fn engine_arm_records_a_frame_into_its_target_without_validation_errors() {
         /// Serializes every test in this binary that creates a GPU device, the
         /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
@@ -2865,7 +1595,7 @@ mod tests {
             );
         }
 
-        for format in crate::context::SURFACE_FORMATS {
+        for format in frust_gpu::SURFACE_FORMATS {
             let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
             let depth = frust_engine::DepthTexture::new(&device, SIZE, SIZE);
             let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)

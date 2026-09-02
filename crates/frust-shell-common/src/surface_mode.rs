@@ -79,8 +79,9 @@
 //! ([`ResolvedSurfaceMode`]) travelling back out to app/plugin code, whose
 //! whole reason to exist is
 //! [`ResolvedSurfaceMode::RefusedTranslucent`]: the host declared Mode B and
-//! the platform resolved opaque anyway (`docs/LIMITATIONS.md`'s
-//! `cam-blit-opaque`). Without it that case is invisible *and* unsignalled — a
+//! the platform resolved opaque anyway (its compositor offered no translucent
+//! `CompositeAlphaMode`; see `docs/NATIVE_WIDGETS_ARCHITECTURE.md`'s Mode-B
+//! paragraph). Without it that case is invisible *and* unsignalled — a
 //! native sibling arranged behind a now-opaque frust surface simply vanishes,
 //! with no way for app code to fall back deliberately.
 //!
@@ -218,8 +219,9 @@ pub enum ResolvedSurfaceMode {
     Translucent,
     /// **The refusal** (`translucencyRefused`): the host declared Mode B, and
     /// the platform resolved the surface opaque anyway — no matching
-    /// `CompositeAlphaMode`, or a GPU-tier blit-fallback surface that cannot
-    /// premultiply (`docs/LIMITATIONS.md`'s `cam-blit-opaque`).
+    /// `CompositeAlphaMode` (the engine's premultiplied output has no other
+    /// refusal case; see `docs/NATIVE_WIDGETS_ARCHITECTURE.md`'s Mode-B
+    /// paragraph).
     ///
     /// frust's own paint side degrades correctly (opaque clear, no hole
     /// punch), but the host's native-sibling z-order was fixed at build time:
@@ -414,8 +416,8 @@ mod tests {
         assert!(!resolved_surface_mode().translucency_refused());
     }
 
-    /// The whole point of the slot: declared Mode B, resolved opaque
-    /// (`docs/LIMITATIONS.md`'s `cam-blit-opaque`).
+    /// The whole point of the slot: declared Mode B, resolved opaque (the
+    /// platform offered no translucent `CompositeAlphaMode`).
     #[test]
     fn declared_but_opaque_resolution_is_refused() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

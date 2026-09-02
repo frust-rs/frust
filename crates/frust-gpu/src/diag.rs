@@ -40,7 +40,7 @@
 //! Metal samples a render pass's counters at the vertex/fragment *stage*
 //! boundaries, so a pass that runs neither stage — a pure clear, an empty
 //! pass — can leave its query pair unwritten, and the ring drops the pair
-//! rather than reporting a garbage span (see [`span_duration`]). This is a
+//! rather than reporting a garbage span (see `span_duration`). This is a
 //! measurement gap, never a correctness one: an untimed pass draws exactly
 //! what it always did. A span made of several passes, which is the shape every
 //! caller here uses, absorbs it — the drawing passes still report.
@@ -544,7 +544,10 @@ impl TimestampRing {
 fn harvest(slot: &RingFrame, used: usize, spans: usize, period_ns: f32) -> GpuFrameSpans {
     let mut reading = GpuFrameSpans::zeroed(spans);
     let bytes = (used * 2) as u64 * QUERY_BYTES;
-    let mapped = slot.readback.slice(0..bytes).get_mapped_range();
+    let mapped =
+        slot.readback.slice(0..bytes).get_mapped_range().expect(
+            "frust-gpu diag: the harvested slot's readback is mapped over the resolved range",
+        );
     let stride = (QUERY_BYTES * 2) as usize;
     for pair in 0..used {
         let at = pair * stride;

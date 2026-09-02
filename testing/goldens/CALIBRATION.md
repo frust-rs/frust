@@ -1,5 +1,10 @@
 # P3 Calibration: classic vs. `vello_cpu` 0.2.0 divergence budget (P2)
 
+> Recipe retired — `tests/calibration.rs` was deleted in p8-04a, alongside the
+> classic (vello) oracle it measured against. Kept as history; the engine's
+> P1 gate against `vello_cpu` 0.2.0 now runs each case's own fixed tolerance
+> (see `docs/TESTING.md` § Golden Classes).
+
 This document is the reviewed record of one run of
 `crates/frust-testing/tests/calibration.rs`'s
 `calibrates_the_engine_vs_classic_perceptual_budget` — the whole unit

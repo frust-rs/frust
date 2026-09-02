@@ -12,7 +12,7 @@
 //! either way.
 //!
 //! Ignored by default: the inner `cargo build` compiles the generated
-//! project's full dependency graph (winit/vello/wgpu/parley via the
+//! project's full dependency graph (winit/wgpu/frust-engine/parley via the
 //! `frust` facade) from a cold target dir, which takes several minutes.
 //! Run explicitly:
 //! `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
@@ -38,7 +38,7 @@ fn unique_dest() -> PathBuf {
 }
 
 #[test]
-#[ignore = "compiles the generated project's full dependency graph (winit/vello/wgpu); run explicitly with `--ignored`"]
+#[ignore = "compiles the generated project's full dependency graph (winit/wgpu/frust-engine); run explicitly with `--ignored`"]
 fn scaffolded_project_builds_against_the_real_facade() {
     let dest = unique_dest();
     let _ = std::fs::remove_dir_all(&dest);
@@ -108,7 +108,7 @@ fn scaffolded_project_builds_against_the_real_facade() {
 /// on every machine without the sibling. Run explicitly:
 /// `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
 #[test]
-#[ignore = "compiles the generated project's full dependency graph (winit/vello/wgpu/clean-signals); run explicitly with `--ignored`"]
+#[ignore = "compiles the generated project's full dependency graph (winit/wgpu/frust-engine/clean-signals); run explicitly with `--ignored`"]
 fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() {
     let dest = unique_dest();
     let _ = std::fs::remove_dir_all(&dest);

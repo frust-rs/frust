@@ -1,18 +1,27 @@
-//! Instance, adapter and lazy logical-device creation: [`Context`] and
+//! Instance, adapter and lazy logical-device creation: [`RenderContext`] and
 //! [`DeviceHandle`].
 //!
 //! This is the crate's entry point — everything else in `frust-gpu` consumes a
 //! [`DeviceHandle`] rather than reaching for a `wgpu::Adapter` itself. A
-//! [`Context`] owns one `wgpu::Instance` and at most one logical device, created
-//! lazily on the first [`Context::device`] call and then reused: a logical
-//! device is display-independent, so surface loss and recreation (rotation,
-//! backgrounding) must not rebuild it.
+//! [`RenderContext`] owns one `wgpu::Instance` and at most one logical device,
+//! created lazily on the first surface (or the first [`RenderContext::device`]
+//! call) and then reused: a logical device is display-independent, so surface
+//! loss and recreation (rotation, backgrounding) must not rebuild it.
+//!
+//! This is also the type `frust-render` re-exports as its own
+//! `frust_render::RenderContext`, which is what every platform shell holds: the
+//! device/surface foundation lives here, and the renderer above adds only the
+//! render-path decisions specific to how a frame is drawn.
+//!
+//! Surface creation itself lives in [`crate::surface`] and the raw-pointer
+//! constructors in [`crate::lifecycle`]; [`RenderContext::create_render_surface`]
+//! is the one entry point that ties them to a device.
 //!
 //! # Pure decision vs. platform lookup
 //!
 //! Every environment-sensitive choice here is split into a pure function taking
-//! the environment as an argument ([`effective_instance_flags`],
-//! [`effective_limits`], [`required_features`], [`decide_log_action`]) plus a
+//! the environment as an argument (`effective_instance_flags`,
+//! [`effective_limits`], `device_features`, [`decide_log_action`]) plus a
 //! separate lookup that answers what the environment actually is
 //! (`is_android_emulator`, [`is_ios_simulator`]). Only the lookups are
 //! platform-gated, so the policies stay unit-testable on any host with no GPU
@@ -24,7 +33,7 @@
 //!
 //! - The Android **emulator** cannot survive `wgpu::InstanceFlags::DEBUG`, so
 //!   the instance is built with those flags stripped there and nowhere else
-//!   ([`effective_instance_flags`]).
+//!   (`effective_instance_flags`).
 //! - The iOS **Simulator** misreports its uniform-buffer alignment, so a device
 //!   request made there is forced back up to 256 bytes ([`effective_limits`]).
 
@@ -34,16 +43,20 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Result, anyhow};
 
 use crate::caps::{DownlevelProfile, TierCaps};
+use crate::surface::{
+    ConfiguredSurface, SurfaceAlphaRequest, SurfaceFactory, resolve_alpha_mode,
+    select_surface_format,
+};
 
 /// Default `wgpu::Device` debug label, used when a caller supplies no
 /// [`ContextOptions::device_label`] of its own.
 const DEFAULT_DEVICE_LABEL: &str = "frust-gpu device";
 
-/// How a [`Context`] should build its instance and request its device.
+/// How a [`RenderContext`] should build its instance and request its device.
 ///
 /// Every field has a working default, so `ContextOptions::default()` is the
 /// ordinary construction — a field exists here only where a host genuinely has
-/// a choice to make.
+/// a choice to make, and [`RenderContext::new`] takes the defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextOptions {
     /// Debug label attached to the created `wgpu::Device`, surfaced by graphics
@@ -72,7 +85,7 @@ impl Default for ContextOptions {
 /// Cheap to clone: `wgpu`'s `Adapter`/`Device`/`Queue` are all `Arc`-backed
 /// handles to one underlying object, so a clone is another handle to the *same*
 /// device rather than a second device. Clone it freely to hand a subsystem the
-/// device it needs instead of threading a `&Context` borrow through it.
+/// device it needs instead of threading a `&RenderContext` borrow through it.
 #[derive(Clone, Debug)]
 pub struct DeviceHandle {
     /// The adapter the device was created from.
@@ -86,7 +99,7 @@ pub struct DeviceHandle {
     /// re-probing the adapter.
     pub caps: TierCaps,
     /// The first uncaptured error this device raised, latched by the handler
-    /// installed in [`Context::device`]. See [`Self::first_uncaptured_error`].
+    /// installed in [`create_device`]. See [`Self::first_uncaptured_error`].
     first_uncaptured_error: Arc<OnceLock<String>>,
 }
 
@@ -112,26 +125,54 @@ impl DeviceHandle {
 /// Owns the `wgpu::Instance` and the single logical device this crate's
 /// consumers render with.
 ///
-/// The device is created lazily — [`Context::new`] performs no adapter
-/// enumeration at all, so a host may build a `Context` early (before it has a
+/// A single `RenderContext` is shared across every surface a shell creates
+/// (frust is single-window); the device is created lazily on the first surface
+/// and reused across surface loss/recreation (rotation, backgrounding) since a
+/// logical device is display-independent. [`RenderContext::new`] performs no
+/// adapter enumeration at all, so a host may build one early (before it has a
 /// window, or on a thread that will never render) and pay for the device only
-/// at the first [`Context::device`] call.
-pub struct Context {
+/// at the first surface — or at an explicit
+/// [`ensure_device_headless`](Self::ensure_device_headless) pre-init.
+pub struct RenderContext {
     instance: wgpu::Instance,
     options: ContextOptions,
-    /// `None` until the first [`Context::device`] call succeeds.
+    /// `None` until a surface (or an explicit pre-init) creates the device.
     device: Option<DeviceHandle>,
 }
 
-impl Context {
-    /// Creates a context with a fresh `wgpu::Instance` and no device yet.
+impl Default for RenderContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RenderContext {
+    /// Creates a context with a fresh wgpu `Instance` and no device yet
+    /// (the device is created lazily on first surface creation).
     ///
     /// The instance flags come from the build configuration
     /// (`InstanceFlags::from_build_config`, which turns `DEBUG`/`VALIDATION` on
-    /// in debug builds) plus the standard `WGPU_*` environment overrides, and
-    /// are then run through [`effective_instance_flags`] on Android so an
-    /// emulator gets them stripped.
-    pub fn new(options: ContextOptions) -> Self {
+    /// in debug builds) plus the standard `WGPU_*` environment overrides. When
+    /// actually running on an Android *emulator* they are then run through
+    /// `effective_instance_flags`, which strips `DEBUG`/`VALIDATION`: the
+    /// `DEBUG` flag makes wgpu enable `VK_EXT_debug_utils` and set object-name
+    /// labels via `vkSetDebugUtilsObjectNameEXT`, and the emulator's gfxstream
+    /// Vulkan HAL (`vulkan.ranchu.so`) segfaults inside that entry point during
+    /// adapter enumeration (observed crash: `#00 vulkan.ranchu.so
+    /// vk_common_SetDebugUtilsObjectNameEXT`) — the same class of debug-utils
+    /// fragility a MoltenVK Vulkan backend is also known to have. Debug object
+    /// labels are only a developer convenience, so dropping them on the
+    /// emulator is a safe way to keep GPU bring-up alive there while leaving
+    /// physical devices' validation safety net — and desktop behavior —
+    /// untouched.
+    pub fn new() -> Self {
+        Self::with_options(ContextOptions::default())
+    }
+
+    /// [`Self::new`] with an explicit [`ContextOptions`] — a headless harness
+    /// that must label its device or pin one backend regardless of the ambient
+    /// environment. Every shell takes `new()`'s defaults instead.
+    pub fn with_options(options: ContextOptions) -> Self {
         let backends = options
             .backends
             .unwrap_or_else(|| wgpu::Backends::from_env().unwrap_or_default());
@@ -154,6 +195,45 @@ impl Context {
         }
     }
 
+    /// A cloneable [`SurfaceFactory`] sharing this context's wgpu `Instance`,
+    /// for creating a [`DetachedSurface`](crate::surface::DetachedSurface) on
+    /// the windowing/main thread when the context itself lives on the render
+    /// thread (the render-thread split). The surface a clone produces stays
+    /// compatible with the device this context creates, since both share one
+    /// Arc-backed instance.
+    pub fn surface_factory(&self) -> SurfaceFactory {
+        SurfaceFactory::new(&self.instance)
+    }
+
+    /// This context's wgpu `Instance`, for the two raw-pointer surface
+    /// constructors in [`crate::lifecycle`] (the mobile shells' path, which
+    /// receives an `ANativeWindow*`/`CAMetalLayer*` rather than a window
+    /// handle a [`SurfaceFactory`] could take).
+    ///
+    /// Hidden from the rendered docs rather than made private, on the same
+    /// grounds as
+    /// [`DetachedSurface::into_surface`](crate::surface::DetachedSurface::into_surface):
+    /// the renderer crate above this one is the intended (and only) caller,
+    /// and no layer above *it* may re-export this accessor.
+    #[doc(hidden)]
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+
+    /// The single logical device, panicking if no surface has created it yet.
+    ///
+    /// Only called from the renderer's install/resize/render paths, all of
+    /// which run strictly after a `create_*_surface`, so the device is always
+    /// present. Use [`Self::device`] for the fallible, creating form.
+    ///
+    /// Hidden from the rendered docs for the same reason as [`Self::instance`].
+    #[doc(hidden)]
+    pub fn device_handle(&self) -> &DeviceHandle {
+        self.device
+            .as_ref()
+            .expect("device must be created before it is used (surface creation creates it)")
+    }
+
     /// The logical device, creating it on first call and returning the same one
     /// afterwards.
     ///
@@ -169,9 +249,7 @@ impl Context {
     /// adapter's own limits were computed for is nonetheless refused. Both are
     /// terminal for GPU rendering; neither is retryable by calling again.
     pub async fn device(&mut self) -> Result<&DeviceHandle> {
-        if self.device.is_none() {
-            self.device = Some(create_device(&self.instance, &self.options).await?);
-        }
+        self.ensure_device_headless().await?;
         Ok(self
             .device
             .as_ref()
@@ -180,22 +258,202 @@ impl Context {
 
     /// What the live device's adapter reported, or `None` while the device is
     /// still uncreated — capabilities are an adapter's answer, and no adapter
-    /// has been selected before the first [`Context::device`] call.
+    /// has been selected before the first device creation.
     pub fn caps(&self) -> Option<&TierCaps> {
         self.device.as_ref().map(|handle| &handle.caps)
     }
+
+    /// Whether the live device was created with `wgpu::Features::PIPELINE_CACHE`.
+    ///
+    /// wgpu only implements the persisted pipeline cache on Vulkan — every
+    /// Vulkan adapter advertises it (Android, Linux, Windows-on-Vulkan);
+    /// Metal and DX12 adapters never do, so it is absent there and
+    /// [`create_pipeline_cache`](Self::create_pipeline_cache) returns `None` —
+    /// the renderer then behaves exactly as it did before this path existed.
+    /// Panics if no surface (and thus no device) has been created yet.
+    pub fn pipeline_cache_supported(&self) -> bool {
+        self.device_handle()
+            .device
+            .features()
+            .contains(wgpu::Features::PIPELINE_CACHE)
+    }
+
+    /// The adapter fingerprint a persisted pipeline-cache blob is tagged with
+    /// (see [`crate::pipeline_cache`]). Panics if no device has been created yet.
+    pub fn adapter_cache_key(&self) -> String {
+        crate::pipeline_cache::adapter_cache_key(&self.device_handle().adapter.get_info())
+    }
+
+    /// Creates a `wgpu::PipelineCache` for the live device, seeded from a
+    /// previously persisted, framed `blob` when it validates for this adapter.
+    ///
+    /// Returns `None` when the device lacks `PIPELINE_CACHE` support (Metal/
+    /// desktop) — the renderer then runs its original, cache-less path. A `blob`
+    /// that fails framing/adapter validation
+    /// ([`crate::pipeline_cache::unframe`]) is discarded and the cache starts
+    /// empty; a `None` `blob` is a cold start.
+    ///
+    /// Hidden from the rendered docs for the same reason as [`Self::instance`].
+    ///
+    /// # Safety
+    ///
+    /// This is the sole sanctioned unsafe site in this module, and the
+    /// obligation is the caller's, not something this method can fully close
+    /// on its own: `unframe`'s magic-tag-plus-adapter-fingerprint check proves
+    /// only that `blob` was framed by `frust-gpu`'s own framing for *this*
+    /// adapter — provenance by convention, not a proof of the actual wgpu
+    /// contract on [`wgpu::Device::create_pipeline_cache`], which requires a
+    /// non-`None` `data` to have come from a prior `PipelineCache::get_data()`
+    /// on a `pipeline_cache_key`-compatible adapter. The caller must ensure
+    /// `blob` is exactly that: a blob previously produced by this driver's own
+    /// pipeline-cache output for this adapter, as persisted by `frust-render`'s
+    /// caching layer (`SurfaceRenderer::pipeline_cache_data`/
+    /// `set_initial_pipeline_cache_data`). A forged blob that nonetheless
+    /// passes the framing/fingerprint check is undefined behaviour per wgpu's
+    /// contract — `fallback: true` only covers a residual *internal* mismatch
+    /// wgpu itself detects, not a blob that misleads it into misbehaving.
+    #[doc(hidden)]
+    pub unsafe fn create_pipeline_cache(&self, blob: Option<&[u8]>) -> Option<wgpu::PipelineCache> {
+        if !self.pipeline_cache_supported() {
+            return None;
+        }
+        let handle = self.device_handle();
+        let key = crate::pipeline_cache::adapter_cache_key(&handle.adapter.get_info());
+        let data = blob.and_then(|b| crate::pipeline_cache::unframe(b, &key));
+        log::debug!(
+            "frust-gpu: creating wgpu PipelineCache (seed: {})",
+            if data.is_some() {
+                "persisted blob"
+            } else {
+                "empty"
+            }
+        );
+        // SAFETY: see this method's `# Safety` section — `data` has already been
+        // validated against this adapter's fingerprint by `unframe`, and
+        // `fallback: true` turns any residual internal mismatch into a
+        // fall-back-to-empty cache rather than UB.
+        let cache = unsafe {
+            handle
+                .device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("frust-gpu pipeline cache"),
+                    data,
+                    fallback: true,
+                })
+        };
+        Some(cache)
+    }
+
+    /// Lazily create the logical device compatible with `surface`, requesting
+    /// the adapter's own limits (never `Limits::default()`, which the iOS
+    /// Simulator cannot satisfy) plus the #7057 alignment mitigation. Reuses
+    /// an already-created device when it is compatible with `surface`, so
+    /// surface loss/recreation (rotation, backgrounding) never rebuilds it — and
+    /// so a device the [`ensure_device_headless`](Self::ensure_device_headless)
+    /// pre-init created before any surface existed is adopted here rather than
+    /// rebuilt.
+    ///
+    /// Hidden from the rendered docs for the same reason as [`Self::instance`]:
+    /// the renderer above calls it to have a device in hand before it sizes its
+    /// own per-surface attachments; nothing higher may.
+    #[doc(hidden)]
+    pub async fn ensure_device(&mut self, surface: &wgpu::Surface<'static>) -> Result<()> {
+        if let Some(existing) = &self.device
+            && existing.adapter.is_surface_supported(surface)
+        {
+            return Ok(());
+        }
+        self.device = Some(create_device(&self.instance, &self.options, Some(surface)).await?);
+        Ok(())
+    }
+
+    /// Create the logical device **before any surface exists**, so the wgpu
+    /// instance/adapter/device bring-up can run on a
+    /// background thread kicked at native-library load (`JNI_OnLoad`) and be
+    /// joined by `nativeInit` instead of running serially after `surfaceCreated`.
+    /// Idempotent: a no-op when a device already exists.
+    ///
+    /// # Android singular-adapter assumption
+    ///
+    /// Requesting the adapter with `compatible_surface: None` picks wgpu's
+    /// default adapter rather than one filtered to a specific surface. On Android
+    /// the Vulkan backend exposes a single physical device, so the adapter chosen
+    /// here is the same one a later surface-filtered request would pick, and
+    /// [`ensure_device`](Self::ensure_device)'s `is_surface_supported` reuse check
+    /// accepts it — the surface created at `nativeInit` reuses this device with no
+    /// rebuild. On a hypothetical multi-adapter device where the pre-init adapter
+    /// did *not* support the eventual surface, `ensure_device` simply rebuilds the
+    /// device against that surface (still correct, just without the overlap win).
+    /// This is the sole production caller that passes `None` below; desktop/iOS
+    /// create their device through the surface path and never invoke it.
+    pub async fn ensure_device_headless(&mut self) -> Result<()> {
+        if self.device.is_some() {
+            return Ok(());
+        }
+        self.device = Some(create_device(&self.instance, &self.options, None).await?);
+        Ok(())
+    }
+
+    /// Builds a configured [`ConfiguredSurface`] from a raw wgpu `Surface`,
+    /// creating the logical device if needed.
+    ///
+    /// The result is renderer-agnostic: the swapchain, the configuration it was
+    /// brought up with, and the resolved alpha facts. Whatever per-frame render
+    /// path a renderer pairs with it is that renderer's own business — see
+    /// `frust_render::context`'s `EngineSurface`.
+    ///
+    /// Hidden from the rendered docs for the same reason as [`Self::instance`].
+    #[doc(hidden)]
+    pub async fn create_render_surface(
+        &mut self,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        present_mode: wgpu::PresentMode,
+        alpha: SurfaceAlphaRequest,
+    ) -> Result<ConfiguredSurface> {
+        self.ensure_device(&surface).await?;
+        let handle = self.device_handle();
+
+        let capabilities = surface.get_capabilities(&handle.adapter);
+        // Resolved from the request and the surface's reported caps alone; the
+        // renderer above reads it back off the returned configuration to pick
+        // its own per-frame path.
+        let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
+        // Whichever supported format the surface reports FIRST — the surface's
+        // own preference order, not this module's (see `select_surface_format`).
+        let format = select_surface_format(&capabilities)?;
+
+        Ok(ConfiguredSurface::configure(
+            surface,
+            &handle.device,
+            format,
+            alpha_mode,
+            (width, height),
+            present_mode,
+        ))
+    }
 }
 
-/// Selects an adapter, probes it, and requests the logical device — the body of
-/// [`Context::device`]'s lazy arm.
+/// Selects an adapter, probes it, and requests the logical device — the body
+/// both [`RenderContext::ensure_device`] and
+/// [`RenderContext::ensure_device_headless`] share.
+///
+/// `compatible_surface` filters adapter selection to one that can present to the
+/// given surface; `None` (the pre-init path, and every headless caller) selects
+/// wgpu's default adapter — see the singular-adapter note on
+/// `ensure_device_headless`. The capability probe, limits mitigation, feature
+/// request and uncaptured-error handler are identical either way: the surface
+/// only ever affected adapter selection, never the device it yields.
 ///
 /// A free function rather than a method so it borrows the instance and options
-/// separately from the `device` field [`Context::device`] is assigning into.
+/// separately from the `device` field the callers assign into.
 async fn create_device(
     instance: &wgpu::Instance,
     options: &ContextOptions,
+    compatible_surface: Option<&wgpu::Surface<'static>>,
 ) -> Result<DeviceHandle> {
-    let adapter = wgpu::util::initialize_adapter_from_env_or_default(instance, None)
+    let adapter = wgpu::util::initialize_adapter_from_env_or_default(instance, compatible_surface)
         .await
         .map_err(|e| anyhow!("frust-gpu: no compatible GPU adapter: {e}"))?;
 
@@ -211,19 +469,21 @@ async fn create_device(
     // so the request never asks for a resolution the adapter cannot satisfy
     // (the swapchain may need more than the downlevel default allows) while
     // every other WebGL2 default limit is requested as-is. Under
-    // `DownlevelProfile::Full` this reads the adapter directly rather than
-    // going through `caps`: the summarised capabilities carry the individual
-    // limits decisions are made from, not the struct `request_device`
-    // requires, and feeding the *adapter's* limits (rather than
-    // `Limits::default()`) is what keeps the request from over-asking and
-    // failing on a constrained mobile adapter.
+    // `DownlevelProfile::Full` — every shipping device — this reads the adapter
+    // directly rather than going through `caps`: the summarised capabilities
+    // carry the individual limits decisions are made from, not the struct
+    // `request_device` requires, and feeding the *adapter's* limits (rather
+    // than `Limits::default()`) is what keeps the request from over-asking and
+    // failing on a constrained mobile adapter — or on the iOS Simulator, whose
+    // macOS-Metal-backed device refuses `Limits::default()` outright.
     let base_limits = if caps.downlevel_profile == DownlevelProfile::WebGl2 {
         wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
     } else {
         adapter.limits()
     };
     let required_limits = effective_limits(base_limits, is_ios_simulator());
-    let required_features = required_features(&caps, cfg!(feature = "perf-trace"));
+    let required_features =
+        device_features(adapter.features(), &caps, cfg!(feature = "perf-trace"));
 
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
@@ -236,18 +496,26 @@ async fn create_device(
         .map_err(|e| anyhow!("frust-gpu: failed to create GPU device: {e}"))?;
 
     // Route wgpu's uncaptured errors to the log and a latch instead of its
-    // default handler, which panics — "handling wgpu errors as fatal by
-    // default". A UI framework must survive a driver's *transient* GPU error
-    // and recover on a later frame rather than abort the process, which across
-    // a mobile FFI boundary means killing the host app. Genuine API misuse is
-    // still surfaced loudly at error level.
+    // default handler, which aborts the process by panicking ("handling wgpu
+    // errors as fatal by default"). A UI framework must survive a driver's
+    // *transient* GPU error and recover on a later frame rather than crash —
+    // e.g. the Android emulator's SwiftShader path can raise a one-off
+    // swapchain-acquire validation error under load, which used to wedge the
+    // app into a per-frame panic loop (the surface stayed ready and every
+    // subsequent render re-hit the fatal handler). Pairing this with the
+    // `Invalid`-acquire → reconfigure recovery (see [`crate::lifecycle`]) lets
+    // the swapchain rebuild and rendering resume. Across a mobile FFI boundary
+    // the default handler's abort means killing the host app outright. Genuine
+    // API misuse is still surfaced — loudly, at error level — just without
+    // killing the process.
     //
     // Two pieces of state, both per-device (captured fresh each time this
-    // closure is installed) and both behind `Arc` because the handler must be
-    // `Fn`, not `FnMut`:
+    // closure is installed, i.e. once per logical device) and both behind `Arc`
+    // because `on_uncaptured_error`'s handler must be `Fn`, not `FnMut`:
     //
     // - `error_count` drives the log latch ([`decide_log_action`]), so a device
-    //   wedged in a per-frame error storm cannot flood the log forever.
+    //   wedged in a genuine per-frame error storm (as opposed to a one-off
+    //   driver hiccup) cannot flood the log forever.
     // - `first_error` latches the first error's text for the frame loop to
     //   poll via [`DeviceHandle::first_uncaptured_error`]. `OnceLock` gives
     //   exactly first-write-wins with no lock held across the handler body.
@@ -345,12 +613,12 @@ const IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT: u32 = 256;
 /// Upstream [gfx-rs/wgpu PR #10189](https://github.com/gfx-rs/wgpu/pull/10189)
 /// makes this unnecessary — drop it once a pinned wgpu release contains it.
 ///
-/// Pure decision logic, mirroring [`effective_instance_flags`]'s split of pure
+/// Pure decision logic, mirroring `effective_instance_flags`'s split of pure
 /// decision vs. platform lookup. It is fed the profile-resolved base limits
-/// (see [`create_device`]) — the adapter's own limits under
+/// (see this module's `create_device`) — the adapter's own limits under
 /// `DownlevelProfile::Full`, the WebGL2 downlevel defaults resolution-folded
 /// with the adapter otherwise — so the device request never over-asks.
-fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
+pub fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
     if is_ios_simulator
         && base.min_uniform_buffer_offset_alignment
             < IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT
@@ -369,26 +637,60 @@ fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits 
 /// sets `target_abi = "sim"`. Compile-time constant: the simulator mitigation
 /// only needs to apply to simulator builds, never physical-device or desktop
 /// ones.
-const fn is_ios_simulator() -> bool {
+pub const fn is_ios_simulator() -> bool {
     cfg!(all(target_os = "ios", target_abi = "sim"))
 }
 
-/// The `wgpu::Features` a device request should ask for, given what the adapter
-/// offers and whether this build compiled the `perf-trace` feature in.
+/// The `wgpu::Features` a device request opportunistically asks for when the
+/// adapter exposes them.
+///
+/// `PIPELINE_CACHE` alone: it is what
+/// [`create_pipeline_cache`](RenderContext::create_pipeline_cache) needs to
+/// seed the renderer's shader-pipeline compilation from a persisted blob. An
+/// optional feature is only ever *added* when the adapter already offers it,
+/// so this can never turn a working adapter into a failed device request.
+pub fn optional_device_features() -> wgpu::Features {
+    wgpu::Features::PIPELINE_CACHE
+}
+
+/// The `wgpu::Features` a device request must genuinely *require*, given what
+/// the adapter reported ([`TierCaps`]) and whether this build compiled the
+/// `perf-trace` feature in.
 ///
 /// The policy is deliberately minimal: **empty** by default. A required feature
 /// is a hard device-creation failure on any adapter lacking it, so asking for
 /// something the crate does not actually need converts a working device into no
-/// device at all. `TIMESTAMP_QUERY` is the single exception — it is what GPU
-/// timing probes are built on, so a `perf-trace` build asks for it, and even
-/// then only when the adapter offers it, so enabling the feature can never turn
-/// a working adapter into a failed device request.
+/// device at all. `TIMESTAMP_QUERY` is the single exception — it is what the
+/// GPU timing probes ([`crate::diag::TimestampRing`]) are built on, so a
+/// `perf-trace` build asks for it, and even then only when the adapter offers
+/// it. A device that did not get the feature leaves the ring inert (`gpu_q=0`),
+/// exactly as a build without `perf-trace` does.
+///
+/// A plain `bool` parameter rather than reading `cfg!` internally, so both
+/// branches are unit-testable regardless of which features this crate was
+/// compiled with.
 fn required_features(caps: &TierCaps, perf_trace: bool) -> wgpu::Features {
     if perf_trace && caps.has_timestamp_query {
         wgpu::Features::TIMESTAMP_QUERY
     } else {
         wgpu::Features::empty()
     }
+}
+
+/// The complete `required_features` set a device request is made with: the
+/// opportunistic set ([`optional_device_features`]) narrowed to what
+/// `adapter_features` actually offers, plus the genuinely required set
+/// ([`required_features`]).
+///
+/// Both halves are adapter-conditioned, so this can never turn a working
+/// adapter into a failed device request — which is why the policy is split out
+/// of [`create_device`] as a pure function over plain values.
+fn device_features(
+    adapter_features: wgpu::Features,
+    caps: &TierCaps,
+    perf_trace: bool,
+) -> wgpu::Features {
+    (adapter_features & optional_device_features()) | required_features(caps, perf_trace)
 }
 
 /// Number of uncaptured `wgpu` errors logged at error level per device before
@@ -407,9 +709,13 @@ const UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD: u32 = 100;
 
 /// What the uncaptured-error handler should do for the `count`-th uncaptured
 /// error (1-indexed) it has observed on a given device.
+///
+/// Also the latch the renderer above reuses for its own per-frame event that
+/// can reproduce every vsync (an engine frame refusal), so the two report at
+/// the same cadence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LogAction {
-    /// One of the first [`MAX_LOGGED_UNCAPTURED_ERRORS`]: log the error itself
+pub enum LogAction {
+    /// One of the first `MAX_LOGGED_UNCAPTURED_ERRORS`: log the error itself
     /// at error level.
     Log,
     /// The first error past the cap: log one suppression notice (naming the
@@ -422,11 +728,11 @@ enum LogAction {
 
 /// Pure latch policy for the uncaptured-error handler (see [`LogAction`]).
 ///
-/// Split out of the handler closure in [`create_device`] so the discipline —
-/// log the first few, announce the latch once, then go quiet except an
-/// occasional debug bump — is unit-testable without a GPU or a real
+/// Split out of the handler closure in this module's `create_device` so the
+/// discipline — log the first few, announce the latch once, then go quiet
+/// except an occasional debug bump — is unit-testable without a GPU or a real
 /// `wgpu::Error`.
-fn decide_log_action(count: u32) -> LogAction {
+pub fn decide_log_action(count: u32) -> LogAction {
     if count <= MAX_LOGGED_UNCAPTURED_ERRORS {
         LogAction::Log
     } else if count == MAX_LOGGED_UNCAPTURED_ERRORS + 1 {
@@ -585,6 +891,44 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_cache_is_requested_whenever_the_adapter_offers_it() {
+        // The shipped Android/Vulkan warm-start path: `PIPELINE_CACHE` is
+        // opportunistically added, which is what makes
+        // `RenderContext::pipeline_cache_supported` true there and the
+        // persisted-blob seed possible at all. Dropping it would silently kill
+        // the warm start on every Vulkan adapter.
+        let caps = TierCaps::fake(DownlevelProfile::Full);
+        let adapter = wgpu::Features::PIPELINE_CACHE | wgpu::Features::DEPTH_CLIP_CONTROL;
+        assert_eq!(
+            device_features(adapter, &caps, false),
+            wgpu::Features::PIPELINE_CACHE,
+            "an offered optional feature is taken, and nothing else is"
+        );
+    }
+
+    #[test]
+    fn an_adapter_without_pipeline_cache_is_never_asked_for_it() {
+        // Metal/DX12: the feature is absent, so the request must not name it —
+        // a required feature the adapter lacks is a hard device-creation
+        // failure, i.e. no GPU at all rather than merely no persisted cache.
+        let caps = TierCaps::fake(DownlevelProfile::Full);
+        assert_eq!(
+            device_features(wgpu::Features::empty(), &caps, false),
+            wgpu::Features::empty()
+        );
+    }
+
+    #[test]
+    fn a_perf_trace_build_asks_for_both_halves_when_both_are_offered() {
+        let caps = TierCaps::fake(DownlevelProfile::Full);
+        assert!(caps.has_timestamp_query, "fixture precondition");
+        assert_eq!(
+            device_features(wgpu::Features::PIPELINE_CACHE, &caps, true),
+            wgpu::Features::PIPELINE_CACHE | wgpu::Features::TIMESTAMP_QUERY
+        );
+    }
+
+    #[test]
     fn default_options_label_the_device_and_leave_backends_to_the_environment() {
         let options = ContextOptions::default();
         assert_eq!(options.device_label, DEFAULT_DEVICE_LABEL);
@@ -595,7 +939,7 @@ mod tests {
     fn a_fresh_context_has_no_device_and_therefore_no_caps() {
         // Construction must not enumerate adapters, so this is a host test, not
         // a GPU one: it passes on a machine with no usable GPU at all.
-        let context = Context::new(ContextOptions::default());
+        let context = RenderContext::new();
         assert!(context.caps().is_none());
     }
 
@@ -604,7 +948,7 @@ mod tests {
                 (pin the adapter on a multi-GPU host with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
     fn gpu_device_creation_reports_adapter_caps() {
         pollster::block_on(async {
-            let mut context = Context::new(ContextOptions::default());
+            let mut context = RenderContext::new();
             let handle = context.device().await.expect("device creation");
 
             let info = handle.adapter.get_info();

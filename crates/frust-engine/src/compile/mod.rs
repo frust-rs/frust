@@ -102,6 +102,10 @@ static IMAGE_SKIP_WARNING: Once = Once::new();
 /// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
 static FONT_SKIP_WARNING: Once = Once::new();
 
+/// Raised the first time the compiler drops a [`Command::ShaderQuad`], on the
+/// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
+static SHADER_QUAD_SKIP_WARNING: Once = Once::new();
+
 /// Where one glyph an atlas-routed draw sampled lives in the atlas array.
 ///
 /// The image half of residency travels as an [`ImageUpload`], carrying pixels;
@@ -146,8 +150,8 @@ pub struct CompiledFrame {
     /// Paints too complex to inline into a draw, indexed by
     /// [`Paint::Indexed`](vello_common::paint::Paint::Indexed).
     pub encoded_paints: Vec<EncodedPaint>,
-    /// The frame's hole punches, hoisted to the root and issued as one
-    /// destination-out pass after every draw (see [`clear`]).
+    /// The frame's hole punches, hoisted to the root and issued at the
+    /// punch's own painter-order position (see [`clear`]).
     ///
     /// Deliberately not draws: a punch erases rather than paints, and keeping
     /// it out of the recording is what lets a target that disregards alpha
@@ -1040,8 +1044,10 @@ impl SceneCompiler {
             // Recognised but not yet compiled. Listed one by one rather than
             // caught by a wildcard so a command added to the display list
             // fails to compile here instead of silently vanishing from every
-            // frame.
-            Command::ShaderQuad { .. } => {}
+            // frame. Tracked as `engine-shader-quad-unwired` in
+            // docs/LIMITATIONS.md until the GPU-seam work wires this command
+            // through; the drop itself is unchanged, just no longer silent.
+            Command::ShaderQuad { .. } => note_shader_quad_skip(),
         }
     }
 
@@ -1536,6 +1542,22 @@ fn note_font_skip() {
     log::debug!("glyph run skipped: its font blob is not a readable face");
 }
 
+/// Report that the compiler dropped a [`Command::ShaderQuad`].
+///
+/// Latched to once per process rather than following [`note_image_skip`] and
+/// [`note_font_skip`]'s warn-then-debug shape: a shader quad's absence is a
+/// standing, known gap (see `engine-shader-quad-unwired` in
+/// docs/LIMITATIONS.md) rather than a per-frame refusal worth re-reporting at
+/// debug level on every later drop.
+fn note_shader_quad_skip() {
+    SHADER_QUAD_SKIP_WARNING.call_once(|| {
+        log::warn!(
+            "ShaderQuad command dropped: the engine compiler does not draw shader quads yet \
+             (see docs/LIMITATIONS.md `engine-shader-quad-unwired`; logged once per process)"
+        );
+    });
+}
+
 /// The transform a command carries, or `None` for one that carries none.
 fn command_transform(command: &Command) -> Option<Affine> {
     match command {
@@ -1991,5 +2013,22 @@ mod tests {
         assert!(is_pixel_aligned(Rect::new(0.0, 0.0, 4.0, 4.0)));
         assert!(!is_pixel_aligned(Rect::new(0.0, 0.5, 4.0, 4.0)));
         assert!(!is_pixel_aligned(Rect::new(0.0, 0.0, 4.0, f64::INFINITY)));
+    }
+
+    /// [`SHADER_QUAD_SKIP_WARNING`] is a process-global [`Once`], so this
+    /// proves the half of "exactly once" a test can still observe once
+    /// another test in the same binary may already have tripped it: the
+    /// latch never un-completes, whatever else in this binary called
+    /// [`note_shader_quad_skip`] first. `Once::call_once` itself is the
+    /// standard-library guarantee behind the other half — that the closure
+    /// inside it runs at most once ever — so calling the reporting function
+    /// twice here and observing the latch hold is a structural stand-in for
+    /// capturing and counting the actual log line.
+    #[test]
+    fn a_dropped_shader_quad_is_latched_to_once_per_process() {
+        note_shader_quad_skip();
+        assert!(SHADER_QUAD_SKIP_WARNING.is_completed());
+        note_shader_quad_skip();
+        assert!(SHADER_QUAD_SKIP_WARNING.is_completed());
     }
 }

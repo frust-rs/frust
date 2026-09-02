@@ -1655,8 +1655,7 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// particular frame's alpha/scale happen to be. **The bracket rect origin must
 /// follow the pod's absolute paint origin** — `ctx.origin() + (layer.dx,
 /// layer.dy)` — so the painted body lands inside the texture (preventing crops
-/// of the shifted body) and the renderer's frame-relative fingerprint stays
-/// slide-invariant. The scale pivot still centers on the rect, which now
+/// of the shifted body). The scale pivot still centers on the rect, which now
 /// follows the slid page.
 fn paint_page_layer(
     pod: &mut ChildPod,

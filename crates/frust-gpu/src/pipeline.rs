@@ -67,7 +67,7 @@
 //! them, so a worker on its way out can never be mistaken for one that will
 //! still pick up the job just queued.
 //!
-//! A compile that unwinds marks its variant [`JobState::Failed`] instead of
+//! A compile that unwinds marks its variant `JobState::Failed` instead of
 //! leaving it claimable-but-unreachable: the queue entry is already spent, so
 //! a `Pending` job nobody re-queues is a job the worker can never build again
 //! and `queued_variants` would count forever. `Failed` is terminal for the
@@ -947,10 +947,14 @@ fn build_render_pipeline(
     let module = shaders
         .get(desc.shader)
         .expect("a RenderPipelineDesc's ShaderId must come from this cache's ShaderLibrary");
-    let layouts: Vec<wgpu::VertexBufferLayout<'_>> = desc
+    // `wgpu::VertexState::buffers` is a slice of `Option`s: a `None` slot
+    // declares a vertex-buffer index the pipeline leaves unbound. Every layout
+    // this cache carries is used, so each one is wrapped in `Some` and no gap
+    // is ever produced.
+    let layouts: Vec<Option<wgpu::VertexBufferLayout<'_>>> = desc
         .vertex_layouts
         .iter()
-        .map(VertexLayout::as_wgpu)
+        .map(|layout| Some(VertexLayout::as_wgpu(layout)))
         .collect();
     let label = format!(
         "frust-gpu pipeline: {name} [{:?}, msaa x{}]",

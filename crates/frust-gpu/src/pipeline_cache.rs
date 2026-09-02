@@ -19,12 +19,13 @@
 //! `create_pipeline_cache(fallback: true)`, which already falls back to an empty
 //! cache for mismatched data rather than misbehaving.
 //!
-//! **The framing is byte-identical to `frust-render`'s `pipeline_cache`
-//! module** — same magic tag, same header layout, same adapter-key
-//! composition — so a blob a shell persisted while running the `frust-render`
-//! path validates unchanged once the same shell runs the engine path, and vice
-//! versa. Neither copy may change the layout without the other: bump [`MAGIC`]
-//! in both if it ever does.
+//! This is the **only** copy of the framing: `frust-render` used to carry an
+//! identical one (kept in lockstep by a drift-guard test) and now re-exports
+//! this module instead, so the on-disk layout has exactly one definition. A
+//! blob persisted by any earlier frust build still validates here unchanged —
+//! bump this module's `MAGIC` if the layout ever does change, so an old blob
+//! is rejected
+//! rather than misparsed.
 
 /// Magic tag prefixing every framed blob: `Frust PipeLine Cache wgpu v1`.
 /// Bumped if the framing layout below ever changes so an old on-disk blob is
