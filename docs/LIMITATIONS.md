@@ -3852,3 +3852,32 @@ limits half of the question.
 
 **Trigger for removal**: the Web Shell plan reaching its own wasm/browser
 measurement pass.
+
+### `engine-shader-quad-unwired` — `draw_shader`/`Command::ShaderQuad` paints nothing on the only renderer
+
+**Observed** (evidence: `crates/frust-engine/src/compile/mod.rs`'s
+`Command::ShaderQuad { .. } => note_shader_quad_skip()` arm;
+`examples/shadertoy` shows a blank effect area on the engine tier): the
+vello-classic-era encode-time shader pre-pass died with vello's removal as a
+render tier, and `frust-render/src/shader_effects.rs` is explicitly
+documented `Currently UNWIRED` — nothing calls it. The compiler's own
+`ShaderQuad` arm recognises the command and still draws nothing, but the drop
+is no longer silent: it raises a `log::warn!` naming the command and this
+entry, latched to once per process so a scene that keeps recording shader
+quads does not repeat it every frame. `crates/frust-testing`'s
+`unit-shader-quad` corpus case is covered by neither golden arm: it sits in
+`engine_goldens.rs`'s `DEFERRED_CASES` rather than its scored set, because a
+compiled engine frame would legitimately omit its subject, and it also names
+itself in its own case spec's backend skip list for the CPU oracle, so
+`oracle_cpu.rs`'s own opaque placeholder stand-in color is never even
+produced for this case.
+
+**Accepted because**: this is an interim registration, not a fix — the
+GPU-seam work that would wire `Command::ShaderQuad` through the engine
+renderer needs `frust-render/src/shader_effects.rs` rebuilt against the
+engine's own pipeline, and drawing nothing stays strictly safer than drawing
+wrong pixels while that is outstanding.
+
+**Trigger for removal**: the GPU-seam work wiring `Command::ShaderQuad`
+through to the engine renderer, at which point this entry, the corpus
+deferral, and the latched warning all come out together.

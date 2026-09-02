@@ -987,20 +987,21 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
-/// `Command::ShaderQuad`, SKIPPED on the CPU oracle.
+/// `Command::ShaderQuad`, unrendered on both arms — see `docs/LIMITATIONS.md`
+/// `engine-shader-quad-unwired`.
 ///
-/// There is no shader pre-pass without a GPU, so the CPU arm can only lower
-/// this to `convert.rs`'s opaque dark placeholder — a frame whose bytes are a
-/// statement about the MISS path, not about the command. Comparing it against
-/// a promoted baseline would be promoting a lie, so the case names
-/// [`ORACLE_ID`] in its skip set and is never rendered there at all (rather
-/// than rendered and ignored).
-///
-/// On a GPU arm the case renders through the same public `encode_scene` seam
-/// an app does. This corpus registers no shader override, so what it pins is
-/// the command reaching the renderer and taking its documented miss path
-/// without a panic; the override-hit path needs `ShaderOverrideSpec`, which
-/// belongs to a renderer-side case, not a scene-recorded one.
+/// The engine's own compiler recognises and drops the command, so a compiled
+/// GPU frame of this case would legitimately be missing the very thing the
+/// case exists to pin; the golden gate holds it out of its scored set for
+/// exactly that reason rather than comparing against such a frame. There is
+/// also no shader pre-pass without a GPU, so the CPU arm has nothing
+/// equivalent to lower this to — its own opaque dark placeholder color exists
+/// for that gap, but this case names [`ORACLE_ID`] in its own skip set, so
+/// the placeholder is never even produced here, let alone compared. What this
+/// case pins, then, is narrower than a rendered frame on either arm: that
+/// recording a `Command::ShaderQuad` and handing the scene to a renderer does
+/// not panic. Coverage of the command actually painting anything waits on the
+/// GPU-seam work `engine-shader-quad-unwired` tracks.
 fn shader_quad() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let program = ShaderProgram::new(SOLID_MAGENTA_WGSL);
