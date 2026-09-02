@@ -2203,6 +2203,53 @@ env var). No per-screen matrix was recorded; the sign-off is global.
 
 ---
 
+## wgpu 30.0.1 device smoke — Phase 8 (p8-07, the frust-owned pin)
+
+### Pixel 5 — 2026-09-02 (p8-07 device gate, phase branch `dfea9a67`)
+
+The engine arm re-measured on the wgpu **30.0.1** tree, after p8-03..p8-06
+deleted the snapshot cache, vello classic and the cpu-tier and p8-05 moved
+the device/surface foundation into `frust-gpu`. Same convention and command
+as the Phase-7 rows above (PROTOCOL §4: 12 runs x 30 s per scenario, first
+2 discarded, 10 kept; `ab_matrix.sh --tier engine --scenarios s1,s2,s5,s6`,
+`--aa`/`--scale` no longer exist); the build carries `perf-trace`, so the
+`gpu_total` columns are GPU-clock readings (`gpu_q=1`). Raw series:
+`benchmarks/raw/pixel5/tier-wgpu30/engine/<scenario>/` plus the nav logcat
+under `.../nav/` — a separate group so the Phase-7 `tier/engine/` series
+(the closed p7-06 gate's evidence) stays intact.
+
+| Backend | Scenario | p50 (ms) | p95 (ms) | gpu_total p50 (ms) | gpu_total p95 (ms) | Graphics (MB) | Phase-7 (wgpu 29.0.4) p50 / p95 / gpu p50 | Device |
+|---|---|---|---|---|---|---|---|---|
+| engine | S1 | 14.94 | 16.39 | 13.88 | 14.09 | 55.29 | 15.19 / 18.11 / 13.90 | Pixel 5 |
+| engine | S2 | 8.71 | 10.42 | 8.33 | 8.54 | 53.73 | 11.67 / 12.75 / 8.38 | Pixel 5 |
+| engine | S5 | 13.24 | 14.03 | 12.33 | 12.57 | 55.57 | 13.23 / 14.06 / 12.31 | Pixel 5 |
+| engine | S6 | 7.15 | 8.96 | 7.94 | 9.44 | 53.18 | 11.57 / 12.25 / 9.20 | Pixel 5 |
+
+Nav (one push/pop pass, material3-demo's own rolling percentiles):
+`total_p50` **12 ms** (Phase 7: 12.29 ms; gate ≤ 16.7 ms — **PASS**),
+`submit_p95` 16 ms.
+
+Verdict: **no regression beyond noise — PASS.** The GPU-clock columns
+match the wgpu-29 run within 0.1 ms on every scenario (the GPU work is
+unchanged by the pin), Graphics PSS is within +1.1 %, and the CPU totals
+are equal (S1, S5) or lower (S2 −25 %, S6 −38 %) — the drop on S2/S6
+lands with Phase 8's deletions (no snapshot pre-pass, no frame split, one
+tier), not with wgpu. The `gpu_total_us` field is non-zero in every one
+of the ~116k kept frames across the four scenarios, so the last-pass
+zero-span symptom seen once on Metal under load
+(`a_real_adapter_reports_plausible_per_pass_gpu_time`) does not occur on
+Vulkan here.
+
+Methodology deviations: (1) no classic arm exists any more, so the
+comparison column is the committed Phase-7 engine row rather than a
+same-day A/B; (2) wireless adb (Tailscale), orchestration-only as before;
+(3) the harness copied its raw series over the committed `tier/engine/`
+group (it keys the raw path by `--tier`, not by pin/date) — the new files
+were moved to `tier-wgpu30/` and the Phase-7 files restored from git
+before this commit (filed as a harness follow-up).
+
+---
+
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 
 `PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB
