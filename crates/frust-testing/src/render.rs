@@ -2,24 +2,25 @@
 //!
 //! `SceneRenderer` is the seam a golden test drives: it hands a
 //! [`frust_scene::Scene`] plus a fixed [`RenderSpec`] to whichever backend is
-//! under test (a `vello_cpu` oracle, the real `frust-render` GPU pipeline
-//! wired in by a downstream card, …) and gets back a [`RenderedImage`] it can
-//! compare against a stored baseline. Scene-layer purity binds here too — no
-//! `vello`/`wgpu` type appears in this module (`docs/CODE_STANDARDS.md`'s
-//! "Leaking `vello`/`wgpu` types outside `frust-render`" anti-pattern).
+//! under test (the `vello_cpu` reference oracle, the GPU engine arm, …) and
+//! gets back a [`RenderedImage`] it can compare against a stored baseline.
+//! Scene-layer purity binds here too — no `vello`/`wgpu` type appears in this
+//! module (`docs/CODE_STANDARDS.md`'s "Leaking `vello`/`wgpu` types outside
+//! `frust-render`" anti-pattern).
 
 use kurbo::Affine;
 use peniko::Color;
 
 /// A backend under test hands back a rendered frame for comparison.
 ///
-/// Implementations live outside this crate (a `vello_cpu` oracle, a
-/// `frust-render`-backed adapter used by that crate's own headless tests,
-/// …) — `frust-testing` only names the contract, never a concrete backend,
-/// so it stays free of `vello`/`wgpu`/GPU dependencies.
+/// The trait itself names no concrete backend and pulls in no
+/// `vello`/`wgpu`/GPU type: an implementation supplies those (this crate's
+/// own [`CpuOracle`](crate::oracle_cpu::CpuOracle) and
+/// [`EngineOracle`](crate::oracle_engine::EngineOracle) do, and a consumer
+/// outside this crate can supply its own).
 pub trait SceneRenderer {
     /// A stable, backend-identifying id (e.g. `"cpu"`,
-    /// `"vulkan-nvidia-t400"`) — matched against [`crate::case::BackendSet`]
+    /// `"engine-metal-macos"`) — matched against [`crate::case::BackendSet`]
     /// to decide whether a case should be skipped for this backend, and
     /// recorded into [`RenderedImage::meta`]/`crate::meta::GoldenMeta` for
     /// golden-class routing (`docs/TESTING.md`'s Golden Classes).

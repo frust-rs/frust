@@ -1,37 +1,31 @@
 //! The adversarial corpus's golden gate: every
-//! [`frust_testing::corpus::adversarial`] case rendered by both arms of the
-//! oracle pair and compared against its own golden class, plus one dedicated
-//! memory-budget assertion for the 5,000-nested-layer case.
+//! [`frust_testing::corpus::adversarial`] case rendered by the CPU arm and
+//! compared against its own golden class, plus one dedicated memory-budget
+//! assertion for the 5,000-nested-layer case.
 //!
 //! ```text
-//! # the CPU arm — no GPU, no environment, part of the ordinary gate:
+//! # no GPU, no environment, part of the ordinary gate:
 //! cargo test -p frust-testing --test adversarial
-//!
-//! # the classic (GPU) arm, on the pinned runner:
-//! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
-//!   cargo test -p frust-testing --test adversarial -- --ignored --nocapture
 //! ```
 //!
 //! This file mirrors `tests/goldens.rs`'s own gate structure (golden class
-//! `cpu/`, `no_ref` recording instead of comparing, the GPU arm's
-//! optional/promotable class) applied to
+//! `cpu/`, `no_ref` recording instead of comparing) applied to
 //! [`frust_testing::corpus::adversarial::adversarial_cases`] instead of the
 //! unit corpus — see that file's module docs for the policy rationale this
-//! one does not repeat.
+//! one does not repeat, including where the GPU half of the coverage lives.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use frust_testing::ORACLE_ID;
 use frust_testing::case::CaseSpec;
 use frust_testing::corpus::{CorpusCase, adversarial_cases, render_case};
 use frust_testing::frame::foreign_font_runs;
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
-use frust_testing::oracle_classic::ClassicOracle;
 use frust_testing::oracle_cpu::CpuOracle;
 use frust_testing::render::SceneRenderer;
-use frust_testing::{ORACLE_ID, UNCLASSIFIED_CLASS};
 
 /// The golden class the CPU oracle's baselines live in
 /// (`testing/goldens/cpu/`) — the same class `unit_cases` promotes into; an
@@ -233,9 +227,9 @@ fn run_corpus(renderer: &mut dyn SceneRenderer, policy: &RunPolicy) {
     );
 }
 
-/// Stack given to the dedicated thread [`cpu_corpus_matches_its_goldens`] and
-/// [`classic_corpus_matches_its_goldens`] render the WHOLE corpus on (see
-/// [`run_on_oversized_stack`]'s docs for why).
+/// Stack given to the dedicated thread [`cpu_corpus_matches_its_goldens`]
+/// renders the WHOLE corpus on (see [`run_on_oversized_stack`]'s docs for
+/// why).
 const RENDER_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Runs `f` on a dedicated thread with [`RENDER_THREAD_STACK_BYTES`] of
@@ -306,17 +300,6 @@ fn the_cpu_class_is_backed_by_the_pinned_oracle() {
     );
 }
 
-/// The unclassified fallback is never a committed golden directory — see
-/// `tests/goldens.rs`'s identical guard.
-#[test]
-fn the_unclassified_class_is_not_a_committed_golden_directory() {
-    assert!(
-        !goldens_root().join(UNCLASSIFIED_CLASS).exists(),
-        "`{UNCLASSIFIED_CLASS}` is the refuse-to-promote fallback — it must never become a \
-         committed golden class directory"
-    );
-}
-
 /// No case in the adversarial corpus shapes a glyph against a host font.
 ///
 /// `run_corpus` above already refuses such a case as part of its own font
@@ -340,42 +323,6 @@ fn no_case_shapes_against_a_host_font() {
         failures.len(),
         failures.join("\n")
     );
-}
-
-/// The classic (GPU) arm, on real hardware — see `tests/goldens.rs`'s
-/// identical test for the full rationale (adapter naming, promotion policy).
-///
-/// ```text
-/// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
-///   cargo test -p frust-testing --test adversarial -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test adversarial -- --ignored`"]
-fn classic_corpus_matches_its_goldens() {
-    let _serialized = render_lock();
-    run_on_oversized_stack(|| {
-        let mut oracle = ClassicOracle::new(frust_render::HeadlessOptions::default())
-            .expect("failed to create the classic (headless GPU) oracle");
-        println!("adversarial: classic arm on {}", oracle.headless_meta());
-        println!("adversarial: golden class `{}`", oracle.id());
-
-        let class = oracle.id();
-        let classified = oracle.is_classified();
-        if !classified {
-            println!(
-                "adversarial: adapter has no reviewed golden class — rendering and probing \
-                 every case, comparing none (see tests/goldens.rs's module docs)"
-            );
-        }
-        run_corpus(
-            &mut oracle,
-            &RunPolicy {
-                class,
-                require_baseline: false,
-                promotable: classified,
-            },
-        );
-    });
 }
 
 // --- `adv-5k-layers`'s bounded-memory assertion -----------------------------

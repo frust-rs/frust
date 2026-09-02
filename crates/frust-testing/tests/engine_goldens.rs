@@ -1,8 +1,7 @@
 //! The engine's primary correctness gate: every corpus case the engine can
-//! draw, rendered by [`EngineOracle`] and held against three references —
-//! `vello_cpu` 0.2.0 (P1), the engine's own committed golden class, and the
-//! vello-classic pipeline at `testing/goldens/CALIBRATION.md`'s measured
-//! perceptual band (P2). All three are HARD: nothing here is advisory.
+//! draw, rendered by [`EngineOracle`] and held against two references —
+//! `vello_cpu` 0.2.0 (P1) and the engine's own committed golden class. Both
+//! are HARD: nothing here is advisory.
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -12,38 +11,21 @@
 //! The host-only tests in this file (scope coverage, class routing, the
 //! command-support tripwire) run in the ordinary gate with no GPU.
 //!
-//! # The two comparisons, and why they are held to different bars
+//! # The P1 comparison, and the bar it is held to
 //!
-//! - **P1, engine vs `vello_cpu`, is near-exact.** Both rasterize the same
-//!   geometry with the same `vello_common` 0.2.0 strip generator at the same
-//!   flattening tolerance; only the *fill* differs (a GPU strip pass against a
-//!   CPU one). So the bar is each case's OWN [`CaseSpec::tolerance`] — the
-//!   corpus default of channel 2, alpha 2, zero tolerated mismatched pixels
-//!   for most cases, and [`Tolerance::exact`] for the two whose subject is
-//!   integer-aligned erase arithmetic (`unit-clear-rect`,
-//!   `adv-destout-in-layer`), which therefore compare PIXEL-EXACT here as well
-//!   as against their baseline. A per-case widening exists only through
-//!   [`ESCALATIONS`] and only with a stated reason. The comparison is made on
-//!   the PREMULTIPLIED frames both arms natively produce rather than on their
-//!   straightened forms — see [`render_raw`], where that is the difference
-//!   between measuring the rasterizers and measuring an unpremultiply's own
-//!   information loss.
-//! - **P2, engine vs classic, is a wide MEASURED band, and it gates.** The
-//!   two are independent rasterizers, and the classic arm
-//!   hands back STRAIGHT alpha, so that comparison necessarily goes through
-//!   [`render_case`]'s conversion — the same footing
-//!   `testing/goldens/CALIBRATION.md` measured its numbers on. That file
-//!   measured how far they legitimately drift over this corpus and derived the
-//!   budget applied here: mean absolute error <= [`CLASSIC_MEAN_BUDGET`] and
-//!   <= [`CLASSIC_PCT_OVER_8_BUDGET`]% of pixels over channel 8, both on the
-//!   1-px eroded interior. The per-channel maximum is recorded and never
-//!   gated: it is UNGATEABLE, because antialiasing conflation along a diagonal
-//!   or curved edge exceeds what a 1-px erosion removes, and the calibration's
-//!   own whole-corpus p95 for it came out at a full 255 (see that file's
-//!   Derived P2 budget and Legitimate Disagreements). A case that legitimately
-//!   sits outside the corpus-wide band carries a reviewed row in
-//!   [`BAND_ESCALATIONS`] rather than the whole gate being loosened to its
-//!   worst member.
+//! **Engine vs `vello_cpu` is near-exact.** Both rasterize the same geometry
+//! with the same `vello_common` 0.2.0 strip generator at the same flattening
+//! tolerance; only the *fill* differs (a GPU strip pass against a CPU one).
+//! So the bar is each case's OWN [`CaseSpec::tolerance`] — the corpus default
+//! of channel 2, alpha 2, zero tolerated mismatched pixels for most cases,
+//! and [`Tolerance::exact`] for the two whose subject is integer-aligned
+//! erase arithmetic (`unit-clear-rect`, `adv-destout-in-layer`), which
+//! therefore compare PIXEL-EXACT here as well as against their baseline. A
+//! per-case widening exists only through [`ESCALATIONS`] and only with a
+//! stated reason. The comparison is made on the PREMULTIPLIED frames both
+//! arms natively produce rather than on their straightened forms — see
+//! [`render_raw`], where that is the difference between measuring the
+//! rasterizers and measuring an unpremultiply's own information loss.
 //!
 //! # Which cases are in scope
 //!
@@ -83,14 +65,13 @@ use image::RgbaImage;
 use frust_scene::Command;
 use frust_testing::case::{CaseSpec, Tolerance};
 use frust_testing::corpus::{
-    CorpusCase, adversarial_cases, page_cases, render_case, straighten_alpha, text_cases,
-    unit_cases, widget_cases,
+    CorpusCase, adversarial_cases, page_cases, straighten_alpha, text_cases, unit_cases,
+    widget_cases,
 };
 use frust_testing::diff::{DiffReport, diff_images};
 use frust_testing::frame::foreign_font_runs;
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
-use frust_testing::oracle_classic::ClassicOracle;
 use frust_testing::oracle_cpu::CpuOracle;
 use frust_testing::oracle_engine::{EngineOracle, EngineOracleOptions};
 use frust_testing::render::{RenderedImage, SceneRenderer};
@@ -220,7 +201,7 @@ const DEFERRED_CASES: &[(&str, &str)] = &[
 /// re-runs a comparison at a looser threshold: an escalation is a reviewed
 /// row here or it does not exist. It lives beside the harness rather than on
 /// the shared [`CaseSpec`] because it is specific to the ENGINE-vs-CPU
-/// pairing — the same case's `cpu/` and classic comparisons are unaffected by
+/// pairing — the same case's own `cpu/` baseline comparison is unaffected by
 /// anything written here.
 ///
 /// # The hint-policy rows (text phase, p5-04)
@@ -567,124 +548,6 @@ const ESCALATIONS: &[(&str, Tolerance, &str)] = &[
     ),
 ];
 
-/// The fixed threshold the engine-vs-classic band is measured under, so
-/// "percent of pixels over 8" means the same thing for every case and the same
-/// thing `CALIBRATION.md` measured.
-const MEASURE_TOLERANCE: Tolerance = Tolerance {
-    channel: 8,
-    alpha: 8,
-    diff_pixels: 0,
-};
-
-/// `CALIBRATION.md`'s measured whole-corpus p95 mean absolute error between
-/// the classic pipeline and `vello_cpu`, rounded up — the mean half of the
-/// advisory engine-vs-classic band.
-const CLASSIC_MEAN_BUDGET: f64 = 2.5;
-
-/// `CALIBRATION.md`'s measured whole-corpus p95 of "% pixels over channel 8"
-/// on the eroded interior, rounded up — the other half of that band. The
-/// per-channel maximum has no budget on purpose: it is ungateable, since edge
-/// conflation on a diagonal or curved boundary survives the 1-px erosion, and
-/// the calibration's own p95 for it came out at a full 255.
-const CLASSIC_PCT_OVER_8_BUDGET: f64 = 4.8;
-
-/// The engine-vs-classic band one case is held to.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Band {
-    /// Maximum mean absolute error, averaged over the four channels.
-    mean: f64,
-    /// Maximum percentage of pixels over [`MEASURE_TOLERANCE`], post-erosion.
-    pct_over_8: f64,
-}
-
-/// The corpus-wide band from `CALIBRATION.md`'s Derived P2 budget.
-const CORPUS_BAND: Band = Band {
-    mean: CLASSIC_MEAN_BUDGET,
-    pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
-};
-
-/// Per-case widenings of [`CORPUS_BAND`], each with the measured reason it is
-/// not the corpus budget's fault.
-///
-/// The corpus budget is a whole-corpus p95, so by construction a handful of
-/// cases sit above it — `CALIBRATION.md`'s Legitimate Disagreements names them
-/// and says not to re-litigate them. Widening the shared budget to cover its
-/// worst member would blind the other cases; a reviewed row here keeps the
-/// tight budget everywhere else and states, per case, both the number measured
-/// and why the disagreement is two correct rasterizers rather than one wrong
-/// one.
-const BAND_ESCALATIONS: &[(&str, Band, &str)] = &[
-    (
-        "unit-blur-rrect",
-        Band {
-            mean: 5.0,
-            pct_over_8: 11.5,
-        },
-        "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
-         mean 4.581 / 10.986% and named it the one outlier driving the corpus-wide budget: the \
-         classic pipeline's Gaussian approximation and `vello_common`'s are independent \
-         implementations whose coverage ramps around a blurred edge are not bit-identical. The \
-         engine shares `vello_common`'s, so it inherits exactly that gap (measured 4.579 / \
-         10.791% here) — this row is the corpus-wide p95 failing to cover its own known outlier, \
-         not engine drift, and the engine's agreement with `vello_cpu` on this case is 0 pixels \
-         differing at channel 2",
-    ),
-    (
-        "unit-path-stroke",
-        Band {
-            mean: CLASSIC_MEAN_BUDGET,
-            pct_over_8: 5.6,
-        },
-        "a steep diagonal stroke, whose antialiased band is wider than the 1-px erosion removes \
-         — `CALIBRATION.md`'s Legitimate Disagreements names this exact case and measured the \
-         classic-vs-`vello_cpu` pair at 5.371%, already over the corpus p95 it helped set. Only \
-         the percentage is widened; the mean stays at the corpus budget, where the case measures \
-         0.530",
-    ),
-    (
-        "adv-huge-image",
-        Band {
-            mean: 4.6,
-            pct_over_8: CLASSIC_PCT_OVER_8_BUDGET,
-        },
-        "`CALIBRATION.md` measured the CLASSIC pipeline against `vello_cpu` on this same case at \
-         mean 2.988 / 2.3438% and its Legitimate Disagreements names it: `Command::Image` \
-         specifies no resampling filter, so the two arms' downsampled edge pixels around a \
-         minified image's boundary legitimately differ while the uniform-colour interior probe \
-         matches exactly. The engine agrees with `vello_cpu` on this case PIXEL FOR PIXEL (0 px \
-         differing at channel 2), so its engine-vs-classic band reproduces that calibration row \
-         exactly (measured mean 2.988 / 2.3438% on the vulkan-nvidia-t400 rig, where the mean \
-         band was first set at 3). On the metal-macos rig (Apple M4) the same case measures \
-         mean 4.487 / 3.5156% while the engine STILL matches `vello_cpu` byte for byte (max \
-         delta [0,0,0,0]) — the classic arm's unspecified-filter minification simply lands \
-         differently on Metal than on the T400 — so the mean is widened to 4.6 to carry both \
-         rigs' measured numbers; the percentage stays at the corpus budget, inside which both \
-         rigs sit",
-    ),
-    // The glyph-run row below is a hint-policy escalation, not
-    // classic/`vello_cpu` antialiasing conflation: `ESCALATIONS`'s module docs
-    // explain the mechanism (the engine hints on this desktop-tier rig,
-    // neither the classic nor the CPU reference ever does), which shows up
-    // here too since classic and `vello_cpu` shape the same UNHINTED glyphs.
-    //
-    // `text-colr-emoji` had a row of its own here and no longer needs one: it
-    // measured mean 16.045 / 20.3000% while a colour face still took the
-    // glyph-atlas route and its page went unwritten, and measures mean 0.110 /
-    // 0.5400% now that the route is refused before insertion — comfortably
-    // inside the corpus band, so it is gated by the corpus band.
-    (
-        "unit-glyph-run",
-        Band {
-            mean: CLASSIC_MEAN_BUDGET,
-            pct_over_8: 5.2,
-        },
-        "hint-policy row: measured mean 1.217 (already inside the corpus mean budget) / 5.1270% \
-         over channel 8, on this 64x64 frame's own glyph ink — only the percentage is widened, \
-         to just past the measured value; a small frame that is mostly text makes a hinted edge's \
-         share of the whole image larger than the corpus-wide p95 was calibrated for",
-    ),
-];
-
 /// Serializes every test in this binary that creates a GPU device.
 ///
 /// Two ignored GPU tests running concurrently have been observed to hang at
@@ -701,7 +564,8 @@ fn render_lock() -> MutexGuard<'static, ()> {
 }
 
 /// Renders `case` on `renderer` WITHOUT the straight-alpha conversion
-/// [`render_case`] applies, or `None` when the case skips this backend.
+/// [`render_case`](frust_testing::corpus::render_case) applies, or `None`
+/// when the case skips this backend.
 ///
 /// The engine-vs-CPU comparison is made on these bytes, in the premultiplied
 /// space both arms natively produce, and that is load-bearing rather than a
@@ -716,7 +580,7 @@ fn render_lock() -> MutexGuard<'static, ()> {
 /// real regression.
 ///
 /// The golden path still goes through [`straighten_alpha`]: a stored PNG is
-/// straight alpha, and every arm's baseline has to be stored the same way to
+/// straight alpha, and both arms' baselines have to be stored the same way to
 /// be comparable at all.
 fn render_raw(renderer: &mut dyn SceneRenderer, case: &CorpusCase) -> Option<RenderedImage> {
     if case.spec.skip.contains(renderer.id()) {
@@ -791,15 +655,6 @@ fn engine_tolerance(spec: &CaseSpec) -> (Tolerance, Option<&'static str>) {
         .map_or((spec.tolerance, None), |(_, tolerance, why)| {
             (*tolerance, Some(*why))
         })
-}
-
-/// The engine-vs-classic band `name` is held to: [`CORPUS_BAND`] unless
-/// [`BAND_ESCALATIONS`] names it.
-fn classic_band(name: &str) -> (Band, Option<&'static str>) {
-    BAND_ESCALATIONS
-        .iter()
-        .find(|(case, _, _)| *case == name)
-        .map_or((CORPUS_BAND, None), |(_, band, why)| (*band, Some(*why)))
 }
 
 /// The repository commit this run's baselines would be attributed to — see
@@ -1043,8 +898,9 @@ fn engine_corpus_matches_vello_cpu_and_its_goldens() {
             continue;
         }
 
-        // A class nobody has promoted yet records instead of comparing, the
-        // same way the classic arm's own gate treats an unpromoted class.
+        // A class nobody has promoted yet records instead of comparing: a
+        // GPU baseline is adapter/driver-specific, promoted only by a
+        // reviewed, deliberate act, so a missing one is never a failure.
         let mut spec = case.spec.clone();
         if !baseline_exists(class, &case) {
             spec.no_ref = true;
@@ -1097,118 +953,6 @@ fn engine_corpus_matches_vello_cpu_and_its_goldens() {
         "{} engine corpus failure(s) in golden class `{class}`:\n{}",
         failures.len(),
         failures.join("\n")
-    );
-}
-
-/// Holds the engine to `CALIBRATION.md`'s measured perceptual band against
-/// the vello-classic pipeline over the same scoped cases — P2, and it GATES.
-///
-/// Every number is still printed, so a run reads as a measurement rather than
-/// a pass/fail bit, but a case outside its band fails the test. The two
-/// are independent rasterizers, so the band is wide and MEASURED rather than
-/// guessed (see the module docs), and its per-channel maximum stays ungated on
-/// purpose. A case that legitimately exceeds the corpus-wide budget carries a
-/// reviewed [`BAND_ESCALATIONS`] row; the shared budget is never loosened to
-/// its worst member.
-///
-/// ```text
-/// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
-///   cargo test -p frust-testing --test engine_goldens -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test engine_goldens -- --ignored`"]
-fn engine_vs_classic_divergence_stays_inside_the_calibrated_band() {
-    let _serialized = render_lock();
-    let mut engine = EngineOracle::new(&EngineOracleOptions::default())
-        .expect("failed to create the engine oracle");
-    let mut classic = ClassicOracle::new(frust_render::HeadlessOptions::default())
-        .expect("failed to create the classic (headless GPU) oracle");
-
-    println!("engine vs classic: engine arm on {}", engine.adapter_meta());
-    println!(
-        "engine vs classic: classic arm on {}",
-        classic.headless_meta()
-    );
-    println!(
-        "engine vs classic: measured under {MEASURE_TOLERANCE:?}, gating band mean <= \
-         {CLASSIC_MEAN_BUDGET}, % over 8 <= {CLASSIC_PCT_OVER_8_BUDGET}% (testing/goldens/\
-         CALIBRATION.md; per-channel max deliberately ungated), {} reviewed per-case widening(s)",
-        BAND_ESCALATIONS.len()
-    );
-    println!(
-        "{:<26} {:>8} {:>10} {:>10}",
-        "case", "mean", "% over 8", "chan max"
-    );
-
-    let mut over_band: Vec<String> = Vec::new();
-    let mut measured = 0_usize;
-
-    for case in scoped_cases() {
-        let name = case.spec.name;
-        let (Some(engine_image), Some(classic_image)) = (
-            render_case(&mut engine, &case)
-                .unwrap_or_else(|err| panic!("case `{name}` failed on the engine: {err:#}")),
-            render_case(&mut classic, &case)
-                .unwrap_or_else(|err| panic!("case `{name}` failed on classic: {err:#}")),
-        ) else {
-            println!("{name:<24} skipped on at least one arm — not measured");
-            continue;
-        };
-
-        let outcome = diff_images(
-            &to_rgba_image(&classic_image),
-            &to_rgba_image(&engine_image),
-            MEASURE_TOLERANCE,
-            case.eroded_interior,
-        );
-        let report = outcome.report;
-        // The eroded-interior per-channel maximum, printed for the record and
-        // never gated: `DiffReport::max_difference` is a whole-image statistic
-        // regardless of erosion, so it is the recorded pixels — the ones that
-        // survived erosion AND exceeded the measurement tolerance — that say
-        // anything about the interior.
-        let channel_max = report
-            .pixels
-            .iter()
-            .flat_map(|pixel| pixel.difference)
-            .map(|delta| u8::try_from(delta.unsigned_abs()).unwrap_or(u8::MAX))
-            .max()
-            .unwrap_or(0);
-        let mean = report.mean_abs_error.iter().sum::<f64>() / report.mean_abs_error.len() as f64;
-
-        let (band, widening) = classic_band(name);
-        println!(
-            "{name:<26} {mean:>8.3} {:>9.4}% {channel_max:>10}{}",
-            report.mismatched_percent,
-            widening
-                .map(|why| format!(
-                    "  (widened to mean {} / {}%: {why})",
-                    band.mean, band.pct_over_8
-                ))
-                .unwrap_or_default()
-        );
-        measured += 1;
-
-        if mean > band.mean || report.mismatched_percent > band.pct_over_8 {
-            over_band.push(format!(
-                "{name}: mean {mean:.3} (band {}), % over 8 {:.4}% (band {}%)",
-                band.mean, report.mismatched_percent, band.pct_over_8
-            ));
-        }
-    }
-
-    println!("engine vs classic: {measured} case(s) measured");
-    if over_band.is_empty() {
-        println!("engine vs classic: every measured case sits inside the calibrated band");
-    }
-
-    assert!(
-        over_band.is_empty(),
-        "{} case(s) outside their calibrated engine-vs-classic band — either the engine drifted \
-         or the disagreement is a reviewed, legitimate one that belongs in BAND_ESCALATIONS with \
-         its measured number:\n{}",
-        over_band.len(),
-        over_band.join("\n")
     );
 }
 
@@ -1357,31 +1101,6 @@ fn every_escalation_is_a_real_widening_of_a_scoped_case() {
     }
 }
 
-/// Every engine-vs-classic band widening names a scoped case, is genuinely
-/// wider than the corpus budget it replaces, and states a reviewable reason.
-#[test]
-fn every_band_escalation_is_a_real_widening_of_a_scoped_case() {
-    for (name, band, why) in BAND_ESCALATIONS {
-        assert!(
-            PHASE_CASES.contains(name),
-            "band escalation for `{name}` names a case the gate does not measure"
-        );
-        assert!(
-            band.mean > CORPUS_BAND.mean || band.pct_over_8 > CORPUS_BAND.pct_over_8,
-            "band escalation for `{name}` is not wider than the corpus band {CORPUS_BAND:?}"
-        );
-        assert!(
-            band.mean >= CORPUS_BAND.mean && band.pct_over_8 >= CORPUS_BAND.pct_over_8,
-            "band escalation for `{name}` TIGHTENS one metric while widening the other — a \
-             widening row is not the place to smuggle a stricter budget in"
-        );
-        assert!(
-            why.len() > 16,
-            "`{name}`'s band-escalation reason is too thin to review: {why:?}"
-        );
-    }
-}
-
 /// The two cases whose subject is erase arithmetic are compared PIXEL-EXACT
 /// against the CPU arm, not at the corpus's rounding-step default.
 ///
@@ -1416,8 +1135,11 @@ fn the_erase_cases_are_compared_pixel_exact_against_the_cpu_arm() {
     }
 }
 
-/// The engine's unclassified fallback is never a committed golden directory —
-/// the engine arm's own tripwire on the guard the other two arms carry.
+/// The engine's unclassified fallback is never a committed golden directory.
+///
+/// A cheap, GPU-free guard on the safety property this gate's `classified`
+/// flag depends on: even with `UPDATE_GOLDENS=1` set, an unreviewed adapter
+/// must not create `testing/goldens/<something>/`.
 #[test]
 fn the_unclassified_engine_class_is_not_a_committed_golden_directory() {
     assert!(
@@ -1427,15 +1149,16 @@ fn the_unclassified_engine_class_is_not_a_committed_golden_directory() {
     );
 }
 
-/// The engine class this rig promotes into is the engine-prefixed twin of the
-/// classic class captured on the same adapter, never the classic class itself.
+/// The engine class this rig promotes into is its own `engine-`-prefixed
+/// directory, never a bare adapter class shared with another rasterizer.
 #[test]
 fn the_pinned_runners_engine_class_is_its_own_directory() {
     let class = engine_golden_class("vulkan", "NVIDIA T400 4GB");
     assert_eq!(class, "engine-vulkan-nvidia-t400");
     assert!(
         class.starts_with("engine-"),
-        "an engine class is prefixed so it can never be read as a classic one"
+        "an engine class is prefixed so a baseline of another pipeline can \
+         never be read as one of the engine's"
     );
 }
 

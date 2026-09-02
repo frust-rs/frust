@@ -1,60 +1,43 @@
 //! The unit corpus's golden gate: every [`frust_testing::corpus::unit`] case
-//! rendered by both arms of the oracle pair and compared against its own
-//! golden class.
+//! rendered by the CPU arm and compared against its own golden class.
 //!
 //! ```text
-//! # the CPU arm — no GPU, no environment, part of the ordinary gate:
+//! # no GPU, no environment, part of the ordinary gate:
 //! cargo test -p frust-testing --test goldens
-//!
-//! # the classic (GPU) arm, on the pinned runner:
-//! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
-//!   cargo test -p frust-testing --test goldens -- --ignored --nocapture
 //! ```
 //!
-//! # What each arm gates
+//! # What this arm gates
 //!
-//! The two arms are NOT held to the same bar, and deliberately so:
+//! **`cpu/` is baseline-REQUIRED.** `vello_cpu` 0.2.0 rasterizes identically
+//! on any host of the same target (pinned SIMD level, zero worker threads —
+//! see `oracle_cpu`'s Determinism section), so a missing or mismatched
+//! baseline is a real failure on any machine. These are the PNGs this corpus
+//! commits, and they are the P1 reference the GPU arm is held against in
+//! `tests/engine_goldens.rs` — the unit corpus's GPU coverage lives there,
+//! over the engine's own `engine-`-prefixed golden classes, and this file is
+//! the GPU-free half.
 //!
-//! - **`cpu/` is baseline-REQUIRED.** `vello_cpu` 0.2.0 rasterizes
-//!   identically on any host of the same target (pinned SIMD level, zero
-//!   worker threads — see `oracle_cpu`'s Determinism section), so a missing
-//!   or mismatched baseline is a real failure on any machine. These are the
-//!   PNGs this corpus commits.
-//! - **A GPU class is baseline-OPTIONAL until someone promotes it.** A
-//!   promoted GPU baseline is adapter- and driver-specific
-//!   (`docs/TESTING.md`'s Golden Classes), so a class directory that does not
-//!   exist yet means "not reviewed on this runner", not "regression": the
-//!   case still renders, still runs its probes, and records its output as a
-//!   review artifact under `target/frust-testing/`. The moment a baseline is
-//!   committed under `testing/goldens/<class>/`, the same run starts
-//!   comparing against it with no code change.
-//!
-//! What makes the GPU arm a real gate in either state is [`Probe`]s: the
+//! What makes a golden a gate rather than a snapshot is [`Probe`]s: the
 //! absolute pixel arithmetic the two promoted cases carry (see
 //! `corpus::unit`) is asserted on every backend, baseline or no baseline.
 //!
 //! # Promotion
 //!
 //! `UPDATE_GOLDENS=1` is the only path that writes a baseline
-//! (`frust_testing::golden`), and this harness narrows it twice more:
-//!
-//! - a case whose probes FAIL is never promoted — a baseline is only ever
-//!   written from a frame that already satisfies its absolute assertions;
-//! - a GPU arm on an adapter with no reviewed golden class
-//!   ([`frust_testing::UNCLASSIFIED_CLASS`]) refuses to promote at all,
-//!   rather than inventing a directory name for an unreviewed machine.
+//! (`frust_testing::golden`), and this harness narrows it once more: a case
+//! whose probes FAIL is never promoted — a baseline is only ever written from
+//! a frame that already satisfies its absolute assertions.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use frust_testing::ORACLE_ID;
 use frust_testing::case::CaseSpec;
 use frust_testing::corpus::{CorpusCase, render_case, unit_cases};
 use frust_testing::frame::foreign_font_runs;
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
-use frust_testing::oracle_classic::ClassicOracle;
 use frust_testing::oracle_cpu::CpuOracle;
 use frust_testing::render::SceneRenderer;
-use frust_testing::{ORACLE_ID, UNCLASSIFIED_CLASS};
 
 /// The golden class the CPU oracle's baselines live in
 /// (`testing/goldens/cpu/`).
@@ -68,12 +51,18 @@ const CPU_CLASS: &str = "cpu";
 
 /// Whether a run is allowed to write baselines, and whether a missing one is
 /// a failure.
+///
+/// Both knobs read `true` for the one arm this file runs; they are kept as
+/// knobs because `run_corpus` is written against the general policy every
+/// corpus gate in this crate shares — an adapter-specific class where a
+/// missing baseline means "not reviewed on this runner" is the shape
+/// `tests/engine_goldens.rs` still needs.
 struct RunPolicy {
     /// The golden class directory the case's baseline is read from/written
     /// to.
     class: &'static str,
     /// When `true`, a case with no stored baseline FAILS. When `false`, it
-    /// records a review artifact and passes (see the module docs).
+    /// records a review artifact and passes.
     require_baseline: bool,
     /// When `true`, `UPDATE_GOLDENS=1` may promote from this run.
     promotable: bool,
@@ -180,10 +169,10 @@ fn run_corpus(renderer: &mut dyn SceneRenderer, policy: &RunPolicy) {
 
     for case in unit_cases() {
         // Font determinism first, before this case's frame is even rendered:
-        // a run shaped against a HOST font is not a portable baseline on
-        // EITHER oracle arm, so it is rejected before anything looks at its
-        // pixels — the same ordering `frust_testing::run_cpu_goldens` uses
-        // for the widget/page corpus (`frame::foreign_font_runs`'s own docs).
+        // a run shaped against a HOST font is not a portable baseline on any
+        // oracle arm, so it is rejected before anything looks at its pixels —
+        // the same ordering `frust_testing::run_cpu_goldens` uses for the
+        // widget/page corpus (`frame::foreign_font_runs`'s own docs).
         let foreign = foreign_font_runs(&case.scene());
         if !foreign.is_empty() {
             for message in foreign {
@@ -215,8 +204,8 @@ fn run_corpus(renderer: &mut dyn SceneRenderer, policy: &RunPolicy) {
             continue;
         }
 
-        // A GPU class that nobody has promoted yet records instead of
-        // comparing (see the module docs); the `cpu/` class never does.
+        // A class nobody has promoted yet records instead of comparing; the
+        // `cpu/` class, being baseline-required, never does.
         let mut spec = case.spec.clone();
         if !policy.require_baseline && !baseline_exists(policy.class, &case) {
             spec.no_ref = true;
@@ -344,62 +333,6 @@ fn the_cpu_class_is_backed_by_the_pinned_oracle() {
         CpuOracle::new().id(),
         ORACLE_ID,
         "the `cpu/` golden class is defined as `{ORACLE_ID}`'s output"
-    );
-}
-
-/// The classic (GPU) arm, on real hardware.
-///
-/// `#[ignore]`d like every other GPU test in this workspace: CI sandboxes
-/// without a GPU skip it, and a local pass on a deliberately selected adapter
-/// is the gate. Name the adapter on a multi-GPU host — this machine
-/// enumerates both an NVIDIA T400 and an Intel iGPU, and
-/// `FRUST_GOLDEN_EXPECT_ADAPTER` turns "which one did I get?" into a refusal
-/// rather than a footnote:
-///
-/// ```text
-/// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
-///   cargo test -p frust-testing --test goldens -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test goldens -- --ignored`"]
-fn classic_corpus_matches_its_goldens() {
-    let mut oracle = ClassicOracle::new(frust_render::HeadlessOptions::default())
-        .expect("failed to create the classic (headless GPU) oracle");
-    println!("goldens: classic arm on {}", oracle.headless_meta());
-    println!("goldens: golden class `{}`", oracle.id());
-
-    let class = oracle.id();
-    let classified = oracle.is_classified();
-    if !classified {
-        println!(
-            "goldens: adapter has no reviewed golden class — rendering and probing every case, \
-             comparing none (see this test file's module docs)"
-        );
-    }
-    run_corpus(
-        &mut oracle,
-        &RunPolicy {
-            class,
-            // A GPU baseline is adapter/driver-specific and is promoted by a
-            // reviewed, deliberate act; a missing one is never a failure
-            // here.
-            require_baseline: false,
-            promotable: classified,
-        },
-    );
-}
-
-/// The unclassified fallback is never a directory anyone can promote into.
-///
-/// A cheap, GPU-free guard on the safety property the GPU test's
-/// `promotable` flag depends on: even with `UPDATE_GOLDENS=1` set, an
-/// unrecognized adapter must not create `testing/goldens/<something>/`.
-#[test]
-fn the_unclassified_class_is_not_a_committed_golden_directory() {
-    assert!(
-        !goldens_root().join(UNCLASSIFIED_CLASS).exists(),
-        "`{UNCLASSIFIED_CLASS}` is the refuse-to-promote fallback — it must never become a \
-         committed golden class directory"
     );
 }
 

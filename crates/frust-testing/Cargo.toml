@@ -22,17 +22,15 @@ frust-scene = { workspace = true }
 # turns text into `frust_scene::GlyphRun`s: shaped against the bundled faces
 # only, never a host font.
 frust-text = { workspace = true }
-# Backs `oracle_classic::ClassicOracle` — the vello-classic (GPU) arm of the
-# oracle pair, a `SceneRenderer` over `frust_render::HeadlessRenderer`. This
-# is the ONE place this crate's former "GPU-free leaf" charter is relaxed, and
-# it is relaxed deliberately: an oracle PAIR needs both arms behind one trait,
-# and this crate is `publish = false`, reachable only across a
-# `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
-# ever sees the edge. `features = []` keeps the DEFAULT feature set (no
-# `cpu-tier`, no `engine-tier`, no `perf-trace`): the classic arm must be the
-# pipeline an app actually ships, and `cpu-tier` would additionally drag the
-# legacy `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own
-# graph beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
+# Named for the `FRUST_GOLDEN_EXPECT_ADAPTER`/`FRUST_GOLDEN_EXPECT_BACKEND`
+# variable names `oracle_engine` refuses a wrongly-resolved adapter against
+# (`GOLDEN_EXPECT_ADAPTER_ENV_VAR`/`GOLDEN_EXPECT_BACKEND_ENV_VAR`): the
+# operator knob is one contract across every GPU run in this repository, so it
+# is imported rather than a second spelling of the same two strings.
+# `features = []` keeps the DEFAULT feature set (no `cpu-tier`, no
+# `engine-tier`, no `perf-trace`): `cpu-tier` would drag the legacy
+# `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's own graph
+# beside the 0.2.0 oracle pin (see tests/dup_identities.rs).
 frust-render = { workspace = true, features = [] }
 # Backs `frame.rs` — the GPU-free widget-frame capture (`RenderRoot::rebuild`
 # -> `layout_with_text` -> `paint` into a `frust_scene::SceneBuilder`, which
@@ -89,15 +87,15 @@ serde_json = { workspace = true }
 # than a dev one: `CpuOracle` is part of this crate's own API, and this whole
 # crate is `publish = false` and reachable only across a `[dev-dependencies]`
 # edge (tests/deps.rs's guard), so no production graph ever sees it. Not
-# `vello`/`wgpu` — this arm of the oracle pair rasterizes on the CPU, so it
-# runs on a GPU-less machine even though `frust-render` is now in the graph.
+# `wgpu` — this arm of the oracle pair rasterizes on the CPU, so it runs on a
+# GPU-less machine even though the engine arm's edges are in the graph.
 vello_cpu_oracle = { workspace = true }
-# Back `oracle_engine::EngineOracle` — the sparse-strip ENGINE arm of the
-# oracle set, a `SceneRenderer` over `frust_engine::EngineRenderer` recording
-# into a `frust_gpu::HeadlessTarget`. Declared for the same reason
-# `frust-render` above is, and under the same charter: an oracle set needs
-# every arm behind one trait, `corpus` hands the same case to all of them, and
-# this crate is `publish = false`, reachable only across a
+# Back `oracle_engine::EngineOracle` — the sparse-strip GPU arm of the oracle
+# pair, a `SceneRenderer` over `frust_engine::EngineRenderer` recording into a
+# `frust_gpu::HeadlessTarget`. This is the ONE place this crate's former
+# "GPU-free leaf" charter is relaxed, and it is relaxed deliberately: an
+# oracle PAIR needs both arms behind one trait, `corpus` hands the same case
+# to both, and this crate is `publish = false`, reachable only across a
 # `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
 # ever sees the engine tier through here. NORMAL rather than dev dependencies
 # for the same reason `vello_cpu_oracle` is one: `EngineOracle` lives in
@@ -125,11 +123,12 @@ vello_common = { workspace = true }
 # `kurbo` and `peniko` exactly as before (`docs/CODE_STANDARDS.md`'s
 # "Leaking `vello`/`wgpu` types outside `frust-render`").
 wgpu = { workspace = true }
-# `frust_render::HeadlessRenderer`'s adapter/device/render API is `async`
-# (wgpu's requests and its error scope are futures) while `SceneRenderer` is
-# sync, so `oracle_classic` drives it with the same minimal block-on executor
-# `frust-render`'s own GPU tests use. A NORMAL dependency for the same reason
-# `vello_cpu_oracle` is one: `ClassicOracle` is part of this crate's API.
+# wgpu's adapter and device requests are futures while `SceneRenderer` is
+# sync, so `oracle_engine` drives them to completion with the same minimal
+# block-on executor `frust-engine`'s and `frust-render`'s own GPU tests use
+# (`tests/ios_sim.rs` and `tests/engine_goldens.rs` drive the engine directly
+# and need it too). A NORMAL dependency for the same reason
+# `vello_cpu_oracle` is one: `EngineOracle` is part of this crate's API.
 pollster = { workspace = true }
 
 [dev-dependencies]
