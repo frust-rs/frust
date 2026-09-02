@@ -64,7 +64,7 @@ use kurbo::{
 };
 use peniko::{Brush, Color, Fill, ImageData};
 
-use frust_gpu::TierCaps;
+use frust_gpu::{SceneTextureId, TierCaps};
 use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
 
 use glifo::{AtlasCacher, GlyphAtlas, GlyphPrepCache, PendingClearRect};
@@ -85,6 +85,7 @@ use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
+use crate::config;
 use crate::error::EngineError;
 use crate::text::{
     AtlasPolicy, GlyphRunTargets, RunKey, RunRoute, context_paint, font_has_color_glyphs,
@@ -106,9 +107,18 @@ static IMAGE_SKIP_WARNING: Once = Once::new();
 /// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
 static FONT_SKIP_WARNING: Once = Once::new();
 
-/// Raised the first time the compiler drops a [`Command::ShaderQuad`], on the
-/// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
+/// Raised the first time the compiler drops a [`Command::ShaderQuad`] whose
+/// program has no rendered target, on the same once-per-process terms as
+/// [`IMAGE_SKIP_WARNING`].
 static SHADER_QUAD_SKIP_WARNING: Once = Once::new();
+
+/// Raised the first time a [`Command::ShaderQuad`] is dropped because the
+/// shader-effect kill switch is set, on the same once-per-process terms as
+/// [`IMAGE_SKIP_WARNING`]. Separate from [`SHADER_QUAD_SKIP_WARNING`] because
+/// it reports a deliberate configuration rather than a missing pre-pass, and
+/// conflating the two would tell an operator who set the switch that something
+/// went wrong.
+static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
 
 /// Where one glyph an atlas-routed draw sampled lives in the atlas array.
 ///
@@ -1091,61 +1101,92 @@ impl SceneCompiler {
             Command::GlyphRun(run) => {
                 self.compile_glyph_run(run, combined * run.transform, route, frame, depth);
             }
-            // Recognised but not yet compiled. Named rather than caught by a
-            // wildcard so a command added to the display list fails to compile
-            // here instead of silently vanishing from every frame. Tracked as
-            // `engine-shader-quad-unwired` in docs/LIMITATIONS.md until the
-            // GPU-seam work wires this command through; the drop itself is
-            // unchanged, just no longer silent.
-            Command::ShaderQuad { .. } => note_shader_quad_skip(),
+            // A fragment program's own pixels were produced before the frame
+            // was compiled, into a texture registered under an id derived from
+            // the program alone (`crate::effects::shader_quad`). From here on
+            // the quad is an external texture like any other — the pre-pass is
+            // the only thing that distinguishes it.
+            Command::ShaderQuad {
+                program,
+                dest,
+                transform,
+                ..
+            } => {
+                if config::shader_effects_disabled() {
+                    note_shader_effects_disabled();
+                    return;
+                }
+                let id = shader_quad_texture_id(program.id());
+                if self.externals.get(id).is_none() {
+                    // No pre-pass ran for this program, or its shader failed
+                    // to compile. Reported in its own words rather than as an
+                    // unregistered scene texture, whose id would name nothing
+                    // a reader could look up.
+                    note_shader_quad_unrendered(program.id());
+                    frame.skipped_externals = frame.skipped_externals.saturating_add(1);
+                    return;
+                }
+                self.draw_external_texture(id, *dest, combined * *transform, frame, depth);
+            }
             Command::SceneTexture {
                 id,
                 dest,
                 transform,
             } => {
-                let transform = combined * *transform;
-                let source = PaintSource::SceneTexture {
-                    id: *id,
-                    dest: *dest,
-                };
-
-                // An externally owned texture is its destination rectangle's
-                // coverage under an image paint that samples the caller's
-                // texture rather than the atlas — the same two rectangle paths
-                // `Command::Image` takes, so a pixel-aligned one costs no
-                // flattening either.
-                if let Some(device_rect) = fast_rect(*dest, transform) {
-                    let recorded = self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
-                    );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                dest.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
-                }
+                self.draw_external_texture(*id, *dest, combined * *transform, frame, depth);
             }
+        }
+    }
+
+    /// Record the texture bound under `id` scaled to fill `dest` under
+    /// `transform` — the body both [`Command::SceneTexture`] and
+    /// [`Command::ShaderQuad`] lower to, since the only thing separating them
+    /// is where the texels came from.
+    ///
+    /// An externally owned texture is its destination rectangle's coverage
+    /// under an image paint that samples the caller's texture rather than the
+    /// atlas — the same two rectangle paths [`Command::Image`] takes, so a
+    /// pixel-aligned one costs no flattening either.
+    fn draw_external_texture(
+        &mut self,
+        id: u64,
+        dest: Rect,
+        transform: Affine,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+    ) {
+        let source = PaintSource::SceneTexture { id, dest };
+
+        if let Some(device_rect) = fast_rect(dest, transform) {
+            let recorded = self.record(
+                frame,
+                depth,
+                source,
+                transform,
+                |generator, storage, clip| {
+                    generator.generate_filled_rect_fast(&device_rect, storage, clip);
+                },
+            );
+            if recorded {
+                frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+            }
+        } else {
+            self.record(
+                frame,
+                depth,
+                source,
+                transform,
+                |generator, storage, clip| {
+                    generator.generate_filled_path(
+                        dest.path_elements(FLATTEN_TOLERANCE),
+                        Fill::NonZero,
+                        transform,
+                        None,
+                        storage,
+                        clip,
+                    );
+                },
+            );
         }
     }
 
@@ -1671,18 +1712,48 @@ fn note_font_skip() {
     log::debug!("glyph run skipped: its font blob is not a readable face");
 }
 
-/// Report that the compiler dropped a [`Command::ShaderQuad`].
+/// The id the offscreen target of fragment program `program_id` is registered
+/// under — the compiler's half of the agreement
+/// [`crate::effects::shader_quad`] makes with the pre-pass that renders it.
+///
+/// A pure function of the program id, computed independently on both sides
+/// rather than exchanged through a side table, because the walk holds nothing
+/// else: a [`Command::ShaderQuad`] carries its `ShaderProgram` and no texture
+/// handle. `SceneTextureId::for_shader_program` is what keeps the derived
+/// value out of the range host textures mint from.
+#[must_use]
+pub fn shader_quad_texture_id(program_id: u64) -> u64 {
+    SceneTextureId::for_shader_program(program_id).get()
+}
+
+/// Report a [`Command::ShaderQuad`] dropped for want of a rendered target.
 ///
 /// Latched to once per process rather than following [`note_image_skip`] and
-/// [`note_font_skip`]'s warn-then-debug shape: a shader quad's absence is a
-/// standing, known gap (see `engine-shader-quad-unwired` in
-/// docs/LIMITATIONS.md) rather than a per-frame refusal worth re-reporting at
-/// debug level on every later drop.
-fn note_shader_quad_skip() {
+/// [`note_font_skip`]'s warn-then-debug shape: a compiler driven without the
+/// pre-pass (a host encoding frames straight through
+/// [`crate::EngineRenderer`], or a program whose shader failed to compile)
+/// produces this on every frame forever, and the second report says nothing
+/// the first did not.
+fn note_shader_quad_unrendered(program_id: u64) {
     SHADER_QUAD_SKIP_WARNING.call_once(|| {
         log::warn!(
-            "ShaderQuad command dropped: the engine compiler does not draw shader quads yet \
-             (see docs/LIMITATIONS.md `engine-shader-quad-unwired`; logged once per process)"
+            "ShaderQuad draws nothing: fragment program {program_id} has no rendered target \
+             — either the frame's shader pre-pass did not run before this compile, or the \
+             program failed to compile (logged once per process)"
+        );
+    });
+}
+
+/// Report a [`Command::ShaderQuad`] dropped because
+/// `FRUST_ENGINE_NO_SHADER_EFFECTS` is set.
+///
+/// Once per process, like the sighting above: the switch is read once and
+/// cannot change under a running process, so the fact is stated once.
+fn note_shader_effects_disabled() {
+    SHADER_EFFECTS_DISABLED_WARNING.call_once(|| {
+        log::warn!(
+            "ShaderQuad commands draw nothing: FRUST_ENGINE_NO_SHADER_EFFECTS is set \
+             (logged once per process)"
         );
     });
 }
@@ -1845,6 +1916,9 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
         Command::Image { dest, .. } => dest.is_finite(),
         Command::SceneTexture { dest, .. } => dest.is_finite(),
+        // Carries a destination rectangle like the two above, and lowers
+        // through the same external-texture path, so the same check applies.
+        Command::ShaderQuad { dest, .. } => dest.is_finite(),
         Command::BlurredRoundedRect {
             rect,
             radii,
@@ -1853,10 +1927,7 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         } => rect.is_finite() && radii_are_finite(*radii) && std_dev.is_finite(),
         Command::GlyphRun(run) => glyph_run_is_finite(run),
         // Carrying no geometry of their own — see above.
-        Command::PopClip
-        | Command::PopLayer
-        | Command::ShaderQuad { .. }
-        | Command::PopSnapshot => true,
+        Command::PopClip | Command::PopLayer | Command::PopSnapshot => true,
     };
 
     if finite {
@@ -2150,16 +2221,40 @@ mod tests {
     /// proves the half of "exactly once" a test can still observe once
     /// another test in the same binary may already have tripped it: the
     /// latch never un-completes, whatever else in this binary called
-    /// [`note_shader_quad_skip`] first. `Once::call_once` itself is the
+    /// [`note_shader_quad_unrendered`] first. `Once::call_once` itself is the
     /// standard-library guarantee behind the other half — that the closure
     /// inside it runs at most once ever — so calling the reporting function
     /// twice here and observing the latch hold is a structural stand-in for
     /// capturing and counting the actual log line.
     #[test]
-    fn a_dropped_shader_quad_is_latched_to_once_per_process() {
-        note_shader_quad_skip();
+    fn an_unrendered_shader_quad_is_latched_to_once_per_process() {
+        note_shader_quad_unrendered(1);
         assert!(SHADER_QUAD_SKIP_WARNING.is_completed());
-        note_shader_quad_skip();
+        note_shader_quad_unrendered(1);
         assert!(SHADER_QUAD_SKIP_WARNING.is_completed());
+    }
+
+    /// The kill switch's own report latches independently of the one above —
+    /// two distinct facts about why a quad drew nothing, each stated once.
+    #[test]
+    fn a_disabled_shader_quad_is_latched_to_once_per_process() {
+        note_shader_effects_disabled();
+        assert!(SHADER_EFFECTS_DISABLED_WARNING.is_completed());
+        note_shader_effects_disabled();
+        assert!(SHADER_EFFECTS_DISABLED_WARNING.is_completed());
+    }
+
+    /// A shader quad's target id is derived, never minted, and lands in the
+    /// half of the id space `SceneTextureId::mint` cannot reach — the whole
+    /// reason the compiler can name a texture it never saw registered.
+    #[test]
+    fn a_shader_quad_target_id_is_derived_from_its_program() {
+        assert_eq!(shader_quad_texture_id(7), shader_quad_texture_id(7));
+        assert_ne!(shader_quad_texture_id(7), shader_quad_texture_id(8));
+        assert_ne!(shader_quad_texture_id(7), 7);
+        assert_eq!(
+            shader_quad_texture_id(7),
+            SceneTextureId::for_shader_program(7).get()
+        );
     }
 }

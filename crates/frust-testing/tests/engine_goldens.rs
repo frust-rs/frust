@@ -34,9 +34,10 @@
 //! snapshot brackets, `ClearRect` hole punches, atlas-resident images,
 //! blurred rounded rects, and glyph runs (incl. COLR colour glyphs and the
 //! atlas-vs-outline route), and resolves solid and gradient paints. One
-//! command remains recognised-and-skipped by its compiler —
-//! [`Command::ShaderQuad`] — so a case that draws it would compare an engine
-//! frame legitimately missing the very thing the case exists to pin.
+//! command still draws nothing on these arms — [`Command::ShaderQuad`], whose
+//! pixels come from a fragment-shader pre-pass neither oracle drives — so a
+//! case that draws it would compare an engine frame legitimately missing the
+//! very thing the case exists to pin.
 //!
 //! [`PHASE_CASES`] names the cases the engine draws in full, across all five
 //! corpora ([`unit_cases`], [`adversarial_cases`], [`widget_cases`],
@@ -167,8 +168,8 @@ const PHASE_CASES: &[&str] = &[
 const DEFERRED_CASES: &[(&str, &str)] = &[
     (
         "unit-shader-quad",
-        "a shader pre-pass the engine does not own; also skipped on the CPU arm, so there \
-         would be no reference either way",
+        "a fragment-shader pre-pass neither golden oracle drives; also skipped on the CPU \
+         arm, so there would be no reference either way",
     ),
     (
         "adv-nan-transform",
@@ -617,8 +618,8 @@ fn scoped_cases() -> Vec<CorpusCase> {
         .collect()
 }
 
-/// Whether `scene` records a command the engine's compiler recognises and
-/// skips — the mechanical membership rule [`PHASE_CASES`] is checked against.
+/// Whether `scene` records a command that draws nothing on these golden arms
+/// — the mechanical membership rule [`PHASE_CASES`] is checked against.
 ///
 /// Two commands have left this list. `Command::GlyphRun` went in the text
 /// phase: the compiler now lowers every glyph run in full, atlas or outline
@@ -626,9 +627,16 @@ fn scoped_cases() -> Vec<CorpusCase> {
 /// anything an engine frame of it would need to pin. `Command::SceneTexture`
 /// followed once the engine grew an external-texture binding — it draws a
 /// registered texture and, by the display list's own contract, nothing at all
-/// for an unregistered id, so it is no longer skipped either way. Only
-/// `Command::ShaderQuad` is still recognised-and-skipped, while the engine
-/// does not yet resolve a user fragment program against the GPU backend.
+/// for an unregistered id, so it is no longer skipped either way.
+///
+/// `Command::ShaderQuad` remains, for a reason that now belongs to the
+/// oracles rather than to the compiler. Its pixels are produced by a
+/// fragment-shader pre-pass that renders the user program into a texture the
+/// frame then samples (`frust_engine::effects::shader_quad`), and neither
+/// oracle drives one: [`EngineOracle`] encodes straight through
+/// `EngineRenderer`, so the quad's id resolves to nothing and the draw is
+/// skipped, and [`CpuOracle`] has no shader compiler at all. A case drawing
+/// one therefore still has nothing to compare.
 fn engine_skipped_commands(scene: &frust_scene::Scene) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     for command in scene.commands() {
@@ -1018,10 +1026,10 @@ fn every_deferred_case_states_why_it_waits() {
 /// compiles — the membership rule behind [`PHASE_CASES`], re-derived from the
 /// scenes rather than trusted.
 ///
-/// A case listed in scope while recording a [`Command::GlyphRun`] or a
-/// [`Command::ShaderQuad`] would compare an engine frame that legitimately
-/// omits its subject, and would read as an engine defect. GPU-free, so the
-/// mistake is caught on any machine rather than only on the pinned runner.
+/// A case listed in scope while recording a [`Command::ShaderQuad`] would
+/// compare an engine frame that legitimately omits its subject, and would read
+/// as an engine defect. GPU-free, so the mistake is caught on any machine
+/// rather than only on the pinned runner.
 #[test]
 fn every_scoped_case_draws_only_commands_the_engine_compiles() {
     let mut wrongly_scoped = Vec::new();

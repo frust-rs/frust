@@ -55,16 +55,6 @@ mod context;
 // still leaking no `wgpu` type (see its module docs).
 mod headless;
 mod renderer;
-// The size-clamp policy half of the shader-showcase feature (its GPU half is
-// `frust_gpu::effects`). Currently UNWIRED: the only caller of either half was
-// the vello-classic tier's encode-time pre-pass, which registered each
-// rendered quad with `vello::Renderer` as an image override — a seam that died
-// with vello, and one the engine tier has no counterpart for until the
-// GPU-seam phase builds one. Retained (rather than deleted) because that phase
-// needs exactly this policy back; the `allow` is what keeps the module intact
-// without an unused-code failure meanwhile.
-#[allow(dead_code)]
-mod shader_effects;
 mod tier;
 
 // The device/surface foundation, re-exported name for name from `frust-gpu`:

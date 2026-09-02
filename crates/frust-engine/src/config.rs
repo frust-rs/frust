@@ -81,6 +81,25 @@ pub fn atlas_disabled() -> bool {
     })
 }
 
+/// Whether offscreen fragment-shader effects are disabled via
+/// `FRUST_ENGINE_NO_SHADER_EFFECTS`. Cached: read once per process.
+///
+/// Consulted by [`crate::effects::shader_quad`] and by the compiler's
+/// [`frust_scene::Command::ShaderQuad`] lowering: when set, no user fragment
+/// program is compiled and no shader quad is drawn — the frame renders
+/// everything else and reports the skip once at warning level. The escape
+/// hatch for a driver that miscompiles a user shader, where the alternative
+/// is losing the whole application rather than one effect.
+pub fn shader_effects_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_SHADER_EFFECTS"),
+            std::env::var("FRUST_ENGINE_NO_SHADER_EFFECTS").ok(),
+        )
+    })
+}
+
 /// Whether layer caching is disabled via `FRUST_ENGINE_NO_LAYERS`.
 /// Cached: read once per process.
 ///
@@ -206,6 +225,30 @@ mod tests {
             env_str(None, Some("2048".to_string())),
             Some("2048".to_string())
         );
+    }
+
+    /// The production reader itself, on the value the process was started
+    /// with: unset in the gate, so the switch is off and shader effects run.
+    /// Reading it here also pins that the reader parses and caches without
+    /// panicking, which is what the frame path depends on.
+    #[test]
+    fn shader_effects_are_enabled_unless_the_switch_is_set() {
+        assert!(!shader_effects_disabled());
+    }
+
+    /// The switch's own parsing rules, exercised through the combinator every
+    /// `FRUST_ENGINE_*` boolean shares — including the runtime-wins
+    /// precedence, which is what lets a compile-time-disabled build be
+    /// re-enabled at launch.
+    #[test]
+    fn shader_effects_switch_parses_like_every_other_engine_flag() {
+        assert!(env_flag_enabled(None, Some("1".to_string())));
+        assert!(env_flag_enabled(None, Some("TRUE".to_string())));
+        assert!(!env_flag_enabled(None, Some("0".to_string())));
+        assert!(!env_flag_enabled(None, Some(String::new())));
+        // Runtime wins in both directions.
+        assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
+        assert!(!env_flag_enabled(Some("1"), Some("0".to_string())));
     }
 
     #[test]

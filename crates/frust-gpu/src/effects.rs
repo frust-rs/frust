@@ -30,17 +30,30 @@
 //! It is deliberately decoupled from any scene vocabulary: the API speaks
 //! `(id: u64, wgsl: &str, size, time)` primitives, never a display list or a
 //! command, so the size-clamp and quad-placement policy that decides *which*
-//! `(id, size)` pairs a frame asks for lives in the renderer above
-//! (`frust_render::shader_effects`), and only the GPU resources live here.
+//! `(id, size)` pairs a frame asks for lives in the layer above
+//! (`frust_engine::effects::shader_quad`), and only the GPU resources live
+//! here.
 //!
 //! # Where the rendered target goes
 //!
-//! [`ShaderEffects::target_texture`] is the seam a renderer draws the result
-//! through. The vello-classic tier used to reach it by registering each target
-//! with `vello::Renderer` as an image override and handing the resulting
-//! `peniko::ImageData` back for `unregister_texture`; that renderer — and the
-//! whole registration/hand-back queue with it — is gone, so the texture is
-//! simply borrowed from the pool instead.
+//! [`ShaderEffects::target_view`] is the seam a renderer draws the result
+//! through: the target carries `TEXTURE_BINDING`, so the view it hands back is
+//! registered as a scene texture and sampled by the frame's own passes. The
+//! texture itself is reachable through [`ShaderEffects::target_texture`] for a
+//! read-back, and its true (clamped) extent through
+//! [`ShaderEffects::target_extent`] — the extent a registration must state,
+//! since it is the texture's own rather than whatever size was asked for.
+//! Nothing is registered with a foreign renderer and nothing is handed back on
+//! eviction: the pool owns the texture and a consumer borrows it.
+//!
+//! ## Alpha
+//!
+//! A target is `Rgba8Unorm` and the pass writes the fragment shader's output
+//! into it unblended, so what the shader returns is what the target holds. The
+//! consumer samples that target as **premultiplied** colour, which is the
+//! convention every other engine paint travels in: a shader returning
+//! `vec4(rgb, a)` must have already multiplied `rgb` by `a`, and one returning
+//! opaque output (`a = 1.0`) is unaffected either way.
 //!
 //! ## Shader contract
 //!
@@ -151,9 +164,11 @@ struct PipelineEntry {
 }
 
 /// The per-`(program, size)` GPU state a shader effect renders into: an
-/// offscreen `Rgba8Unorm` texture (`RENDER_ATTACHMENT | COPY_SRC` — the copy
-/// source a consumer reads), its view, the 16-byte uniform buffer, and the
-/// bind group wiring the buffer to `@binding(0)`. Stores the actual (clamped)
+/// offscreen `Rgba8Unorm` texture (`RENDER_ATTACHMENT | TEXTURE_BINDING |
+/// COPY_SRC` — the attachment the pass writes, the binding a consumer samples
+/// it through, and the copy source a read-back needs), its view, the 16-byte
+/// uniform buffer, and the bind group wiring the buffer to `@binding(0)`.
+/// Stores the actual (clamped)
 /// extent the texture was created at so `encode_pass` and `target_texture` use
 /// the true texture dimensions in the uniform and returned texture handle,
 /// agreeing by construction with the texture's own size.
@@ -383,8 +398,10 @@ impl ShaderEffects {
                 module: &module,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                // Opaque v1 contract: no blending, so a
-                // shader's premultiplied output at alpha=1.0 is written straight.
+                // No blending: the shader's output is written into the
+                // target verbatim, so what a consumer samples is exactly what
+                // the fragment stage returned (premultiplied — see the
+                // module header's alpha note).
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,
                     blend: None,
@@ -507,7 +524,7 @@ impl ShaderEffects {
     /// the device's own `max_texture_dimension_2d` ceiling (floored at 1) — a
     /// device-validity floor only, not the caller's size *policy*: a caller may
     /// still apply a tighter policy cap of its own (e.g.
-    /// `frust-render::shader_effects`'s 8192) before calling, but an oversized
+    /// `frust_engine::effects::shader_quad`'s 8192) before calling, but an oversized
     /// request that reaches here creates a texture at the device ceiling
     /// instead of tripping `wgpu` validation, and warns once per distinct
     /// oversized `(id, requested_w, requested_h)` pair — the warning latches
@@ -547,7 +564,9 @@ impl ShaderEffects {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -633,14 +652,39 @@ impl ShaderEffects {
     /// [`ensure_target`](Self::ensure_target)ed, or the pipeline compile
     /// failed).
     ///
-    /// The seam a renderer draws the effect's result through. It replaces the
-    /// vello-classic tier's image-override registration (`register_texture` /
-    /// `unregister_texture` against `vello::Renderer`, whose handles this
-    /// module used to carry per target and hand back on eviction): with that
-    /// renderer gone there is nothing to register with, so the pool's texture
-    /// is simply borrowed for as long as the borrow lives.
+    /// The read-back seam. A consumer that draws the result instead wants
+    /// [`Self::target_view`], since a scene-texture registration takes a view;
+    /// nothing is registered with a foreign renderer and nothing is handed
+    /// back on eviction — the pool owns the texture and the borrow lives as
+    /// long as the caller holds it.
     pub fn target_texture(&self, id: u64, w: u32, h: u32) -> Option<&wgpu::Texture> {
         self.targets.get(&(id, w, h)).map(|entry| &entry.texture)
+    }
+
+    /// The full-extent view of program `id`'s `(w, h)` target — the handle a
+    /// consumer registers to sample the rendered result — or `None` on the
+    /// same terms as [`Self::target_texture`].
+    ///
+    /// The same view the pass wrote through, rather than a fresh one per
+    /// frame: a view is a handle onto the texture, so creating one per
+    /// registration would churn a resource that never changes while its
+    /// target lives.
+    pub fn target_view(&self, id: u64, w: u32, h: u32) -> Option<&wgpu::TextureView> {
+        self.targets.get(&(id, w, h)).map(|entry| &entry.view)
+    }
+
+    /// The extent program `id`'s `(w, h)` target was actually created at, or
+    /// `None` on the same terms as [`Self::target_texture`].
+    ///
+    /// Not `(w, h)` echoed back: [`Self::ensure_target`] clamps to the
+    /// device's own ceiling, so a registration that stated the requested size
+    /// would map a destination rectangle onto texels the texture does not
+    /// have. This answers what the attachment holds, which is also what the
+    /// `resolution` uniform the shader read was written with.
+    pub fn target_extent(&self, id: u64, w: u32, h: u32) -> Option<(u32, u32)> {
+        self.targets
+            .get(&(id, w, h))
+            .map(|entry| (entry.used_w, entry.used_h))
     }
 }
 
