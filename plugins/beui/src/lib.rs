@@ -98,16 +98,17 @@
 pub mod agents;
 pub mod blocks;
 pub mod components;
+/// The animation substrate every component in this catalog animates with:
+/// stagger driving, per-character text cells, pointer tracking, scroll-effect
+/// adaptation, and kept-mounted exit presence. The motion *tokens* it is timed
+/// by — the curves and springs — stay in [`tokens::motion`].
+pub mod motion;
 pub mod style;
 pub mod tokens;
 
-// The motion substrate (stagger driving, per-character text cells, pointer
-// tracking, scroll-effect adaptation, kept-mounted exit presence) and the
-// overlay hosting seam (anchored positioning, modal hosting) are separately
-// owned modules of this crate; their declarations land with the modules
-// themselves. The motion *tokens* — curves and springs — are already here, in
-// `tokens::motion`.
-// pub mod motion;
+// The overlay hosting seam (anchored positioning, modal hosting) is a
+// separately owned module of this crate; its declaration lands with the module
+// itself.
 // pub mod overlay;
 
 /// The design language itself, flattened to the root: the assembled
