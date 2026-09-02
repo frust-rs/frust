@@ -31,8 +31,9 @@ the same `PopClip` (an avatar/thumbnail mask; no separate rounded clip stack) ·
 beneath it in the scene (the platform-view hole-punch's sole v1 producer) ·
 `Path{path, style, brush, transform}` ·
 `ShaderQuad{program, dest, transform, time}` — a fragment-shader-filled rect
-(the shader-showcase pre-pass; falls back to a placeholder fill when
-`FRUST_NO_SHADER_EFFECTS` is set)
+(the shader-showcase pre-pass; recognised-but-skipped by the engine's compiler
+today — it lowers to a no-op placeholder until the GPU-seam phase wires
+`frust_gpu::effects::ShaderEffects` back up, see [RENDER_ARCHITECTURE.md](../RENDER_ARCHITECTURE.md))
 
 That's the entire drawing vocabulary of the framework. Every button, every
 page transition, every emoji ends up as a sequence of these.

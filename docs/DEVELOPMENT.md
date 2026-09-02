@@ -11,7 +11,7 @@ template work, and the version-pin rows each unit owns live in its spoke:
 | Unit | Development spoke | Holds |
 |------|-------------------|-------|
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
-| RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `vello`/`wgpu`, `image`, `vello_cpu` pins |
+| RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `wgpu`, `image`, `vello_common`/`glifo` pins |
 | SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
 | PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
@@ -138,11 +138,7 @@ unlocking/pairing/Developer Mode). `run` defaults to debug (`build` defaults to
 release); with no device selected it falls back to a streamed `cargo run` (desktop
 preview, or `--watch` below) — first Android/iOS builds take a few minutes.
 
-`frust run --render-tier <gpu|cpu|engine>` forces the desktop preview's render tier
-(`FRUST_RENDER_TIER` for a manual `cargo run`); `gpu` fails fast on an incapable
-adapter, `cpu` can always be forced, and `engine` needs an `engine-tier` build (refused
-with a diagnosis otherwise) — all desktop-preview-only today, see
-[RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md). **`--features <spec>` passthrough**
+**`--features <spec>` passthrough**
 (`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-splittable; appended after the
 mode's own feature selection; refused on `build macos|windows|linux`; the four release lanes
 additionally refuse a devtools-enabling token and reject one outside cargo's strict feature
@@ -270,12 +266,10 @@ third-party design-system crate would, with nothing implicitly re-enabled by fea
 unification (that workspace's own README carries the full rationale). This gate is separate
 from `frust build apk`/`run`'s pipeline gate (*Run*).
 
-**Non-default features are not compiled by the chain above.** `frust-render`'s
-`cpu-tier` (experimental `vello_cpu` render backend —
-[RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s pins) is
-headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
-touching `frust-render`. Its `engine-tier` sibling (the frust-owned `frust-engine` strip
-pipeline) needs no GPU either: `cargo test -p frust-engine`.
+**Non-default features are not compiled by the chain above.** `frust-gpu` and `frust-engine` are
+plain (non-feature-gated) dependencies of `frust-render` now, so their host-only tests already ride
+`cargo test --workspace`; their adapter-pinned real-GPU arms are separate, `--ignored` commands —
+see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s GPU Substrate / Golden Oracle Tests sections.
 `frust-native-widgets`' `demo-components` is a composite
 `NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
 rather than in `examples/playground` (which merely switches it on) because an app
@@ -308,7 +302,7 @@ requires local hardware or is slow, and is marked `#[ignore]` with a reason):
 cargo test -p frust-render -- --ignored
 
 # Scaffold end-to-end test (frust-cli): compiles a freshly generated project's full
-# dependency graph (winit/vello/wgpu) — ~30s cold.
+# dependency graph (winit/wgpu) — ~30s cold.
 cargo test -p frust-cli --test create_e2e -- --ignored
 
 # iOS scaffold test (frust-cli): scaffolds a project and runs `xcodebuild -list` + `plutil
@@ -374,9 +368,8 @@ Proven both ways: host-side (mingw-w64 + `rustup target add x86_64-pc-windows-gn
 and via this container recipe.
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
-uncompiled on any host in this repo's history. Screen-reader verification
-(TalkBack/VoiceOver) and the `cpu-tier` tier's visual behavior on real hardware are
-unverified — both need a device/Simulator or physical GPU this headless host cannot provide.
+uncompiled on any host in this repo's history. Screen-reader verification (TalkBack/VoiceOver)
+is unverified on this headless host — it needs a device/Simulator this host cannot provide.
 **Running, not just type-checking, an iOS test** needs a booted Simulator as the runner:
 `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn booted" cargo test --target
 aarch64-apple-ios-sim -p <crate> [--lib | --test <name>]` — `frust-iap` (`--lib`) and the
@@ -429,14 +422,12 @@ coreutils`) until fixed.
 | `FRUST_DEVTOOLS` | Runtime kill switch for the in-app debug service (`frust-shell-common::devtools`, [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)): setting it to `0` skips starting the service even in a `devtools`-featured build. Same compile-time-or-runtime shape as `FRUST_TRACE` (the feature gates compilation; the var gates only startup). | unset (service starts if compiled in) |
 | `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
 | `FRUST_NO_ANIM_PACING` | Kill switch for animation-loop pacing only (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — a paced (`TickClass::CosmeticLoop`) frame request runs on its vsync as before; the whole-frame skip gate (`FRUST_NO_FRAME_GATE` row above) stays active regardless. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Narrower A/B valve than `FRUST_NO_FRAME_GATE` — reach for this when isolating pacing from skip-gate behavior. | off (pacing active) |
-| `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
-| `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`/`engine`, the last needing an `engine-tier` build) — see *Run* above and [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md). | adapter-probed |
+| `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger's known-noisy-message carve-out (below `debug`) targeted `vello`'s own log lines and is vestigial now that vello is deleted — no build emits under that target any more, so nothing is currently suppressed by it. | `info` |
 | `FRUST_WINDOW_SIZE` | Desktop preview-window initial logical size, `<width>x<height>` (`frust-shell-desktop::app_handler`) — strict `^[0-9]+x[0-9]+$`, both ≥ 1; unset/invalid falls back to the default, invalid also logging one `log::warn!` naming the bad value. Compile-time-or-runtime like `FRUST_TRACE`, runtime winning; changing the knob's *value* (not just presence) forces a relink of `frust-shell-desktop` and downstream, so prefer the runtime env on desktop and reserve `--define` for device builds with no runtime env. Effective size/maximized/source logged once. | `800x600` |
 | `FRUST_WINDOW_MAXIMIZED` | Desktop preview-window `1`/`true` (case-insensitive) maximizes it at creation, winning visually over `FRUST_WINDOW_SIZE` when both are set. Same compile-time-or-runtime shape as `FRUST_TRACE`. | off |
 | `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`, requiring the same `perf-trace` build: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3 (`acquire_us`/`submit_us` as separate fields, superseding v2's single `present_us`); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
-| render-path knobs (`FRUST_NO_DIRECT_SURFACE`, `FRUST_NO_SHADER_EFFECTS`, `FRUST_NO_SNAPSHOT_LAYERS`, `FRUST_AA_MODE`, `FRUST_RENDER_SCALE`) | See [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) § Instrumentation (render path). | — |
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf startup ...`
 line, then periodic `frust-perf frame ...` summaries; on a platform-view page it
@@ -460,7 +451,7 @@ owns them:
 
 | Pins | Owner |
 |------|-------|
-| `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
+| `wgpu`, `image`, `vello_common`/`glifo` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
@@ -512,7 +503,7 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 | iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
 | macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | Three separate literals, none referencing another: `crates/frust-drive/src/manifest.rs`'s private `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` (the manifest-parsed default, read back at build time); `crates/frust-drive/src/scaffold/context.rs`'s own `pub` const of the same name (the scaffold-time default that fills `{{ macos_minimum_system_version }}` in `templates/app/macos.tmpl/Info.plist.tmpl`); and a hard-coded `<string>11.0</string>` test literal in `crates/frust-drive/src/scaffold/mod.rs`. This trio needs the same lockstep discipline as the Android table below but none of the three sites carries the in-file lockstep comment yet — treat that as open follow-up work |
 | Windows | **10**, de facto — winit itself supports 7+ and only tests 10 regularly | Not an in-repo literal. The floor comes from the Win10-era API `frust-shell-windows` actually drives: winit's `Window::set_theme` (native titlebar light/dark theming) reaches DWM immersive dark-mode support, which requires Windows 10 1809+ |
-| Linux | No distro floor; a GPU stack able to run vello's compute-shader pipelines (Vulkan in practice) | Not declared per-distro anywhere in this repo. wgpu itself imposes no Vulkan requirement (`crates/frust-render/src/context.rs` requests `Backends::from_env().unwrap_or_default()`, i.e. all backends including GL) — the real constraint is vello's compute path, and it is an untested assumption while the Linux desktop runtime gate is owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`) |
+| Linux | No distro floor; a GPU adapter able to run `frust-engine`'s ordinary (no-compute) render passes | Not declared per-distro anywhere in this repo. wgpu itself imposes no Vulkan requirement (`crates/frust-gpu/src/context.rs` requests `Backends::from_env().unwrap_or_default()`, i.e. all backends including GL) — the engine's downlevel design rules ask for no compute pass, no storage buffer, no indirect draw, a materially lower bar than the deleted vello-classic tier, and it is an untested assumption while the Linux desktop runtime gate is owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`) |
 
 **Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
 target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's
@@ -572,15 +563,17 @@ An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
 limitation, not a Frust bug). Use a physical device, or boot with `-gpu swiftshader`
 (software Vulkan; slower but correct).
 
-### iOS Simulator cannot render — classic tier only (vello 0.9 / wgpu 29)
+### iOS Simulator uniform-buffer alignment clamp
 
-The iOS Simulator's GPU only exposes the Apple2 Metal feature family, lacking
-`wgpu::DownlevelFlags::INDIRECT_EXECUTION`, which vello 0.9 unconditionally requires — a
-wgpu-hal-29/vello-0.9 limitation, not fixable under the pin. `frust-render` fails fast instead
-of a per-frame panic; `frust run` still builds/installs/launches with a black window.
-**Classic-tier only** — `engine-tier` needs neither flag (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
-deliberately empty) and renders correctly here (gate `engine-p6-ios-simulator-renders`, *Test*
-above). **Physical devices are unaffected on either tier** (iPhone 13 mini, iPhone SE).
+The Simulator's GPU (Apple2 Metal feature family) renders correctly under `frust-engine` — it
+needs neither `COMPUTE_SHADERS` nor `INDIRECT_EXECUTION` (`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is
+deliberately empty), the pair the deleted vello-classic tier required and this GPU lacks (gate
+`engine-p6-ios-simulator-renders`, re-verified on wgpu 30.0.1 by `engine-p8-wgpu30-ios-simulator-renders`,
+*Test* above). One residue remains: the Simulator's Metal validation misreports its own
+uniform-buffer offset alignment, so a device request there is forced back up to 256 bytes
+(`frust-gpu::context`'s `effective_limits`) — kept until upstream
+[gfx-rs/wgpu#10189](https://github.com/gfx-rs/wgpu/pull/10189) ships. Physical devices are
+unaffected (iPhone 13 mini, iPhone SE).
 
 ### Android release build may not pick up `--define`
 
@@ -589,11 +582,10 @@ Gradle's `environment(...)`, but has been observed to drop them (e.g. `FRUST_TRA
 missing from the artifact). Workaround: export the same key/value pairs in the build
 shell's environment first; fix pending.
 
-### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
+### Bitmap-strike color emoji do not render on the engine (COLR emoji do)
 
-vello 0.9's bitmap-glyph decode path (`sbix`/COLR strikes) errors and skips any glyph
-whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed upstream
-([linebender/vello#1031](https://github.com/linebender/vello/issues/1031)). **Safe** for
-huddle's desktop emoji set (uniformly RGBA8); **unverified, at-risk**: Android's CBDT
-strikes may use palette-indexed PNGs at smaller sizes. The desktop logger suppresses
-this noise below `debug` (*Instrumentation*'s `FRUST_LOG` row).
+`frust-engine` decodes COLRv1 colour glyphs only; PNG/BGRA/Mask bitmap-strike glyphs (pinned
+upstream in glifo 0.3.0) go missing rather than landing wrong. **Safe** for huddle's desktop
+emoji set (bundled fonts ship COLR); **at-risk**: Android's CBDT-strike system emoji. See
+[LIMITATIONS.md](LIMITATIONS.md)'s `engine-bitmap-glyphs-gap` for the full evidence and trigger
+for removal.

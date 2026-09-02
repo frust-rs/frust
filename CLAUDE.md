@@ -1,9 +1,10 @@
 # Frust
 
 Frust is a Rust-native, mobile-first declarative UI framework: a `View`/`Widget` retained tree with
-signal-based reactivity, rendered via vello/wgpu, with Android/iOS/desktop shells, a plugin tier,
-and CLI/TUI tooling. It is a multi-crate Cargo workspace documented hub-and-spoke — this file is
-the index; follow a link below rather than reading source cold.
+signal-based reactivity, rendered via the frust-owned `frust-engine` strip pipeline on wgpu, with
+Android/iOS/desktop shells, a plugin tier, and CLI/TUI tooling. It is a multi-crate Cargo workspace
+documented hub-and-spoke — this file is the index; follow a link below rather than reading source
+cold.
 
 ## Documentation
 
@@ -40,7 +41,8 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
 ## Agent Guardrails
 
 - Version pins are LAW (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Version-Pin Policy) — never
-  bump vello/wgpu/ratatui/etc. independently.
+  bump one independently. `wgpu` is frust-owned (no `vello` constraint above it); still bump it only
+  with the engine gate suite (RENDER_DEVELOPMENT.md), never casually.
 - `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, `examples/playground`,
   `examples/design-system-sample`, `examples/material3-demo`, and `plugins/clean-signals-frust`
   are standalone workspaces excluded from the root graph — run their gates from their own
@@ -51,5 +53,6 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
   `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals
   scaffold variant must all resolve the identical git+rev spec (two resolution routes
   would give Cargo two crate identities) — do not change one without the others.
-- engine-tier/hybrid-tier are non-default; never make them default outside the engine plan's
-  swap phase.
+- `frust-engine` (on `frust-gpu`) is the only renderer `frust-render` contains — not a cargo
+  feature, not an override. Do not reintroduce a render-tier choice (env var, CLI flag, or
+  feature) without an explicit new plan.

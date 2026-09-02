@@ -1,31 +1,42 @@
-# Lab 5 — Inside vello 0.9 (reading the real thing, locally)
+# Lab 5 — Inside vello 0.9 (historical background — frust no longer depends on it)
+
+> **This chapter is external theory, not a description of frust's current renderer.** As of Phase
+> 8, `vello`/`vello_shaders`/`vello_encoding` were fully deleted from this workspace — `wgpu` is
+> now a frust-owned pin with nothing above it — and `frust-engine` (a sparse-strips renderer, no
+> compute pass at all) is the only renderer `frust-render` contains. See lab 4 for the current
+> architecture. This chapter stays because vello's all-compute design is still the clearest local
+> worked example of the GPU-pipeline theory chapters 4-5 used to teach; read it as background on a
+> *different* rendering architecture, not on this one.
 
 **Concept:** Below `render_to_texture` lies vello's all-compute pipeline: a
 chain of ~20 WGSL compute dispatches that flatten curves, sort work into
 16×16-pixel tiles, and rasterize per tile. You don't need the blog posts
-first — the pinned source, *including every shader*, is already extracted on
-this machine. Read it like any other dependency.
+first — the pinned source, *including every shader*, was extracted on this
+machine by an earlier, unrelated build. Read it like any other dependency.
 
-## Where it lives (on this machine)
+## Where it lives (on this machine, not in this workspace's lockfile)
 
 Registry root: `/Users/ed/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/`
 
 | Crate | Path | What's in it |
 |---|---|---|
-| `vello-0.9.0` | `<registry>/vello-0.9.0/` | `src/scene.rs` (the API you feed), `src/lib.rs` (`Renderer`, `RenderParams`) |
+| `vello-0.9.0` | `<registry>/vello-0.9.0/` | `src/scene.rs` (the API a vello caller feeds), `src/lib.rs` (`Renderer`, `RenderParams`) |
 | `vello_shaders-0.9.0` | `<registry>/vello_shaders-0.9.0/shader/` | **33 WGSL files** — the entire GPU pipeline, human-readable |
 | `vello_encoding-0.9.0` | `<registry>/vello_encoding-0.9.0/` | The binary scene format (`Encoding`) that `vello::Scene` accumulates |
-| `wgpu-29.0.4` | `<registry>/wgpu-29.0.4/` | The GPU abstraction underneath |
+| `wgpu-29.0.4` | `<registry>/wgpu-29.0.4/` | The GPU abstraction underneath (this workspace is now pinned to 30.0.1 instead — see [RENDER_DEVELOPMENT.md](../RENDER_DEVELOPMENT.md)) |
 
-(If a `cargo clean`-adjacent operation ever removes these, any workspace
-build re-extracts them. Your editor can open them read-only; `rust-analyzer`
-go-to-definition from `frust-render` lands there too.)
+These are leftover from before Phase 8 — nothing in this workspace's `Cargo.lock` references
+`vello` any more, so a `cargo clean`-adjacent operation that prunes the registry cache will NOT
+bring them back on the next `frust` build. Fetch them by hand (`cargo add vello@0.9.0` in a
+scratch directory, or `cargo vendor`) if they are ever missing and you still want to read them.
 
 Verified ground truth worth knowing: `vello::Scene` is literally
 `struct Scene { encoding: Encoding }` (`vello-0.9.0/src/scene.rs` ≈44–49) —
-when frust's `SceneSink` calls `fill()`, vello appends to a compact byte
+a vello caller's `fill()` call appends to a compact byte
 stream (path tags, transforms, draw tags), *not* an object tree. The GPU
-pipeline's input is that stream.
+pipeline's input is that stream. (`frust-engine`'s own scene compiler, by
+contrast, walks `frust_scene::Scene::commands` directly into GPU strip data —
+no intermediate byte-stream encoding — see lab 4.)
 
 ## The pipeline, by shader filename
 
@@ -54,9 +65,9 @@ your chapter-2 bubble-chart experiment (2.1) was stressing).
 
 Open `vello-0.9.0/src/scene.rs`, find `pub fn fill(..)` and follow it into
 `encoding.encode_*` calls; skim `vello_encoding-0.9.0/src/encoding.rs` to see
-what actually got appended (tags + points, no objects). Connect this to
-chapter 4: frust's `encode_us` timing covers *appending to this stream* plus
-dispatching the pipeline above.
+what actually got appended (tags + points, no objects). Contrast this with
+lab 4's `SceneCompiler::compile`, which has no such intermediate stream — it
+walks the scene straight into `GpuStrip`/`GpuEncodedPaint` records.
 
 ### 5.2 — Read `fine.wgsl` with your chapter-2 experiment in mind
 
@@ -66,16 +77,16 @@ the solid-color path to the gradient path (per-pixel math + texture/ramp
 sampling). This is the "learn theory after you've measured it" moment this
 guide is built on.
 
-### 5.3 — Why the iOS Simulator can't run this
+### 5.3 — Why vello 0.9 couldn't run on the iOS Simulator (and why frust's engine can)
 
-`docs/DEVELOPMENT.md` (Known Issues) records that vello 0.9 requires
-`DownlevelFlags::INDIRECT_EXECUTION` — and chapter 4 showed you the probe
-(`tier.rs::GPU_REQUIRED_DOWNLEVEL_FLAGS`). Now find the *reason*: grep
-`vello-0.9.0/src/` for `indirect` — the pipeline sizes several dispatches on
-the GPU (`*_setup.wgsl` stages writing indirect dispatch args), so the
-driver must support GPU-driven dispatch. A pipeline this dynamic can't
-pre-declare workgroup counts from the CPU. That's not trivia; it's the
-defining trait of an all-compute renderer.
+vello 0.9 required `DownlevelFlags::INDIRECT_EXECUTION`, which the Simulator's Apple2 Metal
+feature family never exposes. Find the *reason*: grep `vello-0.9.0/src/` for `indirect` — the
+pipeline sizes several dispatches on the GPU (`*_setup.wgsl` stages writing indirect dispatch
+args), so the driver must support GPU-driven dispatch. A pipeline this dynamic can't pre-declare
+workgroup counts from the CPU. That's not trivia; it's the defining trait of an all-compute
+renderer — and exactly the trait `frust-engine` (lab 4) does not share: no compute pass at all, so
+`ENGINE_REQUIRED_DOWNLEVEL_FLAGS` (`crates/frust-render/src/tier.rs`) is empty and the Simulator
+renders correctly under it today.
 
 ### 5.4 — (Optional) Capture a real frame
 
@@ -102,7 +113,9 @@ in this order, and each will feel like documentation of code you know:
    is a compiler producing a bytecode program per 16×16 tile" line is
    literally `coarse.wgsl` → `fine.wgsl`
 
-Caveat for the future: upstream vello is mid-transition to a *sparse strips*
-architecture (`vello_cpu`/`vello_hybrid` share it — you already ran
-`vello_cpu` in lab 4.2). When this repo's pin eventually moves, the stage
-table above changes; the frust-side seams (chapters 1–4) are designed not to.
+This already happened here: upstream vello's transition to a *sparse strips* architecture
+(`vello_cpu`, and the vendored `vello_common`/`glifo` core `frust-engine` is built on) is exactly
+what replaced the all-compute pipeline this chapter describes. The stage table above no longer
+describes what runs in this repo — lab 4's compiler/scheduler/pipeline seam is the sparse-strips
+equivalent, and it is what the frust-side seams (chapters 1–4) were designed to stay stable
+across.

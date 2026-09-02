@@ -4,8 +4,8 @@
 
 Frust is a Rust-native, declarative, mobile-first UI framework: apps author a `View` tree each
 frame from `Component` state, which diffs into a retained `Widget` tree driving layout, paint,
-and a vello/wgpu GPU render pipeline. Signals-based reactivity (`frust-reactive`) wakes the host
-shell on state change. Android, iOS, and desktop shells embed the same core and render pipeline;
+and a GPU render pipeline — the frust-owned `frust-engine` strip renderer on `wgpu`. Signals-based
+reactivity (`frust-reactive`) wakes the host shell on state change. Android, iOS, and desktop shells embed the same core and render pipeline;
 a plugin tier bridges OS capabilities and native controls; standalone CLI/TUI tooling scaffolds,
 builds, and drives real devices.
 
@@ -17,7 +17,7 @@ its own spoke — read this to orient, then follow one link.
 | Unit | Packages | Responsibility | Spoke |
 |------|----------|-----------------|-------|
 | CORE | `frust-core`, `frust-scene`, `frust-reactive`, `frust-paths`, `frust` (facade) | View/Widget lifecycle, layout, event routing, the Component state boundary; renderer-agnostic scene display-list seam; leaf signals/tasks executor; leaf data/cache-dir resolution; facade curating all of the above into one app!/Component/View API | [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) |
-| RENDER | `frust-render`, `frust-text` | wgpu+Vello GPU backend encoding the scene display list and presenting to a surface, owning render-tier selection and per-surface shader effects; Parley-based text shaping/layout/IME editing engine | [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md) |
+| RENDER | `frust-render`, `frust-text` | wgpu GPU backend presenting a scene to a surface through the frust-owned `frust-engine` strip renderer, plus per-surface shader effects; Parley-based text shaping/layout/IME editing engine | [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md) |
 | WIDGETS | `frust-widgets`, `frust-theme` | Baseline widget set (layout, controls, text, gestures, navigation, platform-view slots) over a shared authoring toolkit; sibling design-token crate bundled into the `Theme` widgets recover from context — the three built-in design systems now live in PLUGINS as sibling plugin crates | [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) |
 | SHELLS | `frust-shell-common`, `frust-shell-desktop`, `frust-shell-macos`, `frust-shell-windows`, `frust-shell-linux`, `frust-shell-android`, `frust-shell-ios` | The seam to each host: owns the event loop/frame callback, drives rebuild→layout→paint→encode→present, and translates native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals; desktop is a shared winit core plus three thin per-OS native-integration crates | [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) |
 | PLUGINS | `frust-plugin`, `plugins/shared-preferences`, `plugins/secure-storage`, `plugins/camera`, `plugins/clipboard`, `plugins/haptics`, `plugins/iap`, `plugins/clean-signals-frust`, `plugins/database`, `plugins/i18n`, `plugins/glyph`, `plugins/material`, `plugins/cupertino`, `plugins/shadcn` | Shared Android platform-handle substrate; six OS-capability plugins behind a shared conformance suite; facade-tier glue for an external clean-architecture core; a pure-Rust embedded-SQL plugin; a Fluent+ICU4X internationalization plugin; four design-system plugins (Glyph/Material/Cupertino/shadcn) built on `frust::authoring` alone — shadcn is the tier's first port of a third-party catalog rather than an in-tree extraction | [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) |
@@ -46,8 +46,9 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
 
 ## Cross-Unit Layer Dependencies
 
-- **Scene-layer purity** — `frust-scene` and `frust-text` expose only `kurbo`/`peniko` types; `vello`
-  and `wgpu` are confined to `frust-render`. No widget or core code depends on a GPU crate directly.
+- **Scene-layer purity** — `frust-scene` and `frust-text` expose only `kurbo`/`peniko` types; `wgpu`
+  is confined to `frust-render`/`frust-gpu`/`frust-engine`. No widget or core code depends on a GPU
+  crate directly.
 - **`frust-reactive` is a leaf** — depends only on `reactive_graph`/`any_spawner`/`tokio`/`futures`;
   nothing in core, scene, render, or a shell may appear in its dependency graph.
 - **`frust-core`'s one documented exception** — `frust-core` depends on `reactive_graph` directly
@@ -82,15 +83,19 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   plugins `frust-glyph`/`frust-material`/`frust-cupertino`) sit *beside* the facade in an app's own
   dependency list, never inside it — `frust` itself carries `default = []`, no catalog feature to
   toggle.
-- **Engine-tier boundary** — `frust-gpu` depends on `wgpu`/`kurbo`/`peniko` only; `frust-engine`
-  depends on `frust-gpu` + `frust-scene`; nothing above RENDER depends on either.
+- **GPU-substrate layer boundary** — `frust-gpu` depends on `wgpu`/`kurbo`/`peniko` only, and owns
+  the device/surface foundation (adapter/device creation, surface lifecycle, pipeline-cache
+  framing) that `frust-render` re-exports under its own names so no shell file has to know where
+  any of it moved to; `frust-engine` depends on `frust-gpu` + `frust-scene` for the scene-to-strip
+  compiler and GPU pipelines; nothing above RENDER depends on either.
 
 ```
 frust-reactive (leaf)              frust-paths (leaf)      tooling: frust-cli/-drive/-tui/-mcp/-dap
         │                                  │                              (no framework crate)
 frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme ──► frust (facade)
    (kurbo/peniko only)         │                                              │
-        │                      └──────────► frust-render (vello/wgpu) ◄──────┘
+        │                      └──────────► frust-render (frust-engine/wgpu) ◄┘
+        │                                     └──► frust-gpu ──► wgpu
         ▼                                                                    │
    shell-desktop ──► shell-{macos,windows,linux}                             │
         │                                                                    │
@@ -110,9 +115,10 @@ and `frust-shell-windows` additionally `frust-theme`.
 
 - **Rebuild wake flow** — a tracked signal write notifies the process-wide `FrameWaker`, which the
   active shell consults to schedule its next frame. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
-- **Render encode flow** — a `frust-scene` `Scene` built by `Component`/widget paint is run through
-  `encode_scene` into a `vello::Scene`, then `SurfaceRenderer` encodes and presents it, either
-  direct-to-surface or via an intermediate-texture blit. See [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md).
+- **Render encode flow** — a `frust-scene` `Scene` built by `Component`/widget paint is compiled by
+  `frust-engine` into GPU strip data, then `SurfaceRenderer` records it into the acquired swapchain
+  view and presents, direct on every backend/alpha-mode pair (with a one-pass un-premultiply
+  conversion on a straight-alpha translucent swapchain). See [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md).
 - **Theme delivery** — the shell owns the active `Theme`; widgets recover it type-erased from the
   paint/layout context; app code reads a cloned `Theme` reactively. `native-widgets` folds it into
   control props every frame, diff-gated against the platform FFI. See
@@ -145,8 +151,7 @@ and `frust-shell-windows` additionally `frust-theme`.
 | `Scene` / `SceneBuilder` | The renderer-agnostic vector display list — the stable widget↔GPU seam (`frust-scene`) |
 | `Theme` | The design-language token bundle (color/type/shape/elevation/motion) recovered from context |
 | `ReactiveRuntime` / `FrameWaker` | The leaf signal/task executor and the wake signal it raises on a tracked write |
-| `SurfaceRenderer` | `frust-render`'s per-surface encode/present owner (direct-to-surface or blit) |
-| `RenderTier` | The GPU (`vello`) rendering path, default; the optional non-default `cpu-tier` feature substitutes a `vello_cpu` software fallback for the same surface target, and the non-default `engine-tier` feature adds an override-only `Engine` variant (the frust-owned `frust-engine` strip pipeline) no adapter probe ever selects |
+| `SurfaceRenderer` | `frust-render`'s per-surface encode/present owner, driving the `frust-engine` renderer direct into the acquired swapchain |
 
 ## See Also
 

@@ -18,13 +18,11 @@ off this index — read this plus the one that covers what you are touching:
   bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
   in one function/module with a `# Safety` doc comment stating the caller contract:
-  - `frust-render`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) and
-    `on_surface_created_from_android_window`/ `on_surface_created_from_metal_layer`
-    (`renderer.rs`) — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
-    `wgpu::Surface`.
-  - `frust-gpu`'s own `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — the
-    engine-substrate crate's sibling pair to the `frust-render` sites above, same raw
-    `ANativeWindow*`/`CAMetalLayer*`-to-`wgpu::Surface` contract, each `# Safety`-noted.
+  - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
+    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`, each
+    `# Safety`-noted. `frust-render`'s `on_surface_created_from_android_window`/
+    `on_surface_created_from_metal_layer` (`renderer.rs`) are the entry points a shell calls;
+    their own `unsafe` is confined to forwarding the raw pointer into the `frust-gpu` pair above.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary (`extern "system"`
     exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s
     `JavaVM` stash), `android_app!`'s generated exports, and the render-thread split's
@@ -59,9 +57,9 @@ off this index — read this plus the one that covers what you are touching:
     `dispatch_get_main_queue()` callback runs on the actual main thread; every
     `UI*FeedbackGenerator` call itself is a plain safe binding. Its `android`/`desktop` backends
     hold no `unsafe`.
-  - `frust-render`'s `RenderContext::create_pipeline_cache` — one call building a
+  - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a
     `wgpu::PipelineCache` from a shell-persisted, adapter-fingerprint-validated blob (see
-    `docs/RENDER_ARCHITECTURE.md`'s `RenderContext` module row).
+    `docs/RENDER_ARCHITECTURE.md`'s `frust-gpu::context` module row).
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no `killpg`) that
     group-kills a streamed child's Unix process group.
   - `frust-camera`'s `apple` backend — AVFoundation message sends behind one `QueueBound<T>`
@@ -206,8 +204,8 @@ Both plugin tiers under `plugins/` carry additional conventions of their own —
 ## GPU / Render-Engine Rules
 
 Downlevel design rules (E1-E18, `crates/frust-gpu/src/lint.rs`) bind `frust-gpu`/`frust-engine`
-— the frust-owned strip pipeline behind the non-default `engine-tier` feature. Four bind every
-change to either crate:
+— the frust-owned strip pipeline `frust-render` always contains, not a cargo feature. Four bind
+every change to either crate:
 
 - **WGSL lives in a `.wgsl` file under `crates/frust-engine/shaders/`, reached via
   `include_str!` — never an inline string literal.** The downlevel lint
@@ -245,10 +243,9 @@ fn validate(&self, ctx: &DoctorCtx) -> Validation {
 Every external tool invocation (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) goes through
 `ProcessRunner`, so `doctor`/`devices` logic tests via `FakeProcessRunner`.
 
-### Leaking `vello`/`wgpu` types outside `frust-render`
+### Leaking `wgpu` types outside `frust-render`/`frust-gpu`/`frust-engine`
 
-**BAD:** a `frust-scene` or `frust-text` public function taking or returning a
-`vello::*`/`wgpu::*` type.
+**BAD:** a `frust-scene` or `frust-text` public function taking or returning a `wgpu::*` type.
 
 **GOOD:** public APIs above `frust-render` speak only `kurbo`/`peniko`; this is what lets
 the GPU backend be swapped later without touching widget or text code.
@@ -565,7 +562,7 @@ shipped instance.
   private workflow ledger own that process context; a ledger number in a comment is a
   dangling reference for every reader without that private repo.
 - **Sanctioned citations** stay fine: `docs/LIMITATIONS.md` stable ids (e.g.
-  `` `cam-blit-opaque` ``) — the register's documented purpose; named semantic rules (`R23`,
+  `` `engine-metal-postmultiplied-truth-bug` ``) — the register's documented purpose; named semantic rules (`R23`,
   `R44-back`) — they name behavior, not a ledger entry; pointers to doc sections; and commit
   SHAs/version pins of *external* repos (e.g. clean-signals' `910f626`).
 - **Substance over ledger number.** When the process context carried real meaning, keep the

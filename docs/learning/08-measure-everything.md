@@ -12,8 +12,7 @@ trace line to point at.**
 |---|---|---|
 | `FRUST_TRACE` | Master switch: `FrameStats` summaries + `StartupSpans` | `crates/frust-shell-common/src/perf.rs` ≈75–111 |
 | `FRUST_TRACE_RAW` | One parseable line **per frame** instead of summaries. **Requires `FRUST_TRACE` too** — alone it does nothing (two-dial contract, `perf.rs` ≈119–128) | `perf.rs` ≈114–135 |
-| `FRUST_LOG` | Desktop stderr log level (the sink perf lines print through); `debug` un-suppresses vello noise | `crates/frust-shell-desktop/src/logger.rs` ≈103 |
-| `FRUST_RENDER_TIER` | `gpu`/`cpu` tier override (lab 4.2) | `crates/frust-render/src/tier.rs` ≈187–216 |
+| `FRUST_LOG` | Desktop stderr log level (the sink perf lines print through); the logger's known-noisy-message carve-out (`debug` un-suppresses it) targeted vello's own log lines and is vestigial now that vello is deleted | `crates/frust-shell-desktop/src/logger.rs` ≈103 |
 | `FRUST_NO_FRAME_GATE` | Gate kill switch (lab 7.1) | `crates/frust-shell-common/src/frame_gate.rs` ≈63 |
 | `FRUST_NO_RESAMPLE` | Resampler kill switch (lab 7.3) | `crates/frust-shell-common/src/resample.rs` ≈54 |
 
@@ -103,8 +102,9 @@ awk '/frust-perf raw/ {for(i=1;i<=NF;i++) if($i ~ /^paint_us=/){sub("paint_us=",
 
 (The harness's `stats.py` under `benchmarks/harness/` does this properly —
 read it once.) Now re-run every experiment you eyeballed earlier with real
-percentiles: gradient→solid (lab 2.1), bubble count sweep, `cpu` tier
-(lab 4.2 — compare `encode_us` distributions GPU vs CPU).
+percentiles: gradient→solid (lab 2.1), bubble count sweep, lab 4.2's capability-gate
+probe (there is no CPU-tier comparison arm any more — the engine is the only
+renderer).
 
 ### 8.2 — Decompose a cold start
 
