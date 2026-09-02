@@ -103,13 +103,12 @@ pub mod components;
 /// adaptation, and kept-mounted exit presence. The motion *tokens* it is timed
 /// by — the curves and springs — stay in [`tokens::motion`].
 pub mod motion;
+/// The overlay hosting seam every panel that leaves its parent's box is built
+/// on: anchored (trigger-relative) placement and modal (scrim + panel) hosting,
+/// both staged by [`motion::Presence`].
+pub mod overlay;
 pub mod style;
 pub mod tokens;
-
-// The overlay hosting seam (anchored positioning, modal hosting) is a
-// separately owned module of this crate; its declaration lands with the module
-// itself.
-// pub mod overlay;
 
 /// The design language itself, flattened to the root: the assembled
 /// [`theme()`](fn@theme), the [`BeuiTokens`] extension, the vendored
