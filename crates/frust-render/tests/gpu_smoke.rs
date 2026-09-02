@@ -1,6 +1,6 @@
 //! GPU smoke tests: render Frust scenes offscreen through
 //! [`frust_render::HeadlessRenderer`] and read the pixels back. These exercise
-//! the real `frust-engine` / wgpu 29 pipeline end to end, so they are
+//! the real `frust-engine` / wgpu 30 pipeline end to end, so they are
 //! `#[ignore]`d and run manually on hardware with a GPU:
 //!
 //! ```text

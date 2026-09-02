@@ -256,8 +256,8 @@ accesskit = "0.24"
 accesskit_winit = "0.33"
 accesskit_android = "0.7"
 accesskit_ios = "=0.1.2"
-# frust-engine's own sparse-strip core (`engine-tier` feature on
-# frust-render), exact-pinned (pre-1.0 experimental), NOT default build. The
+# frust-engine's own sparse-strip core (a plain dependency of frust-render —
+# the only renderer it contains), exact-pinned (pre-1.0 experimental). The
 # only `vello_common`/`glifo` identity now — the legacy `vello_cpu =0.0.9`
 # CPU-tier fallback pin (and its own `vello_common 0.0.9`/`glifo 0.1.1`
 # identities) was retired alongside `frust-render`'s `cpu-tier` feature.

@@ -725,7 +725,7 @@ mod tests {
         let dir = unique_project_dir("desktop-features-rejected");
         let runner = FakeProcessRunner::new();
         let flags = BuildFlags {
-            features: vec!["engine-tier".to_string()],
+            features: vec!["perf-trace".to_string()],
             ..Default::default()
         };
         let target = match host {
@@ -745,7 +745,7 @@ mod tests {
         let err = run_in(&runner, &dir, target).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("--features"), "{message}");
-        assert!(message.contains("engine-tier"), "{message}");
+        assert!(message.contains("perf-trace"), "{message}");
         assert!(message.contains("build apk"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -760,7 +760,7 @@ mod tests {
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
             build: BuildFlags {
-                features: vec!["engine-tier".to_string()],
+                features: vec!["perf-trace".to_string()],
                 ..Default::default()
             },
             split_per_abi: false,

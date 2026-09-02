@@ -23,12 +23,10 @@
 //! ## Radius arity
 //!
 //! `vello_common` 0.2.0's [`BlurredRoundedRectangle`] takes a single `f32`
-//! `radius` — the same arity vello 0.9's `Scene::draw_blurred_rounded_rect`
-//! and vello_cpu's `fill_blurred_rounded_rect` already carry, which is why
-//! `frust-render`'s classic and CPU tiers already collapse a per-corner shadow
-//! through [`CornerRadii::largest`] (see `frust-render::convert` and
-//! `docs/RENDER_ARCHITECTURE.md` Data Flow; recorded as the accepted
-//! limitation `render-blurred-shadow-corner-collapse`). No vello 0.2 type in
+//! `radius` — the same arity vello_cpu's `fill_blurred_rounded_rect` carries,
+//! which is why the CPU oracle collapses a per-corner shadow through
+//! [`CornerRadii::largest`] (see `frust-testing::oracle_cpu`; recorded as the
+//! accepted limitation `render-blurred-shadow-corner-collapse`). No vello 0.2 type in
 //! this dependency line expresses a per-corner blurred rectangle, so this
 //! encoder collapses the same way, through the same method, for the same
 //! reason `frust_scene::CornerRadii::largest`'s own doc gives: a shadow

@@ -2,8 +2,8 @@
 //! construction site for what a desktop preview of a Frust project actually
 //! runs. Every front-end that previews on the host rather than a device
 //! resolves its invocation here: `frust run`'s desktop fallback (which adds
-//! the release-lean preflight's resolved feature list and its own
-//! `--render-tier` env on top), `frust-tui`'s supervisor
+//! the release-lean preflight's resolved feature list on top), `frust-tui`'s
+//! supervisor
 //! (`crates/frust-tui/src/supervise/session.rs`'s `SessionSpec::launch_plan`,
 //! which reshapes the result into its own `LaunchPlan`), and `frust-mcp`'s
 //! session engine (through [`spawn_desktop_session`]). Pure value-building plus

@@ -42,8 +42,8 @@
 //!
 //! # Reflective knob
 //!
-//! iOS 26+'s native switch renders a reflective/glassy knob; vello 0.9 has no
-//! backdrop-blur or lensing primitive, so this ships a **static
+//! iOS 26+'s native switch renders a reflective/glassy knob; frust-engine has
+//! no backdrop-blur or lensing primitive, so this ships a **static
 //! approximation**: a soft drop shadow beneath the knob sourced from
 //! `theme.glass.control`'s [`frust::ShadowSpec`]
 //! (the same "buttons/toggles" glass tier this crate's other widgets read —

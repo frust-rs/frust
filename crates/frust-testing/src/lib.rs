@@ -7,7 +7,7 @@
 //! dependency graph. Both arms of the oracle PAIR ship here — the GPU-free
 //! [`oracle_cpu::CpuOracle`] and the GPU [`oracle_engine::EngineOracle`] —
 //! because [`corpus`] hands the same case to both behind one
-//! [`render::SceneRenderer`]. That is why this crate carries engine-tier
+//! [`render::SceneRenderer`]. That is why this crate carries the engine-layer
 //! edges (`frust-engine`/`frust-gpu`/`wgpu`); see the manifest's comment for
 //! why they are sound. Only `oracle_engine` needs a GPU at run time: every
 //! other module, the CPU arm included, runs on a machine without one.

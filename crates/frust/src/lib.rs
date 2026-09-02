@@ -463,7 +463,7 @@ pub mod authoring {
     pub use frust_widgets::authoring::*;
 
     // tier 3 — geometry/paint. NOTE the split: `Stroke` is kurbo, `Fill` is peniko
-    // (see `crates/frust-render/src/convert.rs`'s own import lines).
+    // (kurbo owns the geometry vocabulary, peniko the paint vocabulary).
     pub use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Shape, Size, Stroke, Vec2};
     pub use peniko::{Brush, Color, Fill, ImageData};
 

@@ -190,10 +190,10 @@ pub fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> boo
 ///
 /// True for `wgpu::Backend::Metal` with `CompositeAlphaMode::PostMultiplied`
 /// alone. wgpu-hal's Metal adapter advertises `PostMultiplied`
-/// (`wgpu-hal-29.0.4/src/metal/adapter.rs:422-425`,
+/// (`wgpu-hal-30.0.1/src/metal/adapter.rs:468-471`,
 /// `composite_alpha_modes: [Opaque, PostMultiplied]`) but its surface
 /// configuration implements the mode as nothing beyond
-/// `render_layer.setOpaque(false)` (`wgpu-hal-29.0.4/src/metal/surface.rs:81-85`)
+/// `render_layer.setOpaque(false)` (`wgpu-hal-30.0.1/src/metal/surface.rs:269-273`)
 /// — it never asks Core Animation to treat the layer's content as straight
 /// alpha, and Core Animation has no such mode: a `CAMetalLayer` ONLY
 /// composites premultiplied (MoltenVK's own equivalent exposes
@@ -206,8 +206,10 @@ pub fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> boo
 /// premultiply-composite it anyway, over-brightening every partial-alpha
 /// pixel — device-visible only at fractional alpha (an indigo/navy wash,
 /// black frames near a translucent split). See `docs/LIMITATIONS.md`'s
-/// `engine-metal-postmultiplied-truth-bug`, and re-check this against
-/// wgpu-hal 30's adapter/surface when that pin lands.
+/// `engine-metal-postmultiplied-truth-bug`. Re-checked at the wgpu 30.0.1
+/// pin: unchanged. Upstream trunk PR gfx-rs/wgpu#9922 (merged 2026-08-18,
+/// unreleased as of 30.0.1) makes Metal advertise `PreMultiplied` instead, so
+/// this predicate retires at the pin bump that carries it.
 ///
 /// Every other backend keeps the ordinary reading: a genuinely-straight
 /// `PostMultiplied` compositor exists on at least one other backend (e.g.

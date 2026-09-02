@@ -495,9 +495,8 @@ impl FrameExecutor {
 
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
-/// surface produces no such measurement (every tier but the engine one, an
-/// `engine-tier` build whose device never got `TIMESTAMP_QUERY`, or simply no
-/// reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+/// surface produces no such measurement (a device that never offered
+/// `TIMESTAMP_QUERY`, or simply no reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
 ///
 /// Shared by [`render_scene`] and [`InlineExecutor::record_skip`] below, the
 /// two frame-record sites in this module.

@@ -382,13 +382,12 @@ account at all.
    Connect listing, no sandbox tester account, no network round trip to
    Apple.
 
-**Simulator caveat: logic only, no picture.** The iOS Simulator's GPU can't
-satisfy vello 0.9's rendering requirement, so `frust run` on the Simulator
-builds/installs/launches but the window stays black
-(`docs/DEVELOPMENT.md`'s Known Issues, *iOS Simulator cannot render*) — a
-render-stack limitation, not this plugin's. The StoreKit-Testing calls above
-still run and can be exercised (log output, a debug harness, a breakpoint),
-but a pixel-accurate purchase-flow check needs a physical device.
+**Simulator caveat.** The iOS Simulator renders frust content (frust-engine
+draws there since the engine swap — `docs/DEVELOPMENT.md`'s Known Issues keeps
+only the uniform-alignment note), so `frust run` on the Simulator shows the
+app. The StoreKit-Testing calls above run and can be exercised there (log
+output, a debug harness, a breakpoint), but a pixel-accurate purchase-flow
+check against the real store sheets still needs a physical device.
 
 ### Android — no offline equivalent
 

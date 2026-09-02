@@ -1,4 +1,4 @@
-//! Layer 4: GPU backend — wgpu 29 over the frust-owned `frust-engine` strip
+//! Layer 4: GPU backend — wgpu 30 over the frust-owned `frust-engine` strip
 //! pipeline.
 //!
 //! Consumes the renderer-agnostic [`frust_scene::Scene`] display list and

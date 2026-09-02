@@ -1,26 +1,25 @@
-//! Regression test: color emoji renders end-to-end
-//! through the pinned parley/fontique/vello stack with **no changes to the
-//! render path** (`frust-render`/`frust-scene`).
+//! Regression test: color emoji SHAPING works end-to-end through the pinned
+//! parley/fontique stack with **no changes to the render path**
+//! (`frust-render`/`frust-scene`).
 //!
-//! Verified capability: vello 0.9.0's `Scene::draw_glyphs(...).draw(...)` natively renders
-//! COLR v0/v1+CPAL and bitmap-strike (sbix) color glyphs straight from a
-//! font's own color tables — `frust-render`'s `draw_glyph_run`
-//! (`crates/frust-render/src/convert.rs`) already calls that API
-//! unmodified, with the run's `.brush()` only ever the fallback foreground
-//! for non-color glyphs. `GlyphRun` is already per-run-font, the correct
-//! granularity for a mixed text+emoji string. Parley auto-tags emoji
-//! clusters `GenericFamily::Emoji`, and fontique's CoreText backend on
-//! macOS resolves that to Apple Color Emoji with zero manual font
-//! registration — so this test only needs to prove shaping-side fallback
-//! actually engages and yields real (non-`.notdef`) glyphs; no
-//! `frust-text` fix was needed (`TextContext`'s default fontique setup
-//! already resolves emoji fallback correctly on this host).
+//! What this proves is shaping-side fallback: parley auto-tags emoji clusters
+//! `GenericFamily::Emoji`, and fontique's CoreText backend on macOS resolves
+//! that to Apple Color Emoji with zero manual font registration, yielding real
+//! (non-`.notdef`) glyphs in a per-run-font `GlyphRun` — the correct
+//! granularity for a mixed text+emoji string. No `frust-text` fix was needed
+//! (`TextContext`'s default fontique setup already resolves emoji fallback
+//! correctly on this host).
 //!
-//! **CBDT/Android caveat**: this only proves fallback + COLR/CPAL/sbix-style
-//! resolution on this (macOS/Apple Color Emoji, an sbix bitmap-strike font)
-//! host. Whether vello 0.9's color-glyph path also renders CBDT (the bitmap
+//! Rendering those glyphs is the engine's business and is NOT covered here:
+//! the engine's glyph path is glifo-based, and its color/bitmap-glyph coverage
+//! is tracked in `docs/LIMITATIONS.md`'s `engine-bitmap-glyphs-gap` (this test
+//! predates the engine swap, when the classic renderer drew COLR/sbix color
+//! glyphs natively).
+//!
+//! **CBDT/Android caveat**: this only proves fallback resolution on this
+//! (macOS/Apple Color Emoji, an sbix bitmap-strike font) host. CBDT (the bitmap
 //! emoji table format Android system fonts typically use) has **not** been
-//! verified on-device — that remains a Phase E device-truth item.
+//! verified on-device — that remains a device-truth item.
 
 use frust_text::{TextContext, TextStyle};
 use kurbo::Point;

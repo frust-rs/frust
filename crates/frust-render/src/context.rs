@@ -710,7 +710,7 @@ mod tests {
     fn metal_post_multiplied_skips_the_unpremultiply_arm() {
         // The upstream wgpu-hal truth bug this predicate corrects for: Metal's
         // `PostMultiplied` composites premultiplied despite advertising
-        // straight alpha (wgpu-hal-29.0.4's metal/adapter.rs advertises the
+        // straight alpha (wgpu-hal-30.0.1's metal/adapter.rs advertises the
         // mode, metal/surface.rs implements it as nothing beyond
         // `setOpaque(false)`, and `CAMetalLayer` only ever composites
         // premultiplied), so handing it the straight-alpha conversion would
