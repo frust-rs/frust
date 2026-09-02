@@ -174,7 +174,7 @@ use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
-use frust_gpu::{PipelineCache, PooledTexture, ShaderLibrary, TextureId, TierCaps};
+use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use glifo::{AtlasCommand, AtlasCommandRecorder, AtlasPaint};
 use kurbo::Affine;
@@ -199,6 +199,7 @@ use crate::filters::{FilterStep, ServedFilter, served_filter};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
+use crate::gpu::bindings::{ExternalRuns, ExternalTextures, lower_encoded_external};
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs};
@@ -297,7 +298,10 @@ pub struct EngineRenderer {
     /// The bounds an intermediate page is sized between — the policy half of
     /// page sizing, kept beside the pool the extents are requested from.
     pages: PageConfig,
-    textures: HashMap<TextureId, wgpu::TextureView>,
+    /// The caller-owned textures a `Command::SceneTexture` resolves against
+    /// (see [`crate::gpu::bindings`]). Its extent half lives on the compiler,
+    /// written by the same two calls that write this.
+    textures: ExternalTextures,
     resources: FrameResources,
     scratch: Scratch,
     /// The render-to-atlas pass, created by the first frame that caches a
@@ -379,7 +383,7 @@ impl EngineRenderer {
             depth: DepthAttachment::new(),
             targets: IntermediateTargets::new(caps),
             pages: PageConfig::default(),
-            textures: HashMap::new(),
+            textures: ExternalTextures::new(),
             resources: FrameResources::new(device, dim),
             scratch: Scratch::default(),
             atlas_glyphs: None,
@@ -515,25 +519,50 @@ impl EngineRenderer {
         self.depth.is_pre_cleared()
     }
 
-    /// Registers `view` under `id` so a scene referencing that texture can
-    /// resolve it, returning whatever was registered under `id` before.
+    /// Registers a caller-owned texture so a
+    /// [`Command::SceneTexture`](frust_scene::Command::SceneTexture) naming
+    /// `id` draws it, returning whatever was registered under `id` before.
+    ///
+    /// `id` is the [`SceneTextureId`] the texture minted for itself
+    /// (`frust_gpu::Texture::as_scene_texture`), and `size` is its extent in
+    /// texels — the rectangle a display list's destination is mapped onto.
+    /// `view` must be a non-array 2D view of a float-sampleable texture
+    /// carrying `wgpu::TextureUsages::TEXTURE_BINDING`; `wgpu` rejects
+    /// anything else when the frame's bind group is built.
+    ///
+    /// Both halves of the registration land here: the view a pass samples and
+    /// the extent the compiler composes a paint transform against. Registering
+    /// is idempotent — re-registering the same id replaces the view and drops
+    /// the bind groups naming the old one.
+    ///
+    /// An extent past `u16::MAX` on either axis, or a zero one, registers
+    /// nothing and answers `None`: the record the shader reads packs the
+    /// source region into `u16` halves, so there is no honest rectangle to
+    /// name. Scenes drawing that id go on drawing nothing.
     pub fn bind_texture(
         &mut self,
-        id: TextureId,
+        id: SceneTextureId,
+        size: (u32, u32),
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
-        self.textures.insert(id, view)
+        self.resources.forget_external(id.get());
+        if !self.compiler.bind_external_texture(id.get(), size) {
+            return self.textures.unbind(id);
+        }
+        self.textures.bind(id, view)
     }
 
-    /// Removes the view registered under `id`, returning it.
-    pub fn unbind_texture(&mut self, id: TextureId) -> Option<wgpu::TextureView> {
-        self.textures.remove(&id)
+    /// Removes the texture registered under `id`, returning its view.
+    pub fn unbind_texture(&mut self, id: SceneTextureId) -> Option<wgpu::TextureView> {
+        self.compiler.unbind_external_texture(id.get());
+        self.resources.forget_external(id.get());
+        self.textures.unbind(id)
     }
 
     /// The view registered under `id`, if any.
     #[must_use]
-    pub fn bound_texture(&self, id: TextureId) -> Option<&wgpu::TextureView> {
-        self.textures.get(&id)
+    pub fn bound_texture(&self, id: SceneTextureId) -> Option<&wgpu::TextureView> {
+        self.textures.get(id)
     }
 
     /// How many external textures are currently bound.
@@ -710,7 +739,7 @@ impl EngineRenderer {
         // the frame's ramps are resident and its records are laid out.
         let atlas_budget = self.compiler.images().budget();
         self.resources
-            .resolve_paints(&frame, &mut self.gradients, atlas_budget);
+            .resolve_paints(&frame, &mut self.gradients, atlas_budget, &self.textures);
         self.scratch.build(
             &frame,
             &rounds,
@@ -1053,6 +1082,12 @@ impl EngineRenderer {
 
         self.resources
             .ensure_bind_groups(device, frame.alpha.0, &frame.alpha.1, format);
+        self.resources.ensure_external_groups(
+            device,
+            frame.alpha.0,
+            &frame.alpha.1,
+            &self.textures,
+        );
         if let Some(pipeline) = frame.opaque.as_ref() {
             self.resources.ensure_bind_groups(
                 device,
@@ -1067,6 +1102,14 @@ impl EngineRenderer {
                 EnginePipeline::StripIntermediate,
                 pipeline,
                 format,
+            );
+            // A layer's own round draws through this variant, so an external
+            // texture inside an isolated layer needs its group here too.
+            self.resources.ensure_external_groups(
+                device,
+                EnginePipeline::StripIntermediate,
+                pipeline,
+                &self.textures,
             );
         }
         if let Some((variant, pipeline)) = frame.punch.as_ref() {
@@ -1166,6 +1209,9 @@ impl EngineRenderer {
                     groups: opaque_groups,
                     resources: &opaque_groups.resources,
                     composites: &[],
+                    // An external paint is never claimed opaque, so the
+                    // depth-writing pass never holds a run.
+                    external_keys: &[],
                     instances,
                     base: 0,
                     segments: &[Segment::Strips(0, opaque_count)],
@@ -1400,6 +1446,7 @@ impl EngineRenderer {
                         groups,
                         resources,
                         composites: &composites,
+                        external_keys: self.resources.external_runs.keys(),
                         instances,
                         base,
                         segments,
@@ -1473,6 +1520,12 @@ struct PassPlan<'a> {
     resources: &'a wgpu::BindGroup,
     /// Group 0 per composite segment, in the order the segments name them.
     composites: &'a [wgpu::BindGroup],
+    /// The externally bound texture each [`Segment::External`] slot names,
+    /// indexed by slot — the frame's own
+    /// [`ExternalRuns::keys`](crate::gpu::bindings::ExternalRuns::keys).
+    /// Empty for a pass that draws no external texture, which is every pass of
+    /// every frame that records no `SceneTexture`.
+    external_keys: &'a [u64],
     instances: &'a wgpu::Buffer,
     /// The instance index every segment's own index is relative to.
     base: u32,
@@ -1485,10 +1538,18 @@ struct PassPlan<'a> {
 
 /// Records one pass: load the colour target, then draw each segment in order.
 ///
-/// Group 0 is re-bound per segment because a composite reads its page through
-/// that group while an ordinary strip reads the placeholder; groups 1-3 are the
-/// variant's own and never change within a pass. A pass with one segment — every
-/// frame that records no layer — sets them exactly once.
+/// Two groups are re-bound per segment. Group 0, because a composite reads its
+/// page through it while an ordinary strip reads the placeholder; and group 1,
+/// because a run of instances sampling an externally bound texture needs that
+/// texture bound where the atlas placeholder otherwise sits. Groups 2-3 are the
+/// variant's own and never change within a pass. A pass with one segment —
+/// every frame that records no layer and no external texture — sets them all
+/// exactly once.
+///
+/// A segment naming a slot with no bind group behind it draws nothing rather
+/// than drawing with whatever group 1 last held: the texture was unbound
+/// between the frame's paint resolution and its recording, and a wrongly
+/// sampled run is worse than a missing one.
 fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(plan.label),
@@ -1505,13 +1566,31 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
 
     let mut composite = 0_usize;
     for segment in plan.segments {
-        let (group, range) = match *segment {
+        let (group, images, range) = match *segment {
             Segment::Strips(first, count) => {
                 if count == 0 {
                     continue;
                 }
                 (
                     plan.resources,
+                    None,
+                    GpuStrip::instance_range(plan.base.saturating_add(first), count),
+                )
+            }
+            Segment::External(first, count, slot) => {
+                if count == 0 {
+                    continue;
+                }
+                let Some(images) = plan
+                    .external_keys
+                    .get(slot as usize)
+                    .and_then(|key| plan.groups.externals.get(key))
+                else {
+                    continue;
+                };
+                (
+                    plan.resources,
+                    Some(images),
                     GpuStrip::instance_range(plan.base.saturating_add(first), count),
                 )
             }
@@ -1522,11 +1601,12 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
                 composite = composite.saturating_add(1);
                 (
                     group,
+                    None,
                     GpuStrip::instance_range(plan.base.saturating_add(first), 1),
                 )
             }
         };
-        plan.groups.bind_with(&mut pass, group);
+        plan.groups.bind_with(&mut pass, group, images);
         pass.draw(GpuStrip::vertex_range(), range);
     }
 }
@@ -1578,6 +1658,8 @@ impl PunchPass<'_> {
                 groups: self.groups,
                 resources: &self.groups.resources,
                 composites: &[],
+                // A punch erases with a solid source; it samples nothing.
+                external_keys: &[],
                 instances: self.instances,
                 base: self.base,
                 segments: &[Segment::Strips(first, count)],
@@ -1965,8 +2047,15 @@ fn grid_size(width: u32, height: u32) -> Result<(u16, u16), EngineError> {
 /// from zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Segment {
-    /// Ordinary strip instances, as `(first, count)`.
+    /// Ordinary strip instances, as `(first, count)`, drawn with the frame's
+    /// own atlas binding.
     Strips(u32, u32),
+    /// Strip instances sampling an externally bound texture, as
+    /// `(first, count, slot)` — a *run*, in the sense
+    /// [`crate::gpu::bindings::ExternalRuns`] gives the word: the maximal span
+    /// of consecutive instances that share one texture, drawn with that
+    /// texture's own group 1 bound.
+    External(u32, u32, u32),
     /// One composite quad at `first`, sampling the finished page in the named
     /// group.
     Composite(u32, PageParity),
@@ -2134,6 +2223,11 @@ impl Scratch {
             let mut first_segment = self.segments.len();
             let mut deepest = 0_u32;
             let mut run_start = self.alpha.len() as u32;
+            // The external texture the open run is drawn with, `None` while it
+            // is drawn with the frame's own atlas binding. A draw that names a
+            // different one closes the run: there is a single external binding
+            // to set (see [`crate::gpu::bindings`]).
+            let mut run_external: Option<u32> = None;
 
             for op in &round.ops {
                 match op {
@@ -2154,6 +2248,7 @@ impl Scratch {
                                     draw.depth,
                                     &mut first_segment,
                                     &mut run_start,
+                                    &mut run_external,
                                 );
                             }
                             let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots)
@@ -2163,6 +2258,15 @@ impl Scratch {
                             let Some(run) = strips.get(draw.strip_range.clone()) else {
                                 continue;
                             };
+                            // Before the first of this draw's instances lands,
+                            // so the run that closes holds exactly the
+                            // instances drawn with the texture it names.
+                            if paint.external != run_external {
+                                let end = self.alpha.len() as u32;
+                                self.push_run(run_start, end, run_external);
+                                run_start = end;
+                                run_external = paint.external;
+                            }
                             let to_opaque = paint.opaque && split_opaque;
 
                             // A generation's last strip is its sentinel, which
@@ -2192,6 +2296,7 @@ impl Scratch {
                                 depth,
                                 &mut first_segment,
                                 &mut run_start,
+                                &mut run_external,
                             );
                         }
 
@@ -2199,10 +2304,7 @@ impl Scratch {
                         // composite is what breaks the run, because it binds a
                         // different page as its colour source.
                         let end = self.alpha.len() as u32;
-                        if end > run_start {
-                            self.segments
-                                .push(Segment::Strips(run_start, end - run_start));
-                        }
+                        self.push_run(run_start, end, run_external);
 
                         deepest = deepest.max(depth);
                         self.segments
@@ -2210,15 +2312,15 @@ impl Scratch {
                         self.alpha
                             .push(composite_instance(composite, window.origin(), depth));
                         run_start = self.alpha.len() as u32;
+                        // A composite draws through group 1's own atlas
+                        // binding, so the run after it starts un-bound again.
+                        run_external = None;
                     }
                 }
             }
 
             let end = self.alpha.len() as u32;
-            if end > run_start {
-                self.segments
-                    .push(Segment::Strips(run_start, end - run_start));
-            }
+            self.push_run(run_start, end, run_external);
 
             // Accumulated rather than assigned: a layer whose round was cut
             // renders in several rounds, and the depth its composite carries is
@@ -2278,6 +2380,7 @@ impl Scratch {
         depth: u32,
         first_segment: &mut usize,
         run_start: &mut u32,
+        run_external: &mut Option<u32>,
     ) {
         let cut = pending
             .iter()
@@ -2292,10 +2395,10 @@ impl Scratch {
         // Close the run this cut interrupts, so the plan's segments name only
         // what was recorded before the punch.
         let end = self.alpha.len() as u32;
-        if end > *run_start {
-            self.segments
-                .push(Segment::Strips(*run_start, end - *run_start));
-        }
+        self.push_run(*run_start, end, *run_external);
+        // The punch's own instances go in next and are drawn solid, so the run
+        // resumed after the cut starts with nothing bound.
+        *run_external = None;
 
         let punch = self.push_punches(issued, strips);
         self.rounds.push(RoundPlan {
@@ -2311,6 +2414,23 @@ impl Scratch {
         });
         *first_segment = self.segments.len();
         *run_start = self.alpha.len() as u32;
+    }
+
+    /// Records the open run of instances `first..end` as one segment, drawn
+    /// with the texture in `external` bound, or nothing at all when the run is
+    /// empty.
+    ///
+    /// The one place a strip segment is created, so the run-breaking rule —
+    /// a segment holds instances sharing one group-1 binding — is stated once
+    /// rather than at each of the four points a run can close.
+    fn push_run(&mut self, first: u32, end: u32, external: Option<u32>) {
+        let Some(count) = end.checked_sub(first).filter(|count| *count > 0) else {
+            return;
+        };
+        self.segments.push(match external {
+            Some(slot) => Segment::External(first, count, slot),
+            None => Segment::Strips(first, count),
+        });
     }
 
     /// Turns `punches` into destination-out instances, appended to the alpha
@@ -2332,6 +2452,7 @@ impl Scratch {
                 // An erase never joins the depth-writing pass: it establishes
                 // no colour for a later fragment to be rejected against.
                 opaque: false,
+                external: None,
             };
             let Some(run) = strips.get(punch.strip_range.clone()) else {
                 continue;
@@ -2657,6 +2778,13 @@ struct PackedPaint {
     /// Whether every pixel this paint produces is opaque, and so whether its
     /// fully-covered spans may take the depth-writing pass.
     opaque: bool,
+    /// The external-texture slot this paint's instances have to be drawn with
+    /// bound, or `None` for every paint the frame's atlas binding serves.
+    ///
+    /// What breaks a pass's instances into runs: the strip pipelines have one
+    /// external binding, so consecutive instances may share a segment only
+    /// while this stays equal (see [`crate::gpu::bindings::ExternalRuns`]).
+    external: Option<u32>,
 }
 
 impl PackedPaint {
@@ -2701,6 +2829,7 @@ fn pack_paint(
             paint: SOLID_PAINT,
             depth_index: depth,
             opaque: color.is_opaque(),
+            external: None,
         }),
         Paint::Indexed(indexed) => {
             let Some(Some(resolved)) = paint_slots.get(indexed.index()) else {
@@ -2717,6 +2846,7 @@ fn pack_paint(
                 paint: pack_paint_descriptor(resolved.paint_type, resolved.texel_offset),
                 depth_index: depth,
                 opaque: resolved.opaque,
+                external: resolved.external,
             })
         }
     }
@@ -2732,6 +2862,11 @@ struct ResolvedPaint {
     texel_offset: u32,
     /// Whether every pixel the paint produces is opaque.
     opaque: bool,
+    /// The external-texture slot this paint samples, for a paint that reads a
+    /// caller-owned texture rather than the atlas (see
+    /// [`crate::gpu::bindings`]). `None` — the ordinary case — means the
+    /// frame's atlas binding serves it.
+    external: Option<u32>,
 }
 
 /// One resource texture and the extent it currently holds.
@@ -2815,6 +2950,10 @@ struct FrameResources {
     /// Reusable staging for the encoded-paint upload, padded to the texture's
     /// footprint.
     paint_staging: Vec<u8>,
+    /// The distinct external textures this frame's paints sample, in the order
+    /// they were first named — the slot numbering the pass segments and the
+    /// group-1 bind groups both address by.
+    external_runs: ExternalRuns,
     /// One set of bind groups per strip pipeline variant. Not one shared set:
     /// every engine pipeline uses wgpu's derived layout, and a derived layout
     /// is exclusive to the pipeline that derived it.
@@ -2860,6 +2999,7 @@ impl FrameResources {
             paint_slots: Vec::new(),
             paint_ramps: Vec::new(),
             paint_staging: Vec::new(),
+            external_runs: ExternalRuns::new(),
             bind_groups: HashMap::new(),
             bind_group_format: None,
             atlas: None,
@@ -2913,9 +3053,11 @@ impl FrameResources {
         frame: &CompiledFrame,
         cache: &mut GradientCache,
         budget: AtlasBudget,
+        externals: &ExternalTextures,
     ) {
         self.paints_data.clear();
         self.paint_slots.clear();
+        self.external_runs.clear();
 
         // Kept in step every frame, not only when this frame's own paints
         // need it: an image reaped by the compiler's age-based eviction while
@@ -2942,12 +3084,27 @@ impl FrameResources {
 
         let mut texel_offset = 0;
         for (index, paint) in frame.encoded_paints.iter().enumerate() {
+            // An external texture's slot travels with its record: the record
+            // itself only says "sample the external binding", and which
+            // texture that binding holds is settled per run when the pass is
+            // recorded rather than per paint.
+            let mut external = None;
             let lowered = match paint {
                 EncodedPaint::Image(image) => image_id(image)
                     .and_then(|id| self.image_registry.get(&id))
                     .and_then(|resident| {
                         lower_encoded_image(image, resident)
                             .map(|record| fit_minified(record, resident))
+                    }),
+                // A paint naming a texture nothing is bound under lowers to
+                // nothing, so its draws are skipped rather than sampling
+                // whichever texture the binding happens to hold.
+                EncodedPaint::ExternalTexture(entry) => externals
+                    .view(entry.texture_id.0)
+                    .and_then(|_| self.external_runs.slot_of(entry.texture_id.0))
+                    .map(|slot| {
+                        external = Some(slot);
+                        lower_encoded_external(entry)
                     }),
                 _ => {
                     let ramp = self.paint_ramps.get(index).copied().flatten();
@@ -2959,6 +3116,7 @@ impl FrameResources {
                     paint_type: record.paint_type(),
                     texel_offset,
                     opaque: !paint.may_have_transparency(),
+                    external,
                 };
                 texel_offset += record.texel_len();
                 self.paints_data.push(record);
@@ -3338,6 +3496,70 @@ impl FrameResources {
         );
         self.bind_groups.insert(variant, groups);
     }
+
+    /// Builds `variant`'s group 1 for every external texture this frame draws
+    /// that it has none for yet.
+    ///
+    /// Called after [`Self::ensure_bind_groups`] has built the variant's own
+    /// set, and only for the variants the frame records with, so a frame that
+    /// draws no external texture builds nothing. What is built is retained
+    /// alongside the rest of the variant's groups and dropped with them — on a
+    /// format change, an atlas growth or a re-budget, all of which change the
+    /// atlas view this group also holds.
+    ///
+    /// A texture with no registered view is skipped rather than substituted:
+    /// its paint did not resolve either, so nothing in the frame names its
+    /// slot.
+    fn ensure_external_groups(
+        &mut self,
+        device: &wgpu::Device,
+        variant: EnginePipeline,
+        pipeline: &wgpu::RenderPipeline,
+        externals: &ExternalTextures,
+    ) {
+        if self.external_runs.is_empty() {
+            return;
+        }
+        // Destructured rather than reached through `self`: the group map is
+        // borrowed mutably while the atlas view and the placeholders are read.
+        let Self {
+            bind_groups,
+            external_runs,
+            atlas,
+            placeholders,
+            ..
+        } = self;
+        let atlas_view = atlas
+            .as_ref()
+            .map(AtlasArray::view)
+            .unwrap_or(&placeholders.atlas_array);
+        let Some(groups) = bind_groups.get_mut(&variant) else {
+            return;
+        };
+        for key in external_runs.keys() {
+            if groups.externals.contains_key(key) {
+                continue;
+            }
+            let Some(view) = externals.view(*key) else {
+                continue;
+            };
+            groups
+                .externals
+                .insert(*key, images_bind_group(device, pipeline, atlas_view, view));
+        }
+    }
+
+    /// Drops every bind group naming the texture registered under `key`.
+    ///
+    /// Called when that registration changes, because a group holds its view
+    /// by value: keeping one past a re-bind would go on sampling the texture
+    /// the caller replaced, and keeping one past an unbind would hold the
+    /// caller's texture alive for as long as this renderer lives.
+    fn forget_external(&mut self, key: u64) {
+        for groups in self.bind_groups.values_mut() {
+            groups.externals.remove(&key);
+        }
+    }
 }
 
 /// Lower one atlas page's recorded commands into the strips that draw it,
@@ -3560,6 +3782,15 @@ struct StripBindGroups {
     images: wgpu::BindGroup,
     paints: wgpu::BindGroup,
     gradients: wgpu::BindGroup,
+    /// Group 1 again, once per externally bound texture this variant has
+    /// drawn: the same atlas array beside that texture's view instead of the
+    /// placeholder. Keyed by the id a display list names the texture by.
+    ///
+    /// A second group rather than a fifth: the four-group ceiling has no
+    /// headroom (see [`crate::gpu::pipelines`]), so an external texture is
+    /// bound by re-setting the group the atlas already occupies — which is why
+    /// a pass's instances are split into runs at all.
+    externals: HashMap<u64, wgpu::BindGroup>,
 }
 
 impl StripBindGroups {
@@ -3588,20 +3819,7 @@ impl StripBindGroups {
     ) -> Self {
         let resources_group =
             resources_bind_group(device, pipeline, alphas, config, &placeholders.layer_input);
-        let images = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-engine strip images"),
-            layout: &pipeline.get_bind_group_layout(1),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(atlas),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&placeholders.external),
-                },
-            ],
-        });
+        let images = images_bind_group(device, pipeline, atlas, &placeholders.external);
         let paints = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frust-engine strip paints"),
             layout: &pipeline.get_bind_group_layout(2),
@@ -3624,22 +3842,63 @@ impl StripBindGroups {
             images,
             paints,
             gradients,
+            externals: HashMap::new(),
         }
     }
 
-    /// Sets all four groups on `pass`, taking group 0 from `resources` rather
-    /// than from this set.
+    /// Sets all four groups on `pass`, taking group 0 from `resources` and
+    /// group 1 from `images` when a segment names one, rather than from this
+    /// set.
     ///
-    /// Group 0 is the one that varies within a pass: it carries both the pass's
+    /// Two of the four vary within a pass. Group 0 carries both the pass's
     /// viewport uniform and the layer input a composite samples, so a page
-    /// round and every composite in it substitute their own. Groups 1-3 are
-    /// frame-wide and belong to the pipeline variant.
-    fn bind_with(&self, pass: &mut wgpu::RenderPass<'_>, resources: &wgpu::BindGroup) {
+    /// round and every composite in it substitute their own. Group 1 carries
+    /// the external texture a run is drawn with, so a segment that samples one
+    /// substitutes the group holding it; every other segment takes this set's
+    /// own, which pairs the atlas array with a placeholder nothing reads.
+    /// Groups 2-3 are frame-wide and belong to the pipeline variant.
+    fn bind_with(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        resources: &wgpu::BindGroup,
+        images: Option<&wgpu::BindGroup>,
+    ) {
         pass.set_bind_group(0, resources, &[]);
-        pass.set_bind_group(1, &self.images, &[]);
+        pass.set_bind_group(1, images.unwrap_or(&self.images), &[]);
         pass.set_bind_group(2, &self.paints, &[]);
         pass.set_bind_group(3, &self.gradients, &[]);
     }
+}
+
+/// Group 1 of a strip pass: the image atlas array, and the caller-owned
+/// texture an external image paint samples.
+///
+/// One function for both shapes the group takes — `external` is
+/// [`Placeholders::external`] for the frame-wide group, or a registered view
+/// for the group a run of external instances is drawn with (see
+/// [`crate::gpu::bindings`]). Built against one pipeline for the same reason
+/// [`resources_bind_group`] is: every engine pipeline uses wgpu's derived
+/// layout, which is exclusive to the pipeline that derived it.
+fn images_bind_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    atlas: &wgpu::TextureView,
+    external: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frust-engine strip images"),
+        layout: &pipeline.get_bind_group_layout(1),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(atlas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(external),
+            },
+        ],
+    })
 }
 
 /// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
@@ -3766,6 +4025,7 @@ mod tests {
             paint_type: PaintType::LinearGradient,
             texel_offset: 6,
             opaque: true,
+            external: None,
         })];
         let paint = pack_paint(&Paint::Indexed(IndexedPaint::new(0)), 2, &slots)
             .expect("a lowered paint resolves");
@@ -3931,7 +4191,9 @@ mod tests {
             scratch.segments[range]
                 .iter()
                 .map(|segment| match *segment {
-                    Segment::Strips(first, count) => first + count,
+                    Segment::Strips(first, count) | Segment::External(first, count, _) => {
+                        first + count
+                    }
                     Segment::Composite(first, _) => first + 1,
                 })
                 .max()
@@ -3946,8 +4208,9 @@ mod tests {
             scratch.segments[after]
                 .iter()
                 .all(|segment| match *segment {
-                    Segment::Strips(first, _) => first >= punch_first + punch_count,
-                    Segment::Composite(first, _) => first >= punch_first + punch_count,
+                    Segment::Strips(first, _)
+                    | Segment::External(first, _, _)
+                    | Segment::Composite(first, _) => first >= punch_first + punch_count,
                 }),
             "and everything recorded after it lands on top of the erase"
         );
@@ -4037,7 +4300,9 @@ mod tests {
         scratch.segments[plan.segments.clone()]
             .iter()
             .filter_map(|segment| match *segment {
-                Segment::Strips(first, count) => Some((first as usize, count as usize)),
+                Segment::Strips(first, count) | Segment::External(first, count, _) => {
+                    Some((first as usize, count as usize))
+                }
                 Segment::Composite(..) => None,
             })
             .flat_map(|(first, count)| scratch.alpha[first..first + count].iter().copied())

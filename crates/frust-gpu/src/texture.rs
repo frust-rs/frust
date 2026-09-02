@@ -70,6 +70,18 @@ impl SceneTextureId {
     pub(crate) fn mint() -> Self {
         Self(NEXT_SCENE_TEXTURE_ID.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// The opaque value this id wraps.
+    ///
+    /// The counterpart of `frust_scene::ShaderProgram::id`, and for the same
+    /// reason: the scene layer carries an externally owned texture as a plain
+    /// `u64` so it depends on no GPU crate, and a caller that registered a
+    /// [`Texture`] needs some way to say which one a display-list command
+    /// means. Minting stays private — this only reads back what was minted.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// A GPU texture: the underlying texture/view pair, the [`TextureDesc`] it

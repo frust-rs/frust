@@ -48,9 +48,12 @@ pub mod paint;
 
 pub mod draw;
 
+pub mod external;
+
 pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
+pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
 use std::collections::HashSet;
@@ -80,6 +83,7 @@ use crate::cache::images::{
 };
 use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
+use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::error::EngineError;
 use crate::text::{
@@ -105,10 +109,6 @@ static FONT_SKIP_WARNING: Once = Once::new();
 /// Raised the first time the compiler drops a [`Command::ShaderQuad`], on the
 /// same once-per-process terms as [`IMAGE_SKIP_WARNING`].
 static SHADER_QUAD_SKIP_WARNING: Once = Once::new();
-
-/// Raised the first time the compiler drops a [`Command::SceneTexture`], on
-/// the same once-per-process terms as [`SHADER_QUAD_SKIP_WARNING`].
-static SCENE_TEXTURE_SKIP_WARNING: Once = Once::new();
 
 /// Where one glyph an atlas-routed draw sampled lives in the atlas array.
 ///
@@ -206,6 +206,17 @@ pub struct CompiledFrame {
     /// hold is a skipped draw, not a panicked frame" measurable rather than
     /// asserted.
     pub skipped_images: u32,
+    /// How many of this frame's draws painted with an externally bound
+    /// texture.
+    pub external_draws: u32,
+    /// How many external-texture draws were dropped — an id nothing is
+    /// registered under, or a destination the texture cannot be mapped onto.
+    ///
+    /// Observational, and the external counterpart of
+    /// [`skipped_images`](Self::skipped_images): "a texture the engine cannot
+    /// resolve is a skipped draw, not a wrongly-sampled one", measured rather
+    /// than asserted.
+    pub skipped_externals: u32,
     /// How many strips this frame's coverage masks cost.
     ///
     /// Observational, and the counter the clip lowering's whole claim rests on:
@@ -320,6 +331,14 @@ pub struct SceneCompiler {
     /// [`Self::for_caps`], or directly by [`Self::set_hint_text`] for a test
     /// that wants either answer without a `TierCaps` in hand.
     hint_text: bool,
+    /// The texel extent of every externally bound texture, so a
+    /// [`Command::SceneTexture`] can be lowered without this crate's compile
+    /// half knowing anything about `wgpu` (see
+    /// [`crate::compile::external`]). Written through
+    /// [`Self::bind_external_texture`]/[`Self::unbind_external_texture`],
+    /// which the renderer calls alongside its own view registry so the two
+    /// halves are always registered together.
+    externals: ExternalExtents,
 }
 
 impl SceneCompiler {
@@ -388,7 +407,32 @@ impl SceneCompiler {
             next_run: 0,
             run_glyph_ids: HashSet::new(),
             hint_text: false,
+            externals: ExternalExtents::new(),
         }
+    }
+
+    /// Records an externally owned texture as bound under `id` at `size`
+    /// texels, answering whether the extent is one a paint can be composed
+    /// against at all (see [`ExternalExtents::bind`]).
+    ///
+    /// Only the extent: the view the frame's passes sample is the renderer's
+    /// (see [`crate::gpu::bindings`]). A caller that registers one half without
+    /// the other gets a texture that draws nothing, which is why the renderer's
+    /// own `bind_texture` writes both.
+    pub fn bind_external_texture(&mut self, id: u64, size: (u32, u32)) -> bool {
+        self.externals.bind(id, size)
+    }
+
+    /// Forgets the extent recorded for `id`, so a `SceneTexture` naming it
+    /// draws nothing again.
+    pub fn unbind_external_texture(&mut self, id: u64) {
+        self.externals.unbind(id);
+    }
+
+    /// The externally bound extents this compiler resolves against.
+    #[must_use]
+    pub fn externals(&self) -> &ExternalExtents {
+        &self.externals
     }
 
     /// The glyph entry map, for the caller that has to drain the pages this
@@ -604,6 +648,8 @@ impl SceneCompiler {
             atlas_layers: 0,
             image_draws: 0,
             skipped_images: 0,
+            external_draws: 0,
+            skipped_externals: 0,
             glyph_draws: 0,
             skipped_glyphs: 0,
             atlas_glyph_draws: 0,
@@ -1045,18 +1091,61 @@ impl SceneCompiler {
             Command::GlyphRun(run) => {
                 self.compile_glyph_run(run, combined * run.transform, route, frame, depth);
             }
-            // Recognised but not yet compiled. Listed one by one rather than
-            // caught by a wildcard so a command added to the display list
-            // fails to compile here instead of silently vanishing from every
-            // frame. Tracked as `engine-shader-quad-unwired` in
-            // docs/LIMITATIONS.md until the GPU-seam work wires this command
-            // through; the drop itself is unchanged, just no longer silent.
+            // Recognised but not yet compiled. Named rather than caught by a
+            // wildcard so a command added to the display list fails to compile
+            // here instead of silently vanishing from every frame. Tracked as
+            // `engine-shader-quad-unwired` in docs/LIMITATIONS.md until the
+            // GPU-seam work wires this command through; the drop itself is
+            // unchanged, just no longer silent.
             Command::ShaderQuad { .. } => note_shader_quad_skip(),
-            // Recognised but not yet compiled: resolving `id` against the GPU
-            // context's registered textures is a render-backend concern the
-            // compiler does not yet implement. Same once-per-process
-            // reporting as `ShaderQuad` above.
-            Command::SceneTexture { .. } => note_scene_texture_skip(),
+            Command::SceneTexture {
+                id,
+                dest,
+                transform,
+            } => {
+                let transform = combined * *transform;
+                let source = PaintSource::SceneTexture {
+                    id: *id,
+                    dest: *dest,
+                };
+
+                // An externally owned texture is its destination rectangle's
+                // coverage under an image paint that samples the caller's
+                // texture rather than the atlas — the same two rectangle paths
+                // `Command::Image` takes, so a pixel-aligned one costs no
+                // flattening either.
+                if let Some(device_rect) = fast_rect(*dest, transform) {
+                    let recorded = self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
+                        },
+                    );
+                    if recorded {
+                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+                    }
+                } else {
+                    self.record(
+                        frame,
+                        depth,
+                        source,
+                        transform,
+                        |generator, storage, clip| {
+                            generator.generate_filled_path(
+                                dest.path_elements(FLATTEN_TOLERANCE),
+                                Fill::NonZero,
+                                transform,
+                                None,
+                                storage,
+                                clip,
+                            );
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -1428,9 +1517,10 @@ impl SceneCompiler {
     /// Encode `source` into the paint a draw carries, or `None` when the paint
     /// cannot be resolved and the draw is to be dropped.
     ///
-    /// Only an image can answer `None`: a solid and a gradient are always
-    /// encodable (a degenerate gradient falls back to a solid), while an image
-    /// needs atlas space the residency may refuse.
+    /// A solid and a gradient are always encodable (a degenerate gradient falls
+    /// back to a solid). The two that can answer `None` are an image, which
+    /// needs atlas space the residency may refuse, and an externally bound
+    /// texture, whose id may name nothing registered.
     fn encode_paint(
         &mut self,
         source: PaintSource<'_>,
@@ -1456,6 +1546,28 @@ impl SceneCompiler {
                 &mut frame.encoded_paints,
                 &mut self.images,
             ),
+            PaintSource::SceneTexture { id, dest } => {
+                // Its own error type and its own counters, so it returns here
+                // rather than joining the atlas-residency match below: nothing
+                // is made resident and nothing is uploaded — the texels are
+                // the caller's and are already on the device.
+                return match encode_scene_texture(
+                    id,
+                    dest,
+                    transform,
+                    &mut self.externals,
+                    &mut frame.encoded_paints,
+                ) {
+                    Ok(encoding) => {
+                        frame.external_draws = frame.external_draws.saturating_add(1);
+                        Some(encoding.paint)
+                    }
+                    Err(_) => {
+                        frame.skipped_externals = frame.skipped_externals.saturating_add(1);
+                        None
+                    }
+                };
+            }
             PaintSource::BlurredRect {
                 rect,
                 radii,
@@ -1505,6 +1617,14 @@ enum PaintSource<'a> {
     Image {
         /// The decoded image to make resident.
         data: &'a ImageData,
+        /// The destination rectangle, in the command's own coordinate space.
+        dest: Rect,
+    },
+    /// A [`Command::SceneTexture`]'s externally bound texture scaled to fill
+    /// `dest`.
+    SceneTexture {
+        /// The opaque id the display list names the texture by.
+        id: u64,
         /// The destination rectangle, in the command's own coordinate space.
         dest: Rect,
     },
@@ -1563,21 +1683,6 @@ fn note_shader_quad_skip() {
         log::warn!(
             "ShaderQuad command dropped: the engine compiler does not draw shader quads yet \
              (see docs/LIMITATIONS.md `engine-shader-quad-unwired`; logged once per process)"
-        );
-    });
-}
-
-/// Report that the compiler dropped a [`Command::SceneTexture`].
-///
-/// Latched to once per process, the same shape as [`note_shader_quad_skip`]:
-/// resolving an externally owned GPU texture against the render backend's
-/// registry is a standing, known gap rather than a per-frame refusal worth
-/// re-reporting at debug level on every later drop.
-fn note_scene_texture_skip() {
-    SCENE_TEXTURE_SKIP_WARNING.call_once(|| {
-        log::warn!(
-            "SceneTexture command dropped: the engine compiler does not resolve external \
-             textures yet (logged once per process)"
         );
     });
 }

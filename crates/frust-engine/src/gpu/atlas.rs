@@ -507,7 +507,7 @@ pub fn pack_tint(tint: Option<Tint>) -> (u32, u32) {
 }
 
 /// The shader's extend-mode numbering.
-const fn extend_mode(extend: peniko::Extend) -> u32 {
+pub const fn extend_mode(extend: peniko::Extend) -> u32 {
     match extend {
         peniko::Extend::Pad => 0,
         peniko::Extend::Repeat => 1,
