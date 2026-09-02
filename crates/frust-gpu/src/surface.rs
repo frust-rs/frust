@@ -263,8 +263,21 @@ pub fn select_surface_format(
 /// Split out of [`ConfiguredSurface::configure`] so the configuration a surface
 /// gets is decided by a pure function over plain values and can be asserted
 /// without a device: `RENDER_ATTACHMENT` usage only, the caller's format and
-/// alpha mode verbatim, no view formats, and the fixed frame latency
-/// (`DESIRED_MAXIMUM_FRAME_LATENCY`, two frames in flight).
+/// alpha mode verbatim, no view formats, the fixed frame latency
+/// (`DESIRED_MAXIMUM_FRAME_LATENCY`, two frames in flight), and
+/// `SurfaceColorSpace::Auto`.
+///
+/// `Auto` is the deliberate choice for the colour space, not a placeholder.
+/// It is the only value guaranteed to be supported for every format a
+/// surface advertises, and `wgpu` defines it as "reproduce the historical
+/// behaviour": `Srgb` for every non-`Rgba16Float` format, which is exactly
+/// the pair [`select_surface_format`] can return (`Rgba8Unorm`/`Bgra8Unorm`).
+/// Naming `Srgb` explicitly would resolve identically today but would start
+/// failing validation the moment a driver in HDR mode stopped advertising it
+/// for the chosen format, and frust encodes no wide-gamut or HDR output —
+/// the engine writes sRGB-encoded values a non-`*Srgb` swapchain format
+/// carries through untouched. A wide-gamut/HDR surface is a deliberate
+/// feature, not a version-bump side effect.
 ///
 /// `size` is `(width, height)` in physical pixels and must be non-zero on both
 /// axes; a zero-sized swapchain is a `wgpu` validation error, and the shell's
@@ -279,6 +292,7 @@ pub fn surface_config(
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
+        color_space: wgpu::SurfaceColorSpace::Auto,
         width,
         height,
         present_mode,
@@ -691,6 +705,10 @@ mod tests {
                 config.desired_maximum_frame_latency,
                 DESIRED_MAXIMUM_FRAME_LATENCY
             );
+            // The colour space is a deliberate constant, not caller-supplied:
+            // `Auto` is supported for every advertised format and resolves to
+            // the sRGB behaviour every shipped frust build has presented in.
+            assert_eq!(config.color_space, wgpu::SurfaceColorSpace::Auto);
         }
     }
 

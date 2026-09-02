@@ -334,8 +334,8 @@ fn aging_frees_an_entry_after_the_keep_alive_window() {
 }
 
 /// The transient policy: a write-only attachment gets
-/// `TextureUsages::TRANSIENT` on an adapter that benefits, and nothing that
-/// is read back ever does.
+/// `TextureUsages::TRANSIENT_ATTACHMENT` on an adapter that benefits, and
+/// nothing that is read back ever does.
 #[test]
 fn transient_usage_follows_the_adapter_and_the_usage_set() {
     let mut transient_caps = desktop_caps();
@@ -349,7 +349,7 @@ fn transient_usage_follows_the_adapter_and_the_usage_set() {
             .texture()
             .desc()
             .usage
-            .contains(wgpu::TextureUsages::TRANSIENT)
+            .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT)
     );
     pool.release(write_only);
 
@@ -363,7 +363,7 @@ fn transient_usage_follows_the_adapter_and_the_usage_set() {
             .texture()
             .desc()
             .usage
-            .contains(wgpu::TextureUsages::TRANSIENT),
+            .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT),
         "a texture that is sampled afterwards is read back, so it is not transient"
     );
     pool.release(sampled);

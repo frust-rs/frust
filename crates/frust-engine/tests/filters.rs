@@ -2180,7 +2180,9 @@ impl FilterHarness {
             .expect("the readback channel must stay open")
             .expect("the readback buffer must map");
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .expect("the mapped readback range must be readable");
         let stride = bytes_per_row as usize;
         let mut image = Image::new(FILTER_REGION.0 as usize, FILTER_REGION.1 as usize);
         for y in 0..image.height {

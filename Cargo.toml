@@ -88,7 +88,7 @@ license = "MIT OR Apache-2.0"
 # and `webgpu` (wasm target only, Frust ships no wasm shell). Confirmed via
 # `cargo tree -e features`: these two (and their naga frontends/backends) are
 # absent from every target's dependency graph.
-wgpu = { version = "29.0.3", default-features = false, features = [
+wgpu = { version = "30.0.1", default-features = false, features = [
     "std",
     "parking_lot",
     "wgsl",

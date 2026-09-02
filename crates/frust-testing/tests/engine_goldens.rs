@@ -1717,7 +1717,9 @@ fn read_page_region(harness: &FilterEngineHarness, parity: PageParity, bounds: R
         .expect("the readback channel must stay open")
         .expect("the readback buffer must map");
 
-    let mapped = slice.get_mapped_range();
+    let mapped = slice
+        .get_mapped_range()
+        .expect("the mapped readback range must be readable");
     let stride = bytes_per_row as usize;
     let row_len = width as usize * 4;
     let mut out = vec![0_u8; row_len * height as usize];

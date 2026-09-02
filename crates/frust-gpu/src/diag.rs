@@ -544,7 +544,10 @@ impl TimestampRing {
 fn harvest(slot: &RingFrame, used: usize, spans: usize, period_ns: f32) -> GpuFrameSpans {
     let mut reading = GpuFrameSpans::zeroed(spans);
     let bytes = (used * 2) as u64 * QUERY_BYTES;
-    let mapped = slot.readback.slice(0..bytes).get_mapped_range();
+    let mapped =
+        slot.readback.slice(0..bytes).get_mapped_range().expect(
+            "frust-gpu diag: the harvested slot's readback is mapped over the resolved range",
+        );
     let stride = (QUERY_BYTES * 2) as usize;
     for pair in 0..used {
         let at = pair * stride;

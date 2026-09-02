@@ -38,11 +38,11 @@
 //! [`PooledTexture::color_attachment`] builds, and it is a correctness rule
 //! before it is a bandwidth one. Pairing `LoadOp::Clear` with
 //! `StoreOp::Discard` is also the precondition for
-//! `wgpu::TextureUsages::TRANSIENT`, which [`effective_usage`] adds on an
-//! adapter that reports [`TierCaps::transient_saves_memory`] — a
+//! `wgpu::TextureUsages::TRANSIENT_ATTACHMENT`, which [`effective_usage`]
+//! adds on an adapter that reports [`TierCaps::transient_saves_memory`] — a
 //! write-only attachment can then live in tile memory and may never get
-//! backing storage at all. `TRANSIENT` is incompatible with every other
-//! usage, so it is applied only to a texture whose whole usage set is
+//! backing storage at all. `TRANSIENT_ATTACHMENT` is incompatible with every
+//! other usage, so it is applied only to a texture whose whole usage set is
 //! `RENDER_ATTACHMENT`; anything sampled or copied out afterwards keeps the
 //! clear/discard policy and no flag.
 //!
@@ -201,10 +201,11 @@ impl PooledTexture<wgpu::Texture, wgpu::TextureView> {
     ///
     /// The ops are not a parameter on purpose. A recycled texture holds
     /// whatever its previous holder left there, so loading it would sample
-    /// another pass's image; and `StoreOp::Discard` is required outright
-    /// once [`effective_usage`] has added `wgpu::TextureUsages::TRANSIENT`.
-    /// A caller that needs its own contents back across passes wants a
-    /// texture it owns, not a pooled intermediate.
+    /// another pass's image; and `StoreOp::Discard` is required outright once
+    /// [`effective_usage`] has added
+    /// `wgpu::TextureUsages::TRANSIENT_ATTACHMENT`. A caller that needs its
+    /// own contents back across passes wants a texture it owns, not a pooled
+    /// intermediate.
     pub fn color_attachment(&self, clear: wgpu::Color) -> ColorAttachment<'_> {
         ColorAttachment {
             view: self.texture.view(),
@@ -254,7 +255,7 @@ pub struct TexturePool<T = wgpu::Texture, V = wgpu::TextureView> {
 impl<T, V> TexturePool<T, V> {
     /// An empty pool configured from an adapter's capabilities: quantized
     /// extents are capped at [`TierCaps::max_texture_dimension_2d`] and
-    /// `wgpu::TextureUsages::TRANSIENT` is applied only where
+    /// `wgpu::TextureUsages::TRANSIENT_ATTACHMENT` is applied only where
     /// [`TierCaps::transient_saves_memory`] says it buys something.
     pub fn new(caps: &TierCaps) -> Self {
         Self::with_max_unused_frames(caps, DEFAULT_MAX_UNUSED_FRAMES)
@@ -412,20 +413,20 @@ fn quantize_dimension(value: u32, max_dimension: u32) -> u32 {
 
 /// The usage a pooled texture requested as `usage` is actually created with.
 ///
-/// Adds `wgpu::TextureUsages::TRANSIENT` — which lets a driver keep the
-/// texture in tile memory and possibly never back it with real storage — on
-/// an adapter that reports it saves memory, and only for a texture whose
-/// entire usage set is `RENDER_ATTACHMENT`. That restriction is `wgpu`'s
-/// own: `TRANSIENT` requires `RENDER_ATTACHMENT` and is incompatible with
-/// every other usage, which lines up exactly with "an intermediate nothing
-/// reads back". Anything sampled, copied or stored keeps its usage
-/// unchanged and relies on the clear/discard ops alone.
+/// Adds `wgpu::TextureUsages::TRANSIENT_ATTACHMENT` — which lets a driver
+/// keep the texture in tile memory and possibly never back it with real
+/// storage — on an adapter that reports it saves memory, and only for a
+/// texture whose entire usage set is `RENDER_ATTACHMENT`. That restriction is
+/// `wgpu`'s own: `TRANSIENT_ATTACHMENT` requires `RENDER_ATTACHMENT` and is
+/// incompatible with every other usage, which lines up exactly with "an
+/// intermediate nothing reads back". Anything sampled, copied or stored keeps
+/// its usage unchanged and relies on the clear/discard ops alone.
 pub fn effective_usage(
     usage: wgpu::TextureUsages,
     transient_saves_memory: bool,
 ) -> wgpu::TextureUsages {
     if transient_saves_memory && usage == wgpu::TextureUsages::RENDER_ATTACHMENT {
-        usage | wgpu::TextureUsages::TRANSIENT
+        usage | wgpu::TextureUsages::TRANSIENT_ATTACHMENT
     } else {
         usage
     }
@@ -475,7 +476,7 @@ mod tests {
         let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
         assert_eq!(
             effective_usage(attachment, true),
-            attachment | wgpu::TextureUsages::TRANSIENT
+            attachment | wgpu::TextureUsages::TRANSIENT_ATTACHMENT
         );
         assert_eq!(effective_usage(attachment, false), attachment);
 
@@ -514,7 +515,10 @@ mod tests {
         };
         let key = pool.key_for(&desc);
         assert_eq!((key.width, key.height), (1024, 768));
-        assert!(key.usage.contains(wgpu::TextureUsages::TRANSIENT));
+        assert!(
+            key.usage
+                .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT)
+        );
         assert_eq!(key.sample_count, 1);
     }
 

@@ -89,7 +89,11 @@ fn adapter_key_includes_driver_info() {
         backend: wgpu::Backend::Vulkan,
         subgroup_min_size: 64,
         subgroup_max_size: 128,
-        transient_saves_memory: false,
+        // `Option<bool>` since wgpu 30 (`None` = the adapter does not say).
+        transient_saves_memory: Some(false),
+        // wgpu 30 reports the applied limit bucket here; frust never requests
+        // bucketing, and `adapter_cache_key` reads none of these fields.
+        limit_bucket: None,
     };
     let key_a = adapter_cache_key(&info);
     info.driver_info = "1.2.4".into();

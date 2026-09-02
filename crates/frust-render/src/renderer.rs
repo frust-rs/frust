@@ -155,13 +155,14 @@ enum SurfaceState {
 /// A frame that has been rendered and queue-submitted but **not yet
 /// presented** — the deferred half of [`SurfaceRenderer::submit_deferred`].
 ///
-/// Opaque by design: it wraps a `wgpu::SurfaceTexture` behind a private field
-/// with no accessor, exactly like [`DetachedSurface`](crate::DetachedSurface),
-/// so no `wgpu` type is nameable outside this crate
-/// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern). It is `Send` — a
-/// `wgpu::SurfaceTexture` owns its swapchain frame and borrows nothing — which
-/// is the whole point: a shell can hand it from the render thread to the thread
-/// that must issue the present.
+/// Opaque by design: it wraps a `wgpu::SurfaceTexture` (and the
+/// `wgpu::Queue` that presents it) behind private fields with no accessor,
+/// exactly like [`DetachedSurface`](crate::DetachedSurface), so no `wgpu` type
+/// is nameable outside this crate (`docs/CODE_STANDARDS.md`'s wgpu-leak
+/// anti-pattern). It is `Send` — a `wgpu::SurfaceTexture` owns its swapchain
+/// frame and borrows nothing, and a `wgpu::Queue` is a cheap `Send + Sync`
+/// handle — which is the whole point: a shell can hand it from the render
+/// thread to the thread that must issue the present.
 ///
 /// **Why deferring the present is a contract, not a micro-optimisation.** On
 /// iOS, a `CAMetalLayer` with `presentsWithTransaction = true` requires
@@ -182,6 +183,11 @@ enum SurfaceState {
 /// older one rather than blocking on it).
 pub struct DeferredPresent {
     texture: wgpu::SurfaceTexture,
+    /// The queue the present is scheduled on. Carried because wgpu 30 moved
+    /// the present from `SurfaceTexture::present(self)` onto
+    /// `Queue::present(texture)`, and this handle outlives the `RenderContext`
+    /// borrow that produced it.
+    queue: wgpu::Queue,
 }
 
 impl std::fmt::Debug for DeferredPresent {
@@ -199,7 +205,7 @@ impl DeferredPresent {
     /// other platform/configuration it is an ordinary present that happens to
     /// have been moved off the submit site.
     pub fn present(self) {
-        self.texture.present();
+        self.queue.present(self.texture);
     }
 }
 
@@ -1053,7 +1059,7 @@ impl SurfaceRenderer {
     pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
         let (outcome, presentable) = self.submit_impl(ctx)?;
         if let Some(surface_texture) = presentable {
-            surface_texture.present();
+            ctx.device_handle().queue.present(surface_texture);
         }
         Ok(outcome)
     }
@@ -1077,13 +1083,19 @@ impl SurfaceRenderer {
         let (outcome, presentable) = self.submit_impl(ctx)?;
         Ok((
             outcome,
-            presentable.map(|texture| DeferredPresent { texture }),
+            // The queue is read INSIDE the map, never before it: `ctx`'s device
+            // is created lazily by surface creation, and reading it eagerly
+            // would panic on the no-surface path that returns `None` here.
+            presentable.map(|texture| DeferredPresent {
+                texture,
+                queue: ctx.device_handle().queue.clone(),
+            }),
         ))
     }
 
     /// Shared body of [`Self::submit`]/[`Self::submit_deferred`]: everything up
-    /// to (but not including) `SurfaceTexture::present`, handing the acquired
-    /// frame back so each wrapper decides where the present happens.
+    /// to (but not including) `Queue::present`, handing the acquired frame
+    /// back so each wrapper decides where the present happens.
     fn submit_impl(
         &mut self,
         ctx: &RenderContext,
