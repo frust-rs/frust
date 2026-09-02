@@ -19,7 +19,7 @@
 //!
 //! # Coverage
 //!
-//! [`tests::every_command_variant_is_covered`] is the guard: it walks every
+//! `tests::every_command_variant_is_covered` is the guard: it walks every
 //! case's recorded scene and asserts all 16 `Command` variants appear. A new
 //! variant fails that test until a case exists for it.
 //!
@@ -428,11 +428,12 @@ fn checkerboard() -> ImageData {
 /// `Command::Image` scaled BOTH ways out of one source: a 16x16 checkerboard
 /// magnified into a 32x32 dest and minified into an 8x8 dest.
 ///
-/// `frust-render`'s `cpu_tier.rs` calls image drawing "best-effort" and the
-/// untested path; this is the case that stops it being untested. Magnifying
-/// and minifying the same bytes in one frame pins the paint-transform
-/// composition in both directions, which is where an off-by-one in the
-/// natural-size-to-dest mapping shows up.
+/// `frust-engine`'s image lowering (`compile/paint.rs`'s
+/// `encode_image_command`) composes the natural-pixel-to-dest transform once,
+/// used whichever direction the scale runs; this is the case that pins both
+/// directions together. Magnifying and minifying the same bytes in one frame
+/// pins the paint-transform composition in both directions, which is where an
+/// off-by-one in the natural-size-to-dest mapping shows up.
 fn image() -> CorpusCase {
     fn record(scene: &mut Scene) {
         let data = checkerboard();
@@ -785,9 +786,9 @@ const PUNCH_EDGE: f64 = (SIZE / 2 + 1) as f64;
 ///    erase an opaque backdrop painted OUTSIDE the group. A group-local erase
 ///    would be sealed in by the group composite, so the encode walk hoists
 ///    the punch to root.
-/// 2. The erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge. vello
-///    0.9's `Compose::Clear` bleeds to whole boundary tiles, which is why the
-///    punch uses `Compose::DestOut` on every tier — the probes just past
+/// 2. The erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge.
+///    `vello_common`'s `Compose::Clear` bleeds to whole boundary tiles, which
+///    is why the punch uses `Compose::DestOut` instead — the probes just past
 ///    `PUNCH_EDGE` are inside the SAME 16-px tile as the punch edge, and they
 ///    must still be opaque red.
 ///

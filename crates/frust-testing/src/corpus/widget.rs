@@ -27,7 +27,7 @@
 //! pointer event dispatched through [`frust_core::RenderRoot::event`] — never
 //! by constructing a widget's private state. `widget-button-pressed` holds a
 //! pointer DOWN with no matching up; `widget-text-field-caret` taps the field
-//! to focus it and paints at [`FrameTime::ZERO`], where the blink phase is
+//! to focus it and paints at [`frust_core::FrameTime::ZERO`], where the blink phase is
 //! zero and the caret is lit. A case that dispatches an event captures a
 //! warm-up frame first, because a pointer event can only hit geometry that a
 //! previous layout pass produced.
@@ -325,7 +325,7 @@ fn text_field_rest() -> CorpusCase {
     }
 }
 
-/// The middle field focused by a real tap, painted at [`FrameTime::ZERO`]
+/// The middle field focused by a real tap, painted at [`frust_core::FrameTime::ZERO`]
 /// where the blink phase is zero and the caret is LIT — the state
 /// `docs/TESTING.md`'s Inputs row calls "focused", plus the caret itself.
 fn text_field_caret() -> CorpusCase {

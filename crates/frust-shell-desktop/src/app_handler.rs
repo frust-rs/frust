@@ -93,8 +93,9 @@ const WINDOW_MAXIMIZED_VAR: &str = "FRUST_WINDOW_MAXIMIZED";
 
 /// Where an effective [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`] value came
 /// from, for the one-line-once log [`window_size_config`] emits — the same
-/// "which build ran" evidence `frust-render`'s `FRUST_AA_MODE`/
-/// `FRUST_RENDER_SCALE` knobs log.
+/// "which build ran" evidence `frust-render`'s own `frust-render tier=engine
+/// …`/`frust-perf render-path …`/`frust-render surface-caps: …` log lines
+/// (`frust-render`'s `renderer`/`context` modules) carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum WindowKnobSource {
     /// Neither knob's env var carried a non-empty value — the byte-identical
@@ -204,9 +205,9 @@ fn parse_window_maximized(raw: Option<&str>) -> bool {
 /// resolved once from [`WINDOW_SIZE_VAR`]/[`WINDOW_MAXIMIZED_VAR`]
 /// (compile-time-or-runtime, see [`resolved_window_knob`]) and cached — a
 /// knob change requires a fresh process, matching every other `FRUST_*` knob.
-/// Logs the effective choice exactly once, the same one-line-once convention
-/// `frust-render`'s `FRUST_AA_MODE`/`FRUST_RENDER_SCALE` knobs use, so a
-/// captured log proves which configuration a run used.
+/// Logs the effective choice exactly once — a captured log proves which
+/// configuration a run used, the same evidentiary role `frust-render`'s own
+/// `tier=engine`/render-path/surface-caps log lines carry.
 fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
     static CONFIG: OnceLock<(LogicalSize<u32>, bool, WindowKnobSource)> = OnceLock::new();
     *CONFIG.get_or_init(|| {

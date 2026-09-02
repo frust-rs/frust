@@ -67,7 +67,7 @@
 //! them, so a worker on its way out can never be mistaken for one that will
 //! still pick up the job just queued.
 //!
-//! A compile that unwinds marks its variant [`JobState::Failed`] instead of
+//! A compile that unwinds marks its variant `JobState::Failed` instead of
 //! leaving it claimable-but-unreachable: the queue entry is already spent, so
 //! a `Pending` job nobody re-queues is a job the worker can never build again
 //! and `queued_variants` would count forever. `Failed` is terminal for the

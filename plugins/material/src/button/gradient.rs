@@ -40,9 +40,12 @@
 //! [`frust::authoring::PaintScene::fill_rounded_rect_brush`]/`fill_path`/
 //! `stroke_path`/`draw_glyph_run` into a real
 //! [`frust_scene::Command`](https://docs.rs/frust-scene) carrying the brush,
-//! and the CPU render tier hands a `Brush::Gradient` straight to
-//! `vello_cpu::PaintType::Gradient` (`crates/frust-render/src/cpu_tier.rs:184`)
-//! — so this module paints real gradients, not a banded-solid approximation.
+//! and the engine's own compiler encodes it through its gradient LUT
+//! (`crates/frust-engine/src/compile/paint.rs`'s `encode_brush`), while the
+//! CPU oracle hands a `Brush::Gradient` straight to
+//! `vello_cpu::PaintType::Gradient` (`crates/frust-testing/src/oracle_cpu.rs`)
+//! — so this module paints real gradients on both rasterizers, not a
+//! banded-solid approximation.
 //! The one gap is [`frust::authoring::PaintScene::fill_rect_brush`] (the
 //! *unrounded* rect variant), whose default falls back to a solid color for a
 //! non-`SceneBuilder` recorder scene; this module never calls it — every fill
@@ -538,10 +541,12 @@ impl ButtonDecoration for GradientButtonDecoration {
 /// run's OWN `transform` — unlike [`PaintScene::fill_rounded_rect_brush`]/
 /// `stroke_path`, whose separate `origin` argument never auto-translates
 /// their brush (see this module's `PaintScene` gradient-support finding),
-/// the glyph-run render path applies `transform` to the active paint too
-/// (vello's `Scene::draw_glyphs(..).transform(run.transform).brush(..)` and
-/// `vello_cpu`'s `set_transform` before `set_paint`, both in
-/// `crates/frust-render`). Calling this with the exact origin the run's
+/// the glyph-run render path applies `transform` to the active paint too —
+/// `frust-engine`'s compiler composes the run's transform into the brush it
+/// encodes (`compile/mod.rs`'s `compile_glyph_run` -> `encode_paint`) and the
+/// CPU oracle's `set_transform(run.transform)` runs before `set_brush`
+/// (`frust-testing/src/oracle_cpu.rs`'s `draw_glyph_run`), on both
+/// rasterizers. Calling this with the exact origin the run's
 /// `transform` will translate from — [`super::ButtonWidget`]'s paint pass's
 /// `label_origin` — cancels that re-application, so the label's gradient
 /// lands at the same window position [`ButtonDecoration::foreground_brush`]
@@ -932,11 +937,12 @@ mod tests {
     }
 
     /// What the render backend actually paints a linear gradient's `start`
-    /// at: `run.transform * gradient.start` — vello's
-    /// `Scene::draw_glyphs(..).transform(run.transform).brush(&run.brush)`
-    /// and `vello_cpu`'s `set_transform(run.transform)` before `set_paint`
-    /// both apply the run's transform to its active paint, not just its
-    /// glyph outlines (`crates/frust-render/src/convert.rs`/`cpu_tier.rs`).
+    /// at: `run.transform * gradient.start` — `frust-engine`'s
+    /// `compile_glyph_run` composes the run's transform into the brush it
+    /// encodes, and the CPU oracle's `set_transform(run.transform)` runs
+    /// before `set_brush`, both applying the run's transform to its active
+    /// paint, not just its glyph outlines (`crates/frust-engine/src/compile`,
+    /// `crates/frust-testing/src/oracle_cpu.rs`).
     fn rendered_linear_start(run: &GlyphRun) -> Point {
         let Brush::Gradient(gradient) = &run.brush else {
             panic!("expected a gradient brush");

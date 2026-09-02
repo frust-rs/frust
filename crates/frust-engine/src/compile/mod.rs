@@ -146,8 +146,8 @@ pub struct CompiledFrame {
     /// Paints too complex to inline into a draw, indexed by
     /// [`Paint::Indexed`](vello_common::paint::Paint::Indexed).
     pub encoded_paints: Vec<EncodedPaint>,
-    /// The frame's hole punches, hoisted to the root and issued as one
-    /// destination-out pass after every draw (see [`clear`]).
+    /// The frame's hole punches, hoisted to the root and issued at the
+    /// punch's own painter-order position (see [`clear`]).
     ///
     /// Deliberately not draws: a punch erases rather than paints, and keeping
     /// it out of the recording is what lets a target that disregards alpha

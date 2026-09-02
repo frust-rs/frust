@@ -73,9 +73,8 @@ const UNPREMULTIPLY_BIND_GROUPS: usize = 1;
 /// The straight-alpha present pass for one surface: a pipeline built for that
 /// surface's own format plus the bind-group layout its program derived.
 ///
-/// Built once per surface configure (a rare event), like the blit arm's
-/// `TextureBlitter` — a pipeline object, a bind-group layout and nothing per
-/// frame but one bind group.
+/// Built once per surface configure (a rare event) — a pipeline object, a
+/// bind-group layout and nothing per frame but one bind group.
 #[derive(Debug)]
 pub struct UnpremultiplyPass {
     pipeline: wgpu::RenderPipeline,

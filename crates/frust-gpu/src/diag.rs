@@ -40,7 +40,7 @@
 //! Metal samples a render pass's counters at the vertex/fragment *stage*
 //! boundaries, so a pass that runs neither stage — a pure clear, an empty
 //! pass — can leave its query pair unwritten, and the ring drops the pair
-//! rather than reporting a garbage span (see [`span_duration`]). This is a
+//! rather than reporting a garbage span (see `span_duration`). This is a
 //! measurement gap, never a correctness one: an untimed pass draws exactly
 //! what it always did. A span made of several passes, which is the shape every
 //! caller here uses, absorbs it — the drawing passes still report.

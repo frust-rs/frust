@@ -58,8 +58,8 @@ impl DownlevelProfile {
 
 /// Whether the `FRUST_ENGINE_DOWNLEVEL` process-wide override is set to a
 /// non-zero value, checking both the compile-time (`option_env!`) and runtime
-/// (`std::env::var`) halves like `frust-render`'s `FRUST_TRACE`/
-/// `FRUST_NO_DIRECT_SURFACE` knobs. Cached: read once per process.
+/// (`std::env::var`) halves like `frust-render`'s `FRUST_TRACE` knob. Cached:
+/// read once per process.
 fn downlevel_override_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -155,7 +155,7 @@ impl TierCaps {
     /// When the resolved [`DownlevelProfile`] is [`DownlevelProfile::WebGl2`]
     /// — a real `wgpu::Backend::Gl` adapter, or `FRUST_ENGINE_DOWNLEVEL=1`
     /// rehearsing it against a desktop backend — the probed limits are run
-    /// through [`clamp_to_webgl2_defaults`] and storage buffers are forced
+    /// through `clamp_to_webgl2_defaults` and storage buffers are forced
     /// off, so the override actually rehearses the downlevel shape instead of
     /// only relabelling desktop values.
     pub fn probe(adapter: &wgpu::Adapter) -> Self {
