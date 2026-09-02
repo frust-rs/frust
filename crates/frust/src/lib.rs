@@ -847,8 +847,8 @@ pub use frust_shell_common::font_registry::register_app_fonts;
 /// B host seam), then `Opaque`/`Translucent` — or
 /// [`ResolvedSurfaceMode::RefusedTranslucent`], the case this exists for: the
 /// host declared Mode B and the platform resolved the surface opaque anyway
-/// (no matching `CompositeAlphaMode`, or a GPU-tier blit-fallback surface —
-/// `docs/LIMITATIONS.md`'s `cam-blit-opaque`). frust's paint side degrades to
+/// (no matching `CompositeAlphaMode`; see `docs/NATIVE_WIDGETS_ARCHITECTURE.md`'s
+/// Mode-B paragraph). frust's paint side degrades to
 /// the Mode A contract on its own, but the host's native-sibling z-order was
 /// fixed at build time, so a sibling arranged *behind* the surface is
 /// invisible **and untappable**. Branch on
