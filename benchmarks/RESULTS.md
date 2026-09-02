@@ -2292,8 +2292,27 @@ cargo binary exposes no AX window to script; reconfigure coverage came
 from the two window-size arms instead), and `gpu_q=0` in this invocation
 shape so no GPU-clock columns — the Pixel 5 matrix above remains the
 pin's GPU-timing evidence. Not a perf record; a liveness + validation +
-alpha-mode smoke. **DX12 (Windows) re-run on 30.0.1 is still owed** — to
-run when the Windows rig is next connected.
+alpha-mode smoke.
+
+### Windows DX12 (Dell mini, Intel UHD Graphics 730) — 2026-09-03 (conductor smoke, phase branch `214981d0`)
+
+The fourth and last shipping-backend arm, run once the rig reconnected.
+`shadcn-demo` release build (the same profile the earlier Windows gate
+cached; incremental rebuild 2 min 23 s, `--locked`), launched as a scheduled
+task on the rig's interactive desktop with `FRUST_TRACE=1`, stderr to a log:
+
+| Arm | Marker line | Uptime | Validation/error lines |
+|---|---|---|---|
+| default 800x600 window, interactive session | `tier=engine (frust-engine strip pipeline, format=Bgra8Unorm into a Bgra8Unorm swapchain, 800x580, adapter Intel(R) UHD Graphics 730)` | ~7 min, then `taskkill` | 0 |
+
+A full-desktop screenshot probe (the earlier gate's `AppActivate` +
+`CopyFromScreen` recipe) shows the gallery's Primitives page fully drawn —
+sidebar, button variants, avatars, keycap chips, spinner, skeleton, card,
+breadcrumb, native `muda` menu bar — with no black region or artifact. Not a
+perf record (no raw frame lines were requested; the gallery idles); a
+liveness + validation smoke matching the macOS arm above. With this the pin
+row's "device smoke on each shipping backend" holds for all four arms:
+Vulkan (Pixel 5), Metal/iOS (iPhone SE + Simulator), Metal/macOS, DX12.
 
 ---
 
