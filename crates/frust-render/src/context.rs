@@ -121,12 +121,6 @@ fn perf_tracing_enabled() -> bool {
 /// GPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenderPathKind {
-    /// The experimental CPU tier's only arm: `vello_cpu` rasterizes into a
-    /// pixmap uploaded into an intermediate `Rgba8Unorm` target that is
-    /// blitted to the swapchain each frame. Blit-only by construction — a
-    /// rasterizer writing its pixels on the CPU has no direct arm to take.
-    #[cfg(feature = "cpu-tier")]
-    Blit,
     /// `frust-engine` renders into the acquired swapchain texture, which needs
     /// only `RENDER_ATTACHMENT` in whatever format the surface reports — no
     /// `Rgba8Unorm` requirement, no `STORAGE_BINDING`, no intermediate and no
@@ -215,7 +209,6 @@ pub(crate) fn choose_engine_render_path(
 /// stated its own answer here.
 pub(crate) fn tier_compiled_in(tier: crate::tier::RenderTier) -> bool {
     match tier {
-        crate::tier::RenderTier::Cpu => cfg!(feature = "cpu-tier"),
         crate::tier::RenderTier::Engine => cfg!(feature = "engine-tier"),
     }
 }
@@ -237,12 +230,6 @@ fn log_render_path(path: RenderPathKind) {
 
     LOGGED.get_or_init(|| {
         let (name, reason) = match path {
-            #[cfg(feature = "cpu-tier")]
-            RenderPathKind::Blit => (
-                "blit",
-                "vello_cpu's pixmap uploaded into an intermediate and blitted to the swapchain \
-                 (cpu-tier)",
-            ),
             #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirect => (
                 "engine-direct",
@@ -487,11 +474,10 @@ pub struct RenderContext {
     /// Lazily created on the first surface; `None` until then.
     pub(crate) device: Option<DeviceHandle>,
     /// The tier [`ensure_device`](Self::ensure_device) selected for the live
-    /// device. Defaults to [`RenderTier::Engine`](crate::RenderTier::Engine)
-    /// and is only ever [`RenderTier::Cpu`](crate::RenderTier::Cpu) in a
-    /// `cpu-tier`-feature build whose probe (or override) chose the CPU
-    /// fallback — the [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to
-    /// pick the encode path.
+    /// device. Defaults to, and — since the experimental CPU fallback was
+    /// retired — is always, [`RenderTier::Engine`](crate::RenderTier::Engine);
+    /// the [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to pick the
+    /// encode path.
     pub(crate) selected_tier: crate::tier::RenderTier,
 }
 
@@ -571,23 +557,9 @@ impl DetachedSurface {
 /// The per-frame render path a [`ConfiguredSurface`] carries — the resources
 /// specific to the chosen arm (see [`RenderPathKind`]).
 ///
-/// The engine arms render into the acquired swapchain view (plus, on the
-/// un-premultiplying one, a surface-owned intermediate); the `cpu-tier`
-/// [`Blit`](Self::Blit) arm owns the intermediate `Rgba8Unorm` target the CPU
-/// rasterizer uploads into plus the `TextureBlitter` that copies it to the
-/// swapchain each frame.
+/// The engine arms render into the acquired swapchain view, plus, on the
+/// un-premultiplying one, a surface-owned intermediate.
 pub(crate) enum RenderPath {
-    /// The `cpu-tier` arm: `vello_cpu` uploads its rasterized pixmap into
-    /// `target_texture` (`COPY_DST`, see [`create_targets`]), then `blitter`
-    /// draws `target_view` over the acquired swapchain texture each frame.
-    /// Always the surface's own size — this tier's rasterizer encodes at
-    /// identity into a pixmap of exactly the swapchain's dimensions.
-    #[cfg(feature = "cpu-tier")]
-    Blit {
-        target_texture: wgpu::Texture,
-        target_view: wgpu::TextureView,
-        blitter: wgpu::util::TextureBlitter,
-    },
     /// The engine tier's arm ([`RenderPathKind::EngineDirect`]): `frust-engine`
     /// records its passes straight into the acquired swapchain view, so there
     /// is no intermediate and no blitter — but the frame needs a depth
@@ -631,7 +603,7 @@ pub(crate) enum RenderPath {
         /// the frame targets has the swapchain's own extent.
         depth: frust_engine::DepthTexture,
         /// The premultiplied intermediate the engine renders the frame into,
-        /// recreated on resize like the blit arm's target.
+        /// recreated on resize alongside the depth attachment above.
         intermediate_view: wgpu::TextureView,
         /// The conversion, built once per surface configure for the
         /// swapchain's own format.
@@ -651,8 +623,7 @@ pub(crate) struct ConfiguredSurface {
     /// computed once at configure time (the mode never changes for a live
     /// surface; a resize reconfigures with the same `config`). No arm refuses
     /// translucency any more: every resolved alpha mode has an engine arm
-    /// ([`choose_engine_render_path`]), straight-alpha translucency included,
-    /// and `cpu-tier`'s `vello_cpu` output is already premultiplied.
+    /// ([`choose_engine_render_path`]), straight-alpha translucency included.
     ///
     /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
     /// at each read so the value a shell observes through
@@ -787,37 +758,6 @@ fn is_android_emulator() -> bool {
         .get("ro.kernel.qemu")
         .as_deref()
         == Some("1")
-}
-
-/// Creates the intermediate render target the `cpu-tier` rasterizer uploads
-/// into, and the blit pass then copies to the acquired surface texture.
-#[cfg(feature = "cpu-tier")]
-fn create_targets(
-    width: u32,
-    height: u32,
-    device: &wgpu::Device,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    // Exactly the two usages this arm needs: `COPY_DST` for the
-    // `write_texture` upload of `vello_cpu`'s rasterized pixmap, and
-    // `TEXTURE_BINDING` for the blitter's sampled full-screen draw.
-    // `Rgba8Unorm` is renderable and sampleable on every wgpu backend.
-    let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-    let target_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("frust-render cpu-tier target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        usage,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        view_formats: &[],
-    });
-    let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (target_texture, target_view)
 }
 
 /// Creates the intermediate the engine renders a frame into on
@@ -1173,16 +1113,15 @@ impl RenderContext {
         // The mode itself is derived from the request and the surface's
         // reported caps alone.
         let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
-        // Each tier decides its own path. The engine reads the adapter's
-        // backend here rather than inside `choose_engine_render_path` itself,
-        // so that function stays a pure value decision, host-testable with no
-        // live adapter ([`compositor_expects_premultiplied`]); the `cpu-tier`
-        // rasterizer is blit-only by construction and has nothing to decide.
+        // The engine reads the adapter's backend here rather than inside
+        // `choose_engine_render_path` itself, so that function stays a pure
+        // value decision, host-testable with no live adapter
+        // ([`compositor_expects_premultiplied`]).
         //
-        // An arm is unreachable in a build that did not compile its renderer
-        // in — `create_device`'s [`tier_compiled_in`] guard refuses such a tier
-        // before any surface reaches here — but each still answers rather than
-        // panicking, so a wiring bug is reported.
+        // The arm is unreachable in a build that did not compile the engine
+        // renderer in — `create_device`'s [`tier_compiled_in`] guard refuses
+        // such a tier before any surface reaches here — but it still answers
+        // rather than panicking, so a wiring bug is reported.
         let path_kind = match tier {
             #[cfg(feature = "engine-tier")]
             crate::tier::RenderTier::Engine => {
@@ -1195,23 +1134,13 @@ impl RenderContext {
                      feature compiled in"
                 ));
             }
-            #[cfg(feature = "cpu-tier")]
-            crate::tier::RenderTier::Cpu => RenderPathKind::Blit,
-            #[cfg(not(feature = "cpu-tier"))]
-            crate::tier::RenderTier::Cpu => {
-                return Err(anyhow!(
-                    "frust-render: the CPU tier was selected without the `cpu-tier` feature \
-                     compiled in"
-                ));
-            }
         };
         log_render_path(path_kind);
         log_surface_alpha_caps(&capabilities, alpha_mode);
 
-        // Every arm draws into the swapchain through an ordinary render pass —
-        // the engine's own passes, or the blit arm's sampled full-screen draw —
-        // so `RENDER_ATTACHMENT` is the whole usage set, in whichever supported
-        // format the surface reports first.
+        // The engine's own passes draw into the swapchain through an ordinary
+        // render pass, so `RENDER_ATTACHMENT` is the whole usage set, in
+        // whichever supported format the surface reports first.
         let format = capabilities
             .formats
             .iter()
@@ -1248,18 +1177,6 @@ impl RenderContext {
             view_formats: vec![],
         };
         let path = match path_kind {
-            // The `cpu-tier` arm: the intermediate the rasterizer uploads into,
-            // plus the blitter that copies it over the acquired swapchain
-            // texture each frame. Always the surface's own size.
-            #[cfg(feature = "cpu-tier")]
-            RenderPathKind::Blit => {
-                let (target_texture, target_view) = create_targets(width, height, &handle.device);
-                RenderPath::Blit {
-                    target_texture,
-                    target_view,
-                    blitter: wgpu::util::TextureBlitter::new(&handle.device, format),
-                }
-            }
             // The engine's direct arm carries exactly one per-surface resource:
             // the depth attachment its opaque pass establishes and its alpha
             // pass tests against, sized to the swapchain that was just
@@ -1305,7 +1222,7 @@ impl RenderContext {
         // that fell back to `Auto` above lands here as `false`, which is what
         // the shells' paint contract keys off (see `alpha_mode_is_translucent`).
         // No arm refuses translucency any more — the engine serves every
-        // resolved mode, and `vello_cpu`'s output is already premultiplied.
+        // resolved mode.
         let resolved_translucent = alpha_mode_is_translucent(alpha_mode);
         let configured = ConfiguredSurface {
             surface,
@@ -1342,26 +1259,14 @@ impl RenderContext {
             .configure(&self.device_handle().device, &surface.config);
     }
 
-    /// Resizes `surface` in place and reconfigures the swapchain. The
-    /// `cpu-tier` blit arm recreates its intermediate target texture at the new
-    /// size, and each engine arm recreates the depth attachment (plus, on the
-    /// un-premultiplying arm, the intermediate) that has to match the
+    /// Resizes `surface` in place and reconfigures the swapchain. Each engine
+    /// arm recreates the depth attachment (plus, on the un-premultiplying arm,
+    /// the intermediate) that has to match the
     /// swapchain's extent. Zero dimensions are rejected upstream.
     pub(crate) fn resize_surface(&self, surface: &mut ConfiguredSurface, width: u32, height: u32) {
         surface.config.width = width;
         surface.config.height = height;
         match &mut surface.path {
-            #[cfg(feature = "cpu-tier")]
-            RenderPath::Blit {
-                target_texture,
-                target_view,
-                ..
-            } => {
-                let (new_texture, new_view) =
-                    create_targets(width, height, &self.device_handle().device);
-                *target_texture = new_texture;
-                *target_view = new_view;
-            }
             // A depth attachment must match its colour attachment's extent
             // exactly, so the resize recreates it here — in the same step that
             // reconfigures the swapchain, keeping the allocation off the frame
@@ -1527,12 +1432,8 @@ mod tests {
 
     #[test]
     fn a_tier_is_only_selectable_in_a_build_that_compiled_it() {
-        // Each tier tracks its own feature — nothing inherits a blanket
+        // The one tier tracks its own feature — nothing inherits a blanket
         // permission, and nothing inherits a blanket refusal.
-        assert_eq!(
-            tier_compiled_in(crate::tier::RenderTier::Cpu),
-            cfg!(feature = "cpu-tier")
-        );
         assert_eq!(
             tier_compiled_in(crate::tier::RenderTier::Engine),
             cfg!(feature = "engine-tier")

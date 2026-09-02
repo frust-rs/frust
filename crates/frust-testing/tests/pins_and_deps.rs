@@ -9,9 +9,11 @@
 //! already cover this same directory's manifests for a different guard).
 //!
 //! - **G5**: the root `[workspace.dependencies]` rows for `vello_common`,
-//!   `glifo`, `vello_cpu`, and `vello_cpu_oracle` each carry a
+//!   `glifo`, and `vello_cpu_oracle` each carry a
 //!   literal `=` version — the engine-core render stack is exact-pinned,
 //!   pre-1.0 and unstable, per `docs/RENDER_DEVELOPMENT.md`'s Version Pins.
+//!   (The legacy `vello_cpu` row — the cpu-tier fallback's own pin — was
+//!   retired alongside `frust-render`'s `cpu-tier` feature.)
 //! - **G7**: `frust-engine` never depends on `vello`/`vello_cpu`/
 //!   `frust-render`/`parley`; `frust-gpu` never depends on
 //!   `frust-scene`/`frust-core`/`frust-widgets`/`frust-engine`; and no crate
@@ -47,8 +49,11 @@ fn parse_manifest(path: &Path) -> toml::Table {
 
 /// Every `[workspace.dependencies]` row this guard requires to carry a
 /// literal `=` version — the engine-core render stack's exact-pinned rows
-/// (`docs/RENDER_DEVELOPMENT.md`'s Version Pins).
-const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu", "vello_cpu_oracle"];
+/// (`docs/RENDER_DEVELOPMENT.md`'s Version Pins). The legacy `vello_cpu` row
+/// (the retired cpu-tier fallback's own pin) is gone, not merely renamed:
+/// `vello_cpu_oracle` predates its retirement and stays the CPU oracle's own
+/// row.
+const EXACT_PINNED_ROWS: &[&str] = &["vello_common", "glifo", "vello_cpu_oracle"];
 
 /// The version requirement string of `[workspace.dependencies].<name>`,
 /// whether the row is a bare string (`name = "=0.1.0"`) or a table
@@ -89,7 +94,7 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
         if !version.starts_with('=') {
             failures.push(format!(
                 "[workspace.dependencies].{name} = \"{version}\" is not exact-pinned — the \
-                 engine-core render stack (vello_common/glifo/vello_cpu/vello_cpu_oracle) \
+                 engine-core render stack (vello_common/glifo/vello_cpu_oracle) \
                  must carry a literal `=` version (docs/RENDER_DEVELOPMENT.md's \
                  Version Pins)"
             ));

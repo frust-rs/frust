@@ -712,12 +712,6 @@ mod tests {
         assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "engine")]);
     }
 
-    #[test]
-    fn desktop_cargo_run_env_sets_the_var_for_cpu() {
-        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Cpu));
-        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "cpu")]);
-    }
-
     /// Regression for the verified desktop-fallback gap: a `--profile`
     /// desktop preview must (a) build in the profile
     /// cargo profile and (b) receive the auto-injected `FRUST_TRACE=1` as an
@@ -843,7 +837,7 @@ mod tests {
             &runner,
             &debug_info(),
             NO_EXTRA,
-            Some(RenderTierArg::Cpu),
+            Some(RenderTierArg::Engine),
             false,
             WatchHooks::fake(),
         )

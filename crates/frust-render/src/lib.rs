@@ -17,11 +17,10 @@
 //! shell must hand over a window). Tier selection ([`RenderTier`],
 //! [`select_render_tier`]) probes real adapter downlevel flags via [`TierCaps`]
 //! and honours an explicit override (env var / CLI flag, see
-//! [`RENDER_TIER_ENV_VAR`]); the experimental `Cpu` tier (vello_cpu, behind the
-//! non-default `cpu-tier` feature) rasterizes into a pixmap uploaded into an
-//! intermediate that is blitted to the swapchain, and is wired into device
-//! creation and presentation only when that feature is compiled in (see the
-//! `cpu_tier` module).
+//! [`RENDER_TIER_ENV_VAR`]) — `Engine` is the only tier this crate contains;
+//! the experimental `vello_cpu`-backed `Cpu` fallback and its `cpu-tier`
+//! feature were retired once the engine tier proved it needs no downlevel
+//! capability that fallback existed to cover.
 //!
 //! [`HeadlessRenderer`] renders the same scenes with no surface at all — the
 //! offscreen harness this crate's pixel-regression tests compare against,
@@ -45,14 +44,6 @@ compile_error!(
 );
 
 mod context;
-// The `SceneSink` command walk. Its one production consumer is the `cpu-tier`
-// rasterizer's sink — the engine tier compiles a `frust_scene::Scene` itself,
-// inside `frust-engine`, and shares no helper here — so the module rides that
-// feature and retires with it.
-#[cfg(feature = "cpu-tier")]
-mod convert;
-#[cfg(feature = "cpu-tier")]
-mod cpu_tier;
 // Offscreen (no surface, no swapchain) engine rendering: the harness the
 // pixel-regression tests render through. Reachable from outside the crate,
 // unlike the effects module below, because those tests live outside it — and

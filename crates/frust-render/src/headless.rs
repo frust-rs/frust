@@ -265,15 +265,10 @@ impl HeadlessRenderer {
         let selection =
             crate::tier::select_render_tier(&caps, crate::tier::render_tier_override_from_env());
         match selection.outcome {
+            // `RenderTier::Engine` is the enum's only variant (the
+            // experimental `Cpu` fallback was retired alongside its
+            // `cpu-tier` feature), so `Available` has nothing else to name.
             crate::tier::TierOutcome::Available(crate::tier::RenderTier::Engine) => {}
-            crate::tier::TierOutcome::Available(other) => {
-                return Err(anyhow!(
-                    "frust-render headless: this harness renders on the engine tier, but tier \
-                     selection resolved `{other:?}` ({}) — unset the render-tier override for a \
-                     headless run",
-                    selection.diagnosis
-                ));
-            }
             crate::tier::TierOutcome::Unavailable { .. } => {
                 return Err(anyhow!(selection.diagnosis));
             }

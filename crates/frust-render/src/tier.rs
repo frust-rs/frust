@@ -1,17 +1,20 @@
 //! Render-tier selection seam.
 //!
 //! [`RenderTier::Engine`] is the frust-owned `frust-engine` strip pipeline —
-//! the DEFAULT and only shipping tier, behind the default `engine-tier`
-//! feature (`frust-render/Cargo.toml`): [`select_render_tier`] probes for it
+//! the sole render tier, behind the default `engine-tier` feature
+//! (`frust-render/Cargo.toml`): [`select_render_tier`] probes for it
 //! automatically, since `frust-engine` needs no downlevel flag at all (see
-//! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]). [`RenderTier::Cpu`] is the
-//! experimental `vello_cpu` fallback, selectable only when the `cpu-tier`
-//! feature is compiled in (not default — see `frust-render/Cargo.toml`).
+//! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]).
 //!
 //! The vello-classic `Gpu` tier is GONE: the renderer, its `vello` dependency
 //! and the `FRUST_RENDER_TIER=gpu` escape hatch that reached it were all
-//! deleted once the engine tier became the default, so `"gpu"` is no longer a
-//! value this seam parses.
+//! deleted once the engine tier became the default. The experimental
+//! `vello_cpu`-backed `Cpu` tier is GONE too, retired alongside its
+//! `cpu-tier` feature once the engine tier proved it needs no downlevel
+//! capability the legacy fallback existed to cover. `"gpu"` and `"cpu"` are
+//! therefore no longer values this seam parses — an unknown override string,
+//! either included, is refused/logged and falls back to no override (see
+//! [`parse_render_tier_override`]).
 //!
 //! [`select_render_tier`] is pure decision logic over [`TierCaps`] (a plain
 //! struct a caller builds from a real `wgpu::Adapter`'s downlevel flags +
@@ -22,18 +25,19 @@
 //! reusing [`TierSelection::diagnosis`] as its single fail-fast message.
 
 /// Which renderer the surface pipeline drives.
+///
+/// The frust-owned render engine (`frust-engine`: a `frust_scene::Scene`
+/// compiled into sparse strips and drawn by ordinary render passes over
+/// `frust-gpu`) is the only variant — selectable when the `engine-tier`
+/// feature is compiled in, the default feature
+/// (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`). The
+/// vello-classic `Gpu` tier and the experimental `vello_cpu`-backed `Cpu`
+/// tier were both retired; this enum keeps a single variant (rather than
+/// collapsing to a unit struct) because [`select_render_tier`] still needs a
+/// value to name in [`TierOutcome::Unavailable`] when no tier is compiled in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RenderTier {
-    /// Experimental CPU fallback (`vello_cpu` 0.0.9), only selectable when
-    /// the `cpu-tier` feature is compiled in.
-    Cpu,
-    /// The frust-owned render engine (`frust-engine`: a `frust_scene::Scene`
-    /// compiled into sparse strips and drawn by ordinary render passes over
-    /// `frust-gpu`), selectable when the `engine-tier` feature is compiled
-    /// in — the default feature
-    /// (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`).
-    ///
-    /// **The default tier [`select_render_tier`] probes for** whenever the
+    /// **The only tier [`select_render_tier`] can ever select**, whenever the
     /// `engine-tier` feature is compiled in: [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]
     /// is deliberately empty, so an adapter that reaches the probe always
     /// satisfies it.
@@ -74,9 +78,9 @@ pub enum TierOutcome {
     /// selected it.
     Available(RenderTier),
     /// No tier is usable in this build. `would_be` names the tier that
-    /// *would* have been selected had it been compiled in — a diagnosed
-    /// failure naming the tier that would apply, e.g. `Cpu` in a build with
-    /// neither the `engine-tier` nor the `cpu-tier` feature.
+    /// *would* have been selected had it been compiled in — always `Engine`,
+    /// the only tier this crate contains, in a build without the
+    /// `engine-tier` feature.
     Unavailable { would_be: RenderTier },
 }
 
@@ -92,25 +96,21 @@ pub struct TierSelection {
 
 /// Selects the render tier.
 ///
-/// - An explicit `override_tier` wins **among available tiers**: a `Cpu`
-///   override always applies here (the CPU tier has no adapter prerequisite;
-///   a build that did not compile it in is refused one level up, by
-///   `context::tier_compiled_in`).
-/// - An `Engine` override applies only in a build that compiled the
-///   `engine-tier` feature in, against [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`];
-///   without it the override is refused ([`TierOutcome::Unavailable`] naming
-///   `Engine`) rather than ignored, so a capture asked for on the engine tier
-///   can never be some other renderer wearing the wrong label. With the
-///   feature compiled in, an explicit `Engine` override is equivalent to the
+/// - An explicit `override_tier` (always `Engine` — the only variant this
+///   enum has) applies only in a build that compiled the `engine-tier`
+///   feature in, against [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]; without it the
+///   override is refused ([`TierOutcome::Unavailable`] naming `Engine`)
+///   rather than ignored, so a capture asked for on the engine tier can never
+///   be some other renderer wearing the wrong label. With the feature
+///   compiled in, an explicit `Engine` override is equivalent to the
 ///   no-override default below.
 /// - Without an override: if the `engine-tier` feature is compiled in, `caps`
 ///   satisfying [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] (deliberately empty, so
 ///   always true) selects [`RenderTier::Engine`] — the default probed tier
-///   (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`). Only a build
-///   compiled WITHOUT the `engine-tier` feature falls through: to
-///   [`RenderTier::Cpu`] when the `cpu-tier` feature is compiled in, and
-///   otherwise to [`TierOutcome::Unavailable`] naming `Cpu` as the tier that
-///   would apply — the caller then fails fast using
+///   (`frust-render/Cargo.toml`'s `default = ["engine-tier"]`). A build
+///   compiled WITHOUT the `engine-tier` feature has no renderer at all, so
+///   this falls through to [`TierOutcome::Unavailable`] naming `Engine` as
+///   the tier that would apply — the caller then fails fast using
 ///   [`TierSelection::diagnosis`].
 pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) -> TierSelection {
     // Always true today: [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is empty by
@@ -120,14 +120,17 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     let engine_capable = caps
         .downlevel_flags
         .contains(ENGINE_REQUIRED_DOWNLEVEL_FLAGS);
+    let engine_compiled = cfg!(feature = "engine-tier") && engine_capable;
 
     if let Some(tier) = override_tier {
         // The engine tier is build-gated, so this is the one thing that can
         // refuse it: without the feature there is no renderer to select.
         // REFUSED rather than quietly ignored — a run asked for on `engine`
         // that rendered through something else would put a mislabelled number
-        // into the comparison the override exists to produce.
-        if tier == RenderTier::Engine && !(cfg!(feature = "engine-tier") && engine_capable) {
+        // into the comparison the override exists to produce. `tier` can only
+        // ever be `Engine` (the enum's one variant), so there is nothing else
+        // to match on here.
+        if !engine_compiled {
             return TierSelection {
                 outcome: TierOutcome::Unavailable {
                     would_be: RenderTier::Engine,
@@ -160,9 +163,10 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     // The engine tier is the probed default whenever its feature is compiled
     // in, which it is by default: `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` is empty,
     // so `engine_capable` is always true and this arm always wins. A build
-    // without the feature falls through to the experimental CPU tier, or to a
-    // diagnosed refusal when that is absent too.
-    if cfg!(feature = "engine-tier") && engine_capable {
+    // compiled without the feature has no renderer to fall back to — the
+    // vello-classic and experimental CPU tiers this seam once fell back to
+    // were both retired.
+    if engine_compiled {
         return TierSelection {
             outcome: TierOutcome::Available(RenderTier::Engine),
             diagnosis: format!(
@@ -173,30 +177,15 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
         };
     }
 
-    let reason = format!(
-        "frust-render: this build did not compile the `engine-tier` feature in, so adapter `{}` \
-         has no default renderer to drive.",
-        caps.adapter_name
-    );
-
-    if cfg!(feature = "cpu-tier") {
-        TierSelection {
-            outcome: TierOutcome::Available(RenderTier::Cpu),
-            diagnosis: format!(
-                "{reason} Falling back to the experimental CPU tier (vello_cpu, `cpu-tier` \
-                 feature)."
-            ),
-        }
-    } else {
-        TierSelection {
-            outcome: TierOutcome::Unavailable {
-                would_be: RenderTier::Cpu,
-            },
-            diagnosis: format!(
-                "{reason} Rebuild with the default `engine-tier` feature, or with the \
-                 experimental `cpu-tier` feature for a CPU fallback."
-            ),
-        }
+    TierSelection {
+        outcome: TierOutcome::Unavailable {
+            would_be: RenderTier::Engine,
+        },
+        diagnosis: format!(
+            "frust-render: this build did not compile the `engine-tier` feature in, so adapter \
+             `{}` has no renderer to drive. Rebuild with the default `engine-tier` feature.",
+            caps.adapter_name
+        ),
     }
 }
 
@@ -204,32 +193,31 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
 /// plumbing) — a compile-time-or-runtime knob like every other `FRUST_*`
 /// knob (see `context::env_str`'s precedence: runtime wins when both are
 /// set, compile-time otherwise). Set directly at runtime, by `frust run
-/// --render-tier cpu|engine` for the spawned desktop process, or baked in
+/// --render-tier engine` for the spawned desktop process, or baked in
 /// at build time via `frust build|run --define FRUST_RENDER_TIER=<tier>` —
 /// the only way an override reaches an Android app process, which has no
 /// runtime env to set (mobile: `--render-tier` itself is not plumbed in v1,
 /// see `frust-cli`'s flag help text; `--define` is).
 pub const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
-/// Pure parse of a raw override string (`"cpu"`/`"engine"`, case-insensitive)
-/// into a [`RenderTier`], or `None` (with a logged warning) for anything else
-/// — `"gpu"` included, since the vello-classic tier it named no longer exists.
-/// Split out from the env lookup ([`render_tier_override_from_env`]) so it is
-/// unit-testable without mutating process-wide env state, mirroring
-/// `context.rs`'s pure-decision/platform-lookup split.
+/// Pure parse of a raw override string (`"engine"`, case-insensitive) into a
+/// [`RenderTier`], or `None` (with a logged warning) for anything else —
+/// `"gpu"` and `"cpu"` included, since the vello-classic and experimental
+/// CPU tiers those named no longer exist. Split out from the env lookup
+/// ([`render_tier_override_from_env`]) so it is unit-testable without
+/// mutating process-wide env state, mirroring `context.rs`'s
+/// pure-decision/platform-lookup split.
 pub fn parse_render_tier_override(raw: &str) -> Option<RenderTier> {
     match raw.to_ascii_lowercase().as_str() {
-        "cpu" => Some(RenderTier::Cpu),
-        // Ungated, exactly like `"cpu"`: the override vocabulary is the same
-        // string set in every build. A build without the `engine-tier`
-        // feature refuses the parsed override in [`select_render_tier`], with
-        // a diagnosis naming the missing feature — a far more useful answer
-        // than "invalid value, ignored".
+        // A build without the `engine-tier` feature refuses the parsed
+        // override in [`select_render_tier`], with a diagnosis naming the
+        // missing feature — a far more useful answer than "invalid value,
+        // ignored".
         "engine" => Some(RenderTier::Engine),
         other => {
             log::warn!(
                 "frust-render: ignoring invalid {RENDER_TIER_ENV_VAR}={other:?} (expected \
-                 \"cpu\" or \"engine\")"
+                 \"engine\")"
             );
             None
         }
@@ -295,13 +283,11 @@ mod tests {
                 selection.outcome,
                 TierOutcome::Available(RenderTier::Engine)
             );
-        } else if cfg!(feature = "cpu-tier") {
-            assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
         } else {
             assert_eq!(
                 selection.outcome,
                 TierOutcome::Unavailable {
-                    would_be: RenderTier::Cpu
+                    would_be: RenderTier::Engine
                 }
             );
         }
@@ -327,22 +313,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn cpu_override_wins_even_on_a_flagless_adapter() {
-        // The CPU tier has no adapter prerequisite, so a `Cpu` override always
-        // applies — even onto an adapter with no downlevel flags at all.
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::empty()), Some(RenderTier::Cpu));
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
-    }
-
-    #[test]
-    fn cpu_override_wins_over_a_fully_capable_adapter_too() {
-        let selection =
-            select_render_tier(&caps(wgpu::DownlevelFlags::all()), Some(RenderTier::Cpu));
-        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
     }
 
     #[test]
@@ -378,9 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_cpu_and_engine_case_insensitively() {
-        assert_eq!(parse_render_tier_override("cpu"), Some(RenderTier::Cpu));
-        assert_eq!(parse_render_tier_override("Cpu"), Some(RenderTier::Cpu));
+    fn parses_engine_case_insensitively() {
         assert_eq!(
             parse_render_tier_override("engine"),
             Some(RenderTier::Engine)
@@ -401,6 +369,15 @@ mod tests {
     }
 
     #[test]
+    fn the_retired_cpu_value_is_no_longer_parsed() {
+        // The experimental `vello_cpu` fallback was deleted with its
+        // `cpu-tier` feature, so `cpu` is an invalid value like any other
+        // typo now — same treatment as the retired `gpu` value above.
+        assert_eq!(parse_render_tier_override("cpu"), None);
+        assert_eq!(parse_render_tier_override("CPU"), None);
+    }
+
+    #[test]
     fn invalid_override_value_is_ignored() {
         assert_eq!(parse_render_tier_override(""), None);
         assert_eq!(parse_render_tier_override("vello"), None);
@@ -413,15 +390,6 @@ mod tests {
         assert_eq!(
             render_tier_override_from_sources(Some("engine"), None),
             Some(RenderTier::Engine)
-        );
-    }
-
-    #[test]
-    fn override_sources_runtime_wins_over_compile_time() {
-        // Both set: runtime wins outright, per `env_str`'s precedence.
-        assert_eq!(
-            render_tier_override_from_sources(Some("engine"), Some("cpu".to_string())),
-            Some(RenderTier::Cpu)
         );
     }
 

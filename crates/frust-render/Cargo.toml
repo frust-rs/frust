@@ -12,10 +12,6 @@ kurbo.workspace = true
 frust-scene.workspace = true
 anyhow.workspace = true
 log.workspace = true
-# Experimental CPU render-tier fallback —
-# optional, only pulled in by the `cpu-tier` feature below; NOT part of the
-# default GPU path. Exact-pinned per the workspace Version-Pin Policy.
-vello_cpu = { workspace = true, optional = true }
 # The frust-owned sparse-strip render engine — optional, only pulled in by the
 # `engine-tier` feature below; NOT part of the default GPU path. A
 # workspace-internal path dependency, so it carries no version pin of its own.
@@ -30,12 +26,11 @@ frust-gpu = { workspace = true, optional = true }
 # DEFAULT: `engine-tier` below — the only shipping renderer. Vello classic is
 # GONE (its `vello` dependency, its `RenderTier::Gpu` variant and the
 # `FRUST_RENDER_TIER=gpu` escape hatch that reached it were all deleted once
-# the engine tier became the default).
+# the engine tier became the default); the experimental `vello_cpu`-backed
+# `cpu-tier` fallback (and its `convert` module's `SceneSink` command walk,
+# its one remaining consumer) is GONE too, retired once the engine tier
+# proved it needs no downlevel capability that fallback existed to cover.
 default = ["engine-tier"]
-# Experimental vello_cpu-backed CPU render tier, and the `convert` module's
-# `SceneSink` command walk that feeds it — the walk's only remaining consumer.
-# NOT default.
-cpu-tier = ["dep:vello_cpu"]
 # The frust-owned engine render tier (`frust-engine` over `frust-gpu`).
 # DEFAULT, and now MANDATORY: `tier::select_render_tier` probes for and selects
 # this tier automatically (`frust-engine` needs no downlevel flag at all — see

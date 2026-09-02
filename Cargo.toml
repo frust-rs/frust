@@ -82,12 +82,12 @@ license = "MIT OR Apache-2.0"
 # additively across every target this workspace builds for (Android: vulkan;
 # iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
 # non-backend runtime plumbing, always needed). Deliberately dropped: `gles`
-# (no shell surfaces a GLES-only device today; the `cpu-tier` `vello_cpu`
-# feature is the documented CPU fallback story instead, see
-# `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm target only,
-# Frust ships no wasm shell). Confirmed via `cargo tree -e features`: these
-# two (and their naga frontends/backends) are absent from every target's
-# dependency graph.
+# (no shell surfaces a GLES-only device today — the engine tier's own
+# downlevel design already covers the WebGL2/GLES3.0 ceiling without a
+# separate `gles` wgpu backend, see `docs/ARCHITECTURE.md`'s `RenderTier` row)
+# and `webgpu` (wasm target only, Frust ships no wasm shell). Confirmed via
+# `cargo tree -e features`: these two (and their naga frontends/backends) are
+# absent from every target's dependency graph.
 wgpu = { version = "29.0.3", default-features = false, features = [
     "std",
     "parking_lot",
@@ -256,25 +256,23 @@ accesskit = "0.24"
 accesskit_winit = "0.33"
 accesskit_android = "0.7"
 accesskit_ios = "=0.1.2"
-# experimental CPU render-tier fallback — optional, feature-gated
-# (`cpu-tier` on frust-render, NOT default), exact-pinned: pre-1.0 with an
-# unstable API, isolated behind the encode adapter so a breaking bump never
-# reaches the default GPU path.
-vello_cpu = "=0.0.9"
 # frust-engine's own sparse-strip core (`engine-tier` feature on
-# frust-render), exact-pinned (pre-1.0 experimental), NOT default build.
+# frust-render), exact-pinned (pre-1.0 experimental), NOT default build. The
+# only `vello_common`/`glifo` identity now — the legacy `vello_cpu =0.0.9`
+# CPU-tier fallback pin (and its own `vello_common 0.0.9`/`glifo 0.1.1`
+# identities) was retired alongside `frust-render`'s `cpu-tier` feature.
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
 glifo = { version = "=0.3.0", default-features = false, features = ["std"] }
 # Dev-only oracle for `frust-testing`: the SAME engine core the engine
 # tier is built on (vello_common 0.2.0 + glifo 0.3.0), rasterized on the CPU
 # with no GPU in the loop, so a golden test compares the engine against its own
 # reference implementation rather than against a different renderer's. Renamed
-# (`vello_cpu_oracle`) rather than bumping the `vello_cpu = "=0.0.9"` row above:
-# the legacy `cpu-tier` fallback stays on 0.0.9, so BOTH `vello_common`
-# identities (0.0.9 and 0.2.0) coexist in the graph on purpose — the rename
-# makes that explicit at every use site, and
-# `crates/frust-testing/tests/dup_identities.rs` is the guard that asserts
-# exactly two of each (flipped to one when a later phase retires 0.0.9).
+# (`vello_cpu_oracle`, package `vello_cpu`) from the era when the retired
+# `cpu-tier` fallback's own `vello_cpu =0.0.9` row also lived here — the name
+# stays even now that it is the sole `vello_cpu` identity, since every use
+# site already spells it and `crates/frust-testing/tests/dup_identities.rs`
+# is the guard that pins the single `vello_common`/`glifo` identity this
+# pin resolves to.
 # Exact-pinned like every other pre-1.0 render-stack row (docs/DEVELOPMENT.md's
 # Version-Pin Policy). Feature trim: `std` + `text` (glyph runs) + exactly one
 # rasterization pipeline. `u8_pipeline` is NOT optional decoration — vello_cpu

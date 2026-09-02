@@ -24,10 +24,6 @@
 //! [`crate::context::choose_engine_render_path`]), so it stays on the
 //! `EngineDirect` arm above with no conversion pass at all.
 //!
-//! The experimental `cpu-tier` fallback keeps the one blit arm: `vello_cpu`
-//! rasterizes into a pixmap inside `encode`, uploads it into the surface's
-//! intermediate, and `submit` copies that over the acquired swapchain texture.
-//!
 //! This crate remaps the v3 present spans on the engine arm — see
 //! [`SurfaceRenderer::submit`].
 
@@ -86,9 +82,8 @@ pub enum SurfaceAlphaRequest {
 /// upholding the "no `SurfaceTexture`/surface outlives a transition" invariant.
 struct ReadySurface {
     surface: ConfiguredSurface,
-    /// The tier-specific renderer that produces this frame's pixels. On the
-    /// `cpu-tier` blit arm it fills the intermediate `surface.path` target; on
-    /// the engine arms it targets the acquired swapchain texture in `submit`.
+    /// The tier-specific renderer that produces this frame's pixels — on the
+    /// engine arms it targets the acquired swapchain texture in `submit`.
     backend: TierBackend,
     /// The device's persisted `wgpu::PipelineCache` (handed to the engine's
     /// pipeline build) paired with the adapter fingerprint
@@ -103,22 +98,13 @@ struct ReadySurface {
 ///
 /// The engine variant records into the acquired swapchain view (or, on the
 /// un-premultiplying arm, into the surface's intermediate) in
-/// [`SurfaceRenderer::submit`]; the CPU variant fills the surface's
-/// intermediate in [`SurfaceRenderer::encode`], which the shared tail then
-/// blits. Without the `cpu-tier` feature this is a one-variant enum.
-// Both renderers are boxed: the whole `ReadySurface` already lives behind a
-// `Box` (`SurfaceState::Ready`), so nothing on the hot path pays for the size
-// of either. The `Engine` variant still carries its refusal counter and
-// timestamp ring inline beside its boxed renderer, which is what makes it
-// larger than the `Cpu` one — an asymmetry worth nothing to fix, since the
-// enum is only ever reached through that outer `Box`.
-#[cfg_attr(feature = "cpu-tier", allow(clippy::large_enum_variant))]
+/// [`SurfaceRenderer::submit`]. A one-variant enum — the experimental
+/// `vello_cpu`-backed `Cpu` variant and its `cpu-tier` feature were retired
+/// alongside the vello-classic tier's own removal.
+// The renderer is boxed: the whole `ReadySurface` already lives behind a
+// `Box` (`SurfaceState::Ready`), so nothing on the hot path pays for its
+// size.
 enum TierBackend {
-    /// Experimental vello_cpu path (`cpu-tier` feature): rasterize headless
-    /// into a pixmap, then upload it into the target texture. Boxed because it
-    /// carries a reusable `RenderContext`/`Pixmap`.
-    #[cfg(feature = "cpu-tier")]
-    Cpu(Box<crate::cpu_tier::CpuTierRenderer>),
     /// The frust-owned engine path (`engine-tier` feature): a
     /// `frust_scene::Scene` compiled into sparse strips and recorded into the
     /// frame's own `wgpu::CommandEncoder` by
@@ -268,7 +254,7 @@ pub struct SurfaceRenderer {
     /// `PIPELINE_CACHE` (any Vulkan adapter); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
-    /// [`Self::submit`] to blit into and present (the acquire/submit span split).
+    /// [`Self::submit`] to render into and present (the acquire/submit span split).
     /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
     /// [`AcquireOutcome::Acquired`] result, taken by the next [`Self::submit`].
     /// A `wgpu::SurfaceTexture` is owned (it does not borrow the surface), so
@@ -276,13 +262,11 @@ pub struct SurfaceRenderer {
     /// confined to `frust-render` while letting a shell time each span with its
     /// own clock (timing stays shell-owned — see `frust-shell-common::perf`).
     pending_present: Option<wgpu::SurfaceTexture>,
-    /// The `base_color` [`Self::encode`] was called with, stashed for the
-    /// **engine** arms only: there, the render that consumes `base_color` runs
-    /// in [`Self::submit`] (it targets the acquired swapchain texture, which
-    /// does not exist until [`Self::acquire`]), so the color must survive the
-    /// gap between `encode` and `submit`. Unused on the `cpu-tier` blit path
-    /// (which renders inside `encode`, where `base_color` is a parameter).
-    /// `None` outside an in-flight engine frame.
+    /// The `base_color` [`Self::encode`] was called with, stashed since the
+    /// render that consumes `base_color` runs in [`Self::submit`] (it targets
+    /// the acquired swapchain texture, which does not exist until
+    /// [`Self::acquire`]), so the color must survive the gap between `encode`
+    /// and `submit`. `None` outside an in-flight engine frame.
     pending_base_color: Option<peniko::Color>,
     /// The engine tier's owned copy of the frame's scene — its counterpart to
     /// [`Self::scene`], and reused across frames for the same reason.
@@ -634,25 +618,13 @@ impl SurfaceRenderer {
         // the shell restored a validated blob via
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
         // `PIPELINE_CACHE` (Metal/DX12). Created before the tier `match` so the
-        // engine arm can hand it to `EngineRenderer::new`; the `Cpu` tier runs
-        // no GPU pipelines and leaves it unused (retained only so a later
-        // `pipeline_cache_data()` still has the handle).
+        // engine arm can hand it to `EngineRenderer::new`.
         let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
 
-        // Pick the tier backend the context's probe selected. Only `Engine` is
-        // reachable without the `cpu-tier` feature (the probe never returns
-        // `Cpu` there, and `ensure_device` guards it).
+        // Pick the tier backend the context's probe selected. `Engine` is the
+        // only tier `RenderTier` names; a build without the `engine-tier`
+        // feature never reaches here at all (`ensure_device` guards it).
         let backend = match ctx.selected_tier() {
-            #[cfg(feature = "cpu-tier")]
-            crate::RenderTier::Cpu => TierBackend::Cpu(Box::new(
-                crate::cpu_tier::CpuTierRenderer::new(surface.config.width, surface.config.height),
-            )),
-            #[cfg(not(feature = "cpu-tier"))]
-            crate::RenderTier::Cpu => {
-                return Err(anyhow!(
-                    "frust-render: Cpu tier selected without the `cpu-tier` feature compiled in"
-                ));
-            }
             #[cfg(feature = "engine-tier")]
             crate::RenderTier::Engine => {
                 let device = &ctx.device_handle().device;
@@ -764,13 +736,6 @@ impl SurfaceRenderer {
         if let SurfaceState::Ready(ready) = &mut self.state {
             ctx.resize_surface(&mut ready.surface, width, height);
             match &mut ready.backend {
-                #[cfg(feature = "cpu-tier")]
-                TierBackend::Cpu(cpu) => {
-                    // Keep the CPU pixmap's size in step with the swapchain:
-                    // the intermediate texture was recreated above, but the
-                    // CPU tier's own `RenderContext`/`Pixmap` are sized too.
-                    cpu.resize(width, height);
-                }
                 #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { engine, .. } => {
                     // The engine's own extent-sized resources (its intermediate
@@ -826,8 +791,6 @@ impl SurfaceRenderer {
         self.clear_pending_frame();
         if let SurfaceState::Ready(ready) = &mut self.state {
             match &mut ready.backend {
-                #[cfg(feature = "cpu-tier")]
-                TierBackend::Cpu(_) => {}
                 // Nothing to release ahead of time: every texture this
                 // backend holds (resource textures, the intermediate pool, its
                 // own depth attachment) dies with the renderer below, and the
@@ -880,26 +843,19 @@ impl SurfaceRenderer {
 
     /// Phase 1 of the frame — the **encode** span: take the frame's scene. It
     /// does **not** touch the swapchain, so a caller timing this call in
-    /// isolation measures encode cost with no vsync wait folded in. What
-    /// happens here depends on the render path (see [`Self::submit`]'s span
-    /// mapping):
-    ///
-    /// - **`cpu-tier` blit arm**: rasterizes (clearing to `base_color`) and
-    ///   uploads into the intermediate `Rgba8Unorm` target — so `encode_us`
-    ///   includes that work — before the blit.
-    /// - **Engine arms**: copy the display list and stash `base_color`; the GPU
-    ///   render moves to [`Self::submit`] (it needs the acquired swapchain
-    ///   texture). `encode_us` is then a memcpy and nothing else.
+    /// isolation measures encode cost with no vsync wait folded in. This copies
+    /// the display list and stashes `base_color`; the GPU render moves to
+    /// [`Self::submit`] (it needs the acquired swapchain texture), so
+    /// `encode_us` is a memcpy and nothing else.
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
     /// phase but [`SurfacePhase::SurfaceReady`]; otherwise
     /// [`EncodeOutcome::Encoded`], after which [`Self::present`] finishes the
     /// frame. Nothing accumulates across frames.
-    // `ctx` is read only by the `cpu-tier` arm's `write_texture` upload; the
-    // engine arms do all their GPU work in `submit`. The parameter stays in
-    // the public signature either way, so a shell's call site is
-    // feature-independent.
-    #[cfg_attr(not(feature = "cpu-tier"), allow(unused_variables))]
+    // `ctx` is unused on this tier — all of its GPU work happens in `submit`
+    // — but the parameter stays in the public signature so a shell's call
+    // site does not have to special-case it.
+    #[allow(unused_variables)]
     pub fn encode(
         &mut self,
         ctx: &RenderContext,
@@ -929,50 +885,8 @@ impl SurfaceRenderer {
         // borrow checker only allows on a single deref.
         let ready: &mut ReadySurface = ready;
 
-        // Only the `cpu-tier` arm below touches the device (its `write_texture`
-        // upload); the engine arms do all their GPU work in `submit`.
-        #[cfg(feature = "cpu-tier")]
-        let device_handle = ctx.device_handle();
-
         // Encode this frame's pixels, per tier and per render path.
         match &mut ready.backend {
-            #[cfg(feature = "cpu-tier")]
-            TierBackend::Cpu(cpu) => {
-                // The CPU tier uploads its pixmap into the intermediate target,
-                // so it is always configured on the blit arm
-                // (`context::create_render_surface`); any other path here is a
-                // wiring bug.
-                let RenderPath::Blit { target_texture, .. } = &ready.surface.path else {
-                    return Err(anyhow!(
-                        "frust-render: cpu-tier requires the blit render path"
-                    ));
-                };
-                let width = ready.surface.config.width;
-                let height = ready.surface.config.height;
-                // Rasterize headless into the reusable pixmap (premultiplied
-                // RGBA8), then upload it into the intermediate target the blit
-                // reads from. `write_texture` needs no row padding (unlike a
-                // buffer copy), so the tight `4 * width` stride is fine.
-                //
-                // The SURFACE's size: this tier's rasterizer encodes at
-                // identity into a pixmap of exactly these dimensions, and its
-                // intermediate is created at the same extent.
-                let pixels = cpu.render(scene, base_color, width, height);
-                device_handle.queue.write_texture(
-                    target_texture.as_image_copy(),
-                    pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * width),
-                        rows_per_image: Some(height),
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
             #[cfg(feature = "engine-tier")]
             TierBackend::Engine { .. } => {
                 // This tier renders in `submit`, which is why its surface is
@@ -1007,18 +921,18 @@ impl SurfaceRenderer {
     /// two-phase [`Self::acquire`] + [`Self::submit`] seam, kept for callers
     /// (and the [`Self::render`] convenience wrapper) that time present as one
     /// span. It acquires the swapchain texture (the blocking vsync/present
-    /// wait) and, on success, blits/submits/presents it.
+    /// wait) and, on success, renders/submits/presents it.
     ///
     /// A caller wanting the finer **acquire** (blocking vsync wait) vs
-    /// **submit** (blit + queue-submit + present) attribution — to separate
-    /// GPU saturation from blit cost — calls
+    /// **submit** (GPU render + queue-submit + present) attribution — to
+    /// separate GPU saturation from render cost — calls
     /// [`Self::acquire`] and [`Self::submit`] directly, timing each with its own
     /// clock (timing stays shell-owned; this crate reads no clock — see
     /// `frust-shell-common::perf`'s layering note). `present`'s combined span
     /// equals `acquire` + `submit` by construction.
     ///
-    /// Assumes [`Self::encode`] has already filled the intermediate target this
-    /// frame. In any phase but [`SurfacePhase::SurfaceReady`] the call is a
+    /// Assumes [`Self::encode`] has already copied this frame's display list.
+    /// In any phase but [`SurfacePhase::SurfaceReady`] the call is a
     /// no-op returning [`FrameOutcome::Skipped`]. On an `Outdated`
     /// acquire the surface is reconfigured and [`FrameOutcome::Redraw`] asks the
     /// shell to try again; on `Lost` the surface is dropped, the machine moves
@@ -1142,26 +1056,16 @@ impl SurfaceRenderer {
     /// Timing this call in isolation attributes the submit work separately from
     /// [`Self::acquire`]'s blocking vsync wait.
     ///
-    /// What the submit span contains depends on the render path (the v3 span
-    /// mapping):
+    /// What the submit span contains: the whole GPU render runs HERE,
+    /// targeting the acquired swapchain texture (which does not exist until
+    /// [`Self::acquire`]) or the surface's intermediate, then present. So the
+    /// frame's GPU cost lands in `submit_us`; `encode_us` is a memcpy.
     ///
-    /// - **Engine arms**: the whole GPU render runs HERE, targeting the
-    ///   acquired swapchain texture (which does not exist until
-    ///   [`Self::acquire`]) or the surface's intermediate, then present. So the
-    ///   frame's GPU cost lands in `submit_us`; `encode_us` is a memcpy.
-    /// - **`cpu-tier` blit arm**: the intermediate target was already filled in
-    ///   [`Self::encode`], so `submit` = create the swapchain view +
-    ///   `TextureBlitter::copy` + queue-submit + present.
-    ///
-    /// **v3 wire mapping (unchanged fields, remapped work).** The
-    /// `acquire_us`/`submit_us` field names and the wire format are unchanged
-    /// (`perf.rs` is untouched). On the engine arms the swapchain **acquire**
-    /// (the blocking vsync wait) still happens in [`Self::acquire`] and is
-    /// recorded in `acquire_us` exactly as before — so acquire precedes the GPU
-    /// render (which lives in this span) rather than following it as on the
-    /// blit arm. A benchmark comparing the two must account for that: the GPU
-    /// render migrates `encode_us` → `submit_us`, `submit_us` sheds the blit,
-    /// and `acquire_us` is unchanged but now sits *before* the render.
+    /// **v3 wire mapping.** The `acquire_us`/`submit_us` field names and the
+    /// wire format are unchanged (`perf.rs` is untouched). The swapchain
+    /// **acquire** (the blocking vsync wait) happens in [`Self::acquire`] and
+    /// is recorded in `acquire_us`, so acquire precedes the GPU render, which
+    /// lives entirely in this span.
     ///
     /// Must follow an [`AcquireOutcome::Acquired`] result from [`Self::acquire`]
     /// on the same frame — it consumes the stashed texture. With nothing stashed
@@ -1180,8 +1084,8 @@ impl SurfaceRenderer {
     }
 
     /// [`Self::submit`] with the final present step handed back to the caller
-    /// instead of issued here: identical GPU work (render/blit + queue-submit),
-    /// but the acquired swapchain frame is returned as an opaque, `Send`
+    /// instead of issued here: identical GPU work (render + queue-submit), but
+    /// the acquired swapchain frame is returned as an opaque, `Send`
     /// [`DeferredPresent`] the caller presents on a thread of its choosing.
     ///
     /// The iOS `presentsWithTransaction` contract is why this exists — see
@@ -1214,9 +1118,9 @@ impl SurfaceRenderer {
             return Ok((FrameOutcome::Skipped, None));
         };
         // The stashed texture is owned, but the encoded frame (the engine's
-        // copied scene, or the blit arm's intermediate target + blitter) lives
-        // on `self` — if the surface vanished between `acquire` and `submit`,
-        // drop the texture and skip rather than present a stale frame.
+        // copied scene) lives on `self` — if the surface vanished between
+        // `acquire` and `submit`, drop the texture and skip rather than
+        // present a stale frame.
         let Self {
             state,
             pending_base_color,
@@ -1437,28 +1341,6 @@ impl SurfaceRenderer {
                     }
                 }
             }
-            // `cpu-tier` blit: copy the intermediate target (filled in
-            // `encode`) into the swapchain texture and submit.
-            #[cfg(feature = "cpu-tier")]
-            RenderPath::Blit {
-                target_view,
-                blitter,
-                ..
-            } => {
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render blit"),
-                        });
-                blitter.copy(
-                    &device_handle.device,
-                    &mut encoder,
-                    target_view,
-                    &swapchain_view,
-                );
-                device_handle.queue.submit([encoder.finish()]);
-            }
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
@@ -1477,11 +1359,9 @@ impl SurfaceRenderer {
 /// (`context::create_engine_intermediate` creates it with exactly this), and
 /// only the conversion pass speaks the swapchain's format.
 ///
-/// One answer for both the install site and the resize-time drift check below,
-/// so the two cannot disagree about which format this surface's renderer was
-/// built for. The `cpu-tier` blit path answers the swapchain's format: it is
-/// not reachable with an engine backend, and answering rather than panicking
-/// keeps the wiring check that follows the reporting one.
+/// One answer for both the install site and the resize-time drift check
+/// below, so the two cannot disagree about which format this surface's
+/// renderer was built for.
 #[cfg(feature = "engine-tier")]
 fn engine_target_format(
     path: &RenderPath,
@@ -1492,8 +1372,6 @@ fn engine_target_format(
             frust_engine::gpu::pipelines::INTERMEDIATE_FORMAT
         }
         RenderPath::EngineDirect { .. } => surface_format,
-        #[cfg(feature = "cpu-tier")]
-        RenderPath::Blit { .. } => surface_format,
     }
 }
 

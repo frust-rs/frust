@@ -116,18 +116,15 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Force the render tier (`cpu`/`engine`)
+        /// Force the render tier (`engine`)
         /// `frust-render` probes for at startup, by setting
         /// `FRUST_RENDER_TIER` for the launched process (see
         /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `engine` is the default tier
-        /// (`frust-render`'s `engine-tier` feature, on by default) — this
-        /// override is equivalent to leaving the flag unset. The
-        /// vello-classic `gpu` tier is GONE and is no longer an accepted
-        /// value. `cpu` is a
-        /// non-default tier the app must have been BUILT with
-        /// (`frust-render`'s `cpu-tier` feature); otherwise the
-        /// launched process refuses the override at startup and says so.
+        /// / `RENDER_TIER_ENV_VAR`). `engine` is the default (and only)
+        /// tier (`frust-render`'s `engine-tier` feature, on by default) —
+        /// this override is equivalent to leaving the flag unset. The
+        /// vello-classic `gpu` tier and the experimental `cpu` tier are
+        /// both GONE and are no longer accepted values.
         /// **Desktop-preview only in v1**: the
         /// `cargo run` fallback gets the env var directly; plumbing an
         /// override to a launched Android/iOS device (`adb`/`devicectl`
@@ -355,19 +352,17 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
 /// `frust run --render-tier` value (see `Command::Run`'s doc comment).
 /// Deliberately independent of `frust_render::RenderTier` — `frust-cli`
 /// has no compile-time dependency on the rendering stack (see
-/// `docs/ARCHITECTURE.md`) — but its variants and their lowercase env
+/// `docs/ARCHITECTURE.md`) — but its variant and its lowercase env
 /// string ([`RenderTierArg::env_value`]) must stay in sync with
 /// `frust_render::parse_render_tier_override`'s accepted values by hand.
 ///
-/// The non-default tier is listed here unconditionally, exactly
-/// because this enum is hand-synced rather than derived: which of them a
-/// given app actually contains is a property of the app's own cargo features,
-/// which this CLI neither knows nor builds — it only sets an env var for the
-/// launched process, and that process refuses an override it cannot honour.
+/// A single variant, hand-synced rather than derived: the vello-classic `gpu`
+/// tier and the experimental `cpu` tier were both retired from
+/// `frust-render`, leaving `engine` the only value this CLI's own render
+/// crate ever accepts.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum RenderTierArg {
-    Cpu,
     Engine,
 }
 
@@ -375,7 +370,6 @@ impl RenderTierArg {
     /// The value `FRUST_RENDER_TIER` is set to for the spawned process.
     pub fn env_value(self) -> &'static str {
         match self {
-            RenderTierArg::Cpu => "cpu",
             RenderTierArg::Engine => "engine",
         }
     }
@@ -742,14 +736,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_with_render_tier_cpu() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "cpu"]);
-        match cli.command.unwrap() {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Cpu));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn rejects_the_retired_cpu_render_tier_value() {
+        // The experimental CPU fallback was deleted alongside its `cpu-tier`
+        // feature, and with it the `cpu` override `RenderTierArg` used to
+        // accept — same treatment as the retired `gpu` value above.
+        assert!(Cli::try_parse_from(["frust", "run", "--render-tier", "cpu"]).is_err());
     }
 
     #[test]
@@ -784,7 +775,6 @@ mod tests {
 
     #[test]
     fn render_tier_arg_env_values() {
-        assert_eq!(RenderTierArg::Cpu.env_value(), "cpu");
         // Hand-synced with `frust_render::parse_render_tier_override`'s
         // accepted strings — this crate depends on no render crate to check
         // it against.
