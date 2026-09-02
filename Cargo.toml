@@ -74,26 +74,20 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# rendering stack — pins are LAW (vello 0.9 requires wgpu 29.0.3; do not bump independently)
+# rendering stack — pins are LAW (do not bump independently)
 #
-# Feature trim: the framework only ever drives vello
-# through wgpu (no CPU-side vello-only build), so `default-features = false`
-# + explicit `features = ["wgpu"]` drops vello's `wgpu_default` default
-# feature, which otherwise pulls in plain `wgpu/default` below it. `wgpu`
-# itself is trimmed to the backends Frust's three shells can actually
-# reach: `wgsl` is vello's own shader frontend (its `wgpu` feature already
-# requires it); `vulkan` + `metal` + `dx12` are the per-OS GPU backends,
-# unioned additively across every target this workspace builds for (Android:
-# vulkan; iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
-# non-backend runtime plumbing, always needed). Deliberately dropped:
-# `gles` (no shell ever surfaces a GLES-only device — vello requires compute
-# shaders GLES can't provide, so a GLES fallback was never a real path; the
-# `cpu-tier` `vello_cpu` feature is the documented CPU fallback story
-# instead, see `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm
-# target only, Frust ships no wasm shell). Confirmed via `cargo tree -e
-# features`: these two (and their naga frontends/backends) are absent from
-# every target's dependency graph.
-vello = { version = "0.9.0", default-features = false, features = ["wgpu"] }
+# Feature trim: `wgpu` is trimmed to the backends Frust's three shells can
+# actually reach: `wgsl` is the shader frontend `frust-engine`'s pipelines are
+# written in; `vulkan` + `metal` + `dx12` are the per-OS GPU backends, unioned
+# additively across every target this workspace builds for (Android: vulkan;
+# iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
+# non-backend runtime plumbing, always needed). Deliberately dropped: `gles`
+# (no shell surfaces a GLES-only device today; the `cpu-tier` `vello_cpu`
+# feature is the documented CPU fallback story instead, see
+# `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm target only,
+# Frust ships no wasm shell). Confirmed via `cargo tree -e features`: these
+# two (and their naga frontends/backends) are absent from every target's
+# dependency graph.
 wgpu = { version = "29.0.3", default-features = false, features = [
     "std",
     "parking_lot",
@@ -121,7 +115,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # frust-tui terminal UI — ratatui 0.30 / crossterm 0.29, pinned to
 # minor per the Version-Pin Policy (pre-1.0 ratatui churn). These pins are used
 # ONLY by `frust-tui`, which is isolated from the framework render stack (it
-# depends on `frust-drive`, never on `frust-core`/`vello`/`wgpu`). `insta` is a
+# depends on `frust-drive`, never on `frust-core`/`frust-render`/`wgpu`). `insta` is a
 # dev-only snapshot harness for the TUI's TestBackend render tests.
 ratatui = "0.30"
 crossterm = "0.29"
@@ -612,7 +606,7 @@ frust-shell-linux = { path = "crates/frust-shell-linux" }
 frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. The app's own
@@ -628,15 +622,6 @@ frust = { path = "crates/frust" }
 # workspace dev workflow (building/testing the crates in this workspace
 # directly); the same override lands in `templates/app/Cargo.toml.tmpl`
 # (every generated app) and `examples/huddle/Cargo.toml`.
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -684,7 +669,7 @@ opt-level = 1
 # fat LTO + cgu=1 alone (opt-level 3, the default — no override needed) shrank the
 # prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
 # unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were
-# also measured, but only *with* a shader/render-stack (vello/wgpu*/naga)
+# also measured, but only *with* a shader/render-stack (wgpu*/naga)
 # carve-out back to `opt-level = 3` — the config that would actually ship,
 # since sacrificing encode-path CPU perf isn't acceptable — and under that
 # carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"

@@ -1,71 +1,85 @@
-//! Layer 4: GPU backend — wgpu 29 + Vello 0.9.
+//! Layer 4: GPU backend — wgpu 29 over the frust-owned `frust-engine` strip
+//! pipeline.
 //!
 //! Consumes the renderer-agnostic [`frust_scene::Scene`] display list and
-//! renders it into a window's swapchain via Vello. Vello 0.9 has no
-//! `render_to_surface`: it renders (by compute) into an `Rgba8Unorm` storage
-//! texture. Where the surface itself supports `Rgba8Unorm` + `STORAGE_BINDING`
-//! (probed per surface), Frust renders **direct-to-surface** — vello targets the
-//! acquired swapchain texture and there is no blit; otherwise it
-//! falls back to rendering into an intermediate `Rgba8Unorm` texture blitted to
-//! the swapchain each frame. Both presentation models live in [`RenderContext`]
-//! / [`SurfaceRenderer`].
+//! renders it into a window's swapchain. `frust-engine` draws through ordinary
+//! render passes into the acquired swapchain texture — no compute pass, no
+//! storage write, no intermediate and no blit — so the surface needs only
+//! `RENDER_ATTACHMENT` in whatever format the platform reports, plus the depth
+//! attachment the surface carries alongside it. The one variation is a
+//! swapchain whose compositor genuinely reads STRAIGHT alpha: there the frame
+//! lands in a surface-owned intermediate and one fragment pass un-premultiplies
+//! it into the swapchain. Both presentation models live in [`RenderContext`] /
+//! [`SurfaceRenderer`].
 //!
-//! `vello`/`wgpu` types are kept out of the public API except at two
-//! deliberate seams: [`SurfaceRenderer::on_surface_created`] takes a
-//! `wgpu::SurfaceTarget` (the shell must hand over a window), and
-//! [`encode_scene`] exposes `vello::Scene` for shells that drive their own
-//! renderer. Tier selection ([`RenderTier`], [`select_render_tier`])
-//! probes real adapter downlevel flags via [`TierCaps`]
+//! `wgpu` types are kept out of the public API except at one deliberate seam:
+//! [`SurfaceRenderer::on_surface_created`] takes a `wgpu::SurfaceTarget` (the
+//! shell must hand over a window). Tier selection ([`RenderTier`],
+//! [`select_render_tier`]) probes real adapter downlevel flags via [`TierCaps`]
 //! and honours an explicit override (env var / CLI flag, see
 //! [`RENDER_TIER_ENV_VAR`]); the experimental `Cpu` tier (vello_cpu, behind the
-//! non-default `cpu-tier` feature) is wired into device creation and
-//! presentation only when that feature is compiled in — its rasterized
-//! `Pixmap` is uploaded into the same intermediate target the GPU path blits
-//! from (see the `cpu_tier` module).
-//!
-//! One Gpu-tier pre-pass runs inside `encode` before the main scene is built:
-//! the fragment-shader pre-pass (`shader_effects`) renders each
-//! `Command::ShaderQuad` into an offscreen texture registered with vello as an
-//! image override. A `Command::PushSnapshot` bracket needs no pre-pass of its
-//! own — it lowers inline through `convert`'s emulation (the presentation
-//! scale composed onto every inner command's transform, sub-unity alpha as a
-//! layer), the same lowering the engine tier's own compiler performs.
+//! non-default `cpu-tier` feature) rasterizes into a pixmap uploaded into an
+//! intermediate that is blitted to the swapchain, and is wired into device
+//! creation and presentation only when that feature is compiled in (see the
+//! `cpu_tier` module).
 //!
 //! [`HeadlessRenderer`] renders the same scenes with no surface at all — the
-//! offscreen oracle harness golden and pixel-regression tests compare against,
+//! offscreen harness this crate's pixel-regression tests compare against,
 //! resolving its adapter, limits and tier exactly as a real device does.
 //!
 //! Surface lifecycle is a first-class state machine: see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
+// The engine tier is no longer one renderer among several — it is the only
+// one. Deleting vello classic left `engine-tier` carrying the whole surface
+// pipeline (the render paths, the alpha routing, the headless harness), so a
+// build without it has no renderer at all: it would fail deep inside those
+// modules with a pile of unrelated type errors instead of saying so. The
+// feature is kept (rather than folded away) because `frust-engine`/`frust-gpu`
+// stay optional dependencies and later cards in this plan still key off it.
+#[cfg(not(feature = "engine-tier"))]
+compile_error!(
+    "frust-render requires the `engine-tier` feature (its default): the vello-classic renderer \
+     was deleted, so it is the only renderer this crate contains. Do not build with \
+     `--no-default-features`."
+);
+
 mod context;
+// The `SceneSink` command walk. Its one production consumer is the `cpu-tier`
+// rasterizer's sink — the engine tier compiles a `frust_scene::Scene` itself,
+// inside `frust-engine`, and shares no helper here — so the module rides that
+// feature and retires with it.
+#[cfg(feature = "cpu-tier")]
 mod convert;
 #[cfg(feature = "cpu-tier")]
 mod cpu_tier;
-// Offscreen (no surface, no swapchain) vello-classic rendering: the harness
-// the oracle/golden and pixel-regression tests render through. Reachable from
-// outside the crate, unlike the pre-pass module, because those tests live
-// outside it — and still leaking no `vello`/`wgpu` type (see its module docs).
+// Offscreen (no surface, no swapchain) engine rendering: the harness the
+// pixel-regression tests render through. Reachable from outside the crate,
+// unlike the effects module below, because those tests live outside it — and
+// still leaking no `wgpu` type (see its module docs).
 mod headless;
 mod lifecycle;
 mod pipeline_cache;
 mod renderer;
-// Offscreen WGSL fragment-shader effects (shader-showcase feature). Crate-
-// private; wired into `SurfaceRenderer::encode`'s Gpu-tier shader pre-pass,
-// which compiles/renders each `Command::ShaderQuad` program into an offscreen
-// texture and registers it as a vello image override before vello encoding.
+// Offscreen WGSL fragment-shader effects (shader-showcase feature). Currently
+// UNWIRED: its only caller was the vello-classic tier's encode-time pre-pass,
+// which registered each rendered quad with `vello::Renderer` as an image
+// override — a seam that died with vello, and one the engine tier has no
+// counterpart for yet. Retained (rather than deleted) because the engine plan
+// moves its compile half into `frust-gpu`, where the engine can drive it; the
+// `allow` is what keeps the module intact without an unused-code failure
+// meanwhile.
+#[allow(dead_code)]
 mod shader_effects;
 mod tier;
 
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
-pub use convert::encode_scene;
-pub use headless::{
-    GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessAa, HeadlessImage,
-    HeadlessMeta, HeadlessOptions, HeadlessRenderer, HeadlessSpec, ShaderOverrideSpec,
-};
+pub use headless::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR};
+#[cfg(feature = "engine-tier")]
+pub use headless::{HeadlessImage, HeadlessMeta, HeadlessOptions, HeadlessRenderer, HeadlessSpec};
 pub use lifecycle::{AcquireOutcome, EncodeOutcome, FrameOutcome, SurfacePhase};
 pub use renderer::{DeferredPresent, SurfaceAlphaRequest, SurfaceRenderer};
 pub use tier::{
-    GPU_REQUIRED_DOWNLEVEL_FLAGS, RENDER_TIER_ENV_VAR, RenderTier, TierCaps, TierOutcome,
+    ENGINE_REQUIRED_DOWNLEVEL_FLAGS, RENDER_TIER_ENV_VAR, RenderTier, TierCaps, TierOutcome,
     TierSelection, parse_render_tier_override, render_tier_override_from_env, select_render_tier,
 };

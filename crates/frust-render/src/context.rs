@@ -1,17 +1,13 @@
 //! [`RenderContext`]: owns the wgpu instance and the logical device surfaces
 //! render on.
 //!
-//! Historically this was a thin wrapper over `vello::util::RenderContext`.
-//! That type creates its per-surface device internally with a hardcoded
-//! `wgpu::Limits::default()` (its `new_device` is private and takes no
-//! `required_limits` hook), which the **iOS Simulator's** macOS-Metal-backed
-//! device cannot satisfy — `request_device` fails and vello surfaces it as
-//! `NoCompatibleDevice` ("Couldn't find suitable device"). We therefore own
-//! adapter/device creation ourselves (requesting the adapter's *actual* limits
-//! plus the [wgpu #7057](https://github.com/gfx-rs/wgpu/issues/7057)
-//! simulator alignment mitigation) and reuse vello only for the surface
-//! plumbing (`vello::util::RenderSurface`, the blitter, and the `Renderer`),
-//! which all accept a plain `wgpu::Device`.
+//! Adapter and device creation are frust's own rather than any upstream
+//! helper's, because the device request has to name the adapter's *actual*
+//! limits: a hardcoded `wgpu::Limits::default()` is what the **iOS
+//! Simulator's** macOS-Metal-backed device cannot satisfy (`request_device`
+//! fails outright). Owning the request is also what lets the
+//! [wgpu #7057](https://github.com/gfx-rs/wgpu/issues/7057) simulator
+//! alignment mitigation apply ([`effective_limits`]).
 //!
 //! Surface creation lives on the lifecycle state machine in
 //! [`crate::SurfaceRenderer`]: the shell mints an empty
@@ -20,18 +16,21 @@
 //! owning device.
 
 use anyhow::{Result, anyhow};
-use kurbo::Affine;
+#[cfg(feature = "perf-trace")]
 use std::sync::OnceLock;
-use wgpu::util::TextureBlitter;
 
 use crate::renderer::SurfaceAlphaRequest;
 
-/// The features vello's renderer opportunistically uses when the adapter
-/// exposes them — mirrors `vello::util::RenderContext::new_device` so our
-/// hand-rolled device request stays behaviourally identical to vello's, apart
-/// from the `required_limits` we control.
-pub(crate) fn vello_optional_features() -> wgpu::Features {
-    wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
+/// The `wgpu::Features` this crate opportunistically asks for when the adapter
+/// exposes them.
+///
+/// `PIPELINE_CACHE` alone: it is what
+/// [`create_pipeline_cache`](RenderContext::create_pipeline_cache) needs to
+/// seed the engine's shader-pipeline compilation from a persisted blob. An
+/// optional feature is only ever *added* when the adapter already offers it,
+/// so this can never turn a working adapter into a failed device request.
+pub(crate) fn optional_device_features() -> wgpu::Features {
+    wgpu::Features::PIPELINE_CACHE
 }
 
 /// The `wgpu::Features` a `perf-trace` build should additionally ask for,
@@ -62,6 +61,11 @@ fn perf_trace_features(adapter_features: wgpu::Features, perf_trace: bool) -> wg
 /// the compile-time-or-runtime parsing every shipping flag (`FRUST_TRACE`,
 /// `FRUST_NO_FRAME_GATE`, `FRUST_NO_RENDER_THREAD`, …) uses, so an Android app
 /// process (which has no runtime env) still honours a baked-in value.
+///
+/// `FRUST_TRACE` (via [`perf_tracing_enabled`]) is the only such flag this
+/// crate still reads, and only under the `perf-trace` feature — hence the
+/// `allow` rather than a `cfg`, which would take the unit tests below with it.
+#[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
 fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String>) -> bool {
     fn is_set_non_zero(value: Option<&str>) -> bool {
         matches!(value, Some(v) if v != "0")
@@ -90,256 +94,6 @@ pub(crate) fn env_str(
     non_empty(runtime).or_else(|| non_empty(compile_time.map(str::to_string)))
 }
 
-/// vello's per-frame anti-aliasing method, selectable via the `FRUST_AA_MODE`
-/// knob (`docs/RENDER_DEVELOPMENT.md` § Instrumentation (render path)) so the
-/// Area-vs-MSAA cost of the fine stage can be A/B'd on device. Crate-private:
-/// the `vello` type it wraps ([`vello::AaConfig`]/[`vello::AaSupport`]) never
-/// crosses this crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak
-/// anti-pattern).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AaMode {
-    /// vello's default: area anti-aliasing. Byte-identical to pre-knob
-    /// behaviour, and the fallback for an unset/empty/unknown knob value.
-    Area,
-    /// 8x multisampling.
-    Msaa8,
-    /// 16x multisampling.
-    Msaa16,
-}
-
-impl std::fmt::Display for AaMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            AaMode::Area => "area",
-            AaMode::Msaa8 => "msaa8",
-            AaMode::Msaa16 => "msaa16",
-        })
-    }
-}
-
-impl AaMode {
-    /// The [`vello::AaConfig`] this mode requests from `RenderParams`.
-    pub(crate) fn to_vello(self) -> vello::AaConfig {
-        match self {
-            AaMode::Area => vello::AaConfig::Area,
-            AaMode::Msaa8 => vello::AaConfig::Msaa8,
-            AaMode::Msaa16 => vello::AaConfig::Msaa16,
-        }
-    }
-
-    /// The [`vello::AaSupport`] a `vello::Renderer` should be built with to
-    /// compile pipelines for exactly this mode — never more: `AaSupport::all()`
-    /// compiles shader permutations for every `AaConfig`, ~3x unnecessary
-    /// pipeline compiles at init (the same rationale `install_surface`'s
-    /// `AaSupport::area_only()` documents), so only the selected mode's bit is
-    /// ever set.
-    pub(crate) fn support(self) -> vello::AaSupport {
-        match self {
-            AaMode::Area => vello::AaSupport::area_only(),
-            AaMode::Msaa8 => vello::AaSupport {
-                area: false,
-                msaa8: true,
-                msaa16: false,
-            },
-            AaMode::Msaa16 => vello::AaSupport {
-                area: false,
-                msaa8: false,
-                msaa16: true,
-            },
-        }
-    }
-}
-
-/// Parses a raw `FRUST_AA_MODE` value (already resolved by [`env_str`]) into
-/// an [`AaMode`]. Case-insensitive on `area`/`msaa8`/`msaa16`, with
-/// surrounding whitespace trimmed first. An unset or empty value falls back
-/// to [`AaMode::Area`] silently (that is simply "the knob wasn't touched");
-/// an unrecognised value also falls back to `Area`, but logs one
-/// `log::warn!` naming the offending value, since that case is more likely a
-/// typo than a deliberate default.
-pub(crate) fn parse_aa_mode(raw: Option<String>) -> AaMode {
-    let Some(trimmed) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
-        return AaMode::Area;
-    };
-    match trimmed.to_ascii_lowercase().as_str() {
-        "area" => AaMode::Area,
-        "msaa8" => AaMode::Msaa8,
-        "msaa16" => AaMode::Msaa16,
-        _ => {
-            log::warn!(
-                "frust-render: unrecognised FRUST_AA_MODE value {trimmed:?}, falling back to area"
-            );
-            AaMode::Area
-        }
-    }
-}
-
-/// The process-wide anti-aliasing mode, resolved once from `FRUST_AA_MODE`
-/// (compile-time-or-runtime, see [`env_str`]) and cached — a `FRUST_AA_MODE`
-/// change requires a fresh process, matching every other `FRUST_*` knob.
-pub(crate) fn aa_mode() -> AaMode {
-    static MODE: OnceLock<AaMode> = OnceLock::new();
-    *MODE.get_or_init(|| {
-        parse_aa_mode(env_str(
-            option_env!("FRUST_AA_MODE"),
-            std::env::var("FRUST_AA_MODE").ok(),
-        ))
-    })
-}
-
-/// The narrowest fraction of the surface `FRUST_RENDER_SCALE` will render at.
-/// Below a quarter of each axis the frame is too coarse for the upscaled
-/// result to be judged against the real one at all — a measurement instrument
-/// still has to show what it measures.
-const MIN_RENDER_SCALE: f64 = 0.25;
-
-/// The widest value `FRUST_RENDER_SCALE` accepts: the surface's own
-/// resolution, which is the default and the byte-identical-to-untouched case.
-/// Rendering ABOVE the surface size is a different feature (supersampling) with
-/// its own cost profile, deliberately out of this knob's range.
-const MAX_RENDER_SCALE: f64 = 1.0;
-
-/// Parses a raw `FRUST_RENDER_SCALE` value (already resolved by [`env_str`])
-/// into the fraction of the surface's pixel size each frame renders at.
-///
-/// An unset or empty value is [`MAX_RENDER_SCALE`] (1.0) silently — that is
-/// simply "the knob wasn't touched". An unparsable or non-finite value
-/// (`abc`, `NaN`, `inf`) also falls back to 1.0 but logs one `log::warn!`
-/// naming it, since that is a typo rather than a deliberate default. A value
-/// outside `MIN_RENDER_SCALE..=MAX_RENDER_SCALE` is clamped into it, likewise
-/// with one warn: `2` means "the knob was misunderstood", and silently
-/// honouring it would present a supersampled frame nobody asked to pay for.
-pub(crate) fn parse_render_scale(raw: Option<String>) -> f64 {
-    let Some(trimmed) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
-        return MAX_RENDER_SCALE;
-    };
-    let Ok(parsed) = trimmed.parse::<f64>() else {
-        log::warn!(
-            "frust-render: unparsable FRUST_RENDER_SCALE value {trimmed:?}, rendering at full \
-             surface resolution"
-        );
-        return MAX_RENDER_SCALE;
-    };
-    // NaN fails every comparison, so it must be rejected before the clamp
-    // rather than by it (`f64::clamp` panics on a NaN bound and returns NaN
-    // for a NaN value); infinities are equally meaningless as a fraction.
-    if !parsed.is_finite() {
-        log::warn!(
-            "frust-render: non-finite FRUST_RENDER_SCALE value {trimmed:?}, rendering at full \
-             surface resolution"
-        );
-        return MAX_RENDER_SCALE;
-    }
-    let clamped = parsed.clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE);
-    if clamped != parsed {
-        log::warn!(
-            "frust-render: FRUST_RENDER_SCALE {parsed} out of range \
-             {MIN_RENDER_SCALE}..={MAX_RENDER_SCALE}, clamped to {clamped}"
-        );
-    }
-    clamped
-}
-
-/// The process-wide render scale, resolved once from `FRUST_RENDER_SCALE`
-/// (compile-time-or-runtime, see [`env_str`]) and cached — a change requires a
-/// fresh process, matching every other `FRUST_*` knob.
-///
-/// The knob renders the whole frame into an intermediate a fraction of the
-/// surface's size and upscales it in the blit pass, so the cost per pixel of
-/// vello's fine stage (which is proportional to the pixels it sweeps) can be
-/// measured on device. It is a measurement instrument, not a shipping mode:
-/// while it is active the surface is pinned onto the blit arm.
-pub(crate) fn render_scale() -> f64 {
-    static SCALE: OnceLock<f64> = OnceLock::new();
-    *SCALE.get_or_init(|| {
-        parse_render_scale(env_str(
-            option_env!("FRUST_RENDER_SCALE"),
-            std::env::var("FRUST_RENDER_SCALE").ok(),
-        ))
-    })
-}
-
-/// Whether this process was ASKED to render below the surface's own
-/// resolution — the raw knob value, read only where a surface is being
-/// configured ([`RenderContext::create_render_surface`]'s forced-blit
-/// decision, which has no surface to ask yet).
-///
-/// Once a surface exists, "is this frame scaled?" is answered by the root it
-/// carries ([`blit_root`], stored on [`RenderPath::Blit`]): that is derived
-/// from the intermediate's REAL size, so it stays true for a CPU-tier surface
-/// (pinned to full resolution whatever the knob says) and for the ceil'd
-/// target the knob actually produces. Deriving it a second time from this
-/// process global is how two answers about one frame start to disagree.
-pub(crate) fn render_scaled() -> bool {
-    render_scale() < MAX_RENDER_SCALE
-}
-
-/// The intermediate-target size for a `width` x `height` surface rendered at
-/// `scale`: each axis rounded UP (a truncated axis would leave the frame's
-/// last row/column unsampled by the upscaling blit) and floored at one texel
-/// (wgpu rejects a zero-sized texture).
-///
-/// Identity at `scale == 1.0` — every `u32` is exactly representable as `f64`,
-/// so `ceil(w * 1.0) == w` with no rounding step — which is what keeps the
-/// default path byte-identical to a build without the knob.
-pub(crate) fn scaled_size(width: u32, height: u32, scale: f64) -> (u32, u32) {
-    // `f64 as u32` saturates at both ends in Rust, so neither a huge product
-    // nor a negative one can wrap; `scale` reaches here already clamped to
-    // `MIN_RENDER_SCALE..=MAX_RENDER_SCALE` anyway.
-    let axis = |value: u32| ((f64::from(value) * scale).ceil() as u32).max(1);
-    (axis(width), axis(height))
-}
-
-/// The root transform every vello pass targeting a blit arm's intermediate
-/// encodes under: the exact mapping of the `surface`'s own coordinate space
-/// onto the `target` the frame is rendered into.
-///
-/// [`Affine::IDENTITY`] whenever the intermediate is the surface's own size —
-/// the unscaled default, which is what keeps that path byte-identical to a
-/// build the render-scale knob never touched — and otherwise the per-axis
-/// ratio `target / surface`.
-///
-/// Per-axis, and derived from the target's size rather than from the scale
-/// that produced it, because [`scaled_size`] rounds each axis UP: a 1179-wide
-/// surface at 0.75 takes an 885-wide intermediate (885/1179 ≈ 0.7506), so a
-/// uniform `scale(0.75)` root would stop short of the intermediate's last
-/// column and the upscaling blit would stretch that unpainted strip of base
-/// colour back over the frame's edge. Scaling by the ratio the target actually
-/// has maps the frame exactly onto it, whichever axis rounded.
-///
-/// `surface` is a live swapchain size, never zero on either axis (zero
-/// dimensions are rejected before a surface is configured or resized).
-pub(crate) fn blit_root(surface: (u32, u32), target: (u32, u32)) -> Affine {
-    if surface == target {
-        return Affine::IDENTITY;
-    }
-    Affine::scale_non_uniform(
-        f64::from(target.0) / f64::from(surface.0),
-        f64::from(target.1) / f64::from(surface.1),
-    )
-}
-
-/// The sampler filter the blit pass upscales with: linear while the
-/// intermediate is smaller than the surface, nearest otherwise.
-///
-/// `TextureBlitter::copy` is a sampled full-screen triangle draw over the
-/// whole destination (verified in wgpu 29.0.4's `util/texture_blitter.rs` +
-/// `blit.wgsl`: normalized tex coords, `textureSample`), so source and
-/// destination sizes may differ and the sampler's `mag_filter` is what
-/// resolves the difference — nearest would show the reduced frame as visible
-/// blocks rather than as the softened image an upscale is meant to be.
-/// `TextureBlitter::new` builds with `FilterMode::Nearest`, so the unscaled
-/// answer here is byte-identical to the blitter the default path had before
-/// this knob existed.
-pub(crate) fn blit_filter(scaled: bool) -> wgpu::FilterMode {
-    if scaled {
-        wgpu::FilterMode::Linear
-    } else {
-        wgpu::FilterMode::Nearest
-    }
-}
-
-/// Whether perf tracing (frust-perf logging) is enabled via the process-wide
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
 ///
@@ -360,34 +114,18 @@ fn perf_tracing_enabled() -> bool {
     })
 }
 
-/// Whether the direct-to-surface render path is force-disabled via the
-/// process-wide `FRUST_NO_DIRECT_SURFACE` flag — the fallback-proof safety valve
-/// that pins a capable device onto the blit arm so the two arms
-/// can be A/B'd on the same hardware. Same compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD` (see `docs/RENDER_DEVELOPMENT.md`
-/// § Instrumentation (render path)). Cached: read once per process.
-fn direct_surface_force_blit() -> bool {
-    static FORCED: OnceLock<bool> = OnceLock::new();
-    *FORCED.get_or_init(|| {
-        env_flag_enabled(
-            option_env!("FRUST_NO_DIRECT_SURFACE"),
-            std::env::var("FRUST_NO_DIRECT_SURFACE").ok(),
-        )
-    })
-}
-
 /// Which per-frame render path a configured surface uses (see [`RenderPath`]).
 ///
 /// Pure decision output, kept separate from the `wgpu` resources so the
-/// selection logic ([`choose_render_path`]) is unit-testable without a GPU.
+/// selection logic ([`choose_engine_render_path`]) is unit-testable without a
+/// GPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenderPathKind {
-    /// vello renders straight into the acquired swapchain texture
-    /// (`Rgba8Unorm` + `STORAGE_BINDING`); no intermediate texture, no blit.
-    Direct,
-    /// vello renders into an intermediate `Rgba8Unorm` target that is blitted to
-    /// the swapchain each frame — the fallback for probe-refused/`Bgra8`-only
-    /// surfaces and the `cpu-tier` path.
+    /// The experimental CPU tier's only arm: `vello_cpu` rasterizes into a
+    /// pixmap uploaded into an intermediate `Rgba8Unorm` target that is
+    /// blitted to the swapchain each frame. Blit-only by construction — a
+    /// rasterizer writing its pixels on the CPU has no direct arm to take.
+    #[cfg(feature = "cpu-tier")]
     Blit,
     /// `frust-engine` renders into the acquired swapchain texture, which needs
     /// only `RENDER_ATTACHMENT` in whatever format the surface reports — no
@@ -396,8 +134,7 @@ pub(crate) enum RenderPathKind {
     /// depth attachment the surface carries alongside it
     /// ([`RenderPath::EngineDirect`]). Chosen by
     /// [`choose_engine_render_path`] for the
-    /// [`Engine`](crate::RenderTier::Engine) tier alone, so neither the
-    /// direct-to-surface probe nor `force_blit` participates.
+    /// [`Engine`](crate::RenderTier::Engine) tier alone.
     #[cfg(feature = "engine-tier")]
     EngineDirect,
     /// `frust-engine` renders into an intermediate of the surface's own and a
@@ -415,28 +152,24 @@ pub(crate) enum RenderPathKind {
     ///
     /// Still the engine family and still `RENDER_ATTACHMENT`-only on both
     /// textures: the conversion is an ordinary render pass into the swapchain
-    /// (never the compute/storage shape [`PremultiplyPass`] uses for vello's
-    /// arm), so nothing about this arm needs a capability the tier refuses.
+    /// (never a compute/storage write), so nothing about this arm needs a
+    /// capability the tier refuses.
     #[cfg(feature = "engine-tier")]
     EngineDirectUnpremultiply,
 }
 
 /// The engine tier's render path for a surface on `backend` whose resolved
-/// alpha mode is `alpha_mode` — one of the two engine arms, never
-/// [`RenderPathKind::Blit`].
+/// alpha mode is `alpha_mode` — one of the two engine arms.
 ///
-/// A sibling of [`choose_render_path`] rather than a branch inside it: the
-/// engine targets an ordinary render attachment in the surface's own format,
-/// so the `Rgba8Unorm`/`STORAGE_BINDING` probe that decides vello's arm has
-/// nothing to say here, and `force_blit` has no blit arm to force it onto.
-/// Unlike that sibling it does take arguments, because the engine's output
-/// convention is what splits the two arms apart:
+/// The engine targets an ordinary render attachment in the surface's own
+/// format, so no format/usage probe participates; what splits the two arms
+/// apart is the engine's output convention against the swapchain's:
 ///
 /// - `Opaque`/`Auto` ignore alpha entirely — [`RenderPathKind::EngineDirect`].
 /// - `Inherit` (Android's translucent mode) and `PreMultiplied` expect
 ///   PREMULTIPLIED alpha, which is what the engine's strip pipelines already
 ///   write (the premultiplied convention every frust GPU path uses). Served
-///   as-is on the same arm: no [`PremultiplyPass`], which would darken every
+///   as-is on the same arm: no conversion, which would darken every
 ///   partial-alpha pixel by a second factor of `a`.
 /// - `PostMultiplied` expects STRAIGHT alpha and would read `(C·a, a)` as
 ///   `(C, a)` — every partial-alpha pixel too dark. It takes
@@ -473,197 +206,29 @@ pub(crate) fn choose_engine_render_path(
     }
 }
 
-/// Pure direct-to-surface path policy: choose [`Direct`] only
-/// when the surface advertises **both** `Rgba8Unorm` and `STORAGE_BINDING` (the
-/// exact requirements of vello 0.9's `render_to_texture` target) **and** the
-/// blit arm is not force-selected; otherwise [`Blit`].
-///
-/// `force_blit` folds together the `FRUST_NO_DIRECT_SURFACE` safety valve and
-/// the `cpu-tier`-selected case (the CPU tier uploads its pixmap into the
-/// intermediate target, so it is blit-only by construction) — both resolved at
-/// the call site. Host-testable: no `wgpu` state is touched here.
-///
-/// [`Direct`]: RenderPathKind::Direct
-/// [`Blit`]: RenderPathKind::Blit
-pub(crate) fn choose_render_path(
-    has_rgba8unorm: bool,
-    has_storage_binding: bool,
-    force_blit: bool,
-) -> RenderPathKind {
-    if !force_blit && has_rgba8unorm && has_storage_binding {
-        RenderPathKind::Direct
-    } else {
-        RenderPathKind::Blit
-    }
-}
-
-/// Whether `tier` can only ever present through the blit arm — one exhaustive
-/// answer per tier, feeding [`choose_render_path`]'s `force_blit`.
-///
-/// Exhaustive on purpose. The expression this replaced read
-/// `selected_tier() != RenderTier::Gpu`, which silently forced the blit arm
-/// (and a `TextureBlitter`, and an intermediate) onto every tier added after
-/// it — a trap a new tier springs by existing, with no compile error. Written
-/// as a match, a new variant cannot compile until it has stated its own
-/// answer here.
-pub(crate) fn tier_forces_blit(tier: crate::tier::RenderTier) -> bool {
-    match tier {
-        // Probed per surface: direct where the swapchain supports vello's
-        // target, blit otherwise.
-        crate::tier::RenderTier::Gpu => false,
-        // Uploads its rasterized pixmap into the intermediate target the blit
-        // reads from, so it is blit-only by construction.
-        crate::tier::RenderTier::Cpu => true,
-        // Renders into the acquired swapchain view itself
-        // ([`choose_engine_render_path`]); an intermediate plus a blit would
-        // be a pass it never asked for, and it owns no intermediate to blit
-        // from.
-        crate::tier::RenderTier::Engine => false,
-    }
-}
-
 /// Whether THIS build actually contains `tier`'s renderer, i.e. whether the
-/// non-default cargo feature that compiles it in is on.
+/// cargo feature that compiles it in is on.
 ///
 /// The guard [`RenderContext::create_device`] fails fast with, so a
 /// [`crate::SurfaceRenderer`] never receives a tier it has no encode path for.
-/// Exhaustive for [`tier_forces_blit`]'s reason: the `!= RenderTier::Gpu`
-/// expression this replaced refused every future tier by default, which would
-/// have made a correctly compiled-in tier unreachable for no stated reason.
+/// Exhaustive on purpose: a tier added later cannot compile until it has
+/// stated its own answer here.
 pub(crate) fn tier_compiled_in(tier: crate::tier::RenderTier) -> bool {
     match tier {
-        crate::tier::RenderTier::Gpu => true,
         crate::tier::RenderTier::Cpu => cfg!(feature = "cpu-tier"),
         crate::tier::RenderTier::Engine => cfg!(feature = "engine-tier"),
     }
 }
 
-/// Whether the shader-showcase fragment-shader pre-pass
-/// (`crate::renderer::run_shader_prepass`) is force-disabled via the
-/// process-wide `FRUST_NO_SHADER_EFFECTS` flag — the same
-/// unproven-render-path safety valve shape as
-/// [`direct_surface_force_blit`]: the pre-pass drives real GPU work
-/// (pipeline compiles, offscreen targets, a vello image-override
-/// registration) that is unproven on device, so this flag is the fallback-proof escape hatch that
-/// reverts every `Command::ShaderQuad` to the existing placeholder-fill
-/// lowering (`convert::encode_range_with_overrides`'s miss path) with zero
-/// pre-pass GPU work. Same compile-time-or-runtime parsing as
-/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/RENDER_DEVELOPMENT.md`
-/// § Instrumentation (render path)). Cached: read once per process.
-pub(crate) fn shader_effects_disabled() -> bool {
-    static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        env_flag_enabled(
-            option_env!("FRUST_NO_SHADER_EFFECTS"),
-            std::env::var("FRUST_NO_SHADER_EFFECTS").ok(),
-        )
-    })
-}
-
-/// The two direct-to-surface capability bits, read once from a surface's
-/// [`wgpu::SurfaceCapabilities`]. Shared by the capability probe log and the
-/// [`choose_render_path`] decision so the query is not duplicated.
-fn direct_surface_caps(capabilities: &wgpu::SurfaceCapabilities) -> (bool, bool) {
-    let has_rgba8unorm = capabilities
-        .formats
-        .contains(&wgpu::TextureFormat::Rgba8Unorm);
-    let has_storage_binding = capabilities
-        .usages
-        .contains(wgpu::TextureUsages::STORAGE_BINDING);
-    (has_rgba8unorm, has_storage_binding)
-}
-
-/// Probes the surface's direct-to-surface capability and logs the result
-/// (if perf tracing is enabled). Logs once per process.
-///
-/// Direct-to-surface rendering requires:
-/// - Rgba8Unorm format in the surface's supported formats
-/// - STORAGE_BINDING usage in the surface's supported usages
-///
-/// Only compiled under the `perf-trace` feature; see the inert
-/// `#[cfg(not(feature = "perf-trace"))]` counterpart
-/// below.
-#[cfg(feature = "perf-trace")]
-fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) {
-    static LOGGED: OnceLock<()> = OnceLock::new();
-
-    if !perf_tracing_enabled() {
-        return;
-    }
-
-    LOGGED.get_or_init(|| {
-        // Format the supported formats as a comma-separated list
-        let formats_str = if capabilities.formats.is_empty() {
-            "[]".to_string()
-        } else {
-            format!(
-                "[{}]",
-                capabilities
-                    .formats
-                    .iter()
-                    .map(|f| format!("{:?}", f))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        };
-
-        // Reuse the shared capability read so the probe verdict and the live
-        // path decision (`choose_render_path`) can never disagree.
-        let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(capabilities);
-
-        // Determine the verdict
-        let direct_to_surface_supported = has_rgba8unorm && has_storage_binding;
-        let verdict = if direct_to_surface_supported {
-            "YES"
-        } else {
-            "NO"
-        };
-
-        // Provide a reason for the verdict
-        let reason = if direct_to_surface_supported {
-            "Rgba8Unorm+STORAGE_BINDING".to_string()
-        } else {
-            let mut missing = Vec::new();
-            if !has_rgba8unorm {
-                missing.push("no Rgba8Unorm");
-            }
-            if !has_storage_binding {
-                missing.push("no STORAGE_BINDING");
-            }
-            missing.join(", ")
-        };
-
-        // Log the surface capabilities probe
-        log::info!(
-            "frust-perf surface-caps formats={} usages={:?} direct_to_surface={} ({})",
-            formats_str,
-            capabilities.usages,
-            verdict,
-            reason
-        );
-    });
-}
-
-/// Without the `perf-trace` feature, the surface-caps probe is a complete
-/// no-op — no logging, no format-string bodies compiled in.
-#[cfg(not(feature = "perf-trace"))]
-#[inline]
-fn probe_direct_to_surface_capability(_capabilities: &wgpu::SurfaceCapabilities) {}
-
 /// Emits the one-per-process startup line naming the chosen render path and the
-/// reason, mirroring the surface-caps probe line style and its
-/// `FRUST_TRACE` gating. Logged once regardless of surface recreation.
+/// reason, mirroring the surface-alpha line's style and its `FRUST_TRACE`
+/// gating. Logged once regardless of surface recreation.
 ///
 /// Only compiled under the `perf-trace` feature; see the inert
 /// `#[cfg(not(feature = "perf-trace"))]` counterpart
 /// below.
 #[cfg(feature = "perf-trace")]
-fn log_render_path(
-    path: RenderPathKind,
-    has_rgba8unorm: bool,
-    has_storage_binding: bool,
-    force_blit: bool,
-) {
+fn log_render_path(path: RenderPathKind) {
     static LOGGED: OnceLock<()> = OnceLock::new();
 
     if !perf_tracing_enabled() {
@@ -672,41 +237,23 @@ fn log_render_path(
 
     LOGGED.get_or_init(|| {
         let (name, reason) = match path {
-            RenderPathKind::Direct => ("direct", "Rgba8Unorm+STORAGE_BINDING".to_string()),
-            RenderPathKind::Blit => {
-                let reason = if force_blit {
-                    // The safety valve wins even on a capable surface — say so, so
-                    // an A/B run's log confirms the arm it is actually exercising.
-                    // `FRUST_RENDER_SCALE < 1` is the third cause: the scaled
-                    // intermediate IS the blit arm's target, so the knob pins
-                    // the surface here exactly like the kill switch does.
-                    "forced (FRUST_NO_DIRECT_SURFACE, FRUST_RENDER_SCALE < 1, or cpu-tier)"
-                        .to_string()
-                } else {
-                    let mut missing = Vec::new();
-                    if !has_rgba8unorm {
-                        missing.push("no Rgba8Unorm");
-                    }
-                    if !has_storage_binding {
-                        missing.push("no STORAGE_BINDING");
-                    }
-                    missing.join(", ")
-                };
-                ("blit", reason)
-            }
+            #[cfg(feature = "cpu-tier")]
+            RenderPathKind::Blit => (
+                "blit",
+                "vello_cpu's pixmap uploaded into an intermediate and blitted to the swapchain \
+                 (cpu-tier)",
+            ),
             #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirect => (
                 "engine-direct",
                 "frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, \
-                 surface-reported format, surface-owned depth)"
-                    .to_string(),
+                 surface-reported format, surface-owned depth)",
             ),
             #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirectUnpremultiply => (
                 "engine-direct-unpremultiply",
                 "frust-engine into a surface-owned intermediate, un-premultiplied into the \
-                 swapchain by one fragment pass (straight-alpha translucent surface)"
-                    .to_string(),
+                 swapchain by one fragment pass (straight-alpha translucent surface)",
             ),
         };
         log::info!("frust-perf render-path {name} ({reason})");
@@ -717,44 +264,7 @@ fn log_render_path(
 /// complete no-op — no logging, no format-string bodies compiled in.
 #[cfg(not(feature = "perf-trace"))]
 #[inline]
-fn log_render_path(
-    _path: RenderPathKind,
-    _has_rgba8unorm: bool,
-    _has_storage_binding: bool,
-    _force_blit: bool,
-) {
-}
-
-/// Emits the one-per-process line naming the effective render scale and the
-/// intermediate size it implies for a `width` x `height` surface, so a device
-/// capture proves which resolution the frame it is timing was rendered at.
-///
-/// Unlike the two probe lines above this is NOT behind the `perf-trace`
-/// feature, matching the `frust-render aa-mode=` line the AA knob logs: one
-/// formatted line per process, available in any build that can be handed the
-/// knob. `scale` is the context's effective render scale (pinned to
-/// [`MAX_RENDER_SCALE`] on the CPU tier — see [`RenderContext::effective_render_scale`]),
-/// so the size reported is the one the blit arm's intermediate actually
-/// takes; on an unscaled surface that is the surface's own size, whichever
-/// arm it ends up on (scale < 1 always forces the blit arm).
-///
-/// A scale below full resolution ALSO emits one `log::warn!`: the knob rewires
-/// the render path (forced blit) and a capture taken hours later should not
-/// have to infer that from an `info` line — a default build logs nothing
-/// extra.
-fn log_render_scale(width: u32, height: u32, scale: f64) {
-    static LOGGED: OnceLock<()> = OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let (target_width, target_height) = scaled_size(width, height, scale);
-        log::info!("frust-render render-scale={scale} blit-target={target_width}x{target_height}");
-        if scale < MAX_RENDER_SCALE {
-            log::warn!(
-                "frust-render measurement knob in effect: render-scale={scale} \
-                 (blit forced)"
-            );
-        }
-    });
-}
+fn log_render_path(_path: RenderPathKind) {}
 
 /// Resolves a caller's [`SurfaceAlphaRequest`] against the live surface's
 /// reported `alpha_modes`, choosing the actual `wgpu::CompositeAlphaMode` to
@@ -829,23 +339,19 @@ fn alpha_mode_is_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
 /// Whether pixels presented to a swapchain configured with this composite
 /// alpha mode must be **premultiplied** before present.
 ///
-/// vello 0.9's fine stage accumulates in premultiplied space but
-/// un-premultiplies at its final write — `rgba_sep = vec4(fg.rgb * (1/fg.a),
-/// fg.a)` in `vello_shaders-0.9.0/shader/fine.wgsl` (the `textureStore` at
-/// line ~1394) — so `render_to_texture`'s output carries **straight**
-/// (non-premultiplied) alpha. A compositor that expects premultiplied alpha
-/// then over-brightens every partial-alpha pixel by `1/a`. The two
-/// premultiplied-expecting modes are `PreMultiplied` and — the shipped Android
-/// translucent case — `Inherit`: on Android the only reported translucent
-/// mode is `Inherit`, under which SurfaceFlinger blends a `TRANSLUCENT`
-/// SurfaceView premultiplied — measured on device: a 50%-alpha
-/// `#FFF176` reached SurfaceFlinger stored straight `#FFF176@128` instead of
-/// premultiplied `#807B3B@128`, compositing over-bright over a Mode B hole.
+/// The two premultiplied-expecting modes are `PreMultiplied` and — the shipped
+/// Android translucent case — `Inherit`: on Android the only reported
+/// translucent mode is `Inherit`, under which SurfaceFlinger blends a
+/// `TRANSLUCENT` SurfaceView premultiplied — measured on device: a 50%-alpha
+/// `#FFF176` reaching SurfaceFlinger stored straight `#FFF176@128` instead of
+/// premultiplied `#807B3B@128` composites over-bright over a Mode B hole.
 ///
-/// `PostMultiplied` (iOS's translucent mode) expects straight alpha — vello's
-/// output is already correct there — and `Opaque`/`Auto` ignore alpha
-/// entirely, so all three take vello's output unchanged. See
-/// [`PremultiplyPass`], the direct-path fix this gates.
+/// `PostMultiplied` (iOS's translucent mode) expects STRAIGHT alpha, and
+/// `Opaque`/`Auto` ignore alpha entirely. The engine's strip pipelines write
+/// premultiplied, so this predicate is read the other way round now — through
+/// [`alpha_mode_is_straight_translucent`], which is what selects the engine's
+/// un-premultiplying arm.
+#[cfg(feature = "engine-tier")]
 fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
     matches!(
         mode,
@@ -861,13 +367,11 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
 /// ([`alpha_mode_is_translucent`]) and expects straight alpha
 /// ([`alpha_mode_needs_premultiply`] is false), which is iOS's translucent
 /// mode. `Inherit`/`PreMultiplied` are translucent but premultiplied, so they
-/// take [`RenderPath::DirectPremultiplied`] on the vello arm and
-/// [`RenderPathKind::EngineDirect`] on the engine one; `Opaque`/`Auto` ignore
-/// alpha entirely.
+/// take [`RenderPathKind::EngineDirect`] as-is; `Opaque`/`Auto` ignore alpha
+/// entirely.
 ///
-/// Pure and mode-only, so the decision is host-testable without a surface. A
-/// surface whose translucency was REFUSED ([`blit_translucency_refused`])
-/// presents opaque whatever this answers of its mode.
+/// Pure and mode-only, so the decision is host-testable without a surface.
+#[cfg(feature = "engine-tier")]
 fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
     alpha_mode_is_translucent(mode) && !alpha_mode_needs_premultiply(mode)
 }
@@ -912,49 +416,6 @@ fn compositor_expects_premultiplied(
     backend == wgpu::Backend::Metal && mode == wgpu::CompositeAlphaMode::PostMultiplied
 }
 
-/// Whether a configured surface must **refuse** translucency because its
-/// chosen render path cannot deliver the premultiplied output the resolved
-/// alpha mode expects (following on the resolved-translucency seam above).
-///
-/// [`RenderPathKind::Blit`]'s `TextureBlitter::copy` is a sampled full-screen
-/// draw — a fixed pass-through fragment shader that samples the source and
-/// writes it out unchanged (wgpu's `util/blit.wgsl`), so it can rescale a
-/// source of a different size ([`scaled_size`]/[`blit_filter`]) but offers
-/// **no stage frust can premultiply in**, unlike the
-/// [`RenderPathKind::Direct`] arm's [`RenderPath::DirectPremultiplied`]
-/// compute pass. So a **GPU-tier** surface forced onto the blit arm (no
-/// `Rgba8Unorm`+`STORAGE_BINDING`, `FRUST_NO_DIRECT_SURFACE`, or
-/// `FRUST_RENDER_SCALE < 1`) that
-/// resolves a premultiplied-expecting alpha mode (`Inherit`/`PreMultiplied`,
-/// [`alpha_mode_needs_premultiply`]) would feed vello's straight-alpha blit
-/// output straight to a premultiplied-expecting compositor — the same
-/// over-bright fringing defect fixed on the direct arm above. Rather than
-/// build an unverifiable
-/// premultiplying blitter (blit targets lack `STORAGE_BINDING`, so it would
-/// need new machinery), the adopted fix is refusal: such a surface resolves
-/// NOT translucent, degrading the app to Mode A (opaque base, no
-/// platform-view punch) instead of silently fringing.
-///
-/// **`cpu-tier` is expressly exempt** — it also forces the blit arm
-/// (`force_blit` above), but its `vello_cpu` output is already
-/// premultiplied (verified: `cpu_tier.rs:108-113`'s `PremulRgba8` sample
-/// type), so cpu-tier Blit+`Inherit` is correct *today* and must keep
-/// resolving translucent; forcing it opaque would be a self-inflicted
-/// regression. The `tier` parameter is what gates this exemption.
-///
-/// Pure decision, kept separate from `create_render_surface`'s wgpu
-/// resources so it is host-testable without a GPU, mirroring
-/// [`choose_render_path`]'s split.
-fn blit_translucency_refused(
-    path_kind: RenderPathKind,
-    alpha_mode: wgpu::CompositeAlphaMode,
-    tier: crate::tier::RenderTier,
-) -> bool {
-    path_kind == RenderPathKind::Blit
-        && alpha_mode_needs_premultiply(alpha_mode)
-        && tier == crate::tier::RenderTier::Gpu
-}
-
 /// Whether a `width` x `height` target fits the device's own
 /// `max_texture_dimension_2d`.
 ///
@@ -969,9 +430,7 @@ fn blit_translucency_refused(
 /// a message naming the ceiling instead.
 ///
 /// Pure and host-testable. Compiled with the engine arm alone, which is its
-/// only caller: vello's own arms are sized from the same surface extent and
-/// would benefit identically, but they predate this check and keep their
-/// existing behaviour.
+/// only caller.
 #[cfg(feature = "engine-tier")]
 pub(crate) fn extent_within_limits(width: u32, height: u32, max_dimension_2d: u32) -> bool {
     width <= max_dimension_2d && height <= max_dimension_2d
@@ -979,10 +438,9 @@ pub(crate) fn extent_within_limits(width: u32, height: u32, max_dimension_2d: u3
 
 /// Permanent surface-caps + chosen-alpha-mode line, logged once
 /// per surface configure (not once per process — a resize/recreate that picks
-/// a different mode is worth a fresh line, unlike the direct-to-surface probe
-/// above). Gated exactly like
-/// [`log_render_path`] so a release build (no `perf-trace` feature) stays
-/// string-free.
+/// a different mode is worth a fresh line, unlike the render-path line above).
+/// Gated exactly like [`log_render_path`] so a release build (no `perf-trace`
+/// feature) stays string-free.
 #[cfg(feature = "perf-trace")]
 fn log_surface_alpha_caps(
     capabilities: &wgpu::SurfaceCapabilities,
@@ -1009,16 +467,14 @@ fn log_surface_alpha_caps(
 }
 
 /// A logical device plus the adapter it came from and the queue that executes
-/// its command buffers — the frust-owned equivalent of
-/// `vello::util::DeviceHandle` (whose `adapter` field is private, which is why
-/// we cannot reuse vello's device pool).
+/// its command buffers.
 pub(crate) struct DeviceHandle {
     pub(crate) adapter: wgpu::Adapter,
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
 }
 
-/// Owns the wgpu `Instance` and the single logical device vello renders with.
+/// Owns the wgpu `Instance` and the single logical device the renderer uses.
 ///
 /// A single `RenderContext` is shared across every surface a shell creates
 /// (frust is single-window); the device is created lazily on the first
@@ -1031,12 +487,11 @@ pub struct RenderContext {
     /// Lazily created on the first surface; `None` until then.
     pub(crate) device: Option<DeviceHandle>,
     /// The tier [`ensure_device`](Self::ensure_device) selected for the live
-    /// device. Defaults to [`RenderTier::Gpu`] and
-    /// is only ever [`RenderTier::Cpu`] in a `cpu-tier`-feature build whose
-    /// probe (or override) chose the CPU fallback — the
-    /// [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to pick the encode
-    /// path. In a default (GPU-only) build a failed GPU probe errors out of
-    /// `ensure_device` before this is ever set to anything but `Gpu`.
+    /// device. Defaults to [`RenderTier::Engine`](crate::RenderTier::Engine)
+    /// and is only ever [`RenderTier::Cpu`](crate::RenderTier::Cpu) in a
+    /// `cpu-tier`-feature build whose probe (or override) chose the CPU
+    /// fallback — the [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to
+    /// pick the encode path.
     pub(crate) selected_tier: crate::tier::RenderTier,
 }
 
@@ -1113,209 +568,30 @@ impl DetachedSurface {
     }
 }
 
-/// Straight-alpha → premultiplied-alpha conversion compute pass for the direct
-/// render path's translucent, premultiplied-expecting arm
-/// ([`RenderPath::DirectPremultiplied`]).
-///
-/// vello 0.9 outputs **straight** alpha (see [`alpha_mode_needs_premultiply`]);
-/// a `PreMultiplied`/`Inherit` swapchain needs it premultiplied. This pass
-/// reads the straight vello output as a sampled texture and writes
-/// `(rgb*a, a)` into the swapchain (a write-only `rgba8unorm` storage texture —
-/// the same `STORAGE_BINDING` the direct path already configures the swapchain
-/// with). Portable: sampled read + write-only storage, no in-place read-write
-/// storage (which `rgba8unorm` does not support).
-pub(crate) struct PremultiplyPass {
-    pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-}
-
-/// WGSL for [`PremultiplyPass`]: premultiply every texel of a straight-alpha
-/// source into a premultiplied destination. One invocation per pixel; the
-/// bounds guard covers a surface whose dimensions are not a multiple of the
-/// workgroup size.
-const PREMULTIPLY_WGSL: &str = r#"
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
-
-@compute @workgroup_size(8, 8)
-fn premultiply(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(dst);
-    if gid.x >= dims.x || gid.y >= dims.y {
-        return;
-    }
-    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-    let c = textureLoad(src, coord, 0);
-    textureStore(dst, coord, vec4<f32>(c.rgb * c.a, c.a));
-}
-"#;
-
-impl PremultiplyPass {
-    /// Compute workgroup edge (matches `@workgroup_size(8, 8)` in
-    /// [`PREMULTIPLY_WGSL`]); dispatch counts round up against it.
-    const WORKGROUP: u32 = 8;
-
-    /// Builds the compute pipeline + bind-group layout. Cheap enough to build
-    /// once per surface configure (a rare event), like the blit arm's
-    /// [`TextureBlitter`].
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("frust-render premultiply module"),
-            source: wgpu::ShaderSource::Wgsl(PREMULTIPLY_WGSL.into()),
-        });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frust-render premultiply binds"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("frust-render premultiply layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("frust-render premultiply pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("premultiply"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        Self {
-            pipeline,
-            bind_group_layout,
-        }
-    }
-
-    /// Records the straight→premultiplied compute pass into `encoder`: reads
-    /// `src_view` (vello's straight output) and writes premultiplied pixels
-    /// into `dst_view` (the acquired swapchain texture). The caller submits
-    /// `encoder`.
-    pub(crate) fn record(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        src_view: &wgpu::TextureView,
-        dst_view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-    ) {
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frust-render premultiply bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(dst_view),
-                },
-            ],
-        });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("frust-render premultiply pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(
-            width.div_ceil(Self::WORKGROUP),
-            height.div_ceil(Self::WORKGROUP),
-            1,
-        );
-    }
-}
-
 /// The per-frame render path a [`ConfiguredSurface`] carries — the resources
 /// specific to the chosen arm (see [`RenderPathKind`]).
 ///
-/// The [`Direct`](Self::Direct) arm holds nothing extra: vello renders straight
-/// into the acquired swapchain texture, so there is no intermediate target or
-/// blitter to keep. The [`Blit`](Self::Blit) arm owns the intermediate
-/// `Rgba8Unorm` target vello renders into plus the [`TextureBlitter`] that
-/// copies it to the swapchain each frame.
+/// The engine arms render into the acquired swapchain view (plus, on the
+/// un-premultiplying one, a surface-owned intermediate); the `cpu-tier`
+/// [`Blit`](Self::Blit) arm owns the intermediate `Rgba8Unorm` target the CPU
+/// rasterizer uploads into plus the `TextureBlitter` that copies it to the
+/// swapchain each frame.
 pub(crate) enum RenderPath {
-    /// Direct-to-surface: the swapchain is configured `Rgba8Unorm` +
-    /// `STORAGE_BINDING` and vello's `render_to_texture` targets its acquired
-    /// texture directly. Eliminates the intermediate texture and
-    /// the per-frame blit pass.
-    Direct,
-    /// Direct-to-surface for a **premultiplied-expecting translucent** swapchain
-    /// (`Inherit`/`PreMultiplied` alpha mode — see
-    /// [`alpha_mode_needs_premultiply`]). vello's
-    /// output is straight-alpha, but such a compositor blends premultiplied, so
-    /// the frame cannot be presented straight from `render_to_texture`. vello
-    /// instead renders into `intermediate_view` (in `encode`, where it already
-    /// exists — unlike the swapchain), then [`Self::DirectPremultiplied`]'s
-    /// `premultiply` compute pass writes `(rgb*a, a)` into the acquired
-    /// swapchain texture (in `submit`). Opaque and `PostMultiplied` surfaces
-    /// never take this arm (they stay [`Self::Direct`], byte-identical). Still
-    /// the direct family (`STORAGE_BINDING` swapchain, no `RENDER_ATTACHMENT`
-    /// blit) — the extra pass is one compute dispatch over the frame, paid only
-    /// by the translucent surfaces that need it.
-    ///
-    /// Only `intermediate_view` is stored, not the backing `wgpu::Texture`: a
-    /// `TextureView` refcounts its texture alive internally, and unlike the blit
-    /// arm's `target_texture` (which cpu-tier writes into via `write_texture`)
-    /// nothing here needs the texture handle — this arm is GPU-tier only.
-    DirectPremultiplied {
-        intermediate_view: wgpu::TextureView,
-        premultiply: PremultiplyPass,
-    },
-    /// Blit fallback: vello renders into `target_view`, then `blitter` draws
-    /// `target_texture` over the acquired swapchain texture each frame —
-    /// upscaling it when `FRUST_RENDER_SCALE` made the intermediate smaller
-    /// than the swapchain. Also the `cpu-tier` upload target (`COPY_DST`, see
-    /// [`create_targets`]).
+    /// The `cpu-tier` arm: `vello_cpu` uploads its rasterized pixmap into
+    /// `target_texture` (`COPY_DST`, see [`create_targets`]), then `blitter`
+    /// draws `target_view` over the acquired swapchain texture each frame.
+    /// Always the surface's own size — this tier's rasterizer encodes at
+    /// identity into a pixmap of exactly the swapchain's dimensions.
+    #[cfg(feature = "cpu-tier")]
     Blit {
         target_texture: wgpu::Texture,
         target_view: wgpu::TextureView,
-        blitter: TextureBlitter,
-        /// The intermediate's own pixel size, which is the surface's size
-        /// unless `FRUST_RENDER_SCALE` shrank it ([`scaled_size`]) — the size
-        /// every pass that targets this texture must use (vello's
-        /// `RenderParams`), as opposed to `ConfiguredSurface::config`'s
-        /// swapchain size, which stays the surface's. Stored rather than
-        /// re-derived per frame so one resolved answer feeds every consumer.
-        target_size: (u32, u32),
-        /// The root transform every vello pass into this intermediate encodes
-        /// under — [`blit_root`] of the swapchain size onto `target_size`,
-        /// resolved once where that size is (surface creation and resize).
-        /// `Affine::IDENTITY` while unscaled, so the default path encodes
-        /// exactly the transform it did before the render-scale knob existed.
-        ///
-        /// Stored beside the size it is derived from, rather than recomputed
-        /// per frame from the process-global scale, so the frame is scaled by
-        /// precisely the ratio its target has: the two cannot drift apart, and
-        /// the ceil'd axis has no unpainted strip left in it.
-        root: Affine,
+        blitter: wgpu::util::TextureBlitter,
     },
     /// The engine tier's arm ([`RenderPathKind::EngineDirect`]): `frust-engine`
-    /// records its passes straight into the acquired swapchain view, so like
-    /// [`Self::Direct`] there is no intermediate and no blitter — but unlike
-    /// it, the frame needs a depth attachment matching the target extent, and
-    /// this is what owns it.
+    /// records its passes straight into the acquired swapchain view, so there
+    /// is no intermediate and no blitter — but the frame needs a depth
+    /// attachment matching the target extent, and this is what owns it.
     ///
     /// Owned HERE rather than left to the engine's own lazily allocated
     /// attachment because the surface is what knows when the extent changed:
@@ -1338,20 +614,16 @@ pub(crate) enum RenderPath {
     /// acquired swapchain texture, `(rgb / max(a, ε), a)` in one full-screen
     /// fragment pass recorded into the frame's own encoder.
     ///
-    /// The engine's counterpart to [`Self::DirectPremultiplied`], and the exact
-    /// mirror of it: that arm premultiplies vello's straight output for a
-    /// premultiplied-expecting swapchain through a compute dispatch, this one
-    /// un-premultiplies the engine's premultiplied output for a
-    /// straight-expecting one through a *render* pass — this tier runs where
-    /// compute does not, and its swapchain carries no `STORAGE_BINDING` to
-    /// write through.
+    /// The conversion is a *render* pass, not a compute dispatch: this tier
+    /// runs where compute does not, and its swapchain carries no
+    /// `STORAGE_BINDING` to write through.
     ///
     /// The intermediate is `Rgba8Unorm` (`frust_engine`'s own off-screen
     /// format, which is what the renderer's pipelines are warmed for on this
     /// arm) with `RENDER_ATTACHMENT | TEXTURE_BINDING`: a colour attachment for
-    /// the frame, a sampled source for the pass. Only its view is stored, for
-    /// [`Self::DirectPremultiplied`]'s reason — a `TextureView` refcounts its
-    /// texture alive and nothing here needs the texture handle.
+    /// the frame, a sampled source for the pass. Only its view is stored — a
+    /// `TextureView` refcounts its texture alive and nothing here needs the
+    /// texture handle.
     #[cfg(feature = "engine-tier")]
     EngineDirectUnpremultiply {
         /// The depth attachment, exactly as [`Self::EngineDirect`] carries it —
@@ -1368,10 +640,8 @@ pub(crate) enum RenderPath {
 }
 
 /// A configured swapchain surface plus the render-path resources for the arm it
-/// was configured for — frust's replacement for `vello::util::RenderSurface`
-/// (whose fields always include an intermediate target + blitter, which the
-/// direct arm does not use). Crate-private; the wrapped `wgpu` types never
-/// escape `frust-render`.
+/// was configured for. Crate-private; the wrapped `wgpu` types never escape
+/// `frust-render`.
 pub(crate) struct ConfiguredSurface {
     pub(crate) surface: wgpu::Surface<'static>,
     pub(crate) config: wgpu::SurfaceConfiguration,
@@ -1379,13 +649,10 @@ pub(crate) struct ConfiguredSurface {
     /// Whether this surface **actually** came up translucent — the wgpu-free
     /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
     /// computed once at configure time (the mode never changes for a live
-    /// surface; a resize reconfigures with the same `config`), *except* when
-    /// the blit arm's refusal forces it to `false`: a GPU-tier blit-fallback
-    /// surface cannot deliver the premultiplied output such an alpha mode
-    /// expects ([`blit_translucency_refused`] — `cpu-tier` is exempt). The
-    /// engine tier has no such refusal: every resolved alpha mode has an engine
-    /// arm ([`choose_engine_render_path`]), straight-alpha translucency
-    /// included.
+    /// surface; a resize reconfigures with the same `config`). No arm refuses
+    /// translucency any more: every resolved alpha mode has an engine arm
+    /// ([`choose_engine_render_path`]), straight-alpha translucency included,
+    /// and `cpu-tier`'s `vello_cpu` output is already premultiplied.
     ///
     /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
     /// at each read so the value a shell observes through
@@ -1396,9 +663,9 @@ pub(crate) struct ConfiguredSurface {
 }
 
 /// Every swapchain format [`RenderContext::create_render_surface`] can
-/// configure a surface with: the direct arm's mandatory `Rgba8Unorm` (vello's
-/// `render_to_texture` target format) and, on the blit arm, whichever of the
-/// two the platform reports first.
+/// configure a surface with: whichever of the two the platform reports first.
+/// The engine builds its strip pipelines for the format it is handed, so
+/// neither is privileged.
 pub(crate) const SURFACE_FORMATS: [wgpu::TextureFormat; 2] = [
     wgpu::TextureFormat::Rgba8Unorm,
     wgpu::TextureFormat::Bgra8Unorm,
@@ -1522,33 +789,21 @@ fn is_android_emulator() -> bool {
         == Some("1")
 }
 
-/// Creates the intermediate render target vello draws into (it renders via a
-/// compute shader, which cannot bind a swapchain texture directly, so each
-/// frame is blitted from this target to the acquired surface texture).
-/// Replicates `vello::util::create_targets` (which is private).
+/// Creates the intermediate render target the `cpu-tier` rasterizer uploads
+/// into, and the blit pass then copies to the acquired surface texture.
+#[cfg(feature = "cpu-tier")]
 fn create_targets(
     width: u32,
     height: u32,
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    // The GPU tier renders into this via a storage binding, then blits it to
-    // the swapchain. `RENDER_ATTACHMENT` keeps the intermediate usable as a
-    // colour attachment — what the engine tier's own un-premultiplying arm
-    // needs of it. `Rgba8Unorm` is renderable on every wgpu backend, so the
-    // combined usage is universally available. The CPU tier (`cpu-tier`
-    // feature) instead uploads its rasterized pixmap into it with
-    // `write_texture`, which needs `COPY_DST` — added only under the feature
-    // so default GPU-only builds keep the exact usage set they had before.
-    #[allow(unused_mut)]
-    let mut usage = wgpu::TextureUsages::STORAGE_BINDING
-        | wgpu::TextureUsages::TEXTURE_BINDING
-        | wgpu::TextureUsages::RENDER_ATTACHMENT;
-    #[cfg(feature = "cpu-tier")]
-    {
-        usage |= wgpu::TextureUsages::COPY_DST;
-    }
+    // Exactly the two usages this arm needs: `COPY_DST` for the
+    // `write_texture` upload of `vello_cpu`'s rasterized pixmap, and
+    // `TEXTURE_BINDING` for the blitter's sampled full-screen draw.
+    // `Rgba8Unorm` is renderable and sampleable on every wgpu backend.
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
     let target_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("frust-render vello target"),
+        label: Some("frust-render cpu-tier target"),
         size: wgpu::Extent3d {
             width,
             height,
@@ -1570,12 +825,11 @@ fn create_targets(
 /// view refcounts the texture alive, and nothing on this arm needs the texture
 /// handle).
 ///
-/// Deliberately NOT [`create_targets`]: that target carries `STORAGE_BINDING`
-/// for vello's compute write, and this tier has neither a compute stage nor a
-/// storage texture anywhere in it (its downlevel design rules refuse both). The
-/// usage here is exactly what the two consumers need — `RENDER_ATTACHMENT` for
+/// The usage is exactly what the two consumers need — `RENDER_ATTACHMENT` for
 /// the frame's own passes, `TEXTURE_BINDING` for the un-premultiplying pass to
-/// sample it — so the arm asks a downlevel adapter for nothing it lacks.
+/// sample it — so the arm asks a downlevel adapter for nothing it lacks (this
+/// tier has neither a compute stage nor a storage texture anywhere in it; its
+/// downlevel design rules refuse both).
 ///
 /// The format is the engine's own off-screen format rather than the surface's:
 /// the renderer on this arm is warmed for it (`renderer::engine_target_format`),
@@ -1603,8 +857,7 @@ impl RenderContext {
     /// Creates a context with a fresh wgpu `Instance` and no device yet
     /// (the device is created lazily on first surface creation).
     ///
-    /// Mirrors `vello::util::RenderContext::new()`'s instance setup, except
-    /// when actually running on an Android *emulator* it strips the
+    /// When actually running on an Android *emulator* the instance setup strips the
     /// `DEBUG`/`VALIDATION` instance flags (which
     /// `InstanceFlags::from_build_config()` turns on in debug builds). The
     /// `DEBUG` flag makes wgpu enable `VK_EXT_debug_utils` and set
@@ -1634,7 +887,7 @@ impl RenderContext {
         Self {
             instance,
             device: None,
-            selected_tier: crate::tier::RenderTier::Gpu,
+            selected_tier: crate::tier::RenderTier::default(),
         }
     }
 
@@ -1651,8 +904,8 @@ impl RenderContext {
     }
 
     /// The render tier the live device was created for (see
-    /// [`selected_tier`](Self::selected_tier) field). `Gpu` until a surface
-    /// (and thus a device) has been created.
+    /// [`selected_tier`](Self::selected_tier) field). The default tier
+    /// (`Engine`) until a surface — and thus a device — has been created.
     pub(crate) fn selected_tier(&self) -> crate::tier::RenderTier {
         self.selected_tier
     }
@@ -1803,23 +1056,14 @@ impl RenderContext {
                 .await
                 .map_err(|e| anyhow!("frust-render: no compatible GPU adapter: {e}"))?;
 
-        // Consult the tier probe instead of a
-        // bespoke downlevel check, so a failed GPU probe surfaces through the
-        // one diagnostic path `select_render_tier` owns (shared with its own
-        // unit tests). An explicit override (`FRUST_RENDER_TIER`, or
-        // `frust run --render-tier` setting it for the spawned process)
-        // wins *among available tiers* — a `Cpu` override always applies, but a
-        // `Gpu` override onto an adapter that lacks the required downlevel flags
-        // is refused (`select_render_tier` returns `Unavailable`), so the
-        // `Unavailable` arm below fails fast rather than handing vello a device
-        // it panics on. When the `cpu-tier` feature is compiled in, a failed
-        // GPU probe now selects the experimental `Cpu` tier (vello_cpu, see the
-        // `cpu_tier` module + `SurfaceRenderer`) instead of failing — the
-        // device is still created (only vello's compute path is unavailable;
-        // the blit the CPU pixmap rides is a basic render pipeline). Without
-        // the feature, `select_render_tier` never returns `Available(Cpu)`, so
-        // a failed probe still fails fast here exactly like the prior bespoke
-        // check did, just through the unified diagnosis.
+        // Consult the tier probe rather than a bespoke downlevel check, so a
+        // refused adapter surfaces through the one diagnostic path
+        // `select_render_tier` owns (shared with its own unit tests). An
+        // explicit override (`FRUST_RENDER_TIER`, or `frust run --render-tier`
+        // setting it for the spawned process) wins *among available tiers*.
+        // The engine tier requires no downlevel flag at all, so in a default
+        // build this always resolves `Available(Engine)`; the `Unavailable`
+        // arm below is reached only by a build that compiled no renderer in.
         let downlevel = adapter.get_downlevel_capabilities();
         let caps = crate::tier::TierCaps {
             downlevel_flags: downlevel.flags,
@@ -1833,17 +1077,16 @@ impl RenderContext {
                 return Err(anyhow!(selection.diagnosis));
             }
         };
-        // An experimental tier is only reachable in a build that compiled its
-        // renderer in; guard against a stray selection so the SurfaceRenderer
-        // never sees a tier it has no encode path for. Asked per tier
-        // ([`tier_compiled_in`]) rather than as `!= RenderTier::Gpu`, which
-        // refused every tier but the default one whatever its feature said.
+        // A tier is only reachable in a build that compiled its renderer in;
+        // guard against a stray selection so the SurfaceRenderer never sees a
+        // tier it has no encode path for. Asked per tier
+        // ([`tier_compiled_in`]).
         if !tier_compiled_in(tier) {
             return Err(anyhow!(selection.diagnosis));
         }
         self.selected_tier = tier;
 
-        let required_features = (adapter.features() & vello_optional_features())
+        let required_features = (adapter.features() & optional_device_features())
             | perf_trace_features(adapter.features(), cfg!(feature = "perf-trace"));
         let required_limits = effective_limits(adapter.limits(), is_ios_simulator());
         let (device, queue) = adapter
@@ -1908,28 +1151,8 @@ impl RenderContext {
         Ok(())
     }
 
-    /// The render scale that actually applies to this context's surfaces:
-    /// [`render_scale`] on the GPU tier, [`MAX_RENDER_SCALE`] on the CPU tier.
-    ///
-    /// `cpu-tier` rasterizes into its own pixmap through
-    /// [`crate::convert::encode_into`] — an entry with no root transform at
-    /// all — and uploads it into the same intermediate at the swapchain's
-    /// dimensions, so a shrunken intermediate would be a `write_texture`
-    /// larger than its destination rather than a scaled frame. The knob
-    /// measures vello's GPU fine stage, so the experimental CPU tier simply
-    /// keeps rendering at full size instead.
-    fn effective_render_scale(&self) -> f64 {
-        if self.selected_tier() == crate::tier::RenderTier::Gpu {
-            render_scale()
-        } else {
-            MAX_RENDER_SCALE
-        }
-    }
-
-    /// Builds a configured [`RenderSurface`] from a raw wgpu `Surface`,
-    /// creating the logical device if needed. Replaces
-    /// `vello::util::RenderContext::create_render_surface` so we control the
-    /// device's `required_limits`.
+    /// Builds a configured [`ConfiguredSurface`] from a raw wgpu `Surface`,
+    /// creating the logical device if needed.
     pub(crate) async fn create_render_surface(
         &mut self,
         surface: wgpu::Surface<'static>,
@@ -1939,118 +1162,80 @@ impl RenderContext {
         alpha: SurfaceAlphaRequest,
     ) -> Result<ConfiguredSurface> {
         self.ensure_device(&surface).await?;
-        // The tier probe already ran in `ensure_device`, so
-        // `selected_tier()` is authoritative here: the `cpu-tier` path uploads
-        // its pixmap into the intermediate target, so it is blit-only and forces
-        // the blit arm alongside the `FRUST_NO_DIRECT_SURFACE` safety valve.
-        //
-        // `FRUST_RENDER_SCALE < 1` forces it too, and for the same structural
-        // reason: the scaled frame lives in an intermediate that has to be
-        // upscaled into the swapchain, which is precisely the blit arm's
-        // per-frame pass. A scaled surface therefore behaves exactly as
-        // `FRUST_NO_DIRECT_SURFACE` does — including
-        // [`blit_translucency_refused`] for a premultiplied-expecting alpha
-        // mode — instead of growing a second scaled path on the direct arms.
-        //
-        // Asked of the tier through [`tier_forces_blit`], not as
-        // `selected_tier() != RenderTier::Gpu`: that expression forced the
-        // blit arm onto any tier added later, intermediate and blitter
-        // included, however little it wanted one.
+        // The tier probe already ran in `ensure_device`, so `selected_tier()`
+        // is authoritative here.
         let tier = self.selected_tier();
-        let force_blit = direct_surface_force_blit() || render_scaled() || tier_forces_blit(tier);
         let handle = self.device_handle();
 
         let capabilities = surface.get_capabilities(&handle.adapter);
-        probe_direct_to_surface_capability(&capabilities);
-        let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
-        // Resolved BEFORE the path decision, not after it: the engine arm's
-        // path answer is a function of the resolved alpha mode
-        // ([`choose_engine_render_path`]), which the vello arms' answer is
-        // not. The mode itself is derived from the request and the surface's
-        // reported caps alone, so moving the call up changes nothing for the
-        // arms that ignore it; its own log line stays where it was.
+        // Resolved BEFORE the path decision: the engine arm's path answer is a
+        // function of the resolved alpha mode ([`choose_engine_render_path`]).
+        // The mode itself is derived from the request and the surface's
+        // reported caps alone.
         let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
-        // The engine tier decides its path on its own terms
-        // ([`choose_engine_render_path`]) — it shares neither the probe nor
-        // the valve `choose_render_path` weighs. Every other tier takes the
-        // untouched vello decision. The backend is read here rather than
-        // inside `choose_engine_render_path` itself so that function stays a
-        // pure value decision, host-testable with no live adapter
-        // ([`compositor_expects_premultiplied`]).
-        #[cfg(feature = "engine-tier")]
+        // Each tier decides its own path. The engine reads the adapter's
+        // backend here rather than inside `choose_engine_render_path` itself,
+        // so that function stays a pure value decision, host-testable with no
+        // live adapter ([`compositor_expects_premultiplied`]); the `cpu-tier`
+        // rasterizer is blit-only by construction and has nothing to decide.
+        //
+        // An arm is unreachable in a build that did not compile its renderer
+        // in — `create_device`'s [`tier_compiled_in`] guard refuses such a tier
+        // before any surface reaches here — but each still answers rather than
+        // panicking, so a wiring bug is reported.
         let path_kind = match tier {
+            #[cfg(feature = "engine-tier")]
             crate::tier::RenderTier::Engine => {
                 choose_engine_render_path(handle.adapter.get_info().backend, alpha_mode)
             }
-            _ => choose_render_path(has_rgba8unorm, has_storage_binding, force_blit),
+            #[cfg(not(feature = "engine-tier"))]
+            crate::tier::RenderTier::Engine => {
+                return Err(anyhow!(
+                    "frust-render: the engine tier was selected without the `engine-tier` \
+                     feature compiled in"
+                ));
+            }
+            #[cfg(feature = "cpu-tier")]
+            crate::tier::RenderTier::Cpu => RenderPathKind::Blit,
+            #[cfg(not(feature = "cpu-tier"))]
+            crate::tier::RenderTier::Cpu => {
+                return Err(anyhow!(
+                    "frust-render: the CPU tier was selected without the `cpu-tier` feature \
+                     compiled in"
+                ));
+            }
         };
-        #[cfg(not(feature = "engine-tier"))]
-        let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
-        log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
-        log_render_scale(width, height, self.effective_render_scale());
-
+        log_render_path(path_kind);
         log_surface_alpha_caps(&capabilities, alpha_mode);
 
-        // Direct arm: the swapchain itself is the vello render target, so it must
-        // be `Rgba8Unorm` (vello's `render_to_texture` target format) and carry
-        // `STORAGE_BINDING` (vello renders via a compute storage write). Blit arm:
-        // any supported `Rgba8/Bgra8` swapchain works — the blitter converts the
-        // intermediate `Rgba8Unorm` target into it — and only `RENDER_ATTACHMENT`
-        // is needed.
-        let (format, usage) = match path_kind {
-            RenderPathKind::Direct => (
-                wgpu::TextureFormat::Rgba8Unorm,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
-            ),
-            RenderPathKind::Blit => {
-                let format = capabilities
-                    .formats
-                    .iter()
-                    .copied()
-                    .find(|it| SURFACE_FORMATS.contains(it))
-                    .ok_or_else(|| {
-                        anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
-                    })?;
-                (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
+        // Every arm draws into the swapchain through an ordinary render pass —
+        // the engine's own passes, or the blit arm's sampled full-screen draw —
+        // so `RENDER_ATTACHMENT` is the whole usage set, in whichever supported
+        // format the surface reports first.
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|it| SURFACE_FORMATS.contains(it))
+            .ok_or_else(|| anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)"))?;
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+
+        // The extent is checked once, up front, for every texture sized against
+        // it below (the engine's depth attachment, and its intermediate on the
+        // un-premultiplying arm): an over-ceiling surface is refused with a
+        // diagnosis naming the limit, rather than handed to wgpu as texture
+        // creations it rejects ([`extent_within_limits`]).
+        #[cfg(feature = "engine-tier")]
+        {
+            let max_dimension_2d = handle.device.limits().max_texture_dimension_2d;
+            if !extent_within_limits(width, height, max_dimension_2d) {
+                return Err(anyhow!(
+                    "frust-render: engine tier refuses a {width}x{height} surface — the device's \
+                     max_texture_dimension_2d is {max_dimension_2d}, and both the swapchain and \
+                     the depth attachment paired with it are sized from this extent"
+                ));
             }
-            // Engine arms: `frust-engine` builds its strip pipelines for the
-            // format it is handed and draws through ordinary render passes, so
-            // the swapchain needs `RENDER_ATTACHMENT` and nothing else, in
-            // whichever supported format the surface reports first —
-            // duplicated rather than shared with the blit arm above because
-            // the two lists are free to diverge: this tier's pipelines are
-            // not bound by vello's `render_to_texture` target format. The
-            // un-premultiplying arm asks for exactly the same swapchain: its
-            // extra texture is the intermediate BEHIND the swapchain, and the
-            // pass that writes the swapchain is an ordinary render pass.
-            //
-            // The extent is checked here, once, for every texture sized
-            // against it below (the depth attachment, and the intermediate on
-            // the un-premultiplying arm): an over-ceiling surface is refused
-            // with a diagnosis naming the limit, rather than handed to wgpu as
-            // texture creations it rejects ([`extent_within_limits`]).
-            #[cfg(feature = "engine-tier")]
-            RenderPathKind::EngineDirect | RenderPathKind::EngineDirectUnpremultiply => {
-                let max_dimension_2d = handle.device.limits().max_texture_dimension_2d;
-                if !extent_within_limits(width, height, max_dimension_2d) {
-                    return Err(anyhow!(
-                        "frust-render: engine tier refuses a {width}x{height} surface — the \
-                         device's max_texture_dimension_2d is {max_dimension_2d}, and both the \
-                         swapchain and the depth attachment paired with it are sized from this \
-                         extent"
-                    ));
-                }
-                let format = capabilities
-                    .formats
-                    .iter()
-                    .copied()
-                    .find(|it| SURFACE_FORMATS.contains(it))
-                    .ok_or_else(|| {
-                        anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
-                    })?;
-                (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
-            }
-        };
+        }
 
         let config = wgpu::SurfaceConfiguration {
             usage,
@@ -2063,42 +1248,16 @@ impl RenderContext {
             view_formats: vec![],
         };
         let path = match path_kind {
-            // A premultiplied-expecting translucent swapchain (`Inherit`/
-            // `PreMultiplied`) cannot take vello's straight output directly —
-            // it needs a premultiply pass. Such surfaces get an
-            // intermediate vello renders into plus the compute pass that
-            // premultiplies it into the swapchain. Opaque/`PostMultiplied`
-            // surfaces skip all of this and stay byte-identical on `Direct`.
-            RenderPathKind::Direct if alpha_mode_needs_premultiply(alpha_mode) => {
-                let (_intermediate_texture, intermediate_view) =
-                    create_targets(width, height, &handle.device);
-                RenderPath::DirectPremultiplied {
-                    intermediate_view,
-                    premultiply: PremultiplyPass::new(&handle.device),
-                }
-            }
-            RenderPathKind::Direct => RenderPath::Direct,
+            // The `cpu-tier` arm: the intermediate the rasterizer uploads into,
+            // plus the blitter that copies it over the acquired swapchain
+            // texture each frame. Always the surface's own size.
+            #[cfg(feature = "cpu-tier")]
             RenderPathKind::Blit => {
-                // The swapchain keeps the surface's own size (the frame is
-                // presented at full resolution however it was rendered); only
-                // the intermediate shrinks, and the blit's sampled draw
-                // stretches it back over the whole swapchain texture.
-                let scale = self.effective_render_scale();
-                let (target_width, target_height) = scaled_size(width, height, scale);
-                let (target_texture, target_view) =
-                    create_targets(target_width, target_height, &handle.device);
+                let (target_texture, target_view) = create_targets(width, height, &handle.device);
                 RenderPath::Blit {
                     target_texture,
                     target_view,
-                    // Linear only while scaled — the unscaled builder is the
-                    // exact configuration `TextureBlitter::new` produces.
-                    blitter: wgpu::util::TextureBlitterBuilder::new(&handle.device, format)
-                        .sample_type(blit_filter(scale < MAX_RENDER_SCALE))
-                        .build(),
-                    target_size: (target_width, target_height),
-                    // Derived HERE, from the size that was just resolved, so
-                    // the encode side never re-derives a scale of its own.
-                    root: blit_root((width, height), (target_width, target_height)),
+                    blitter: wgpu::util::TextureBlitter::new(&handle.device, format),
                 }
             }
             // The engine's direct arm carries exactly one per-surface resource:
@@ -2107,16 +1266,13 @@ impl RenderContext {
             // configured (the extent was checked against the device ceiling
             // above).
             //
-            // Deliberately NOT reachable from the premultiply arm, and
-            // deliberately needing nothing from it: that arm premultiplies
-            // vello's straight output for a premultiplied-expecting swapchain,
-            // whereas `frust-engine` already writes premultiplied, so
-            // `Inherit`/`PreMultiplied` land here correct and untouched. A
-            // Metal `PostMultiplied` swapchain (iOS included) lands here too,
-            // for the identical reason: `compositor_expects_premultiplied`
-            // answers true for it, since Metal's own compositor reads that
-            // mode's swapchain premultiplied regardless of its name (upstream
-            // wgpu-hal truth bug — see that predicate's doc).
+            // `Inherit`/`PreMultiplied` land here correct and untouched, since
+            // `frust-engine` already writes premultiplied. A Metal
+            // `PostMultiplied` swapchain (iOS included) lands here too, for the
+            // identical reason: `compositor_expects_premultiplied` answers true
+            // for it, since Metal's own compositor reads that mode's swapchain
+            // premultiplied regardless of its name (upstream wgpu-hal truth bug
+            // — see that predicate's doc).
             #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirect => RenderPath::EngineDirect {
                 depth: frust_engine::DepthTexture::new(&handle.device, width, height),
@@ -2145,21 +1301,12 @@ impl RenderContext {
                 ),
             },
         };
-        let resolved_translucent =
-            if blit_translucency_refused(path_kind, alpha_mode, self.selected_tier()) {
-                log::warn!(
-                    "frust-render: GPU-tier blit-fallback surface cannot deliver premultiplied \
-                 output (alpha_mode={alpha_mode:?}) — refusing translucency, app degrades to \
-                 Mode A"
-                );
-                false
-            } else {
-                // The RESOLVED translucency, not the request: a
-                // `TranslucentPreferred` that fell back to `Auto` above lands here
-                // as `false`, which is what the shells' paint contract keys off
-                // (see `alpha_mode_is_translucent`).
-                alpha_mode_is_translucent(alpha_mode)
-            };
+        // The RESOLVED translucency, not the request: a `TranslucentPreferred`
+        // that fell back to `Auto` above lands here as `false`, which is what
+        // the shells' paint contract keys off (see `alpha_mode_is_translucent`).
+        // No arm refuses translucency any more — the engine serves every
+        // resolved mode, and `vello_cpu`'s output is already premultiplied.
+        let resolved_translucent = alpha_mode_is_translucent(alpha_mode);
         let configured = ConfiguredSurface {
             surface,
             config,
@@ -2170,9 +1317,8 @@ impl RenderContext {
         Ok(configured)
     }
 
-    /// Builds a [`RenderSurface`] from anything convertible into a wgpu
-    /// `SurfaceTarget` (the desktop `winit` window path). Replaces
-    /// `vello::util::RenderContext::create_surface`.
+    /// Builds a [`ConfiguredSurface`] from anything convertible into a wgpu
+    /// `SurfaceTarget` (the desktop `winit` window path).
     pub(crate) async fn create_surface(
         &mut self,
         target: impl Into<wgpu::SurfaceTarget<'static>>,
@@ -2196,51 +1342,32 @@ impl RenderContext {
             .configure(&self.device_handle().device, &surface.config);
     }
 
-    /// Resizes `surface` in place and reconfigures the swapchain. The blit arm
-    /// and the direct-premultiplied arm each recreate their intermediate target
-    /// texture at the new size; the plain direct arm has no intermediate, so
-    /// only the swapchain config changes. Zero dimensions are rejected upstream.
-    ///
-    /// The blit arm's intermediate is recreated at the SCALED size and its
-    /// recorded `target_size` and `root` updated with it, so a resize under
-    /// `FRUST_RENDER_SCALE` keeps rendering at the same fraction of the new
-    /// surface rather than silently returning to full resolution, and keeps
-    /// mapping the frame exactly onto the new target. The
-    /// direct-premultiplied arm is never scaled — scale < 1 forces the blit
-    /// arm, so that arm only ever exists at scale 1.0.
+    /// Resizes `surface` in place and reconfigures the swapchain. The
+    /// `cpu-tier` blit arm recreates its intermediate target texture at the new
+    /// size, and each engine arm recreates the depth attachment (plus, on the
+    /// un-premultiplying arm, the intermediate) that has to match the
+    /// swapchain's extent. Zero dimensions are rejected upstream.
     pub(crate) fn resize_surface(&self, surface: &mut ConfiguredSurface, width: u32, height: u32) {
         surface.config.width = width;
         surface.config.height = height;
         match &mut surface.path {
+            #[cfg(feature = "cpu-tier")]
             RenderPath::Blit {
                 target_texture,
                 target_view,
-                target_size,
-                root,
                 ..
             } => {
-                let (target_width, target_height) =
-                    scaled_size(width, height, self.effective_render_scale());
                 let (new_texture, new_view) =
-                    create_targets(target_width, target_height, &self.device_handle().device);
+                    create_targets(width, height, &self.device_handle().device);
                 *target_texture = new_texture;
                 *target_view = new_view;
-                *target_size = (target_width, target_height);
-                *root = blit_root((width, height), (target_width, target_height));
-            }
-            RenderPath::DirectPremultiplied {
-                intermediate_view, ..
-            } => {
-                let (_new_texture, new_view) =
-                    create_targets(width, height, &self.device_handle().device);
-                *intermediate_view = new_view;
             }
             // A depth attachment must match its colour attachment's extent
             // exactly, so the resize recreates it here — in the same step that
             // reconfigures the swapchain, keeping the allocation off the frame
             // path. Skipped when the extent is unchanged
             // (`DepthTexture::matches`), which is what a reconfigure with the
-            // same size costs today on every other arm too.
+            // same size costs on the other arm too.
             //
             // An over-ceiling extent keeps the existing attachment rather than
             // creating one wgpu would refuse: the swapchain reconfigure below
@@ -2290,7 +1417,6 @@ impl RenderContext {
                     *intermediate_view = create_engine_intermediate(width, height, device);
                 }
             }
-            RenderPath::Direct => {}
         }
         self.configure_surface(surface);
     }
@@ -2400,251 +1526,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_aa_mode_none_is_area() {
-        assert_eq!(parse_aa_mode(None), AaMode::Area);
-    }
-
-    #[test]
-    fn parse_aa_mode_empty_is_area() {
-        assert_eq!(parse_aa_mode(Some(String::new())), AaMode::Area);
-    }
-
-    #[test]
-    fn parse_aa_mode_case_insensitive_hits() {
-        assert_eq!(parse_aa_mode(Some("area".to_string())), AaMode::Area);
-        assert_eq!(parse_aa_mode(Some("AREA".to_string())), AaMode::Area);
-        assert_eq!(parse_aa_mode(Some("Msaa8".to_string())), AaMode::Msaa8);
-        assert_eq!(parse_aa_mode(Some("MSAA8".to_string())), AaMode::Msaa8);
-        assert_eq!(parse_aa_mode(Some("msaa16".to_string())), AaMode::Msaa16);
-        assert_eq!(parse_aa_mode(Some("MsAa16".to_string())), AaMode::Msaa16);
-    }
-
-    #[test]
-    fn parse_aa_mode_trims_surrounding_whitespace() {
-        assert_eq!(parse_aa_mode(Some("  msaa8  ".to_string())), AaMode::Msaa8);
-        assert_eq!(
-            parse_aa_mode(Some("\tmsaa16\n".to_string())),
-            AaMode::Msaa16
-        );
-    }
-
-    #[test]
-    fn parse_aa_mode_unknown_falls_back_to_area() {
-        assert_eq!(parse_aa_mode(Some("nonsense".to_string())), AaMode::Area);
-    }
-
-    #[test]
-    fn aa_mode_support_enables_exactly_the_selected_mode() {
-        let area = AaMode::Area.support();
-        assert!(area.area);
-        assert!(!area.msaa8);
-        assert!(!area.msaa16);
-
-        let msaa8 = AaMode::Msaa8.support();
-        assert!(!msaa8.area);
-        assert!(msaa8.msaa8);
-        assert!(!msaa8.msaa16);
-
-        let msaa16 = AaMode::Msaa16.support();
-        assert!(!msaa16.area);
-        assert!(!msaa16.msaa8);
-        assert!(msaa16.msaa16);
-    }
-
-    #[test]
-    fn aa_mode_to_vello_matches_selected_mode() {
-        assert_eq!(AaMode::Area.to_vello(), vello::AaConfig::Area);
-        assert_eq!(AaMode::Msaa8.to_vello(), vello::AaConfig::Msaa8);
-        assert_eq!(AaMode::Msaa16.to_vello(), vello::AaConfig::Msaa16);
-    }
-
-    #[test]
-    fn aa_mode_display_matches_knob_spelling() {
-        assert_eq!(AaMode::Area.to_string(), "area");
-        assert_eq!(AaMode::Msaa8.to_string(), "msaa8");
-        assert_eq!(AaMode::Msaa16.to_string(), "msaa16");
-    }
-
-    #[test]
-    fn parse_render_scale_unset_or_empty_is_full_resolution() {
-        // The knob wasn't touched: full resolution, silently.
-        assert_eq!(parse_render_scale(None), 1.0);
-        assert_eq!(parse_render_scale(Some(String::new())), 1.0);
-        assert_eq!(parse_render_scale(Some("   ".to_string())), 1.0);
-    }
-
-    #[test]
-    fn parse_render_scale_reads_a_fraction_in_range() {
-        assert_eq!(parse_render_scale(Some("0.75".to_string())), 0.75);
-        assert_eq!(parse_render_scale(Some("0.5".to_string())), 0.5);
-        // Trimmed like every other string knob, and the top of the range is a
-        // legal (identity) value rather than a clamp.
-        assert_eq!(parse_render_scale(Some("  0.6\n".to_string())), 0.6);
-        assert_eq!(parse_render_scale(Some("1".to_string())), 1.0);
-    }
-
-    #[test]
-    fn parse_render_scale_clamps_out_of_range_values() {
-        // Above the surface's own resolution is supersampling, not this knob.
-        assert_eq!(parse_render_scale(Some("2".to_string())), 1.0);
-        // Below a quarter the frame is too coarse to judge the upscale by.
-        assert_eq!(parse_render_scale(Some("0.1".to_string())), 0.25);
-        assert_eq!(parse_render_scale(Some("-1".to_string())), 0.25);
-    }
-
-    #[test]
-    fn parse_render_scale_rejects_unparsable_and_non_finite_values() {
-        // A typo must not render at a mystery resolution, and NaN/inf must be
-        // caught BEFORE the clamp (`f64::clamp` would hand NaN straight back).
-        assert_eq!(parse_render_scale(Some("abc".to_string())), 1.0);
-        assert_eq!(parse_render_scale(Some("NaN".to_string())), 1.0);
-        assert_eq!(parse_render_scale(Some("inf".to_string())), 1.0);
-        assert_eq!(parse_render_scale(Some("-inf".to_string())), 1.0);
-    }
-
-    #[test]
-    fn scaled_size_rounds_up_and_is_identity_at_full_scale() {
-        // A 1080x2400 phone at the two scales the measurement uses.
-        assert_eq!(scaled_size(1080, 2400, 0.75), (810, 1800));
-        assert_eq!(scaled_size(1080, 2400, 0.5), (540, 1200));
-        // Identity at 1.0 is what keeps the default path byte-identical.
-        assert_eq!(scaled_size(1080, 2400, 1.0), (1080, 2400));
-        // Rounds UP, so no row/column of the surface goes unsampled.
-        assert_eq!(scaled_size(1081, 2401, 0.5), (541, 1201));
-        // …and never asks wgpu for a zero-sized texture.
-        assert_eq!(scaled_size(1, 1, 0.25), (1, 1));
-    }
-
-    #[test]
-    fn blit_filter_is_linear_only_while_scaled() {
-        // Nearest unscaled is exactly what `TextureBlitter::new` builds, so an
-        // unscaled surface keeps the blitter it always had.
-        assert_eq!(blit_filter(false), wgpu::FilterMode::Nearest);
-        assert_eq!(blit_filter(true), wgpu::FilterMode::Linear);
-    }
-
-    #[test]
-    fn blit_root_is_identity_when_the_intermediate_is_the_surface_size() {
-        // The unscaled default, both spellings of it: the size handed straight
-        // through, and the one `scaled_size` produces at full scale. Identity
-        // here is what keeps the default path byte-identical.
-        assert_eq!(
-            blit_root((1080, 2400), (1080, 2400)).as_coeffs(),
-            Affine::IDENTITY.as_coeffs()
-        );
-        assert_eq!(
-            blit_root((1080, 2400), scaled_size(1080, 2400, 1.0)).as_coeffs(),
-            Affine::IDENTITY.as_coeffs()
-        );
-    }
-
-    #[test]
-    fn blit_root_is_the_plain_scale_on_an_evenly_divisible_surface() {
-        // 1080x2340 at 0.75 divides evenly on both axes, so nothing was
-        // rounded and the root IS the requested fraction.
-        let target = scaled_size(1080, 2340, 0.75);
-        assert_eq!(target, (810, 1755));
-        assert_eq!(
-            blit_root((1080, 2340), target).as_coeffs(),
-            Affine::scale(0.75).as_coeffs()
-        );
-    }
-
-    #[test]
-    fn blit_root_follows_the_rounded_up_target_not_the_requested_scale() {
-        // 1179x2556 at 0.75: the width rounds up (884.25 -> 885) while the
-        // height divides evenly, so the frame must be stretched slightly wider
-        // than 0.75 to reach the intermediate's last column. A uniform
-        // `scale(0.75)` root would stop short of it and the upscaling blit
-        // would stretch that unpainted strip of base colour over the frame's
-        // right edge.
-        let target = scaled_size(1179, 2556, 0.75);
-        assert_eq!(target, (885, 1917));
-        let root = blit_root((1179, 2556), target);
-        assert_eq!(
-            root.as_coeffs(),
-            Affine::scale_non_uniform(885.0 / 1179.0, 1917.0 / 2556.0).as_coeffs()
-        );
-        assert_ne!(root.as_coeffs(), Affine::scale(0.75).as_coeffs());
-        // Per-axis, and exact at the far edge: the surface's last column/row
-        // lands on the intermediate's last column/row, whichever axis rounded.
-        let coeffs = root.as_coeffs();
-        assert!(coeffs[0] > 0.75, "the rounded-up axis stretches further");
-        assert_eq!(coeffs[3], 0.75, "the even axis is untouched");
-        assert!((coeffs[0] * 1179.0 - 885.0).abs() < 1e-9);
-        assert!((coeffs[3] * 2556.0 - 1917.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn a_scaled_surface_agrees_with_the_root_it_encodes_under() {
-        // The one-derivation contract: "the intermediate shrank" and "the
-        // root" are two reads of the same pair of sizes, so they can never
-        // disagree about a frame.
-        for (surface, scale) in [
-            ((1080, 2400), 0.75),
-            ((1179, 2556), 0.75),
-            ((720, 1600), 1.0),
-        ] {
-            let target = scaled_size(surface.0, surface.1, scale);
-            let root = blit_root(surface, target);
-            assert_eq!(
-                target != surface,
-                root.as_coeffs() != Affine::IDENTITY.as_coeffs()
-            );
-        }
-    }
-
-    #[test]
-    fn direct_path_chosen_only_when_both_caps_present_and_not_forced() {
-        // The GO population (OP9/Xiaomi 12): Rgba8Unorm + STORAGE_BINDING, no
-        // force → direct-to-surface.
-        assert_eq!(
-            choose_render_path(true, true, false),
-            RenderPathKind::Direct
-        );
-    }
-
-    #[test]
-    fn force_blit_overrides_a_capable_surface() {
-        // FRUST_NO_DIRECT_SURFACE, FRUST_RENDER_SCALE < 1, or cpu-tier pins a
-        // fully-capable surface onto the blit arm — the fallback-proof safety
-        // valve / A-B mechanism. The scaled case rides this same decision:
-        // there is no scaled variant of either direct arm.
-        assert_eq!(choose_render_path(true, true, true), RenderPathKind::Blit);
-    }
-
-    #[test]
-    fn missing_either_cap_falls_back_to_blit() {
-        // iPhone SE (Bgra8-only): no Rgba8Unorm → blit.
-        assert_eq!(choose_render_path(false, true, false), RenderPathKind::Blit);
-        // No STORAGE_BINDING → blit.
-        assert_eq!(choose_render_path(true, false, false), RenderPathKind::Blit);
-        // Neither → blit.
-        assert_eq!(
-            choose_render_path(false, false, false),
-            RenderPathKind::Blit
-        );
-        // Neither, and forced → still blit (force never resurrects direct).
-        assert_eq!(choose_render_path(false, false, true), RenderPathKind::Blit);
-    }
-
-    #[test]
-    fn only_the_cpu_tier_forces_the_blit_arm() {
-        // The R10 trap, pinned: the engine tier renders into the acquired
-        // swapchain view, so forcing it onto the blit arm (and its
-        // intermediate + `TextureBlitter`) would hand it a pass it never
-        // asked for. Only the CPU tier, which uploads a pixmap into that
-        // intermediate, is blit-only.
-        assert!(!tier_forces_blit(crate::tier::RenderTier::Gpu));
-        assert!(tier_forces_blit(crate::tier::RenderTier::Cpu));
-        assert!(!tier_forces_blit(crate::tier::RenderTier::Engine));
-    }
-
-    #[test]
     fn a_tier_is_only_selectable_in_a_build_that_compiled_it() {
-        // The default tier is always in; each experimental one tracks its own
-        // feature — nothing inherits a blanket refusal.
-        assert!(tier_compiled_in(crate::tier::RenderTier::Gpu));
+        // Each tier tracks its own feature — nothing inherits a blanket
+        // permission, and nothing inherits a blanket refusal.
         assert_eq!(
             tier_compiled_in(crate::tier::RenderTier::Cpu),
             cfg!(feature = "cpu-tier")
@@ -2665,29 +1549,6 @@ mod tests {
         wgpu::CompositeAlphaMode::PreMultiplied,
         wgpu::CompositeAlphaMode::PostMultiplied,
     ];
-
-    #[cfg(feature = "engine-tier")]
-    #[test]
-    fn engine_render_path_is_never_blit() {
-        // The R10 trap on this tier: the engine owns no blit arm, so no
-        // (backend, alpha mode) pair may route it onto vello's. Asserted
-        // across EVERY pair, since a pair this tier has to work for is the
-        // one most likely to reach for a fallback.
-        for backend in wgpu::Backend::ALL {
-            for mode in EVERY_ALPHA_MODE {
-                assert_ne!(
-                    choose_engine_render_path(backend, mode),
-                    RenderPathKind::Blit,
-                    "engine path resolved to Blit for {backend:?}/{mode:?}"
-                );
-                assert_ne!(
-                    choose_engine_render_path(backend, mode),
-                    RenderPathKind::Direct,
-                    "engine path resolved to vello's direct arm for {backend:?}/{mode:?}"
-                );
-            }
-        }
-    }
 
     #[cfg(feature = "engine-tier")]
     #[test]
@@ -2824,27 +1685,6 @@ mod tests {
                     compositor_expects_premultiplied(backend, mode),
                     expected,
                     "compositor_expects_premultiplied({backend:?}, {mode:?})"
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "engine-tier")]
-    #[test]
-    fn the_engine_tier_refuses_no_surfaces_translucency() {
-        // The blit arm's refusal is a GPU-tier rule and stays one: an engine
-        // surface keeps the translucency it resolved, whichever arm or
-        // backend it took, so a Mode B iOS app is composited rather than
-        // degraded to Mode A.
-        for backend in wgpu::Backend::ALL {
-            for mode in EVERY_ALPHA_MODE {
-                assert!(
-                    !blit_translucency_refused(
-                        choose_engine_render_path(backend, mode),
-                        mode,
-                        crate::tier::RenderTier::Engine
-                    ),
-                    "an engine surface had its translucency refused for {backend:?}/{mode:?}"
                 );
             }
         }
@@ -3157,647 +1997,5 @@ mod tests {
             SurfaceAlphaRequest::Opaque,
             &caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Inherit]),
         )));
-    }
-
-    #[test]
-    fn premultiply_gated_on_premultiplied_expecting_modes() {
-        // The two premultiplied-expecting modes need the pass:
-        // `Inherit` is Android's translucent mode (SurfaceFlinger blends
-        // premultiplied); `PreMultiplied` is explicit.
-        assert!(alpha_mode_needs_premultiply(
-            wgpu::CompositeAlphaMode::Inherit
-        ));
-        assert!(alpha_mode_needs_premultiply(
-            wgpu::CompositeAlphaMode::PreMultiplied
-        ));
-        // Straight-expecting (iOS `PostMultiplied`) and alpha-ignoring
-        // (`Opaque`/`Auto`, every opaque surface) take vello's output unchanged
-        // — the pass must never touch them, or the opaque path stops being
-        // byte-identical.
-        assert!(!alpha_mode_needs_premultiply(
-            wgpu::CompositeAlphaMode::PostMultiplied
-        ));
-        assert!(!alpha_mode_needs_premultiply(
-            wgpu::CompositeAlphaMode::Opaque
-        ));
-        assert!(!alpha_mode_needs_premultiply(
-            wgpu::CompositeAlphaMode::Auto
-        ));
-    }
-
-    #[test]
-    fn gpu_tier_blit_refuses_premultiplied_expecting_translucency() {
-        // A GPU-tier surface forced onto the blit
-        // arm (no Rgba8Unorm+STORAGE_BINDING) that resolves a
-        // premultiplied-expecting alpha mode (Android's `Inherit`) must
-        // refuse translucency — the blit arm's `TextureBlitter::copy` is a
-        // fixed pass-through sampled draw with no premultiply stage frust can
-        // reach, so presenting it straight would reproduce the
-        // over-bright-fringing defect.
-        assert!(blit_translucency_refused(
-            RenderPathKind::Blit,
-            wgpu::CompositeAlphaMode::Inherit,
-            crate::tier::RenderTier::Gpu,
-        ));
-        assert!(blit_translucency_refused(
-            RenderPathKind::Blit,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            crate::tier::RenderTier::Gpu,
-        ));
-    }
-
-    #[test]
-    fn cpu_tier_blit_stays_translucent_capable() {
-        // The regression guard that matters most: cpu-tier ALSO forces the
-        // blit arm (`force_blit`), but `vello_cpu`'s output is already
-        // premultiplied (`cpu_tier.rs:108-113`'s `PremulRgba8`), so refusal
-        // must NOT fire for it — forcing it opaque would be a
-        // self-inflicted regression on a path that is correct today.
-        assert!(!blit_translucency_refused(
-            RenderPathKind::Blit,
-            wgpu::CompositeAlphaMode::Inherit,
-            crate::tier::RenderTier::Cpu,
-        ));
-        assert!(!blit_translucency_refused(
-            RenderPathKind::Blit,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            crate::tier::RenderTier::Cpu,
-        ));
-    }
-
-    #[test]
-    fn blit_refusal_never_fires_for_non_premultiplied_modes_or_direct_path() {
-        // Straight-expecting/alpha-ignoring modes never need refusal, on
-        // either path kind.
-        for mode in [
-            wgpu::CompositeAlphaMode::PostMultiplied,
-            wgpu::CompositeAlphaMode::Opaque,
-            wgpu::CompositeAlphaMode::Auto,
-        ] {
-            assert!(!blit_translucency_refused(
-                RenderPathKind::Blit,
-                mode,
-                crate::tier::RenderTier::Gpu
-            ));
-        }
-        // The Direct arm is unaffected regardless of tier/mode — it already
-        // has its own premultiply pass (`RenderPath::DirectPremultiplied`),
-        // so byte-identical direct-path behavior is preserved.
-        for mode in [
-            wgpu::CompositeAlphaMode::Inherit,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::PostMultiplied,
-            wgpu::CompositeAlphaMode::Opaque,
-            wgpu::CompositeAlphaMode::Auto,
-        ] {
-            assert!(!blit_translucency_refused(
-                RenderPathKind::Direct,
-                mode,
-                crate::tier::RenderTier::Gpu
-            ));
-        }
-    }
-
-    /// The exact premultiply arithmetic the [`PremultiplyPass`] shader performs,
-    /// as an always-run reference (no GPU): a 50%-alpha `#FFF176` painted over
-    /// a Mode B hole must reach a premultiplied-expecting compositor stored
-    /// premultiplied (`~#807B3B@128`), NOT straight (`#FFF176@128` — the
-    /// over-bright value the device measured before this fix). Encodes the
-    /// predicted-correct pixel a device re-check must confirm.
-    #[test]
-    fn d3_premultiply_math_matches_verify_predictions() {
-        // `premultiply` in PREMULTIPLY_WGSL is `rgb * a` in normalized [0,1];
-        // in 8-bit that is `round(c * a / 255)`.
-        fn premul8(c: u8, a: u8) -> u8 {
-            ((u32::from(c) * u32::from(a) + 127) / 255) as u8
-        }
-
-        // 50%-alpha #FFF176 (a translucent ghost-button fill color). a=128 ≈ 0.502.
-        let (r, g, b, a) = (0xFF, 0xF1, 0x76, 128);
-        let premul = [premul8(r, a), premul8(g, a), premul8(b, a), a];
-        // Straight (the WRONG, over-bright value) keeps rgb at full intensity.
-        assert_eq!([r, g, b, a], [0xFF, 0xF1, 0x76, 128]);
-        // Premultiplied is materially darker per channel — this is the fix.
-        assert_eq!(premul, [0x80, 0x79, 0x3B, 128]);
-        // Within a couple of LSB of the predicted `~#807B3B@128`.
-        assert!((i16::from(premul[1]) - 0x7B).abs() <= 2);
-
-        // A second point on the curve: 25%-alpha opaque-magenta debris fill
-        // (an `#E4..FF`-class over-bright color). a=64 ≈ 0.251.
-        let a = 64;
-        assert_eq!(
-            [premul8(0xFF, a), premul8(0x00, a), premul8(0xFF, a), a],
-            [0x40, 0x00, 0x40, 64]
-        );
-        // Fully-opaque pixels are premultiply-invariant — this is why the
-        // opaque path stays byte-identical and in-scene blends over opaque
-        // content already composite correctly.
-        assert_eq!(
-            [premul8(0xFF, 255), premul8(0xF1, 255), premul8(0x76, 255)],
-            [0xFF, 0xF1, 0x76]
-        );
-    }
-
-    // ---- GPU-dependent tests ----
-    //
-    // Each drives real adapter work, so each is `#[ignore]`d and run by hand
-    // on a host with a GPU (`cargo test -p frust-render -- --ignored`; Metal
-    // locally). A sandbox without an adapter skips them rather than failing:
-    //
-    // - `premultiply_pass_converts_vello_straight_output_to_premultiplied` —
-    //   vello's straight output really is straight, and `PremultiplyPass`
-    //   converts it.
-    // - `scaled_blit_stretches_the_intermediate_over_the_whole_target` — a
-    //   smaller intermediate reaches every pixel of the swapchain-sized
-    //   target through the blit, leaving no edge strip behind.
-    // - `a_narrowed_aa_support_renders_the_mode_it_was_built_for` — a renderer
-    //   whose `AaSupport` was narrowed to one mode renders that mode.
-    //
-    // The shared opener is `gpu_device`; readback of an arbitrary-width
-    // texture goes through `read_rgba`.
-
-    /// Real-GPU end-to-end confirmation of the premultiply fix on this host's
-    /// Vulkan adapter: vello's `render_to_texture` emits **straight** alpha, and
-    /// [`PremultiplyPass`] converts it to premultiplied — the exact operation
-    /// [`RenderPath::DirectPremultiplied`] inserts before presenting a
-    /// premultiplied-expecting translucent swapchain (Android `Inherit`). No
-    /// on-screen surface exists headlessly, so this drives the two GPU halves
-    /// (vello output + the compute pass) directly against owned textures rather
-    /// than through `submit`.
-    ///
-    /// Encodes the predicted `#FFF176@128` behavior: asserts (a) vello stores
-    /// the fill STRAIGHT (`r≈255`, proving the diagnosis — the output really is
-    /// non-premultiplied), then (b) the pass stores it PREMULTIPLIED
-    /// (`r≈128 = round(255 * 128/255)`, proving the fix), each within a couple
-    /// of LSB of the value derived from vello's own readback.
-    #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-    fn premultiply_pass_converts_vello_straight_output_to_premultiplied() {
-        pollster::block_on(run());
-
-        async fn run() {
-            const SIZE: u32 = 64; // 64*4 = 256-byte rows: no copy-padding math.
-
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions::default())
-                .await
-                .expect("no compatible GPU adapter");
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("frust premultiply test"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                })
-                .await
-                .expect("failed to create device");
-
-            let make_tex = |label: &str, extra: wgpu::TextureUsages| {
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: SIZE,
-                        height: SIZE,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC
-                        | extra,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    view_formats: &[],
-                })
-            };
-            // vello's straight output target (also the premultiply pass's read
-            // source), and the pass's write destination (the "swapchain").
-            let straight_tex = make_tex("straight (vello)", wgpu::TextureUsages::empty());
-            let straight_view = straight_tex.create_view(&wgpu::TextureViewDescriptor::default());
-            let premul_tex = make_tex("premultiplied (out)", wgpu::TextureUsages::empty());
-            let premul_view = premul_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-            // A 50%-alpha #FFF176 fill over a fully-transparent base — a
-            // translucent ghost button over a Mode B hole (alpha-0 behind).
-            let mut fk_scene = frust_scene::Scene::new();
-            {
-                let mut builder = frust_scene::SceneBuilder::new(&mut fk_scene);
-                builder.fill_rect(
-                    kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
-                    peniko::Brush::Solid(peniko::Color::from_rgba8(0xFF, 0xF1, 0x76, 128)),
-                );
-            }
-            let mut vello_scene = vello::Scene::new();
-            crate::encode_scene(&fk_scene, &mut vello_scene);
-            let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
-                .expect("failed to create vello renderer");
-            renderer
-                .render_to_texture(
-                    &device,
-                    &queue,
-                    &vello_scene,
-                    &straight_view,
-                    &vello::RenderParams {
-                        base_color: peniko::Color::TRANSPARENT,
-                        width: SIZE,
-                        height: SIZE,
-                        antialiasing_method: vello::AaConfig::Area,
-                    },
-                )
-                .expect("render_to_texture failed");
-
-            // Run the fix: straight → premultiplied into the destination.
-            let pass = PremultiplyPass::new(&device);
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            pass.record(
-                &device,
-                &mut encoder,
-                &straight_view,
-                &premul_view,
-                SIZE,
-                SIZE,
-            );
-            queue.submit([encoder.finish()]);
-
-            let straight = read_centre(&device, &queue, &straight_tex, SIZE).await;
-            let premul = read_centre(&device, &queue, &premul_tex, SIZE).await;
-
-            // (a) vello stored STRAIGHT alpha: rgb near full intensity, a≈128.
-            // This is the diagnosis — the un-premultiply in fine.wgsl.
-            assert!(
-                straight[0] >= 250 && (i16::from(straight[3]) - 128).abs() <= 2,
-                "expected vello straight output (~#FFF176@128), got {straight:?}"
-            );
-            // (b) the pass stored PREMULTIPLIED alpha, derived from vello's own
-            // straight readback so the assertion is robust to vello's rounding:
-            // premul_c ≈ round(straight_c * a/255).
-            let a = u32::from(straight[3]);
-            for ch in 0..3 {
-                let expected = ((u32::from(straight[ch]) * a + 127) / 255) as i16;
-                assert!(
-                    (i16::from(premul[ch]) - expected).abs() <= 2,
-                    "channel {ch}: premultiplied {} not within 2 LSB of expected {expected} \
-                     (straight {straight:?} -> premul {premul:?})",
-                    premul[ch]
-                );
-            }
-            // Alpha is unchanged by premultiply; red must have visibly darkened
-            // (255 -> ~128), proving the pass actually ran.
-            assert_eq!(premul[3], straight[3], "premultiply must not change alpha");
-            assert!(
-                premul[0] < 160,
-                "red should be premultiplied down toward 128, got {}",
-                premul[0]
-            );
-        }
-
-        /// Copies the centre texel of `tex` back to the CPU as `[r,g,b,a]`.
-        async fn read_centre(
-            device: &wgpu::Device,
-            queue: &wgpu::Queue,
-            tex: &wgpu::Texture,
-            size: u32,
-        ) -> [u8; 4] {
-            let bytes_per_row = size * 4;
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("frust premultiply readback"),
-                size: u64::from(bytes_per_row * size),
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(size),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-            );
-            queue.submit([encoder.finish()]);
-
-            let slice = buffer.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |res| {
-                let _ = tx.send(res);
-            });
-            device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .expect("device poll failed");
-            rx.recv()
-                .expect("map channel closed")
-                .expect("buffer map failed");
-            let data = slice.get_mapped_range();
-            let centre = ((size / 2) * bytes_per_row + (size / 2) * 4) as usize;
-            [
-                data[centre],
-                data[centre + 1],
-                data[centre + 2],
-                data[centre + 3],
-            ]
-        }
-    }
-
-    /// The scaled blit end to end on this host's adapter: an intermediate
-    /// smaller than the target, filled edge to edge, must reach EVERY pixel of
-    /// the target through the blitter — the upscale [`RenderPath::Blit`]
-    /// performs once its intermediate has been shrunk. A destination pixel
-    /// left at the clear colour would be exactly the strip a target the frame
-    /// does not quite cover leaves behind (see [`blit_root`]).
-    ///
-    /// Runs both roundings [`scaled_size`] can produce: 100 halves evenly to
-    /// 50, while 65 rounds up to 33 — the odd case, where the intermediate
-    /// covers slightly MORE than the requested fraction.
-    #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-    fn scaled_blit_stretches_the_intermediate_over_the_whole_target() {
-        pollster::block_on(run());
-
-        async fn run() {
-            const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-            let (device, queue) = gpu_device("frust scaled blit test").await;
-
-            for size in [100u32, 65] {
-                let target = scaled_size(size, size, 0.5);
-                assert!(
-                    target.0 < size && target.1 < size,
-                    "the intermediate must really be smaller for this to test an upscale"
-                );
-                let make_tex = |label: &str, (w, h): (u32, u32), extra| {
-                    device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some(label),
-                        size: wgpu::Extent3d {
-                            width: w,
-                            height: h,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
-                        format: FORMAT,
-                        view_formats: &[],
-                    })
-                };
-                // The blit arm's two textures: the intermediate vello renders
-                // into (sampled by the blitter) and the swapchain-sized
-                // destination it is copied onto.
-                let intermediate = make_tex(
-                    "frust blit smoke intermediate",
-                    target,
-                    wgpu::TextureUsages::TEXTURE_BINDING,
-                );
-                let destination = make_tex(
-                    "frust blit smoke destination",
-                    (size, size),
-                    wgpu::TextureUsages::COPY_SRC,
-                );
-                let intermediate_view =
-                    intermediate.create_view(&wgpu::TextureViewDescriptor::default());
-                let destination_view =
-                    destination.create_view(&wgpu::TextureViewDescriptor::default());
-
-                let mut encoder =
-                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                // Stand in for the frame: the whole intermediate opaque red,
-                // so any destination pixel the blit fails to cover shows up as
-                // the destination's own (black, transparent) initial content.
-                {
-                    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("frust blit smoke fill"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &intermediate_view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-                }
-                // The blitter the scaled arm builds: a sampled full-screen
-                // draw over the whole destination, `Linear` because the source
-                // is smaller ([`blit_filter`]).
-                wgpu::util::TextureBlitterBuilder::new(&device, FORMAT)
-                    .sample_type(blit_filter(true))
-                    .build()
-                    .copy(&device, &mut encoder, &intermediate_view, &destination_view);
-                queue.submit([encoder.finish()]);
-
-                let pixels = read_rgba(&device, &queue, &destination, size, size).await;
-                assert_eq!(pixels.len(), (size * size) as usize);
-                for (index, pixel) in pixels.iter().enumerate() {
-                    assert!(
-                        pixel[0] >= 250 && pixel[1] <= 5 && pixel[2] <= 5 && pixel[3] >= 250,
-                        "{size}x{size} target from a {}x{} intermediate: pixel \
-                         ({}, {}) is {pixel:?}, not opaque red — the blit left it uncovered",
-                        target.0,
-                        target.1,
-                        index as u32 % size,
-                        index as u32 / size,
-                    );
-                }
-            }
-        }
-    }
-
-    /// A `vello::Renderer` built for ONE anti-aliasing mode renders that mode:
-    /// the narrowing [`AaMode::support`] performs (instead of compiling every
-    /// `AaConfig`'s pipelines) must still leave the mode the frame asks for
-    /// present, or every pass would fail at `render_to_texture`.
-    ///
-    /// Msaa8 is the interesting case — it is the mode the default `Area` build
-    /// does NOT compile, so a renderer that renders it here really was built
-    /// for it. Metal is a correct MSAA implementation; the corruption this
-    /// mode shows on one Adreno part is device-specific and registered
-    /// (`render-measurement-knobs-not-shipping-modes`), so it is no reason to
-    /// leave the seam untested here.
-    #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-    fn a_narrowed_aa_support_renders_the_mode_it_was_built_for() {
-        pollster::block_on(run());
-
-        async fn run() {
-            const SIZE: u32 = 64;
-            let mode = AaMode::Msaa8;
-            let (device, queue) = gpu_device("frust narrowed aa test").await;
-
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("frust aa smoke target"),
-                size: wgpu::Extent3d {
-                    width: SIZE,
-                    height: SIZE,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                // vello renders by compute storage write; the readback needs
-                // the copy source.
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            // An opaque red rect inset from every edge, so the frame carries
-            // both filled and anti-aliased pixels.
-            let mut fk_scene = frust_scene::Scene::new();
-            {
-                let mut builder = frust_scene::SceneBuilder::new(&mut fk_scene);
-                builder.fill_rect(
-                    kurbo::Rect::new(8.0, 8.0, 56.0, 56.0),
-                    peniko::Brush::Solid(peniko::Color::from_rgba8(0xFF, 0x00, 0x00, 0xFF)),
-                );
-            }
-            let mut vello_scene = vello::Scene::new();
-            crate::encode_scene(&fk_scene, &mut vello_scene);
-
-            let mut renderer = vello::Renderer::new(
-                &device,
-                vello::RendererOptions {
-                    antialiasing_support: mode.support(),
-                    ..Default::default()
-                },
-            )
-            .expect("failed to create a vello renderer with a narrowed AaSupport");
-            renderer
-                .render_to_texture(
-                    &device,
-                    &queue,
-                    &vello_scene,
-                    &view,
-                    &vello::RenderParams {
-                        base_color: peniko::Color::BLACK,
-                        width: SIZE,
-                        height: SIZE,
-                        antialiasing_method: mode.to_vello(),
-                    },
-                )
-                .unwrap_or_else(|e| panic!("render_to_texture failed for aa-mode={mode}: {e}"));
-
-            let pixels = read_rgba(&device, &queue, &texture, SIZE, SIZE).await;
-            let red = pixels
-                .iter()
-                .filter(|p| p[0] >= 250 && p[1] <= 5 && p[2] <= 5)
-                .count();
-            assert!(
-                red > 0,
-                "aa-mode={mode} rendered no red pixels at all — the narrowed \
-                 support did not render the mode it was built for"
-            );
-        }
-    }
-
-    /// The adapter + device the GPU tests above open with: this host's default
-    /// adapter, and a device at default limits.
-    async fn gpu_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .expect("no compatible GPU adapter");
-        adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some(label),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            })
-            .await
-            .expect("failed to create device")
-    }
-
-    /// Copies all of `tex` back to the CPU as one `[r,g,b,a]` per pixel,
-    /// un-padding the row alignment `copy_texture_to_buffer` requires: an
-    /// arbitrary width does not land on it (100 pixels is 400 bytes, and the
-    /// copy demands a multiple of 256), unlike the 64-wide targets whose rows
-    /// are exactly one alignment unit.
-    async fn read_rgba(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        tex: &wgpu::Texture,
-        width: u32,
-        height: u32,
-    ) -> Vec<[u8; 4]> {
-        let row_bytes = width * 4;
-        let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frust gpu-test readback"),
-            size: u64::from(padded_row_bytes * height),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row_bytes),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-
-        let slice = buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll failed");
-        rx.recv()
-            .expect("map channel closed")
-            .expect("buffer map failed");
-        let data = slice.get_mapped_range();
-        (0..height)
-            .flat_map(|row| {
-                let start = (row * padded_row_bytes) as usize;
-                data[start..start + row_bytes as usize]
-                    .chunks_exact(4)
-                    .map(|texel| [texel[0], texel[1], texel[2], texel[3]])
-                    .collect::<Vec<_>>()
-            })
-            .collect()
     }
 }

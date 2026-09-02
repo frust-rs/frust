@@ -116,15 +116,15 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Force the render tier (`gpu`/`cpu`/`engine`)
+        /// Force the render tier (`cpu`/`engine`)
         /// `frust-render` probes for at startup, by setting
         /// `FRUST_RENDER_TIER` for the launched process (see
         /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `engine` is now the default tier
+        /// / `RENDER_TIER_ENV_VAR`). `engine` is the default tier
         /// (`frust-render`'s `engine-tier` feature, on by default) — this
-        /// override is now equivalent to leaving the flag unset. `gpu` is
-        /// the vello-classic escape hatch for one release (unconditionally
-        /// compiled, no feature to opt into). `cpu` is a
+        /// override is equivalent to leaving the flag unset. The
+        /// vello-classic `gpu` tier is GONE and is no longer an accepted
+        /// value. `cpu` is a
         /// non-default tier the app must have been BUILT with
         /// (`frust-render`'s `cpu-tier` feature); otherwise the
         /// launched process refuses the override at startup and says so.
@@ -367,7 +367,6 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum RenderTierArg {
-    Gpu,
     Cpu,
     Engine,
 }
@@ -376,7 +375,6 @@ impl RenderTierArg {
     /// The value `FRUST_RENDER_TIER` is set to for the spawned process.
     pub fn env_value(self) -> &'static str {
         match self {
-            RenderTierArg::Gpu => "gpu",
             RenderTierArg::Cpu => "cpu",
             RenderTierArg::Engine => "engine",
         }
@@ -735,14 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_with_render_tier_gpu() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "gpu"]);
-        match cli.command.unwrap() {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Gpu));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
+    fn rejects_the_retired_gpu_render_tier_value() {
+        // The vello-classic tier was deleted, and with it the `gpu` override
+        // `frust_render::parse_render_tier_override` used to accept — so clap
+        // must refuse the value here rather than set an env var the launched
+        // process would only warn about and ignore.
+        assert!(Cli::try_parse_from(["frust", "run", "--render-tier", "gpu"]).is_err());
     }
 
     #[test]
@@ -788,7 +784,6 @@ mod tests {
 
     #[test]
     fn render_tier_arg_env_values() {
-        assert_eq!(RenderTierArg::Gpu.env_value(), "gpu");
         assert_eq!(RenderTierArg::Cpu.env_value(), "cpu");
         // Hand-synced with `frust_render::parse_render_tier_override`'s
         // accepted strings — this crate depends on no render crate to check

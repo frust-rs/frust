@@ -97,7 +97,7 @@ engine-tier = ["frust/engine-tier"]
 # no override needed) shrank the prior baseline (lto="thin", no cgu
 # override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
 # unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
-# shader/render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3` —
+# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3` —
 # the config that would actually ship, since sacrificing encode-path CPU
 # perf isn't acceptable — and under that carve-out "s" measured 7.36MB
 # (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
@@ -121,7 +121,7 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. This app's
@@ -130,15 +130,6 @@ strip = "none"
 # `opt-level = 1` (see the wildcard override below); `opt-level = 2` is used
 # here for the shader-compile-heavy crates specifically (see frust's own root
 # `Cargo.toml` for the full rationale — the same override, kept in sync).
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

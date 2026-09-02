@@ -11,9 +11,15 @@
 # desktop release binary with NO feature overrides (its ordinary default
 # build) and asserts `frust-engine`/`frust_engine` marker strings ARE present
 # in it — the INVERTED expectation from the pre-swap gate, which asserted
-# their absence — and that the vello classic markers are STILL present (the
-# one-release `FRUST_RENDER_TIER=gpu` escape hatch this card ships is not
-# deleted until p8-04).
+# their absence — and that the vello-classic markers are now ABSENT, since
+# vello and the `FRUST_RENDER_TIER=gpu` escape hatch that reached it were
+# deleted.
+#
+# The absence patterns are the CLASSIC-ONLY crate names `vello_shaders` and
+# `vello_encoding`, deliberately NOT a bare `vello`: `vello_common` (and
+# `glifo`) are `frust-engine`'s own vendored rasterizer core and legitimately
+# remain in the binary, so a bare-`vello` absence assertion would be a
+# guaranteed false FAIL rather than a leak check.
 #
 # The ON arm remains a positive control — the mirror of
 # `scripts/release-lean-check.sh`'s `check_strings_present`: it builds
@@ -32,9 +38,10 @@
 #   0 if every check executed (0 skipped) and passed
 #   1 if the arguments themselves are invalid (usage error)
 #   2 if a built artifact FAILED its marker check — the default arm's binary
-#     missing the frust-engine or vello-classic markers it should now carry,
-#     or the ON arm's rlib carrying none despite the feature being on (a check
-#     that cannot see what it is looking for)
+#     missing the frust-engine markers it should now carry or still carrying a
+#     vello-classic one, or the ON arm's rlib carrying no frust-engine marker
+#     despite the feature being on (a check that cannot see what it is looking
+#     for)
 #   3 if one or more checks were SKIPPED rather than executed (a build that
 #     could not be produced on this box, or no `strings` command) —
 #     INCONCLUSIVE, never silently reported as PASS
@@ -51,7 +58,7 @@ APP_DIR="${REPO_ROOT}/examples/material3-demo"
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
-      sed -n '2,42p' "$0"
+      sed -n '2,50p' "$0"
       exit 0
       ;;
     *)
@@ -112,6 +119,40 @@ check_markers_present() {
   done
 }
 
+# Asserts each marker in `patterns` (space separated) is ABSENT from a built
+# artifact — the leak half of the check. Unlike the present-check above, a
+# missing artifact or a missing `strings` is still a SKIP: an assertion that
+# could not run is inconclusive either way.
+check_markers_absent() {
+  local artifact="$1"
+  local label="$2"
+  shift 2
+  local patterns=("$@")
+
+  if [ ! -f "${artifact}" ]; then
+    echo "SKIP ${label}: artifact not found at ${artifact}"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    return
+  fi
+
+  if ! command -v strings >/dev/null 2>&1; then
+    echo "SKIP ${label}: 'strings' command not available"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+    return
+  fi
+
+  local pattern count
+  for pattern in "${patterns[@]}"; do
+    count=$(strings "${artifact}" | grep -c -- "${pattern}" || true)
+    if [ "${count}" -eq 0 ]; then
+      echo "PASS ${label}: found 0 occurrences of '${pattern}'"
+    else
+      echo "FAIL ${label}: found ${count} occurrences of '${pattern}' (expected 0)"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  done
+}
+
 # --- Default arm: material3-demo's ordinary (no feature overrides) release build ----
 
 echo "-- Building material3-demo desktop release (default features — engine tier now default) --"
@@ -151,9 +192,10 @@ else
 fi
 echo
 
-echo "-- default-arm marker check (engine tier reached via default features; vello classic escape hatch still present) --"
+echo "-- default-arm marker check (engine tier reached via default features; vello classic deleted) --"
 check_markers_present "${OFF_BIN}" "default-arm frust-engine markers" "frust_engine"
-check_markers_present "${OFF_BIN}" "default-arm vello-classic markers" "vello"
+check_markers_absent "${OFF_BIN}" "default-arm vello-classic markers" \
+  "vello_shaders" "vello_encoding"
 echo
 
 # --- ON arm: positive control ----------------------------------------------

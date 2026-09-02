@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-vello.workspace = true
 wgpu.workspace = true
 peniko.workspace = true
 kurbo.workspace = true
@@ -28,24 +27,22 @@ frust-engine = { workspace = true, optional = true }
 frust-gpu = { workspace = true, optional = true }
 
 [features]
-# DEFAULT: `engine-tier` below. Vello classic (`Gpu`) survives one release
-# behind the `FRUST_RENDER_TIER=gpu` override (`tier::select_render_tier`);
-# it is never gated behind a Cargo feature of its own (the `vello`
-# dependency above is unconditional), only behind that runtime/compile-time
-# override.
+# DEFAULT: `engine-tier` below — the only shipping renderer. Vello classic is
+# GONE (its `vello` dependency, its `RenderTier::Gpu` variant and the
+# `FRUST_RENDER_TIER=gpu` escape hatch that reached it were all deleted once
+# the engine tier became the default).
 default = ["engine-tier"]
-# Experimental vello_cpu-backed CPU render tier.
-# NOT default — the GPU (vello) path is unaffected when this is off.
+# Experimental vello_cpu-backed CPU render tier, and the `convert` module's
+# `SceneSink` command walk that feeds it — the walk's only remaining consumer.
+# NOT default.
 cpu-tier = ["dep:vello_cpu"]
 # The frust-owned engine render tier (`frust-engine` over `frust-gpu`).
-# DEFAULT: `tier::select_render_tier` now probes for and selects this tier
-# automatically (`frust-engine` needs none of the vello GPU tier's downlevel
-# flags — see `ENGINE_REQUIRED_DOWNLEVEL_FLAGS`), so a build that wants to
-# omit `frust-engine`/`frust-gpu` symbols
-# (`scripts/testing/engine-lean-check.sh`'s ON arm) now needs an explicit
-# `--no-default-features` opt-out rather than simply not asking for this
-# feature. `FRUST_RENDER_TIER=gpu` remains the vello-classic escape hatch for
-# one release; `FRUST_RENDER_TIER=engine` is now equivalent to the default.
+# DEFAULT, and now MANDATORY: `tier::select_render_tier` probes for and selects
+# this tier automatically (`frust-engine` needs no downlevel flag at all — see
+# `ENGINE_REQUIRED_DOWNLEVEL_FLAGS`), and since vello classic was deleted it is
+# the only renderer this crate contains — `lib.rs` `compile_error!`s on a build
+# without it rather than failing deep inside the surface pipeline. Kept as a
+# feature because `frust-engine`/`frust-gpu` remain optional dependencies.
 engine-tier = ["dep:frust-engine", "dep:frust-gpu"]
 # Opt-in perf-tracing probes: gates the
 # `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
@@ -55,9 +52,8 @@ engine-tier = ["dep:frust-engine", "dep:frust-gpu"]
 # (`frust_gpu::diag::TimestampRing`) live rather than permanently inert. NOT
 # default — a build without this feature compiles neither the probe bodies
 # nor their `"frust-perf ..."` string literals, and never asks for the
-# feature. The `FRUST_NO_DIRECT_SURFACE`/`FRUST_NO_SHADER_EFFECTS` kill
-# switches and the uncaptured-error handler are deliberately NOT behind this
-# feature — they must keep working in a release build with no features
+# feature. The uncaptured-error handler is deliberately NOT behind this
+# feature — it must keep working in a release build with no features
 # enabled. `frust-engine`/`frust-gpu` are both optional (`engine-tier`) —
 # `?` forwards this crate's own `perf-trace` to theirs only when
 # `engine-tier` has already activated them, never activating either on its
@@ -71,7 +67,6 @@ android_system_properties.workspace = true
 
 [dev-dependencies]
 pollster = "0.4"
-vello.workspace = true
 wgpu.workspace = true
 peniko.workspace = true
 kurbo.workspace = true

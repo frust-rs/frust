@@ -1,24 +1,24 @@
 //! Translation of the renderer-agnostic [`frust_scene::Scene`] display list
-//! into `vello` draw calls.
+//! into individual draw calls.
 //!
 //! The mapping logic lives behind the [`SceneSink`] trait so it can be unit
 //! tested without a GPU (see the tests below, which record calls into a plain
-//! `Vec`). The only production implementor is `vello::Scene`; the public
-//! [`encode_scene`] entry point is the one place a `vello` type appears in this
-//! crate's API — deliberately, so a shell that owns its own `vello::Renderer`
-//! can reuse Frust's scene encoding (mirrors how `frust-scene` allows
-//! only `peniko` types in its own public API).
+//! `Vec`). Since the vello-classic tier was deleted the only production
+//! implementor is the `cpu-tier` fallback's `vello_cpu` sink, which is why the
+//! whole module rides that feature (`lib.rs`) rather than the default build —
+//! the engine tier compiles a `frust_scene::Scene` itself, in `frust-engine`,
+//! and shares nothing here.
 
 use frust_scene::{Command, DashPattern, GlyphRun, PathStyle, Scene};
-use kurbo::{Affine, BezPath, Line, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Stroke};
+use kurbo::{Affine, BezPath, PathEl, Point, Rect, RoundedRectRadii};
 use peniko::{Brush, Color, Fill, ImageData};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
-/// Implemented for `vello::Scene` (real rendering) and for a recording sink in
-/// tests (GPU-free verification of the command mapping).
+/// Implemented for the `cpu-tier` rasterizer's sink (real rendering) and for a
+/// recording sink in tests (GPU-free verification of the command mapping).
 pub(crate) trait SceneSink {
     /// Fill an axis-aligned rectangle with `brush` under `transform`.
     fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect);
@@ -51,7 +51,7 @@ pub(crate) trait SceneSink {
     ///
     /// A single `radius`, unlike the two rounded methods above: neither backend
     /// has a per-corner blurred primitive, so the walk lowers a per-corner
-    /// shadow before it reaches a sink (see `encode_into_with_shaders`).
+    /// shadow before it reaches a sink (see `encode_commands`).
     fn draw_blurred_rounded_rect(
         &mut self,
         transform: Affine,
@@ -75,59 +75,19 @@ pub(crate) trait SceneSink {
     fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64);
 }
 
-/// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
-///
-/// Call `target.reset()` before this to clear the previous frame — the render
-/// path does exactly that, rebuilding the scene fresh every frame rather than
-/// accumulating draw calls across frames.
-///
-/// This is the no-shader-map convenience entry the public seam
-/// (`docs/ARCHITECTURE.md`'s scene-layer purity rule) exposes for shells that
-/// drive their own `vello::Renderer`: with no per-frame shader-override map,
-/// every `Command::ShaderQuad` lowers to its miss placeholder (a CPU-tier /
-/// no-prepass caller has no compiled shader targets anyway). The in-crate
-/// render path calls [`encode_into_with_shaders`] instead, once per frame.
-pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
-    encode_into(scene, target);
-}
-
-/// Generic worker behind [`encode_scene`]; kept separate so tests (and the
-/// `cpu-tier` sink) can drive it with a non-`vello` sink and no shader map. The
-/// empty map means every [`Command::ShaderQuad`] misses to its placeholder, so
-/// the `adapter_max` passed here is immaterial — `u32::MAX` (no extra clamp).
-///
-/// No root scaling either: a caller driving its own renderer targets a
-/// surface-sized texture (`FRUST_RENDER_SCALE` is the in-crate render path's
-/// own instrument, applied where that path knows its target's size).
+/// Encodes every command in `scene` into `sink`, under no root transform and
+/// with no shader-override map — so every [`Command::ShaderQuad`] lowers to its
+/// miss placeholder, which is all a CPU-tier caller (with no compiled shader
+/// targets of its own) could resolve anyway. The `adapter_max` handed to the
+/// walk is therefore immaterial: `u32::MAX`, i.e. no extra clamp.
 pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
-    encode_into_with_shaders(scene, Affine::IDENTITY, sink, &HashMap::new(), u32::MAX);
-}
-
-/// The whole `scene` under `root`, resolving each [`Command::ShaderQuad`]
-/// against `shader_images` (`(program id, clamped physical size)` → the shader
-/// pre-pass's registered override [`ImageData`]). A hit lowers to a
-/// `draw_image`; a miss keeps the placeholder fill.
-///
-/// `root` is pre-multiplied onto every command's own recorded transform (see
-/// [`encode_commands`]). It is `Affine::IDENTITY` for every ordinary frame —
-/// each command already carries its own composed transform, so the scene is
-/// encoded in the surface's device space. The render path passes
-/// `Affine::scale(s)` instead when `FRUST_RENDER_SCALE` shrank the target it
-/// is rendering into, which maps that same device space onto the smaller
-/// intermediate; the blit pass then stretches the result back over the
-/// swapchain.
-///
-/// Every [`Command::PushSnapshot`] lowers through the inline emulation in
-/// [`encode_commands`] — the one lowering this crate has for a snapshot
-/// bracket.
-pub(crate) fn encode_into_with_shaders(
-    scene: &Scene,
-    root: Affine,
-    sink: &mut impl SceneSink,
-    shader_images: &HashMap<(u64, u32, u32), ImageData>,
-    adapter_max: u32,
-) {
-    encode_commands(scene.commands(), root, sink, shader_images, adapter_max);
+    encode_commands(
+        scene.commands(),
+        Affine::IDENTITY,
+        sink,
+        &HashMap::new(),
+        u32::MAX,
+    );
 }
 
 /// The command walk behind every entry point above, parameterized by the
@@ -363,8 +323,8 @@ fn encode_commands(
                 // texture registered with vello as an image override — see
                 // `crate::renderer`'s pre-pass). A hit
                 // lowers to the same `draw_image` path a `Command::Image` uses,
-                // reusing `natural_to_dest_transform`'s natural→dest scaling so
-                // the physical-pixel target lands pixel-for-pixel in `dest`.
+                // with the sink's own natural→dest scaling, so the
+                // physical-pixel target lands pixel-for-pixel in `dest`.
                 //
                 // The map is keyed by `(id, clamped physical size)`, so the same
                 // program drawn at two sizes in one frame resolves each quad to
@@ -385,7 +345,7 @@ fn encode_commands(
                 // into the smaller target, one resample instead of a second
                 // pre-pass at another size.
                 let (w, h) = crate::shader_effects::clamp_size(
-                    crate::renderer::physical_size(*transform, *dest),
+                    physical_size(*transform, *dest),
                     adapter_max,
                 );
                 let transform = combined * *transform;
@@ -593,187 +553,25 @@ fn well_formed(elements: impl Iterator<Item = PathEl>) -> BezPath {
     out
 }
 
-impl SceneSink for vello::Scene {
-    fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect) {
-        self.fill(style, transform, brush, None, rect);
-    }
-
-    fn fill_rounded_rect(
-        &mut self,
-        style: Fill,
-        transform: Affine,
-        brush: &Brush,
-        rect: &Rect,
-        radii: RoundedRectRadii,
-    ) {
-        // `kurbo::RoundedRect` implements `Shape`, so it fills through the same
-        // path as a plain rect.
-        let rounded = RoundedRect::from_rect(*rect, radii);
-        self.fill(style, transform, brush, None, &rounded);
-    }
-
-    fn stroke_line(&mut self, transform: Affine, brush: &Brush, p0: Point, p1: Point, width: f64) {
-        let line = Line::new(p0, p1);
-        self.stroke(&Stroke::new(width), transform, brush, None, &line);
-    }
-
-    fn draw_glyph_run(&mut self, run: &GlyphRun) {
-        // `FontHandle` wraps `peniko::FontData`, which is exactly what
-        // `vello::Scene::draw_glyphs` accepts in 0.9.
-        self.draw_glyphs(run.font.font())
-            .font_size(run.font_size)
-            .brush(&run.brush)
-            .transform(run.transform)
-            .draw(
-                Fill::NonZero,
-                run.glyphs.iter().map(|g| vello::Glyph {
-                    id: g.id,
-                    x: g.x,
-                    y: g.y,
-                }),
-            );
-    }
-
-    fn push_clip(&mut self, transform: Affine, rect: &Rect) {
-        // A `push_layer` with a plain blend mode clips subsequent draws to the
-        // shape (the clip is implicit in the layer). The clip is applied under
-        // the command's own transform so it lines up with the (equally
-        // transformed) draws it encloses — e.g. the desktop shell's HiDPI scale.
-        self.push_layer(
-            Fill::NonZero,
-            peniko::BlendMode::default(),
-            1.0,
-            transform,
-            rect,
-        );
-    }
-
-    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radii: RoundedRectRadii) {
-        // Same layer-as-clip mechanism as `push_clip` above, with a rounded
-        // shape: `vello::Scene::push_layer` takes `clip: &impl Shape`, and
-        // `kurbo::RoundedRect` is one. The concrete `RoundedRect` is built
-        // HERE, inside the render crate — `frust-scene` carries only `Rect` +
-        // its own `CornerRadii` (scene-layer purity, `docs/ARCHITECTURE.md`).
-        let rounded = RoundedRect::from_rect(*rect, radii);
-        self.push_layer(
-            Fill::NonZero,
-            peniko::BlendMode::default(),
-            1.0,
-            transform,
-            &rounded,
-        );
-    }
-
-    fn pop_clip(&mut self) {
-        self.pop_layer();
-    }
-
-    fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect) {
-        // vello's `Scene::draw_image` draws at the image's *natural* pixel
-        // size under the given transform; map
-        // natural -> dest by scaling then translating to `dest`'s origin,
-        // composed under the incoming (widget-position) transform.
-        let Some(image_transform) = natural_to_dest_transform(transform, data, dest) else {
-            return;
-        };
-        vello::Scene::draw_image(self, data, image_transform);
-    }
-
-    fn draw_blurred_rounded_rect(
-        &mut self,
-        transform: Affine,
-        rect: &Rect,
-        color: Color,
-        radius: f64,
-        std_dev: f64,
-    ) {
-        vello::Scene::draw_blurred_rounded_rect(self, transform, *rect, color, radius, std_dev);
-    }
-
-    // These two impls rely on `vello::Scene`'s *inherent* `push_layer`/
-    // `pop_layer` methods outranking this trait's identically-named methods in
-    // Rust's method-resolution order (inherent methods are always preferred
-    // over trait methods) — `self.push_layer(...)`/`vello::Scene::pop_layer(self)`
-    // therefore call vello's own methods, not recurse into this `SceneSink`
-    // impl. This is implicit, not enforced by the compiler: a `vello` version
-    // bump that renames/removes either inherent method would silently make
-    // these calls recurse (infinite loop) instead of failing to compile.
-    // Re-verify this after any `vello` version bump; fully-qualify
-    // (`<vello::Scene>::push_layer`) if resolution ever becomes ambiguous.
-    fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32) {
-        self.push_layer(
-            Fill::NonZero,
-            peniko::BlendMode::default(),
-            alpha,
-            transform,
-            rect,
-        );
-    }
-
-    fn pop_layer(&mut self) {
-        vello::Scene::pop_layer(self);
-    }
-
-    fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
-        // The hole-punch: a layer whose composite is `Compose::DestOut` with an
-        // OPAQUE fill erases the destination (color *and* alpha) exactly where
-        // the source covers — `dst' = dst·(1−src.a)`, so a full-alpha fill
-        // zeroes the rect while the fill's own antialiased coverage keeps the
-        // erase pixel-exact at the edges. Deliberately NOT `Compose::Clear`:
-        // vello 0.9 applies Clear at 16-px-tile granularity, ignoring the
-        // layer's per-pixel clip coverage in boundary tiles, which bleeds the
-        // punch up to 15 px past an unaligned rect edge (pixel-proven by
-        // `tests/gpu_smoke.rs`'s unaligned-edge probe on Metal
-        // and as a visible ring on cupid). DestOut weights the erase by the
-        // source's own alpha, so unpainted pixels in a boundary tile are
-        // untouched by construction.
-        //
-        // Fill the clip inside the layer so the erase has full geometric
-        // coverage across `rect` (the color is irrelevant — only alpha drives
-        // DestOut).
-        //
-        // `self.push_layer`/`vello::Scene::pop_layer` resolve to vello's own
-        // inherent methods, not this `SceneSink` impl (see the note on the
-        // `push_layer` impl above — re-verify after any vello bump).
-        let blend = peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::DestOut);
-        self.push_layer(Fill::NonZero, blend, 1.0, transform, rect);
-        self.fill(
-            Fill::NonZero,
-            transform,
-            &Brush::Solid(Color::BLACK),
-            None,
-            rect,
-        );
-        vello::Scene::pop_layer(self);
-    }
-
-    fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
-        self.fill(Fill::NonZero, transform, brush, None, path);
-    }
-
-    fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64) {
-        self.stroke(&Stroke::new(width), transform, brush, None, path);
-    }
-}
-
-/// Compose `transform` (the widget's own position/scale) with the affine that
-/// maps an image's natural pixel rect `(0, 0, width, height)` onto `dest` —
-/// what vello's "draws at natural size under the given transform" contract
-/// (`vello::Scene::draw_image`'s doc comment) needs to land pixel-for-pixel
-/// inside `dest`. `None` for a degenerate (zero-area) natural size.
-fn natural_to_dest_transform(transform: Affine, data: &ImageData, dest: &Rect) -> Option<Affine> {
-    let natural_w = data.width as f64;
-    let natural_h = data.height as f64;
-    if natural_w <= 0.0 || natural_h <= 0.0 {
-        return None;
-    }
-    let scale_x = dest.width() / natural_w;
-    let scale_y = dest.height() / natural_h;
-    Some(
-        transform
-            * Affine::translate((dest.x0, dest.y0))
-            * Affine::scale_non_uniform(scale_x, scale_y),
-    )
+/// The physical-pixel extent of a shader quad: the axis-aligned bounding box of
+/// `dest` mapped through `transform` (the root transform carries the DPI scale),
+/// as `(width, height)` rounded to whole pixels. A degenerate/negative extent
+/// yields `0`, which `clamp_size` then floors to `1`.
+///
+/// Lives here, beside the [`Command::ShaderQuad`] lowering that recomputes each
+/// quad's `(program id, clamped physical size)` map key: the pre-pass that used
+/// to key the map under the same size was the vello tier's, and went with it.
+fn physical_size(transform: Affine, dest: Rect) -> (u32, u32) {
+    let bbox = transform.transform_rect_bbox(dest);
+    let to_u32 = |v: f64| {
+        let v = v.round();
+        if v.is_finite() && v > 0.0 {
+            v as u32
+        } else {
+            0
+        }
+    };
+    (to_u32(bbox.width()), to_u32(bbox.height()))
 }
 
 #[cfg(test)]
@@ -1205,22 +1003,6 @@ mod tests {
         );
     }
 
-    /// The rounded clip must reach a real `vello::Scene` (via
-    /// `kurbo::RoundedRect`, built inside this crate) without panicking — the
-    /// `RecordingSink` checks above only verify the structural mapping.
-    #[test]
-    fn rounded_clip_encodes_into_a_real_vello_scene_without_panicking() {
-        let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new(&mut scene);
-        builder.push_transform(Affine::translate((1.0, 1.0)));
-        builder.push_clip_rounded(Rect::new(0.0, 0.0, 64.0, 64.0), 16.0);
-        builder.draw_image(&two_by_two_image(), Rect::new(0.0, 0.0, 64.0, 64.0));
-        builder.pop_clip();
-
-        let mut vello_scene = vello::Scene::new();
-        encode_scene(&scene, &mut vello_scene);
-    }
-
     #[test]
     fn rounded_rect_maps_to_rounded_fill_with_radius() {
         let mut scene = Scene::new();
@@ -1421,11 +1203,11 @@ mod tests {
         let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
         builder.draw_shader(&program, dest, 1.0);
 
-        // Drive `encode_into_with_shaders` with a `RecordingSink` rather than
-        // a real `vello::Scene`, so the assertion needs no GPU device.
+        // Drive the walk with a `RecordingSink`, so the assertion needs no
+        // GPU device.
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(
-            &scene,
+        encode_commands(
+            scene.commands(),
             Affine::IDENTITY,
             &mut sink,
             &HashMap::new(),
@@ -1464,7 +1246,13 @@ mod tests {
         shader_images.insert((program.id(), 40, 40), two_by_two_image());
 
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(&scene, Affine::IDENTITY, &mut sink, &shader_images, max_dim);
+        encode_commands(
+            scene.commands(),
+            Affine::IDENTITY,
+            &mut sink,
+            &shader_images,
+            max_dim,
+        );
 
         assert_eq!(
             sink.events,
@@ -1501,7 +1289,13 @@ mod tests {
         shader_images.insert((program.id(), 80, 60), image_of_size(3, 3));
 
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(&scene, Affine::IDENTITY, &mut sink, &shader_images, max_dim);
+        encode_commands(
+            scene.commands(),
+            Affine::IDENTITY,
+            &mut sink,
+            &shader_images,
+            max_dim,
+        );
 
         assert_eq!(
             sink.events,
@@ -1748,29 +1542,6 @@ mod tests {
                 Event::PopClip,
             ]
         );
-    }
-
-    /// Encodes into a *real* `vello::Scene` (no GPU) to prove the new commands
-    /// don't panic through the actual `SceneSink` impl — a round-trip
-    /// check, not just the `RecordingSink` structural check.
-    #[test]
-    fn new_commands_encode_into_a_real_vello_scene_without_panicking() {
-        let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new(&mut scene);
-        let translate = Affine::translate((1.0, 1.0));
-        builder.push_transform(translate);
-        builder.draw_blurred_rounded_rect(Rect::new(0.0, 0.0, 20.0, 20.0), 4.0, 3.0, RED);
-        builder.push_clip(Rect::new(0.0, 0.0, 50.0, 50.0));
-        builder.push_layer(Rect::new(5.0, 5.0, 15.0, 15.0), 0.5);
-        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
-        builder.pop_layer();
-        builder.pop_clip();
-        // The hole-punch's `Compose::DestOut` layer must round-trip through the
-        // real `vello::Scene` sink without panicking.
-        builder.clear_rect(Rect::new(2.0, 2.0, 8.0, 8.0));
-
-        let mut vello_scene = vello::Scene::new();
-        encode_scene(&scene, &mut vello_scene);
     }
 
     fn triangle_path() -> BezPath {
@@ -2070,89 +1841,6 @@ mod tests {
         assert_close(&sorted_dash_lengths(&dashed), &[2.0, 2.0, 2.0]);
     }
 
-    /// The per-corner and dashed commands must reach a real `vello::Scene`
-    /// (through `kurbo::RoundedRect`/`kurbo::dash`, both built inside this
-    /// crate) without panicking — the `RecordingSink` checks above only verify
-    /// the structural mapping.
-    #[test]
-    fn per_corner_and_dashed_commands_encode_into_a_real_vello_scene_without_panicking() {
-        let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new(&mut scene);
-        let radii = CornerRadii::new(16.0, 0.0, 8.0, 4.0);
-        builder.push_clip_rounded_radii(Rect::new(0.0, 0.0, 64.0, 64.0), radii);
-        builder.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 32.0, 32.0), radii, Brush::Solid(RED));
-        builder.draw_blurred_rounded_rect_radii(Rect::new(0.0, 0.0, 32.0, 32.0), radii, 2.0, RED);
-        builder.pop_clip();
-        builder.stroke_path_dashed(
-            triangle_path(),
-            2.0,
-            DashPattern::new(3.0, 2.0).with_phase(1.0),
-            Brush::Solid(RED),
-        );
-
-        let mut vello_scene = vello::Scene::new();
-        encode_scene(&scene, &mut vello_scene);
-    }
-
-    /// A widget can paint a stroked arc via `PaintScene`/`SceneBuilder` without
-    /// any `frust-render` dependency, and it reaches a real `vello::Scene`
-    /// without panicking.
-    #[test]
-    fn arc_path_fill_and_stroke_encode_into_a_real_vello_scene_without_panicking() {
-        let path =
-            frust_scene::arc_path(Point::new(10.0, 10.0), 8.0, 0.0, std::f64::consts::PI / 2.0);
-
-        let mut scene = Scene::new();
-        let mut builder = SceneBuilder::new(&mut scene);
-        builder.fill_path(path.clone(), Brush::Solid(RED));
-        builder.stroke_path(path, 2.0, Brush::Solid(RED));
-
-        let mut vello_scene = vello::Scene::new();
-        encode_scene(&scene, &mut vello_scene);
-    }
-
-    #[test]
-    fn natural_to_dest_transform_scales_and_translates_under_identity() {
-        // A 2x2 natural image into a 40x40 dest offset by (5, 6) under an
-        // identity widget transform: uniform 20x scale (40 / 2), then
-        // translated to dest's origin.
-        let data = two_by_two_image();
-        let dest = Rect::new(5.0, 6.0, 45.0, 46.0);
-        let transform =
-            natural_to_dest_transform(Affine::IDENTITY, &data, &dest).expect("non-degenerate");
-
-        // The natural-space corners (0,0) and (2,2) must map exactly onto
-        // dest's corners.
-        assert_eq!(transform * Point::new(0.0, 0.0), Point::new(5.0, 6.0));
-        assert_eq!(transform * Point::new(2.0, 2.0), Point::new(45.0, 46.0));
-    }
-
-    #[test]
-    fn natural_to_dest_transform_composes_with_widget_transform() {
-        let data = two_by_two_image();
-        let dest = Rect::new(0.0, 0.0, 4.0, 4.0);
-        let widget_transform = Affine::translate((10.0, 20.0));
-        let transform =
-            natural_to_dest_transform(widget_transform, &data, &dest).expect("non-degenerate");
-
-        // Natural (0,0) maps to dest's origin (0,0), then the widget's own
-        // translate is applied on top.
-        assert_eq!(transform * Point::new(0.0, 0.0), Point::new(10.0, 20.0));
-    }
-
-    #[test]
-    fn natural_to_dest_transform_is_none_for_zero_area_natural_size() {
-        let data = ImageData {
-            data: Blob::from(Vec::<u8>::new()),
-            format: peniko::ImageFormat::Rgba8,
-            alpha_type: peniko::ImageAlphaType::Alpha,
-            width: 0,
-            height: 0,
-        };
-        let dest = Rect::new(0.0, 0.0, 10.0, 10.0);
-        assert!(natural_to_dest_transform(Affine::IDENTITY, &data, &dest).is_none());
-    }
-
     /// The `Command::PushSnapshot` inline emulation (acceptance criterion): a
     /// snapshot body with `alpha` 0.5 and `scale` 0.9 must lower to the exact
     /// same op sequence as the equivalent `push_transform` +
@@ -2269,7 +1957,7 @@ mod tests {
 
         let root = Affine::scale(2.0);
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(&scene, root, &mut sink, &HashMap::new(), u32::MAX);
+        encode_commands(scene.commands(), root, &mut sink, &HashMap::new(), u32::MAX);
 
         assert_eq!(
             sink.events,
@@ -2296,7 +1984,7 @@ mod tests {
 
         let root = Affine::translate((5.0, 5.0));
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(&scene, root, &mut sink, &HashMap::new(), u32::MAX);
+        encode_commands(scene.commands(), root, &mut sink, &HashMap::new(), u32::MAX);
 
         assert_eq!(
             sink.events,
@@ -2336,7 +2024,7 @@ mod tests {
 
         let encode = |root: Affine| {
             let mut sink = RecordingSink::default();
-            encode_into_with_shaders(&scene, root, &mut sink, &HashMap::new(), u32::MAX);
+            encode_commands(scene.commands(), root, &mut sink, &HashMap::new(), u32::MAX);
             sink.events
         };
 

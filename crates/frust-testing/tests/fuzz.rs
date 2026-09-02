@@ -130,7 +130,7 @@ const DIFFERENTIAL_TOLERANCE: Tolerance = Tolerance::new().with_channel(6).with_
 /// arms, over every case in a run.
 ///
 /// The second half of the bar (see the module docs). It is the same channel-8
-/// band `testing/goldens/CALIBRATION.md` measures the classic arm's own drift
+/// band the P1 engine-vs-`vello_cpu` comparison this suite runs is judged
 /// under, so the two numbers mean the same thing, and it sits above a measured
 /// worst of 6 — a deliberately thin margin, since the regressions this half
 /// exists to catch (a hairline landing on a different pixel, a cap or dash

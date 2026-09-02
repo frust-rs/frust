@@ -1,7 +1,6 @@
 //! GPU smoke tests: render Frust scenes offscreen through
 //! [`frust_render::HeadlessRenderer`] and read the pixels back. These exercise
-//! the real vello 0.9 / wgpu 29 pipeline end to end (the version-pin
-//! de-risking this workspace's rendering stack needs), so they are
+//! the real `frust-engine` / wgpu 29 pipeline end to end, so they are
 //! `#[ignore]`d and run manually on hardware with a GPU:
 //!
 //! ```text
@@ -16,37 +15,25 @@
 //! turn "which GPU did this run on?" into a refusal rather than a footnote.
 //! `--nocapture` prints the resolved adapter metadata each test records.
 //!
-//! Every case renders through the same public seams an app does
-//! (`encode_scene` inside the harness), so the actual scene-to-vello mapping
-//! is what gets validated, not a hand-written vello scene; the harness itself
-//! brackets each render in a wgpu `Validation` error scope and fails on any
-//! captured error, so an uncaptured-validation-error assertion is no longer
-//! each test's own job.
+//! Every case renders through the same public seams an app does (the harness
+//! drives `frust_engine::EngineRenderer` exactly as `SurfaceRenderer::submit`
+//! does), so the actual scene-to-pixels path is what gets validated, not a
+//! hand-written engine frame; the harness itself brackets each render in a
+//! wgpu `Validation` error scope and fails on any captured error, so an
+//! uncaptured-validation-error assertion is no longer each test's own job.
+//!
+//! Pixels come back PREMULTIPLIED (the engine's own convention — see
+//! [`frust_render::HeadlessImage`]), which the assertions below are written
+//! against; every content pixel they probe is opaque, where the two
+//! conventions agree, apart from the fully-erased ones the hole-punch case
+//! checks.
 
-use frust_render::{HeadlessOptions, HeadlessRenderer, HeadlessSpec, ShaderOverrideSpec};
+use frust_render::{HeadlessOptions, HeadlessRenderer, HeadlessSpec};
 use frust_scene::{Scene, SceneBuilder};
 use peniko::Brush;
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED};
 
 const SIZE: u32 = 64;
-
-/// A self-contained fullscreen-triangle WGSL module returning a solid green —
-/// the shape of the shader pre-pass's offscreen program (`shader_effects.rs`'s
-/// prelude + an `fs_main`), minus the uniform block a solid color needs.
-const SOLID_GREEN_WGSL: &str = r#"
-struct VsOut { @builtin(position) pos: vec4<f32> };
-@vertex
-fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
-    var out: VsOut;
-    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-    out.pos = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-    return out;
-}
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
-}
-"#;
 
 /// Creates the offscreen renderer and prints the GPU it resolved — the
 /// provenance (`docs/TESTING.md` § GPU Run Metadata) every promoted baseline
@@ -93,68 +80,12 @@ async fn run() {
     );
 }
 
-/// End-to-end smoke of the shader-showcase GPU mechanism the `encode` pre-pass
-/// (`renderer.rs`'s `run_shader_prepass`) performs: render a solid-color WGSL
-/// fragment shader into an offscreen `Rgba8Unorm` texture, register it with
-/// vello as an image override (`register_texture`), and draw it through Frust's
-/// scene encode — the exact `draw_image` a `Command::ShaderQuad` lowers to.
-/// Reads the presented pixels back and asserts the shader's color survived the
-/// override→atlas copy, with no uncaptured validation error (the harness fails
-/// the render itself on one).
-///
-/// The crate-private `ShaderEffects` wrapper is unit-tested in-crate; this
-/// covers the real-device GPU path it drives, which no headless surface can.
-#[test]
-#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-fn shader_override_solid_color_survives_the_atlas_copy() {
-    pollster::block_on(run_shader());
-}
-
-async fn run_shader() {
-    let mut headless = headless().await;
-
-    // Compile + run the fullscreen solid-green fragment shader into an
-    // offscreen target and hand it to vello as an image override.
-    let image_handle = headless
-        .register_shader_override(&ShaderOverrideSpec {
-            width: SIZE,
-            height: SIZE,
-            wgsl: SOLID_GREEN_WGSL,
-        })
-        .await
-        .expect("shader override failed");
-
-    // Draw it through the Frust scene encode — the `draw_image` a `ShaderQuad`
-    // lowers to.
-    let mut fk_scene = Scene::new();
-    {
-        let mut builder = SceneBuilder::new(&mut fk_scene);
-        builder.draw_image(
-            &image_handle,
-            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
-        );
-    }
-    let image = headless
-        .render(&fk_scene, &HeadlessSpec::new(SIZE, SIZE))
-        .await
-        .expect("headless render failed");
-
-    // Centre pixel came from the solid-green shader via the override copy.
-    let [r, g, b, _] = image.pixel(SIZE / 2, SIZE / 2);
-    assert!(
-        g > r && g > b,
-        "centre pixel should be green-dominant (the shader color), got rgb=({r},{g},{b})"
-    );
-}
-
 /// Pixel-level regression test for the Mode B hole punch: a `clear_rect`
 /// recorded INSIDE a
 /// clip/opacity layer group must still erase an opaque backdrop painted
-/// OUTSIDE the group (the encode walk hoists the punch to root — a
-/// group-local erase would be sealed in by the group composite), and the
-/// erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge (vello 0.9's
-/// `Compose::Clear` bleeds to whole boundary tiles, which is why the punch
-/// uses `Compose::DestOut`; both defects were first caught on-device).
+/// OUTSIDE the group (a group-local erase would be sealed in by the group
+/// composite), and the erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED
+/// edge (both defects were first caught on-device).
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
 fn clear_rect_punches_pixel_exact_through_a_layer_group() {
@@ -215,7 +146,7 @@ async fn run_clear_probe() {
 /// The inline lowering of a `Command::PushSnapshot` bracket, pixel for pixel
 /// — the only lowering this crate has for one.
 ///
-/// Reached through the public `encode_scene` seam alone: the bracket's
+/// Reached through the public headless seam alone: the bracket's
 /// presentation scale as a transform correction and its sub-unity alpha as a
 /// layer, which is what every render path and every tier produces. This pins
 /// the absolute arithmetic that lowering must hit and the z-order of a command
@@ -317,7 +248,7 @@ async fn run_snapshot() {
 /// 512, so a slip is visible on the very first row boundary.
 ///
 /// The same renderer then renders a second, differently sized frame, covering
-/// the device/`vello::Renderer`/target reuse across renders.
+/// the device/engine-renderer/target reuse across renders.
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
 fn unaligned_width_reads_back_without_row_padding() {
@@ -370,7 +301,7 @@ async fn run_row_padding() {
         );
     }
 
-    // A second render at a different size, through the same device and vello
+    // A second render at a different size, through the same device and engine
     // renderer, must be just as correct.
     let mut square = Scene::new();
     {

@@ -707,9 +707,9 @@ mod tests {
     }
 
     #[test]
-    fn desktop_cargo_run_env_sets_the_var_for_gpu() {
-        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Gpu));
-        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "gpu")]);
+    fn desktop_cargo_run_env_sets_the_var_for_engine() {
+        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Engine));
+        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "engine")]);
     }
 
     #[test]
