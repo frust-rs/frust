@@ -9,11 +9,9 @@
 //! On a multi-adapter host, pin the adapter the same way any other headless
 //! run does (`WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400`) — adapter
 //! selection goes through the environment-aware initializer
-//! [`frust_gpu::Context`] itself uses, so the knob is honoured.
+//! [`frust_gpu::RenderContext`] itself uses, so the knob is honoured.
 
-use frust_gpu::{
-    ColorAttachment, CommandBuffer, Context, ContextOptions, HeadlessTarget, RenderTarget,
-};
+use frust_gpu::{ColorAttachment, CommandBuffer, HeadlessTarget, RenderContext, RenderTarget};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -55,7 +53,7 @@ fn channel_u8(value: f64) -> u8 {
             (pin the adapter on a multi-GPU host with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
 fn clear_through_one_borrowed_encoder_reads_back_exactly() {
     pollster::block_on(async {
-        let mut context = Context::new(ContextOptions::default());
+        let mut context = RenderContext::new();
         let handle = context.device().await.expect("device creation");
 
         // 97x61: neither dimension is a multiple of wgpu's copy-row
@@ -106,10 +104,10 @@ fn clear_through_one_borrowed_encoder_reads_back_exactly() {
 fn two_headless_targets_on_one_context_render_in_one_submit() {
     // E12: desktop renders one window today, but the engine must not assume
     // it — two independent render targets, recorded and submitted through a
-    // single command buffer on one shared `Context`, must come back with
+    // single command buffer on one shared `RenderContext`, must come back with
     // their own distinct contents.
     pollster::block_on(async {
-        let mut context = Context::new(ContextOptions::default());
+        let mut context = RenderContext::new();
         let handle = context.device().await.expect("device creation");
 
         let width = 32;

@@ -42,11 +42,12 @@
 use anyhow::{Result, anyhow};
 
 /// Every swapchain format [`select_surface_format`] will configure a surface
-/// with, in preference order.
+/// with — a membership set, not a preference order.
 ///
 /// Both are 8-bit-per-channel unorm formats the engine's pipelines are built
-/// for; `Rgba8Unorm` is listed first so a platform reporting both lands on the
-/// same format the engine's offscreen targets use, sparing the channel swizzle.
+/// for, and the engine warms itself for whichever one the surface hands over,
+/// so neither is privileged. Which of the two a platform reporting both lands
+/// on is the *surface's* own preference order — see [`select_surface_format`].
 pub const SURFACE_FORMATS: [wgpu::TextureFormat; 2] = [
     wgpu::TextureFormat::Rgba8Unorm,
     wgpu::TextureFormat::Bgra8Unorm,
@@ -182,8 +183,61 @@ pub fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> boo
     alpha_mode_is_translucent(mode) && !alpha_mode_needs_premultiply(mode)
 }
 
-/// Picks the swapchain format to configure with: the first entry of
-/// [`SURFACE_FORMATS`] the surface reports.
+/// Whether `backend`'s compositor actually composites `mode` premultiplied,
+/// **despite** [`alpha_mode_is_straight_translucent`] answering true for it —
+/// an upstream wgpu-hal truth bug specific to one backend/mode pair, not a
+/// property of the mode alone.
+///
+/// True for `wgpu::Backend::Metal` with `CompositeAlphaMode::PostMultiplied`
+/// alone. wgpu-hal's Metal adapter advertises `PostMultiplied`
+/// (`wgpu-hal-29.0.4/src/metal/adapter.rs:422-425`,
+/// `composite_alpha_modes: [Opaque, PostMultiplied]`) but its surface
+/// configuration implements the mode as nothing beyond
+/// `render_layer.setOpaque(false)` (`wgpu-hal-29.0.4/src/metal/surface.rs:81-85`)
+/// — it never asks Core Animation to treat the layer's content as straight
+/// alpha, and Core Animation has no such mode: a `CAMetalLayer` ONLY
+/// composites premultiplied (MoltenVK's own equivalent exposes
+/// `OPAQUE | PRE_MULTIPLIED` for the identical layer, never a straight
+/// option). So a Metal `PostMultiplied` swapchain reads back exactly like a
+/// premultiplied one — `display = C·a + BG·(1−a)` — even though the mode's
+/// name and wgpu's advertised contract say straight. Handing it the
+/// spec-correct straight-alpha conversion therefore double-corrects: the
+/// frame is un-premultiplied for a compositor that was going to
+/// premultiply-composite it anyway, over-brightening every partial-alpha
+/// pixel — device-visible only at fractional alpha (an indigo/navy wash,
+/// black frames near a translucent split). See `docs/LIMITATIONS.md`'s
+/// `engine-metal-postmultiplied-truth-bug`, and re-check this against
+/// wgpu-hal 30's adapter/surface when that pin lands.
+///
+/// Every other backend keeps the ordinary reading: a genuinely-straight
+/// `PostMultiplied` compositor exists on at least one other backend (e.g.
+/// Vulkan's own `POST_MULTIPLIED` composite-alpha flag), so this predicate is
+/// Metal-specific rather than blanket-disbelieving the mode everywhere.
+///
+/// A **platform** fact rather than a renderer policy, which is why it sits
+/// beside [`resolve_alpha_mode`] here: which render path a renderer picks in
+/// response is the renderer's own business (see
+/// `frust_render::context::choose_engine_render_path`, the one caller).
+///
+/// Pure and (backend, mode)-only, so the decision is host-testable without a
+/// live adapter.
+pub fn compositor_expects_premultiplied(
+    backend: wgpu::Backend,
+    mode: wgpu::CompositeAlphaMode,
+) -> bool {
+    backend == wgpu::Backend::Metal && mode == wgpu::CompositeAlphaMode::PostMultiplied
+}
+
+/// Picks the swapchain format to configure with: the first format **the
+/// surface reports** that is one of [`SURFACE_FORMATS`].
+///
+/// The preference order is the *surface's*, not this module's — the platform
+/// lists its formats best-first, and taking its first supported entry is the
+/// selection every shipped frust build has configured its swapchain with
+/// (device-gated on Android/Vulkan, iOS/macOS/Metal and Windows). The engine
+/// warms its strip pipelines for whichever of the two it is handed, so neither
+/// is privileged here; reordering this to prefer `Rgba8Unorm` would silently
+/// change the swapchain format on the platforms that report `Bgra8Unorm` first.
 ///
 /// Errors when the surface supports neither, which no shipping platform does —
 /// the engine draws through a render pass into whichever of the two is
@@ -191,9 +245,11 @@ pub fn alpha_mode_is_straight_translucent(mode: wgpu::CompositeAlphaMode) -> boo
 pub fn select_surface_format(
     capabilities: &wgpu::SurfaceCapabilities,
 ) -> Result<wgpu::TextureFormat> {
-    SURFACE_FORMATS
-        .into_iter()
-        .find(|format| capabilities.formats.contains(format))
+    capabilities
+        .formats
+        .iter()
+        .copied()
+        .find(|format| SURFACE_FORMATS.contains(format))
         .ok_or_else(|| {
             anyhow!(
                 "frust-gpu: no supported surface format (Rgba8Unorm/Bgra8Unorm) in {:?}",
@@ -207,8 +263,8 @@ pub fn select_surface_format(
 /// Split out of [`ConfiguredSurface::configure`] so the configuration a surface
 /// gets is decided by a pure function over plain values and can be asserted
 /// without a device: `RENDER_ATTACHMENT` usage only, the caller's format and
-/// alpha mode verbatim, no view formats, and the fixed
-/// [`DESIRED_MAXIMUM_FRAME_LATENCY`].
+/// alpha mode verbatim, no view formats, and the fixed frame latency
+/// (`DESIRED_MAXIMUM_FRAME_LATENCY`, two frames in flight).
 ///
 /// `size` is `(width, height)` in physical pixels and must be non-zero on both
 /// axes; a zero-sized swapchain is a `wgpu` validation error, and the shell's
@@ -383,7 +439,7 @@ impl ConfiguredSurface {
 
     /// Whether this surface really came up translucent — the answer a shell's
     /// paint contract keys off, never the original
-    /// [`SurfaceAlphaRequest`](SurfaceAlphaRequest).
+    /// [`SurfaceAlphaRequest`].
     pub fn resolved_translucent(&self) -> bool {
         self.resolved_translucent
     }
@@ -556,21 +612,35 @@ mod tests {
     }
 
     #[test]
-    fn rgba8_is_preferred_over_bgra8_when_both_are_reported() {
-        let caps = caps_with_formats(&[
+    fn the_surfaces_own_order_decides_when_both_formats_are_reported() {
+        // The shipped selection: the platform lists its formats best-first and
+        // the first supported entry wins, whichever of the two that is. This is
+        // what every device-gated build configured its swapchain with; picking
+        // by THIS module's order instead would flip the format on platforms
+        // that report `Bgra8Unorm` first.
+        let bgra_first = caps_with_formats(&[
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
         ]);
         assert_eq!(
-            select_surface_format(&caps).unwrap(),
+            select_surface_format(&bgra_first).unwrap(),
+            wgpu::TextureFormat::Bgra8Unorm,
+            "the surface's own preference order decides, not this module's"
+        );
+        let rgba_first = caps_with_formats(&[
             wgpu::TextureFormat::Rgba8Unorm,
-            "preference is this module's order, not the surface's"
+            wgpu::TextureFormat::Bgra8Unorm,
+        ]);
+        assert_eq!(
+            select_surface_format(&rgba_first).unwrap(),
+            wgpu::TextureFormat::Rgba8Unorm
         );
     }
 
     #[test]
-    fn bgra8_is_taken_when_it_is_the_only_supported_format() {
-        // The shape a Metal/Dx12 surface reports: no `Rgba8Unorm` swapchain.
+    fn unsupported_formats_are_skipped_over_rather_than_taken() {
+        // The shape a Metal/Dx12 surface reports: an sRGB variant first, which
+        // is not one of ours, then the plain `Bgra8Unorm` that is.
         let caps = caps_with_formats(&[
             wgpu::TextureFormat::Bgra8UnormSrgb,
             wgpu::TextureFormat::Bgra8Unorm,
@@ -621,6 +691,102 @@ mod tests {
                 config.desired_maximum_frame_latency,
                 DESIRED_MAXIMUM_FRAME_LATENCY
             );
+        }
+    }
+
+    #[test]
+    fn forced_mismatch_translucent_request_resolves_not_translucent() {
+        // A surface whose advertised capabilities carry NO translucent mode,
+        // asked for translucency. The request is honoured as far as it can be
+        // (`Auto`), but the RESOLVED translucency — the value
+        // `SurfaceRenderer::surface_resolved_translucent` hands the shells — is
+        // `false`, so the shells keep the opaque (Mode A) paint contract: an
+        // opaque base colour and no `ClearRect` punch.
+        for modes in [
+            [wgpu::CompositeAlphaMode::Opaque].as_slice(),
+            &[wgpu::CompositeAlphaMode::Auto],
+            &[],
+        ] {
+            let caps = caps_with_alpha_modes(modes);
+            let resolved = resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps);
+            assert_eq!(resolved, wgpu::CompositeAlphaMode::Auto, "{modes:?}");
+            assert!(
+                !alpha_mode_is_translucent(resolved),
+                "a fallback-to-opaque surface must never report translucent ({modes:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn happy_path_translucent_request_resolves_translucent() {
+        // The shipped configs stay unchanged: Android (`Inherit`-only) and iOS
+        // (`[Opaque, PostMultiplied]`) both resolve to a translucent mode, so
+        // the punch + transparent base keep running exactly as today.
+        for modes in [
+            [wgpu::CompositeAlphaMode::Inherit].as_slice(),
+            &[
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ],
+        ] {
+            let resolved = resolve_alpha_mode(
+                SurfaceAlphaRequest::TranslucentPreferred,
+                &caps_with_alpha_modes(modes),
+            );
+            assert!(alpha_mode_is_translucent(resolved), "{modes:?}");
+        }
+        // An opaque request never reports translucent, whatever the surface
+        // advertises.
+        assert!(!alpha_mode_is_translucent(resolve_alpha_mode(
+            SurfaceAlphaRequest::Opaque,
+            &caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Inherit]),
+        )));
+    }
+
+    /// Every composite alpha mode a surface can resolve to, so a claim about
+    /// the truth bug is made across the whole space rather than the modes it
+    /// was written for.
+    const EVERY_ALPHA_MODE: [wgpu::CompositeAlphaMode; 5] = [
+        wgpu::CompositeAlphaMode::Auto,
+        wgpu::CompositeAlphaMode::Opaque,
+        wgpu::CompositeAlphaMode::Inherit,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::PostMultiplied,
+    ];
+
+    #[test]
+    fn compositor_expects_premultiplied_is_metal_post_multiplied_only() {
+        // Direct guard on the predicate itself, across the whole (backend,
+        // mode) space: the upstream wgpu-hal truth bug is one backend/mode
+        // pair, and must never spread to another backend or another mode.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                let expected = backend == wgpu::Backend::Metal
+                    && mode == wgpu::CompositeAlphaMode::PostMultiplied;
+                assert_eq!(
+                    compositor_expects_premultiplied(backend, mode),
+                    expected,
+                    "compositor_expects_premultiplied({backend:?}, {mode:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_truth_bug_only_ever_contradicts_a_straight_translucent_mode() {
+        // The predicate exists to override `alpha_mode_is_straight_translucent`
+        // for one pair; anywhere it answers true, that predicate must have
+        // answered true too, or it would be silently redirecting a mode that
+        // never needed conversion in the first place.
+        for backend in wgpu::Backend::ALL {
+            for mode in EVERY_ALPHA_MODE {
+                if compositor_expects_premultiplied(backend, mode) {
+                    assert!(
+                        alpha_mode_is_straight_translucent(mode),
+                        "{backend:?}/{mode:?} is contradicted without being straight-translucent"
+                    );
+                }
+            }
         }
     }
 }

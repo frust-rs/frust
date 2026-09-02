@@ -1,8 +1,8 @@
 //! [`SurfaceRenderer`]: the surface-lifecycle state machine that
 //! renders a [`frust_scene::Scene`] into one window's swapchain each frame.
 //!
-//! Wraps the pure lifecycle logic in [`crate::lifecycle`] around the actual
-//! `wgpu` resources: it starts in [`SurfacePhase::NoSurface`], becomes
+//! Wraps the pure lifecycle logic in [`frust_gpu::lifecycle`] around the
+//! actual `wgpu` resources: it starts in [`SurfacePhase::NoSurface`], becomes
 //! renderable on `on_surface_created`, resizes on `on_surface_changed`, tears
 //! down on `on_surface_destroyed`, and drops to [`SurfacePhase::SurfaceLost`]
 //! when the swapchain reports `Lost` mid-frame.
@@ -11,13 +11,14 @@
 //! encode copies the frame's scene, then acquire → one
 //! `EngineRenderer::encode` into the acquired swapchain view and its
 //! surface-owned depth attachment
-//! ([`crate::context::RenderPath::EngineDirect`]) → submit → present →
+//! ([`RenderPath::EngineDirect`](crate::context::RenderPath::EngineDirect)) → submit → present →
 //! `end_frame`. No intermediate and no blit. A swapchain whose compositor
 //! genuinely reads it as STRAIGHT alpha takes the same shape with one pass
 //! appended and one indirection added: the frame is encoded into a
 //! surface-owned intermediate and un-premultiplied into the acquired view from
 //! there, in the same encoder
-//! ([`crate::context::RenderPath::EngineDirectUnpremultiply`]). iOS's sole
+//! ([`RenderPath::EngineDirectUnpremultiply`](crate::context::RenderPath::EngineDirectUnpremultiply)).
+//! iOS's sole
 //! translucent mode (`PostMultiplied`) does NOT take that arm: it is backed
 //! by Metal, whose compositor reads a `PostMultiplied` swapchain premultiplied
 //! regardless of the mode's name (an upstream wgpu-hal truth bug — see
@@ -37,43 +38,12 @@ use std::time::Duration;
 #[cfg(feature = "engine-tier")]
 use kurbo::Affine;
 
-use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
-use crate::lifecycle::{
+use crate::context::{EngineSurface, RenderPath};
+use frust_gpu::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
-
-/// Caller-requested alpha-compositing behavior for a surface configuration —
-/// the `frust-render` public seam a shell picks
-/// between an opaque (today's default) and a translucent-preferred surface;
-/// the resolved `wgpu::CompositeAlphaMode` itself never crosses this boundary
-/// (mirrors [`DetachedSurface`]'s opacity — see `docs/CODE_STANDARDS.md`'s
-/// wgpu-leak anti-pattern), so this type stays `kurbo`/`peniko`-free too.
-///
-/// Resolution (`crate::context::resolve_alpha_mode`) happens inside
-/// [`RenderContext::create_render_surface`](crate::context::RenderContext::create_render_surface),
-/// validated against the live surface's `SurfaceCapabilities::alpha_modes`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SurfaceAlphaRequest {
-    /// Today's behavior for every existing caller: `wgpu::CompositeAlphaMode::Auto`,
-    /// bit-for-bit unchanged.
-    Opaque,
-    /// Prefer a translucent alpha-compositing mode (Mode B platform views),
-    /// trying
-    /// `Inherit` (Android's only reported mode) then `PostMultiplied` (iOS's
-    /// translucent mode) then `PreMultiplied`, in that order, against the
-    /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
-    /// a `log::warn!`) when none of those three is available — translucency
-    /// is then unavailable on that surface.
-    ///
-    /// **This is a request, not an outcome.** Never key a paint contract off
-    /// it: read
-    /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
-    /// after the surface is installed instead — a fallback
-    /// must degrade to the opaque Mode A contract, or the hole punch presents
-    /// black rectangles on an opaque swapchain.
-    TranslucentPreferred,
-}
+use frust_gpu::{DetachedSurface, RenderContext, SurfaceAlphaRequest};
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
@@ -81,7 +51,7 @@ pub enum SurfaceAlphaRequest {
 /// `RenderSurface`, is dropped on every transition out of `SurfaceReady`,
 /// upholding the "no `SurfaceTexture`/surface outlives a transition" invariant.
 struct ReadySurface {
-    surface: ConfiguredSurface,
+    surface: EngineSurface,
     /// The tier-specific renderer that produces this frame's pixels — on the
     /// engine arms it targets the acquired swapchain texture in `submit`.
     backend: TierBackend,
@@ -90,7 +60,7 @@ struct ReadySurface {
     /// its data is framed under, so [`SurfaceRenderer::pipeline_cache_data`] can
     /// hand back a validatable blob. `None` on adapters without
     /// `PIPELINE_CACHE` (Metal/DX12) — see
-    /// [`crate::context::RenderContext::create_pipeline_cache`].
+    /// [`frust_gpu::RenderContext::create_pipeline_cache`].
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
 }
 
@@ -118,7 +88,7 @@ enum TierBackend {
         ///
         /// Counted rather than logged per frame: a refusal that reproduces
         /// every frame would otherwise flood the log with one identical line
-        /// per vsync. The count feeds [`crate::context::decide_log_action`] —
+        /// per vsync. The count feeds [`frust_gpu::context::decide_log_action`] —
         /// the same latch the uncaptured-`wgpu`-error handler uses — so the
         /// first few refusals are reported in full, the latch is announced
         /// once, and the running total keeps surfacing on the periodic debug
@@ -235,7 +205,7 @@ impl DeferredPresent {
 
 /// Per-surface renderer and lifecycle state machine.
 ///
-/// Holds the current [`SurfaceState`] plus the cross-call stashes one frame
+/// Holds the current surface state plus the cross-call stashes one frame
 /// needs. Constructed empty with [`SurfaceRenderer::new`]; the shell brings it
 /// online with [`on_surface_created`](Self::on_surface_created).
 pub struct SurfaceRenderer {
@@ -247,7 +217,7 @@ pub struct SurfaceRenderer {
     /// `SurfaceLost`), and on installing a fresh surface.
     consecutive_invalid: u8,
     /// Persisted, framed `wgpu::PipelineCache` blob (see
-    /// [`crate::pipeline_cache`]) a prior run wrote and the shell restored from
+    /// [`frust_gpu::pipeline_cache`]) a prior run wrote and the shell restored from
     /// disk via [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data),
     /// consumed at the next surface install to seed the engine's shader-pipeline
     /// compilation. `None` is a cold start. Only meaningful on adapters with
@@ -358,7 +328,7 @@ impl SurfaceRenderer {
 
     /// The current pipeline-cache data to persist, framed with the adapter
     /// fingerprint so a later launch can validate it before reuse (see
-    /// [`crate::pipeline_cache`]).
+    /// [`frust_gpu::pipeline_cache`]).
     ///
     /// `None` when there is no live cache to read — no surface installed, or an
     /// adapter without `PIPELINE_CACHE` (Metal/DX12) — or when the driver has
@@ -372,7 +342,7 @@ impl SurfaceRenderer {
         };
         let (cache, key) = ready.pipeline_cache.as_ref()?;
         let data = cache.get_data()?;
-        Some(crate::pipeline_cache::frame(key, &data))
+        Some(frust_gpu::pipeline_cache::frame(key, &data))
     }
 
     /// Whether the **live** surface actually resolved to a translucent
@@ -402,7 +372,7 @@ impl SurfaceRenderer {
     /// anti-pattern).
     pub fn surface_resolved_translucent(&self) -> bool {
         match &self.state {
-            SurfaceState::Ready(ready) => ready.surface.resolved_translucent,
+            SurfaceState::Ready(ready) => ready.surface.resolved_translucent(),
             SurfaceState::NoSurface | SurfaceState::Lost => false,
         }
     }
@@ -475,16 +445,16 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
-        let surface = ctx
-            .create_surface(
-                window,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
+        let surface = crate::context::create_engine_surface_from_target(
+            ctx,
+            window,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -513,16 +483,16 @@ impl SurfaceRenderer {
         height: u32,
         alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
-        let surface = ctx
-            .create_render_surface(
-                surface.into_surface(),
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            surface.into_surface(),
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -534,13 +504,13 @@ impl SurfaceRenderer {
     /// sanctioned unsafe entry points (see also
     /// [`on_surface_created_from_metal_layer`](Self::on_surface_created_from_metal_layer));
     /// the raw-pointer handling is isolated in
-    /// [`crate::lifecycle::create_android_surface`].
+    /// [`frust_gpu::lifecycle::create_android_surface`].
     ///
     /// # Safety
     ///
     /// `window_ptr` must be a valid, acquired `ANativeWindow*` that outlives the
     /// surface (and all its `SurfaceTexture`s). See
-    /// [`crate::lifecycle::create_android_surface`] for the full contract.
+    /// [`frust_gpu::lifecycle::create_android_surface`] for the full contract.
     pub async unsafe fn on_surface_created_from_android_window(
         &mut self,
         ctx: &mut RenderContext,
@@ -552,17 +522,18 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
         // the surface.
-        let raw = unsafe { crate::lifecycle::create_android_surface(&ctx.instance, window_ptr) }?;
-        let surface = ctx
-            .create_render_surface(
-                raw,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::AutoVsync,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
+        let raw =
+            unsafe { frust_gpu::lifecycle::create_android_surface(ctx.instance(), window_ptr) }?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            raw,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::AutoVsync,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
@@ -570,7 +541,7 @@ impl SurfaceRenderer {
     /// Swift shell surface creation), transitioning to
     /// [`SurfacePhase::SurfaceReady`].
     ///
-    /// Only compiled on Apple targets (mirrors [`crate::lifecycle::create_metal_surface`]'s
+    /// Only compiled on Apple targets (mirrors [`frust_gpu::lifecycle::create_metal_surface`]'s
     /// gating): the raw-pointer handling is isolated there, one of the
     /// framework's sanctioned unsafe boundaries alongside
     /// [`on_surface_created_from_android_window`](Self::on_surface_created_from_android_window).
@@ -583,7 +554,7 @@ impl SurfaceRenderer {
     ///
     /// `layer_ptr` must be a valid, live `CAMetalLayer*` that outlives the
     /// surface (and all its `SurfaceTexture`s). See
-    /// [`crate::lifecycle::create_metal_surface`] for the full contract.
+    /// [`frust_gpu::lifecycle::create_metal_surface`] for the full contract.
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     pub async unsafe fn on_surface_created_from_metal_layer(
         &mut self,
@@ -596,23 +567,23 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
-        let raw = unsafe { crate::lifecycle::create_metal_surface(&ctx.instance, layer_ptr) }?;
-        let surface = ctx
-            .create_render_surface(
-                raw,
-                width.max(1),
-                height.max(1),
-                wgpu::PresentMode::Fifo,
-                alpha,
-            )
-            .await
-            .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
+        let raw = unsafe { frust_gpu::lifecycle::create_metal_surface(ctx.instance(), layer_ptr) }?;
+        let surface = crate::context::create_engine_surface(
+            ctx,
+            raw,
+            width.max(1),
+            height.max(1),
+            wgpu::PresentMode::Fifo,
+            alpha,
+        )
+        .await
+        .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 
     /// Wraps a freshly created `RenderSurface` in a device-bound renderer and
     /// installs it as the live surface. Shared by the safe and Android paths.
-    fn install_surface(&mut self, ctx: &RenderContext, surface: ConfiguredSurface) -> Result<()> {
+    fn install_surface(&mut self, ctx: &RenderContext, surface: EngineSurface) -> Result<()> {
         // Seed the engine's shader-pipeline compilation from a persisted
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
@@ -621,10 +592,12 @@ impl SurfaceRenderer {
         // engine arm can hand it to `EngineRenderer::new`.
         let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
 
-        // Pick the tier backend the context's probe selected. `Engine` is the
-        // only tier `RenderTier` names; a build without the `engine-tier`
-        // feature never reaches here at all (`ensure_device` guards it).
-        let backend = match ctx.selected_tier() {
+        // Build the tier backend. `Engine` is the only tier `RenderTier`
+        // names, and a build without the `engine-tier` feature never reaches
+        // here at all: `context::create_engine_surface` resolves the tier
+        // through the probe and refuses one this build did not compile in,
+        // before any surface is configured.
+        let backend = match crate::RenderTier::Engine {
             #[cfg(feature = "engine-tier")]
             crate::RenderTier::Engine => {
                 let device = &ctx.device_handle().device;
@@ -635,7 +608,7 @@ impl SurfaceRenderer {
                 // land in a surface-owned intermediate instead
                 // ([`engine_target_format`]).
                 //
-                // A resize keeps that format (`RenderContext::resize_surface`
+                // A resize keeps that format (`EngineSurface::resize`
                 // rewrites only the dimensions), so `on_surface_changed`
                 // resizes the renderer in place; a FORMAT change arrives as a
                 // fresh surface and lands back here, building a renderer
@@ -644,7 +617,7 @@ impl SurfaceRenderer {
                 // re-warm after a format change is a driver-cache hit rather
                 // than a cold compile.
                 let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
-                let engine_format = engine_target_format(&surface.path, surface.config.format);
+                let engine_format = engine_target_format(&surface.path, surface.config().format);
                 let engine = frust_engine::EngineRenderer::new(
                     device,
                     &caps,
@@ -661,9 +634,9 @@ impl SurfaceRenderer {
                         "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
                          a {:?} swapchain, {}x{}, adapter `{}`)",
                         engine_format,
-                        surface.config.format,
-                        surface.config.width,
-                        surface.config.height,
+                        surface.config().format,
+                        surface.config().width,
+                        surface.config().height,
                         caps.adapter_name
                     );
                 });
@@ -734,7 +707,9 @@ impl SurfaceRenderer {
             return;
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
-            ctx.resize_surface(&mut ready.surface, width, height);
+            ready
+                .surface
+                .resize(&ctx.device_handle().device, width, height);
             match &mut ready.backend {
                 #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { engine, .. } => {
@@ -742,13 +717,13 @@ impl SurfaceRenderer {
                     // pool's parked entries, and the depth attachment it would
                     // own if the surface did not) are re-established here,
                     // off the frame path. The surface's own depth attachment
-                    // was recreated by `resize_surface` above, in the same
-                    // step that reconfigured the swapchain.
+                    // was recreated by `EngineSurface::resize` above, in
+                    // the same step that reconfigured the swapchain.
                     //
                     // The pipelines survive: only a FORMAT change would need a
                     // renderer warmed for a different target, and a resize
-                    // never changes one — `resize_surface` rewrites the
-                    // dimensions alone. Asserted rather than assumed, since a
+                    // never changes one — `EngineSurface::resize` rewrites
+                    // the dimensions alone. Asserted rather than assumed, since a
                     // silent divergence would compile a fresh pipeline on the
                     // frame path for every frame that followed. Compared
                     // against the format the ARM implies, not the swapchain's
@@ -756,7 +731,7 @@ impl SurfaceRenderer {
                     // the engine's off-screen format) is not reported as drift
                     // on every resize.
                     let expected =
-                        engine_target_format(&ready.surface.path, ready.surface.config.format);
+                        engine_target_format(&ready.surface.path, ready.surface.config().format);
                     if engine.format() != expected {
                         log::warn!(
                             "frust-render: engine renderer warmed for {:?} but this surface's \
@@ -982,7 +957,7 @@ impl SurfaceRenderer {
         let ready: &mut ReadySurface = ready;
 
         use wgpu::CurrentSurfaceTexture as Cst;
-        let acquired = ready.surface.surface.get_current_texture();
+        let acquired = ready.surface.gpu.surface().get_current_texture();
         let status = match &acquired {
             Cst::Success(_) | Cst::Suboptimal(_) => AcquireStatus::Usable,
             Cst::Outdated => AcquireStatus::Outdated,
@@ -1022,7 +997,7 @@ impl SurfaceRenderer {
                 AcquireOutcome::Acquired
             }
             AcquireAction::Reconfigure => {
-                ctx.configure_surface(&ready.surface);
+                ready.surface.reconfigure(&ctx.device_handle().device);
                 AcquireOutcome::Reconfigured
             }
             AcquireAction::Lose => {
@@ -1180,9 +1155,9 @@ impl SurfaceRenderer {
                     engine_scene,
                     frust_engine::EngineTarget {
                         view: &swapchain_view,
-                        format: surface.config.format,
-                        width: surface.config.width,
-                        height: surface.config.height,
+                        format: surface.config().format,
+                        width: surface.config().width,
+                        height: surface.config().height,
                         // The surface's own attachment, recreated with the
                         // swapchain (`context::RenderPath::EngineDirect`).
                         // Nothing else writes it, so it is not pre-cleared:
@@ -1287,9 +1262,9 @@ impl SurfaceRenderer {
                         // swapchain: what the swapchain receives is the
                         // conversion's output.
                         view: intermediate_view,
-                        format: engine_target_format(&surface.path, surface.config.format),
-                        width: surface.config.width,
-                        height: surface.config.height,
+                        format: engine_target_format(&surface.path, surface.config().format),
+                        width: surface.config().width,
+                        height: surface.config().height,
                         depth: Some(depth.view()),
                         // The INTERMEDIATE's own convention, which is
                         // premultiplied like every other engine target — the
@@ -1376,7 +1351,7 @@ fn engine_target_format(
 }
 
 /// Reports the `count`-th frame this surface's engine renderer refused, under
-/// [`crate::context::decide_log_action`]'s latch.
+/// [`frust_gpu::context::decide_log_action`]'s latch.
 ///
 /// A refusal is a per-frame event on a path that can reproduce every vsync — a
 /// scheduler escalation on a layer shape the engine does not serve, or a
@@ -1389,19 +1364,19 @@ fn engine_target_format(
 /// were lost, not merely that some were.
 #[cfg(feature = "engine-tier")]
 fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
-    match crate::context::decide_log_action(count) {
-        crate::context::LogAction::Log => {
+    match frust_gpu::context::decide_log_action(count) {
+        frust_gpu::context::LogAction::Log => {
             log::warn!(
                 "frust-render: engine refused frame {count} on this surface — {error}; the \
                  frame is dropped rather than presented"
             );
         }
-        crate::context::LogAction::SuppressionNotice => {
+        frust_gpu::context::LogAction::SuppressionNotice => {
             log::warn!(
                 "frust-render: further engine frame refusals suppressed (total so far: {count})"
             );
         }
-        crate::context::LogAction::Silent { debug_bump } => {
+        frust_gpu::context::LogAction::Silent { debug_bump } => {
             if debug_bump {
                 log::debug!(
                     "frust-render: engine frame refusals now {count} on this surface (still \
@@ -1636,7 +1611,7 @@ mod tests {
             );
         }
 
-        for format in crate::context::SURFACE_FORMATS {
+        for format in frust_gpu::SURFACE_FORMATS {
             let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
             let depth = frust_engine::DepthTexture::new(&device, SIZE, SIZE);
             let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)

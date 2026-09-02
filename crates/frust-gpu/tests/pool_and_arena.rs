@@ -486,10 +486,10 @@ fn arena_grows_only_and_keeps_its_high_water_mark() {
 #[ignore = "needs a real GPU adapter; run with `cargo test -p frust-gpu -- --ignored` \
             (pin the adapter on a multi-GPU host with WGPU_BACKEND / WGPU_ADAPTER_NAME)"]
 fn gpu_pool_and_arena_round_trip_on_a_real_device() {
-    use frust_gpu::context::{Context, ContextOptions};
+    use frust_gpu::context::RenderContext;
 
     pollster::block_on(async {
-        let mut context = Context::new(ContextOptions::default());
+        let mut context = RenderContext::new();
         let handle = context.device().await.expect("device creation");
         println!(
             "frust-gpu pool/arena adapter: {:?}",

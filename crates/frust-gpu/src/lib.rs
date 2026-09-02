@@ -1,11 +1,12 @@
 //! The `wgpu` adapter/device/surface substrate the render engine builds on.
 //!
 //! `frust-gpu` owns nothing rendering-specific — no scene display list, no
-//! shader pipeline, no `vello`/`glifo` dependency. Its whole job is the layer
-//! directly above `wgpu` itself: probing what an adapter can actually do
-//! ([`caps::TierCaps`]) and, in later work, turning that into instances,
-//! devices, surfaces and pooled GPU resources a renderer built on top of it
-//! can consume without re-deriving adapter capabilities itself.
+//! strip pipeline, no `glifo` dependency. Its whole job is the layer directly
+//! above `wgpu` itself: probing what an adapter can actually do
+//! ([`caps::TierCaps`]) and turning that into the instance, device, surfaces
+//! and pooled GPU resources a renderer built on top of it consumes without
+//! re-deriving adapter capabilities itself. [`context::RenderContext`] is that
+//! foundation, and the one `frust-render` re-exports to its shells.
 //!
 //! [`caps::TierCaps::probe`] is the only place a real `wgpu::Adapter` is
 //! consulted; every decision built on top of it takes the plain
@@ -19,6 +20,7 @@ pub mod arena;
 pub mod caps;
 pub mod context;
 pub mod diag;
+pub mod effects;
 pub mod encoder;
 pub mod headless;
 pub mod lifecycle;
@@ -32,8 +34,9 @@ pub mod texture;
 
 pub use arena::{BufferSlice, BufferUploader, HostBuffer};
 pub use caps::{DownlevelProfile, TierCaps};
-pub use context::{Context, ContextOptions, DeviceHandle};
+pub use context::{ContextOptions, DeviceHandle, RenderContext};
 pub use diag::{GpuFrameSpans, TimestampRing};
+pub use effects::ShaderEffects;
 pub use encoder::CommandBuffer;
 pub use headless::HeadlessTarget;
 pub use lifecycle::{
@@ -46,6 +49,7 @@ pub use pool::{PoolKey, PoolStats, PooledTexture, TextureAllocator, TexturePool}
 pub use shader::{ShaderId, ShaderLibrary};
 pub use surface::{
     ConfiguredSurface, DetachedSurface, SURFACE_FORMATS, SurfaceAlphaRequest, SurfaceFactory,
+    compositor_expects_premultiplied,
 };
 pub use texture::{
     Attachment, ColorAttachment, DepthAttachment, RenderTarget, SceneTextureId, Texture,
