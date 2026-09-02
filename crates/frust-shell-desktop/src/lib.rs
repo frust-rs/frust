@@ -3,7 +3,7 @@
 //! crate builds on.
 //!
 //! Wraps winit 0.30's [`ApplicationHandler`](winit::application::ApplicationHandler)
-//! event loop around the Frust render stack (`frust-render` + vello), so a
+//! event loop around the Frust render stack (`frust-render` + `frust-engine`), so a
 //! `cargo run` opens the app in a native window with a sub-second rebuild loop
 //! and no mobile toolchain. The facade crate (`frust`) drives this via
 //! [`run_desktop`] (zero-config) or [`run_desktop_with`] (with the app's

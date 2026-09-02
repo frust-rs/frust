@@ -2010,10 +2010,10 @@ mod tests {
     /// the scaffolded `linux/app.desktop`, and the real app crate.
     ///
     /// Debug mode on purpose: this compiles the app's entire dependency graph
-    /// (winit/vello/wgpu), and a release build of it would multiply an already
+    /// (winit/wgpu/frust-engine), and a release build of it would multiply an already
     /// long compile for no extra coverage of anything this module owns.
     #[test]
-    #[ignore = "compiles a scaffolded project's full dependency graph (winit/vello/wgpu); run with `cargo test -p frust-drive --lib -- --ignored scaffolded_linux_bundle`"]
+    #[ignore = "compiles a scaffolded project's full dependency graph (winit/wgpu/frust-engine); run with `cargo test -p frust-drive --lib -- --ignored scaffolded_linux_bundle`"]
     fn scaffolded_linux_bundle_smoke_builds_a_real_bundle_on_this_host() {
         use crate::build_info::BuildMode;
         use crate::process::RealProcessRunner;

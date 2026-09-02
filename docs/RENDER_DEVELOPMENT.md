@@ -51,7 +51,7 @@ above):**
 | `FRUST_ENGINE_NO_DEPTH` | Disables the engine's depth attachment/test (`config::depth_disabled`); the two draw passes collapse into one blended painter-order pass. | Wired |
 | `FRUST_ENGINE_NO_ATLAS` | Routes every glyph/image atlas resolution to a logged skip instead. | Wired |
 | `FRUST_ENGINE_ATLAS_SIZE=<W>x<H>` | Overrides the capability-chosen per-layer atlas extent (e.g. `2048x2048`); runtime wins over compile-time. | Wired |
-| `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below); the classic vello tier ignores it, and no browser/wasm measurement exists — the arm was cancelled, not merely unimplemented (`engine-webgl2-unhosted` in LIMITATIONS.md). | Wired |
+| `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below); no browser/wasm measurement exists — the arm was cancelled, not merely unimplemented (`engine-webgl2-unhosted` in LIMITATIONS.md). | Wired |
 | `FRUST_ENGINE_NO_LAYERS` / `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the layer-cache/resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
 
 Each follows `FRUST_TRACE`'s compile-time-`option_env!`-or-runtime-`std::env::var` shape, runtime
@@ -153,7 +153,7 @@ promoted. Each case's measured engine-vs-`vello_cpu` tolerance is documented in
 
 **iOS Simulator engine gate** (gate: `engine-p6-ios-simulator-renders`;
 `crates/frust-testing/tests/ios_sim.rs`, `#![cfg(target_os = "ios")]`): the one automated proof
-that the engine tier renders correct, non-black pixels on exactly the adapter classic vello is
+that the engine tier renders correct, non-black pixels on exactly the adapter vello classic was
 black on by construction (the Simulator's Apple2 Metal feature set lacks `INDIRECT_EXECUTION`).
 Drives `EngineRenderer` directly against the Simulator's own real adapter and compares seven
 unit-corpus cases against the embedded `testing/goldens/cpu/` baseline (`include_bytes!`, not a

@@ -41,15 +41,16 @@
 //! interchangeable — each is the right tool for a different shape of caller.
 //!
 //! [`frust_scene::Command::BlurredRoundedRect`] is a *scene command*: a widget
-//! records one, `frust-render`'s `convert.rs` lowers it straight to vello
-//! 0.9's `Scene::draw_blurred_rounded_rect` (or the CPU tier's
+//! records one, the engine compiler (`compile::blur_rrect`) encodes it as a
+//! `vello_common` blurred-rounded-rect paint the strip shader evaluates per
+//! pixel (the CPU oracle mirrors it through vello_cpu's
 //! `fill_blurred_rounded_rect`), and the shadow of a rectangle with a single
 //! corner radius (per-corner radii collapse to
 //! [`frust_scene::CornerRadii::largest`] at encode time — see that command's
 //! own doc) is painted analytically, in one draw, with no intermediate
 //! texture and no extra render pass. That is the whole of what it can shadow:
 //! one rectangle, gaussian-blurred by an error-function approximation
-//! (`erf7`) baked into vello's own kernel, never arbitrary content.
+//! (`erf7`) baked into the strip shader's own kernel, never arbitrary content.
 //!
 //! A drop-shadow [filter](crate::filters) layer is the opposite trade. It
 //! shadows *whatever a layer's contents turn out to be* — text, an image, a
