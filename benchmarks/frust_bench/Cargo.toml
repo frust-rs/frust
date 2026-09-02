@@ -112,11 +112,6 @@ reactive_graph = "0.2"
 # it (and enable `frust/perf-trace` instead). Mirrors
 # `templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
-# The frust-owned engine render tier, forwarded to the facade's own
-# `engine-tier` feature. Empty by default and selected by no build mode — a matrix
-# arm reaches it with an explicit `frust build --features engine-tier`,
-# paired with `--define FRUST_RENDER_TIER=engine` to actually select the tier.
-engine-tier = ["frust/engine-tier"]
 
 [profile.release]
 lto = "fat"

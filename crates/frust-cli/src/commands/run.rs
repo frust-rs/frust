@@ -9,19 +9,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use notify::{RecursiveMode, Watcher};
 
-use crate::cli::{BuildFlags, RenderTierArg};
+use crate::cli::BuildFlags;
 use frust_drive::android_run::{self, DeviceSelection};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::ios_run;
 use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
-
-/// Env var `frust-render`'s `RenderContext` reads at startup
-/// (`frust_render::RENDER_TIER_ENV_VAR`) — kept as a literal here rather
-/// than importing `frust-render` (see `RenderTierArg`'s doc comment on
-/// why `frust-cli` stays independent of the rendering stack).
-const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
 /// The testable core of `run`, taking an injected [`ProcessRunner`].
 /// `commands::dispatch` constructs the real runner and calls this (the CLI's
@@ -31,7 +25,6 @@ pub fn run_in(
     runner: &dyn ProcessRunner,
     build_args: BuildFlags,
     device_id: Option<String>,
-    render_tier: Option<RenderTierArg>,
     watch: bool,
     verbose: bool,
 ) -> Result<u8> {
@@ -39,7 +32,6 @@ pub fn run_in(
         runner,
         build_args,
         device_id,
-        render_tier,
         watch,
         verbose,
         WatchHooks::real(),
@@ -54,7 +46,6 @@ fn run_in_with_hooks(
     runner: &dyn ProcessRunner,
     build_args: BuildFlags,
     device_id: Option<String>,
-    render_tier: Option<RenderTierArg>,
     watch: bool,
     verbose: bool,
     hooks: WatchHooks,
@@ -85,7 +76,7 @@ fn run_in_with_hooks(
     // non-deterministic. Reaches the exact call the `Desktop` arm below
     // would make anyway, just one step earlier.
     if watch {
-        return run_desktop_fallback(runner, &info, &extra_features, render_tier, watch, hooks);
+        return run_desktop_fallback(runner, &info, &extra_features, watch, hooks);
     }
 
     let discoverers = devices::default_discoverers();
@@ -98,31 +89,13 @@ fn run_in_with_hooks(
 
     match android_run::select_device(&found, device_id.as_deref()) {
         DeviceSelection::Desktop => {
-            run_desktop_fallback(runner, &info, &extra_features, render_tier, watch, hooks)
+            run_desktop_fallback(runner, &info, &extra_features, watch, hooks)
         }
-        DeviceSelection::Auto(device) => {
-            warn_render_tier_not_plumbed(render_tier);
-            run_on_device(runner, &device, &info, &extra_features)
-        }
+        DeviceSelection::Auto(device) => run_on_device(runner, &device, &info, &extra_features),
         DeviceSelection::Ambiguous(candidates) => {
-            warn_render_tier_not_plumbed(render_tier);
             select_from_prompt(runner, &candidates, &info, &extra_features)
         }
         DeviceSelection::Error(message) => bail!(message),
-    }
-}
-
-/// `--render-tier` is desktop-preview-only in v1 (see `Command::Run`'s doc
-/// comment) — a device run still probes its own tier on-device, it just
-/// can't be forced from here yet, so tell the caller rather than silently
-/// dropping the flag.
-fn warn_render_tier_not_plumbed(render_tier: Option<RenderTierArg>) {
-    if let Some(tier) = render_tier {
-        println!(
-            "[note] --render-tier {} is not plumbed to on-device runs yet (desktop-preview only \
-             in v1); the device still probes its own render tier.",
-            tier.env_value()
-        );
     }
 }
 
@@ -161,11 +134,9 @@ fn run_on_device(
 /// The invocation itself is resolved by `frust_drive::desktop_run` — the one
 /// desktop launch-plan construction site the workbench and the MCP server also
 /// go through, so `frust run` and a `frust-tui` desktop session cannot drift
-/// apart. This front-end contributes exactly two things on top: the
+/// apart. This front-end contributes exactly one thing on top: the
 /// release-lean preflight's resolved feature list
-/// (`desktop_plan_with_features`), and a `--render-tier` override as
-/// [`RENDER_TIER_ENV_VAR`] — the one path that flag is actually plumbed to in
-/// v1 (see `Command::Run`'s doc comment).
+/// (`desktop_plan_with_features`).
 ///
 /// What the plan carries is the resolved [`BuildInfo`] in full (verified
 /// pre-extraction gap — the old fallback ignored `--profile` and dropped
@@ -179,7 +150,6 @@ fn run_desktop_fallback(
     runner: &dyn ProcessRunner,
     info: &BuildInfo,
     extra_features: &[String],
-    render_tier: Option<RenderTierArg>,
     watch: bool,
     hooks: WatchHooks,
 ) -> Result<u8> {
@@ -197,7 +167,7 @@ fn run_desktop_fallback(
     }
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let plan = desktop_run::desktop_plan_with_features(&cwd, info, &feature_refs);
-    let env = desktop_cargo_run_env(&plan, render_tier);
+    let env = desktop_cargo_run_env(&plan);
 
     if watch {
         return run_desktop_watch(runner, &plan, &env, &cwd, hooks);
@@ -548,23 +518,15 @@ fn spawn_preview(
 /// The env pairs [`run_desktop_fallback`]'s `cargo run` is spawned with: the
 /// resolved plan's own environment (every `--define KEY=VALUE`, plus the
 /// profile build's auto-injected `FRUST_TRACE=1` — see
-/// `frust_drive::desktop_run`), plus this front-end's own `--render-tier`
-/// override as [`RENDER_TIER_ENV_VAR`], which no other front-end has.
+/// `frust_drive::desktop_run`) and nothing else. This front-end used to append
+/// a render-tier override of its own here; the renderer is no longer a choice,
+/// so the plan's environment is the whole of it.
+///
 /// Split out from the spawning call so the mapping is unit-testable without a
 /// fake runner that would otherwise ignore the `env` argument entirely (see
 /// [`frust_drive::process::FakeProcessRunner::run_streaming`]).
-fn desktop_cargo_run_env(
-    plan: &DesktopPlan,
-    render_tier: Option<RenderTierArg>,
-) -> Vec<(String, String)> {
-    let mut env = plan.env.clone();
-    if let Some(tier) = render_tier {
-        env.push((
-            RENDER_TIER_ENV_VAR.to_string(),
-            tier.env_value().to_string(),
-        ));
-    }
-    env
+fn desktop_cargo_run_env(plan: &DesktopPlan) -> Vec<(String, String)> {
+    plan.env.clone()
 }
 
 fn select_from_prompt(
@@ -701,15 +663,9 @@ mod tests {
     }
 
     #[test]
-    fn desktop_cargo_run_env_is_empty_without_defines_or_override() {
-        let env = desktop_cargo_run_env(&plan_for(&debug_info()), None);
+    fn desktop_cargo_run_env_is_empty_without_defines() {
+        let env = desktop_cargo_run_env(&plan_for(&debug_info()));
         assert_eq!(env_pairs(&env), Vec::<(&str, &str)>::new());
-    }
-
-    #[test]
-    fn desktop_cargo_run_env_sets_the_var_for_engine() {
-        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Engine));
-        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "engine")]);
     }
 
     /// Regression for the verified desktop-fallback gap: a `--profile`
@@ -736,7 +692,7 @@ mod tests {
                 "frust/devtools"
             ]
         );
-        let env = desktop_cargo_run_env(&plan, None);
+        let env = desktop_cargo_run_env(&plan);
         assert!(env_pairs(&env).contains(&("FRUST_TRACE", "1")), "{env:?}");
     }
 
@@ -790,7 +746,7 @@ mod tests {
         let plan = desktop_run::desktop_plan_with_features(
             Path::new("/tmp/project"),
             &debug_info(),
-            &["frust/perf-trace", "frust/devtools", "engine-tier"],
+            &["frust/perf-trace", "frust/devtools", "lean"],
         );
         assert_eq!(
             plan.args,
@@ -801,7 +757,7 @@ mod tests {
                 "--features",
                 "frust/devtools",
                 "--features",
-                "engine-tier",
+                "lean",
             ]
         );
     }
@@ -819,12 +775,11 @@ mod tests {
     }
 
     #[test]
-    fn run_desktop_fallback_streams_cargo_run_regardless_of_render_tier() {
+    fn run_desktop_fallback_streams_cargo_run() {
         // FakeProcessRunner's run_streaming ignores its env argument (keyed
-        // only on cmd/args — see its doc comment), so this proves the
-        // desktop fallback still reaches `cargo run` with a render-tier
-        // override set; desktop_cargo_run_env's own tests above cover the
-        // env-pair construction itself.
+        // only on cmd/args — see its doc comment), so this proves the desktop
+        // fallback reaches `cargo run` at all; desktop_cargo_run_env's own
+        // test above covers the env-pair construction itself.
         let runner = FakeProcessRunner::new().with(
             "cargo run --features frust/perf-trace --features frust/devtools",
             Output {
@@ -833,15 +788,8 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let out = run_desktop_fallback(
-            &runner,
-            &debug_info(),
-            NO_EXTRA,
-            Some(RenderTierArg::Engine),
-            false,
-            WatchHooks::fake(),
-        )
-        .unwrap();
+        let out = run_desktop_fallback(&runner, &debug_info(), NO_EXTRA, false, WatchHooks::fake())
+            .unwrap();
         assert_eq!(out, 0);
     }
 
@@ -856,7 +804,6 @@ mod tests {
             &runner,
             BuildFlags::default(),
             Some("emulator-5554".to_string()),
-            None,
             true,
             false,
         )
@@ -899,7 +846,6 @@ mod tests {
         let err = run_in_with_hooks(
             &runner,
             BuildFlags::default(),
-            None,
             None,
             true,
             false,

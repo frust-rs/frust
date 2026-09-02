@@ -39,7 +39,6 @@ pub(crate) use frust_gpu::context::{effective_limits, is_ios_simulator, optional
 // the mode says the swapchain stores, and the one backend/mode pair where that
 // claim is untrue. The *routing* they feed ([`choose_engine_render_path`]) is
 // this crate's.
-#[cfg(feature = "engine-tier")]
 use frust_gpu::surface::{alpha_mode_is_straight_translucent, compositor_expects_premultiplied};
 
 /// Whether a `FRUST_*` boolean env flag is set to a non-zero value, checking
@@ -57,27 +56,6 @@ fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String
         matches!(value, Some(v) if v != "0")
     }
     is_set_non_zero(name_compile_time) || is_set_non_zero(name_runtime.as_deref())
-}
-
-/// The precedence-resolved value of a `FRUST_*` string-valued env knob (e.g.
-/// `FRUST_RENDER_TIER`), checking both the compile-time (`option_env!`) and
-/// runtime (`std::env::var`) halves like [`env_flag_enabled`], but returning
-/// the value itself rather than a bool.
-///
-/// **Runtime wins**: a non-empty runtime value is returned even when a
-/// compile-time value is also set; an empty (`""`) runtime value is treated
-/// as unset and falls through to the compile-time half; `None` when neither
-/// half carries a non-empty value. Same spirit as `env_flag_enabled`'s
-/// compile-time-or-runtime parsing, so an Android app process (no runtime
-/// env) still honours a baked-in value.
-pub(crate) fn env_str(
-    compile_time: Option<&'static str>,
-    runtime: Option<String>,
-) -> Option<String> {
-    fn non_empty(value: Option<String>) -> Option<String> {
-        value.filter(|v| !v.is_empty())
-    }
-    non_empty(runtime).or_else(|| non_empty(compile_time.map(str::to_string)))
 }
 
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
@@ -112,9 +90,8 @@ pub(crate) enum RenderPathKind {
     /// blit (ordinary render passes, no compute storage write), plus a
     /// depth attachment the surface carries alongside it
     /// ([`RenderPath::EngineDirect`]). Chosen by
-    /// [`choose_engine_render_path`] for the
-    /// [`Engine`](crate::RenderTier::Engine) tier alone.
-    #[cfg(feature = "engine-tier")]
+    /// [`choose_engine_render_path`], which routes every surface onto one of
+    /// this enum's two arms.
     EngineDirect,
     /// `frust-engine` renders into an intermediate of the surface's own and a
     /// full-screen fragment pass un-premultiplies it into the acquired
@@ -132,8 +109,7 @@ pub(crate) enum RenderPathKind {
     /// Still the engine family and still `RENDER_ATTACHMENT`-only on both
     /// textures: the conversion is an ordinary render pass into the swapchain
     /// (never a compute/storage write), so nothing about this arm needs a
-    /// capability the tier refuses.
-    #[cfg(feature = "engine-tier")]
+    /// capability the engine refuses.
     EngineDirectUnpremultiply,
 }
 
@@ -173,7 +149,6 @@ pub(crate) enum RenderPathKind {
 /// Pure and (backend, mode)-only, so it is host-testable without a surface.
 /// The two predicates it reads are platform facts owned by `frust-gpu`
 /// ([`frust_gpu::surface`]); the *routing* they feed is this crate's.
-#[cfg(feature = "engine-tier")]
 pub(crate) fn choose_engine_render_path(
     backend: wgpu::Backend,
     alpha_mode: wgpu::CompositeAlphaMode,
@@ -187,57 +162,29 @@ pub(crate) fn choose_engine_render_path(
     }
 }
 
-/// Whether THIS build actually contains `tier`'s renderer, i.e. whether the
-/// cargo feature that compiles it in is on.
+/// Refuses an adapter that cannot drive the engine, carrying
+/// [`crate::EngineUnsupported`]'s diagnosis as the error.
 ///
-/// The guard [`resolve_render_tier`] fails fast with, so a
-/// [`crate::SurfaceRenderer`] never receives a tier it has no encode path for.
-/// Exhaustive on purpose: a tier added later cannot compile until it has
-/// stated its own answer here.
-pub(crate) fn tier_compiled_in(tier: crate::tier::RenderTier) -> bool {
-    match tier {
-        crate::tier::RenderTier::Engine => cfg!(feature = "engine-tier"),
-    }
-}
-
-/// The render tier this surface will be driven on, or a hard error carrying
-/// [`crate::tier::TierSelection::diagnosis`].
-///
-/// Consults the tier probe rather than a bespoke downlevel check, so a refused
-/// adapter surfaces through the one diagnostic path
-/// [`crate::select_render_tier`] owns (shared with its own unit tests). An
-/// explicit override (`FRUST_RENDER_TIER`, or `frust run --render-tier` setting
-/// it for the spawned process) wins *among available tiers*. The engine tier
-/// requires no downlevel flag at all, so in a default build this always
-/// resolves `Available(Engine)`; the `Unavailable` arm is reached only by a
-/// build that compiled no renderer in — which `lib.rs`'s `compile_error!`
-/// already refuses, leaving this as the runtime backstop.
+/// Consults the shared capability gate ([`crate::engine_support`]) rather than
+/// a bespoke downlevel check, so a refused adapter surfaces through the one
+/// diagnostic path that gate owns — shared with its own unit tests and with
+/// the headless harness, which asks the identical question of the adapter it
+/// resolved. The engine requires no downlevel flag at all
+/// ([`crate::ENGINE_REQUIRED_DOWNLEVEL_FLAGS`] is empty), so every adapter
+/// that reaches here passes today; the refusal arm exists so a requirement
+/// ever added to that constant refuses the surface with a diagnosis instead of
+/// failing somewhere inside the engine.
 ///
 /// Asked per surface creation rather than per device creation: the device is
-/// `frust-gpu`'s to build and that crate must not depend on this one's tier
-/// seam. Both happen once per surface episode on every shipping platform, and
-/// the answer is a pure function of the adapter either way.
-fn resolve_render_tier(adapter: &wgpu::Adapter) -> Result<crate::tier::RenderTier> {
-    let downlevel = adapter.get_downlevel_capabilities();
+/// `frust-gpu`'s to build and that crate must not depend on this one's gate.
+/// Both happen once per surface episode on every shipping platform, and the
+/// answer is a pure function of the adapter either way.
+fn check_engine_support(adapter: &wgpu::Adapter) -> Result<()> {
     let caps = crate::tier::TierCaps {
-        downlevel_flags: downlevel.flags,
+        downlevel_flags: adapter.get_downlevel_capabilities().flags,
         adapter_name: adapter.get_info().name,
     };
-    let override_tier = crate::tier::render_tier_override_from_env();
-    let selection = crate::tier::select_render_tier(&caps, override_tier);
-    let tier = match selection.outcome {
-        crate::tier::TierOutcome::Available(tier) => tier,
-        crate::tier::TierOutcome::Unavailable { .. } => {
-            return Err(anyhow!(selection.diagnosis));
-        }
-    };
-    // A tier is only reachable in a build that compiled its renderer in;
-    // guard against a stray selection so the SurfaceRenderer never sees a
-    // tier it has no encode path for. Asked per tier ([`tier_compiled_in`]).
-    if !tier_compiled_in(tier) {
-        return Err(anyhow!(selection.diagnosis));
-    }
-    Ok(tier)
+    crate::tier::engine_support(&caps).map_err(|refusal| anyhow!(refusal.to_string()))
 }
 
 /// Emits the one-per-process startup line naming the chosen render path and the
@@ -257,13 +204,11 @@ fn log_render_path(path: RenderPathKind) {
 
     LOGGED.get_or_init(|| {
         let (name, reason) = match path {
-            #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirect => (
                 "engine-direct",
                 "frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, \
                  surface-reported format, surface-owned depth)",
             ),
-            #[cfg(feature = "engine-tier")]
             RenderPathKind::EngineDirectUnpremultiply => (
                 "engine-direct-unpremultiply",
                 "frust-engine into a surface-owned intermediate, un-premultiplied into the \
@@ -323,9 +268,7 @@ fn log_surface_alpha_caps(_surface: &ConfiguredSurface, _handle: &DeviceHandle) 
 /// is what `wgpu::Device::limits` reports back), so the surface is refused with
 /// a message naming the ceiling instead.
 ///
-/// Pure and host-testable. Compiled with the engine arm alone, which is its
-/// only caller.
-#[cfg(feature = "engine-tier")]
+/// Pure and host-testable.
 pub(crate) fn extent_within_limits(width: u32, height: u32, max_dimension_2d: u32) -> bool {
     width <= max_dimension_2d && height <= max_dimension_2d
 }
@@ -347,7 +290,6 @@ pub(crate) enum RenderPath {
     /// reconfigures the swapchain, keeping the reallocation off the frame
     /// path, and the pairing can never disagree with the colour attachment it
     /// is attached beside.
-    #[cfg(feature = "engine-tier")]
     EngineDirect {
         /// The `Depth24Plus` attachment this surface's frames test against,
         /// sized to the swapchain and recreated with it. Handed to the engine
@@ -372,7 +314,6 @@ pub(crate) enum RenderPath {
     /// the frame, a sampled source for the pass. Only its view is stored — a
     /// `TextureView` refcounts its texture alive and nothing here needs the
     /// texture handle.
-    #[cfg(feature = "engine-tier")]
     EngineDirectUnpremultiply {
         /// The depth attachment, exactly as [`Self::EngineDirect`] carries it —
         /// sized to the swapchain and recreated with it, since the intermediate
@@ -454,7 +395,6 @@ impl EngineSurface {
             // mismatched depth attachment is refused by the engine rather than
             // submitted ([`extent_within_limits`], the same ceiling
             // `create_engine_surface` refuses on).
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirect { depth } => {
                 let max_dimension_2d = device.limits().max_texture_dimension_2d;
                 if !extent_within_limits(width, height, max_dimension_2d) {
@@ -474,7 +414,6 @@ impl EngineSurface {
             // itself survives — it holds a pipeline built for the surface's
             // format, which a resize never changes, and its bind group names
             // the source view per frame rather than at build time.
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirectUnpremultiply {
                 depth,
                 intermediate_view,
@@ -513,7 +452,6 @@ impl EngineSurface {
 /// The format is the engine's own off-screen format rather than the surface's:
 /// the renderer on this arm is warmed for it (`renderer::engine_target_format`),
 /// and only the final pass has to speak the swapchain's format.
-#[cfg(feature = "engine-tier")]
 fn create_engine_intermediate(width: u32, height: u32, device: &wgpu::Device) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frust-render engine intermediate"),
@@ -548,9 +486,9 @@ pub(crate) async fn create_engine_surface(
     alpha: SurfaceAlphaRequest,
 ) -> Result<EngineSurface> {
     ctx.ensure_device(&surface).await?;
-    // The tier probe's diagnosis is this crate's single fail-fast message for
-    // an adapter no compiled-in renderer can drive.
-    let _tier = resolve_render_tier(&ctx.device_handle().adapter)?;
+    // The capability gate's diagnosis is this crate's single fail-fast message
+    // for an adapter the engine cannot drive.
+    check_engine_support(&ctx.device_handle().adapter)?;
 
     // The extent is checked once, up front, for every texture sized against
     // it below (the engine's depth attachment, and its intermediate on the
@@ -559,16 +497,13 @@ pub(crate) async fn create_engine_surface(
     // creations it rejects ([`extent_within_limits`]). Asked before the
     // swapchain is configured, so no `wgpu` validation error is raised on the
     // way to the refusal.
-    #[cfg(feature = "engine-tier")]
-    {
-        let max_dimension_2d = ctx.device_handle().device.limits().max_texture_dimension_2d;
-        if !extent_within_limits(width, height, max_dimension_2d) {
-            return Err(anyhow!(
-                "frust-render: engine tier refuses a {width}x{height} surface — the device's \
-                 max_texture_dimension_2d is {max_dimension_2d}, and both the swapchain and \
-                 the depth attachment paired with it are sized from this extent"
-            ));
-        }
+    let max_dimension_2d = ctx.device_handle().device.limits().max_texture_dimension_2d;
+    if !extent_within_limits(width, height, max_dimension_2d) {
+        return Err(anyhow!(
+            "frust-render: the engine refuses a {width}x{height} surface — the device's \
+             max_texture_dimension_2d is {max_dimension_2d}, and both the swapchain and \
+             the depth attachment paired with it are sized from this extent"
+        ));
     }
 
     // `frust-gpu` resolves the alpha mode against the surface's reported caps,
@@ -584,26 +519,8 @@ pub(crate) async fn create_engine_surface(
     // `choose_engine_render_path` itself, so that function stays a pure
     // value decision, host-testable with no live adapter
     // ([`compositor_expects_premultiplied`]).
-    //
-    // The arm is unreachable in a build that did not compile the engine
-    // renderer in — `resolve_render_tier`'s [`tier_compiled_in`] guard refuses
-    // such a tier before any surface reaches here — but it still answers
-    // rather than panicking, so a wiring bug is reported.
     let alpha_mode = configured.config().alpha_mode;
-    let path_kind = {
-        #[cfg(feature = "engine-tier")]
-        {
-            choose_engine_render_path(handle.adapter.get_info().backend, alpha_mode)
-        }
-        #[cfg(not(feature = "engine-tier"))]
-        {
-            let _ = alpha_mode;
-            return Err(anyhow!(
-                "frust-render: the engine tier was selected without the `engine-tier` \
-                 feature compiled in"
-            ));
-        }
-    };
+    let path_kind = choose_engine_render_path(handle.adapter.get_info().backend, alpha_mode);
     log_render_path(path_kind);
     log_surface_alpha_caps(&configured, handle);
 
@@ -622,7 +539,6 @@ pub(crate) async fn create_engine_surface(
         // for it, since Metal's own compositor reads that mode's swapchain
         // premultiplied regardless of its name (upstream wgpu-hal truth bug
         // — see that predicate's doc).
-        #[cfg(feature = "engine-tier")]
         RenderPathKind::EngineDirect => RenderPath::EngineDirect {
             depth: frust_engine::DepthTexture::new(&handle.device, width, height),
         },
@@ -639,7 +555,6 @@ pub(crate) async fn create_engine_surface(
         // serves a Metal surface (Metal's `PostMultiplied` takes the arm
         // above instead) — the one pipeline it compiles is paid once per
         // surface configure either way.
-        #[cfg(feature = "engine-tier")]
         RenderPathKind::EngineDirectUnpremultiply => RenderPath::EngineDirectUnpremultiply {
             depth: frust_engine::DepthTexture::new(&handle.device, width, height),
             intermediate_view: create_engine_intermediate(width, height, &handle.device),
@@ -716,53 +631,8 @@ mod tests {
         assert!(env_flag_enabled(Some("1"), Some("0".to_string())));
     }
 
-    #[test]
-    fn env_str_unset_both_halves_is_none() {
-        assert_eq!(env_str(None, None), None);
-    }
-
-    #[test]
-    fn env_str_runtime_non_empty_beats_compile_time() {
-        assert_eq!(
-            env_str(Some("engine"), Some("area".to_string())),
-            Some("area".to_string())
-        );
-    }
-
-    #[test]
-    fn env_str_empty_runtime_falls_through_to_compile_time() {
-        assert_eq!(
-            env_str(Some("engine"), Some(String::new())),
-            Some("engine".to_string())
-        );
-    }
-
-    #[test]
-    fn env_str_compile_time_only() {
-        assert_eq!(env_str(Some("engine"), None), Some("engine".to_string()));
-    }
-
-    #[test]
-    fn env_str_runtime_only() {
-        assert_eq!(
-            env_str(None, Some("area".to_string())),
-            Some("area".to_string())
-        );
-    }
-
-    #[test]
-    fn a_tier_is_only_selectable_in_a_build_that_compiled_it() {
-        // The one tier tracks its own feature — nothing inherits a blanket
-        // permission, and nothing inherits a blanket refusal.
-        assert_eq!(
-            tier_compiled_in(crate::tier::RenderTier::Engine),
-            cfg!(feature = "engine-tier")
-        );
-    }
-
     /// Every composite alpha mode a surface can resolve to, so a routing claim
     /// is made across the whole space rather than the modes it was written for.
-    #[cfg(feature = "engine-tier")]
     const EVERY_ALPHA_MODE: [wgpu::CompositeAlphaMode; 5] = [
         wgpu::CompositeAlphaMode::Auto,
         wgpu::CompositeAlphaMode::Opaque,
@@ -771,7 +641,6 @@ mod tests {
         wgpu::CompositeAlphaMode::PostMultiplied,
     ];
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn every_alpha_mode_routes_to_an_engine_arm() {
         // The completeness claim: this tier serves the whole space, with no
@@ -793,7 +662,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn engine_serves_opaque_and_premultiplied_modes_directly() {
         // Premultiplied output meets a premultiplied-expecting swapchain, and
@@ -817,7 +685,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn straight_alpha_translucency_routes_through_the_unpremultiply_arm() {
         // Off Metal, a straight-alpha translucent mode (`PostMultiplied`
@@ -839,7 +706,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn metal_post_multiplied_skips_the_unpremultiply_arm() {
         // The upstream wgpu-hal truth bug this predicate corrects for: Metal's
@@ -874,7 +740,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn non_metal_post_multiplied_keeps_the_unpremultiply_arm() {
         // Genuinely-straight `PostMultiplied` compositors exist off Metal
@@ -892,7 +757,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "engine-tier")]
     #[test]
     fn extent_limits_refuse_only_an_over_ceiling_axis() {
         assert!(extent_within_limits(4096, 4096, 4096));

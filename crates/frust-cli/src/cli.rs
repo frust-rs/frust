@@ -116,23 +116,6 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Force the render tier (`engine`)
-        /// `frust-render` probes for at startup, by setting
-        /// `FRUST_RENDER_TIER` for the launched process (see
-        /// docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). `engine` is the default (and only)
-        /// tier (`frust-render`'s `engine-tier` feature, on by default) —
-        /// this override is equivalent to leaving the flag unset. The
-        /// vello-classic `gpu` tier and the experimental `cpu` tier are
-        /// both GONE and are no longer accepted values.
-        /// **Desktop-preview only in v1**: the
-        /// `cargo run` fallback gets the env var directly; plumbing an
-        /// override to a launched Android/iOS device (`adb`/`devicectl`
-        /// env/intent extras) is not implemented yet — the on-device tier
-        /// probe still runs regardless, it just can't be forced from here.
-        #[arg(long = "render-tier", value_name = "TIER")]
-        render_tier: Option<RenderTierArg>,
-
         /// Desktop-only rebuild-relaunch dev loop:
         /// watches the project's `src/` tree and `Cargo.toml`, and on
         /// any change kills the running `cargo run` child and relaunches a
@@ -349,32 +332,6 @@ pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), St
     }
 }
 
-/// `frust run --render-tier` value (see `Command::Run`'s doc comment).
-/// Deliberately independent of `frust_render::RenderTier` — `frust-cli`
-/// has no compile-time dependency on the rendering stack (see
-/// `docs/ARCHITECTURE.md`) — but its variant and its lowercase env
-/// string ([`RenderTierArg::env_value`]) must stay in sync with
-/// `frust_render::parse_render_tier_override`'s accepted values by hand.
-///
-/// A single variant, hand-synced rather than derived: the vello-classic `gpu`
-/// tier and the experimental `cpu` tier were both retired from
-/// `frust-render`, leaving `engine` the only value this CLI's own render
-/// crate ever accepts.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum RenderTierArg {
-    Engine,
-}
-
-impl RenderTierArg {
-    /// The value `FRUST_RENDER_TIER` is set to for the spawned process.
-    pub fn env_value(self) -> &'static str {
-        match self {
-            RenderTierArg::Engine => "engine",
-        }
-    }
-}
-
 /// `frust create --arch` value (see `Command::Create`'s doc comment).
 /// Deliberately independent of `crate::scaffold`'s own arch-tag vocabulary
 /// (`scaffold::KNOWN_ARCHES`) — `frust-cli`'s `commands::create` module
@@ -558,15 +515,10 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["frust", "run"]);
         match cli.command.unwrap() {
-            Command::Run {
-                build,
-                render_tier,
-                watch,
-            } => {
+            Command::Run { build, watch } => {
                 assert!(!build.build.debug);
                 assert!(!build.build.profile);
                 assert!(!build.build.release);
-                assert_eq!(render_tier, None);
                 assert!(!watch);
             }
             other => panic!("expected Run, got {other:?}"),
@@ -578,13 +530,13 @@ mod tests {
         // The three spellings cargo itself accepts must be equivalent here,
         // since every downstream funnel joins the result back into one CSV.
         for argv in [
-            vec!["frust", "run", "--features", "engine-tier,perf-trace"],
-            vec!["frust", "run", "--features", "engine-tier perf-trace"],
+            vec!["frust", "run", "--features", "devtools,perf-trace"],
+            vec!["frust", "run", "--features", "devtools perf-trace"],
             vec![
                 "frust",
                 "run",
                 "--features",
-                "engine-tier",
+                "devtools",
                 "--features",
                 "perf-trace",
             ],
@@ -593,7 +545,7 @@ mod tests {
             match cli.command.unwrap() {
                 Command::Run { build, .. } => assert_eq!(
                     build.extra_features(),
-                    vec!["engine-tier".to_string(), "perf-trace".to_string()],
+                    vec!["devtools".to_string(), "perf-trace".to_string()],
                     "argv {argv:?}"
                 ),
                 other => panic!("expected Run, got {other:?}"),
@@ -639,17 +591,17 @@ mod tests {
             "apk",
             "--profile",
             "--features",
-            "engine-tier",
+            "devtools",
             "--define",
-            "FRUST_RENDER_TIER=engine",
+            "FRUST_TRACE=1",
         ]);
         match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Apk { build, .. },
             } => {
                 assert!(build.build.profile);
-                assert_eq!(build.build.defines, vec!["FRUST_RENDER_TIER=engine"]);
-                assert_eq!(build.extra_features(), vec!["engine-tier".to_string()]);
+                assert_eq!(build.build.defines, vec!["FRUST_TRACE=1"]);
+                assert_eq!(build.extra_features(), vec!["devtools".to_string()]);
             }
             other => panic!("expected Build/Apk, got {other:?}"),
         }
@@ -658,7 +610,7 @@ mod tests {
     #[test]
     fn feature_token_charset_ok_accepts_plain_and_pkg_qualified_names() {
         for token in [
-            "engine-tier",
+            "perf-trace",
             "perf_trace",
             "v1.2",
             "frust/devtools",
@@ -671,7 +623,7 @@ mod tests {
     #[test]
     fn feature_token_charset_ok_rejects_shell_metacharacters() {
         for token in [
-            "engine-tier;rm",
+            "perf-trace;rm",
             "$(rm -rf /)",
             "a b",
             "`whoami`",
@@ -687,13 +639,13 @@ mod tests {
 
     #[test]
     fn validate_feature_token_charset_passes_on_all_valid_tokens() {
-        let tokens = vec!["engine-tier".to_string(), "frust/devtools".to_string()];
+        let tokens = vec!["perf-trace".to_string(), "frust/devtools".to_string()];
         assert!(validate_feature_token_charset(&tokens).is_ok());
     }
 
     #[test]
     fn validate_feature_token_charset_names_the_first_bad_token() {
-        let tokens = vec!["engine-tier".to_string(), "evil;touch".to_string()];
+        let tokens = vec!["perf-trace".to_string(), "evil;touch".to_string()];
         let err = validate_feature_token_charset(&tokens).unwrap_err();
         assert_eq!(err, "evil;touch");
     }
@@ -726,59 +678,20 @@ mod tests {
         }
     }
 
+    /// The retired tier-selection flag is now an unknown argument, not a flag
+    /// with one legal value: `frust-render` contains exactly one renderer, so
+    /// there is nothing left to force. Pinned as a test because the flag was
+    /// documented and scripted against — clap must refuse it outright rather
+    /// than accept it and set an env var nothing reads.
     #[test]
-    fn rejects_the_retired_gpu_render_tier_value() {
-        // The vello-classic tier was deleted, and with it the `gpu` override
-        // `frust_render::parse_render_tier_override` used to accept — so clap
-        // must refuse the value here rather than set an env var the launched
-        // process would only warn about and ignore.
-        assert!(Cli::try_parse_from(["frust", "run", "--render-tier", "gpu"]).is_err());
-    }
-
-    #[test]
-    fn rejects_the_retired_cpu_render_tier_value() {
-        // The experimental CPU fallback was deleted alongside its `cpu-tier`
-        // feature, and with it the `cpu` override `RenderTierArg` used to
-        // accept — same treatment as the retired `gpu` value above.
-        assert!(Cli::try_parse_from(["frust", "run", "--render-tier", "cpu"]).is_err());
-    }
-
-    #[test]
-    fn parses_run_with_render_tier_engine() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "engine"]);
-        match cli.command.unwrap() {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Engine));
-            }
-            other => panic!("expected Run, got {other:?}"),
+    fn rejects_the_retired_render_tier_flag() {
+        for value in ["engine", "gpu", "cpu", "vello"] {
+            assert!(
+                Cli::try_parse_from(["frust", "run", "--render-tier", value]).is_err(),
+                "--render-tier {value} must be rejected"
+            );
         }
-    }
-
-    #[test]
-    fn parses_run_without_render_tier_is_none() {
-        let cli = Cli::parse_from(["frust", "run"]);
-        match cli.command.unwrap() {
-            Command::Run { render_tier, .. } => assert_eq!(render_tier, None),
-            other => panic!("expected Run, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_render_tier_value() {
-        // clap validates against the enum, so the fixture has to name
-        // something outside it. `vello` is the engine, never a tier
-        // name, and matches the unknown-value fixture in
-        // `frust_render::tier`'s own parse test.
-        let result = Cli::try_parse_from(["frust", "run", "--render-tier", "vello"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn render_tier_arg_env_values() {
-        // Hand-synced with `frust_render::parse_render_tier_override`'s
-        // accepted strings — this crate depends on no render crate to check
-        // it against.
-        assert_eq!(RenderTierArg::Engine.env_value(), "engine");
+        assert!(Cli::try_parse_from(["frust", "run", "--render-tier"]).is_err());
     }
 
     #[test]

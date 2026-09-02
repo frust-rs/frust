@@ -1,4 +1,4 @@
-//! Offscreen engine-tier rendering: the harness the crate's own pixel-level
+//! Offscreen engine rendering: the harness the crate's own pixel-level
 //! regression tests render a [`frust_scene::Scene`] through when there is no
 //! window and no surface.
 //!
@@ -23,10 +23,10 @@
 //!    so a baseline can never be promoted from the wrong GPU with the right
 //!    file name.
 //! 3. **The device is the app's device.** Limits, optional features and the
-//!    render-tier probe are the ones `RenderContext` resolves, so a headless
-//!    run cannot pass on capabilities a real surface would never get — and a
-//!    tier override that asks for anything but the engine is refused rather
-//!    than quietly honoured.
+//!    engine's adapter-capability gate are the ones a real surface resolves,
+//!    so a headless run cannot pass on capabilities a real surface would never
+//!    get, and an adapter the engine cannot drive is refused here in the same
+//!    words `RenderContext`'s own surface path refuses it.
 //!
 //! Every render is bracketed by a `Validation` error scope and fails on any
 //! captured error, and the readback strips wgpu's 256-byte row padding
@@ -53,8 +53,7 @@ use anyhow::{Result, anyhow};
 ///
 /// This is a *check*, not a selector: `WGPU_ADAPTER_NAME` chooses the adapter,
 /// this refuses the run when the choice did not land where the operator
-/// believed it would. Also read by `frust-testing`'s own engine oracle, which
-/// is why it lives outside this module's `engine-tier` gate.
+/// believed it would. Also read by `frust-testing`'s own engine oracle.
 pub const GOLDEN_EXPECT_ADAPTER_ENV_VAR: &str = "FRUST_GOLDEN_EXPECT_ADAPTER";
 
 /// Environment variable naming the wgpu backend a golden/oracle run must have
@@ -122,7 +121,6 @@ pub struct HeadlessMeta {
 }
 
 impl HeadlessMeta {
-    #[cfg(feature = "engine-tier")]
     fn from_info(info: &wgpu::AdapterInfo) -> Self {
         let driver = if info.driver_info.is_empty() {
             info.driver.clone()
@@ -196,7 +194,6 @@ impl HeadlessImage {
 /// every wgpu backend, so a readback's channel order needs no per-backend
 /// correction — unlike a swapchain, whose reported format is the platform's
 /// business.
-#[cfg(feature = "engine-tier")]
 const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// A reusable offscreen engine renderer: one adapter, one device, one
@@ -205,7 +202,6 @@ const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 ///
 /// See the module docs for what makes it a harness rather than a convenience
 /// wrapper.
-#[cfg(feature = "engine-tier")]
 pub struct HeadlessRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -216,18 +212,17 @@ pub struct HeadlessRenderer {
     target: Option<frust_gpu::HeadlessTarget>,
 }
 
-#[cfg(feature = "engine-tier")]
 impl HeadlessRenderer {
-    /// Resolves an adapter, verifies it against the expectations, probes the
-    /// render tier, and creates the device and engine renderer every later
-    /// [`render`](Self::render) reuses.
+    /// Resolves an adapter, verifies it against the expectations, checks it
+    /// can drive the engine, and creates the device and engine renderer every
+    /// later [`render`](Self::render) reuses.
     ///
     /// # Errors
     ///
     /// Fails when no adapter is available, when the resolved adapter does not
     /// meet an `expect_adapter`/`expect_backend` expectation (**before** any
-    /// rendering), when the tier probe refuses the adapter or resolves
-    /// anything but the engine tier, or when device/renderer creation fails.
+    /// rendering), when the engine's capability gate refuses the adapter, or
+    /// when device/renderer creation fails.
     pub async fn new(options: HeadlessOptions) -> Result<Self> {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         descriptor.backends = resolve_backends(
@@ -254,25 +249,14 @@ impl HeadlessRenderer {
             .or_else(|| golden_env(GOLDEN_EXPECT_BACKEND_ENV_VAR));
         check_expectations(&meta, expect_adapter.as_deref(), expect_backend.as_deref())?;
 
-        // The same tier probe device creation runs, so a headless render can
-        // never pass on an adapter the app itself would refuse — and so an
-        // override asking for another renderer refuses the run rather than
-        // producing pixels under the wrong label.
+        // The same capability gate the surface path asks at surface creation,
+        // so a headless render can never pass on an adapter the app itself
+        // would refuse — and it refuses in the identical words.
         let caps = crate::tier::TierCaps {
             downlevel_flags: adapter.get_downlevel_capabilities().flags,
             adapter_name: meta.adapter.clone(),
         };
-        let selection =
-            crate::tier::select_render_tier(&caps, crate::tier::render_tier_override_from_env());
-        match selection.outcome {
-            // `RenderTier::Engine` is the enum's only variant (the
-            // experimental `Cpu` fallback was retired alongside its
-            // `cpu-tier` feature), so `Available` has nothing else to name.
-            crate::tier::TierOutcome::Available(crate::tier::RenderTier::Engine) => {}
-            crate::tier::TierOutcome::Unavailable { .. } => {
-                return Err(anyhow!(selection.diagnosis));
-            }
-        }
+        crate::tier::engine_support(&caps).map_err(|refusal| anyhow!(refusal.to_string()))?;
 
         let required_features = adapter.features() & crate::context::optional_device_features();
         let required_limits =
@@ -445,10 +429,11 @@ fn resolve_backends(
 }
 
 /// The value of a `FRUST_GOLDEN_EXPECT_*` variable, treating an empty value as
-/// unset (`context::env_str`'s shared precedence, runtime half only — these
-/// are operator knobs for a host test run, never baked into a binary).
+/// unset. The runtime half only — these are operator knobs for a host test
+/// run, never baked into a binary, so there is no compile-time half to resolve
+/// against.
 fn golden_env(name: &str) -> Option<String> {
-    crate::context::env_str(None, std::env::var(name).ok())
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// Refuses a run whose resolved GPU is not the expected one, **before** it can

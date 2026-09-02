@@ -12,10 +12,12 @@ kurbo.workspace = true
 frust-scene.workspace = true
 anyhow.workspace = true
 log.workspace = true
-# The frust-owned sparse-strip render engine — optional, only pulled in by the
-# `engine-tier` feature below; NOT part of the default GPU path. A
-# workspace-internal path dependency, so it carries no version pin of its own.
-frust-engine = { workspace = true, optional = true }
+# The frust-owned sparse-strip render engine — the renderer this crate drives,
+# and the only one it contains. NOT optional: the cargo feature that once
+# gated it was retired once the engine became the sole renderer, so there is
+# no build of this crate without it. A workspace-internal path dependency, so
+# it carries no version pin of its own.
+frust-engine.workspace = true
 # The wgpu device/surface foundation. NOT optional: `RenderContext`,
 # `SurfaceFactory`, `DetachedSurface`, the surface-lifecycle state machine, the
 # pipeline-cache framing and the shader-effect pipelines all live there now and
@@ -24,39 +26,32 @@ frust-engine = { workspace = true, optional = true }
 frust-gpu.workspace = true
 
 [features]
-# DEFAULT: `engine-tier` below — the only shipping renderer. Vello classic is
-# GONE (its `vello` dependency, its `RenderTier::Gpu` variant and the
-# `FRUST_RENDER_TIER=gpu` escape hatch that reached it were all deleted once
-# the engine tier became the default); the experimental `vello_cpu`-backed
-# `cpu-tier` fallback (and its `convert` module's `SceneSink` command walk,
-# its one remaining consumer) is GONE too, retired once the engine tier
-# proved it needs no downlevel capability that fallback existed to cover.
-default = ["engine-tier"]
-# The frust-owned engine render tier (`frust-engine` over `frust-gpu`).
-# DEFAULT, and now MANDATORY: `tier::select_render_tier` probes for and selects
-# this tier automatically (`frust-engine` needs no downlevel flag at all — see
-# `ENGINE_REQUIRED_DOWNLEVEL_FLAGS`), and since vello classic was deleted it is
-# the only renderer this crate contains — `lib.rs` `compile_error!`s on a build
-# without it rather than failing deep inside the surface pipeline. Kept as a
-# feature because `frust-engine` remains an optional dependency.
-engine-tier = ["dep:frust-engine"]
+# NO default feature, and no renderer to select: `frust-engine` is a plain
+# dependency above and its strip pipeline is the only renderer this crate
+# contains. The tier feature that was once this crate's `default` is GONE — it
+# named a choice that no longer exists, so every build of this crate,
+# `--no-default-features` included, is an engine build. Vello classic is GONE
+# too (its `vello` dependency and the env-var escape hatch that reached it
+# were deleted when the engine became the default), as is the experimental
+# `vello_cpu`-backed `cpu-tier` fallback, retired once the engine proved it
+# needs no downlevel capability that fallback existed to cover.
+#
 # Opt-in perf-tracing probes: gates the
 # `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
 # `context.rs`, plus (through the `frust-gpu/perf-trace` row below) the device
 # request asking for `wgpu::Features::TIMESTAMP_QUERY` when the adapter offers
-# it — what makes the engine tier's GPU-timestamp ring
+# it — what makes the engine's GPU-timestamp ring
 # (`frust_gpu::diag::TimestampRing`) live rather than permanently inert. NOT
 # default — a build without this feature compiles neither the probe bodies
 # nor their `"frust-perf ..."` string literals, and never asks for the
 # feature. The uncaptured-error handler is deliberately NOT behind this
 # feature — it must keep working in a release build with no features
-# enabled. `frust-engine` is optional (`engine-tier`), so `?` forwards this
-# crate's own `perf-trace` to it only when `engine-tier` has already activated
-# it, never activating it on its own. `frust-gpu` is unconditional and is
-# forwarded to directly: it owns the device request that asks for
-# `TIMESTAMP_QUERY`, so without that row a `perf-trace` build would compile the
-# probes and never get the feature that makes them live.
-perf-trace = ["frust-engine?/perf-trace", "frust-gpu/perf-trace"]
+# enabled. Both rows forward unconditionally now that neither dependency is
+# optional: `frust-engine` owns the per-pass timestamp spans, and `frust-gpu`
+# owns the device request that asks for `TIMESTAMP_QUERY` — without that
+# second row a `perf-trace` build would compile the probes and never get the
+# feature that makes them live.
+perf-trace = ["frust-engine/perf-trace", "frust-gpu/perf-trace"]
 
 # Nothing in this crate reads an Android system property any more: the emulator
 # probe that did (`is_android_emulator`, which strips the instance's DEBUG flags

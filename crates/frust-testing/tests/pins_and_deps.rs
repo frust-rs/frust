@@ -1,7 +1,11 @@
 //! Guards G5 and G7: the engine-core version pins stay exact, and the
-//! engine-tier boundary (`docs/ARCHITECTURE.md`'s Cross-Unit Layer
+//! engine-tier LAYER boundary (`docs/ARCHITECTURE.md`'s Cross-Unit Layer
 //! Dependencies / `docs/RENDER_ARCHITECTURE.md`'s Layer Dependencies) stays a
-//! one-way edge no manifest can reopen silently.
+//! one-way edge no manifest can reopen silently. "Engine-tier" here is the
+//! name of that layer rule — the `frust-engine`/`frust-gpu` tier of the
+//! dependency graph — never a cargo feature: the feature of that name was
+//! retired when the engine became the only renderer, and this guard is about
+//! the direction of an edge, not about how one is switched on.
 //!
 //! Both are plain manifest scans run as ordinary `cargo test` (this repo has
 //! no lint-plugin tooling — see `docs/CODE_STANDARDS.md`; precedent:
@@ -109,7 +113,8 @@ fn g5_engine_core_pins_carry_a_literal_exact_version() {
 }
 
 // ---------------------------------------------------------------------
-// G7: the engine-tier dependency-direction boundary
+// G7: the engine-tier LAYER's dependency-direction boundary
+// (the `frust-engine`/`frust-gpu` tier of the graph — not a cargo feature)
 // ---------------------------------------------------------------------
 
 /// The dependency-table names Cargo recognizes as ordinary (non-dev) edges —
@@ -171,8 +176,8 @@ fn assert_none_depend_on(manifest_path: &Path, forbidden: &[&str]) {
         assert!(
             !deps.contains(*name),
             "{}: [dependencies]/[build-dependencies] must not name `{name}` — the \
-             engine-tier boundary (docs/ARCHITECTURE.md's Cross-Unit Layer Dependencies) is a \
-             one-way edge",
+             engine-tier layer boundary (docs/ARCHITECTURE.md's Cross-Unit Layer Dependencies) \
+             is a one-way edge",
             relative.display()
         );
     }
@@ -197,7 +202,7 @@ fn g7_frust_gpu_never_depends_on_a_layer_above_it() {
 }
 
 #[test]
-fn g7_nothing_above_render_depends_on_the_engine_tier() {
+fn g7_nothing_above_render_depends_on_the_engine_tier_layer() {
     let root = repo_root();
 
     let mut manifests = vec![

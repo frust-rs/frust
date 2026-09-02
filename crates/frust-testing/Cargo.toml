@@ -27,10 +27,12 @@ frust-text = { workspace = true }
 # (`GOLDEN_EXPECT_ADAPTER_ENV_VAR`/`GOLDEN_EXPECT_BACKEND_ENV_VAR`): the
 # operator knob is one contract across every GPU run in this repository, so it
 # is imported rather than a second spelling of the same two strings.
-# `features = []` keeps the DEFAULT feature set (no `engine-tier`, no
-# `perf-trace`) — `frust-render`'s legacy `cpu-tier` feature (which would have
-# dragged its own `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's
-# graph beside the 0.2.0 oracle pin) was retired; see tests/dup_identities.rs.
+# `features = []` keeps the default feature set, which is now empty: the tier
+# feature that used to head this list was retired with the tier selection it
+# named, leaving only the non-default `perf-trace` this crate does not want.
+# `frust-render`'s legacy `cpu-tier` feature (which would have dragged its own
+# `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's graph beside the
+# 0.2.0 oracle pin) was retired earlier; see tests/dup_identities.rs.
 frust-render = { workspace = true, features = [] }
 # Backs `frame.rs` — the GPU-free widget-frame capture (`RenderRoot::rebuild`
 # -> `layout_with_text` -> `paint` into a `frust_scene::SceneBuilder`, which
@@ -100,8 +102,9 @@ vello_cpu_oracle = { workspace = true }
 # ever sees the engine tier through here. NORMAL rather than dev dependencies
 # for the same reason `vello_cpu_oracle` is one: `EngineOracle` lives in
 # `src/` and is part of this crate's own API. `tests/pins_and_deps.rs`'s G7
-# boundary is untouched — it forbids an engine-tier edge from `frust-core`/
-# `frust-widgets`/`frust`/`plugins/*`, and this crate is none of those.
+# layer boundary is untouched — it forbids an edge onto the engine/GPU layer
+# from `frust-core`/`frust-widgets`/`frust`/`plugins/*`, and this crate is
+# none of those.
 frust-engine = { workspace = true }
 frust-gpu = { workspace = true }
 # The engine's own filter vocabulary (`vello_common::filter_effects::{Filter,
@@ -117,7 +120,7 @@ vello_common = { workspace = true }
 # Named directly because the engine seam is spelled in wgpu's own vocabulary:
 # `EngineTarget` carries a `wgpu::TextureView`/`wgpu::TextureFormat` and
 # `EngineRenderer::encode` records into a `wgpu::CommandEncoder` the CALLER
-# owns, and neither engine-tier crate re-exports wgpu, so an adapter for that
+# owns, and neither engine-layer crate re-exports wgpu, so an adapter for that
 # seam has to name it. It stays confined to `oracle_engine`'s internals: no
 # `wgpu` type appears in this crate's public API, which speaks plain bytes,
 # `kurbo` and `peniko` exactly as before (`docs/CODE_STANDARDS.md`'s

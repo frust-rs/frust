@@ -14,17 +14,18 @@
 //!
 //! `wgpu` types are kept out of the public API except at one deliberate seam:
 //! [`SurfaceRenderer::on_surface_created`] takes a `wgpu::SurfaceTarget` (the
-//! shell must hand over a window). Tier selection ([`RenderTier`],
-//! [`select_render_tier`]) probes real adapter downlevel flags via [`TierCaps`]
-//! and honours an explicit override (env var / CLI flag, see
-//! [`RENDER_TIER_ENV_VAR`]) — `Engine` is the only tier this crate contains;
-//! the experimental `vello_cpu`-backed `Cpu` fallback and its `cpu-tier`
-//! feature were retired once the engine tier proved it needs no downlevel
-//! capability that fallback existed to cover.
+//! shell must hand over a window). There is no renderer to select: the engine
+//! is the only one this crate contains, so what was a tier probe is now a
+//! plain capability gate ([`engine_support`] over [`TierCaps`], against
+//! [`ENGINE_REQUIRED_DOWNLEVEL_FLAGS`]) that refuses an adapter which cannot
+//! run it. The cargo feature that gated the engine, the env-var/CLI override
+//! that picked a renderer, and the vello-classic/`vello_cpu` tiers they chose
+//! between are all gone.
 //!
 //! [`HeadlessRenderer`] renders the same scenes with no surface at all — the
 //! offscreen harness this crate's pixel-regression tests compare against,
-//! resolving its adapter, limits and tier exactly as a real device does.
+//! resolving its adapter and limits exactly as a real device does and asking
+//! the same capability gate.
 //!
 //! Surface lifecycle is a first-class state machine: see [`SurfaceRenderer`]
 //! and [`SurfacePhase`]/[`FrameOutcome`], whose pure transition tables live in
@@ -43,23 +44,7 @@
 //! so a shell keeps writing `frust_render::RenderContext` and never learns
 //! where any of it moved to. What is genuinely this crate's own is the
 //! renderer: the render-path decision, the engine resources each arm owns, the
-//! tier seam, and [`SurfaceRenderer`] itself.
-
-// The engine tier is no longer one renderer among several — it is the only
-// one. Deleting vello classic left `engine-tier` carrying the whole surface
-// pipeline (the render paths, the alpha routing, the headless harness), so a
-// build without it has no renderer at all: it would fail deep inside those
-// modules with a pile of unrelated type errors instead of saying so. The
-// feature is kept (rather than folded away) because `frust-engine` stays an
-// optional dependency and later cards in this plan still key off it.
-// `frust-gpu` is NOT optional any more: the device/surface foundation this
-// crate re-exports unconditionally lives there.
-#[cfg(not(feature = "engine-tier"))]
-compile_error!(
-    "frust-render requires the `engine-tier` feature (its default): the vello-classic renderer \
-     was deleted, so it is the only renderer this crate contains. Do not build with \
-     `--no-default-features`."
-);
+//! engine's own capability gate, and [`SurfaceRenderer`] itself.
 
 mod context;
 // Offscreen (no surface, no swapchain) engine rendering: the harness the
@@ -87,14 +72,17 @@ pub use frust_gpu::{
     AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext,
     SurfaceAlphaRequest, SurfaceFactory, SurfacePhase,
 };
-pub use headless::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR};
-#[cfg(feature = "engine-tier")]
-pub use headless::{HeadlessImage, HeadlessMeta, HeadlessOptions, HeadlessRenderer, HeadlessSpec};
+pub use headless::{
+    GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
+    HeadlessOptions, HeadlessRenderer, HeadlessSpec,
+};
 // `DeferredPresent` stays here: it wraps a frame this crate's renderer
 // acquired, submitted and handed back un-presented, which is a renderer
 // concern, not a foundation one.
 pub use renderer::{DeferredPresent, SurfaceRenderer};
-pub use tier::{
-    ENGINE_REQUIRED_DOWNLEVEL_FLAGS, RENDER_TIER_ENV_VAR, RenderTier, TierCaps, TierOutcome,
-    TierSelection, parse_render_tier_override, render_tier_override_from_env, select_render_tier,
-};
+// The adapter-capability gate is all that is left of the tier seam: the
+// renderer itself is no longer a choice, so the tier enum, its selection
+// result types, the selection function, the env-var name and the override
+// parsers are all gone from this surface along with the choice they
+// described.
+pub use tier::{ENGINE_REQUIRED_DOWNLEVEL_FLAGS, EngineUnsupported, TierCaps, engine_support};

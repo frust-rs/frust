@@ -7,7 +7,7 @@
 //! down on `on_surface_destroyed`, and drops to [`SurfacePhase::SurfaceLost`]
 //! when the swapchain reports `Lost` mid-frame.
 //!
-//! The `engine-tier` path — the default and only shipping renderer — is:
+//! The frame — there is one renderer and one path family — is:
 //! encode copies the frame's scene, then acquire → one
 //! `EngineRenderer::encode` into the acquired swapchain view and its
 //! surface-owned depth attachment
@@ -35,7 +35,6 @@ use anyhow::{Result, anyhow};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-#[cfg(feature = "engine-tier")]
 use kurbo::Affine;
 
 use crate::context::{EngineSurface, RenderPath};
@@ -64,23 +63,23 @@ struct ReadySurface {
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
 }
 
-/// The per-surface renderer for the selected [`crate::RenderTier`].
+/// The per-surface renderer.
 ///
 /// The engine variant records into the acquired swapchain view (or, on the
 /// un-premultiplying arm, into the surface's intermediate) in
 /// [`SurfaceRenderer::submit`]. A one-variant enum — the experimental
 /// `vello_cpu`-backed `Cpu` variant and its `cpu-tier` feature were retired
-/// alongside the vello-classic tier's own removal.
+/// alongside the vello-classic renderer's own removal, and the cargo feature
+/// that once gated this one went with the choice it described.
 // The renderer is boxed: the whole `ReadySurface` already lives behind a
 // `Box` (`SurfaceState::Ready`), so nothing on the hot path pays for its
 // size.
 enum TierBackend {
-    /// The frust-owned engine path (`engine-tier` feature): a
+    /// The frust-owned engine path: a
     /// `frust_scene::Scene` compiled into sparse strips and recorded into the
     /// frame's own `wgpu::CommandEncoder` by
     /// [`frust_engine::EngineRenderer`], which never submits — the encoder is
     /// created and submitted in [`SurfaceRenderer::submit`].
-    #[cfg(feature = "engine-tier")]
     Engine {
         engine: Box<frust_engine::EngineRenderer>,
         /// How many of this surface's frames the engine has refused so far
@@ -258,7 +257,6 @@ pub struct SurfaceRenderer {
     /// (strip building, paint encoding) plus command recording lands in
     /// `submit_us`. Compare whole frames across tiers, never `encode_us`
     /// against `encode_us`.
-    #[cfg(feature = "engine-tier")]
     engine_scene: frust_scene::Scene,
 }
 
@@ -281,7 +279,6 @@ impl SurfaceRenderer {
             initial_cache_data: None,
             pending_present: None,
             pending_base_color: None,
-            #[cfg(feature = "engine-tier")]
             engine_scene: frust_scene::Scene::default(),
         }
     }
@@ -387,11 +384,10 @@ impl SurfaceRenderer {
     /// surface produces no such measurement.
     ///
     /// `None` — the `gpu_q=0` case a shell reports — for every reason there is:
-    /// a tier other than the engine one, a build without the `engine-tier`
-    /// feature, a device created without `wgpu::Features::TIMESTAMP_QUERY`
-    /// (which a build that did not compile `perf-trace` in never asks for), and
-    /// the first few frames of a surface, before the ring's first readback has
-    /// landed.
+    /// no live surface, a device created without
+    /// `wgpu::Features::TIMESTAMP_QUERY` (which a build that did not compile
+    /// `perf-trace` in never asks for), and the first few frames of a surface,
+    /// before the ring's first readback has landed.
     ///
     /// The reading lags the calling frame: a frame's queries are mapped
     /// without ever blocking the frame path, so what comes back is a recent
@@ -399,28 +395,21 @@ impl SurfaceRenderer {
     /// fresh reading lands per frame, so the series is complete and offset,
     /// not sparse — see [`frust_gpu::diag::TimestampRing`].
     pub fn gpu_pass_timings(&self) -> Option<GpuPassTimings> {
-        #[cfg(feature = "engine-tier")]
-        {
-            let SurfaceState::Ready(ready) = &self.state else {
-                return None;
-            };
-            #[allow(irrefutable_let_patterns)]
-            let TierBackend::Engine { timestamps, .. } = &ready.backend else {
-                return None;
-            };
-            let reading = timestamps.latest()?;
-            let span = |which: frust_engine::EngineSpan| reading.span(which.index());
-            Some(GpuPassTimings {
-                prepass: span(frust_engine::EngineSpan::Prepass),
-                main: span(frust_engine::EngineSpan::Main),
-                composite: span(frust_engine::EngineSpan::Composite),
-                blit: span(frust_engine::EngineSpan::Blit),
-            })
-        }
-        #[cfg(not(feature = "engine-tier"))]
-        {
-            None
-        }
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        #[allow(irrefutable_let_patterns)]
+        let TierBackend::Engine { timestamps, .. } = &ready.backend else {
+            return None;
+        };
+        let reading = timestamps.latest()?;
+        let span = |which: frust_engine::EngineSpan| reading.span(which.index());
+        Some(GpuPassTimings {
+            prepass: span(frust_engine::EngineSpan::Prepass),
+            main: span(frust_engine::EngineSpan::Main),
+            composite: span(frust_engine::EngineSpan::Composite),
+            blit: span(frust_engine::EngineSpan::Blit),
+        })
     }
 
     /// The current lifecycle phase.
@@ -594,82 +583,78 @@ impl SurfaceRenderer {
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
-        // `PIPELINE_CACHE` (Metal/DX12). Created before the tier `match` so the
-        // engine arm can hand it to `EngineRenderer::new`.
+        // `PIPELINE_CACHE` (Metal/DX12). Created before the backend below so
+        // it can be handed to `EngineRenderer::new`.
         let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
 
-        // Build the tier backend. `Engine` is the only tier `RenderTier`
-        // names, and a build without the `engine-tier` feature never reaches
-        // here at all: `context::create_engine_surface` resolves the tier
-        // through the probe and refuses one this build did not compile in,
-        // before any surface is configured.
-        let backend = match crate::RenderTier::Engine {
-            #[cfg(feature = "engine-tier")]
-            crate::RenderTier::Engine => {
-                let device = &ctx.device_handle().device;
-                // Built for the format this surface's FRAMES will target,
-                // because the engine warms its strip pipelines for exactly one
-                // of them: the swapchain's own on the direct arm, the engine's
-                // off-screen format on the un-premultiplying one, whose frames
-                // land in a surface-owned intermediate instead
-                // ([`engine_target_format`]).
-                //
-                // A resize keeps that format (`EngineSurface::resize`
-                // rewrites only the dimensions), so `on_surface_changed`
-                // resizes the renderer in place; a FORMAT change arrives as a
-                // fresh surface and lands back here, building a renderer
-                // warmed for the new format — off the frame path, and seeded
-                // from the same persisted `wgpu::PipelineCache` blob, so a
-                // re-warm after a format change is a driver-cache hit rather
-                // than a cold compile.
-                let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
-                let engine_format = engine_target_format(&surface.path, surface.config().format);
-                let engine = frust_engine::EngineRenderer::new(
-                    device,
-                    &caps,
+        // Build the backend. There is exactly one renderer and no tier to
+        // dispatch on: `context::create_engine_surface` has already refused an
+        // adapter the engine cannot drive, before any surface is configured.
+        let backend = {
+            let device = &ctx.device_handle().device;
+            // Built for the format this surface's FRAMES will target,
+            // because the engine warms its strip pipelines for exactly one
+            // of them: the swapchain's own on the direct arm, the engine's
+            // off-screen format on the un-premultiplying one, whose frames
+            // land in a surface-owned intermediate instead
+            // ([`engine_target_format`]).
+            //
+            // A resize keeps that format (`EngineSurface::resize`
+            // rewrites only the dimensions), so `on_surface_changed`
+            // resizes the renderer in place; a FORMAT change arrives as a
+            // fresh surface and lands back here, building a renderer
+            // warmed for the new format — off the frame path, and seeded
+            // from the same persisted `wgpu::PipelineCache` blob, so a
+            // re-warm after a format change is a driver-cache hit rather
+            // than a cold compile.
+            let caps = frust_gpu::TierCaps::probe(&ctx.device_handle().adapter);
+            let engine_format = engine_target_format(&surface.path, surface.config().format);
+            let engine = frust_engine::EngineRenderer::new(
+                device,
+                &caps,
+                engine_format,
+                pipeline_cache.as_ref(),
+            )
+            .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
+            // One line per process naming the renderer, next to the
+            // `render-path`/`aa-mode` lines, so a capture proves which
+            // renderer produced the frames it is timing.
+            //
+            // FIXED EVIDENCE MARKER: the `frust-render tier=engine (...)`
+            // text below is byte-for-byte load-bearing — every device gate
+            // greps logcat/console for it and `benchmarks/RESULTS.md`
+            // quotes it verbatim. It outlived the retirement of the tier
+            // *selection* deliberately (there is nothing left to select,
+            // but the receipts still have to match), so do not reword,
+            // re-case or re-punctuate it, and emit it unconditionally.
+            static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
+            ENGINE_LOGGED.get_or_init(|| {
+                log::info!(
+                    "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
+                     a {:?} swapchain, {}x{}, adapter `{}`)",
                     engine_format,
-                    pipeline_cache.as_ref(),
-                )
-                .map_err(|e| anyhow!("frust-render: failed to create engine renderer: {e}"))?;
-                // One line per process naming the tier, next to the
-                // `render-path`/`aa-mode` lines, so a capture proves which
-                // renderer produced the frames it is timing.
-                static ENGINE_LOGGED: OnceLock<()> = OnceLock::new();
-                ENGINE_LOGGED.get_or_init(|| {
-                    log::info!(
-                        "frust-render tier=engine (frust-engine strip pipeline, format={:?} into \
-                         a {:?} swapchain, {}x{}, adapter `{}`)",
-                        engine_format,
-                        surface.config().format,
-                        surface.config().width,
-                        surface.config().height,
-                        caps.adapter_name
-                    );
-                });
-                // Built from the LIVE device rather than from `caps`: the
-                // adapter offering `TIMESTAMP_QUERY` is not the same statement
-                // as the device having been created with it, and creating a
-                // query set the device never enabled is a validation error
-                // rather than a missing measurement. The ring asks the device
-                // itself and goes inert when the answer is no.
-                let timestamps = frust_gpu::diag::TimestampRing::new(
-                    device,
-                    &ctx.device_handle().queue,
-                    frust_engine::EngineSpan::COUNT,
-                    frust_engine::diag::TIMESTAMP_RING_LABEL,
+                    surface.config().format,
+                    surface.config().width,
+                    surface.config().height,
+                    caps.adapter_name
                 );
-                TierBackend::Engine {
-                    engine: Box::new(engine),
-                    refused_frames: 0,
-                    timestamps,
-                }
-            }
-            #[cfg(not(feature = "engine-tier"))]
-            crate::RenderTier::Engine => {
-                return Err(anyhow!(
-                    "frust-render: Engine tier selected without the `engine-tier` feature \
-                     compiled in"
-                ));
+            });
+            // Built from the LIVE device rather than from `caps`: the
+            // adapter offering `TIMESTAMP_QUERY` is not the same statement
+            // as the device having been created with it, and creating a
+            // query set the device never enabled is a validation error
+            // rather than a missing measurement. The ring asks the device
+            // itself and goes inert when the answer is no.
+            let timestamps = frust_gpu::diag::TimestampRing::new(
+                device,
+                &ctx.device_handle().queue,
+                frust_engine::EngineSpan::COUNT,
+                frust_engine::diag::TIMESTAMP_RING_LABEL,
+            );
+            TierBackend::Engine {
+                engine: Box::new(engine),
+                refused_frames: 0,
+                timestamps,
             }
         };
         debug_assert_eq!(
@@ -717,7 +702,6 @@ impl SurfaceRenderer {
                 .surface
                 .resize(&ctx.device_handle().device, width, height);
             match &mut ready.backend {
-                #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { engine, .. } => {
                     // The engine's own extent-sized resources (its intermediate
                     // pool's parked entries, and the depth attachment it would
@@ -778,7 +762,6 @@ impl SurfaceRenderer {
                 // surface's own depth attachment — plus, on the
                 // un-premultiplying arm, its intermediate — dies with the
                 // surface beside it.
-                #[cfg(feature = "engine-tier")]
                 TierBackend::Engine { .. } => {}
             }
         }
@@ -852,7 +835,6 @@ impl SurfaceRenderer {
         let Self {
             state,
             pending_base_color,
-            #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
         } = self;
@@ -866,34 +848,28 @@ impl SurfaceRenderer {
         // borrow checker only allows on a single deref.
         let ready: &mut ReadySurface = ready;
 
-        // Encode this frame's pixels, per tier and per render path.
-        match &mut ready.backend {
-            #[cfg(feature = "engine-tier")]
-            TierBackend::Engine { .. } => {
-                // This tier renders in `submit`, which is why its surface is
-                // configured on one of the two engine paths (`context::choose_engine_render_path`): straight into
-                // the acquired swapchain view, or into a surface-owned
-                // intermediate the same `submit` un-premultiplies from. Any
-                // other path here is a wiring bug, reported rather than
-                // rendered.
-                if !matches!(
-                    &ready.surface.path,
-                    RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. }
-                ) {
-                    return Err(anyhow!(
-                        "frust-render: engine-tier requires the engine render path"
-                    ));
-                }
-                // The frame's whole CPU-side encode on this arm: copy the
-                // display list somewhere that outlives the borrow, since
-                // `EngineRenderer::encode` compiles it itself in `submit`.
-                // `clone_from` reuses the buffer's capacity, so a steady-state
-                // frame allocates nothing — see the field's measurement note.
-                engine_scene.clone_from(scene);
-                // Carried to `submit`, where the render that consumes it runs.
-                *pending_base_color = Some(base_color);
-            }
+        // Encode this frame's pixels. The engine renders in `submit`, which
+        // is why its surface is configured on one of the two engine paths
+        // (`context::choose_engine_render_path`): straight into the acquired
+        // swapchain view, or into a surface-owned intermediate the same
+        // `submit` un-premultiplies from. Any other path here is a wiring bug,
+        // reported rather than rendered.
+        if !matches!(
+            &ready.surface.path,
+            RenderPath::EngineDirect { .. } | RenderPath::EngineDirectUnpremultiply { .. }
+        ) {
+            return Err(anyhow!(
+                "frust-render: the engine requires an engine render path"
+            ));
         }
+        // The frame's whole CPU-side encode on this arm: copy the display list
+        // somewhere that outlives the borrow, since `EngineRenderer::encode`
+        // compiles it itself in `submit`. `clone_from` reuses the buffer's
+        // capacity, so a steady-state frame allocates nothing — see the
+        // field's measurement note.
+        engine_scene.clone_from(scene);
+        // Carried to `submit`, where the render that consumes it runs.
+        *pending_base_color = Some(base_color);
 
         Ok(EncodeOutcome::Encoded)
     }
@@ -1111,7 +1087,6 @@ impl SurfaceRenderer {
         let Self {
             state,
             pending_base_color,
-            #[cfg(feature = "engine-tier")]
             engine_scene,
             ..
         } = self;
@@ -1134,7 +1109,6 @@ impl SurfaceRenderer {
             // encoder and never submits, so every pass of the frame lands in
             // this one command buffer, in order, against the texture about to
             // be presented.
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirect { depth } => {
                 #[allow(irrefutable_let_patterns)]
                 let TierBackend::Engine {
@@ -1144,7 +1118,7 @@ impl SurfaceRenderer {
                 } = backend
                 else {
                     return Err(anyhow!(
-                        "frust-render: engine render path requires the engine tier"
+                        "frust-render: an engine render path requires the engine backend"
                     ));
                 };
                 // Set in `encode`; a well-formed frame always encoded first —
@@ -1239,7 +1213,6 @@ impl SurfaceRenderer {
             // `context::choose_engine_render_path` now routes onto
             // `EngineDirect` above instead; this arm serves a genuinely
             // straight-alpha, non-Metal `PostMultiplied` compositor.)
-            #[cfg(feature = "engine-tier")]
             RenderPath::EngineDirectUnpremultiply {
                 depth,
                 intermediate_view,
@@ -1253,7 +1226,7 @@ impl SurfaceRenderer {
                 } = backend
                 else {
                     return Err(anyhow!(
-                        "frust-render: engine render path requires the engine tier"
+                        "frust-render: an engine render path requires the engine backend"
                     ));
                 };
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1349,7 +1322,6 @@ impl SurfaceRenderer {
 /// One answer for both the install site and the resize-time drift check
 /// below, so the two cannot disagree about which format this surface's
 /// renderer was built for.
-#[cfg(feature = "engine-tier")]
 fn engine_target_format(
     path: &RenderPath,
     surface_format: wgpu::TextureFormat,
@@ -1374,7 +1346,6 @@ fn engine_target_format(
 /// total, and the periodic debug bump keeps the counter visible afterwards.
 /// Every line carries the count, so a capture read later says how many frames
 /// were lost, not merely that some were.
-#[cfg(feature = "engine-tier")]
 fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
     match frust_gpu::context::decide_log_action(count) {
         frust_gpu::context::LogAction::Log => {
@@ -1566,9 +1537,8 @@ mod tests {
     /// Run over BOTH surface formats, since which one a swapchain reports
     /// first is the platform's business and the engine warms its pipelines for
     /// exactly the one it is handed.
-    #[cfg(feature = "engine-tier")]
     #[test]
-    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render --features engine-tier -- --ignored`"]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
     fn engine_arm_records_a_frame_into_its_target_without_validation_errors() {
         /// Serializes every test in this binary that creates a GPU device, the
         /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan

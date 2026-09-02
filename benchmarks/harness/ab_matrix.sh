@@ -193,32 +193,31 @@
 #                      placeholder is printed instead).
 #   --tier <csv>       render arms to sweep. Omitted entirely by default —
 #                      the matrix then runs ONE cell, the app's ordinary
-#                      default build (which reaches the engine tier through
-#                      `frust-render`'s own default feature), filed under
+#                      default build (which is an engine build: `frust-render`
+#                      contains no other renderer), filed under
 #                      `<raw-root>/<device>/fine-floor/default/`. Passing it
 #                      turns on the tier axis: the run files its raw series
 #                      under `<raw-root>/<device>/tier/<cell>/` instead (so a
 #                      tier sweep never overwrites a default-arm cell) and the
 #                      table grows the per-scenario gpu_total/Graphics
 #                      columns. Values (validated up front):
-#                        default       no --features, no FRUST_RENDER_TIER
-#                                      define — the app's ordinary build.
-#                                      Cell label `default`.
-#                        engine        the frust-owned `frust-engine` strip
-#                                      pipeline, named explicitly:
-#                                      `--features engine-tier --define
-#                                      FRUST_RENDER_TIER=engine`. Cell label
-#                                      `engine`. This needs the measured app
-#                                      to expose an `engine-tier` feature of
-#                                      its own forwarding to `frust-render`'s
-#                                      (the `engine-tier = ["frust/engine-tier"]`
-#                                      row in benchmarks/frust_bench and
-#                                      examples/material3-demo is the
-#                                      pattern); without it cargo rejects the
-#                                      arm's --features at build time rather
-#                                      than producing a mislabelled APK.
+#                        default       the app's ordinary build, no arm-
+#                                      specific build args. Cell label
+#                                      `default`.
+#                        engine        a LABELLED SYNONYM of `default`: the
+#                                      frust-owned `frust-engine` strip
+#                                      pipeline is what an ordinary build
+#                                      already runs, so this arm passes the
+#                                      same (empty) build args and differs
+#                                      only in its cell label `engine`, kept
+#                                      so RESULTS.md's existing `engine` cell
+#                                      names stay stable. The feature +
+#                                      env-var define this arm used to pass
+#                                      named a tier selection that no longer
+#                                      exists and would now be rejected by
+#                                      cargo.
 #                      The vello-classic `classic` arm is GONE with the
-#                      renderer it named. The axis is kept, one value wide
+#                      renderer it named. The axis is kept, one renderer wide
 #                      today, as the seam a second arm plugs into.
 #   --scenarios <csv>  benchmarks/frust_bench scenario ids to run per cell,
 #                      passed through to run.sh (default: s1,s2,s4). Each
@@ -1199,21 +1198,22 @@ emit_table() {
 # array, so a value never re-splits on whitespace):
 #
 #   default       (nothing — the app's ordinary build)
-#   engine        --features engine-tier --define FRUST_RENDER_TIER=engine
+#   engine        (nothing — same build, kept only for its cell label)
 #
-# On the `engine` arm the feature and the define are always passed together:
-# the define alone selects a tier the build has no code for, which
-# `frust-render` refuses outright rather than serving through some other
-# renderer, so a half-specified arm would fail at startup instead of
-# measuring anything. `--define FRUST_TRACE_RAW=1` is common to every arm and
-# stays on the caller's line.
+# Both arms are empty today. The renderer is no longer selectable: the
+# frust-engine strip pipeline is the only one `frust-render` contains, so the
+# feature + env-var define the `engine` arm used to pass name a choice that
+# does not exist any more (cargo would reject the feature outright). The arm
+# survives as a labelled synonym so RESULTS.md's `engine` cells keep their
+# names, and this function stays the seam a genuinely different second arm
+# would plug its build args into. `--define FRUST_TRACE_RAW=1` is common to
+# every arm and stays on the caller's line.
 tier_build_args() {
   local tier="$1"
   case "${tier}" in
     default)
       ;;
     engine)
-      printf '%s\n' "--features" "engine-tier" "--define" "FRUST_RENDER_TIER=engine"
       ;;
     *)
       die "tier_build_args: unknown tier '${tier}'"
@@ -1225,8 +1225,8 @@ tier_build_args() {
 # progress line carries, matching what tier_build_args passes.
 tier_build_desc() {
   case "$1" in
-    default) echo "default build (no tier flags)" ;;
-    engine) echo "tier=engine, --features engine-tier" ;;
+    default) echo "default build (no arm flags)" ;;
+    engine) echo "engine arm — same default build, labelled cell" ;;
     *) die "tier_build_desc: unknown tier '$1'" ;;
   esac
 }

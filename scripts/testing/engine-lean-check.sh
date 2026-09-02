@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# scripts/testing/engine-lean-check.sh — Default-tier swap: the
-# frust-engine tier is now reached through ordinary default features, not
-# opt-in dead weight.
+# scripts/testing/engine-lean-check.sh — the frust-engine renderer is what an
+# ordinary build contains, with no vello-classic weight left beside it.
 #
-# `examples/material3-demo` is the DEFAULT-arm target: a standalone workspace
-# (its own `Cargo.lock`, run from its own directory — see
-# `docs/DEVELOPMENT.md`'s Test section) that deps `frust` with default
-# features, which now reaches `frust-render`'s `default = ["engine-tier"]`
-# with no manifest edits anywhere in the chain. This script builds its
-# desktop release binary with NO feature overrides (its ordinary default
-# build) and asserts `frust-engine`/`frust_engine` marker strings ARE present
-# in it — the INVERTED expectation from the pre-swap gate, which asserted
-# their absence — and that the vello-classic markers are now ABSENT, since
-# vello and the `FRUST_RENDER_TIER=gpu` escape hatch that reached it were
-# deleted.
+# `examples/material3-demo` is the target: a standalone workspace (its own
+# `Cargo.lock`, run from its own directory — see `docs/DEVELOPMENT.md`'s Test
+# section) that deps `frust` with default features. This script builds its
+# desktop release binary with NO feature overrides (its ordinary build) and
+# asserts `frust-engine`/`frust_engine` marker strings ARE present in it — the
+# INVERTED expectation from the pre-swap gate, which asserted their absence —
+# and that the vello-classic markers are now ABSENT, since vello and the
+# env-var escape hatch that reached it were deleted.
 #
 # The absence patterns are the CLASSIC-ONLY crate names `vello_shaders` and
 # `vello_encoding`, deliberately NOT a bare `vello`: `vello_common` (and
@@ -21,13 +17,14 @@
 # remain in the binary, so a bare-`vello` absence assertion would be a
 # guaranteed false FAIL rather than a leak check.
 #
-# The ON arm remains a positive control — the mirror of
-# `scripts/release-lean-check.sh`'s `check_strings_present`: it builds
-# `frust-render` with the `engine-tier` feature explicitly ON, from the ROOT
-# workspace, and asserts the same markers ARE present in the produced rlib. A
-# check that can only ever report absence proves nothing about its own
-# sensitivity; kept as an independent confirmation of the feature itself even
-# though the default arm above now already carries it.
+# There is no second, feature-ON arm any more. It existed as a positive
+# control while the engine was an opt-in cargo feature — it built
+# `frust-render` with that feature explicitly on and asserted the same markers
+# in the rlib. The feature is gone (the engine is a plain dependency of
+# `frust-render`, and there is no other renderer to build instead), so an
+# ON/OFF distinction has nothing to distinguish: the default arm above IS the
+# engine build, and its own present-check is what proves the check can see
+# what it is looking for.
 #
 # Reuses `scripts/release-lean-check.sh`'s SKIP-vs-FAIL exit-code shape: a run
 # made entirely of skips must never report PASS.
@@ -37,11 +34,9 @@
 # Exits with:
 #   0 if every check executed (0 skipped) and passed
 #   1 if the arguments themselves are invalid (usage error)
-#   2 if a built artifact FAILED its marker check — the default arm's binary
-#     missing the frust-engine markers it should now carry or still carrying a
-#     vello-classic one, or the ON arm's rlib carrying no frust-engine marker
-#     despite the feature being on (a check that cannot see what it is looking
-#     for)
+#   2 if a built artifact FAILED its marker check — the binary missing the
+#     frust-engine markers it should carry, or still carrying a vello-classic
+#     one
 #   3 if one or more checks were SKIPPED rather than executed (a build that
 #     could not be produced on this box, or no `strings` command) —
 #     INCONCLUSIVE, never silently reported as PASS
@@ -58,7 +53,7 @@ APP_DIR="${REPO_ROOT}/examples/material3-demo"
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
-      sed -n '2,50p' "$0"
+      sed -n '2,45p' "$0"
       exit 0
       ;;
     *)
@@ -153,9 +148,9 @@ check_markers_absent() {
   done
 }
 
-# --- Default arm: material3-demo's ordinary (no feature overrides) release build ----
+# --- material3-demo's ordinary (no feature overrides) release build ---------
 
-echo "-- Building material3-demo desktop release (default features — engine tier now default) --"
+echo "-- Building material3-demo desktop release (default features — the engine build) --"
 
 # Standalone workspace: never let a caller's globally exported
 # CARGO_TARGET_DIR (this repo's other cargo invocations require one — see
@@ -166,73 +161,36 @@ echo "-- Building material3-demo desktop release (default features — engine ti
 # ...) requires — pinned explicitly rather than trusting "unset means default".
 BUILD_LOG="$(mktemp)"
 trap 'rm -f "${BUILD_LOG}"' EXIT
-OFF_TARGET_DIR="${APP_DIR}/target"
+APP_TARGET_DIR="${APP_DIR}/target"
 
-if ! (cd "${APP_DIR}" && CARGO_TARGET_DIR="${OFF_TARGET_DIR}" cargo build --release) >"${BUILD_LOG}" 2>&1; then
-  echo "SKIP default-arm build: material3-demo's release build failed on this box (see \
+if ! (cd "${APP_DIR}" && CARGO_TARGET_DIR="${APP_TARGET_DIR}" cargo build --release) >"${BUILD_LOG}" 2>&1; then
+  echo "SKIP build: material3-demo's release build failed on this box (see \
 ${BUILD_LOG} below) — a build failure never fakes a PASS here, it downgrades to INCONCLUSIVE"
   cat "${BUILD_LOG}"
   SKIP_COUNT=$((SKIP_COUNT + 1))
-  OFF_BIN=""
+  APP_BIN=""
 else
-  echo "default-arm build OK."
+  echo "Build OK."
   PKG_NAME="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "${APP_DIR}/Cargo.toml" | head -n1)"
   if [ -z "${PKG_NAME}" ]; then
     echo "error: could not read [package] name from ${APP_DIR}/Cargo.toml" >&2
     exit 1
   fi
   BIN_STEM="$(printf '%s' "${PKG_NAME}" | tr '-' '_')"
-  OFF_BIN="${OFF_TARGET_DIR}/release/${BIN_STEM}"
+  APP_BIN="${APP_TARGET_DIR}/release/${BIN_STEM}"
   for ext in "" ".exe"; do
-    if [ -f "${OFF_BIN}${ext}" ]; then
-      OFF_BIN="${OFF_BIN}${ext}"
+    if [ -f "${APP_BIN}${ext}" ]; then
+      APP_BIN="${APP_BIN}${ext}"
       break
     fi
   done
 fi
 echo
 
-echo "-- default-arm marker check (engine tier reached via default features; vello classic deleted) --"
-check_markers_present "${OFF_BIN}" "default-arm frust-engine markers" "frust_engine"
-check_markers_absent "${OFF_BIN}" "default-arm vello-classic markers" \
+echo "-- marker check (the engine is what a default build contains; vello classic deleted) --"
+check_markers_present "${APP_BIN}" "frust-engine markers" "frust_engine"
+check_markers_absent "${APP_BIN}" "vello-classic markers" \
   "vello_shaders" "vello_encoding"
-echo
-
-# --- ON arm: positive control ----------------------------------------------
-
-echo "-- Building frust-render release with the engine tier ON --"
-
-# The ROOT workspace this time, not the standalone example: this arm builds the
-# crate that OWNS the feature. Honours a caller-exported CARGO_TARGET_DIR (this
-# repo's root builds normally run with one) and falls back to the workspace's
-# own `target/` when none is set — never the default arm's dedicated dir,
-# which belongs to the standalone example alone.
-ON_TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
-ON_BUILD_LOG="$(mktemp)"
-trap 'rm -f "${BUILD_LOG}" "${ON_BUILD_LOG}"' EXIT
-
-if ! (cd "${REPO_ROOT}" && CARGO_TARGET_DIR="${ON_TARGET_DIR}" \
-      cargo build --release -p frust-render --features engine-tier) \
-      >"${ON_BUILD_LOG}" 2>&1; then
-  echo "SKIP ON-arm build: frust-render's engine-tier release build failed on this box (log \
-below) — a build failure never fakes a PASS here, it downgrades to INCONCLUSIVE"
-  cat "${ON_BUILD_LOG}"
-  SKIP_COUNT=$((SKIP_COUNT + 1))
-  ON_ARTIFACT=""
-else
-  echo "ON-arm build OK."
-  # Cargo uplifts a library target into the profile dir under its plain name;
-  # fall back to the hashed copy under `deps/` if that ever stops holding.
-  ON_ARTIFACT="${ON_TARGET_DIR}/release/libfrust_render.rlib"
-  if [ ! -f "${ON_ARTIFACT}" ]; then
-    ON_ARTIFACT="$(ls -t "${ON_TARGET_DIR}"/release/deps/libfrust_render-*.rlib 2>/dev/null \
-      | head -n1)"
-  fi
-fi
-echo
-
-echo "-- ON-arm marker check (engine tier ON, positive control) --"
-check_markers_present "${ON_ARTIFACT}" "ON-arm frust-engine markers" "frust_engine"
 echo
 
 # --- Summary -----------------------------------------------------------
