@@ -382,7 +382,7 @@ fn code_panel(state: &State) -> AnyView<State> {
 /// `file_diff`: a synthetic diff model, streamed row by row.
 fn diff_panel(state: &State) -> AnyView<State> {
     let rows = diff_rows();
-    let visible = state.diff_visible();
+    let visible = state.diff_visible().min(rows.len());
     let model = file_diff_model(
         "src/runner.ts",
         vec![diff_hunk("@@ -18,3 +18,4 @@", rows[..visible].to_vec())],
@@ -437,7 +437,7 @@ fn output(body: impl Into<String>) -> frust::TextView {
 /// `tool_result`: a run that streams to success, plus a failed and a cancelled
 /// instance.
 fn result_panels(state: &State) -> AnyView<State> {
-    let visible = state.output_lines();
+    let visible = state.output_lines().min(OUTPUT.len());
     let running = visible < OUTPUT.len();
     let body = OUTPUT[..visible].join("\n");
 

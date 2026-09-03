@@ -39,7 +39,7 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             Row(vec![
                 category_card(
                     "Motion",
-                    "9 pages covering the 41 Phase-2 motion components: text, buttons, controls, selection, overlays, navigation, surfaces, data, and a WGSL shader page.",
+                    "9 pages covering the 41 motion components: text, buttons, controls, selection, overlays, navigation, surfaces, data, and a WGSL shader page.",
                     Page::MotionText,
                 ),
                 any(SizedBox(Some(16.0), None)),

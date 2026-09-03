@@ -346,13 +346,17 @@ impl ShaderPalette {
 /// `Rgba8Unorm` target unblended, so a colour written this way lands on the same
 /// value a `fill_rect` of it would.
 fn wgsl_rgb(color: Color) -> String {
-    let c = color.components;
+    // Sanitised at the sink, not only at the builders: the theme-resolved
+    // palette and the public `variant_wgsl` route reach here too, and a
+    // non-finite literal is not WGSL.
+    let c = finite_color(color).components;
     format!("vec3<f32>({:.6}, {:.6}, {:.6})", c[0], c[1], c[2])
 }
 
-/// Format a colour's alpha as a WGSL `f32` literal.
+/// Format a colour's alpha as a WGSL `f32` literal (sanitised like
+/// [`wgsl_rgb`]).
 fn wgsl_alpha(color: Color) -> String {
-    format!("{:.6}", color.components[3])
+    format!("{:.6}", finite_color(color).components[3])
 }
 
 /// The premultiply helper every generated source returns through, so the
@@ -1044,13 +1048,13 @@ mod tests {
         ShaderPalette::from_theme(variant, Some(&crate::theme()))
     }
 
-    /// Every ported variant's WGSL keeps the engine's fragment contract: it
-    /// defines `fs_main` over `FrustVsOut`, redeclares nothing the prelude
-    /// already provides, and returns through the premultiply helper.
-    ///
-    /// This is the structural half of "it compiles" — see the module docs on
-    /// what the device-side validation of these sources costs and where it
-    /// currently lives.
+    /// Every variant's source upholds the engine's fragment-program contract
+    /// as far as a string check can tell: the prelude's entry point and
+    /// uniforms are used, nothing the prelude declares is redeclared, and the
+    /// braces balance. No in-repo gate compiles these five programs — this
+    /// crate has no GPU dev-dependency — so their device-side validation is
+    /// the out-of-tree T400 render run recorded with the port (and owed to
+    /// the accepted-limitations register until an ignored GPU test can land).
     #[test]
     fn every_variant_source_upholds_the_engine_fragment_contract() {
         for variant in ShaderBackgroundVariant::ALL {
