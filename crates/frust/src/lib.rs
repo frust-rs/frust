@@ -624,7 +624,7 @@ pub mod authoring {
 ///    has a pass, and changes nothing — a registration is a claim, never a
 ///    silent takeover.
 /// 3. **Paint the id.** In `Widget::paint`, record
-///    [`authoring::scene::SceneBuilder::scene_texture`] with
+///    [`authoring::PaintScene::draw_scene_texture`] with
 ///    `id.get()` and the destination rectangle. The pass's binding and the
 ///    display list naming it meet inside one frame, so the ordering is
 ///    already right; an id whose pass has not bound anything yet simply draws
@@ -723,6 +723,10 @@ pub mod gpu {
     pub use frust_render::{
         ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
     };
+    /// The wgpu graphics library, re-exported for plugins that record an
+    /// [`ExternalPass`] so they do not need a direct `wgpu` dependency.
+    #[cfg(feature = "gpu")]
+    pub use wgpu;
 
     /// Run `f` against the shell-owned live [`DeviceHandle`], or `None` if no
     /// shell has installed one yet (see the module docs' *Reaching the

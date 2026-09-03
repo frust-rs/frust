@@ -180,6 +180,23 @@ pub trait PaintScene {
     /// one.
     fn draw_shader(&mut self, _program: &ShaderProgram, _dest: Rect, _time: f32) {}
 
+    /// Composite a bound scene texture (pre-rendered via [`ExternalPass`](frust_gpu::ExternalPass))
+    /// into the scene.
+    ///
+    /// An additive method on this otherwise layer-2 trait — authorized because the
+    /// texture id and destination have to reach the scene through the same
+    /// `&mut dyn PaintScene` seam every other paint call uses. `id` is a
+    /// `SceneTextureId::get()`; `dest` is in the scene's coordinate space.
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real scene-texture command.
+    ///
+    /// The engine renders nothing if the id is unbound and warns once per
+    /// process. Output is always blended (never replaces). The binding is
+    /// established outside this paint call by [`ExternalPass::record`](frust_gpu::ExternalPass::record);
+    /// a texture whose pass has not bound anything yet simply draws nothing
+    /// that frame, never an error.
+    fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {}
+
     /// Draw a gaussian-blurred rounded-rectangle elevation shadow (an
     /// approximation of a CSS `box-shadow`) at `origin`/`size`.
     ///
@@ -438,6 +455,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
         SceneBuilder::draw_shader(self, program, dest, time);
+    }
+
+    fn draw_scene_texture(&mut self, id: u64, dest: Rect) {
+        SceneBuilder::scene_texture(self, id, dest);
     }
 
     fn draw_shadow(&mut self, origin: Point, size: Size, radius: f64, std_dev: f64, color: Color) {
@@ -2571,6 +2592,7 @@ mod tests {
         rects: Vec<(Point, Size)>,
         texts: Vec<(Point, String)>,
         shaders: Vec<(u64, Rect, f32)>,
+        scene_textures: Vec<(u64, Rect)>,
     }
 
     impl PaintScene for RecordingScene {
@@ -2582,6 +2604,9 @@ mod tests {
         }
         fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
             self.shaders.push((program.id(), dest, time));
+        }
+        fn draw_scene_texture(&mut self, id: u64, dest: Rect) {
+            self.scene_textures.push((id, dest));
         }
     }
 
@@ -2755,6 +2780,35 @@ mod tests {
         assert_eq!(scene.shaders[0].0, program.id());
         assert_eq!(scene.shaders[0].1, dest);
         assert_eq!(scene.shaders[0].2, time);
+    }
+
+    #[test]
+    fn widget_paint_emits_scene_texture_into_scene() {
+        /// A leaf widget that paints a scene texture.
+        struct SceneTextureWidget {
+            id: u64,
+            dest: Rect,
+        }
+
+        impl Widget for SceneTextureWidget {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, _ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                scene.draw_scene_texture(self.id, self.dest);
+            }
+        }
+
+        let id = 42u64;
+        let dest = Rect::new(10.0, 20.0, 100.0, 150.0);
+        let mut w = SceneTextureWidget { id, dest };
+        let mut scene = RecordingScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 200.0));
+        w.paint(&mut ctx, &mut scene);
+        assert_eq!(scene.scene_textures.len(), 1);
+        assert_eq!(scene.scene_textures[0].0, id);
+        assert_eq!(scene.scene_textures[0].1, dest);
     }
 
     #[test]
