@@ -19,16 +19,6 @@ license.workspace = true
 frust = { path = "../../crates/frust", default-features = false }
 kurbo = { workspace = true }
 peniko = { workspace = true }
-# Optional, off by default, and reachable only through the `gpu-effects`
-# feature below: the 3D substrate implements the facade's `ExternalPass`, whose
-# `record` is handed the frame's own `wgpu::Device`/`Queue`/`CommandEncoder`,
-# and builds its own render pipeline over them. The facade re-exports the GPU
-# *types* but not `wgpu` itself, so a caller driving a render pass beside the
-# engine names `wgpu` in its own right — the shape `crates/frust/src/lib.rs`'s
-# `gpu` module documents. `cargo tree -p frust-beui -e normal` on a default
-# build still resolves to frust + kurbo + peniko alone, which is the plugin
-# charter line this crate is held to (docs/PLUGINS_CODE_STANDARDS.md).
-wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
@@ -43,8 +33,11 @@ default = []
 # The GPU-effect substrate (`src/gpu_fx`): real perspective for the catalog's
 # 3D component variants, rendered through the facade's GPU seam
 # (`frust/gpu` -> `frust::gpu`) into an offscreen target the engine
-# composites. Deliberately NOT default — a default build carries no `wgpu`
-# edge, no `gpu_fx` module and no behaviour change whatsoever, and every
+# composites. The substrate reaches `wgpu` only through `frust::gpu`'s
+# re-export, so this crate carries no `wgpu` edge of its own (the plugin
+# charter line docs/PLUGINS_CODE_STANDARDS.md records). Deliberately NOT
+# default — a default build carries no `gpu_fx` module and no behaviour
+# change whatsoever, and every
 # component that can use the substrate keeps its 2D path as the one it renders
 # when the feature is absent or the GPU is unreachable at runtime.
-gpu-effects = ["dep:wgpu", "frust/gpu"]
+gpu-effects = ["frust/gpu"]

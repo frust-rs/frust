@@ -134,6 +134,8 @@ pub use schedule::{DECORATIVE_FRAME_INTERVAL, FxCadence, FxPass, request_frame};
 pub(crate) mod test_gpu {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
+    use frust::gpu::wgpu;
+
     /// The provenance variable every GPU run in this workspace records under
     /// (`docs/TESTING.md`'s GPU Run Metadata), named here as a literal because
     /// the facade does not re-export the renderer's own constant.

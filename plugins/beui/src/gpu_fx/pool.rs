@@ -47,6 +47,8 @@
 //! testable without a GPU.
 
 use std::collections::HashMap;
+
+use frust::gpu::wgpu;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::quad3d::{COLOR_FORMAT, DEPTH_FORMAT};

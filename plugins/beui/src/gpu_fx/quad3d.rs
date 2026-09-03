@@ -62,6 +62,8 @@
 
 use std::sync::Arc;
 
+use frust::gpu::wgpu;
+
 use peniko::Color;
 
 use frust::authoring::Rect;
@@ -919,6 +921,7 @@ mod tests {
         translation,
     };
     use frust::authoring::Rect;
+    use frust::gpu::wgpu;
     use peniko::Color;
 
     /// Projects a world point through the view-projection this substrate
@@ -1135,6 +1138,7 @@ mod tests {
 #[cfg(test)]
 mod gpu_tests {
     use frust::authoring::Rect;
+    use frust::gpu::wgpu;
     use peniko::Color;
 
     use super::{
