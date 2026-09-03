@@ -27,6 +27,12 @@
 //! | `isValidAddress` / `truncateAddress` | [`is_valid_address`] / [`truncate_address`] |
 //! | `formatAmount` (`maximumFractionDigits`, grouped past 1000) | [`format_amount`] |
 //! | `ActionButton`'s four-way label and its `disabled` rule | [`swap_action_label`], [`SwapActionState`] |
+//! | `active:scale-[0.97]` on the token, settings and `Max` affordances | [`SWAP_TAP_SCALE`] via `SwapWidget`'s shared `affordance_press` lane |
+//!
+//! The action button's own press shrink (`paint_action`) also reuses
+//! [`SWAP_TAP_SCALE`] through `action_press` — this port has no separately
+//! documented upstream value for the submit button, so it borrows the same
+//! constant rather than inventing an undocumented one.
 //!
 //! # Degradations against the web original
 //!
@@ -151,7 +157,10 @@ pub const SWAP_FLIP_TURN: f64 = 180.0;
 /// `whileTap={{ scale: 0.9 }}` — the flip button's press shrink.
 pub const SWAP_FLIP_PRESS_SCALE: f64 = 0.9;
 
-/// `active:scale-[0.97]` — the token and settings affordances' press shrink.
+/// `active:scale-[0.97]` — the token, settings and `Max` affordances' press
+/// shrink, driven by `SwapWidget`'s shared `affordance_press` lane. The
+/// action button's own press shrink (`action_press`) also borrows this
+/// constant; see the upstream-mapping table at the top of the module.
 pub const SWAP_TAP_SCALE: f64 = 0.97;
 
 /// `setTimeout(() => setQuoting(false), 450)` — how long a re-quote holds the
@@ -190,12 +199,23 @@ pub fn is_valid_address(value: &str) -> bool {
 /// Deliberately not the wallet card's own truncation, which is a different rule
 /// on a different length — upstream ships two, and folding them would change
 /// one component's output.
+///
+/// Counted in **characters, not bytes** (the `wallet_card.rs` pattern), so a
+/// caller-supplied value that happens to be 42 bytes but not 42 characters —
+/// or 42 characters with a multibyte one among the first six or last four —
+/// is cut on a char boundary rather than mid-codepoint, which a raw byte
+/// slice cannot guarantee for arbitrary text.
 pub fn truncate_address(value: &str) -> String {
-    if value.starts_with("0x") && value.len() == 42 {
-        format!("{}...{}", &value[..6], &value[value.len() - 4..])
-    } else {
-        value.to_string()
+    if !value.starts_with("0x") {
+        return value.to_string();
     }
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() != 42 {
+        return value.to_string();
+    }
+    let head: String = chars[..6].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 /// `formatAmount(n, max = 6)`: `0` for zero and anything non-finite, at most two
@@ -562,6 +582,14 @@ pub struct SwapWidget {
     flip_press: Lane,
     /// The action button's press shrink.
     action_press: Lane,
+    /// The token/settings/`Max` affordances' shared press shrink — only one
+    /// of them can be armed at a time (a single `armed: Option<Target>`
+    /// drives all presses), so one lane covers the whole group.
+    affordance_press: Lane,
+    /// Which affordance `affordance_press` is currently shrinking, so paint
+    /// applies the value to the right box during the release decay (the
+    /// lane itself no longer knows once `armed` is cleared on `Up`/`Cancel`).
+    affordance_press_target: Option<Target>,
     /// Whether the destination row is open, as this widget last resolved it.
     show_destination: bool,
     /// The frame the current re-quote started on, or `None` once it settled.
@@ -577,6 +605,7 @@ pub struct SwapWidget {
     settings: Rect,
     max_box: Rect,
     flip_box: Rect,
+    quote_box: Rect,
     destination_box: Rect,
     action_box: Rect,
     /// The affordance a `Down` armed.
@@ -700,6 +729,17 @@ impl SwapWidget {
             _ => 1.0,
         }
     }
+
+    /// `SWAP_TAP_SCALE` for `target` if it is the affordance
+    /// `affordance_press` is currently shrinking, `1.0` (at rest) otherwise —
+    /// the token boxes, the settings glyph and `Max` all read this.
+    fn affordance_scale(&self, target: Target) -> f64 {
+        if self.affordance_press_target == Some(target) {
+            press_scale(SWAP_TAP_SCALE, self.affordance_press.value())
+        } else {
+            1.0
+        }
+    }
 }
 
 /// The four quote-row labels, in upstream's own order.
@@ -757,6 +797,8 @@ impl<State: 'static> View<State> for SwapView<State> {
             ),
             flip_press: Lane::at_rest(Ramp::spring(SPRING_PRESS), 0.0),
             action_press: Lane::at_rest(Ramp::spring(SPRING_PRESS), 0.0),
+            affordance_press: Lane::at_rest(Ramp::spring(SPRING_PRESS), 0.0),
+            affordance_press_target: None,
             show_destination: show,
             quoting_since: None,
             quote_pending: false,
@@ -766,6 +808,7 @@ impl<State: 'static> View<State> for SwapView<State> {
             settings: Rect::ZERO,
             max_box: Rect::ZERO,
             flip_box: Rect::ZERO,
+            quote_box: Rect::ZERO,
             destination_box: Rect::ZERO,
             action_box: Rect::ZERO,
             armed: None,
@@ -966,7 +1009,8 @@ impl Widget for SwapWidget {
         // The quote block, the destination row and the action button.
         let quote_height = SWAP_QUOTE_ROW_HEIGHT * 4.0 + style::GAP_MD * 2.0;
         y += style::GAP_MD;
-        let quote_y = y;
+        self.quote_box =
+            Rect::from_origin_size(Point::new(SWAP_PADDING, y), Size::new(inner, quote_height));
         y += quote_height + style::GAP_SM;
         let revealed = self.reveal.value().clamp(0.0, 1.0);
         self.destination_box = Rect::from_origin_size(
@@ -978,7 +1022,6 @@ impl Widget for SwapWidget {
             Point::new(SWAP_PADDING, y),
             Size::new(inner, SWAP_ACTION_HEIGHT),
         );
-        let _ = quote_y;
 
         bc.constrain(Size::new(width, self.action_box.y1 + SWAP_PADDING))
     }
@@ -1014,25 +1057,35 @@ impl Widget for SwapWidget {
                 ctx.request_frame();
             }
         }
-        if reduce {
+        // The destination reveal changes the widget's own height, so it is a
+        // layout animation rather than a repaint. `Lane::advance` snaps to
+        // the target and returns `false` on the very frame it settles, which
+        // would silently skip that final relayout, and the `reduce_motion`
+        // snap below has no `advance` call at all to gate on — so the
+        // request is decided from a before/after compare instead, the same
+        // pattern `tool_result.rs`'s own reveal lane uses.
+        let reveal_before = self.reveal.value();
+        let moving = if reduce {
             self.flip.snap();
             self.reveal.snap();
             self.chevron.snap();
             self.flip_press.snap();
             self.action_press.snap();
+            self.affordance_press.snap();
+            false
         } else {
             let mut animating = self.flip.advance(now);
             animating |= self.chevron.advance(now);
             animating |= self.flip_press.advance(now);
             animating |= self.action_press.advance(now);
+            animating |= self.affordance_press.advance(now);
             if animating {
                 ctx.request_frame();
             }
-            // The destination reveal changes the widget's own height, so it is
-            // a layout animation rather than a repaint.
-            if self.reveal.advance(now) {
-                ctx.request_layout();
-            }
+            self.reveal.advance(now)
+        };
+        if moving || self.reveal.value() != reveal_before {
+            ctx.request_layout();
         }
 
         let radius = style::resolve_radius(SWAP_RADIUS, size.width, size.height);
@@ -1053,7 +1106,7 @@ impl Widget for SwapWidget {
         draw_settings(
             scene,
             origin + self.settings.center().to_vec2(),
-            style::ICON_SIZE,
+            style::ICON_SIZE * self.affordance_scale(Target::Settings),
             chrome.dim_ink,
         );
         scene.fill_rect(
@@ -1187,28 +1240,41 @@ impl SwapWidget {
             scene,
         );
 
-        // The token affordance.
+        // The token affordance, shrinking on its own press (`SWAP_TAP_SCALE`,
+        // documented under `active:scale-[0.97]`).
+        let side = if index == 0 {
+            SwapSide::From
+        } else {
+            SwapSide::To
+        };
+        let token_scale = self.affordance_scale(Target::Token(side));
         let token = self.tokens[index];
         let token_at = origin + token.origin().to_vec2();
+        let token_box_size = Size::new(token.width() * token_scale, token.height() * token_scale);
+        let token_box_at = token_at
+            + Vec2::new(
+                (token.width() - token_box_size.width) / 2.0,
+                (token.height() - token_box_size.height) / 2.0,
+            );
         scene.fill_rounded_rect(
-            token_at,
-            token.size(),
+            token_box_at,
+            token_box_size,
             style::RADIUS_CONTROL,
             chrome.surface,
         );
         paint_panel_hairline(
             scene,
-            token_at,
-            token.size(),
+            token_box_at,
+            token_box_size,
             style::RADIUS_CONTROL,
             chrome.border,
         );
         let symbol = self.symbols[index].size();
         self.symbols[index].paint(
-            token_at
+            token_box_at
                 + Vec2::new(
-                    (token.width() - symbol.width) / 2.0,
-                    (token.height() - symbol.height) / 2.0,
+                    (token_box_size.width - symbol.width) / 2.0,
+                    (token_box_size.height - symbol.height) / 2.0,
                 ),
             chrome.ink,
             scene,
@@ -1225,12 +1291,14 @@ impl SwapWidget {
             scene,
         );
         if index == 0 && self.max_box.width() > 0.0 {
+            let max_scale = self.affordance_scale(Target::Max);
             let max = self.max.size();
+            let max_size = Size::new(max.width * max_scale, max.height * max_scale);
             self.max.paint(
                 origin
                     + Vec2::new(
-                        self.max_box.x0 + (self.max_box.width() - max.width) / 2.0,
-                        self.max_box.y0 + (self.max_box.height() - max.height) / 2.0,
+                        self.max_box.x0 + (self.max_box.width() - max_size.width) / 2.0,
+                        self.max_box.y0 + (self.max_box.height() - max_size.height) / 2.0,
                     ),
                 chrome.dim_ink,
                 scene,
@@ -1280,12 +1348,7 @@ impl SwapWidget {
         wash: Color,
         alpha: f64,
     ) {
-        let rect = Rect::new(
-            self.fields[1].x0,
-            self.fields[1].y1 + SWAP_GAP + style::GAP_MD,
-            self.fields[1].x1,
-            self.destination_box.y0 - style::GAP_SM,
-        );
+        let rect = self.quote_box;
         if rect.height() <= 0.0 {
             return;
         }
@@ -1476,6 +1539,10 @@ impl SwapWidget {
                 match target {
                     Target::Flip => self.flip_press.retarget(1.0),
                     Target::Submit if self.state.is_enabled() => self.action_press.retarget(1.0),
+                    Target::Token(_) | Target::Settings | Target::Max => {
+                        self.affordance_press_target = Some(target);
+                        self.affordance_press.retarget(1.0);
+                    }
                     _ => {}
                 }
                 ctx.request_redraw();
@@ -1487,6 +1554,7 @@ impl SwapWidget {
                 };
                 self.flip_press.retarget(0.0);
                 self.action_press.retarget(0.0);
+                self.affordance_press.retarget(0.0);
                 ctx.request_redraw();
                 if over == Some(armed) {
                     self.fire(ctx, armed);
@@ -1500,6 +1568,7 @@ impl SwapWidget {
                 }
                 self.flip_press.retarget(0.0);
                 self.action_press.retarget(0.0);
+                self.affordance_press.retarget(0.0);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -1642,6 +1711,39 @@ mod tests {
         );
         assert_eq!(truncate_address("alice.eth"), "alice.eth");
         assert_eq!(truncate_address("0xabc"), "0xabc");
+    }
+
+    #[test]
+    fn a_multibyte_value_that_only_looks_like_a_full_address_in_bytes_is_never_sliced_mid_codepoint()
+     {
+        // 2 ASCII + twelve 3-byte codepoints + 4 ASCII = 42 *bytes*, but only
+        // 18 *characters* — the crafted input M8's review finding names,
+        // which panicked ("byte index 6 is not a char boundary") through the
+        // old byte-length check.
+        let value = format!("0x{}{}", "日".repeat(12), ".eth");
+        assert_eq!(value.len(), 42, "the crafted input is 42 bytes, not chars");
+        assert_eq!(
+            truncate_address(&value),
+            value,
+            "not 42 characters, so it must be shown as-is rather than sliced"
+        );
+
+        // Reached indirectly through the widget's own label path:
+        // `is_valid_address` accepts it (it ends in `.eth`), and
+        // `swap_action_label` truncates the destination — that path must not
+        // panic either.
+        assert!(is_valid_address(&value));
+        let label = swap_action_label(SwapActionState::SendTo, &eth(), &sol(), &value);
+        assert_eq!(label, format!("Swap + Send to {value}"));
+
+        // A genuine 42-*character* multibyte address is still truncated, on a
+        // char boundary rather than a byte one.
+        let wide = format!("0x{}{}", "€".repeat(38), "ab");
+        let chars: Vec<char> = wide.chars().collect();
+        assert_eq!(chars.len(), 42);
+        let head: String = chars[..6].iter().collect();
+        let tail: String = chars[38..].iter().collect();
+        assert_eq!(truncate_address(&wide), format!("{head}...{tail}"));
     }
 
     #[test]
@@ -1818,6 +1920,20 @@ mod tests {
             let now = self.clock;
             self.root.paint(&mut rec, ft_ms(now));
             rec
+        }
+
+        /// Paint one frame with **no** relayout in between — the shape a bare
+        /// `request_frame`/`request_redraw` actually drives in production,
+        /// unlike [`Self::step`], which relayouts unconditionally every call
+        /// (masking a missed `request_layout`, per docs/REVIEW_FOCUS.md's
+        /// layout-skip hot spot). Returns whether the paint itself asked for
+        /// a relayout, so a missed call fails the assertion instead of being
+        /// silently absorbed by an intervening layout pass.
+        fn paint_only(&mut self, ms: f64) -> (Recorder, bool) {
+            self.clock += ms;
+            let mut rec = Recorder::default();
+            let outcome = self.root.paint(&mut rec, ft_ms(self.clock));
+            (rec, outcome.needs_layout)
         }
 
         fn event(&mut self, event: InputEvent) {
@@ -2005,6 +2121,179 @@ mod tests {
         assert_eq!(
             first.rrects, second.rrects,
             "a reduced-motion flip was still turning"
+        );
+    }
+
+    // ---- M5: the destination reveal's relayout coverage ---------------------
+
+    #[test]
+    fn a_reduced_motion_destination_toggle_relayouts_on_the_next_paint_only_frame() {
+        let mut h = Harness::themed(reduced());
+        let closed_height = h.step(0.0).rrects[0].1.height;
+        let at = h.destination_centre();
+        // `Target::Destination`'s own handler only requests a redraw
+        // (`fire`'s trailing `ctx.request_redraw()`); the relayout must come
+        // from the very next paint, not from the event itself — no `step`
+        // (which always relayouts) runs in between.
+        h.event(pointer(PointerPhase::Down, at.x, at.y));
+        h.event(pointer(PointerPhase::Up, at.x, at.y));
+        let (_, needs_layout) = h.paint_only(0.0);
+        assert!(
+            needs_layout,
+            "the reduce_motion destination snap never asked for a relayout"
+        );
+        let open_height = h.step(0.0).rrects[0].1.height;
+        assert!(
+            open_height > closed_height,
+            "the destination row never grew under reduce_motion: {closed_height} -> {open_height}"
+        );
+    }
+
+    #[test]
+    fn the_reveal_s_settling_frame_still_requests_layout() {
+        let mut h = Harness::new();
+        let at = h.destination_centre();
+        h.event(pointer(PointerPhase::Down, at.x, at.y));
+        h.event(pointer(PointerPhase::Up, at.x, at.y));
+
+        // The first paint after a retarget latches the animation's start
+        // time, so it always reads as elapsed-zero regardless of the delta
+        // passed in — the `tool_result.rs` reveal carries the same rule.
+        let (_, opening) = h.paint_only(0.0);
+        assert!(opening, "the reveal's opening frame skipped its relayout");
+
+        // Mid-flight, well short of `SWAP_DEST_REVEAL`.
+        let (_, mid) = h.paint_only(SWAP_DEST_REVEAL.as_secs_f64() * 1_000.0 / 2.0);
+        assert!(mid, "a mid-flight reveal frame must relayout too");
+
+        // The exact frame the ramp settles: `Lane::advance` returns `false`
+        // here (the bug this test guards), but the value still moves from
+        // its mid-flight sample to the target, which the before/after
+        // compare must still catch.
+        let (_, settling) = h.paint_only(SWAP_DEST_REVEAL.as_secs_f64() * 1_000.0 / 2.0 + 10.0);
+        assert!(
+            settling,
+            "the reveal's settling frame skipped its relayout — the last-laid \
+             geometry sits a hair short of rest"
+        );
+
+        // One frame later, at rest: nothing left to relayout for.
+        let (_, resting) = h.paint_only(16.0);
+        assert!(!resting, "a resting reveal keeps asking for a relayout");
+    }
+
+    // ---- M1: the token/settings/`Max` press feedback -------------------------
+
+    fn build_swap() -> SwapWidget {
+        let mut counter = 0u64;
+        let view: SwapView<()> = swap(eth(), sol()).amount(1.0);
+        View::<()>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    fn layout_swap(w: &mut SwapWidget) -> Size {
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut ctx, &BoxConstraints::new(Size::ZERO, WINDOW))
+    }
+
+    /// Dispatch a pointer `phase` at `at` (widget-local) directly to `w`,
+    /// bypassing `RenderRoot` — the same seam `tool_result.rs`'s own
+    /// `paint_at` uses for its `PaintCtx`, extended to `EventCtx`.
+    fn press_swap(w: &mut SwapWidget, size: Size, at: Point, phase: PointerPhase) {
+        let mut state = ();
+        let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, size);
+        w.event(&mut ctx, &pointer(phase, at.x, at.y));
+    }
+
+    fn paint_swap(w: &mut SwapWidget, size: Size, ms: f64) {
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(ms));
+        w.paint(&mut ctx, &mut rec);
+    }
+
+    #[test]
+    fn a_pressed_token_affordance_arms_and_shrinks_only_its_own_side() {
+        let mut w = build_swap();
+        let size = layout_swap(&mut w);
+        let at = w.tokens[0].center();
+
+        press_swap(&mut w, size, at, PointerPhase::Down);
+        assert_eq!(
+            w.affordance_press_target,
+            Some(Target::Token(SwapSide::From)),
+            "pressing the From token affordance never armed its press lane"
+        );
+
+        // The press spring's own first paint after the retarget latches its
+        // start time and so reads elapsed-zero (the same rule the reveal's
+        // settling-frame tests above document); a second paint is needed to
+        // see it in flight.
+        paint_swap(&mut w, size, 0.0);
+        paint_swap(&mut w, size, 60.0);
+        let from_scale = w.affordance_scale(Target::Token(SwapSide::From));
+        assert!(
+            from_scale < 1.0,
+            "SWAP_TAP_SCALE's documented token press shrink never took hold: {from_scale}"
+        );
+        assert_eq!(
+            w.affordance_scale(Target::Token(SwapSide::To)),
+            1.0,
+            "the To side must not shrink from the From side's own press"
+        );
+
+        press_swap(&mut w, size, at, PointerPhase::Up);
+        paint_swap(&mut w, size, 800.0);
+        paint_swap(&mut w, size, 1_600.0);
+        assert_eq!(
+            w.affordance_scale(Target::Token(SwapSide::From)),
+            1.0,
+            "the token press shrink never released back to resting scale"
+        );
+    }
+
+    #[test]
+    fn the_settings_and_max_affordances_shrink_on_their_own_press() {
+        let mut w = build_swap();
+        let size = layout_swap(&mut w);
+        assert!(
+            w.max_box.width() > 0.0,
+            "eth() carries a balance, so Max must be present to press"
+        );
+
+        let settings_at = w.settings.center();
+        press_swap(&mut w, size, settings_at, PointerPhase::Down);
+        assert_eq!(w.affordance_press_target, Some(Target::Settings));
+        paint_swap(&mut w, size, 0.0);
+        paint_swap(&mut w, size, 60.0);
+        assert!(
+            w.affordance_scale(Target::Settings) < 1.0,
+            "the settings affordance never shrank on press"
+        );
+        press_swap(&mut w, size, settings_at, PointerPhase::Up);
+        paint_swap(&mut w, size, 800.0);
+        paint_swap(&mut w, size, 1_600.0);
+        assert_eq!(
+            w.affordance_scale(Target::Settings),
+            1.0,
+            "settings' press shrink never released back to resting scale"
+        );
+
+        let max_at = w.max_box.center();
+        press_swap(&mut w, size, max_at, PointerPhase::Down);
+        assert_eq!(w.affordance_press_target, Some(Target::Max));
+        paint_swap(&mut w, size, 1_600.0);
+        paint_swap(&mut w, size, 1_660.0);
+        assert!(
+            w.affordance_scale(Target::Max) < 1.0,
+            "Max never shrank on press"
+        );
+        press_swap(&mut w, size, max_at, PointerPhase::Up);
+        paint_swap(&mut w, size, 2_400.0);
+        paint_swap(&mut w, size, 3_200.0);
+        assert_eq!(
+            w.affordance_scale(Target::Max),
+            1.0,
+            "Max's press shrink never released back to resting scale"
         );
     }
 }
