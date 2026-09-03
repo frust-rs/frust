@@ -555,9 +555,7 @@ impl ContextMenuPanelWidget {
         if count == 0 {
             return None;
         }
-        let start = self
-            .active
-            .map_or(if step > 0 { count - 1 } else { 0 }, |i| i);
+        let start = self.active.unwrap_or(if step > 0 { count - 1 } else { 0 });
         for hop in 1..=count {
             let offset = step * hop as isize;
             let index = (start as isize + offset).rem_euclid(count as isize) as usize;

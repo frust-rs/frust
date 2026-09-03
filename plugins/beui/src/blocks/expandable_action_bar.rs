@@ -508,9 +508,7 @@ impl ExpandableActionBarWidget {
         if count == 0 {
             return None;
         }
-        let start = self
-            .highlight
-            .map_or(if step > 0 { count - 1 } else { 0 }, |i| i);
+        let start = self.highlight.unwrap_or(if step > 0 { count - 1 } else { 0 });
         for hop in 1..=count {
             let index = (start as isize + step * hop as isize).rem_euclid(count as isize) as usize;
             if !self.entries[index].disabled {

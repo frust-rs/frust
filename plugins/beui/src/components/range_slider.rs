@@ -600,12 +600,8 @@ impl WaveBars {
 
     /// Land every bar on `value` at once and stop — the `reduce_motion` path.
     fn snap(&mut self, value: f64) {
-        for scale in &mut self.scale {
-            *scale = value;
-        }
-        for velocity in &mut self.velocity {
-            *velocity = 0.0;
-        }
+        self.scale.fill(value);
+        self.velocity.fill(0.0);
         self.history.clear();
         self.last = None;
     }
