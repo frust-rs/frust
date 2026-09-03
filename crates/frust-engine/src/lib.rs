@@ -19,12 +19,15 @@
 //! pooling, depth and resource limits. `FRUST_ENGINE_NO_ATLAS` and
 //! `FRUST_ENGINE_ATLAS_SIZE` are consulted by [`cache::images`]: the first
 //! makes every image draw a logged skip, the second overrides the atlas extent
-//! the adapter's tier would otherwise choose.
+//! the adapter's tier would otherwise choose, and
+//! `FRUST_ENGINE_NO_SHADER_EFFECTS` turns off [`effects::shader_quad`]'s user
+//! fragment programs.
 
 pub mod cache;
 pub mod compile;
 pub mod config;
 pub mod diag;
+pub mod effects;
 pub mod error;
 pub mod filters;
 pub mod gpu;
@@ -43,6 +46,7 @@ pub use compile::paint::{
 };
 pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
 pub use diag::{EngineSpan, FrameTimestamps};
+pub use effects::ShaderQuadPass;
 pub use error::EngineError;
 pub use gpu::{
     ATLAS_FORMAT, AtlasArray, DepthAttachment, DepthTexture, EnginePipeline, EngineShaderModule,

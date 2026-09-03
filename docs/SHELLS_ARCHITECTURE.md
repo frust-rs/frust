@@ -31,6 +31,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
+| `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through the facade's `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both of its device-creation sites; the Android and iOS shells forward the feature but do not install a handle yet, so `with_context` answers `None` there |
 | `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
 | `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, and the reopen observer in its `appkit_glue` unsafe zone |
 | `frust-shell-windows` | Win32 integration: taskbar identity, window/taskbar icons, an `HMENU` menu bar with keyboard accelerators, and titlebar brightness — every `unsafe` and every `windows-sys` call confined to `win32_glue` |
@@ -256,6 +257,14 @@ the bare theme cap regardless of any longer per-request interval (see
   fires nothing. Android additionally reads the app's resolved brightness back over JNI — after
   every appearance change and once per frame — so a theme forced from Rust reaches the status bar
   without waiting for a platform event.
+- **Accessibility:** `frust-core`'s semantics pass reports every node's `bounds` in logical
+  pixels — the same layout unit paint scales from — while accesskit expects physical pixels. The
+  desktop shell's `build_tree_update` stamps a root `Affine::scale(window.scale_factor())`
+  transform onto the accesskit `TreeUpdate` it pushes (left `None` at scale 1.0, matching
+  accesskit's own identity-transform guidance), converting the whole tree through accesskit's
+  ancestor-transform rule so an assistive-technology client reads physical-pixel bounds matching
+  the DPR-scaled paint pass. The mobile shells own their own accessibility bridges
+  (`accesskit_android`, `accesskit_ios`) rather than sharing this path.
 - **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
   watches the animator duration scale via a `ContentObserver` plus an `onResume` re-read, iOS the
   UIKit reduce-motion notification plus an activation re-read, and desktop has no source at all (a

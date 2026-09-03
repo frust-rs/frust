@@ -22,7 +22,12 @@
 //!   `frust-render`/`parley`; `frust-gpu` never depends on
 //!   `frust-scene`/`frust-core`/`frust-widgets`/`frust-engine`; and no crate
 //!   above RENDER (`frust-core`, `frust-widgets`, `frust`, every
-//!   `plugins/*`) depends on `frust-engine` or `frust-gpu`.
+//!   `plugins/*`) depends on `frust-engine` or `frust-gpu` — with one
+//!   sanctioned exception: `crates/frust` may carry an **optional**,
+//!   **non-default** `frust-gpu` edge (the feature-gated `frust::gpu`
+//!   re-export), never `frust-engine`. See
+//!   `g7_nothing_above_render_depends_on_the_engine_tier_layer` below for
+//!   both halves of that carve-out.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -208,11 +213,10 @@ fn g7_nothing_above_render_depends_on_the_engine_tier_layer() {
     let mut manifests = vec![
         root.join("crates/frust-core/Cargo.toml"),
         root.join("crates/frust-widgets/Cargo.toml"),
-        root.join("crates/frust/Cargo.toml"),
     ];
     manifests.extend(member_manifests(&root, "plugins"));
     assert!(
-        manifests.len() > 3,
+        manifests.len() > 2,
         "expected at least one plugins/*/Cargo.toml under {}",
         root.display()
     );
@@ -220,4 +224,71 @@ fn g7_nothing_above_render_depends_on_the_engine_tier_layer() {
     for manifest_path in &manifests {
         assert_none_depend_on(manifest_path, &["frust-engine", "frust-gpu"]);
     }
+
+    // `crates/frust` carries the one sanctioned exception: an optional,
+    // non-default `frust-gpu` edge behind the facade's `gpu` feature
+    // (`frust::gpu`, see `crates/frust/src/lib.rs`) so an app — or a future
+    // 3D-rendering crate sitting beside the facade — can reach the GPU
+    // substrate without depending on `frust-render`/`frust-gpu` itself.
+    // `frust-engine` stays fully forbidden even here.
+    let frust_manifest = root.join("crates/frust/Cargo.toml");
+    assert_none_depend_on(&frust_manifest, &["frust-engine"]);
+    assert_frust_gpu_edge_is_optional_and_non_default(&frust_manifest);
+}
+
+/// Asserts `crates/frust/Cargo.toml`'s `frust-gpu` dependency (the sanctioned
+/// GPU-substrate exception above) is declared `optional = true` and that no
+/// `[features].default` entry turns it on — the two guarantees that keep the
+/// carve-out from silently widening into an unconditional edge every build
+/// carries.
+fn assert_frust_gpu_edge_is_optional_and_non_default(manifest_path: &Path) {
+    let table = parse_manifest(manifest_path);
+    let relative = manifest_path
+        .strip_prefix(repo_root())
+        .unwrap_or(manifest_path);
+
+    let deps = table
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{}: has no [dependencies] table", relative.display()));
+    let frust_gpu = deps.get("frust-gpu").unwrap_or_else(|| {
+        panic!(
+            "{}: expected a `frust-gpu` row under [dependencies] — the sanctioned \
+             GPU-substrate re-export edge (`frust::gpu`); if this crate no longer carries \
+             the seam, drop this assertion too",
+            relative.display()
+        )
+    });
+    let is_optional = matches!(
+        frust_gpu,
+        toml::Value::Table(row) if row.get("optional").and_then(toml::Value::as_bool) == Some(true)
+    );
+    assert!(
+        is_optional,
+        "{}: `frust-gpu` must be declared `optional = true` — an unconditional edge would \
+         reopen the engine-tier layer boundary for every build, not just a `gpu`-featured one",
+        relative.display()
+    );
+
+    let default_features: Vec<String> = table
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        default_features
+            .iter()
+            .all(|entry| entry != "dep:frust-gpu" && entry != "gpu"),
+        "{}: [features].default must not enable `gpu`/`dep:frust-gpu` — the GPU substrate \
+         seam must stay opt-in",
+        relative.display()
+    );
 }

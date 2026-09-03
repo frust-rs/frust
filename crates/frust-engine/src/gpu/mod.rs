@@ -25,6 +25,7 @@
 //! returns an error instead of asserting.
 
 pub mod atlas;
+pub mod bindings;
 pub mod config;
 pub mod depth;
 pub mod paint_texture;
@@ -35,6 +36,7 @@ pub mod strips;
 pub mod targets;
 
 pub use atlas::{ATLAS_FORMAT, ATLAS_USAGES, AtlasArray, lower_encoded_image};
+pub use bindings::{ExternalRuns, ExternalTextures, lower_encoded_external};
 pub use config::{GpuConfig, tex_width_bits};
 pub use depth::{DepthAttachment, DepthTexture};
 pub use paint_texture::{

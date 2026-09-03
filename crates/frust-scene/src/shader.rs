@@ -13,11 +13,14 @@ static NEXT_SHADER_PROGRAM_ID: AtomicU64 = AtomicU64::new(1);
 /// source is carried here as an opaque string (precedent:
 /// `frust_theme::GlassMaterial::blur_radius_intent`, a future-backend
 /// contract that is likewise plain data rather than a compiled resource) —
-/// only `frust-render` compiles it into a GPU pipeline.
+/// only the render backend compiles it into a GPU pipeline.
 ///
-/// **v1 contract**: the shader MUST write opaque output (alpha = 1.0) —
-/// vello's image-override copy is bit-for-bit, and Frust's render target is
-/// premultiplied; the conventions only coincide at alpha = 1.0.
+/// **Alpha contract**: the shader's output is taken as **premultiplied** —
+/// the convention every paint in a Frust frame travels in. A shader returning
+/// `vec4(rgb, a)` must have already multiplied `rgb` by `a`; the result is
+/// composited over what is behind it, so a translucent or fully transparent
+/// fragment shows the scene beneath rather than black. Opaque output
+/// (`a = 1.0`) is unaffected by the convention and needs nothing done to it.
 #[derive(Clone, Debug)]
 pub struct ShaderProgram {
     /// Process-unique id, minted fresh by [`ShaderProgram::new`] and shared
@@ -41,7 +44,7 @@ impl ShaderProgram {
     ///
     /// Call this **once** per distinct shader and retain (or `Clone`) the
     /// result — never mint a fresh `ShaderProgram` every frame or rebuild.
-    /// `frust-render`'s shader-effects engine compiles and caches a GPU
+    /// The renderer's shader-effects engine compiles and caches a GPU
     /// pipeline keyed by [`id()`](Self::id): a fresh id every frame is a
     /// permanent cache miss, forcing a full pipeline recompile (plus
     /// target/registration churn) every single frame instead of the

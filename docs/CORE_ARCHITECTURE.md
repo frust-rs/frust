@@ -19,7 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-core::app` / `tree` | `RenderRoot` owns the widget tree and theme, driving the rebuild → layout → paint → event pass; `WidgetTree`/`RenderRoot::inspect()` expose a read-only pre-order snapshot for external tooling |
 | `frust-core::component` | `Component`/`ComponentView`/`ComponentWidget` — a stateful-widget analog with retained state and its own reactive `Owner` |
 | `frust-core::event` / `animation` / `semantics` | Input/gesture routing, animation curve vocabulary, window insets, and pull-based accesskit semantics |
-| `frust-scene::scene` / `builder` | `Scene`/`SceneBuilder`/`Command` — the renderer-agnostic vector display list consumed by `frust-render` |
+| `frust-scene::scene` / `builder` | `Scene`/`SceneBuilder`/`Command` — the renderer-agnostic vector display list consumed by `frust-render`. `Command::SceneTexture { id, dest, transform }` draws a caller-owned GPU texture scaled to fill `dest`; `id` is opaque scene-layer data (the same precedent `ShaderProgram`'s own id sets) only the render backend resolves — an unregistered id draws nothing. `Command::ShaderQuad`'s fragment-shader output is treated as premultiplied alpha and rendered by the engine into such a texture ahead of the scene pass |
 | `frust-scene::glyph` / `shader` | Carries shaped text and opaque WGSL shader handles from `frust-text` through the `Scene` |
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |

@@ -2070,6 +2070,7 @@ dependencies = [
  "any_spawner",
  "anyhow",
  "frust-core",
+ "frust-gpu",
  "frust-reactive",
  "frust-render",
  "frust-scene",

@@ -83,3 +83,12 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # this targets only exists in the iOS-gated dependency block, so this is a no-op
 # off-iOS.
 devtools = ["frust-shell-common/devtools"]
+# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
+# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
+# `frust-shell-common/gpu` carries the process-wide slot a render executor
+# installs the live device into (see `frust-shell-desktop`'s `render.rs` for
+# the desktop half of that wiring). This shell's own `ffi_glue`/`app`
+# render-thread install site is not wired to it yet — an accepted gap, see
+# the crate's `lib.rs` docs — so today this row only makes the two lower
+# features reachable, with nothing here yet calling `install_gpu_handle`.
+gpu = ["frust-shell-common/gpu", "frust-render/gpu"]

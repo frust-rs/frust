@@ -131,7 +131,7 @@ enum Bracket {
     Transform,
 }
 
-/// One builder call. The set covers all sixteen `Command` variants — `Path`
+/// One builder call. The set covers all seventeen `Command` variants — `Path`
 /// twice, once filled and once stroked, since the two reach it through
 /// different builder methods — plus the transform stack, which records no
 /// command of its own but is the other thing a balanced program has to unwind.
@@ -183,6 +183,10 @@ enum Op {
     ShaderQuad {
         dest: Rect,
         time: f32,
+    },
+    SceneTexture {
+        id: u64,
+        dest: Rect,
     },
     PushClip {
         rect: Rect,
@@ -325,6 +329,7 @@ fn record(ops: &[Op], builder: &mut SceneBuilder<'_>) {
                 None => builder.stroke_path(path.clone(), *width, brush.clone()),
             },
             Op::ShaderQuad { dest, time } => builder.draw_shader(&shared_shader(), *dest, *time),
+            Op::SceneTexture { id, dest } => builder.scene_texture(*id, *dest),
             Op::PushClip { rect } => builder.push_clip(*rect),
             Op::PushClipRounded { rect, radii } => builder.push_clip_rounded_radii(*rect, *radii),
             Op::PopClip => builder.pop_clip(),
@@ -503,6 +508,7 @@ fn op_with_glyph_transform(glyph_transform: BoxedStrategy<Affine>) -> impl Strat
             }
         }),
         (rect(), coord_f32()).prop_map(|(dest, time)| Op::ShaderQuad { dest, time }),
+        (any::<u64>(), rect()).prop_map(|(id, dest)| Op::SceneTexture { id, dest }),
         rect().prop_map(|rect| Op::PushClip { rect }),
         (rect(), radii()).prop_map(|(rect, radii)| Op::PushClipRounded { rect, radii }),
         Just(Op::PopClip),
@@ -768,6 +774,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             dest: rect,
             time: 0.0,
         },
+        Op::SceneTexture { id: 1, dest: rect },
         Op::PushClip { rect },
         Op::PopClip,
         Op::PushClipRounded {
@@ -807,6 +814,7 @@ fn every_command_variant_is_reachable_from_the_op_set() {
             Command::ShaderQuad { .. } => "ShaderQuad",
             Command::PushSnapshot { .. } => "PushSnapshot",
             Command::PopSnapshot => "PopSnapshot",
+            Command::SceneTexture { .. } => "SceneTexture",
         })
         .collect();
     seen.sort_unstable();
@@ -828,8 +836,9 @@ fn every_command_variant_is_reachable_from_the_op_set() {
         "PushLayer",
         "PushSnapshot",
         "RoundedRect",
+        "SceneTexture",
         "ShaderQuad",
     ];
     expected.sort_unstable();
-    assert_eq!(seen, expected, "one op set, all sixteen command variants");
+    assert_eq!(seen, expected, "one op set, all seventeen command variants");
 }

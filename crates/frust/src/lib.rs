@@ -512,6 +512,114 @@ pub mod authoring {
     }
 }
 
+/// The GPU substrate seam, behind the non-default `gpu` cargo feature: the
+/// `frust-gpu` device/texture/pipeline vocabulary an app — or a future
+/// 3D-rendering crate sitting beside the facade — needs to register an
+/// externally owned GPU texture and draw it through
+/// [`authoring::scene::SceneBuilder::scene_texture`], without a direct
+/// `frust-render`/`frust-gpu` dependency of its own.
+///
+/// [`Context`] is `frust-gpu`'s `RenderContext` (the device/instance
+/// foundation every shell already owns) under the name this seam exposes it
+/// as. [`Texture`]/[`TextureDesc`]/[`RenderTarget`] describe a GPU texture
+/// and where it can be rendered into; [`SceneTextureId`] is the
+/// process-unique id [`Texture::as_scene_texture`] mints, and is the value a
+/// [`authoring::scene::Command::SceneTexture`] resolves against — an id
+/// nothing binds simply draws nothing, never an error (see
+/// `scene_texture`'s own docs). [`CommandBuffer`], [`ShaderLibrary`], and
+/// [`RenderPipelineDesc`] are the lower-level encode/pipeline vocabulary a
+/// caller driving its own render pass beside the engine's needs.
+///
+/// This seam is deliberately narrow: nothing above RENDER depends on
+/// `frust-gpu` today (`docs/ARCHITECTURE.md`'s GPU-substrate layer
+/// boundary), and this feature-gated re-export is the one sanctioned
+/// exception — an app opts in explicitly, and the facade's own default build
+/// carries none of it.
+///
+/// A real [`Texture`] is built from a [`TextureDesc`] naming a
+/// `wgpu::TextureFormat`/`wgpu::TextureUsages` pair directly — this crate
+/// does not re-export `wgpu` itself (only the GPU-substrate *types* built on
+/// it), so a caller filling in those two fields depends on `wgpu` in its own
+/// right, exactly as any other code driving a render pass beside the engine
+/// does. Once minted, [`Texture::as_scene_texture`]'s id composes with
+/// [`authoring::scene::SceneBuilder::scene_texture`] with no GPU device in
+/// the loop at all:
+///
+/// ```
+/// use frust::authoring::Rect;
+/// use frust::authoring::scene::{Command, Scene, SceneBuilder};
+/// use frust::gpu::Texture;
+///
+/// // Checked at compile time over any texture/view pair a caller supplies —
+/// // `Texture::as_scene_texture()`'s minted id composes with
+/// // `SceneBuilder::scene_texture` with no live `Texture` needed to prove it.
+/// fn draw_registered_texture<T, V>(texture: &Texture<T, V>, scene: &mut Scene, dest: Rect) {
+///     let mut builder = SceneBuilder::new(scene);
+///     builder.scene_texture(texture.as_scene_texture().get(), dest);
+/// }
+///
+/// // The same recording behavior, exercised at runtime with the same opaque
+/// // `u64` id a minted `SceneTextureId::get()` ultimately is.
+/// let id = 42;
+/// let dest = Rect::new(0.0, 0.0, 64.0, 64.0);
+/// let mut scene = Scene::new();
+/// SceneBuilder::new(&mut scene).scene_texture(id, dest);
+///
+/// match &scene.commands()[0] {
+///     Command::SceneTexture { id: recorded, .. } => assert_eq!(*recorded, id),
+///     other => panic!("expected SceneTexture, got {other:?}"),
+/// }
+/// ```
+///
+/// # Reaching the shell's own live device: [`with_context`]
+///
+/// Everything above builds a *standalone* [`Context`] — useful for a
+/// headless harness, but a second device, not the one the running shell
+/// already created and is presenting frames through. [`with_context`] reaches
+/// that one instead: the shell's render executor installs its
+/// [`DeviceHandle`] (the device/queue/adapter pair, cheap to clone since
+/// wgpu's own types are `Arc`-backed) into a process-wide slot the first time
+/// a surface — and so a device — comes up
+/// (`frust_shell_common::gpu::install_gpu_handle`, see that module's docs),
+/// and [`with_context`] reads it back through the identical seam
+/// (`frust_shell_common::gpu::gpu_handle`). It answers `None` before that
+/// first surface exists (desktop's zero-config preview window, a mobile
+/// shell before its first frame) — check the `Option`, never assume `Some`.
+/// Never blocks: once installed, the read is a lock-free `OnceLock::get`, so
+/// calling this from the UI thread is always safe.
+///
+/// Only the desktop shell installs one today; the two mobile shells forward
+/// the `gpu` feature but do not install yet (an accepted gap — see
+/// `frust-shell-android`/`frust-shell-ios`'s own crate docs), so
+/// `with_context` always answers `None` there for now.
+///
+/// ```
+/// // No device exists in this doctest process, so `with_context` answers
+/// // `None` — exactly the state an app sees before its shell's first frame.
+/// let adapter_name = frust::gpu::with_context(|handle| handle.caps.adapter_name.clone());
+/// assert!(adapter_name.is_none());
+/// ```
+#[cfg(feature = "gpu")]
+pub mod gpu {
+    pub use frust_gpu::{
+        CommandBuffer, DeviceHandle, RenderContext as Context, RenderPipelineDesc, RenderTarget,
+        SceneTextureId, ShaderLibrary, Texture, TextureDesc,
+    };
+
+    /// Run `f` against the shell-owned live [`DeviceHandle`], or `None` if no
+    /// shell has installed one yet (see the module docs' *Reaching the
+    /// shell's own live device* section).
+    ///
+    /// Distinct from [`Context`] (`frust-gpu`'s `RenderContext`), which an app
+    /// can build a *standalone* device from (`Context::new()` +
+    /// `ensure_device_headless`/a real surface) — that path always creates a
+    /// second device. `with_context` never creates one; it only reads back
+    /// the one the running shell already owns.
+    pub fn with_context<R>(f: impl FnOnce(&DeviceHandle) -> R) -> Option<R> {
+        frust_shell_common::gpu::gpu_handle::<DeviceHandle>().map(f)
+    }
+}
+
 /// The accessibility vocabulary crate, whole — the long-tail valve behind
 /// [`authoring`]'s by-name `Node`/`NodeId`/`Role`, for the rest of what a
 /// semantics-contributing widget may need (`Action`, `Live`, `Toggled`, …).

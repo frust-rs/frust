@@ -15,6 +15,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Process-unique id counter backing [`SceneTextureId::mint`].
 static NEXT_SCENE_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The bit [`SceneTextureId::for_shader_program`] sets so an offscreen shader
+/// effect's target id can never be one [`SceneTextureId::mint`] hands out.
+///
+/// `mint` counts up from 1 off a single process-wide counter, so an id with
+/// the top bit set is one it would only reach after 2^63 mints — more textures
+/// than a process can create. Reserving that bit makes the two id spaces
+/// disjoint by construction rather than by luck, which is what lets a
+/// fragment program's own ordinal be reused as the id its rendered target is
+/// registered under without ever colliding with a host texture carrying the
+/// same ordinal.
+const SHADER_PROGRAM_NAMESPACE: u64 = 1 << 63;
+
 /// Describes a texture to create: dimensions, format, usage, and an optional
 /// debug label.
 ///
@@ -65,10 +77,43 @@ pub struct SceneTextureId(u64);
 
 impl SceneTextureId {
     /// Mints a fresh, process-unique id. Crate-private: the only place a
-    /// [`SceneTextureId`] comes from is [`Texture::new`], which stores the
-    /// minted value once and shares it across `Clone`.
+    /// counted [`SceneTextureId`] comes from is [`Texture::new`], which stores
+    /// the minted value once and shares it across `Clone`.
     pub(crate) fn mint() -> Self {
         Self(NEXT_SCENE_TEXTURE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The id under which the offscreen target of the fragment program
+    /// `program_id` is registered.
+    ///
+    /// Derived from the program's own ordinal rather than minted, because both
+    /// halves of the seam have to name the same texture while holding
+    /// different things: the pre-pass that renders the program has the target,
+    /// and the display-list walk that draws it has only
+    /// `frust_scene::ShaderProgram::id`. A pure function of the program id
+    /// lets each compute the id the other used, with no shared side table to
+    /// keep in step.
+    ///
+    /// Disjoint from [`Self::mint`]'s range by construction — see
+    /// [`SHADER_PROGRAM_NAMESPACE`] — so a host texture and a shader target
+    /// can never answer to the same id. A `program_id` large enough to reach
+    /// the reserved bit itself is impossible for the same counting reason its
+    /// minter is.
+    #[must_use]
+    pub const fn for_shader_program(program_id: u64) -> Self {
+        Self(program_id | SHADER_PROGRAM_NAMESPACE)
+    }
+
+    /// The opaque value this id wraps.
+    ///
+    /// The counterpart of `frust_scene::ShaderProgram::id`, and for the same
+    /// reason: the scene layer carries an externally owned texture as a plain
+    /// `u64` so it depends on no GPU crate, and a caller that registered a
+    /// [`Texture`] needs some way to say which one a display-list command
+    /// means. Minting stays private — this only reads back what was minted.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -254,6 +299,31 @@ mod tests {
     /// `Texture<wgpu::Texture, wgpu::TextureView>` would, with no device.
     fn fake_texture() -> Texture<u32, u32> {
         Texture::new(0, 0, fake_desc())
+    }
+
+    #[test]
+    fn a_shader_program_id_never_collides_with_a_minted_one() {
+        // Every minted id stays in the counter's own range; every shader
+        // target id carries the reserved bit, so the two can never meet.
+        for _ in 0..64 {
+            let minted = fake_texture().as_scene_texture();
+            assert_eq!(minted.get() & SHADER_PROGRAM_NAMESPACE, 0);
+            assert_ne!(minted, SceneTextureId::for_shader_program(minted.get()));
+        }
+    }
+
+    #[test]
+    fn a_shader_program_id_is_a_pure_function_of_the_program() {
+        // Both halves of the seam derive the same id from the same program,
+        // and distinct programs stay distinct.
+        assert_eq!(
+            SceneTextureId::for_shader_program(9),
+            SceneTextureId::for_shader_program(9)
+        );
+        assert_ne!(
+            SceneTextureId::for_shader_program(9),
+            SceneTextureId::for_shader_program(10)
+        );
     }
 
     #[test]
