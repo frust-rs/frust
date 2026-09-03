@@ -48,8 +48,11 @@ pub struct State {
     chip_expanded: bool,
     /// What the chip's action last reported.
     chip_status: String,
-    /// The selected item id per [`SWAP_TRANSITIONS`] entry.
-    swap_values: [String; 4],
+    /// The selected item id per mounted `action_swap`: one slot per specimen,
+    /// each holding an id from that specimen's own item list — the four
+    /// transition specimens (`copy`/`copied`), the Sm and Lg send specimens
+    /// (`send`/`sent`) and the icon specimen (`copy`/`copied`).
+    swap_values: [String; 7],
 }
 
 impl Default for State {
@@ -65,7 +68,10 @@ impl Default for State {
                 "copy".to_string(),
                 "copy".to_string(),
                 "copy".to_string(),
+                "copy".to_string(),
                 "send".to_string(),
+                "send".to_string(),
+                "copy".to_string(),
             ],
         }
     }
@@ -361,24 +367,24 @@ fn action_swaps(state: &State) -> AnyView<State> {
                 ActionSwapItem::new("sent", "Sent"),
             ])
             .size(ActionSwapSize::Sm)
-            .value(state.swap_values[3].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[3] = id)),
+            .value(state.swap_values[4].clone())
+            .on_change(|s: &mut State, id: String| s.swap_values[4] = id)),
             any(action_swap(vec![
                 ActionSwapItem::new("send", "Send invite"),
                 ActionSwapItem::new("sent", "Invite sent"),
             ])
             .size(ActionSwapSize::Lg)
             .tone(ButtonTone::Secondary)
-            .value(state.swap_values[3].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[3] = id)),
+            .value(state.swap_values[5].clone())
+            .on_change(|s: &mut State, id: String| s.swap_values[5] = id)),
             any(action_swap(vec![
                 ActionSwapItem::new("copy", "\u{2398}"),
                 ActionSwapItem::new("copied", "\u{2713}"),
             ])
             .size(ActionSwapSize::Icon)
             .tone(ButtonTone::Outline)
-            .value(state.swap_values[0].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[0] = id)),
+            .value(state.swap_values[6].clone())
+            .on_change(|s: &mut State, id: String| s.swap_values[6] = id)),
             any(action_swap(items()).disabled(true)),
         ],
         16.0,

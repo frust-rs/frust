@@ -339,7 +339,7 @@ impl State {
 /// span list, with a collapse morph and a copy affordance.
 fn code_panel(state: &State) -> AnyView<State> {
     let lines = snippet();
-    let visible = state.code_lines();
+    let visible = state.code_lines().min(lines.len());
     let code = lines[..visible]
         .iter()
         .map(|spans| line_text(spans))

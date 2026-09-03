@@ -1,6 +1,6 @@
 //! Theming: the beUI palette across both brightnesses, a live light/dark
 //! toggle wired through `frust_beui`'s own [`theme_toggle`], and a typography
-//! specimen. The motion-token visualizer is a stub: b-2x wires a real
+//! specimen. The motion-token visualizer is a stub: a later pass wires a real
 //! timeline against `frust_beui::tokens::motion`'s curves and springs — this
 //! page only names the surface.
 

@@ -9,7 +9,7 @@
 //! # Nav shell
 //!
 //! The rail is `frust_beui::components::animated_sidebar` — the catalog's own
-//! motion-driven sidebar (Phase 2) — carrying every gallery page in one flat,
+//! motion-driven sidebar — carrying every gallery page in one flat,
 //! springing list; see `nav.rs`'s module docs for why it is flat rather than
 //! the grouped/labelled shape `examples/shadcn-demo`'s `frust_shadcn` sidebar
 //! has. Page content swaps under `frust::motion::switcher`'s
@@ -34,8 +34,9 @@ use frust::{
 use nav::Page;
 
 /// The app's whole retained state: which gallery page is showing, whether the
-/// nav rail is expanded, and the two pages that carry real interactive state
-/// today — every other page is a stub (see `pages/mod.rs`).
+/// nav rail is expanded, and the state of the two pages that keep theirs here
+/// (Home and Theming) — every section page hosts its own in a page-local
+/// component (see `pages/mod.rs`).
 pub struct AppState {
     pub page: Page,
     pub sidebar_open: bool,

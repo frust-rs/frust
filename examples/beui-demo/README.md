@@ -1,10 +1,12 @@
 # beui-demo
 
-The `frust-beui` design-system plugin's desktop gallery — a scaffold, built by
-`b-19`, that every leaf page currently just names: `Home` and `Theming` are
-live, and the sixteen pages under Motion/Agents/Blocks are titled placeholders
-(`crate::pages::stub_page`) that `b-20`/`b-21`/`b-22` (and the shader page,
-`b-11b`) fill in with real components.
+The `frust-beui` design-system plugin's desktop gallery: eighteen pages that
+show every ported component interactively — a home page with the upstream
+attribution, nine Motion pages (text effects, buttons, controls, selection,
+overlays, navigation, surfaces, data, and the WGSL shader backgrounds), three
+Agents pages (chat primitives, agent-output panels, the assembled chat app
+over a mock streaming driver), four Blocks pages (command surfaces, morphing
+tabs and stacks, forms and upload, showcase blocks), and a Theming page.
 
 Root-workspace member (covered by the `examples/*` glob in the root
 `Cargo.toml`, not standalone) — desktop-only, no Android/iOS output. Mirrors
@@ -37,7 +39,7 @@ desktop preview.
 ## Nav shell
 
 The rail is `frust_beui::components::animated_sidebar` — the catalog's own
-motion-driven sidebar (Phase 2), collapsible via the top bar's
+motion-driven sidebar, collapsible via the top bar's
 Collapse/Expand button. `animated_sidebar` ports upstream's panel-and-menu,
 not a labelled-group header slot (see that module's own doc comment), so this
 scaffold keeps the rail as one flat, springing list and folds each grouped
@@ -52,11 +54,13 @@ Eighteen pages, in nav order:
   `10c283e433a8f4f0ac0736684d4426ab612b9f55`), and a category-overview card
   per section, each linking straight into that section's first page.
 - **Motion** (9 pages: `text`, `buttons`, `controls`, `selection`, `overlays`,
-  `navigation`, `surfaces`, `data`, `shader`) — 8 stub pages mirror tasks
-  `b-04`..`b-11`'s ported components; `shader` is `b-11b`'s, gated on the
-  engine's `ShaderQuad` (p9-03).
-- **Agents** (3 pages: `primitives`, `panels`, `chat`) — `b-21`.
-- **Blocks** (4 pages: `command`, `morph`, `forms`, `showcase`) — `b-22`.
+  `navigation`, `surfaces`, `data`, `shader`) — the 41 motion components with
+  every registry variant, plus the five `shader_background` variants on the
+  engine's `ShaderQuad` seam.
+- **Agents** (3 pages: `primitives`, `panels`, `chat`) — the 17 agent
+  components, headlined by the chat app over its mock streaming driver.
+- **Blocks** (4 pages: `command`, `morph`, `forms`, `showcase`) — the 22
+  blocks, each with the port's premise corrections in its caption.
 - **Theming** — the beUI palette across both brightnesses (`BEUI_LIGHT`,
   `BEUI_DARK`), a live light/dark toggle via `frust_beui`'s own
   [`theme_toggle`](../../plugins/beui/src/components/theme_toggle.rs), and a
@@ -79,9 +83,9 @@ Theming) alongside the active page's title.
   (`frust_beui::palette`/`sans_family`/`mono_family`) rather than a literal
   color authored in this crate.
 - **TODO:** the motion-token visualizer (Theming page) is a named stub, not a
-  live timeline; the sixteen Motion/Agents/Blocks pages are titled
-  placeholders until `b-20`/`b-21`/`b-22`/`b-11b` land; the nav rail is a flat
-  list rather than a grouped/labelled one (see "Nav shell" above).
+  live timeline; the nav rail is a flat list rather than a grouped/labelled
+  one (see "Nav shell" above); every section page hosts its state in a
+  page-local component, so a page starts fresh each time it is opened.
 
 ## Verifying it
 

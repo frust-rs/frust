@@ -26,8 +26,8 @@
 //! [`DEFERRED_VARIANTS`] and are **not** ported: each is a distinct shader
 //! (Perlin/simplex fields, Voronoi cells, metaballs, god rays, dithering), and
 //! each needs its own hand-written WGSL plus its own GPU verification. They are
-//! a documented gap, not a silent one — the catalog page names them and the
-//! accepted-limitations register carries the entry.
+//! a documented gap, not a silent one — the catalog page names them and they
+//! are listed for the accepted-limitations register.
 //!
 //! # How a variant reaches the GPU
 //!
@@ -167,7 +167,7 @@ const TIME_WRAP_SECS: f64 = 3600.0;
 ///
 /// Each is a distinct `@paper-design/shaders` program needing its own
 /// hand-written WGSL and its own GPU verification; the catalog page names them
-/// and the accepted-limitations register carries the entry. Together with
+/// and they are listed for the accepted-limitations register. Together with
 /// [`ShaderBackgroundVariant::ALL`] this accounts for all 21 upstream slugs —
 /// which the module's own tests assert, so the list cannot silently drift.
 pub const DEFERRED_VARIANTS: [&str; 16] = [
@@ -625,13 +625,46 @@ fn env_disables_shader_effects(raw: Option<&str>) -> bool {
     raw.is_some_and(|v| v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true"))
 }
 
-/// Whether [`SHADER_EFFECTS_KILL_SWITCH`] is set in this process. Cached: read
-/// once, exactly as the engine's own `config::shader_effects_disabled` is.
+/// The engine's own precedence for [`SHADER_EFFECTS_KILL_SWITCH`]: a value in
+/// the process environment wins; otherwise the value baked in at compile
+/// time counts. Mobile shells generally cannot hand a process an environment
+/// variable at run time, so the compile-time half is the one they use — and
+/// the widget must fall back on exactly the builds where the engine drops the
+/// quad, or it would keep minting programs nobody draws.
+fn kill_switch_enabled(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
+    match runtime {
+        Some(value) => env_disables_shader_effects(Some(value)),
+        None => env_disables_shader_effects(compile_time),
+    }
+}
+
+/// Whether [`SHADER_EFFECTS_KILL_SWITCH`] is set for this process — at run
+/// time or at compile time, resolved once, exactly as the engine's own
+/// `config::shader_effects_disabled` resolves it.
 fn shader_effects_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| {
-        env_disables_shader_effects(std::env::var(SHADER_EFFECTS_KILL_SWITCH).ok().as_deref())
+        kill_switch_enabled(
+            option_env!("FRUST_ENGINE_NO_SHADER_EFFECTS"),
+            std::env::var(SHADER_EFFECTS_KILL_SWITCH).ok().as_deref(),
+        )
     })
+}
+
+/// A colour safe to bake into a shader source: every component finite and in
+/// `0..=1`. A non-finite component becomes `0.0` — the same "ignore the
+/// nonsense" rule [`ShaderBackgroundView::speed`] applies to its input — so no
+/// caller value can put `NaN` or `inf` into a WGSL constant.
+fn finite_color(color: Color) -> Color {
+    let c = color.components;
+    let fix = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    Color::new([fix(c[0]), fix(c[1]), fix(c[2]), fix(c[3])])
 }
 
 /// A declarative beUI shader background. See the [module docs](self).
@@ -675,20 +708,26 @@ impl<State: 'static> ShaderBackgroundView<State> {
     /// Replace the whole resolved palette, tokens included — the escape hatch a
     /// caller reaching for upstream's own hex presets needs.
     pub fn palette(mut self, palette: ShaderPalette) -> Self {
-        self.palette = Some(palette);
+        self.palette = Some(ShaderPalette {
+            colors: palette.colors.map(finite_color),
+            back: finite_color(palette.back),
+        });
         self
     }
 
     /// Override the four colour stops, keeping the token-resolved backdrop.
+    /// Non-finite components are dropped to `0.0` and every component is
+    /// clamped to `0..=1` before it can reach a shader constant.
     pub fn colors(mut self, colors: [Color; 4]) -> Self {
-        self.colors = Some(colors);
+        self.colors = Some(colors.map(finite_color));
         self
     }
 
     /// Override the backdrop — upstream's `colorBack`. Its alpha decides whether
-    /// the background is opaque or composites over the scene behind it.
+    /// the background is opaque or composites over the scene behind it; the
+    /// components are sanitised like [`Self::colors`].
     pub fn back(mut self, back: Color) -> Self {
-        self.back = Some(back);
+        self.back = Some(finite_color(back));
         self
     }
 
@@ -1512,6 +1551,44 @@ mod tests {
         assert!(
             (time - DEFAULT_SPEED).abs() < 1e-5,
             "the preset speed stood"
+        );
+    }
+
+    /// The kill switch resolves the way the engine resolves it: a run-time
+    /// value wins, a compile-time value counts when the run-time one is unset,
+    /// and both halves accept the engine's spellings.
+    #[test]
+    fn the_kill_switch_honours_the_compile_time_half_like_the_engine() {
+        assert!(kill_switch_enabled(Some("1"), None));
+        assert!(kill_switch_enabled(Some("TRUE"), None));
+        assert!(!kill_switch_enabled(Some("0"), None));
+        assert!(!kill_switch_enabled(None, None));
+        assert!(kill_switch_enabled(None, Some("true")));
+        assert!(kill_switch_enabled(Some("0"), Some("1")), "run time wins");
+        assert!(
+            !kill_switch_enabled(Some("1"), Some("0")),
+            "run time wins the other way too"
+        );
+        assert!(
+            !kill_switch_enabled(Some("1"), Some("")),
+            "an empty run-time value is a set value"
+        );
+    }
+
+    /// No caller colour can put a non-finite or out-of-range component into a
+    /// shader constant.
+    #[test]
+    fn colours_are_sanitised_before_they_reach_the_source() {
+        let bad = Color::new([f32::NAN, 2.0, -1.0, f32::INFINITY]);
+        let view = shader_background::<()>(ShaderBackgroundVariant::MeshGradient)
+            .colors([bad, bad, bad, bad])
+            .back(bad);
+        for c in view.colors.expect("colours set") {
+            assert_eq!(c.components, [0.0, 1.0, 0.0, 0.0]);
+        }
+        assert_eq!(
+            view.back.expect("back set").components,
+            [0.0, 1.0, 0.0, 0.0]
         );
     }
 }
