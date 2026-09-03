@@ -176,8 +176,10 @@ fn sfnt_family_name(font: &peniko::FontData) -> Option<String> {
         } else {
             // Windows/Unicode platforms: UTF-16BE.
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
                 .collect();
             String::from_utf16(&units).ok()?
         };

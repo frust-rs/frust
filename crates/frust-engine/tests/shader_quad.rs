@@ -385,7 +385,11 @@ fn assert_only_dest_painted(frame: &[u8], base: Color) {
 /// Asserts `frame` holds nothing but `base`.
 fn assert_frame_is_base(frame: &[u8], base: Color) {
     assert!(
-        frame.chunks_exact(4).all(|texel| texel == rgba(base)),
+        frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|texel| *texel == rgba(base)),
         "the frame is the base colour everywhere"
     );
 }
