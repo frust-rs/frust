@@ -24,6 +24,19 @@
 //! modified — only the filenames are normalized to the `<Family>-Variable.ttf`
 //! shape the other bundled catalogs use.
 //!
+//! # Provenance
+//!
+//! Both faces are vendored from vercel/geist-font release `v1.7.2` (asset
+//! `geist-font-v1.7.2.zip`), which packages them as `Geist[wght].ttf` and
+//! `GeistMono[wght].ttf` — the names this module's `Geist-Variable.ttf` and
+//! `GeistMono-Variable.ttf` are the normalized (bytes-identical) forms of.
+//! SHA-256 of the vendored bytes:
+//!
+//! - `Geist-Variable.ttf`:
+//!   `cdcc4815cbf5f9882fa74e48f8ab410a0495781a58ff7316570f664e7e987753`
+//! - `GeistMono-Variable.ttf`:
+//!   `0e1af3f507a1c8dfbb03d13ffad585834cd45ed7ccb78c756c7ce7873d180d30`
+//!
 //! The bytes are compiled in **unconditionally**: depending on this plugin at
 //! all is the beUI opt-in, so there is no second feature to switch the faces
 //! off with (the `frust-glyph` precedent, which `frust-shadcn` follows too).

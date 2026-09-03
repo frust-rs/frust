@@ -114,13 +114,13 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::Theme;
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedCallback, EventCtx,
     EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase,
     Rect, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback, rebuild_child,
     route_event_single, teardown_child, visit_children,
 };
+use frust::{FrameTime, Theme};
 
 use super::finite_or_zero;
 use crate::motion::{Presence, PresencePhase, Ramp};
@@ -219,6 +219,27 @@ pub const ANCHORED_EXIT_SCALE: f64 = 0.94;
 /// How long an anchored panel's exit takes (`tooltip.tsx`'s
 /// `exit.transition.duration`).
 pub const ANCHORED_EXIT: Duration = Duration::from_millis(120);
+
+/// Standard deviations of Gaussian blur beyond which a drop shadow's own
+/// visible contribution is negligible — three sigma covers ~99.7% of it.
+///
+/// Mirrors `overlay::modal`'s own `SHADOW_SPILL_NEAR`/`_FAR` derivation
+/// (duplicated rather than shared through `overlay::mod`, which carries no
+/// item either host reaches into): the content mounted here paints its own
+/// shadow outside its layout rect exactly as a modal's panel does, from the
+/// same `tokens::theme` glass chrome recipe (`y_offset 24, blur_std_dev 30`).
+const SHADOW_SPILL_SIGMAS: f64 = 3.0;
+const GLASS_SHADOW_Y_OFFSET: f64 = 24.0;
+const GLASS_SHADOW_BLUR_STD_DEV: f64 = 30.0;
+
+/// How far outside the content its own shadow may reach on the sides with no
+/// directional offset (top, left, right).
+const SHADOW_SPILL_NEAR: f64 = SHADOW_SPILL_SIGMAS * GLASS_SHADOW_BLUR_STD_DEV;
+
+/// How far outside the content its shadow reaches on the offset (downward)
+/// side.
+const SHADOW_SPILL_FAR: f64 =
+    GLASS_SHADOW_Y_OFFSET + SHADOW_SPILL_SIGMAS * GLASS_SHADOW_BLUR_STD_DEV;
 
 impl Default for OverlayPlacement {
     fn default() -> Self {
@@ -658,12 +679,18 @@ impl AnchoredOverlayWidget {
     /// has to replace the driver. A driver replaced mid-*exit* is re-opened and
     /// re-closed on the spot: that keeps the pending exit real (and so still
     /// reported through [`Presence::take_exited`]) instead of silently dropping
-    /// an owner's unmount bookkeeping on the floor.
-    fn sync_motion(&mut self, reduce: bool) {
+    /// an owner's unmount bookkeeping on the floor. One replaced while fully
+    /// `Present` is parked back there directly rather than restarted from
+    /// `Absent`: `Presence::set_open` only ever *opens into* an entrance, so a
+    /// naive rebuild here would replay the whole thing over a panel the user
+    /// is already looking at, every time a ramp/config/`reduce_motion` change
+    /// lands on an overlay that was simply sitting open.
+    fn sync_motion(&mut self, reduce: bool, now: FrameTime) {
         if self.reduced == Some(reduce) {
             return;
         }
         let was_exiting = self.presence.phase() == PresencePhase::Exiting;
+        let was_present = self.presence.phase() == PresencePhase::Present;
         self.reduced = Some(reduce);
         let base = Presence::new(self.enter, self.exit);
         let mut next = if reduce { base.collapsed() } else { base };
@@ -671,6 +698,16 @@ impl AnchoredOverlayWidget {
             next.set_open(true);
         }
         next.set_open(self.open);
+        if was_present && self.open {
+            // Two `advance` calls — one to latch the fresh driver's own
+            // clock, one at (or past) its settle time — land it on `Present`
+            // without a frame of visible motion.
+            let settle = next.active_ramp().settle();
+            let settled_at =
+                FrameTime::from_nanos(now.as_nanos().saturating_add(settle.as_nanos() as u64));
+            next.advance(now);
+            next.advance(settled_at);
+        }
         self.presence = next;
     }
 
@@ -785,7 +822,7 @@ impl Widget for AnchoredOverlayWidget {
         }
 
         let reduce = Theme::from_paint_ctx(ctx).is_some_and(|theme| theme.motion.reduce_motion);
-        self.sync_motion(reduce);
+        self.sync_motion(reduce, ctx.frame_time());
 
         let progress = self.presence.advance(ctx.frame_time());
         // A ramp with a visible endpoint: unpaced frames while it plays, none
@@ -814,7 +851,26 @@ impl Widget for AnchoredOverlayWidget {
         let rect = self.rect + ctx.origin().to_vec2();
         let pivot = transform_origin(self.placement.side, self.placement.align, rect);
 
-        scene.push_layer(rect.origin(), rect.size(), alpha);
+        // A pushed layer clips to its own rectangle, and the content paints
+        // its own shadow outside its layout rect — the same discipline
+        // `overlay::modal`'s panel keeps, and for the same reason: a layer
+        // sized to the resting `rect` alone would cut the shadow at every
+        // partial alpha. `scale` never grows past `1.0` while `alpha` is
+        // under it (both `ANCHORED_ENTER_SCALE` and `ANCHORED_EXIT_SCALE` are
+        // under `1.0`), and the transform's pivot sits on `rect`'s own edge,
+        // so a contraction toward it never moves the transformed content
+        // outside `rect` — only the shadow needs the extra room, and only
+        // while still fading; a fully open panel needs no layer at all.
+        let layer_pushed = alpha < 1.0;
+        if layer_pushed {
+            let layer = Rect::new(
+                rect.x0 - SHADOW_SPILL_NEAR,
+                rect.y0 - SHADOW_SPILL_NEAR,
+                rect.x1 + SHADOW_SPILL_NEAR,
+                rect.y1 + SHADOW_SPILL_FAR,
+            );
+            scene.push_layer(layer.origin(), layer.size(), alpha);
+        }
         scene.push_transform(
             Affine::translate(pivot.to_vec2())
                 * Affine::scale(scale)
@@ -822,7 +878,9 @@ impl Widget for AnchoredOverlayWidget {
         );
         self.content.paint_child(ctx, scene);
         scene.pop_transform();
-        scene.pop_layer();
+        if layer_pushed {
+            scene.pop_layer();
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
@@ -837,22 +895,30 @@ impl Widget for AnchoredOverlayWidget {
         // A closed (or closing) kept-mounted host claims no focus and dismisses
         // on nothing: light dismiss and Escape are off the moment `open` flips.
         // A broadcast still reaches the content, which is what keeps its pods
-        // live. A `Down` is still routed to the content while the panel is
-        // visibly present — `route_event_single` hit-tests it against the
-        // content's own bounds first — so a panel mid-exit swallows a press
-        // that lands on it rather than letting it fall through to the page
-        // underneath. Once the exit settles the host is fully transparent to
-        // input again: the press that closed the overlay already reached the
-        // page, and every later one does too.
+        // live. A `Down` still reaches the content while the panel is visibly
+        // present, so it still gets first refusal — but the panel itself must
+        // swallow whatever lands on it regardless of what the content answers,
+        // matching the open path below (a press on the panel's own background,
+        // not just a control inside it, is still the panel's): a press that
+        // fell through here would reach the page underneath a panel the user
+        // can still see. Once the exit settles the host is fully transparent
+        // to input again: the press that closed the overlay already reached
+        // the page, and every later one does too.
         if !self.open {
             if event.is_broadcast() {
                 self.content.event_child(ctx, event);
                 return EventResult::Ignored;
             }
             if self.presence.is_visible()
-                && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down)
+                && let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
             {
-                return route_event_single(&mut self.content, ctx, event);
+                route_event_single(&mut self.content, ctx, event);
+                return if self.rect.contains(p.position) {
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                };
             }
             return EventResult::Ignored;
         }
@@ -1207,20 +1273,99 @@ mod tests {
         }
     }
 
+    /// A fixed-size leaf that paints its own drop shadow outside its layout
+    /// rect — the geometry a fade layer must stay wide enough not to clip.
+    struct ShadowedPanel(Size);
+
+    /// The retained half of [`ShadowedPanel`].
+    struct ShadowedPanelWidget(Size);
+
+    impl View<AppState> for ShadowedPanel {
+        type Element = ShadowedPanelWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ShadowedPanelWidget {
+            ShadowedPanelWidget(self.0)
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut ShadowedPanelWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.0 = self.0;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for ShadowedPanelWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            let origin = ctx.origin();
+            let size = ctx.size();
+            scene.fill_rect(origin, size, Color::BLACK);
+            // The shadow's own visual reach: `SHADOW_SPILL_NEAR` on the sides
+            // with no offset, `SHADOW_SPILL_FAR` on the downward one.
+            let shadow_origin =
+                Point::new(origin.x - SHADOW_SPILL_NEAR, origin.y - SHADOW_SPILL_NEAR);
+            let shadow_size = Size::new(
+                size.width + SHADOW_SPILL_NEAR * 2.0,
+                size.height + SHADOW_SPILL_NEAR + SHADOW_SPILL_FAR,
+            );
+            scene.fill_rect(shadow_origin, shadow_size, Color::BLACK);
+        }
+    }
+
+    /// A fixed-size leaf that never claims a press — for proving the panel's
+    /// own barrier does not depend on what the content answers.
+    struct DecliningPanel(Size);
+
+    /// The retained half of [`DecliningPanel`].
+    struct DecliningPanelWidget(Size);
+
+    impl View<AppState> for DecliningPanel {
+        type Element = DecliningPanelWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> DecliningPanelWidget {
+            DecliningPanelWidget(self.0)
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut DecliningPanelWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.0 = self.0;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for DecliningPanelWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+        // `event` deliberately left at the `Widget` default (`Ignored`).
+    }
+
     const CONTENT: Size = Size::new(120.0, 60.0);
     const ANCHOR: Rect = Rect::new(100.0, 200.0, 180.0, 240.0);
 
-    /// A recording scene: the filled rects in paint order, and the alpha of each
-    /// composited layer.
+    /// A recording scene: the filled rects in paint order, the alpha of each
+    /// composited layer, and each layer's own recorded rectangle (origin,
+    /// size) alongside it.
     #[derive(Default)]
     struct Recorder {
         rects: Vec<(Point, Size)>,
         alphas: Vec<f32>,
+        layers: Vec<(Point, Size)>,
     }
 
     impl PaintScene for Recorder {
-        fn push_layer(&mut self, _origin: Point, _size: Size, alpha: f32) {
+        fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
             self.alphas.push(alpha);
+            self.layers.push((origin, size));
         }
         fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
             self.rects.push((origin, size));
@@ -1238,11 +1383,32 @@ mod tests {
         state: AppState,
         tcx: TextContext,
         anchor: OverlayAnchor,
+        shadowed: bool,
     }
 
     impl Harness {
         fn new() -> Self {
             Self::with_theme(None)
+        }
+
+        /// A host whose content paints its own shadow outside its layout
+        /// rect (see [`ShadowedPanel`]) — for a layer-containment check that
+        /// needs a real shadow to contain.
+        fn shadowed() -> Self {
+            let anchor = OverlayAnchor::new();
+            anchor.set(ANCHOR);
+            let mut h = Harness {
+                root: RenderRoot::new(),
+                state: AppState {
+                    open: true,
+                    ..AppState::default()
+                },
+                tcx: TextContext::new(),
+                anchor,
+                shadowed: true,
+            };
+            h.pass();
+            h
         }
 
         fn with_theme(theme: Option<Theme>) -> Self {
@@ -1260,6 +1426,7 @@ mod tests {
                 },
                 tcx: TextContext::new(),
                 anchor,
+                shadowed: false,
             };
             h.pass();
             h
@@ -1267,15 +1434,27 @@ mod tests {
 
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
+            let shadowed = self.shadowed;
             let mut logic = move |s: &mut AppState| {
-                frust::Stack(vec![any(anchored(Panel(CONTENT))
-                    .anchor(&anchor)
-                    .open(s.open)
-                    .on_dismiss(|s: &mut AppState| {
-                        s.dismissed += 1;
-                        s.open = false;
-                    })
-                    .on_exited(|s: &mut AppState| s.exited += 1))])
+                let on_dismiss = |s: &mut AppState| {
+                    s.dismissed += 1;
+                    s.open = false;
+                };
+                let on_exited = |s: &mut AppState| s.exited += 1;
+                let view: AnyView<AppState> = if shadowed {
+                    any(anchored(ShadowedPanel(CONTENT))
+                        .anchor(&anchor)
+                        .open(s.open)
+                        .on_dismiss(on_dismiss)
+                        .on_exited(on_exited))
+                } else {
+                    any(anchored(Panel(CONTENT))
+                        .anchor(&anchor)
+                        .open(s.open)
+                        .on_dismiss(on_dismiss)
+                        .on_exited(on_exited))
+                };
+                frust::Stack(vec![view])
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1462,9 +1641,12 @@ mod tests {
         assert_eq!(first.alphas.len(), 1, "one staged layer, the content's");
         assert!(first.alphas[0] < 1.0, "the entrance starts transparent");
         // Well past the spring's settle time it is fully present and asks for
-        // nothing more.
+        // nothing more — no layer either, since nothing is left to fade.
         let settled = h.paint(4_000);
-        assert_eq!(settled.alphas, vec![1.0]);
+        assert!(
+            settled.alphas.is_empty(),
+            "a fully open panel needs no fade layer"
+        );
     }
 
     #[test]
@@ -1478,12 +1660,17 @@ mod tests {
         h.pass();
         let mid = h.paint(4_000);
         assert_eq!(mid.rects.len(), 1, "still painted at the start of the exit");
+        assert!(
+            mid.alphas.is_empty(),
+            "the exit clock just latched at full opacity, so nothing is fading yet"
+        );
         assert_eq!(h.state.exited, 0);
 
         // Half-way through the exit it is dimmer but still there.
         let half = h.paint(4_000 + ANCHORED_EXIT.as_millis() as u64 / 2);
         assert_eq!(half.rects.len(), 1);
-        assert!(half.alphas[0] < mid.alphas[0].max(1.0));
+        assert_eq!(half.alphas.len(), 1, "now mid-fade, so layered");
+        assert!(half.alphas[0] < 1.0);
 
         // Past the exit ramp it paints nothing at all…
         let after = h.paint(4_000 + ANCHORED_EXIT.as_millis() as u64 + 1);
@@ -1526,9 +1713,10 @@ mod tests {
         let mut theme = crate::theme();
         theme.motion.reduce_motion = true;
         let mut h = Harness::with_theme(Some(theme));
-        // The entrance is over on the frame it starts.
+        // The entrance is over on the frame it starts — fully open immediately,
+        // so no fade layer either.
         let first = h.paint(0);
-        assert_eq!(first.alphas, vec![1.0]);
+        assert!(first.alphas.is_empty());
         // …and so is the exit, which still reports itself exactly once.
         h.state.open = false;
         h.pass();
@@ -1536,6 +1724,137 @@ mod tests {
         assert!(after.rects.is_empty());
         h.pointer(PointerPhase::Move, 5.0, 5.0);
         assert_eq!(h.state.exited, 1);
+    }
+
+    #[test]
+    fn the_layer_contains_a_content_painted_shadow_through_entry_and_exit() {
+        let assert_shadow_contained = |rec: &Recorder| {
+            assert_eq!(rec.layers.len(), 1, "still fading, so still layered");
+            let layer = Rect::from_origin_size(rec.layers[0].0, rec.layers[0].1);
+            // The host paints no chrome of its own: `rects[0]` is the
+            // content's own fill, `rects[1]` the shadow it paints outside it.
+            assert_eq!(rec.rects.len(), 2);
+            let shadow = Rect::from_origin_size(rec.rects[1].0, rec.rects[1].1);
+            assert!(
+                layer.x0 - 1e-6 <= shadow.x0
+                    && layer.y0 - 1e-6 <= shadow.y0
+                    && layer.x1 + 1e-6 >= shadow.x1
+                    && layer.y1 + 1e-6 >= shadow.y1,
+                "layer {layer:?} clips the shadow {shadow:?}"
+            );
+        };
+
+        // Entrance: progress 0 and mid-ramp.
+        let mut h = Harness::shadowed();
+        assert_shadow_contained(&h.paint(0));
+        assert_shadow_contained(&h.paint(20));
+
+        // Exit: latch the exit's own clock at rest, then read mid-ramp.
+        h.paint(4_000);
+        h.state.open = false;
+        h.pass();
+        h.paint(4_000);
+        assert_shadow_contained(&h.paint(4_000 + ANCHORED_EXIT.as_millis() as u64 / 2));
+    }
+
+    #[test]
+    fn a_mid_exit_press_on_the_panel_is_swallowed_even_when_the_content_declines_it() {
+        let anchor = OverlayAnchor::new();
+        anchor.set(ANCHOR);
+        let mut root: RenderRoot<AppState, frust::StackView<AppState>> = RenderRoot::new();
+        let mut state = AppState {
+            open: true,
+            ..AppState::default()
+        };
+        let mut tcx = TextContext::new();
+        let mut pass = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                        state: &mut AppState| {
+            let anchor = anchor.clone();
+            let mut logic = move |s: &mut AppState| {
+                frust::Stack(vec![any(anchored(DecliningPanel(CONTENT))
+                    .anchor(&anchor)
+                    .open(s.open))])
+            };
+            root.rebuild(&mut logic, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        };
+        pass(&mut root, &mut state);
+        root.paint(&mut Recorder::default(), FrameTime::from_nanos(0));
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(4_000 * 1_000_000),
+        );
+
+        state.open = false;
+        pass(&mut root, &mut state);
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(4_000 * 1_000_000),
+        );
+
+        let c = placed().center();
+        let down = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                    state: &mut AppState| {
+            root.event(
+                state,
+                &InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    position: c,
+                    button: PointerButton::Primary,
+                }),
+            )
+            .handled
+        };
+        assert!(
+            down(&mut root, &mut state),
+            "the still-visible panel swallows the press, whatever the \
+             declining content answers"
+        );
+    }
+
+    #[test]
+    fn a_config_change_while_open_and_settled_does_not_restart_the_entrance() {
+        let cell = OverlayAnchor::new();
+        cell.set(ANCHOR);
+        let view = anchored(Panel(CONTENT)).anchor(&cell);
+        let mut counter = 0u64;
+        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
+
+        let paint = |w: &mut AnchoredOverlayWidget, ms: u64| {
+            let mut ctx =
+                PaintCtx::for_test(Point::ORIGIN, WINDOW, FrameTime::from_nanos(ms * 1_000_000));
+            let mut rec = Recorder::default();
+            w.paint(&mut ctx, &mut rec);
+            rec
+        };
+        paint(&mut w, 0);
+        let settled = paint(&mut w, 4_000);
+        assert!(settled.alphas.is_empty(), "settled: no fade layer yet");
+        assert_eq!(w.phase(), PresencePhase::Present);
+
+        // A rebuild that forces the driver to be rebuilt (any ramp change
+        // does — reduce_motion is only one trigger among several) while the
+        // overlay is open and already settled.
+        let changed = anchored(Panel(CONTENT))
+            .anchor(&cell)
+            .exit(Ramp::eased(Duration::from_millis(999), EASE_OUT));
+        let mut counter2 = 1u64;
+        View::<AppState>::rebuild(&changed, &view, &mut w, &mut BuildCtx::new(&mut counter2));
+        w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
+
+        let after = paint(&mut w, 4_100);
+        assert_eq!(
+            w.phase(),
+            PresencePhase::Present,
+            "landed back on `Present`, not replaying the entrance"
+        );
+        assert!(
+            after.alphas.is_empty(),
+            "still fully open, so still no layer"
+        );
     }
 
     // ---- the trigger-side capture -----------------------------------------

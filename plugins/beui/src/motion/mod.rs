@@ -272,7 +272,16 @@ fn spring_settle(spring: SpringDescription) -> Duration {
     if !seconds.is_finite() {
         return SPRING_SETTLE_CAP;
     }
-    Duration::from_secs_f64(seconds).clamp(SPRING_SETTLE_FLOOR, SPRING_SETTLE_CAP)
+    // `Duration::from_secs_f64` panics on a value that overflows `Duration`'s
+    // own range — a damping ratio near zero drives `rate` near zero and
+    // `seconds` past it — so the cap has to bound the `f64` *before*
+    // conversion; clamping the constructed `Duration` afterward, as this used
+    // to, is already too late to avoid the panic.
+    let seconds = seconds.clamp(
+        SPRING_SETTLE_FLOOR.as_secs_f64(),
+        SPRING_SETTLE_CAP.as_secs_f64(),
+    );
+    Duration::from_secs_f64(seconds)
 }
 
 #[cfg(test)]
@@ -408,6 +417,22 @@ mod tests {
             damping: 0.0,
         };
         let ramp = Ramp::spring(dead);
+        assert_eq!(ramp.settle(), SPRING_SETTLE_CAP);
+        assert!(ramp.progress(Duration::from_millis(10)).is_finite());
+    }
+
+    /// A damping ratio near zero drives the analytic settle estimate's raw
+    /// seconds count past what `Duration` can represent — `spring_settle`
+    /// must cap it before ever building one, not after, or the conversion
+    /// itself panics.
+    #[test]
+    fn a_near_undamped_spring_clamps_to_the_cap_instead_of_overflowing_duration() {
+        let barely_damped = SpringDescription {
+            mass: 1.0,
+            stiffness: 100.0,
+            damping: 1e-20,
+        };
+        let ramp = Ramp::spring(barely_damped);
         assert_eq!(ramp.settle(), SPRING_SETTLE_CAP);
         assert!(ramp.progress(Duration::from_millis(10)).is_finite());
     }

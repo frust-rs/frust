@@ -149,6 +149,32 @@ pub const SHEET_HEIGHT_FRACTION: f64 = 0.5;
 /// close.
 const PROGRESS_EPSILON: f64 = 1e-3;
 
+/// Standard deviations of Gaussian blur beyond which a drop shadow's own
+/// visible contribution is negligible — three sigma covers ~99.7% of it.
+const SHADOW_SPILL_SIGMAS: f64 = 3.0;
+
+/// `tokens::theme`'s `glass_scale` chrome tier's own `ShadowSpec` — the recipe
+/// a panel painting the glass chrome shadow (`y_offset 24, blur_std_dev 30`)
+/// actually casts. [`SHADOW_SPILL_NEAR`]/[`SHADOW_SPILL_FAR`] are derived from
+/// these two numbers rather than the live `ShadowSpec`, because the theme
+/// builds it inside a closure with no standalone constant to import.
+const GLASS_SHADOW_Y_OFFSET: f64 = 24.0;
+const GLASS_SHADOW_BLUR_STD_DEV: f64 = 30.0;
+
+/// How far outside the panel its own content shadow may reach on the sides
+/// with no directional offset (top, left, right): [`SHADOW_SPILL_SIGMAS`]
+/// standard deviations of the chrome shadow's own blur — mirroring
+/// `plugins/shadcn/src/overlay/modal.rs`'s `SHADOW_SPILL`, split in two here
+/// because that shadow's `y_offset` makes only one side of it asymmetric (see
+/// [`SHADOW_SPILL_FAR`]).
+const SHADOW_SPILL_NEAR: f64 = SHADOW_SPILL_SIGMAS * GLASS_SHADOW_BLUR_STD_DEV;
+
+/// How far outside the panel its shadow reaches on the offset (downward)
+/// side: the same [`SHADOW_SPILL_SIGMAS`] standard deviations of blur, plus
+/// the shadow's own `y_offset`.
+const SHADOW_SPILL_FAR: f64 =
+    GLASS_SHADOW_Y_OFFSET + SHADOW_SPILL_SIGMAS * GLASS_SHADOW_BLUR_STD_DEV;
+
 /// Which edge an edge-mounted panel is pinned to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModalEdge {
@@ -655,6 +681,10 @@ pub struct ModalWidget {
     /// started outside the panel.
     scrim_captured: bool,
     scrim_down_outside: bool,
+    /// A focus release a dismissal could not deliver because the dispatch
+    /// that requested it was a pointer event (see [`Self::request_dismiss`]),
+    /// drained on this host's next `Scroll`/`Key`/`Ime` pass.
+    pending_focus_release: bool,
 }
 
 impl ModalWidget {
@@ -729,7 +759,7 @@ impl ModalWidget {
     ///
     /// Refuses a second one — that is what makes each dismiss path fire its
     /// callbacks exactly once.
-    fn request_dismiss(&mut self, ctx: &mut EventCtx) {
+    fn request_dismiss(&mut self, ctx: &mut EventCtx, event: &InputEvent) {
         if !self.dismissable() {
             return;
         }
@@ -745,7 +775,37 @@ impl ModalWidget {
         }
         if ctx.has_focus() {
             // Hand the keyboard chain back: the panel is leaving, and nothing
-            // inside it should keep the focus path.
+            // inside it should keep the focus path. `EventCtx::release_focus`
+            // only reaches the root's own focus session on a `Scroll`/`Key`/
+            // `Ime` dispatch (the root's event loop never consults a release
+            // on the `Pointer` arm), so a dismissal reached from the backdrop
+            // Up is deferred instead of dropped — [`Self::drain_focus_release`]
+            // fires it on this host's next pass of one of those kinds.
+            if matches!(
+                event,
+                InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_)
+            ) {
+                ctx.release_focus();
+            } else {
+                self.pending_focus_release = true;
+            }
+        }
+    }
+
+    /// Deliver a focus release [`Self::request_dismiss`] could not make stick
+    /// on the pointer dispatch that requested it, the moment a dispatch of a
+    /// kind the root's own focus bookkeeping actually honours comes through.
+    fn drain_focus_release(&mut self, ctx: &mut EventCtx, event: &InputEvent) {
+        if !self.pending_focus_release
+            || !matches!(
+                event,
+                InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_)
+            )
+        {
+            return;
+        }
+        self.pending_focus_release = false;
+        if ctx.has_focus() {
             ctx.release_focus();
         }
     }
@@ -810,13 +870,23 @@ impl ModalWidget {
             // itself un-dismissable — every later dismissal needs it clear —
             // over a fully exited, input-transparent panel that no longer
             // swallows anything and a page it never actually popped.
-            // Recoverable, not bricked: reopen the panel and the scrim, the
-            // same way [`ModalView::open`] flipping back on does, so a later
-            // dismissal arms a fresh exit against the stack as it now stands.
+            //
+            // Recoverable, not bricked, but only when the app still considers
+            // the host open: reopening the panel and the scrim unconditionally
+            // would resurrect a visible, input-swallowing, undismissable,
+            // unannounced barrier over a page whose own flag already says it
+            // should be gone (`ModalView::open(false)`, never resynced because
+            // the refusal short-circuited before `on_dismiss` fired). `open`
+            // reflects the app's own intent regardless of the refusal, so it
+            // is what decides whether there is anything to reopen — a closed
+            // app flag just clears the latch and leaves the panel to finish
+            // settling absent, the same as any other close.
             self.staged = false;
-            self.panel.set_open(true);
-            self.scrim.set_open(true);
-            ctx.request_frame();
+            if self.open {
+                self.panel.set_open(true);
+                self.scrim.set_open(true);
+                ctx.request_frame();
+            }
         }
     }
 }
@@ -846,6 +916,7 @@ impl<State: 'static> View<State> for ModalView<State> {
             rect: Rect::ZERO,
             scrim_captured: false,
             scrim_down_outside: false,
+            pending_focus_release: false,
         }
     }
 
@@ -958,15 +1029,30 @@ impl Widget for ModalWidget {
                 let alpha = progress.clamp(0.0, 1.0) as f32;
                 // A pushed layer clips to its own rectangle, so a layer sized to
                 // the panel's *resting* `rect` cuts off whatever the transform
-                // below moves past it. `scale` never grows past `1.0` while
-                // `alpha` is under it — both `PANEL_ENTER_SCALE` and
-                // `PANEL_EXIT_SCALE` are under `1.0`, and `alpha < 1.0` is
-                // exactly the range this branch scales *toward* `1.0` over —
-                // so the lift is the only headroom the layer needs, inflated by
-                // its exact travel this frame; a fully open panel needs no
-                // layer at all, since nothing is moved out of its own rect.
+                // below moves past it — both the lift and, since the content
+                // paints its own shadow outside its layout rect, that shadow's
+                // own reach. `scale` never grows past `1.0` while `alpha` is
+                // under it — both `PANEL_ENTER_SCALE` and `PANEL_EXIT_SCALE` are
+                // under `1.0`, and `alpha < 1.0` is exactly the range this
+                // branch scales *toward* `1.0` over — so the scale itself needs
+                // no extra room; a fully open panel needs no layer at all,
+                // since nothing is moved out of its own rect.
+                //
+                // `Rect::inflate` is symmetric and cannot express the shadow's
+                // own directional reach (its `y_offset` widens only the
+                // downward side), so the layer's bounds are built explicitly:
+                // `SHADOW_SPILL_NEAR` on every side but the bottom, which also
+                // carries `SHADOW_SPILL_FAR` and the lift's own travel (the
+                // panel is lifted *down* from its resting position while
+                // entering or exiting, so only that edge needs the extra
+                // room).
                 if alpha < 1.0 {
-                    let layer = rect.inflate(0.0, lift.y.abs());
+                    let layer = Rect::new(
+                        rect.x0 - SHADOW_SPILL_NEAR,
+                        rect.y0 - SHADOW_SPILL_NEAR,
+                        rect.x1 + SHADOW_SPILL_NEAR,
+                        rect.y1 + SHADOW_SPILL_FAR + lift.y.abs(),
+                    );
                     scene.push_layer(layer.origin(), layer.size(), alpha);
                     layer_pushed = true;
                 }
@@ -1008,6 +1094,7 @@ impl Widget for ModalWidget {
             }
             return EventResult::Ignored;
         }
+        self.drain_focus_release(ctx, event);
         // Claim focus on every `Down` — what makes Escape reachable, and what
         // keeps the root's focus session alive while the modal is up.
         // Re-claiming while focused is a no-op.
@@ -1026,7 +1113,7 @@ impl Widget for ModalWidget {
         }
         if let InputEvent::Key(key) = event {
             if key.key == Key::Named(NamedKey::Escape) {
-                self.request_dismiss(ctx);
+                self.request_dismiss(ctx, event);
             }
             // Every other key is swallowed too: nothing behind a modal may act
             // on a keystroke its content declined.
@@ -1056,7 +1143,7 @@ impl Widget for ModalWidget {
                 // matching the upstream backdrop being a button rather than a
                 // pointerdown listener.
                 if self.scrim_down_outside && !self.rect.contains(p.position) {
-                    self.request_dismiss(ctx);
+                    self.request_dismiss(ctx, event);
                 }
                 EventResult::Handled
             }
@@ -1349,6 +1436,51 @@ mod tests {
         }
     }
 
+    /// A fixed-size leaf that paints its own drop shadow outside its layout
+    /// rect, exactly the reach [`SHADOW_SPILL_NEAR`]/[`SHADOW_SPILL_FAR`] are
+    /// derived to cover — the geometry a fade layer must stay wide enough not
+    /// to clip.
+    struct ShadowedPanel(Size);
+
+    /// The retained half of [`ShadowedPanel`].
+    struct ShadowedPanelWidget(Size);
+
+    impl View<AppState> for ShadowedPanel {
+        type Element = ShadowedPanelWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ShadowedPanelWidget {
+            ShadowedPanelWidget(self.0)
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut ShadowedPanelWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.0 = self.0;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for ShadowedPanelWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            let origin = ctx.origin();
+            let size = ctx.size();
+            scene.fill_rect(origin, size, Color::BLACK);
+            // The shadow's own visual reach: `SHADOW_SPILL_NEAR` on the sides
+            // with no offset, `SHADOW_SPILL_FAR` on the downward one.
+            let shadow_origin =
+                Point::new(origin.x - SHADOW_SPILL_NEAR, origin.y - SHADOW_SPILL_NEAR);
+            let shadow_size = Size::new(
+                size.width + SHADOW_SPILL_NEAR * 2.0,
+                size.height + SHADOW_SPILL_NEAR + SHADOW_SPILL_FAR,
+            );
+            scene.fill_rect(shadow_origin, shadow_size, Color::BLACK);
+        }
+    }
+
     const CONTENT: Size = Size::new(320.0, 200.0);
     /// A frame time well past every entrance ramp in the default config.
     const SETTLED: u64 = 4_000;
@@ -1389,20 +1521,28 @@ mod tests {
         config: ModalConfig,
         closed: Rc<Cell<u32>>,
         stage: bool,
+        shadowed: bool,
     }
 
     impl Harness {
         fn new(config: ModalConfig) -> Self {
-            Self::build(config, false, None)
+            Self::build(config, false, false, None)
         }
 
         /// A host whose dismissal stages its own exit against a state-free close
         /// — the navigator shape, without a navigator.
         fn staged(config: ModalConfig) -> Self {
-            Self::build(config, true, None)
+            Self::build(config, true, false, None)
         }
 
-        fn build(config: ModalConfig, stage: bool, theme: Option<Theme>) -> Self {
+        /// A staged host whose content paints its own shadow outside its
+        /// layout rect (see [`ShadowedPanel`]) — for a layer-containment
+        /// check that needs a real shadow to contain.
+        fn shadowed_staged(config: ModalConfig) -> Self {
+            Self::build(config, true, true, None)
+        }
+
+        fn build(config: ModalConfig, stage: bool, shadowed: bool, theme: Option<Theme>) -> Self {
             let mut root = RenderRoot::new();
             if let Some(theme) = theme {
                 root.set_theme(Box::new(theme));
@@ -1417,6 +1557,7 @@ mod tests {
                 config,
                 closed: Rc::new(Cell::new(0)),
                 stage,
+                shadowed,
             };
             h.pass();
             h
@@ -1426,21 +1567,35 @@ mod tests {
             let config = self.config;
             let closed = self.closed.clone();
             let stage = self.stage;
+            let shadowed = self.shadowed;
             let mut logic = move |s: &mut AppState| {
                 let closed = closed.clone();
-                let view = modal(Panel(CONTENT), config)
-                    .open(s.open)
-                    .label("Settings")
-                    .on_dismiss(|s: &mut AppState| {
-                        s.dismissed += 1;
-                        s.open = false;
-                    });
-                let view = if stage {
-                    view.on_close(move || closed.set(closed.get() + 1))
-                } else {
-                    view
+                let on_dismiss = |s: &mut AppState| {
+                    s.dismissed += 1;
+                    s.open = false;
                 };
-                frust::Stack(vec![any(view)])
+                let view: AnyView<AppState> = if shadowed {
+                    let view = modal(ShadowedPanel(CONTENT), config)
+                        .open(s.open)
+                        .label("Settings")
+                        .on_dismiss(on_dismiss);
+                    if stage {
+                        any(view.on_close(move || closed.set(closed.get() + 1)))
+                    } else {
+                        any(view)
+                    }
+                } else {
+                    let view = modal(Panel(CONTENT), config)
+                        .open(s.open)
+                        .label("Settings")
+                        .on_dismiss(on_dismiss);
+                    if stage {
+                        any(view.on_close(move || closed.set(closed.get() + 1)))
+                    } else {
+                        any(view)
+                    }
+                };
+                frust::Stack(vec![view])
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1596,6 +1751,36 @@ mod tests {
         assert_eq!(h.state.dismissed, 1);
         h.escape();
         assert_eq!(h.state.dismissed, 1, "dismissed exactly once");
+    }
+
+    #[test]
+    fn a_backdrop_dismissal_releases_the_roots_focus_path_on_its_next_key_pass() {
+        let mut h = Harness::new(ModalConfig::centered());
+        h.settle();
+        // The `Down` half of the backdrop click is what seats the root's
+        // focus session; the `Up` half is what tries — and, on the pointer
+        // dispatch alone, fails — to hand it back.
+        h.pointer(PointerPhase::Down, 2.0, 2.0);
+        assert!(
+            h.root.is_focus_active(),
+            "the down seated the focus session"
+        );
+        h.pointer(PointerPhase::Up, 2.0, 2.0);
+        assert_eq!(h.state.dismissed, 1);
+        assert!(
+            h.root.is_focus_active(),
+            "the root's own event loop never consults a release on the \
+             pointer dispatch, so it cannot have moved yet"
+        );
+
+        // A rebuild syncs `open` onto the widget, same as a real reactive app
+        // — and the barrier, still mid-exit, still answers a key press.
+        h.pass();
+        assert!(h.escape(), "still up and still swallowing keys");
+        assert!(
+            !h.root.is_focus_active(),
+            "the deferred release lands on this key pass"
+        );
     }
 
     #[test]
@@ -1779,7 +1964,7 @@ mod tests {
     fn reduce_motion_collapses_both_ramps_and_still_stages_the_close() {
         let mut theme = crate::theme();
         theme.motion.reduce_motion = true;
-        let mut h = Harness::build(ModalConfig::centered(), true, Some(theme));
+        let mut h = Harness::build(ModalConfig::centered(), true, false, Some(theme));
         // Present on the frame it first paints.
         let first = h.paint(0);
         assert!(
@@ -1858,6 +2043,40 @@ mod tests {
     }
 
     #[test]
+    fn the_layer_contains_a_content_painted_shadow_through_entry_and_exit() {
+        let assert_shadow_contained = |rec: &Recorder| {
+            assert_eq!(rec.layers.len(), 1, "still fading, so still layered");
+            let layer = Rect::from_origin_size(rec.layers[0].0, rec.layers[0].1);
+            // `rects`: `[0]` the scrim, `[1]` the panel's own black fill,
+            // `[2]` the shadow it paints outside that fill.
+            assert_eq!(rec.rects.len(), 3);
+            let shadow = Rect::from_origin_size(rec.rects[2].0, rec.rects[2].1);
+            assert!(
+                layer.x0 - 1e-6 <= shadow.x0
+                    && layer.y0 - 1e-6 <= shadow.y0
+                    && layer.x1 + 1e-6 >= shadow.x1
+                    && layer.y1 + 1e-6 >= shadow.y1,
+                "layer {layer:?} clips the shadow {shadow:?}"
+            );
+        };
+
+        // Entrance: progress 0 and mid-ramp.
+        let mut h = Harness::shadowed_staged(ModalConfig::centered());
+        assert_shadow_contained(&h.paint(0));
+        assert_shadow_contained(&h.paint(20));
+
+        // Exit: latch the exit's own clock at rest, then read mid-ramp — the
+        // frame the exit starts on is still at full opacity (nothing to
+        // contain yet, see the settled case above), so the first read worth
+        // checking is partway through it, on `PANEL_EXIT_SCALE` rather than
+        // `PANEL_ENTER_SCALE`.
+        h.paint(SETTLED);
+        h.click(2.0, 2.0);
+        h.paint(SETTLED);
+        assert_shadow_contained(&h.paint(SETTLED + PANEL_EXIT.as_millis() as u64 / 2));
+    }
+
+    #[test]
     fn a_reopened_modal_is_dismissable_again_and_publishes_its_semantics_node() {
         let mut h = Harness::staged(ModalConfig::centered());
         h.settle();
@@ -1890,6 +2109,41 @@ mod tests {
         assert_eq!(
             h.state.dismissed, 2,
             "the reopened panel is dismissable again, not permanently latched"
+        );
+    }
+
+    /// The same reopen guarantee, but flipped back on *while the exit is
+    /// still animating* — `staged && !closed` — rather than after it has
+    /// fully settled, which is the case the test above covers.
+    #[test]
+    fn reopening_before_the_exit_settles_is_dismissable_again_and_publishes_its_semantics_node() {
+        let mut h = Harness::staged(ModalConfig::centered());
+        h.settle();
+        h.click(2.0, 2.0);
+        assert_eq!(h.state.dismissed, 1);
+        h.pass();
+        // Latch the exit's clock, then read it partway through — still
+        // running, and the staged close has not fired yet.
+        h.paint(SETTLED);
+        let mid = h.paint(SETTLED + PANEL_EXIT.as_millis() as u64 / 2);
+        assert_eq!(mid.rects.len(), 2, "still mid-exit");
+        assert_eq!(h.closed.get(), 0, "the staged close has not fired");
+
+        h.state.open = true;
+        h.pass();
+        h.settle();
+
+        let open = h.root.semantics();
+        assert!(
+            open.nodes.iter().any(|(_, n)| n.role() == Role::Dialog),
+            "announced again, not left latched from the interrupted exit"
+        );
+        let c = centred_rect().center();
+        h.click(c.x, c.y);
+        h.escape();
+        assert_eq!(
+            h.state.dismissed, 2,
+            "dismissable again after a reopen that interrupted the exit"
         );
     }
 
@@ -1968,12 +2222,18 @@ mod tests {
         /// single frame of an already-staged ramp by hand. Returns whether
         /// another frame is wanted.
         fn paint(&mut self, ms: u64) -> bool {
-            self.root
-                .paint(
-                    &mut Recorder::default(),
-                    FrameTime::from_nanos(ms * 1_000_000),
-                )
-                .needs_frame
+            self.paint_rec(ms).0
+        }
+
+        /// [`Self::paint`], keeping the recorded scene instead of discarding
+        /// it — for a check that needs to see what actually painted.
+        fn paint_rec(&mut self, ms: u64) -> (bool, Recorder) {
+            let mut rec = Recorder::default();
+            let needs_frame = self
+                .root
+                .paint(&mut rec, FrameTime::from_nanos(ms * 1_000_000))
+                .needs_frame;
+            (needs_frame, rec)
         }
 
         /// Rebuild → layout → paint until nothing asks for another frame
@@ -2104,6 +2364,54 @@ mod tests {
             "the modal is still dismissible after the refused pop"
         );
         assert_eq!(h.controller.depth(), 1);
+    }
+
+    /// A refused pop must not resurrect a barrier the app's own `open` flag
+    /// already says is gone — the state-bearing counterpart of the refusal
+    /// above, where the app never flips its own flag and the panel *should*
+    /// come back.
+    #[test]
+    fn a_refused_pop_does_not_resurrect_a_barrier_the_app_already_closed() {
+        let mut h = NavHarness::new();
+        let open = Rc::new(Cell::new(true));
+        let open_for_build = open.clone();
+        show_modal(
+            &h.controller,
+            move || {
+                modal(Block(Size::new(200.0, 120.0)), ModalConfig::centered())
+                    .open(open_for_build.get())
+            },
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<i32>()),
+        );
+        h.drive(0);
+        assert_eq!(h.controller.depth(), 2, "the modal is up");
+
+        // Stage the exit, then let the app's own flag say it is already gone
+        // — independent of whether the navigator's pop ever lands.
+        h.click(5.0, 5.0);
+        open.set(false);
+        h.pass();
+        h.paint(3_000);
+
+        // The same push-during-the-ramp trick that forces the staged pop to
+        // be refused (see the test above).
+        h.controller
+            .push_transparent(|| any::<NavState, _>(Block(Size::new(400.0, 100.0))));
+        h.drive(3_100);
+        assert_eq!(h.controller.depth(), 3, "the pushed page survives");
+        assert!(h.state.results.is_empty(), "nothing reported a dismissal");
+
+        // Every layer paints (the pushed page is transparent), so the only
+        // rects left are the root page's and the pushed page's own — the
+        // modal must not repaint a scrim or a panel once `open` says it is
+        // gone, refusal or not.
+        let (_, rec) = h.paint_rec(9_000);
+        assert_eq!(
+            rec.rects.len(),
+            2,
+            "the modal resurrected a barrier its own `open` flag already \
+             closed"
+        );
     }
 
     #[test]
