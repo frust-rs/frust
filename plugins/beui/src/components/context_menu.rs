@@ -1605,6 +1605,53 @@ mod tests {
     }
 
     #[test]
+    fn a_retarget_mid_travel_continues_from_the_displayed_rect_at_full_alpha() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        focus_panel(&mut h);
+        h.event(arrow_down());
+        h.frame(2_016.0);
+        h.frame(3_000.0);
+        let (start, _) = pill_of(&h.paint_at(3_000.0)).expect("the pill sits on `Back`");
+
+        // `Back` -> `Reload`, then `Reload` -> `Delete` while still in flight.
+        // A lane's clock starts on its first paint after the retarget, so
+        // paint once to latch it before sampling mid-flight.
+        h.event(arrow_down());
+        h.paint_at(3_016.0);
+        let (mid, _) = pill_of(&h.paint_at(3_100.0)).expect("mid-flight pill");
+        assert!(
+            mid.y > start.y,
+            "the pill had left `Back` when the retarget landed"
+        );
+        h.event(arrow_down());
+        let (resumed, _) = pill_of(&h.paint_at(3_101.0)).expect("pill right after the retarget");
+        assert!(
+            (resumed.y - mid.y).abs() < 1.0,
+            "the retarget continues from the displayed rect, not from `Reload` or `Back`"
+        );
+        // `Delete` is destructive, so the pill takes the danger alpha the
+        // moment it becomes the active row — a tone switch, not a fade.
+        let mut last_y = resumed.y;
+        for ms in [3_150.0, 3_250.0, 3_450.0, 5_000.0] {
+            let (origin, color) = pill_of(&h.paint_at(ms)).expect("the pill never disappears");
+            assert_eq!(
+                color.components[3], CONTEXT_MENU_DANGER_PILL_ALPHA,
+                "at {ms}ms: no fade"
+            );
+            assert!(
+                origin.y >= last_y,
+                "at {ms}ms the pill only travels towards `Delete`"
+            );
+            last_y = origin.y;
+        }
+        assert!(
+            last_y >= start.y + 2.0 * CONTEXT_MENU_ITEM_HEIGHT,
+            "the pill arrived two selectable rows down, on `Delete`"
+        );
+    }
+
+    #[test]
     fn enter_on_a_row_that_became_unselectable_selects_nothing_and_hides_the_pill() {
         let mut h = Harness::new();
         h.open_at(INSET + 10.0, INSET + 10.0);
