@@ -694,11 +694,15 @@ impl Widget for SheetPanelWidget {
                     ctx.request_redraw();
                     return EventResult::Handled;
                 }
-                PointerPhase::Move if self.from.is_some() => {
-                    let from = self.from.expect("a drag in flight has a start point");
-                    self.offset.set(p.position.y - from.y);
-                    ctx.request_redraw();
-                    return EventResult::Handled;
+                PointerPhase::Move => {
+                    // A drag in flight has a start point; otherwise this
+                    // falls through to the content below, same as any other
+                    // move.
+                    if let Some(from) = self.from {
+                        self.offset.set(p.position.y - from.y);
+                        ctx.request_redraw();
+                        return EventResult::Handled;
+                    }
                 }
                 PointerPhase::Up if self.from.is_some() => {
                     self.release(ctx);

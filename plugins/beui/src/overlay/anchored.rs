@@ -913,8 +913,14 @@ impl Widget for AnchoredOverlayWidget {
                 && let InputEvent::Pointer(p) = event
                 && p.phase == PointerPhase::Down
             {
-                route_event_single(&mut self.content, ctx, event);
-                return if self.rect.contains(p.position) {
+                // A press inside `rect` belongs to the panel regardless of
+                // what the content answers (the barrier's widening), but a
+                // press outside `rect` that the content itself consumed is
+                // still `Handled` — its own answer isn't discarded just
+                // because it fell outside the panel's own bounds.
+                let content_handled =
+                    route_event_single(&mut self.content, ctx, event) == EventResult::Handled;
+                return if self.rect.contains(p.position) || content_handled {
                     EventResult::Handled
                 } else {
                     EventResult::Ignored
@@ -1347,6 +1353,50 @@ mod tests {
             scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
         }
         // `event` deliberately left at the `Widget` default (`Ignored`).
+    }
+
+    /// A fixed-size leaf that captures the pointer on `Down` and answers every
+    /// event `Handled` for as long as it holds the capture — even once the
+    /// pointer has moved outside its own bounds — for proving the closed
+    /// host's barrier doesn't discard the content's own `Handled` for an
+    /// event that lands outside `rect` but that the content still consumed.
+    struct CapturingPanel(Size);
+
+    /// The retained half of [`CapturingPanel`].
+    struct CapturingPanelWidget(Size);
+
+    impl View<AppState> for CapturingPanel {
+        type Element = CapturingPanelWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CapturingPanelWidget {
+            CapturingPanelWidget(self.0)
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut CapturingPanelWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.0 = self.0;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for CapturingPanelWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            if p.phase == PointerPhase::Down {
+                ctx.capture_pointer();
+            }
+            EventResult::Handled
+        }
     }
 
     const CONTENT: Size = Size::new(120.0, 60.0);
@@ -1809,6 +1859,77 @@ mod tests {
             down(&mut root, &mut state),
             "the still-visible panel swallows the press, whatever the \
              declining content answers"
+        );
+    }
+
+    #[test]
+    fn a_closed_panels_content_capture_answer_survives_outside_its_rect() {
+        let anchor = OverlayAnchor::new();
+        anchor.set(ANCHOR);
+        let mut root: RenderRoot<AppState, frust::StackView<AppState>> = RenderRoot::new();
+        let mut state = AppState {
+            open: true,
+            ..AppState::default()
+        };
+        let mut tcx = TextContext::new();
+        let mut pass = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                        state: &mut AppState| {
+            let anchor = anchor.clone();
+            let mut logic = move |s: &mut AppState| {
+                frust::Stack(vec![any(anchored(CapturingPanel(CONTENT))
+                    .anchor(&anchor)
+                    .open(s.open))])
+            };
+            root.rebuild(&mut logic, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        };
+        pass(&mut root, &mut state);
+        root.paint(&mut Recorder::default(), FrameTime::from_nanos(0));
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(4_000 * 1_000_000),
+        );
+
+        let down = |root: &mut RenderRoot<AppState, frust::StackView<AppState>>,
+                    state: &mut AppState,
+                    position: Point| {
+            root.event(
+                state,
+                &InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    position,
+                    button: PointerButton::Primary,
+                }),
+            )
+            .handled
+        };
+
+        // A press inside the content while it is still open lets it capture
+        // the pointer.
+        let c = placed().center();
+        assert!(down(&mut root, &mut state, c), "the open press is claimed");
+
+        // Close the host, then press again while it is still visibly fading.
+        state.open = false;
+        pass(&mut root, &mut state);
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(4_000 * 1_000_000),
+        );
+
+        // A press far outside `rect` — but the content still holds the
+        // capture from the earlier press, so `route_event_single` still
+        // forwards it and the content still consumes it. The closed-but-
+        // visible host must not discard that answer just because the
+        // position missed `rect`.
+        let outside = Point::new(2.0, 2.0);
+        assert!(
+            !placed().contains(outside),
+            "the probe position must actually be outside `rect`"
+        );
+        assert!(
+            down(&mut root, &mut state, outside),
+            "the content's own capture-held answer must survive outside `rect`"
         );
     }
 

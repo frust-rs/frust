@@ -109,7 +109,7 @@ use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchored,
 };
-use crate::press::{Lane, inside, is_activation_key};
+use crate::press::{Lane, inside, is_activation_key, presses};
 use crate::style;
 use crate::text::LabelRun;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
@@ -468,6 +468,9 @@ pub struct ContextMenuPanelWidget {
     reduced: Option<bool>,
     /// The row the pill sits on — hover or keyboard.
     active: Option<usize>,
+    /// The row a primary `Down` armed, so `Up` activates only that row and
+    /// only when the release re-hits it.
+    armed: Option<usize>,
     /// The pill's travel between rows, `0.0` at `pill_from`, `1.0` at the active
     /// row (`SPRING_LAYOUT`, upstream's own shared-layout spring).
     pill: Lane,
@@ -594,6 +597,7 @@ impl<State: 'static> View<State> for ContextMenuPanelView<State> {
             morph,
             reduced: None,
             active: None,
+            armed: None,
             pill: Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0),
             pill_from: Rect::ZERO,
             pill_to: Rect::ZERO,
@@ -612,6 +616,7 @@ impl<State: 'static> View<State> for ContextMenuPanelView<State> {
         if element.rows.len() != self.items.len() {
             element.rows = self.items.iter().cloned().map(Row::new).collect();
             element.active = None;
+            element.armed = None;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else {
             for (row, item) in element.rows.iter_mut().zip(&self.items) {
@@ -631,6 +636,7 @@ impl<State: 'static> View<State> for ContextMenuPanelView<State> {
                 // the keyboard says so.
                 element.entered_at = None;
                 element.active = None;
+                element.armed = None;
                 element.pill.retarget_with(Ramp::spring(SPRING_LAYOUT), 0.0);
                 element.pill.snap();
             }
@@ -780,13 +786,20 @@ impl Widget for ContextMenuPanelWidget {
                         }
                         EventResult::Handled
                     }
-                    PointerPhase::Up => match self.row_at(p.position) {
-                        Some(index) => {
-                            (self.on_select)(ctx, index);
-                            EventResult::Handled
+                    PointerPhase::Up => {
+                        // Activation is armed-and-re-hit, not "wherever the Up
+                        // lands": only a row a primary Down armed fires, and
+                        // only when the release lands back on that same row —
+                        // a stray Up (no arming Down reached this widget) or a
+                        // secondary button (which never arms below) does
+                        // nothing.
+                        if let Some(armed) = self.armed.take()
+                            && self.row_at(p.position) == Some(armed)
+                        {
+                            (self.on_select)(ctx, armed);
                         }
-                        None => EventResult::Handled,
-                    },
+                        EventResult::Handled
+                    }
                     PointerPhase::Down => {
                         // A press inside the panel is the panel's: swallowed so
                         // the host's light dismiss never sees it, and claimed
@@ -796,10 +809,24 @@ impl Widget for ContextMenuPanelWidget {
                         // content — both pods sit on one chain and the deeper
                         // claim wins the descent, which is the only way a key
                         // reaches a widget inside an anchored panel.
+                        //
+                        // Only a primary press arms a row for activation — a
+                        // secondary press still claims focus (it is the panel's
+                        // event either way) but starts no activation.
+                        if presses(p) {
+                            self.armed = self.row_at(p.position);
+                        }
                         ctx.request_focus();
                         EventResult::Handled
                     }
-                    PointerPhase::Cancel => EventResult::Ignored,
+                    PointerPhase::Cancel => {
+                        // Never touches real state beyond clearing the arm —
+                        // see the Cancel-never-mutates-state rule.
+                        if self.armed.take().is_none() {
+                            return EventResult::Ignored;
+                        }
+                        EventResult::Handled
+                    }
                 }
             }
             InputEvent::Key(key) => {
@@ -1389,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn hovering_a_row_lights_the_pill_and_a_release_selects_it() {
+    fn hovering_a_row_lights_the_pill_and_a_primary_press_release_selects_it() {
         let mut h = Harness::new();
         h.open_at(INSET + 10.0, INSET + 10.0);
         let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
@@ -1401,8 +1428,56 @@ mod tests {
             rec.rrects.iter().any(|(_, _, r, _)| *r == style::RADIUS_LG),
             "the pill is a `rounded-lg` fill under the row"
         );
+        // Activation is armed-and-re-hit: the Down that arms the row, then an
+        // Up that lands back on it.
+        h.event(pointer(PointerPhase::Down, INSET + 40.0, back_y));
         h.event(pointer(PointerPhase::Up, INSET + 40.0, back_y));
         assert_eq!(h.state.selected, vec![1], "the index the caller wrote");
+    }
+
+    #[test]
+    fn a_stray_up_with_no_arming_down_selects_nothing() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        let back_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT / 2.0;
+        // No Down landed on the panel at all — a hover alone never arms a row.
+        h.event(pointer(PointerPhase::Move, INSET + 40.0, back_y));
+        h.frame(2_016.0);
+        h.event(pointer(PointerPhase::Up, INSET + 40.0, back_y));
+        assert!(h.state.selected.is_empty(), "a stray Up must not activate");
+    }
+
+    #[test]
+    fn a_secondary_press_release_on_a_row_selects_nothing() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        let back_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT / 2.0;
+        h.event(secondary(PointerPhase::Down, INSET + 40.0, back_y));
+        h.event(secondary(PointerPhase::Up, INSET + 40.0, back_y));
+        assert!(
+            h.state.selected.is_empty(),
+            "a secondary press/release never arms or activates a row"
+        );
+    }
+
+    #[test]
+    fn a_release_that_drifts_off_the_armed_row_selects_nothing() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        let back_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT / 2.0;
+        // A row below `Back` — landing anywhere off `Back`'s rect is enough to
+        // fail the re-hit, disabled or not.
+        let elsewhere_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT * 1.5;
+        h.event(pointer(PointerPhase::Down, INSET + 40.0, back_y));
+        // The release lands on a different row than the one the Down armed.
+        h.event(pointer(PointerPhase::Up, INSET + 40.0, elsewhere_y));
+        assert!(
+            h.state.selected.is_empty(),
+            "a release off the armed row must not re-hit a different one"
+        );
     }
 
     #[test]

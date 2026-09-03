@@ -213,10 +213,11 @@ impl Lane {
     }
 
     /// Re-aim at `to`, starting from whatever is on screen now. A no-op when
-    /// the lane already rests on that target, so a redundant `rebuild`
-    /// cannot restart a settled run.
+    /// the lane is already aimed at that target — whether at rest or
+    /// in-flight — so a redundant `rebuild` (settled or mid-run) cannot
+    /// restart or stall the clock.
     pub(crate) fn retarget(&mut self, to: f64) {
-        if self.to == to && self.start.is_none() {
+        if self.to == to {
             return;
         }
         self.from = self.displayed;
@@ -231,7 +232,7 @@ impl Lane {
     /// and exit are timed differently, which is the ordinary shape upstream
     /// (`animate` a spring, `exit` a short tween).
     pub(crate) fn retarget_with(&mut self, ramp: Ramp, to: f64) {
-        if self.ramp == ramp && self.to == to && self.start.is_none() {
+        if self.ramp == ramp && self.to == to {
             return;
         }
         self.from = self.displayed;
@@ -496,6 +497,41 @@ mod tests {
         lane.snap();
         assert_eq!(lane.value(), 0.0);
         assert!(!lane.advance(at(41)));
+    }
+
+    #[test]
+    fn retarget_at_the_same_target_leaves_the_clock_untouched() {
+        // Settled: retargeting a resting lane at its own resting value is a
+        // pure no-op — no advance is owed.
+        let mut settled = Lane::at_rest(Ramp::spring(SPRING_PRESS), 1.0);
+        settled.retarget(1.0);
+        assert!(
+            !settled.advance(at(0)),
+            "re-aiming a settled lane at its own value must not start a run"
+        );
+
+        // In-flight: re-aiming at the target already being flown toward must
+        // not restart the clock — the same elapsed time keeps counting.
+        let mut lane = Lane::at_rest(Ramp::spring(SPRING_PRESS), 0.0);
+        lane.retarget(1.0);
+        lane.advance(at(0));
+        lane.advance(at(40));
+        let before = lane.value();
+
+        // A redundant same-target retarget, as a per-frame layout call would
+        // issue every pass while still in flight toward the same target.
+        lane.retarget(1.0);
+        lane.advance(at(41));
+        let after_redundant_retarget = lane.value();
+        assert!(
+            after_redundant_retarget > before,
+            "the clock kept running across the redundant retarget: {before} -> {after_redundant_retarget}"
+        );
+
+        // Settling still lands on the target at the originally-scheduled
+        // time rather than being pushed out by the redundant retarget.
+        assert!(!lane.advance(at(5_000)));
+        assert_eq!(lane.value(), 1.0);
     }
 
     /// A lane can change ramps mid-life, which is what an entrance-spring /

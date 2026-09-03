@@ -1306,13 +1306,25 @@ impl Widget for AnimatedToastStackWidget {
                 let Some(index) = self.slot_of(armed.id) else {
                     return EventResult::Handled;
                 };
-                let inside_card = self
-                    .card_rect(index)
-                    .is_some_and(|card| card.contains(p.position));
+                let card = self.card_rect(index);
                 match armed.target {
-                    ToastTarget::Close if inside_card => (self.on_dismiss)(ctx, armed.id),
-                    ToastTarget::Action if inside_card => {
-                        if let Some(on_action) = self.on_action.as_mut() {
+                    // A release must re-hit the armed sub-target's own rect,
+                    // not just land anywhere on the card — an `Up` elsewhere
+                    // on the card after arming `Close`/`Action` must not fire
+                    // it.
+                    ToastTarget::Close => {
+                        let re_hit =
+                            card.is_some_and(|card| self.close_rect(card).contains(p.position));
+                        if re_hit {
+                            (self.on_dismiss)(ctx, armed.id);
+                        }
+                    }
+                    ToastTarget::Action => {
+                        let re_hit = card.is_some_and(|card| {
+                            self.action_rect(index, card)
+                                .is_some_and(|rect| rect.contains(p.position))
+                        });
+                        if re_hit && let Some(on_action) = self.on_action.as_mut() {
                             on_action(ctx, armed.id);
                         }
                     }
@@ -1327,7 +1339,6 @@ impl Widget for AnimatedToastStackWidget {
                             (self.on_dismiss)(ctx, armed.id);
                         }
                     }
-                    _ => {}
                 }
                 ctx.request_redraw();
                 EventResult::Handled
@@ -1866,6 +1877,31 @@ mod tests {
         dispatch(&mut widget, &pointer(PointerPhase::Down, close), &mut log);
         dispatch(&mut widget, &pointer(PointerPhase::Up, close), &mut log);
         assert_eq!(log.dismissed, vec![2], "the front card is the newest");
+    }
+
+    /// A release must re-hit the armed sub-target's own rect, not just land
+    /// anywhere on the card: an `Up` elsewhere on the card after arming
+    /// `Close` does not close it.
+    #[test]
+    fn an_up_elsewhere_on_the_card_after_arming_close_does_not_close_it() {
+        let mut widget = laid_out(entries(&[1, 2]));
+        settle(&mut widget);
+        let card = widget.card_rect(1).expect("front card");
+        let close = widget.close_rect(card).center();
+        // Well inside the card, but nowhere near the close box.
+        let elsewhere = card.center();
+        assert!(
+            !widget.close_rect(card).contains(elsewhere),
+            "the probe point must actually miss the close box"
+        );
+
+        let mut log = Log::default();
+        dispatch(&mut widget, &pointer(PointerPhase::Down, close), &mut log);
+        dispatch(&mut widget, &pointer(PointerPhase::Up, elsewhere), &mut log);
+        assert!(
+            log.dismissed.is_empty(),
+            "a release that drifted off the close box must not dismiss"
+        );
     }
 
     /// The action button reports through its own callback, not through dismiss.

@@ -742,6 +742,17 @@ impl<State: 'static> View<State> for RangeSliderView<State> {
             element.max = hi;
             element.step = step;
             element.ticks_key = None;
+            // The confirmed value didn't move, but its fraction within the
+            // range did — re-derive `pos` against the new bounds the same
+            // way a confirmed-value change does, or the painted thumb keeps
+            // sitting at its old fraction of a range that no longer applies.
+            let fraction = fraction_of(self.current(), lo, hi);
+            if element.dragging && element.variant == RangeSliderVariant::Ruler {
+                element.pos.retarget(fraction);
+                element.pos.snap();
+            } else {
+                element.pos.retarget(fraction);
+            }
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.current() != self.current() {
@@ -2678,6 +2689,35 @@ mod tests {
                 .abs()
                 < 1e-6,
             "opacity-50, not the form controls' 60"
+        );
+    }
+
+    /// A range change alone (the confirmed value unchanged) still moves the
+    /// painted thumb: its fraction of the range shifted even though the raw
+    /// value didn't.
+    #[test]
+    fn a_range_change_alone_re_derives_the_painted_fraction() {
+        let mut counter = 0u64;
+        let prev = view(50.0, RangeSliderVariant::Default).range(0.0, 100.0);
+        let mut w = View::<Values>::build(&prev, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = w.layout(
+            &mut ctx,
+            &BoxConstraints::new(Size::ZERO, Size::new(WIDTH, 400.0)),
+        );
+        paint_settled(&mut w, size);
+        assert!((w.pos.value() - 0.5).abs() < 1e-9, "50 of 0..100 is 0.5");
+
+        // Narrowing the range without touching the value moves the fraction:
+        // 50 of 0..200 is a quarter, not a half.
+        let next = view(50.0, RangeSliderVariant::Default).range(0.0, 200.0);
+        View::<Values>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        paint_settled(&mut w, size);
+        assert!(
+            (w.pos.value() - 0.25).abs() < 1e-9,
+            "the thumb did not follow the range change: {}",
+            w.pos.value()
         );
     }
 }

@@ -29,16 +29,18 @@
 //!   string, a gradient brush). Splitting these into cells would throw away
 //!   kerning for no gain, since none of them moves a letter independently.
 //!
-//! # Cell count is the caller's responsibility
+//! # The per-letter cell budget
 //!
-//! [`CharCells`](crate::motion::CharCells) puts no cap on how many cells a
-//! string splits into, and neither does this component: a 4000-character
-//! paragraph becomes 4000 independently shaped, independently composited leaves.
-//! The assumed limit is upstream's own use — a **short display string**,
-//! conservatively ~80 graphemes: a heading, a caption, a status line. Past that,
-//! use a plain [`text`](frust::text) run. The whole-run variants have no such
-//! ceiling (one shaped run whatever the length), but [`Scramble`](TextAnimationVariant::Scramble)
-//! re-shapes on a tick and should be held to the same budget.
+//! [`CharCells`](crate::motion::CharCells) itself puts no cap on how many cells
+//! a string splits into, but this component does: [`TEXT_ANIMATION_CELL_BUDGET`]
+//! graphemes (~80 — upstream's own assumed use: a heading, a caption, a status
+//! line). Past that, a per-letter variant ([`Reveal`](TextAnimationVariant::Reveal),
+//! [`Cascade`](TextAnimationVariant::Cascade)) falls back to painting the string
+//! as one plain, non-animating shaped run rather than building one independently
+//! animated, independently composited leaf per character — a debug build notes
+//! the fallback on `stderr`. The whole-run variants have no such ceiling (one
+//! shaped run whatever the length), but [`Scramble`](TextAnimationVariant::Scramble)
+//! re-shapes on a tick and should still be kept short for its own sake.
 //!
 //! # Degradations against upstream
 //!
@@ -78,6 +80,21 @@ use crate::style::{TEXT_BASE, with_alpha};
 use crate::text::paint_glyph_run as paint_run;
 use crate::tokens::motion::{EASE_IN_OUT, SPRING_LAYOUT};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
+
+/// The per-letter cell budget, in graphemes — see the [module docs](self).
+/// Past this many graphemes a per-letter variant
+/// ([`Reveal`](TextAnimationVariant::Reveal), [`Cascade`](TextAnimationVariant::Cascade))
+/// falls back to a plain, non-animating shaped run instead of one animatable
+/// cell per character. **Community-approximate**: upstream states no exact
+/// number, only its own assumed use (a heading, a caption, a status line);
+/// ~80 is this port's own conservative reading of that use.
+pub const TEXT_ANIMATION_CELL_BUDGET: usize = 80;
+
+/// The number of grapheme cells `content` would split into — the count
+/// [`TEXT_ANIMATION_CELL_BUDGET`] is measured against.
+fn grapheme_count(content: &str) -> usize {
+    CharCells::split(content).len()
+}
 
 /// Per-letter delay of the reveal — `stagger = 0.09` (`text-reveal.tsx`).
 const REVEAL_STAGGER: Duration = Duration::from_millis(90);
@@ -268,12 +285,24 @@ impl<State: 'static> TextAnimationView<State> {
     }
 
     /// Rebuild the per-letter child for the current variant and styling.
+    ///
+    /// Past [`TEXT_ANIMATION_CELL_BUDGET`] graphemes a per-letter variant
+    /// stages no cells at all — [`TextAnimationWidget`] falls back to
+    /// painting a plain run instead (see the [module docs](self)).
     fn restage(&mut self) {
-        let content: &str = if self.variant.is_per_letter() {
-            &self.content
-        } else {
-            ""
-        };
+        let in_budget = self.variant.is_per_letter()
+            && grapheme_count(&self.content) <= TEXT_ANIMATION_CELL_BUDGET;
+        #[cfg(debug_assertions)]
+        if self.variant.is_per_letter() && !in_budget {
+            eprintln!(
+                "frust-beui: text_animation {:?} content is {} graphemes, past the \
+                 {TEXT_ANIMATION_CELL_BUDGET}-grapheme cell budget — falling back to a \
+                 plain run instead of one cell per character",
+                self.variant,
+                grapheme_count(&self.content),
+            );
+        }
+        let content: &str = if in_budget { &self.content } else { "" };
         let mut cells: CharCellsView<State> = char_cascade(content);
         cells = cells.size(self.size);
         if let Some(color) = self.color {
@@ -332,6 +361,15 @@ impl TextAnimationWidget {
     /// docs](self)' budget is stated in.
     pub fn cell_count(&self) -> usize {
         self.split.len()
+    }
+
+    /// Whether this widget currently renders through per-grapheme cells: a
+    /// per-letter variant does, but only within
+    /// [`TEXT_ANIMATION_CELL_BUDGET`] graphemes — past that this widget
+    /// falls back to painting a plain, non-animating run instead of one
+    /// animatable leaf per character (see the [module docs](self)).
+    pub fn renders_per_letter(&self) -> bool {
+        self.variant.is_per_letter() && self.split.len() <= TEXT_ANIMATION_CELL_BUDGET
     }
 
     /// The string currently on screen: the scramble's live sample, or the
@@ -467,7 +505,7 @@ impl<State: 'static> View<State> for TextAnimationView<State> {
 
 impl Widget for TextAnimationWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        if self.variant.is_per_letter() {
+        if self.renders_per_letter() {
             let size = self.cells.layout_child(ctx, bc);
             self.cells.set_origin(Point::ORIGIN);
             return size;
@@ -476,7 +514,8 @@ impl Widget for TextAnimationWidget {
         let ink = self.ink(Theme::from_layout_ctx(ctx));
         let style = self.run_style(Theme::from_layout_ctx(ctx), ink);
         // The scramble shapes whatever `paint` last sampled; every other
-        // whole-run variant shapes the content itself.
+        // whole-run variant — and an over-budget per-letter variant falling
+        // back to a plain run — shapes the content itself.
         let wanted = if self.variant == TextAnimationVariant::Scramble {
             self.display.clone()
         } else {
@@ -495,7 +534,7 @@ impl Widget for TextAnimationWidget {
         let theme = Theme::from_paint_ctx(ctx);
         let reduce = theme.is_some_and(|t| t.motion.reduce_motion);
 
-        if self.variant.is_per_letter() {
+        if self.renders_per_letter() {
             // The cells own their own timing, their own frame requests and their
             // own reduced-motion collapse.
             self.cells.paint_child(ctx, scene);
@@ -510,10 +549,13 @@ impl Widget for TextAnimationWidget {
         let size = ctx.size();
 
         match self.variant {
-            // Handled by the early return above; the arm exists so the match
-            // stays exhaustive without a catch-all that would swallow a new
-            // variant.
-            TextAnimationVariant::Reveal | TextAnimationVariant::Cascade => {}
+            // In-budget cells are handled by the early return above; reaching
+            // this arm means the cell budget was exceeded (see
+            // `renders_per_letter`) — a plain, non-animating run instead of
+            // one leaf per character.
+            TextAnimationVariant::Reveal | TextAnimationVariant::Cascade => {
+                paint_run(self.run.as_ref(), origin, &Brush::Solid(ink), scene);
+            }
             TextAnimationVariant::Scramble => {
                 let duration = self.scramble_duration();
                 let wanted = if reduce || self.glyphs.is_empty() {
@@ -600,7 +642,7 @@ impl Widget for TextAnimationWidget {
             Role::Label,
             |node| node.set_value(self.content.as_str()),
             |ctx| {
-                if self.variant.is_per_letter() {
+                if self.renders_per_letter() {
                     self.cells.semantics_child(ctx);
                 }
             },
@@ -853,6 +895,46 @@ mod tests {
             );
             assert_eq!(variant.is_per_letter(), per_letter, "{variant:?}");
         }
+    }
+
+    /// Past [`TEXT_ANIMATION_CELL_BUDGET`] graphemes a per-letter variant
+    /// falls back to painting a plain, non-animating run rather than staging
+    /// one cell per character.
+    #[test]
+    fn past_the_cell_budget_a_per_letter_variant_falls_back_to_a_plain_run() {
+        let long = "x".repeat(TEXT_ANIMATION_CELL_BUDGET + 1);
+        for variant in [TextAnimationVariant::Reveal, TextAnimationVariant::Cascade] {
+            let view = text_animation::<()>(long.clone()).variant(variant);
+            let mut widget = laid_out(&view);
+            assert_eq!(widget.cell_count(), TEXT_ANIMATION_CELL_BUDGET + 1);
+            assert!(
+                !widget.renders_per_letter(),
+                "{variant:?} over budget must not render per letter"
+            );
+
+            let (rec, needs_frame, ..) = painted(&mut widget, 0, None);
+            assert!(
+                !rec.brushes.is_empty(),
+                "{variant:?} over budget still paints a shaped run"
+            );
+            assert!(
+                !needs_frame,
+                "{variant:?}'s plain-run fallback asks for no further frames"
+            );
+        }
+
+        // Exactly at the budget still renders per letter; the ceiling is
+        // exclusive.
+        let at_budget = "x".repeat(TEXT_ANIMATION_CELL_BUDGET);
+        let widget =
+            laid_out(&text_animation::<()>(at_budget).variant(TextAnimationVariant::Reveal));
+        assert_eq!(widget.cell_count(), TEXT_ANIMATION_CELL_BUDGET);
+        assert!(widget.renders_per_letter());
+
+        // A short string plainly stays on the per-letter route.
+        let short =
+            laid_out(&text_animation::<()>("Ship it").variant(TextAnimationVariant::Cascade));
+        assert!(short.renders_per_letter());
     }
 
     /// A per-letter variant splits the string into one cell per grapheme —

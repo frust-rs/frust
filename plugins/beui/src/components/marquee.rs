@@ -89,6 +89,20 @@ pub const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 /// visibly rather than stepping once a second.
 pub const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Floor on a non-empty track's length, in logical px. A degenerate near-zero
+/// track (rounding noise, or children whose combined size collapses toward
+/// zero) would otherwise blow the paint-copy count up toward "as many as fit
+/// across an astronomically short seam"; flooring it keeps that count bounded
+/// without changing the empty-track (no children) case, which stays exactly
+/// `0.0` and paints a single static copy.
+const MIN_TRACK_LENGTH: f64 = 1.0;
+
+/// Ceiling on how many track copies a single paint pass draws, regardless of
+/// how the box extent and track length divide. A pathologically short track
+/// (even after the floor above) still repeats a bounded number of times per
+/// frame rather than scaling with the box extent.
+const MAX_TRACK_COPIES: usize = 64;
+
 /// Unthemed fallback surface (beUI light `--background`) — what the edge fade
 /// dissolves into.
 const FALLBACK_SURFACE: Color = BEUI_LIGHT.background;
@@ -242,8 +256,15 @@ impl MarqueeWidget {
         if self.track <= 0.0 || self.speed.is_zero() {
             return MAX_FRAME_INTERVAL;
         }
-        Duration::from_secs_f64(self.speed.as_secs_f64() / self.track)
-            .clamp(MIN_FRAME_INTERVAL, MAX_FRAME_INTERVAL)
+        // Clamp the seconds *before* building a `Duration` from it — an
+        // extreme speed/track ratio (a huge `speed`, or a track shrunk toward
+        // the floor above) can overflow `Duration::from_secs_f64`'s range,
+        // which panics rather than saturating.
+        let secs = (self.speed.as_secs_f64() / self.track).clamp(
+            MIN_FRAME_INTERVAL.as_secs_f64(),
+            MAX_FRAME_INTERVAL.as_secs_f64(),
+        );
+        Duration::from_secs_f64(secs)
     }
 
     /// Advance the scroll by the time since the previous frame, holding it while
@@ -369,8 +390,15 @@ impl Widget for MarqueeWidget {
             }
         }
         // The trailing gap is deliberate: it is the seam between one copy of the
-        // track and the next, and upstream spaces it identically.
-        self.track = along;
+        // track and the next, and upstream spaces it identically. A non-empty
+        // track is floored at `MIN_TRACK_LENGTH` so a near-zero sum can't blow
+        // up the paint-copy count; an empty one (no children) stays exactly
+        // `0.0`.
+        self.track = if along > 0.0 {
+            along.max(MIN_TRACK_LENGTH)
+        } else {
+            0.0
+        };
         self.offset = if self.track > 0.0 {
             self.offset.rem_euclid(self.track)
         } else {
@@ -407,7 +435,7 @@ impl Widget for MarqueeWidget {
         let vertical = self.direction.is_vertical();
         let extent = if vertical { size.height } else { size.width };
         let copies = if self.track > 0.0 {
-            (extent / self.track).ceil() as usize + 1
+            ((extent / self.track).ceil() as usize + 1).min(MAX_TRACK_COPIES)
         } else {
             1
         };
@@ -820,6 +848,39 @@ mod tests {
         let (_, needs_frame, paced) = painted(&mut widget, 0, None);
         assert!(needs_frame);
         assert_eq!(paced, Some(Duration::from_millis(10)));
+    }
+
+    /// A near-zero track (children whose combined size collapses toward zero)
+    /// is floored, and the paint-copy count stays capped rather than scaling
+    /// with the box extent.
+    #[test]
+    fn a_near_zero_track_is_floored_and_its_paint_copies_are_capped() {
+        let mut widget =
+            laid_out(&marquee(vec![any(SizedBox::<()>(Some(0.01), Some(20.0)))]).gap(0.0));
+        assert_eq!(
+            widget.track_length(),
+            MIN_TRACK_LENGTH,
+            "a near-zero track is floored"
+        );
+        let (recorder, _, _) = painted(&mut widget, 0, None);
+        assert_eq!(
+            recorder.transforms.len(),
+            MAX_TRACK_COPIES,
+            "the copy count stays capped rather than scaling with the box extent"
+        );
+    }
+
+    /// An extreme speed against a floored track does not overflow
+    /// `Duration::from_secs_f64` — it clamps into the same band as any other
+    /// cadence instead of panicking.
+    #[test]
+    fn an_extreme_speed_track_ratio_clamps_instead_of_panicking() {
+        let widget = laid_out(
+            &marquee(vec![any(SizedBox::<()>(Some(0.01), Some(20.0)))])
+                .gap(0.0)
+                .speed(Duration::MAX),
+        );
+        assert_eq!(widget.frame_interval(), MAX_FRAME_INTERVAL);
     }
 
     /// `reduce_motion` stops the scroll outright and asks for nothing further —
