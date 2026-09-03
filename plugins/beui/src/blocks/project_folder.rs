@@ -43,6 +43,45 @@
 //! perspective projection would; what is lost is the sheared parallax of the
 //! true projection, a few pixels of skew at these angles on a 224px card.
 //!
+//! # The true-3D fan, behind `gpu-effects`
+//!
+//! With the non-default `gpu-effects` feature on,
+//! [`ProjectFolderView::gpu_fan`] renders the preview sheets as **genuinely
+//! projected** plates: quads this crate renders through
+//! [`crate::gpu_fx::fan`] into an offscreen target the engine composites,
+//! carrying the same in-plane rotation [`folder_fan`] already computes, a real
+//! displacement into depth per stacking slot, and a swing about the vertical
+//! axis that grows as the fan opens. The pile stops being a paint order and
+//! becomes an arrangement in space.
+//!
+//! It is opt-in for one blunt reason, and the reason is the boundary the whole
+//! substrate is under:
+//!
+//! > **A 3D face is a colour, a ramp or a caller-owned texture — never a
+//! > widget subtree.** Each sheet's *caption* and its hairline keep painting
+//! > flat, above the composite. What the 3D path replaces is the sheets'
+//! > **fills**, not their content.
+//!
+//! Three consequences a caller should expect, none of them recoverable at this
+//! tier:
+//!
+//! - **An overlapped caption stops being dimmed.** In the flat pile a nearer
+//!   sheet's translucent fill washes over the caption of the sheet behind it;
+//!   the projected pile composites every plate in one target and then paints
+//!   every caption over it, so a covered caption reads at full strength.
+//! - **The plates have square corners.** [`SHEET_RADIUS`] still rounds the
+//!   flat hairline; a rounded clip is a rectangle in scene space and a turned
+//!   plate is not one, so the hairline and its plate part company by a pixel
+//!   or two at the ends of a fully open fan.
+//! - **The back panel and the front flap stay 2D.** Both are [`tilt_scale`]
+//!   foreshortening, unchanged: they are the folder, not the fan, and turning
+//!   only the fan is what makes the sheets read as sitting *inside* it.
+//!
+//! The runtime fallback is the ordinary contract: acquisition answers `None`
+//! before a shell's first surface, on every platform whose shell installs no
+//! device, and under the substrate's kill switch — and the card then paints
+//! precisely the flat fan it always did, `gpu_fan` set or not.
+//!
 //! # Degradations against the web original
 //!
 //! - **No expand overlay, no focus trap, no portal** — the section above.
@@ -67,6 +106,14 @@ use frust::authoring::{
 };
 
 use crate::components::popover::{paint_panel_hairline, resolve_panel};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::card3d::{self, Card3d};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::fan::{self, FanSheet};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::quad3d::QuadFace;
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::schedule::request_frame;
 use crate::motion::Ramp;
 use crate::press::{Lane, inside, is_activation_key, press_scale, presses};
 use crate::style;
@@ -125,6 +172,15 @@ pub const FOLDER_HAIRLINE_ALPHA: f32 = 0.10;
 
 /// `disabled:opacity-50` — a disabled folder's ink opacity.
 pub const FOLDER_DISABLED_OPACITY: f32 = 0.5;
+
+/// The label this block's GPU pass is diagnosed under.
+#[cfg(feature = "gpu-effects")]
+const FX_LABEL: &str = "project-folder";
+
+/// Upstream's own `zIndex` for the frontmost sheet, which
+/// [`FolderSheet::depth`] counts down from — and therefore what a depth is
+/// turned back into a [`FanSheet::slot`] with.
+pub const SHEET_TOP_Z: i32 = 10;
 
 // ---- Motion ----------------------------------------------------------------
 
@@ -348,6 +404,8 @@ struct FolderConfig {
 pub struct ProjectFolderView<State: 'static> {
     previews: Vec<ProjectFolderPreview>,
     config: FolderConfig,
+    #[cfg(feature = "gpu-effects")]
+    gpu_fan: bool,
     on_open_change: OnOpenChange<State>,
     on_activate: OnActivate<State>,
 }
@@ -368,6 +426,8 @@ pub fn project_folder<State: 'static>(
             disabled: false,
             label: None,
         },
+        #[cfg(feature = "gpu-effects")]
+        gpu_fan: false,
         on_open_change: Rc::new(|_, _| {}),
         on_activate: Rc::new(|_| {}),
     }
@@ -413,6 +473,19 @@ impl<State: 'static> ProjectFolderView<State> {
         self
     }
 
+    /// Spread the preview sheets as **genuinely projected** plates, behind the
+    /// non-default `gpu-effects` feature — see the [module docs](self)' *The
+    /// true-3D fan*.
+    ///
+    /// Off by default, and an enhancement either way: the captions keep
+    /// painting flat above the composite, and a build with no reachable GPU
+    /// renders exactly the flat fan this card always did.
+    #[cfg(feature = "gpu-effects")]
+    pub fn gpu_fan(mut self, gpu_fan: bool) -> Self {
+        self.gpu_fan = gpu_fan;
+        self
+    }
+
     /// Set the fan's open/close callback.
     pub fn on_open_change<F: Fn(&mut State, bool) + 'static>(mut self, on_open_change: F) -> Self {
         self.on_open_change = Rc::new(on_open_change);
@@ -448,6 +521,13 @@ pub struct ProjectFolderWidget {
     reported: bool,
     /// Whether a press is armed on the card.
     armed: bool,
+    /// Whether the caller asked for the true-3D fan.
+    #[cfg(feature = "gpu-effects")]
+    gpu_fan: bool,
+    /// The 3D path's handle: acquired lazily on a paint, cleared when the fan
+    /// stands down, released from `View::teardown`.
+    #[cfg(feature = "gpu-effects")]
+    fx: Card3d,
     on_open_change: ErasedArgCallback<bool>,
     on_activate: ErasedCallback,
 }
@@ -541,6 +621,10 @@ impl<State: 'static> View<State> for ProjectFolderView<State> {
             focused: false,
             reported: open,
             armed: false,
+            #[cfg(feature = "gpu-effects")]
+            gpu_fan: self.gpu_fan,
+            #[cfg(feature = "gpu-effects")]
+            fx: Card3d::new(FX_LABEL),
             on_open_change: erase_callback_arg(&self.on_open_change),
             on_activate: erase_callback(&self.on_activate),
         }
@@ -574,12 +658,31 @@ impl<State: 'static> View<State> for ProjectFolderView<State> {
             element.set_open(open);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        #[cfg(feature = "gpu-effects")]
+        if element.gpu_fan != self.gpu_fan {
+            element.gpu_fan = self.gpu_fan;
+            if !self.gpu_fan {
+                // Withdrawn mid-life: the claim is kept (it can be switched
+                // back on) but the pass stops compositing a fan nothing is
+                // asking for.
+                element.fx.clear();
+            }
+            flags |= ChangeFlags::PAINT;
+        }
         // Closures are not comparable; reinstalling the adapters is cheap.
         element.on_open_change = erase_callback_arg(&self.on_open_change);
         element.on_activate = erase_callback(&self.on_activate);
         flags
     }
 
+    /// Give up the 3D claim. A handle dropped without this leaves its pass
+    /// called every frame forever; the card has no children to tear down.
+    #[cfg(feature = "gpu-effects")]
+    fn teardown(&self, element: &mut ProjectFolderWidget, _ctx: &mut BuildCtx<'_>) {
+        element.fx.release();
+    }
+
+    #[cfg(not(feature = "gpu-effects"))]
     fn teardown(&self, _element: &mut ProjectFolderWidget, _ctx: &mut BuildCtx<'_>) {}
 }
 
@@ -678,21 +781,15 @@ impl Widget for ProjectFolderWidget {
             hairline,
         );
 
-        // 2. The sheets, furthest back first.
-        let centre_x = origin.x + size.width / 2.0;
+        // 2. The sheets. Their surfaces first, as one projected pile when the
+        // caller asked for it — the flat fills then stand down and only the
+        // hairlines and captions paint over the composite.
+        let projected = self.paint_fan(ctx, scene, origin, size, background);
+
+        // ...then the pile itself, furthest back first.
         for index in folder_fan_order(self.sheet_count()) {
-            let placement = self.sheet(index);
-            let sheet_size = Size::new(
-                SHEET_WIDTH * placement.scale,
-                SHEET_HEIGHT * placement.scale,
-            );
-            // `-ml-12` puts a sheet's own left edge half a sheet left of the
-            // centre line, so the fan pivots about that line rather than about
-            // the card's left edge.
-            let at = Point::new(
-                centre_x + placement.x - sheet_size.width / 2.0,
-                origin.y + placement.y,
-            );
+            let (placement, local, sheet_size) = self.sheet_box(size, index);
+            let at = origin + local.to_vec2();
             scene.push_layer(at, sheet_size, placement.opacity.clamp(0.0, 1.0) as f32);
             scene.push_transform(Affine::rotate_about(
                 placement.rotation.to_radians(),
@@ -701,12 +798,14 @@ impl Widget for ProjectFolderWidget {
                     at.y + sheet_size.height / 2.0,
                 ),
             ));
-            scene.fill_rounded_rect(
-                at,
-                sheet_size,
-                SHEET_RADIUS,
-                style::with_alpha(background, SHEET_FILL_ALPHA),
-            );
+            if !projected {
+                scene.fill_rounded_rect(
+                    at,
+                    sheet_size,
+                    SHEET_RADIUS,
+                    style::with_alpha(background, SHEET_FILL_ALPHA),
+                );
+            }
             paint_panel_hairline(scene, at, sheet_size, SHEET_RADIUS, hairline);
             if let Some(label) = self.sheets.get(index) {
                 let text = label.size();
@@ -820,6 +919,26 @@ fn paint_tilted_panel(
 }
 
 impl ProjectFolderWidget {
+    /// Where sheet `index` lands right now: its placement, its box's top-left
+    /// **in the card's own space**, and the size it is drawn at.
+    ///
+    /// The one place the fan's box arithmetic lives, so the flat pile and the
+    /// projected one cannot drift apart. `-ml-12` puts a sheet's own left edge
+    /// half a sheet left of the centre line, so the fan pivots about that line
+    /// rather than about the card's left edge.
+    fn sheet_box(&self, size: Size, index: usize) -> (FolderSheet, Point, Size) {
+        let placement = self.sheet(index);
+        let sheet_size = Size::new(
+            SHEET_WIDTH * placement.scale,
+            SHEET_HEIGHT * placement.scale,
+        );
+        let at = Point::new(
+            size.width / 2.0 + placement.x - sheet_size.width / 2.0,
+            placement.y,
+        );
+        (placement, at, sheet_size)
+    }
+
     /// Paint the front flap: the tilted surface, its title row and its meta row.
     #[allow(clippy::too_many_arguments)]
     fn paint_flap(
@@ -939,6 +1058,102 @@ impl ProjectFolderWidget {
                 EventResult::Handled
             }
         }
+    }
+}
+
+#[cfg(feature = "gpu-effects")]
+impl ProjectFolderWidget {
+    /// Composite the projected pile, answering whether it took the sheets'
+    /// surfaces over.
+    ///
+    /// `false` — and therefore the ordinary flat fills — whenever the caller
+    /// did not opt in, the GPU is unreachable, the card has no usable box, or
+    /// there is no preview to fan. Every one of those is an ordinary frame,
+    /// not an error.
+    fn paint_fan(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        size: Size,
+        background: Color,
+    ) -> bool {
+        if !self.gpu_fan {
+            self.fx.clear();
+            return false;
+        }
+        if !self.fx.acquire() {
+            return false;
+        }
+        let Some((dest, extent)) = card3d::target_for(origin, size) else {
+            self.fx.clear();
+            return false;
+        };
+        let sheets = self.fan_sheets(size, extent, background);
+        if sheets.is_empty() {
+            self.fx.clear();
+            return false;
+        }
+
+        // The pass binds during the frame *after* the paint that submitted, so
+        // a first submission owes one frame or the pile would wait for an
+        // unrelated repaint to appear.
+        let first = self
+            .fx
+            .submit(extent, fan::fan_scene(&sheets, self.fan_progress()));
+        request_frame(ctx, card3d::cadence(first));
+        let Some(id) = self.fx.scene_texture_id() else {
+            return false;
+        };
+        scene.draw_scene_texture(id, dest);
+        true
+    }
+
+    /// The plates the pile spreads, **furthest back first** — the same order
+    /// [`folder_fan_order`] gives the flat pile, which is what keeps a
+    /// translucent plate blending over the one behind it rather than
+    /// rejecting it (see [`crate::gpu_fx::fan`]'s own docs).
+    ///
+    /// Each sheet's own opacity folds into its plate's alpha, since the flat
+    /// layer that carried it now wraps only the hairline and the caption.
+    fn fan_sheets(&self, size: Size, extent: (u32, u32), background: Color) -> Vec<FanSheet> {
+        let count = self.sheet_count();
+        folder_fan_order(count)
+            .into_iter()
+            .map(|index| {
+                let (placement, at, sheet_size) = self.sheet_box(size, index);
+                let alpha = SHEET_FILL_ALPHA * placement.opacity.clamp(0.0, 1.0) as f32;
+                FanSheet {
+                    dest: card3d::in_target(
+                        extent,
+                        size,
+                        frust::authoring::Rect::from_origin_size(at, sheet_size),
+                    ),
+                    face: QuadFace::Solid(style::with_alpha(background, alpha)),
+                    roll_degrees: placement.rotation,
+                    // Upstream counts its stack down from `SHEET_TOP_Z`; the
+                    // substrate counts slots up from the front.
+                    slot: SHEET_TOP_Z - placement.depth,
+                    swing: fan::swing_of(index, count),
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(feature = "gpu-effects"))]
+impl ProjectFolderWidget {
+    /// Without the `gpu-effects` feature there is no pile to project: the
+    /// sheets are their flat fills and nothing else.
+    fn paint_fan(
+        &mut self,
+        _ctx: &mut PaintCtx,
+        _scene: &mut dyn PaintScene,
+        _origin: Point,
+        _size: Size,
+        _background: Color,
+    ) -> bool {
+        false
     }
 }
 
@@ -1090,6 +1305,10 @@ mod tests {
         activations: u32,
         controlled: Option<bool>,
         disabled: bool,
+        /// Whether the card is asked for the projected pile — which in a test
+        /// process is always refused, and is exactly the point.
+        #[cfg(feature = "gpu-effects")]
+        gpu: bool,
     }
 
     struct Harness {
@@ -1132,6 +1351,10 @@ mod tests {
                 .on_activate(|s: &mut App| s.activations += 1);
                 if let Some(open) = s.controlled {
                     card = card.open(open);
+                }
+                #[cfg(feature = "gpu-effects")]
+                {
+                    card = card.gpu_fan(s.gpu);
                 }
                 frust::Stack(vec![any(card)])
             };
@@ -1238,6 +1461,118 @@ mod tests {
             open_at.y > closed_at.y,
             "it shortened toward its base, not about its middle"
         );
+    }
+
+    /// The fallback contract, from this card's side: no shell installs a
+    /// device in a test process, so the projected pile never claims one and the
+    /// card paints *precisely* the fills, hairlines and captions it paints with
+    /// the mode off. This is the path every caller of `gpu_fan` gets on
+    /// Android, on iOS, and on a desktop frame before the first surface exists.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_pile_without_a_device_paints_exactly_its_flat_fan() {
+        let painted = |gpu: bool| {
+            let mut h = Harness::new();
+            h.state.gpu = gpu;
+            h.state.controlled = Some(true);
+            h.step(0.0);
+            h.step(3_000.0)
+        };
+        let flat = painted(false);
+        let projected = painted(true);
+        assert_eq!(projected.rrects, flat.rrects);
+        assert_eq!(projected.layers, flat.layers);
+        assert_eq!(projected.inks, flat.inks);
+        assert_eq!(projected.transforms, flat.transforms);
+        assert_eq!(projected.strokes, flat.strokes);
+    }
+
+    /// The claim that keeps the two piles from drifting: every plate lands on
+    /// exactly the box its flat sheet is drawn into, carries the sheet's own
+    /// in-plane rotation and opacity, and stacks in the order the flat pile
+    /// paints in.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn every_plate_lands_on_its_flat_sheets_own_box() {
+        let previews: Vec<ProjectFolderPreview> = ["a", "b", "c", "d", "e"]
+            .map(folder_preview)
+            .into_iter()
+            .collect();
+        let view = project_folder::<App>("Brand refresh", previews)
+            .open(true)
+            .gpu_fan(true);
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let widget = View::<App>::build(&view, &mut ctx);
+        let card = Size::new(FOLDER_WIDTH, FOLDER_HEIGHT);
+        let (_, extent) = card3d::target_for(Point::ORIGIN, card).expect("a card with area");
+
+        let order = folder_fan_order(widget.sheet_count());
+        let sheets = widget.fan_sheets(card, extent, Color::WHITE);
+        assert_eq!(sheets.len(), order.len());
+
+        for (plate, index) in sheets.iter().zip(&order) {
+            let (placement, at, sheet_size) = widget.sheet_box(card, *index);
+            let expected = card3d::in_target(
+                extent,
+                card,
+                frust::authoring::Rect::from_origin_size(at, sheet_size),
+            );
+            assert!((plate.dest.x0 - expected.x0).abs() < 1e-9, "sheet {index}");
+            assert!((plate.dest.y0 - expected.y0).abs() < 1e-9, "sheet {index}");
+            assert!((plate.dest.width() - sheet_size.width).abs() < 1e-9);
+            assert!((plate.roll_degrees - placement.rotation).abs() < 1e-9);
+            assert_eq!(plate.slot, SHEET_TOP_Z - placement.depth);
+            let QuadFace::Solid(color) = &plate.face else {
+                panic!("a plate is a flat fill");
+            };
+            assert!(
+                (f64::from(color.components[3]) - f64::from(SHEET_FILL_ALPHA) * placement.opacity)
+                    .abs()
+                    < 1e-6,
+                "sheet {index} did not carry its own opacity"
+            );
+        }
+
+        // Furthest back first, and the swing runs end to end across the fan.
+        let slots: Vec<i32> = sheets.iter().map(|sheet| sheet.slot).collect();
+        for pair in slots.windows(2) {
+            assert!(pair[0] >= pair[1], "out of stacking order: {slots:?}");
+        }
+        let quads = fan::fan_scene(&sheets, 1.0);
+        assert!(quads.depth, "the pile occludes by distance");
+        let swings: Vec<f64> = sheets.iter().map(|sheet| sheet.swing).collect();
+        assert!(swings.iter().any(|swing| *swing < 0.0));
+        assert!(swings.iter().any(|swing| *swing > 0.0));
+        assert!(
+            swings.iter().map(|swing| swing.abs()).fold(0.0, f64::max) - 1.0 < 1e-9,
+            "the ends reach the full swing"
+        );
+    }
+
+    /// The mode is a live opt-in: switching it off mid-life stops the pile
+    /// without giving up the claim, and switching it back on resumes.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_projected_pile_switches_on_and_off_in_place() {
+        let previews = || vec![folder_preview("a"), folder_preview("b")];
+        let off = project_folder::<App>("t", previews());
+        let on = project_folder::<App>("t", previews()).gpu_fan(true);
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let mut widget = View::<App>::build(&off, &mut ctx);
+        assert!(!widget.gpu_fan);
+
+        let flags = View::<App>::rebuild(&on, &off, &mut widget, &mut ctx);
+        assert!(widget.gpu_fan);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        let flags = View::<App>::rebuild(&off, &on, &mut widget, &mut ctx);
+        assert!(!widget.gpu_fan);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        View::<App>::teardown(&off, &mut widget, &mut ctx);
+        assert!(!widget.fx.is_active());
     }
 
     #[test]

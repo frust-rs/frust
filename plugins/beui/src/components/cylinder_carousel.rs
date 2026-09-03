@@ -53,6 +53,42 @@
 //! finger speed. Recorded as a substrate finding — a velocity-seeded spring
 //! belongs in [`crate::motion`], not in one component.
 //!
+//! # The true-3D wall, behind `gpu-effects`
+//!
+//! With the non-default `gpu-effects` feature on,
+//! [`CylinderCarouselView::gpu_cylinder`] seats a **genuinely projected**
+//! plate under every ball: a quad this crate renders through
+//! [`crate::gpu_fx::cylinder`] into an offscreen target the engine composites,
+//! turned into the wall at the same wall angle [`CylinderCarouselGeometry`]
+//! resolves and seated in depth by the very scale that geometry computed
+//! ([`Cylinder3d::scaled_face`](crate::gpu_fx::cylinder::Cylinder3d::scaled_face)).
+//! So the plate lands on precisely the box the flat item occupies, and what
+//! the 3D path adds is what an `Affine` cannot express: the keystone of a face
+//! genuinely turned away from the viewer, and an occlusion order taken from
+//! distance rather than from paint order.
+//!
+//! It is opt-in for one blunt reason, and the reason is the boundary the whole
+//! substrate is under:
+//!
+//! > **A 3D face is a colour, a ramp or a caller-owned texture — never a
+//! > widget subtree.** Each item's own content keeps compositing flat under
+//! > the `Affine` above, exactly as it does without the feature. What the 3D
+//! > path renders is the **wall the items line**, not the items.
+//!
+//! Two consequences a caller should expect:
+//!
+//! - **The stage grows a wall it did not have.** Upstream paints nothing
+//!   behind a ball, so the plate is a deliberate departure rather than a port
+//!   — it is what makes a turned wall visible at all, since a transparent one
+//!   would project nothing.
+//! - **The plates have square corners** and the stage's own `inset(0)` clip is
+//!   what trims them at the edge, exactly as it trims the flat balls.
+//!
+//! The runtime fallback is the ordinary contract: acquisition answers `None`
+//! before a shell's first surface, on every platform whose shell installs no
+//! device, and under the substrate's kill switch — and the carousel then
+//! paints precisely the 2D wall it always did, `gpu_cylinder` set or not.
+//!
 //! # Items are not pointer targets
 //!
 //! The stage owns the gesture outright, as it does upstream (`touch-none`,
@@ -82,9 +118,23 @@ use frust::authoring::{
 };
 use frust::{FrameTime, SpringDescription, Theme};
 use kurbo::{Point, Size};
+#[cfg(feature = "gpu-effects")]
+use kurbo::{Rect, Vec2};
+#[cfg(feature = "gpu-effects")]
+use peniko::Color;
 
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::card3d::{self, Card3d};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::cylinder::{self, Cylinder3d, CylinderAxis};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::quad3d::{Quad3d, QuadFace};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::schedule::request_frame;
 use crate::motion::Ramp;
 use crate::press::{SpringScalar, inside, presses};
+#[cfg(feature = "gpu-effects")]
+use crate::style;
 
 /// Upstream's `itemSize = 200` — the item box's cap, in logical px.
 pub const DEFAULT_ITEM_SIZE: f64 = 200.0;
@@ -158,6 +208,24 @@ pub const VELOCITY_WINDOW_MS: f64 = 90.0;
 
 /// How many pointer samples a drag keeps for the velocity estimate.
 const VELOCITY_SAMPLES: usize = 8;
+
+/// Alpha of one ball's plate on the true-3D wall
+/// ([`CylinderCarouselView::gpu_cylinder`]).
+///
+/// Low enough to read as a surface the items sit on rather than as a card
+/// around them — upstream has no plate at all, and this one exists to make the
+/// wall's turn visible, not to reframe the content.
+#[cfg(feature = "gpu-effects")]
+pub const WALL_ALPHA: f32 = 0.06;
+
+/// The label this component's GPU pass is diagnosed under.
+#[cfg(feature = "gpu-effects")]
+const FX_LABEL: &str = "cylinder-carousel";
+
+/// Unthemed fallback ink for the wall's plates — the light table's
+/// `--foreground`.
+#[cfg(feature = "gpu-effects")]
+const FALLBACK_WALL_INK: Color = crate::BEUI_LIGHT.foreground;
 
 /// Which side of the cylinder the items line — upstream's `variant` prop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,6 +428,8 @@ pub struct CylinderCarouselView<State: 'static> {
     auto_rotate_speed: f64,
     default_index: usize,
     height: Option<f64>,
+    #[cfg(feature = "gpu-effects")]
+    gpu_cylinder: bool,
     on_index_change: Option<OnIndexChange<State>>,
 }
 
@@ -380,6 +450,8 @@ pub fn cylinder_carousel<State: 'static>(
         auto_rotate_speed: DEFAULT_AUTO_ROTATE_SPEED,
         default_index: 0,
         height: None,
+        #[cfg(feature = "gpu-effects")]
+        gpu_cylinder: false,
         on_index_change: None,
     }
 }
@@ -459,6 +531,19 @@ impl<State: 'static> CylinderCarouselView<State> {
         self
     }
 
+    /// Line the wall with **genuinely projected** plates, behind the
+    /// non-default `gpu-effects` feature — see the [module docs](self)' *The
+    /// true-3D wall*.
+    ///
+    /// Off by default, and an enhancement either way: each item's content keeps
+    /// compositing flat above the wall, and a build with no reachable GPU
+    /// renders exactly the 2D carousel this control always did.
+    #[cfg(feature = "gpu-effects")]
+    pub fn gpu_cylinder(mut self, gpu_cylinder: bool) -> Self {
+        self.gpu_cylinder = gpu_cylinder;
+        self
+    }
+
     /// Report the centred item as it changes (`onIndexChange`) — at release for
     /// a fling, see the [module docs](self).
     pub fn on_index_change<F: Fn(&mut State, usize) + 'static>(mut self, callback: F) -> Self {
@@ -511,6 +596,13 @@ pub struct CylinderCarouselWidget {
     /// The index last reported, so a gesture crossing the same item twice
     /// reports it once.
     emitted: usize,
+    /// Whether the caller asked for the true-3D wall.
+    #[cfg(feature = "gpu-effects")]
+    gpu_cylinder: bool,
+    /// The 3D path's handle: acquired lazily on a paint, cleared when the wall
+    /// stands down, released from `View::teardown`.
+    #[cfg(feature = "gpu-effects")]
+    fx: Card3d,
     on_index_change: Option<ErasedArgCallback<usize>>,
 }
 
@@ -656,6 +748,10 @@ impl<State: 'static> View<State> for CylinderCarouselView<State> {
             auto_frame: None,
             hovered: false,
             emitted: self.default_index,
+            #[cfg(feature = "gpu-effects")]
+            gpu_cylinder: self.gpu_cylinder,
+            #[cfg(feature = "gpu-effects")]
+            fx: Card3d::new(FX_LABEL),
             on_index_change: self.on_index_change.as_ref().map(erase_callback_arg),
         }
     }
@@ -718,13 +814,143 @@ impl<State: 'static> View<State> for CylinderCarouselView<State> {
             element.height = self.height;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        #[cfg(feature = "gpu-effects")]
+        if element.gpu_cylinder != self.gpu_cylinder {
+            element.gpu_cylinder = self.gpu_cylinder;
+            if !self.gpu_cylinder {
+                // Withdrawn mid-life: the claim is kept (it can be switched
+                // back on) but the pass stops compositing a wall nothing is
+                // asking for.
+                element.fx.clear();
+            }
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 
     fn teardown(&self, element: &mut CylinderCarouselWidget, ctx: &mut BuildCtx<'_>) {
+        // The claim goes first: a handle dropped without this leaves its pass
+        // called every frame forever.
+        #[cfg(feature = "gpu-effects")]
+        element.fx.release();
         for (view, pod) in self.items.iter().zip(element.items.iter_mut()) {
             teardown_child(view, pod, ctx);
         }
+    }
+}
+
+#[cfg(feature = "gpu-effects")]
+impl CylinderCarouselWidget {
+    /// The wall this carousel's balls line, as the substrate describes it: a
+    /// cylinder turning about a vertical axis, its faces on the outside for
+    /// `convex` and the inside for `concave`.
+    ///
+    /// The radius is the one upstream's own edge rule implies — the radius at
+    /// which a ball's centre at [`THETA_EDGE`] sits exactly on the stage's
+    /// edge. Only the axis and the side are actually read off the drum here:
+    /// the placement is upstream's hand-rolled projection and stays so (see the
+    /// [module docs](self)), so the seat's own travel and depth are not the
+    /// ones this component seats by.
+    fn wall(&self) -> Cylinder3d {
+        let radius = if THETA_EDGE.sin() > 0.0 {
+            self.geometry.half_width / THETA_EDGE.sin()
+        } else {
+            self.geometry.half_width
+        };
+        Cylinder3d::new(radius, CylinderAxis::Vertical, self.geometry.convex)
+    }
+
+    /// Composite the projected wall, answering whether it took over.
+    ///
+    /// `false` — and therefore no wall at all, exactly as this stage has always
+    /// painted — whenever the caller did not opt in, the GPU is unreachable,
+    /// the stage has no usable box, or every ball is off-stage. Every one of
+    /// those is an ordinary frame, not an error.
+    fn paint_wall(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        size: Size,
+    ) -> bool {
+        if !self.gpu_cylinder {
+            self.fx.clear();
+            return false;
+        }
+        if !self.fx.acquire() {
+            return false;
+        }
+        let ink = Theme::from_paint_ctx(ctx).map_or(FALLBACK_WALL_INK, |t| t.scheme().on_surface);
+        let Some((dest, extent)) = card3d::target_for(origin, size) else {
+            self.fx.clear();
+            return false;
+        };
+        let faces = self.wall_faces(extent, ink);
+        if faces.is_empty() {
+            self.fx.clear();
+            return false;
+        }
+
+        // The pass binds during the frame *after* the paint that submitted, so
+        // a first submission owes one frame or the wall would wait for an
+        // unrelated repaint to appear.
+        let first = self.fx.submit(extent, cylinder::drum_scene(faces));
+        request_frame(ctx, card3d::cadence(first));
+        let Some(id) = self.fx.scene_texture_id() else {
+            return false;
+        };
+        scene.draw_scene_texture(id, dest);
+        true
+    }
+
+    /// One plate per on-stage ball, placed where the flat ball is placed and
+    /// seated in depth by the scale that placement already computed — so the
+    /// plate projects onto precisely the box its item paints into, and the
+    /// item's content lands on its own surface rather than beside it.
+    ///
+    /// The plates are submitted in item order, not depth order: the depth
+    /// attachment is what resolves two that overlap, which is the whole point
+    /// of the mode.
+    fn wall_faces(&self, extent: (u32, u32), ink: Color) -> Vec<Quad3d> {
+        let wall = self.wall();
+        let count = self.count();
+        let item = Size::new(self.geometry.size, self.geometry.size);
+        let centre = Point::new(f64::from(extent.0) / 2.0, f64::from(extent.1) / 2.0);
+        let face = QuadFace::Solid(style::with_alpha(ink, WALL_ALPHA));
+        (0..count)
+            .filter_map(|index| {
+                let offset =
+                    CylinderCarouselGeometry::wrapped_offset(index, self.scroll.value(), count);
+                let placement = self.geometry.place(offset);
+                // The stage's own exit rule decides what is on stage; the
+                // substrate's horizon is the narrower second guard, since a
+                // ball may be clamped past a quarter turn while its centre is
+                // still inside the stage.
+                let angle = (offset * self.geometry.alpha).clamp(-THETA_CLAMP, THETA_CLAMP);
+                if placement.hidden || !wall.visible(angle) {
+                    return None;
+                }
+                let seat = wall.seat(angle);
+                let dest =
+                    Rect::from_center_size(centre + Vec2::new(placement.x, placement.y), item);
+                Some(wall.scaled_face(seat, dest, face.clone(), placement.scale))
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(feature = "gpu-effects"))]
+impl CylinderCarouselWidget {
+    /// Without the `gpu-effects` feature there is no wall to project: the
+    /// stage is its 2D path and nothing else.
+    fn paint_wall(
+        &mut self,
+        _ctx: &mut PaintCtx,
+        _scene: &mut dyn PaintScene,
+        _origin: Point,
+        _size: Size,
+    ) -> bool {
+        false
     }
 }
 
@@ -813,6 +1039,13 @@ impl Widget for CylinderCarouselWidget {
         // `clip-path: inset(0)` — a ball leaving the stage disappears at the
         // edge rather than painting over a sibling.
         scene.push_clip(origin, size);
+
+        // The wall the balls line, when the caller asked for the projected one:
+        // inside the clip, so the overscanned target's margin is trimmed by the
+        // same rule that trims a ball leaving the stage, and before the items,
+        // which keep compositing flat on top of it.
+        self.paint_wall(ctx, scene, origin, size);
+
         let centre = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         let item = self.geometry.size;
         let count = self.count();
@@ -1494,6 +1727,161 @@ mod tests {
         let (_, needs_frame) = painted(&mut spinning, 1_000, Some(&theme));
         assert!(!needs_frame);
         assert_eq!(spinning.scroll(), 0.0);
+    }
+
+    /// The fallback contract, from this control's side: no shell installs a
+    /// device in a test process, so the projected wall never claims one and the
+    /// stage paints *precisely* the transforms it paints with the mode off.
+    /// This is the path every caller of `gpu_cylinder` gets on Android, on
+    /// iOS, and on a desktop frame before the first surface exists.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_wall_without_a_device_paints_exactly_its_two_dimensional_path() {
+        let mut flat = laid_out(&view());
+        let mut projected = laid_out(&view().gpu_cylinder(true));
+        let (flat_paint, _) = painted(&mut flat, 0, None);
+        let (projected_paint, _) = painted(&mut projected, 0, None);
+
+        assert!(
+            !projected.fx.is_active(),
+            "a test process has no shell device"
+        );
+        assert!(projected.gpu_cylinder, "the opt-in is still recorded");
+        assert!(!flat.gpu_cylinder);
+        assert_eq!(projected_paint.transforms, flat_paint.transforms);
+        assert_eq!(projected_paint.clips, flat_paint.clips);
+    }
+
+    /// The claim that keeps the two paths from drifting: every plate lands on
+    /// exactly the box its flat ball paints into — same centre, and a depth
+    /// that projects it back to the same scale — while carrying the turn into
+    /// the wall that the flat ball cannot.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn every_plate_lands_on_its_flat_balls_own_box() {
+        let mut widget = laid_out(&view().gpu_cylinder(true));
+        // Mid-roll, so no ball is dead centre.
+        widget.scroll.jump_to(1.35);
+        let (_, extent) = card3d::target_for(Point::ORIGIN, STAGE).expect("a stage with area");
+        let faces = widget.wall_faces(extent, Color::WHITE);
+
+        let on_stage: Vec<usize> = (0..widget.count())
+            .filter(|index| {
+                let offset = CylinderCarouselGeometry::wrapped_offset(
+                    *index,
+                    widget.scroll(),
+                    widget.count(),
+                );
+                !widget.geometry.place(offset).hidden
+            })
+            .collect();
+        assert_eq!(faces.len(), on_stage.len());
+
+        let camera = f64::from(crate::gpu_fx::quad3d::CAMERA_DISTANCE);
+        let centre = Point::new(f64::from(extent.0) / 2.0, f64::from(extent.1) / 2.0);
+        for (face, index) in faces.iter().zip(&on_stage) {
+            let offset =
+                CylinderCarouselGeometry::wrapped_offset(*index, widget.scroll(), widget.count());
+            let placement = widget.geometry.place(offset);
+            assert!((face.dest.center().x - centre.x - placement.x).abs() < 1e-9);
+            assert!((face.dest.center().y - centre.y - placement.y).abs() < 1e-9);
+            assert!((face.dest.width() - widget.geometry.size).abs() < 1e-9);
+            // The depth is the one that projects the plate back onto the ball's
+            // own scale, which is what keeps the two the same size.
+            let projected = camera / (camera - f64::from(face.depth_offset));
+            assert!(
+                (projected - placement.scale).abs() < 1e-5,
+                "plate {index} projects at {projected} where its ball is scaled {}",
+                placement.scale
+            );
+            assert!(
+                face.pitch.abs() < 1e-9,
+                "a vertical axis yaws, never pitches"
+            );
+            assert!(face.is_renderable());
+        }
+
+        // The wall is concave by default, so a ball right of centre turns its
+        // right edge toward the viewer and one left of centre its left edge.
+        let right = faces
+            .iter()
+            .max_by(|a, b| a.dest.center().x.total_cmp(&b.dest.center().x))
+            .expect("a ball on stage");
+        let left = faces
+            .iter()
+            .min_by(|a, b| a.dest.center().x.total_cmp(&b.dest.center().x))
+            .expect("a ball on stage");
+        assert!(right.yaw < 0.0 && left.yaw > 0.0);
+    }
+
+    /// Lining the outside of the wall inverts both the turn and the order the
+    /// plates occlude in — the same drum seen from the other side.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_convex_wall_turns_and_stacks_the_other_way() {
+        let (_, extent) = card3d::target_for(Point::ORIGIN, STAGE).expect("a stage with area");
+        let faces_for = |variant: CylinderCarouselVariant| {
+            let mut widget = laid_out(&view().variant(variant).gpu_cylinder(true));
+            widget.scroll.jump_to(1.35);
+            widget.wall_faces(extent, Color::WHITE)
+        };
+        let concave = faces_for(CylinderCarouselVariant::Concave);
+        let convex = faces_for(CylinderCarouselVariant::Convex);
+
+        // How far from the stage's centre line the nearest plate sits, against
+        // how far the furthest-out one does: an outside wall is nearest in the
+        // middle, an inside wall at its ends.
+        let stage_centre = f64::from(extent.0) / 2.0;
+        let from_centre = |face: &Quad3d| (face.dest.center().x - stage_centre).abs();
+        let nearest = |faces: &[Quad3d]| {
+            faces
+                .iter()
+                .max_by(|a, b| a.depth_offset.total_cmp(&b.depth_offset))
+                .map(&from_centre)
+                .expect("a ball on stage")
+        };
+        let widest = |faces: &[Quad3d]| faces.iter().map(&from_centre).fold(0.0_f64, f64::max);
+        assert!(
+            (nearest(&concave) - widest(&concave)).abs() < 1e-9,
+            "the inside of the wall comes forward at its ends"
+        );
+        assert!(
+            nearest(&convex) < widest(&convex),
+            "the outside of the wall is nearest in the middle"
+        );
+        // ...and the turn mirrors with the side.
+        let right = |faces: &[Quad3d]| {
+            faces
+                .iter()
+                .max_by(|a, b| a.dest.center().x.total_cmp(&b.dest.center().x))
+                .expect("a ball on stage")
+                .yaw
+        };
+        assert!(right(&concave) < 0.0 && right(&convex) > 0.0);
+    }
+
+    /// The mode is a live opt-in: switching it off mid-life stops the wall
+    /// without giving up the claim, and switching it back on resumes.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_projected_wall_switches_on_and_off_in_place() {
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let off = view();
+        let on = view().gpu_cylinder(true);
+        let mut widget = View::<Landings>::build(&off, &mut ctx);
+        assert!(!widget.gpu_cylinder);
+
+        let flags = View::<Landings>::rebuild(&on, &off, &mut widget, &mut ctx);
+        assert!(widget.gpu_cylinder);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        let flags = View::<Landings>::rebuild(&off, &on, &mut widget, &mut ctx);
+        assert!(!widget.gpu_cylinder);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        View::<Landings>::teardown(&off, &mut widget, &mut ctx);
+        assert!(!widget.fx.is_active());
     }
 
     /// An empty carousel is inert rather than a division by zero.

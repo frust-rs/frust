@@ -46,6 +46,46 @@
 //! approximation is worth taking; it is still an approximation, not the same
 //! render.
 //!
+//! # The true-3D drum, behind `gpu-effects`
+//!
+//! With the non-default `gpu-effects` feature on, [`WheelPicker::gpu_drum`]
+//! seats a **genuinely projected** plate under every row: a quad this crate
+//! renders through [`crate::gpu_fx::cylinder`] into an offscreen target the
+//! engine composites, on the same cylinder [`Drum`] already describes and at
+//! the same angle [`Drum::angle`] already resolves. The approximation above
+//! becomes a real rotation — each plate keystones, and a row that has turned
+//! onto the far side of the wall is hidden by the row in front of it through
+//! depth rather than by a `visibility` rule.
+//!
+//! It is opt-in for one blunt reason, and the reason is the boundary the whole
+//! substrate is under:
+//!
+//! > **A 3D face is a colour, a ramp or a caller-owned texture — never a
+//! > widget subtree.** The rows' *text* keeps painting flat, above the
+//! > composite, placed by exactly the affine this module always used. What the
+//! > 3D path adds is the drum's **surface**; the labels riding on it are still
+//! > the 2D ones.
+//!
+//! Three consequences a caller should expect, none of them recoverable at this
+//! tier:
+//!
+//! - **The drum grows a surface it did not have.** Upstream paints no plate
+//!   behind a row, so a plate is a deliberate departure rather than a port —
+//!   it is what makes a projected drum read as a solid one, and it is why the
+//!   mode is a caller's choice rather than something that appears under a
+//!   theme.
+//! - **The plate and its text disagree slightly at the horizon.** The plate is
+//!   projected by the substrate's camera and the text is scaled by upstream's
+//!   [`PERSPECTIVE`], so a row near the cutoff paints its plate a few percent
+//!   smaller than its label. Both are masked to near-zero alpha there.
+//! - **The plates have square corners** and the window's rounded clip is what
+//!   trims them, exactly as it trims the flat rows.
+//!
+//! The runtime fallback is the ordinary contract: acquisition answers `None`
+//! before a shell's first surface, on every platform whose shell installs no
+//! device, and under the substrate's kill switch — and the wheel then paints
+//! precisely the 2D drum it always did, `gpu_drum` set or not.
+//!
 //! # Other degradations
 //!
 //! - **The edge fade is per row, not per pixel.** Upstream masks the container
@@ -78,6 +118,14 @@ use frust::authoring::{
 };
 use frust::{FrameTime, Theme};
 
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::card3d::{self, Card3d};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::cylinder::{self, Cylinder3d, CylinderAxis};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::quad3d::{Quad3d, QuadFace};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::schedule::request_frame;
 use crate::press::{inside_inclusive as inside, presses};
 use crate::style;
 use crate::text::Label as ShapedText;
@@ -144,6 +192,20 @@ pub const RING_ALPHA: f32 = 0.2;
 /// Where the container's mask reaches full opacity, as a fraction of its height
 /// (`linear-gradient(to bottom, transparent, #000 22%, …)`).
 pub const MASK_STOP: f64 = 0.22;
+
+/// Alpha of one row's plate on the true-3D drum
+/// ([`WheelPicker::gpu_drum`]), before the mask ramp and the disabled tint are
+/// applied to it.
+///
+/// A shade heavier than [`BAND_ALPHA`]: the band is a wash *over* a row and
+/// this is the drum's own surface *under* one, and a surface that reads as
+/// nothing is not worth a render pass.
+#[cfg(feature = "gpu-effects")]
+pub const PLATE_ALPHA: f32 = 0.06;
+
+/// The label this component's GPU pass is diagnosed under.
+#[cfg(feature = "gpu-effects")]
+const FX_LABEL: &str = "wheel-picker";
 
 /// Unthemed fallback ink — the light table's `--foreground`.
 const FALLBACK_FOREGROUND: Color = crate::BEUI_LIGHT.foreground;
@@ -337,6 +399,8 @@ pub struct WheelPicker<State: 'static> {
     item_height: f64,
     disabled: bool,
     label: Option<String>,
+    #[cfg(feature = "gpu-effects")]
+    gpu_drum: bool,
     on_value_change: OnValueChange<State>,
 }
 
@@ -355,6 +419,8 @@ pub fn wheel_picker<State: 'static, F: Fn(&mut State, String) + 'static>(
         item_height: DEFAULT_ITEM_HEIGHT,
         disabled: false,
         label: None,
+        #[cfg(feature = "gpu-effects")]
+        gpu_drum: false,
         on_value_change: Rc::new(on_value_change),
     }
 }
@@ -383,6 +449,19 @@ impl<State: 'static> WheelPicker<State> {
     /// Name the control for assistive tech (`aria-label`).
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Seat every row on a **genuinely projected** cylinder, behind the
+    /// non-default `gpu-effects` feature — see the [module docs](self)' *The
+    /// true-3D drum*.
+    ///
+    /// Off by default, and an enhancement either way: the row text keeps
+    /// painting flat above the composite, and a build with no reachable GPU
+    /// renders exactly the 2D drum this control always did.
+    #[cfg(feature = "gpu-effects")]
+    pub fn gpu_drum(mut self, gpu_drum: bool) -> Self {
+        self.gpu_drum = gpu_drum;
         self
     }
 
@@ -471,6 +550,10 @@ impl<State: 'static> View<State> for WheelPicker<State> {
             wheel_idle_since: None,
             frame: FrameTime::ZERO,
             size: Size::ZERO,
+            #[cfg(feature = "gpu-effects")]
+            gpu_drum: self.gpu_drum,
+            #[cfg(feature = "gpu-effects")]
+            fx: Card3d::new(FX_LABEL),
             on_value_change: erase_callback_arg(&self.on_value_change),
         }
     }
@@ -531,6 +614,17 @@ impl<State: 'static> View<State> for WheelPicker<State> {
             }
             flags |= ChangeFlags::PAINT;
         }
+        #[cfg(feature = "gpu-effects")]
+        if element.gpu_drum != self.gpu_drum {
+            element.gpu_drum = self.gpu_drum;
+            if !self.gpu_drum {
+                // Withdrawn mid-life: the claim is kept (it can be switched
+                // back on) but the pass stops compositing a drum nothing is
+                // asking for.
+                element.fx.clear();
+            }
+            flags |= ChangeFlags::PAINT;
+        }
         if prev.label != self.label {
             element.label = self.label.clone();
             // Semantics-only, but `PAINT` is what bumps the root's semantics
@@ -538,6 +632,13 @@ impl<State: 'static> View<State> for WheelPicker<State> {
             flags |= ChangeFlags::PAINT;
         }
         flags
+    }
+
+    /// Give up the 3D claim. A handle dropped without this leaves its pass
+    /// called every frame forever; the control has no children to tear down.
+    #[cfg(feature = "gpu-effects")]
+    fn teardown(&self, element: &mut WheelPickerWidget, _ctx: &mut BuildCtx<'_>) {
+        element.fx.release();
     }
 }
 
@@ -569,6 +670,13 @@ pub struct WheelPickerWidget {
     /// `EventCtx` carries none.
     frame: FrameTime,
     size: Size,
+    /// Whether the caller asked for the true-3D drum.
+    #[cfg(feature = "gpu-effects")]
+    gpu_drum: bool,
+    /// The 3D path's handle: acquired lazily on a paint, cleared when the drum
+    /// stands down, released from `View::teardown`.
+    #[cfg(feature = "gpu-effects")]
+    fx: Card3d,
     on_value_change: frust::authoring::ErasedArgCallback<String>,
 }
 
@@ -731,6 +839,122 @@ impl WheelPickerWidget {
     }
 }
 
+#[cfg(feature = "gpu-effects")]
+impl WheelPickerWidget {
+    /// The drum this control's rows are seated on, as the substrate describes
+    /// it: the cylinder [`Drum`] already resolved, turning about a horizontal
+    /// axis, with the rows on the **outside** of the wall — the centre row
+    /// nearest and the rest receding, which is what an iOS-style picker is.
+    fn cylinder(&self) -> Cylinder3d {
+        Cylinder3d::new(self.drum.radius, CylinderAxis::Horizontal, true)
+    }
+
+    /// Composite the projected drum surface, answering whether it took over.
+    ///
+    /// `false` — and therefore no surface at all, exactly as this control has
+    /// always painted — whenever the caller did not opt in, the GPU is
+    /// unreachable, the window has no usable box, or every row is masked out.
+    /// Every one of those is an ordinary frame, not an error.
+    ///
+    /// Reduced motion is deliberately *not* one of them: the drum's curvature
+    /// is this control's shape, not its animation, and the reduced-motion rule
+    /// here collapses glides (see the [module docs](self)).
+    fn paint_drum(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        size: Size,
+        ink: Color,
+        opacity: f32,
+    ) -> bool {
+        if !self.gpu_drum {
+            self.fx.clear();
+            return false;
+        }
+        if !self.fx.acquire() {
+            return false;
+        }
+        let Some((dest, extent)) = card3d::target_for(origin, size) else {
+            self.fx.clear();
+            return false;
+        };
+        let faces = self.drum_faces(size, extent, ink, opacity);
+        if faces.is_empty() {
+            self.fx.clear();
+            return false;
+        }
+
+        // The pass binds during the frame *after* the paint that submitted, so
+        // a first submission owes one frame or the drum would wait for an
+        // unrelated repaint to appear.
+        let first = self.fx.submit(extent, cylinder::drum_scene(faces));
+        request_frame(ctx, card3d::cadence(first));
+        let Some(id) = self.fx.scene_texture_id() else {
+            return false;
+        };
+        scene.draw_scene_texture(id, dest);
+        true
+    }
+
+    /// One plate per visible row, seated on the cylinder at the angle the flat
+    /// path places the same row by — [`Drum::angle`] is the single source of
+    /// truth for where the drum is, and this only renders it.
+    ///
+    /// The plates are translucent, and [`drum_scene`](cylinder::drum_scene)
+    /// submits them nearest first under a depth attachment, which is what keeps
+    /// two rows overlapping near the horizon from double-darkening their seam:
+    /// the nearer plate wins outright, as it would on a solid drum.
+    fn drum_faces(&self, size: Size, extent: (u32, u32), ink: Color, opacity: f32) -> Vec<Quad3d> {
+        let drum = self.cylinder();
+        let centre = Point::new(f64::from(extent.0) / 2.0, f64::from(extent.1) / 2.0);
+        let row = Size::new(size.width, self.item_height);
+        (0..self.labels.len())
+            .filter_map(|index| {
+                let angle = self.drum.angle(index as f64, self.scroll);
+                // The substrate's horizon and this control's own cutoff are the
+                // same quarter turn: `item_angle` is `90 / cutoff` degrees, so
+                // a row past `hide_beyond` rows is a row past 90 degrees.
+                if !drum.visible(angle) {
+                    return None;
+                }
+                let seat = drum.seat(angle);
+                // The container mask, evaluated at the row's own centre —
+                // the identical rule the flat rows fade by.
+                let alpha = mask_alpha(size.height / 2.0 + seat.travel.y, size.height)
+                    * f64::from(opacity)
+                    * f64::from(PLATE_ALPHA);
+                if alpha <= 0.0 {
+                    return None;
+                }
+                Some(drum.face(
+                    seat,
+                    drum.seated_rect(centre, row, seat),
+                    QuadFace::Solid(style::with_alpha(ink, alpha as f32)),
+                    f64::from(extent.1),
+                ))
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(feature = "gpu-effects"))]
+impl WheelPickerWidget {
+    /// Without the `gpu-effects` feature the drum has no surface to project:
+    /// the control is its 2D path and nothing else.
+    fn paint_drum(
+        &mut self,
+        _ctx: &mut PaintCtx,
+        _scene: &mut dyn PaintScene,
+        _origin: Point,
+        _size: Size,
+        _ink: Color,
+        _opacity: f32,
+    ) -> bool {
+        false
+    }
+}
+
 impl Widget for WheelPickerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
@@ -787,11 +1011,19 @@ impl Widget for WheelPickerWidget {
         } else {
             1.0
         };
-        let tint =
-            |color: Color| style::disabled_tint(color, self.disabled, style::DISABLED_OPACITY);
+        // `disabled` is copied out rather than read through `self`: the drum's
+        // own paint below takes `&mut self`, and a closure holding the borrow
+        // would outlive it.
+        let disabled = self.disabled;
+        let tint = |color: Color| style::disabled_tint(color, disabled, style::DISABLED_OPACITY);
 
         scene.fill_rounded_rect(origin, size, style::RADIUS_2XL, tint(colors.card));
         scene.push_clip_rounded(origin, size, style::RADIUS_2XL);
+
+        // The drum's own surface, when the caller asked for the projected one:
+        // inside the clip, so the overscanned target's margin is trimmed by the
+        // same `overflow-hidden` that trims the rows.
+        self.paint_drum(ctx, scene, origin, size, colors.ink, opacity);
 
         // The curved drum of dimmed rows.
         self.paint_rows(scene, origin, size, false, opacity);
@@ -1708,5 +1940,196 @@ mod tests {
         let labelled = WheelPickerOption::new("07", "7 minutes");
         assert_eq!(labelled.value, "07");
         assert_eq!(labelled.label, "7 minutes");
+    }
+
+    /// The fallback contract, from this control's side: no shell installs a
+    /// device in a test process, so the projected drum never claims one and the
+    /// control paints *precisely* the rows, band, outline and alphas it paints
+    /// with the mode off. This is the path every caller of `gpu_drum` gets on
+    /// Android, on iOS, and on a desktop frame before the first surface exists.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_drum_without_a_device_paints_exactly_its_two_dimensional_path() {
+        let paint_with = |gpu: bool| {
+            let (mut widget, size) = laid_out(&view("02", 6).gpu_drum(gpu));
+            let recorded = paint(&mut widget, size);
+            (widget, recorded)
+        };
+        let (flat_widget, flat) = paint_with(false);
+        let (projected_widget, projected) = paint_with(true);
+
+        assert!(
+            !projected_widget.fx.is_active(),
+            "a test process has no shell device"
+        );
+        assert!(projected_widget.gpu_drum, "the opt-in is still recorded");
+        assert!(!flat_widget.gpu_drum);
+        assert_eq!(projected.rrects, flat.rrects);
+        assert_eq!(projected.clips, flat.clips);
+        assert_eq!(projected.layers, flat.layers);
+        assert_eq!(projected.glyphs, flat.glyphs);
+        assert_eq!(projected.strokes.len(), flat.strokes.len());
+    }
+
+    /// The claim that keeps the two paths from drifting: every plate is seated
+    /// at the angle the flat row is placed by, so the plate lands on the row's
+    /// own centre line and the label rides on its own surface rather than
+    /// beside it.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn every_plate_is_seated_where_its_flat_row_is() {
+        let (mut widget, size) = laid_out(&view("02", 6).gpu_drum(true));
+        // Mid-roll, so the drum is somewhere no row is dead centre.
+        widget.scroll = 2.4;
+        let (_, extent) = card3d::target_for(Point::ZERO, size).expect("a window with area");
+        let faces = widget.drum_faces(size, extent, Color::WHITE, 1.0);
+
+        let visible: Vec<usize> = (0..6)
+            .filter(|index| !widget.drum.place(*index as f64, widget.scroll).hidden)
+            .collect();
+        assert_eq!(
+            faces.len(),
+            visible.len(),
+            "the substrate's horizon is this drum's own cutoff"
+        );
+
+        let centre_y = f64::from(extent.1) / 2.0;
+        for (face, index) in faces.iter().zip(&visible) {
+            let placement = widget.drum.place(*index as f64, widget.scroll);
+            assert!(
+                (face.dest.center().y - centre_y - placement.offset).abs() < 1e-9,
+                "plate {index} sits at {} where its row sits at {}",
+                face.dest.center().y - centre_y,
+                placement.offset
+            );
+            assert!((face.dest.width() - size.width).abs() < 1e-9);
+            assert!((face.dest.height() - widget.item_height).abs() < 1e-9);
+            assert!(face.is_renderable());
+        }
+
+        // The centre row faces the viewer and its neighbours lean away from it,
+        // in opposite directions — the drum, not a stack of parallel plates.
+        let front = cylinder::frontmost(
+            visible
+                .iter()
+                .map(|index| widget.drum.angle(*index as f64, widget.scroll)),
+        )
+        .expect("a visible row");
+        assert!(faces[front].pitch.abs() < faces[front + 1].pitch.abs());
+        assert!(faces[front].depth_offset > faces[front + 1].depth_offset);
+        // A row above the centre leans its top away from the viewer and a row
+        // below it leans its bottom away, which on this drum's axis is a
+        // negative pitch above and a positive one below.
+        assert!(faces[0].pitch < 0.0, "the first row sits above the centre");
+        assert!(
+            faces[faces.len() - 1].pitch > 0.0,
+            "the last row sits below it"
+        );
+    }
+
+    /// The scene this control actually submits, rendered on real hardware: two
+    /// rows overlapping near the horizon compose to **one** plate's alpha, not
+    /// to two stacked ones.
+    ///
+    /// That is the depth attachment earning its place here. The plates are
+    /// translucent, so painter order would blend every seam twice and draw a
+    /// dark band across the drum wherever two rows meet; depth lets the nearer
+    /// plate win outright, which is what a solid drum surface looks like.
+    ///
+    /// Ignored by default; see `crate::gpu_fx::test_gpu` for the invocation and
+    /// why a read-back is the only honest check here.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn the_projected_drum_never_double_darkens_a_seam() {
+        use crate::gpu_fx::card3d::test_render::{pixel, render};
+        use crate::gpu_fx::cylinder::drum_scene;
+        use crate::gpu_fx::quad3d::Quad3dRenderer;
+        use crate::gpu_fx::test_gpu::with_device;
+
+        let (mut widget, size) = laid_out(&view("02", 6).gpu_drum(true));
+        // Mid-roll, so the rows are spread across the whole arc and the ones
+        // near the horizon genuinely overlap.
+        widget.scroll = 2.4;
+        let (_, extent) = card3d::target_for(Point::ZERO, size).expect("a window with area");
+        let faces = widget.drum_faces(size, extent, Color::WHITE, 1.0);
+        assert!(faces.len() >= 2, "the drum submitted nothing to overlap");
+
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "wheel-picker-drum");
+            let mut alone = Vec::with_capacity(faces.len());
+            for face in &faces {
+                alone.push(render(
+                    device,
+                    queue,
+                    &mut renderer,
+                    extent,
+                    true,
+                    &drum_scene([face.clone()]),
+                ));
+            }
+            let together = render(
+                device,
+                queue,
+                &mut renderer,
+                extent,
+                true,
+                &drum_scene(faces.clone()),
+            );
+
+            // The first texel two plates both cover, found by rendering each
+            // alone rather than by predicting where the projection puts them.
+            let seam = (0..extent.0 * extent.1)
+                .map(|i| (i % extent.0, i / extent.0))
+                .find_map(|(x, y)| {
+                    let covering: Vec<u8> = alone
+                        .iter()
+                        .map(|frame| pixel(frame, extent.0, x, y)[3])
+                        .filter(|alpha| *alpha > 0)
+                        .collect();
+                    (covering.len() >= 2).then_some((x, y, covering))
+                });
+            let (x, y, covering) = seam.expect("two rows on a drum overlap on screen");
+            let stacked: u32 = covering.iter().map(|alpha| u32::from(*alpha)).sum();
+            let composed = pixel(&together, extent.0, x, y)[3];
+            println!(
+                "wheel drum seam: ({x}, {y}) covering {covering:?}, composed {composed}, \
+                 painter order would be {stacked}"
+            );
+            assert!(
+                covering.iter().any(|alpha| alpha.abs_diff(composed) <= 1),
+                "the seam composed to {composed}, which is none of the plates covering it \
+                 ({covering:?})"
+            );
+            assert!(
+                u32::from(composed) + 1 < stacked,
+                "the seam was blended twice"
+            );
+        });
+    }
+
+    /// The mode is a live opt-in: switching it off mid-life stops the drum
+    /// without giving up the claim, and switching it back on resumes.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_projected_drum_switches_on_and_off_in_place() {
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let off = view("02", 6);
+        let on = view("02", 6).gpu_drum(true);
+        let mut widget = View::<Picked>::build(&off, &mut ctx);
+        assert!(!widget.gpu_drum);
+
+        let flags = View::<Picked>::rebuild(&on, &off, &mut widget, &mut ctx);
+        assert!(widget.gpu_drum);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        let flags = View::<Picked>::rebuild(&off, &on, &mut widget, &mut ctx);
+        assert!(!widget.gpu_drum);
+        assert!(flags.contains(ChangeFlags::PAINT));
+
+        // ...and the teardown is total whether or not anything was ever held.
+        View::<Picked>::teardown(&off, &mut widget, &mut ctx);
+        assert!(!widget.fx.is_active());
     }
 }

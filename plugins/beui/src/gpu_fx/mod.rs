@@ -33,6 +33,17 @@
 //! - [`card3d`] — the first geometry built on top of the four: card-shaped
 //!   tilt and depth-fanned stack, plus [`Card3d`], the handle lifecycle a
 //!   component holds rather than open-coding.
+//! - [`cylinder`] — rotating geometry: faces seated on a drum turning about a
+//!   horizontal or a vertical axis, each leaning into the wall and occluding
+//!   its neighbours by distance.
+//! - [`fan`] — spreading geometry: a pile of sheets pivoting apart in their
+//!   own plane and swinging into depth as it opens.
+//!
+//! The last three are peers, and the last two own only geometry: they render
+//! the position a component's own 2D arithmetic already computed rather than
+//! computing a second one that could drift from it. Both share [`Card3d`] as
+//! their handle — the substrate has one — and [`card3d::target_for`] as their
+//! target.
 //!
 //! # The shape a component uses it in
 //!
@@ -97,18 +108,16 @@
 
 pub mod card3d;
 pub mod context;
+pub mod cylinder;
+pub mod fan;
 pub mod pool;
 pub mod quad3d;
 pub mod schedule;
 
-// Further 3D variant modules attach here as their own `pub mod` lines
-// (cylinder/wheel geometry, each owning its component-facing view). This
-// module deliberately declares none of them ahead of time: a `pub mod` line
-// without a file behind it does not compile, and an empty file declared here
-// would be an unused module rather than a reservation.
-
 pub use card3d::{Card3d, FanCard};
 pub use context::{FxAvailability, GpuFx, GpuFxHandle, KILL_SWITCH_ENV_VAR};
+pub use cylinder::{Cylinder3d, CylinderAxis, CylinderSeat, VISIBLE_ARC};
+pub use fan::{FanSheet, SHEET_LIFT, SHEET_STEP, SHEET_SWING_DEGREES};
 pub use pool::{
     Binding, FxComponentId, FxTarget, MAX_TARGET_SIDE, MAX_UNSEEN_FRAMES, TARGET_QUANTUM,
     TargetKey, TargetPool,
