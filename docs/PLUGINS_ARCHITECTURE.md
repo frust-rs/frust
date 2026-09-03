@@ -194,7 +194,7 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   than unmount it, since the framework has no seam for keeping a conditionally-mounted view alive
   past the rebuild that drops it (the *kept-mounted pattern*, documented in each plugin's own
   `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
-  [LIMITATIONS.md](LIMITATIONS.md), which now has both plugins as consumers).
+  [LIMITATIONS.md](LIMITATIONS.md)).
 - **`frust-beui` carries a third, independently-shaped `overlay` seam** — its own `anchored`/`modal`
   hosts (not ported from `frust-shadcn`'s), staged by the catalog's own `motion::Presence` driver,
   with the same *which-component-mounts-through-which-host* table discipline (`overlay/mod.rs`'s own
@@ -202,8 +202,9 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   Its `anchored` host takes the identical kept-mounted `.open(bool)` shape — a third
   `shadcn-anchored-exit-needs-kept-mounted` consumer — and its `modal` host's `StagedPop` is an
   advisory one-frame depth guard: it snapshots the navigator's page-stack depth when an exit ramp is
-  staged and refuses to fire the pop if that depth moved before the ramp settles, the same
-  identity-guard shape `frust-material`'s staged pop already carries, under its own name.
+  staged and refuses to fire the pop if that depth moved before the ramp settles — the same
+  identity-guard shape `frust-material`'s staged pop already carries; the two independently
+  authored hosts converged on the same guard under the same name, `StagedPop`.
 - **`frust-beui`'s three catalogs (`components`/`agents`/`blocks`) mirror upstream beUI's own
   registry split** — 42 `components` (incl. `shader_background`'s five WGSL variants), 17 `agents`,
   22 `blocks`, 81 slugs total; public symbols stay module-prefixed rather than flat re-exported at

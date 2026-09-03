@@ -2556,9 +2556,10 @@ port of either) hits it too.
 **Applies to**: every component built on any of the three catalogs' `overlay::anchored` host —
 shadcn's popover, tooltip, hover-card, dropdown/context menu, select, combobox; material's menu
 (incl. submenu), dropdown, tooltip, and the search view's docked panel; beUI's tooltip, popover,
-context menu, and the dropdown panels of select/combobox/multi_select. Each catalog's `modal` host
-is unaffected, since its exit is staged through the navigator's own pop-result/back-press machinery
-(shadcn, material) or through `StagedPop`'s own depth-guarded close (beUI) instead of a mount flag.
+context menu, citations' preview, and the dropdown panels of select/combobox/multi_select. Each
+catalog's `modal` host is unaffected, since its exit is staged through the navigator's own
+pop-result/back-press machinery (shadcn, material) or through `StagedPop`'s own depth-guarded
+close (beUI) instead of a mount flag.
 
 **Why accepted**: this is the framework-level trade the pattern makes explicit, not an oversight — a
 kept-mounted host costs one layout of its content per frame while closed and nothing else, which all
@@ -2625,7 +2626,7 @@ calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner �
 
 ---
 
-### `beui-components-not-ported` — sixteen `shader_background` variants, and named gaps across five other components
+### `beui-components-not-ported` — sixteen `shader_background` variants, and named gaps across eight other components
 
 **Observed**: `frust-beui` (beUI v2 port) leaves several upstream pieces out, each named at the
 point it was found:
@@ -2655,19 +2656,30 @@ point it was found:
   here `citations` composes above `streaming_response` instead, as its own slug).
 - `approval_card` ships the review surface but not the multi-step question wizard (a distinct,
   larger surface the porting card scoped out).
+- `button` ships no `ButtonLink` — frust has no anchor element, so upstream's link-flavoured
+  button variant is out; a navigation button here is a callback like any other.
+- `knockout_bracket` ships no `knockout-wheel` — the registry bundles a second, 1,100-line
+  radial-layout component behind the same slug; porting it would be a second component behind
+  one name, so it is not carried.
 
-**Applies to**: `frust_beui::components::shader_background` and the five components above; no other
-module in the 81-slug catalog has a named not-ported gap of this kind.
+**Applies to**: `frust_beui::components::shader_background` and the eight components above
+(`scroll_animation`, `message_bubble`, `message_scroller`, `prompt_input`, `streaming_response`,
+`approval_card`, `button`, `knockout_bracket`). Smaller feature- or prop-level "not ported" notes
+elsewhere in the catalog (for example popover's hover-trigger mode, wheel_picker's tick sound,
+tooltip's tap-to-toggle) are degradations of a shipped component, not a missing sub-component or
+surface, and are out of scope for this entry.
 
 **Why accepted**: each is a named dependency or scope boundary recorded at the point it was found,
 not a regression — sixteen more hand-written WGSL programs (each needing its own GPU verification),
-a second scroll-physics engine, and a multi-step wizard surface are all real follow-up scope, not
-oversights baked into the ones that shipped.
+a second scroll-physics engine, a multi-step wizard surface, an anchor-element button variant, and
+a second radial-layout component are all real follow-up scope, not oversights baked into the ones
+that shipped.
 
 **Evidence**: `plugins/beui/src/components/shader_background.rs` module docs and
-`DEFERRED_VARIANTS`; `plugins/beui/src/agents/message_bubble.rs`, `message_scroller.rs`,
-`prompt_input.rs`, `streaming_response.rs`, and `approval_card.rs` module docs' "Degradations"
-sections.
+`DEFERRED_VARIANTS`; `plugins/beui/src/components/scroll_animation.rs`,
+`plugins/beui/src/agents/message_bubble.rs`, `message_scroller.rs`, `prompt_input.rs`,
+`streaming_response.rs`, and `approval_card.rs` module docs' "Degradations" sections;
+`plugins/beui/src/components/button.rs:40-42`; `plugins/beui/src/blocks/knockout_bracket.rs:46`.
 
 ---
 
@@ -2712,31 +2724,25 @@ something a facade-only plugin can add.
 
 ---
 
-### `beui-per-char-text-shaping` — cross-cell typographic relationships are lost in effect text, and per-letter text_animation currently drops word spaces
+### `beui-per-char-text-shaping` — cross-cell typographic relationships are lost in effect text
 
 **Observed**: `motion::chars` shapes every grapheme cell independently so it can be individually
 transformed, which means every cross-cell typographic relationship a single shaped run would keep
 is lost: kerning pairs no longer tighten, ligatures no longer form, and a cursive or complex script
 (Arabic, Devanagari) loses the joining/reordering that makes it legible. This is inherent to the
 effect, not an implementation shortcut, and the module docs restrict its own use to short display
-strings for exactly this reason — never body text. Separately, and not yet recorded in that
-module's own docs: the per-letter `text_animation` variants (`Reveal`, `Cascade`) currently also
-drop word spaces when run on the desktop shell — an open component bug in the port, not a
-documented degradation, found running the `beui-demo` gallery's Motion · Text page.
+strings for exactly this reason — never body text. The substrate itself round-trips whitespace as
+its own cell, so a cascade can leave a gap where a space is.
 
 **Applies to**: `motion::chars::CharCells`/`CharCellsView` and every component built on it (the
-per-letter `action_swap` cascade, `text_animation`'s `Reveal`/`Cascade` arms, `citations`' cascade);
-the word-space bug is specific to `text_animation`'s two per-letter arms.
+per-letter `action_swap` cascade, `text_animation`'s `Reveal`/`Cascade` arms, `citations`' cascade).
 
 **Why accepted**: the shaping compromise is structural — the effect requires independently
 transformable letters, and a single shaped run has none — and upstream (`inline-block` spans per
-letter) carries the identical compromise for the identical reason. The word-space bug is tracked
-here as a known, unfixed defect rather than silently shipped; it is not yet reflected in
-`text_animation.rs`'s own module doc.
+letter) carries the identical compromise for the identical reason.
 
 **Evidence**: `plugins/beui/src/motion/chars.rs` module docs ("The shaping compromise, stated
-plainly"); `plugins/beui/src/components/text_animation.rs` module docs ("Per-letter" rendering
-route); `examples/beui-demo`'s Motion · Text page (`pages/motion/text.rs`), on-device observation.
+plainly") and its `whitespace_is_preserved_as_its_own_cell` test.
 
 ---
 
@@ -2817,9 +2823,9 @@ reaching whatever it landed on, once per hover session (the trigger is suppresse
 leaves it and re-arms).
 
 **Applies to**: every component mounted through `overlay::anchored` for constraint (1) — popover,
-tooltip, hover-card, context menu, the dropdown panels of select/combobox/multi_select, citations'
-preview; `tooltip` alone for the swallowed-press gap (2), since it is the catalog's only hover-only
-trigger on this host.
+tooltip, context menu, the dropdown panels of select/combobox/multi_select, citations' preview;
+`tooltip` alone for the swallowed-press gap (2), since it is the catalog's only hover-only trigger
+on this host.
 
 **Why accepted**: (1) is the same bounded-constraints/no-scroll-view mounting contract
 `frust_shadcn`'s and `frust_material`'s `overlay::anchored` hosts already carry (`overlay/mod.rs`'s
@@ -2848,7 +2854,10 @@ caption); `plugins/beui/src/components/tooltip.rs` module docs ("A press while t
    message field when the panel closes while the field holds focus — the framework gates the orphan
    mark on a live focus chain a rebuild cannot see (`docs/CODE_STANDARDS.md`), so the session stands
    until the next press elsewhere blurs it, the same shape `overlay-no-auto-focus-on-appear`
-   documents from the opposite direction.
+   documents from the opposite direction. The close is a paint-only morph (the widget stays mounted
+   and keeps its focus), so keystrokes and IME composition keep routing into the now-invisible field
+   for as long as the session stands — an app hosting a sensitive value in the message field clears
+   or reconstructs the field on close rather than relying on the panel's own dismissal to do it.
 3. **`hold_action_button`'s `on_complete` fires on the next event pass, not the instant the fill
    lands.** The fill is advanced during paint, which carries no `EventCtx` to call an app callback
    through; the completion is latched at paint and drained on the next pointer event the widget
@@ -2871,7 +2880,8 @@ gaps with no plugin-tier fix available, already accepted for their originating c
 **Evidence**: `plugins/beui/src/components/select.rs`, `combobox.rs`, `multi_select.rs` module docs
 ("No type-ahead"/"No type-ahead, and no keyboard list navigation");
 `plugins/beui/src/blocks/feedback_widget.rs` module docs ("Closing does not blur the message
-field"); `plugins/beui/src/components/expanding_arrow_button.rs` module docs ("fires on the next
+field", "It reserves its open box and paints inside it" — the morph is pure paint, no rebuild);
+`plugins/beui/src/components/expanding_arrow_button.rs` module docs ("fires on the next
 event pass", "Keyboard activation is not ported"); `plugins/beui/src/components/animated_toast_stack.rs`
 module docs ("No timer").
 
@@ -2890,6 +2900,34 @@ platform-input gap, not something a facade-only plugin can add.
 
 **Evidence**: `plugins/beui/src/blocks/file_upload.rs` module docs and
 `FileUploadView::add_files`/`on_browse` (no drag-session or path type reaches a widget).
+
+---
+
+### `beui-consent-correlation-is-opt-in` — a decision/action callback only correlates to its request when the caller sets an `id`
+
+**Observed**: `agents::tool_approval` and `agents::approval_card` each expose two decision
+callbacks: `ToolApprovalView::on_decision`/`ApprovalCardView::on_action` (the default, no request
+identity) and `ToolApprovalView::on_decision_with_id`/`ApprovalCardView::on_action_with_id` (which
+also report `Option<String>` — `Some(id)` when the builder's own `id(..)` was set on that card,
+`None` when it was not). Neither module derives a fallback identity from its content — `tool`/
+`title` are not unique — so an app that leaves `id` unset and wires only the id-less callback
+cannot distinguish which of several overlapping requests a decision answers.
+
+**Applies to**: `frust_beui::agents::tool_approval::ToolApprovalView` and
+`frust_beui::agents::approval_card::ApprovalCardView`.
+
+**Why accepted**: correlation is opt-in by design — a caller with only ever one open request at a
+time has no need for it, and forcing an `id` on every card would be surface no single-request
+caller wants. The hazard is the id-less path being the default: a caller that grows to multiple
+concurrent requests without also switching callbacks silently routes consent to the wrong one.
+
+**Evidence**: `plugins/beui/src/agents/tool_approval.rs` module docs ("Correlating a decision with
+the request it answers") and `ToolApprovalView::id`/`on_decision_with_id`;
+`plugins/beui/src/agents/approval_card.rs` module docs ("Correlating an action with the review it
+answers") and `ApprovalCardView::id`/`on_action_with_id`.
+
+**Trigger for removal**: a required-id builder variant, or a lint/debug-assert that catches an
+id-less callback wired alongside more than one concurrently open card.
 
 ---
 
@@ -3001,7 +3039,10 @@ rendered by an adapter/device in this crate's own tests.
 in-repo GPU test, the same verification split the engine's own downlevel/WebGL2 lints accept for
 shader correctness — a plugin-tier crate is not where a GPU-adapter test harness lives.
 
-**Evidence**: `plugins/beui/Cargo.toml` (no GPU dev-dependency);
+**Evidence**: on 2026-09-03 the conductor re-ran an out-of-tree wgpu harness that compiled all five
+WGSL programs and rendered each to an offscreen target on an NVIDIA T400 over Vulkan (headless
+Linux rig, the same adapter pins the engine's ignored tests use), outcome PASS; the worker's
+earlier run on the same rig reported the same. `plugins/beui/Cargo.toml` (no GPU dev-dependency);
 `plugins/beui/src/components/shader_background.rs` (WGSL sources as `&str` constants, compiled only
 by the engine at runtime).
 
@@ -3012,19 +3053,30 @@ by the engine at runtime).
 **Observed**: `overlay::modal`'s navigator-hosted path (`show_modal`,
 `NavigatorController::push_with_options`) is exercised by this crate's in-process host tests only;
 the `beui-demo` desktop gallery pass covered the `Stack`-mounted overlay pages (the hover/anchored
-family) but not a device run of the navigator-pushed modal path specifically.
+family) but not a device or desktop-window run of the navigator-pushed modal path specifically.
 
 **Applies to**: `frust_beui::overlay::modal`'s `show_modal` route and every modal-hosted component
 (morphing_modal, center_morph_modal, command_palette, drawer, animated_sidebar, bottom_sheet).
 
-**Why accepted**: the mechanism is shared with `frust_shadcn`'s and `frust_material`'s already
-device-verified `show_modal` routes (same `NavigatorController::push_with_options` seam), so the
-residual risk is component-specific paint, not the navigator mechanism; a dedicated device pass is
-still owed before this is closed out.
+**Why accepted**: the entrance/exit-staging half of the mechanism is shared with `frust_material`'s
+already device-verified `show_overlay_modal` route — same `push_with_options` +
+`BackPolicy::DismissAnimated` seam, same `StagedPop`/`StagedExit` guard — so the residual risk on
+that leg is component-specific paint, not the navigator mechanism. That argument does not cover
+the back-press leg: a platform back press arriving mid-exit-ramp has not itself been exercised on
+`frust_beui`'s route on a device. (`frust_shadcn`'s modal is a different seam,
+`push_transparent_for_result` → `push_impl(BackPolicy::Pop)`, and is not part of this
+shared-mechanism argument at all.)
 
-**Evidence**: `plugins/beui/src/overlay/modal.rs` test module (in-process only);
+**Evidence**: `plugins/beui/src/overlay/modal.rs:1281` (`show_modal`, `push_with_options` at
+`:1308`) and its test module (in-process only); `plugins/material/src/overlay/modal.rs:1146`
+(`show_overlay_modal`);
+`plugins/shadcn/src/overlay/modal.rs:655` (`push_transparent_for_result`);
+`crates/frust-widgets/src/nav/controller.rs:388-395` (`push_impl(BackPolicy::Pop)`);
 `examples/beui-demo/README.md`'s "Verifying it" section (headless dev rig, no device run recorded
 for the modal-hosted pages specifically).
+
+**Trigger for removal**: a device or desktop-window pass of `show_modal`, including a platform
+back press delivered mid-exit-ramp.
 
 ---
 
