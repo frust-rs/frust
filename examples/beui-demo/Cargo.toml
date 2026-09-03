@@ -1,0 +1,24 @@
+# `beui-demo`: the beUI design-system plugin's desktop gallery — a
+# root-workspace member (covered by the root `Cargo.toml`'s `examples/*`
+# glob, and deliberately not added to that manifest's `exclude` list) rather
+# than a standalone workspace like `examples/huddle`/`playground`: it is
+# desktop-only, scaffolds no per-project Android/iOS build output that would
+# need its own `target/` dir, and carries no out-of-tree git+rev dependency —
+# none of the three reasons the standalone examples give for excluding
+# themselves apply here. Riding the root workspace also means `cargo test
+# --workspace`/`cargo clippy --workspace --all-targets -- -D warnings` covers
+# it automatically, with no separate per-example gate to remember.
+#
+# Single-crate, desktop-only shape (no `lib.rs`/`android`/`ios`/`cdylib`),
+# mirroring `examples/shadcn-demo` — the closest existing precedent for a
+# design-system gallery riding the root workspace.
+[package]
+name = "beui-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+frust = { workspace = true }
+frust-beui = { path = "../../plugins/beui" }
