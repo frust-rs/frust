@@ -1395,7 +1395,13 @@ impl Widget for FileUploadWidget {
             // rows appear/disappear instantly without overwriting the presence's
             // configured ramps, so they remain available when reduce_motion toggles.
             if reduce {
-                row.shown = if row.presence.is_visible() { 1.0 } else { 0.0 };
+                if row.leaving {
+                    // A leaving row releases its slot on the frame the removal is
+                    // requested, without mutating the presence's ramps.
+                    row.shown = 0.0;
+                } else {
+                    row.shown = if row.presence.is_visible() { 1.0 } else { 0.0 };
+                }
             }
             if row.presence.is_animating() {
                 // A leaving row's height is what its presence drives, so that
@@ -1406,8 +1412,10 @@ impl Widget for FileUploadWidget {
                     owes_frame = true;
                 }
             } else if row.leaving && !row.presence.is_visible() {
-                // A row whose exit ramp has just settled needs to be dropped.
-                // Request a rebuild so drop_exited() can remove it on the next pass.
+                // A row whose exit ramp has just settled needs a relayout for the
+                // queue to collapse visually. A subsequent View::rebuild still calls
+                // drop_exited() to remove it from self.rows, but layout alone does
+                // not trigger that rebuild-only cleanup.
                 owes_layout = true;
             }
         }
@@ -2485,15 +2493,36 @@ mod tests {
         // Progress should snap to 1.0 under reduce_motion
         assert!((bare.widget.rows[0].progress.value() - 1.0).abs() < 1e-9);
 
-        // ...and a removal with reduce_motion shows the presence handles it.
+        // A removal with reduce_motion releases the row's slot immediately.
         bare.rebuild(view(vec![]));
-        // Paint to advance the presence. With collapsed ramps (zero duration),
-        // the presence should quickly transition.
-        bare.paint_at(UPLOAD_ROW_MS as f64 * 2.0);
-        // The row should be marked as leaving.
-        if !bare.widget.rows.is_empty() {
-            assert!(bare.widget.rows[0].leaving, "removed row marked as leaving");
-        }
+        bare.paint_at(0.0);
+        // Under reduce_motion, the row is marked as leaving and its shown
+        // progress is immediately snapped to 0.0, releasing the height slot.
+        assert!(bare.widget.rows[0].leaving, "removed row marked as leaving");
+        assert!(
+            (bare.widget.rows[0].shown - 0.0).abs() < 1e-9,
+            "removed row released its slot immediately under reduce_motion"
+        );
+
+        // Ramps survive toggling reduce_motion off: when toggled off while leaving,
+        // shown should not be 0.0 anymore.
+        bare.theme.motion.reduce_motion = false;
+        bare.paint_at(1.0); // Paint at 1ms into the exit ramp
+        let shown_without_reduce = bare.widget.rows[0].shown;
+        // With reduce_motion off and at 1ms into the exit, shown should be
+        // slightly less than 1.0 (exiting), not 0.0 (snapped).
+        assert!(
+            shown_without_reduce > 0.0 && shown_without_reduce < 1.0,
+            "presence ramp not snapped when reduce_motion is off"
+        );
+
+        // Toggle reduce_motion back on and verify it snaps again.
+        bare.theme.motion.reduce_motion = true;
+        bare.paint_at(1.0); // Paint at the same time but with reduce_motion on
+        assert!(
+            (bare.widget.rows[0].shown - 0.0).abs() < 1e-9,
+            "toggling reduce_motion back on snaps the row to invisible again"
+        );
     }
 
     #[test]
@@ -2514,29 +2543,36 @@ mod tests {
 
     #[test]
     fn the_spinner_requests_the_cosmetic_loop_frame_class() {
+        // The spinner requests CosmeticLoop when uploading, not a bare Transition.
         let mut bare = Bare::new(vec![item("a", "a.txt", 10).progress(30.0)]);
         assert!(bare.widget.any_uploading());
-        bare.paint_at(0.0);
-        // Verify the spinner is still uploading and will request frames.
-        assert!(bare.widget.any_uploading());
 
+        // Verify the frame class is CosmeticLoop while uploading.
+        let mut ctx = PaintCtx::for_test(Point::ZERO, Size::new(WIDTH, 900.0), ft_ms(0.0))
+            .with_theme(&bare.theme as &dyn Any);
+        let mut rec = Recorder::default();
+        bare.widget.paint(&mut ctx, &mut rec);
+        assert_eq!(
+            ctx.frame_class(),
+            Some(TickClass::CosmeticLoop),
+            "spinner requests CosmeticLoop while uploading"
+        );
+
+        // When nothing is uploading, CosmeticLoop is not requested.
         bare.rebuild(view(vec![
             item("a", "a.txt", 10).status(FileUploadStatus::Success),
         ]));
         assert!(!bare.widget.any_uploading());
-    }
-
-    #[test]
-    fn reduce_motion_snaps_progress_lanes() {
-        // Verify that under reduce_motion, progress lanes snap to their targets
-        // instead of animating. The spinner and other ui elements should appear
-        // instantly instead of fading/transitioning.
-        let mut bare = Bare::new(vec![item("a", "a.txt", 10).progress(0.0)]);
-        bare.theme.motion.reduce_motion = true;
-        bare.rebuild(view(vec![item("a", "a.txt", 10).progress(100.0)]));
-        bare.paint_at(100.0);
-        // Progress should be snapped to 1.0 instantly
-        assert!((bare.widget.rows[0].progress.value() - 1.0).abs() < 1e-9);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, Size::new(WIDTH, 900.0), ft_ms(0.0))
+            .with_theme(&bare.theme as &dyn Any);
+        let mut rec = Recorder::default();
+        bare.widget.paint(&mut ctx, &mut rec);
+        // CosmeticLoop should not be requested when upload is complete.
+        assert_ne!(
+            ctx.frame_class(),
+            Some(TickClass::CosmeticLoop),
+            "CosmeticLoop not requested when upload is complete"
+        );
     }
 
     #[test]
