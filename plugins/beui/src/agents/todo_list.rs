@@ -636,6 +636,9 @@ pub struct TodoListWidget {
     viewport: Rect,
     /// The rows' total height, as of the last layout.
     content_height: f64,
+    /// The rows' total height that was laid out, used to detect when
+    /// row presence changes need a new layout pass.
+    laid_content_height: f64,
     on_open_change: Option<ErasedArgCallback<bool>>,
 }
 
@@ -823,6 +826,7 @@ impl<State: 'static> View<State> for TodoListView<State> {
             header_box: Rect::ZERO,
             viewport: Rect::ZERO,
             content_height: 0.0,
+            laid_content_height: 0.0,
             on_open_change: self.on_open_change.as_ref().map(erase_callback_arg),
         }
     }
@@ -969,6 +973,7 @@ impl Widget for TodoListWidget {
             content = self.empty.size().height + TODO_ROW_PADDING_Y * 2.0;
         }
         self.content_height = content;
+        self.laid_content_height = content;
 
         let capped = content.min(self.max_height);
         let open_height = capped + TODO_LIST_PADDING;
@@ -1038,7 +1043,10 @@ impl Widget for TodoListWidget {
                 origin.x + TODO_LIST_PADDING,
                 origin.y + TODO_HEADER_HEIGHT - lift + self.follow.value(),
             );
-            owes_frame |= self.paint_rows(ctx, scene, &colors, list_origin, reduce_motion, now);
+            let (rows_owes_frame, rows_owes_layout) =
+                self.paint_rows(ctx, scene, &colors, list_origin, reduce_motion, now);
+            owes_frame |= rows_owes_frame;
+            owes_layout |= rows_owes_layout;
             scene.pop_layer();
             scene.pop_clip();
         }
@@ -1268,7 +1276,9 @@ impl TodoListWidget {
         let _ = ctx;
     }
 
-    /// Paint the task rows, returning whether any of them still owes a frame.
+    /// Paint the task rows, returning whether any of them still owes a frame or layout.
+    /// Detects when row presence animations change the content height and signals
+    /// that layout is needed to update the list's size.
     fn paint_rows(
         &mut self,
         ctx: &mut PaintCtx,
@@ -1277,7 +1287,7 @@ impl TodoListWidget {
         list_origin: Point,
         reduce_motion: bool,
         now: FrameTime,
-    ) -> bool {
+    ) -> (bool, bool) {
         if self.rows.is_empty() {
             self.empty.paint(
                 Point::new(
@@ -1287,12 +1297,13 @@ impl TodoListWidget {
                 colors.muted,
                 scene,
             );
-            return false;
+            return (false, false);
         }
 
         let mut owes_frame = false;
         let mut y = list_origin.y;
         let width = self.viewport.width();
+        let mut current_content = 0.0;
         for row in &mut self.rows {
             if reduce_motion {
                 // Reduced motion draws every mark at rest rather than playing
@@ -1301,11 +1312,16 @@ impl TodoListWidget {
             }
             let presence = row.presence.advance(now);
             owes_frame |= row.presence.is_animating();
+            let alpha = presence.clamp(0.0, 1.0);
+            row.shown = alpha;
+            // Track content height: the presence animation changes row.shown,
+            // which is read by layout to size the list. Request layout whenever
+            // this height differs from what was laid out, including the frame
+            // the animation settles.
+            current_content += row.height * alpha;
             if presence <= 0.0 {
                 continue;
             }
-            let alpha = presence.clamp(0.0, 1.0);
-            row.shown = alpha;
             let shift = match row.presence.phase() {
                 crate::motion::PresencePhase::Exiting => -TODO_ROW_EXIT_SHIFT * (1.0 - alpha),
                 _ => TODO_ROW_ENTER_SHIFT * (1.0 - alpha),
@@ -1330,7 +1346,8 @@ impl TodoListWidget {
             y += row.height * alpha;
         }
         let _ = ctx;
-        owes_frame
+        let owes_layout = (current_content - self.laid_content_height).abs() > 1e-6;
+        (owes_frame, owes_layout)
     }
 }
 
@@ -2049,5 +2066,113 @@ mod tests {
         assert_eq!(themed.ink, theme.scheme().on_surface);
         assert_eq!(themed.danger, theme.scheme().error);
         assert_eq!(themed.muted, theme.scheme().on_surface_variant);
+    }
+
+    /// Paint-only stepping: advance paint at regular intervals without layout.
+    /// Returns whether layout was requested on the paint pass.
+    fn step_paint_only(
+        widget: &mut TodoListWidget,
+        size: Size,
+        ms: u64,
+        theme: Option<&Theme>,
+    ) -> bool {
+        let (_, _, needs_layout) = painted(widget, size, ms, theme);
+        needs_layout
+    }
+
+    /// Appending a row to an open list requests layout while the entrance runs
+    /// and on the frame it settles; after layout, the list height includes the row.
+    #[test]
+    fn appending_a_row_to_an_open_list_requests_layout_during_and_after_entrance() {
+        let initial = todo_list::<Opened>(vec![todo_item("a", "First")])
+            .open(true)
+            .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&initial);
+        let initial_height = layout(&mut widget);
+        painted(&mut widget, size, 0, None);
+
+        // Append a new row via rebuild.
+        let updated = todo_list::<Opened>(vec![todo_item("a", "First"), todo_item("b", "New row")])
+            .open(true)
+            .collapse_on_complete(false);
+        rebuild(&mut widget, &initial, &updated);
+
+        // Paint-only frames during entrance should request layout at some point.
+        let mut layout_requested_during_animation = false;
+        for ms in [50u64, 100, 150, 200, 250, 300, 350, 400].iter() {
+            if step_paint_only(&mut widget, size, *ms, None) {
+                layout_requested_during_animation = true;
+                break;
+            }
+        }
+        assert!(
+            layout_requested_during_animation,
+            "row entrance animation must request layout during entrance"
+        );
+
+        // After layout is applied, the list height should include the new row.
+        let new_height = layout(&mut widget);
+        assert!(
+            new_height.height > initial_height.height,
+            "new row must increase list height"
+        );
+    }
+
+    /// Removing a row from an open list requests layout symmetrically.
+    #[test]
+    fn removing_a_row_from_an_open_list_requests_layout_during_and_after_exit() {
+        let initial =
+            todo_list::<Opened>(vec![todo_item("a", "First"), todo_item("b", "To remove")])
+                .open(true)
+                .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&initial);
+        let initial_height = layout(&mut widget);
+        painted(&mut widget, size, 0, None);
+
+        // Remove the row via rebuild.
+        let updated = todo_list::<Opened>(vec![todo_item("a", "First")])
+            .open(true)
+            .collapse_on_complete(false);
+        rebuild(&mut widget, &initial, &updated);
+
+        // Paint-only frames during exit should request layout at some point.
+        let mut layout_requested_during_animation = false;
+        for ms in [50u64, 100, 150, 200, 250, 300, 350, 400].iter() {
+            if step_paint_only(&mut widget, size, *ms, None) {
+                layout_requested_during_animation = true;
+                break;
+            }
+        }
+        assert!(
+            layout_requested_during_animation,
+            "row exit animation must request layout during exit"
+        );
+
+        // After layout, height should decrease.
+        let new_height = layout(&mut widget);
+        assert!(
+            new_height.height < initial_height.height,
+            "removed row must decrease list height"
+        );
+    }
+
+    /// An idle settled list requests no layout on paint-only frames.
+    #[test]
+    fn idle_settled_list_requests_no_layout_on_paint_only_frames() {
+        let list = todo_list::<Opened>(plan())
+            .open(true)
+            .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&list);
+        painted(&mut widget, size, 0, None);
+
+        // Paint many frames without layout; none should request layout.
+        for ms in [10, 20, 50, 100, 200, 500].iter() {
+            let needs_layout = step_paint_only(&mut widget, size, *ms, None);
+            assert!(
+                !needs_layout,
+                "settled list at {}ms should not request layout",
+                ms
+            );
+        }
     }
 }

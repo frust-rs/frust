@@ -703,6 +703,9 @@ pub struct AgentActivityWidget {
     viewport: Rect,
     /// The rows' unclipped height, as of the last layout.
     content_height: f64,
+    /// The rows' total height that was laid out, used to detect when
+    /// row presence changes need a new layout pass.
+    laid_content_height: f64,
     on_open_change: Option<ErasedArgCallback<bool>>,
 }
 
@@ -818,6 +821,7 @@ impl<State: 'static> View<State> for AgentActivityView<State> {
             header_box: Rect::ZERO,
             viewport: Rect::ZERO,
             content_height: 0.0,
+            laid_content_height: 0.0,
             on_open_change: self.on_open_change.as_ref().map(erase_callback_arg),
         }
     }
@@ -941,6 +945,7 @@ impl Widget for AgentActivityWidget {
         }
         content = (content - ACTIVITY_ROW_GAP).max(0.0);
         self.content_height = content;
+        self.laid_content_height = content;
 
         // While working the viewport holds its full cap so the glide has room to
         // run; once complete it shrinks to what the log actually needs.
@@ -998,8 +1003,10 @@ impl Widget for AgentActivityWidget {
                 origin.x,
                 origin.y + ACTIVITY_HEADER_HEIGHT + ACTIVITY_LIST_PADDING_Y + self.follow.value(),
             );
-            owes_frame |=
+            let (rows_owes_frame, rows_owes_layout) =
                 self.paint_rows(scene, &colors, list_origin, size.width, reduce_motion, now);
+            owes_frame |= rows_owes_frame;
+            owes_layout |= rows_owes_layout;
             scene.pop_layer();
             scene.pop_clip();
 
@@ -1149,7 +1156,9 @@ impl AgentActivityWidget {
         let _ = size;
     }
 
-    /// Paint the log's rows, returning whether any of them still owes a frame.
+    /// Paint the log's rows, returning whether any of them still owes a frame or layout.
+    /// Detects when row presence animations change the content height and signals
+    /// that layout is needed to update the list's size.
     fn paint_rows(
         &mut self,
         scene: &mut dyn PaintScene,
@@ -1158,9 +1167,9 @@ impl AgentActivityWidget {
         width: f64,
         reduce_motion: bool,
         now: FrameTime,
-    ) -> bool {
+    ) -> (bool, bool) {
         if self.rows.is_empty() {
-            return false;
+            return (false, false);
         }
         let started = *self.stagger_started.get_or_insert(now);
         let elapsed = now.saturating_sub(started);
@@ -1174,6 +1183,7 @@ impl AgentActivityWidget {
 
         let mut y = list_origin.y;
         let pulse = pulse_alpha(now, reduce_motion);
+        let mut current_content = ACTIVITY_LIST_PADDING_Y * 2.0;
         for (index, row) in self.rows.iter_mut().enumerate() {
             let presence = row.presence.advance(now);
             owes_frame |= row.presence.is_animating();
@@ -1184,6 +1194,11 @@ impl AgentActivityWidget {
             };
             let alpha = (presence * entrance).clamp(0.0, 1.0);
             row.shown = presence.clamp(0.0, 1.0);
+            // Track content height: the presence animation changes row.shown,
+            // which is read by layout to size the list. Request layout whenever
+            // this height differs from what was laid out, including the frame
+            // the animation settles.
+            current_content += (row.height + ACTIVITY_ROW_GAP) * row.shown;
             if alpha <= 0.0 {
                 y += row.height * row.shown + ACTIVITY_ROW_GAP;
                 continue;
@@ -1212,7 +1227,9 @@ impl AgentActivityWidget {
             }
             y += row.height * row.shown + ACTIVITY_ROW_GAP;
         }
-        owes_frame
+        current_content = (current_content - ACTIVITY_ROW_GAP).max(0.0);
+        let owes_layout = (current_content - self.laid_content_height).abs() > 1e-6;
+        (owes_frame, owes_layout)
     }
 
     /// Whether any visible row carries a perpetually pulsing mark.
@@ -1872,5 +1889,118 @@ mod tests {
         let themed = ActivityColors::resolve(Some(&theme));
         assert_eq!(themed.ink, theme.scheme().on_surface);
         assert_eq!(themed.muted, theme.scheme().on_surface_variant);
+    }
+
+    /// Paint-only stepping: advance paint at regular intervals without layout.
+    /// Returns whether layout was requested on the paint pass.
+    fn step_paint_only(
+        widget: &mut AgentActivityWidget,
+        size: Size,
+        ms: u64,
+        theme: Option<&Theme>,
+    ) -> bool {
+        let (_, _, needs_layout) = painted(widget, size, ms, theme);
+        needs_layout
+    }
+
+    /// Appending a row to an open stream requests layout while the entrance runs
+    /// and on the frame it settles; after layout, the stream height includes the row.
+    #[test]
+    fn appending_a_row_to_an_open_stream_requests_layout_during_and_after_entrance() {
+        let initial = agent_activity::<Opened>(vec![activity_step("a", "First")])
+            .open(true)
+            .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&initial);
+        let initial_height = layout(&mut widget);
+        painted(&mut widget, size, 0, None);
+
+        // Append a new row via rebuild.
+        let updated = agent_activity::<Opened>(vec![
+            activity_step("a", "First"),
+            activity_step("b", "New step"),
+        ])
+        .open(true)
+        .collapse_on_complete(false);
+        rebuild(&mut widget, &initial, &updated);
+
+        // Paint-only frames during entrance should request layout at some point.
+        let mut layout_requested_during_animation = false;
+        for ms in [50u64, 100, 150, 200, 250, 300, 350, 400].iter() {
+            if step_paint_only(&mut widget, size, *ms, None) {
+                layout_requested_during_animation = true;
+                break;
+            }
+        }
+        assert!(
+            layout_requested_during_animation,
+            "row entrance animation must request layout during entrance"
+        );
+
+        // After layout is applied, the stream height should include the row.
+        let new_height = layout(&mut widget);
+        assert!(
+            new_height.height > initial_height.height,
+            "new row must increase stream height"
+        );
+    }
+
+    /// Removing a row from an open stream requests layout symmetrically.
+    #[test]
+    fn removing_a_row_from_an_open_stream_requests_layout_during_and_after_exit() {
+        let initial = agent_activity::<Opened>(vec![
+            activity_step("a", "First"),
+            activity_step("b", "To remove"),
+        ])
+        .open(true)
+        .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&initial);
+        let initial_height = layout(&mut widget);
+        painted(&mut widget, size, 0, None);
+
+        // Remove the row via rebuild.
+        let updated = agent_activity::<Opened>(vec![activity_step("a", "First")])
+            .open(true)
+            .collapse_on_complete(false);
+        rebuild(&mut widget, &initial, &updated);
+
+        // Paint-only frames during exit should request layout at some point.
+        let mut layout_requested_during_animation = false;
+        for ms in [50u64, 100, 150, 200, 250, 300, 350, 400].iter() {
+            if step_paint_only(&mut widget, size, *ms, None) {
+                layout_requested_during_animation = true;
+                break;
+            }
+        }
+        assert!(
+            layout_requested_during_animation,
+            "row exit animation must request layout during exit"
+        );
+
+        // After layout, height should decrease.
+        let new_height = layout(&mut widget);
+        assert!(
+            new_height.height < initial_height.height,
+            "removed row must decrease stream height"
+        );
+    }
+
+    /// An idle settled stream requests no layout on paint-only frames.
+    #[test]
+    fn idle_settled_stream_requests_no_layout_on_paint_only_frames() {
+        let stream = agent_activity::<Opened>(log())
+            .open(true)
+            .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&stream);
+        painted(&mut widget, size, 0, None);
+
+        // Paint many frames without layout; none should request layout.
+        for ms in [10, 20, 50, 100, 200, 500].iter() {
+            let needs_layout = step_paint_only(&mut widget, size, *ms, None);
+            assert!(
+                !needs_layout,
+                "settled stream at {}ms should not request layout",
+                ms
+            );
+        }
     }
 }
