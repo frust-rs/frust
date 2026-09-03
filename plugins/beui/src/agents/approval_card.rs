@@ -56,6 +56,20 @@
 //! [`Dismiss`](ApprovalCardAction) is deliberately **not** latched — it closes
 //! the surface rather than answering it, and is offered in every status.
 //!
+//! # Payload swaps disarm an in-flight press
+//!
+//! `title`/`description`/`content`/the offered button set are the thing a
+//! decision is actually consent *for*. `rebuild` treats a change to any of
+//! them as a new episode the same way a status change is: it clears an
+//! in-flight `Down` capture and resets keyboard focus to the safe default, so
+//! a payload swap delivered between `Down` and `Up` disarms the press rather
+//! than letting the release fire against whatever is now displayed (mirrors
+//! [`citations`](super::citations)'s own item-list invalidation).
+//! [`ApprovalCardView::on_action_with_id`] additionally hands the callback the
+//! identity of the review actually shown ([`ApprovalCardView::id`], defaulting
+//! to `title`), so an app juggling more than one open review never has to
+//! assume an action answers whichever one it currently has in mind.
+//!
 //! # Degradations against the web original
 //!
 //! - **No question wizard**, above.
@@ -247,7 +261,11 @@ pub struct ApprovalCardView<State: 'static> {
     request_changes: bool,
     reject: bool,
     dismissible: bool,
+    /// An explicit review identity (see [`Self::id`]); empty means "derive
+    /// from `title`".
+    id: String,
     on_action: Option<OnArg<State, ApprovalCardAction>>,
+    on_action_with_id: Option<OnArg<State, (ApprovalCardAction, String)>>,
 }
 
 /// Create an approval card, pending and offering all three decisions.
@@ -265,7 +283,9 @@ pub fn approval_card<State: 'static>() -> ApprovalCardView<State> {
         request_changes: true,
         reject: true,
         dismissible: false,
+        id: String::new(),
         on_action: None,
+        on_action_with_id: None,
     }
 }
 
@@ -326,6 +346,15 @@ impl<State: 'static> ApprovalCardView<State> {
         self
     }
 
+    /// An explicit identity for this review (defaults to `title` when
+    /// unset). Passed to [`Self::on_action_with_id`] — see the [module
+    /// docs](self)'s "Payload swaps disarm an in-flight press" section for
+    /// why an app juggling more than one open review wants this.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
     /// Report the user's action. A decision fires at most once per interactive
     /// episode — see the [module docs](self).
     pub fn on_action<F: Fn(&mut State, ApprovalCardAction) + 'static>(
@@ -333,6 +362,22 @@ impl<State: 'static> ApprovalCardView<State> {
         on_action: F,
     ) -> Self {
         self.on_action = Some(Rc::new(on_action));
+        self
+    }
+
+    /// Like [`Self::on_action`], but also reports the identity of the review
+    /// actually shown when the action fired ([`Self::id`], or `title` when no
+    /// explicit id was set) — additive, so an existing `on_action` call site
+    /// keeps compiling unchanged. Both may be set; both fire.
+    pub fn on_action_with_id<F: Fn(&mut State, ApprovalCardAction, String) + 'static>(
+        mut self,
+        on_action: F,
+    ) -> Self {
+        self.on_action_with_id = Some(Rc::new(
+            move |state: &mut State, (action, id): (ApprovalCardAction, String)| {
+                on_action(state, action, id);
+            },
+        ));
         self
     }
 
@@ -386,7 +431,13 @@ pub struct ApprovalCardWidget {
     focused: ApprovalCardAction,
     hovered: Option<ApprovalCardAction>,
     captured: Option<ApprovalCardAction>,
+    /// The resolved review identity — [`ApprovalCardView::id`] when set,
+    /// otherwise `title`. Handed to an action so the app can tell which
+    /// review it answers even across a payload swap; see the [module
+    /// docs](self).
+    id: String,
     on_action: Option<ErasedArgCallback<ApprovalCardAction>>,
+    on_action_with_id: Option<ErasedArgCallback<(ApprovalCardAction, String)>>,
 }
 
 /// The buttons a view offers, shaped.
@@ -404,6 +455,29 @@ fn build_buttons<State: 'static>(
             (action, LabelRun::new(label))
         })
         .collect()
+}
+
+/// Resolve the review identity an action reports: `id` when the view set one
+/// explicitly, else `title`.
+fn resolve_id(id: &str, title: &str) -> String {
+    if id.is_empty() {
+        title.to_owned()
+    } else {
+        id.to_owned()
+    }
+}
+
+/// The safe, least-permissive affordance keyboard activation defaults to:
+/// `Reject` when offered, else `RequestChanges` when offered, else `Approve`
+/// (the only decision left offered, and so the only default left to give).
+fn safe_default_action(request_changes: bool, reject: bool) -> ApprovalCardAction {
+    if reject {
+        ApprovalCardAction::Reject
+    } else if request_changes {
+        ApprovalCardAction::RequestChanges
+    } else {
+        ApprovalCardAction::Approve
+    }
 }
 
 impl<State: 'static> View<State> for ApprovalCardView<State> {
@@ -440,10 +514,12 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             content_height: 0.0,
             result_height: 0.0,
             body_natural: 0.0,
-            focused: ApprovalCardAction::Approve,
+            focused: safe_default_action(self.request_changes, self.reject),
             hovered: None,
             captured: None,
+            id: resolve_id(&self.id, &self.title),
             on_action: self.on_action.as_ref().map(erase_callback_arg),
+            on_action_with_id: self.on_action_with_id.as_ref().map(erase_callback_arg),
         }
     }
 
@@ -454,17 +530,29 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.on_action = self.on_action.as_ref().map(erase_callback_arg);
+        element.on_action_with_id = self.on_action_with_id.as_ref().map(erase_callback_arg);
         let mut flags = ChangeFlags::NONE;
+        // Whether any consent-bearing field (what an action is actually
+        // *for*) changed this rebuild — see the [module docs](self)'s
+        // "Payload swaps disarm an in-flight press" section.
+        let mut content_changed = false;
 
         if element.title_text != self.title {
             element.title = LabelRun::new(self.title.clone());
             element.title_text = self.title.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            content_changed = true;
         }
         if element.description_text != self.description {
             element.description = self.description.as_deref().map(WrappedRun::new);
             element.description_text = self.description.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            content_changed = true;
+        }
+        let next_id = resolve_id(&self.id, &self.title);
+        if element.id != next_id {
+            element.id = next_id;
+            content_changed = true;
         }
         if element.approve_label != self.approve_label
             || element.request_changes != self.request_changes
@@ -474,8 +562,8 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             element.request_changes = self.request_changes;
             element.reject = self.reject;
             element.buttons = build_buttons(self);
-            element.focused = ApprovalCardAction::Approve;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            content_changed = true;
         }
         if element.dismissible != self.dismissible {
             element.dismissible = self.dismissible;
@@ -509,18 +597,31 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             element.content.as_mut(),
         ) {
             (Some(before), Some(after), Some(pod)) => {
-                flags |= rebuild_child(before, after, pod, ctx);
+                let content_flags = rebuild_child(before, after, pod, ctx);
+                content_changed |= content_flags.needs_paint();
+                flags |= content_flags;
             }
             (Some(before), None, Some(pod)) => {
                 teardown_child(before, pod, ctx);
                 element.content = None;
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                content_changed = true;
             }
             (_, Some(after), None) => {
                 element.content = Some(build_child(after, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                content_changed = true;
             }
             _ => {}
+        }
+        if content_changed {
+            // A payload swap disarms whatever `Down` armed and re-arms
+            // keyboard focus at the safe default — mirrors citations.rs's
+            // own item-list invalidation. The next `Up` (captured now
+            // `None`) is a no-op regardless of where it lands.
+            element.captured = None;
+            element.focused = safe_default_action(element.request_changes, element.reject);
+            flags |= ChangeFlags::PAINT;
         }
         flags
     }
@@ -682,11 +783,20 @@ impl ApprovalCardWidget {
         if target.is_decision() && (self.decided || !self.status.accepts_decision()) {
             return;
         }
+        // Both callbacks, when set, report the same fired action — the plain
+        // one for an existing call site, the id-carrying one for a caller
+        // that wants to know which review it answers.
+        let mut fired = false;
         if let Some(on_action) = self.on_action.as_mut() {
-            if target.is_decision() {
-                self.decided = true;
-            }
             on_action(ctx, target);
+            fired = true;
+        }
+        if let Some(on_action_with_id) = self.on_action_with_id.as_mut() {
+            on_action_with_id(ctx, (target, self.id.clone()));
+            fired = true;
+        }
+        if fired && target.is_decision() {
+            self.decided = true;
         }
     }
 
@@ -1205,6 +1315,8 @@ mod tests {
         action: Option<ApprovalCardAction>,
         actions: u32,
         dismissals: u32,
+        action_id: Option<(ApprovalCardAction, String)>,
+        action_id_calls: u32,
     }
 
     fn ft_ms(ms: f64) -> FrameTime {
@@ -1224,6 +1336,10 @@ mod tests {
                 if action == ApprovalCardAction::Dismiss {
                     s.dismissals += 1;
                 }
+            })
+            .on_action_with_id(|s: &mut Reviewed, action: ApprovalCardAction, id: String| {
+                s.action_id = Some((action, id));
+                s.action_id_calls += 1;
             })
     }
 
@@ -1475,6 +1591,105 @@ mod tests {
         assert_eq!(state.actions, 1, "but `submitting` accepts no decision");
     }
 
+    /// A payload swap delivered between `Down` and `Up` disarms the in-flight
+    /// press instead of firing an action against whatever is now displayed —
+    /// the tool-approval bait-and-switch M7 closes.
+    #[test]
+    fn a_payload_swap_disarms_an_in_flight_press() {
+        let (mut w, size) = laid_out(ApprovalCardStatus::Pending);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Down, approve),
+            &mut state,
+        );
+        assert!(w.captured.is_some(), "the press armed");
+
+        // A different review lands mid-press — same status, different
+        // content, exactly what a streaming agent surface can deliver.
+        let swapped = approval_card::<Reviewed>()
+            .title("Apply these OTHER changes?")
+            .description("A different agent turn swapped the review mid-press.")
+            .content(text("src/other.rs"))
+            .status(ApprovalCardStatus::Pending)
+            .dismissible(true)
+            .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
+                s.action = Some(action);
+                s.actions += 1;
+            });
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        View::<Reviewed>::rebuild(
+            &swapped,
+            &view(ApprovalCardStatus::Pending),
+            &mut w,
+            &mut ctx,
+        );
+
+        assert!(w.captured.is_none(), "the payload swap disarmed the press");
+        assert_eq!(
+            w.focused,
+            ApprovalCardAction::Reject,
+            "focus re-armed at the safe default"
+        );
+
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Up, approve),
+            &mut state,
+        );
+        assert_eq!(
+            state.actions, 0,
+            "the swapped-in review never received an action"
+        );
+    }
+
+    /// An action carries the identity of the review actually shown, not a
+    /// bare enum the app must guess an owner for.
+    #[test]
+    fn an_action_reports_the_id_of_the_review_shown() {
+        let mut w = build(
+            &approval_card::<Reviewed>()
+                .id("review-7")
+                .title("Apply these changes?")
+                .status(ApprovalCardStatus::Pending)
+                .on_action_with_id(|s: &mut Reviewed, action: ApprovalCardAction, id: String| {
+                    s.action_id = Some((action, id));
+                    s.action_id_calls += 1;
+                }),
+        );
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap();
+        press(&mut w, size, approve.center(), &mut state);
+        assert_eq!(
+            state.action_id,
+            Some((ApprovalCardAction::Approve, "review-7".to_owned()))
+        );
+        assert_eq!(state.action_id_calls, 1);
+    }
+
+    /// With no explicit id, an action's identity falls back to `title`.
+    #[test]
+    fn the_review_id_defaults_to_the_title() {
+        let (w, _) = laid_out(ApprovalCardStatus::Pending);
+        assert_eq!(w.id, "Apply these changes?");
+    }
+
+    /// Keyboard activation with no explicit selection lands on the safe,
+    /// least-permissive decision — never `Approve`.
+    #[test]
+    fn the_default_focus_is_the_safe_decision() {
+        let (w, _) = laid_out(ApprovalCardStatus::Pending);
+        assert_eq!(w.focused, ApprovalCardAction::Reject);
+    }
+
     /// A dismiss is not a decision: it fires from any status and is never
     /// latched.
     #[test]
@@ -1523,15 +1738,18 @@ mod tests {
     }
 
     /// Keyboard: the arrows rove every offered button plus the dismiss, and the
-    /// activation keys fire the one under the cursor.
+    /// activation keys fire the one under the cursor. Default focus starts on
+    /// the safe (`Reject`) decision, not `Approve` — see
+    /// `the_default_focus_is_the_safe_decision`.
     #[test]
     fn the_arrows_rove_every_trigger_and_enter_fires_it() {
         let (mut w, size) = laid_out(ApprovalCardStatus::Pending);
         paint_at(&mut w, size, None, 0.0);
         let mut state = Reviewed::default();
         assert_eq!(w.targets().len(), 4, "three decisions plus the dismiss");
+        assert_eq!(w.focused, ApprovalCardAction::Reject, "the safe default");
 
-        dispatch(&mut w, size, &key(NamedKey::ArrowRight), &mut state);
+        dispatch(&mut w, size, &key(NamedKey::ArrowLeft), &mut state);
         assert_eq!(w.focused, ApprovalCardAction::RequestChanges);
         dispatch(&mut w, size, &key(NamedKey::Enter), &mut state);
         assert_eq!(state.action, Some(ApprovalCardAction::RequestChanges));
