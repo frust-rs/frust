@@ -921,7 +921,6 @@ mod tests {
         translation,
     };
     use frust::authoring::Rect;
-    use frust::gpu::wgpu;
     use peniko::Color;
 
     /// Projects a world point through the view-projection this substrate
