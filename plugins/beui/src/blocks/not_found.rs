@@ -214,6 +214,22 @@ pub fn glitch_tick(elapsed: Duration) -> u64 {
     (elapsed.as_nanos() / GLITCH_TICK.as_nanos()) as u64
 }
 
+/// The scramble's shown-glyph signature at `elapsed`, over a `len`-character
+/// code: how many cells have settled, and which tick the still-churning
+/// cells are on. The tick is pinned to `0` once `settled == len`, since a
+/// settled cell's glyph no longer depends on it — comparing two signatures
+/// this way never asks for a relayout once the scramble has nothing left to
+/// change, while still catching the exact frame it lands on its final glyph.
+fn glitch_signature(elapsed: Duration, len: usize) -> (usize, u64) {
+    let settled = glitch_settled(elapsed, len);
+    let tick = if settled < len {
+        glitch_tick(elapsed)
+    } else {
+        0
+    };
+    (settled, tick)
+}
+
 /// The glyph character `index` shows on `tick` — a deterministic stand-in for
 /// upstream's `Math.random()`, for the reason the [module docs](self) give.
 ///
@@ -493,6 +509,20 @@ pub struct NotFoundWidget {
     /// a fresh, non-empty shape, and a paint-only frame simply keeps painting
     /// whatever the last layout produced.
     elapsed: Duration,
+    /// The Glitch scramble's `(settled cell count, tick)` as of the shape the
+    /// last `layout` pass actually produced. The tick is pinned to `0` once
+    /// every cell has settled, since a settled cell no longer depends on it.
+    ///
+    /// `paint` compares this against what the just-latched `elapsed` implies
+    /// (see [`glitch_signature`]) and requests a relayout on any difference —
+    /// never from whether the scramble is still "running", which observes
+    /// the shown glyphs one frame stale and misses the exact frame the
+    /// scramble lands on its final glyph.
+    laid_glitch: (usize, u64),
+    /// The Terminal's typed prefix length per line, as of the shape the last
+    /// `layout` pass actually produced — the Terminal analogue of
+    /// `laid_glitch`, compared the same way.
+    laid_terminal: [usize; 3],
     /// The two actions' boxes in the widget's own space.
     actions: [Rect; 2],
     /// The action a `Down` armed.
@@ -539,6 +569,33 @@ impl NotFoundWidget {
                 elapsed
                     < last.1
                         + TERMINAL_CHAR_STAGGER * self.lines[2].content().chars().count() as u32
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether what the *last* `layout` shaped differs from what `elapsed`
+    /// implies now — the before/after compare `paint` requests a relayout
+    /// from, in place of a "still running" predicate that is always one
+    /// frame stale and so misses the exact frame an animation lands on its
+    /// settled content.
+    fn owes_relayout(&self, elapsed: Duration) -> bool {
+        match self.config.style {
+            NotFoundStyle::Glitch => {
+                glitch_signature(elapsed, self.cells.len()) != self.laid_glitch
+            }
+            NotFoundStyle::Terminal => {
+                let mut wanted = [0usize; 3];
+                for (index, (_, delay)) in TERMINAL_LINES.into_iter().enumerate() {
+                    let stagger = if index == 1 {
+                        TERMINAL_ERROR_STAGGER
+                    } else {
+                        TERMINAL_CHAR_STAGGER
+                    };
+                    let len = self.lines[index].content().chars().count();
+                    wanted[index] = terminal_typed(elapsed, delay, stagger, len);
+                }
+                wanted != self.laid_terminal
             }
             _ => false,
         }
@@ -601,6 +658,8 @@ impl<State: 'static> View<State> for NotFoundView<State> {
             ],
             started: None,
             elapsed: Duration::ZERO,
+            laid_glitch: (0, 0),
+            laid_terminal: [0; 3],
             actions: [Rect::ZERO; 2],
             armed: None,
             hovered: None,
@@ -634,6 +693,8 @@ impl<State: 'static> View<State> for NotFoundView<State> {
                     .collect();
                 element.started = None;
                 element.elapsed = Duration::ZERO;
+                element.laid_glitch = (0, 0);
+                element.laid_terminal = [0; 3];
                 element.armed = None;
             }
             element.title.set_content(self.config.title.clone());
@@ -718,8 +779,13 @@ impl Widget for NotFoundWidget {
                     };
                     cell.set_content(shown);
                 }
+                // What this pass actually shaped, for `paint` to compare the
+                // next frame's elapsed against — see `laid_glitch`'s field
+                // doc.
+                self.laid_glitch = glitch_signature(elapsed, self.cells.len());
             }
             NotFoundStyle::Terminal => {
+                let mut laid = [0usize; 3];
                 for (index, (_, delay)) in TERMINAL_LINES.into_iter().enumerate() {
                     let stagger = if index == 1 {
                         TERMINAL_ERROR_STAGGER
@@ -728,9 +794,14 @@ impl Widget for NotFoundWidget {
                     };
                     let source: Vec<char> = self.lines[index].content().chars().collect();
                     let typed = terminal_typed(elapsed, delay, stagger, source.len());
+                    laid[index] = typed;
                     let text: String = source.iter().take(typed).collect();
                     self.typed[index].set_content(text);
                 }
+                // What this pass actually shaped, for `paint` to compare the
+                // next frame's elapsed against — see `laid_terminal`'s field
+                // doc.
+                self.laid_terminal = laid;
             }
             NotFoundStyle::Magnetic | NotFoundStyle::Spotlight | NotFoundStyle::Stacked => {}
         }
@@ -823,8 +894,20 @@ impl Widget for NotFoundWidget {
         // `elapsed` field doc.
         self.elapsed = elapsed;
         if !reduce && self.is_running(elapsed) {
-            // The scramble/typing is still substituting content, which only a
-            // layout pass may reshape (`request_layout` implies a frame too).
+            // The scramble/typing may still change what the next frame's
+            // layout would shape; keep a frame coming so paint gets another
+            // chance to check — a plain frame request, not a layout one:
+            // whether a layout is actually owed is the before/after compare
+            // below, not this "still running" predicate on its own (a
+            // still-running check alone is one frame stale and misses the
+            // exact frame the animation lands on its settled content).
+            ctx.request_frame();
+        }
+        if !reduce && self.owes_relayout(elapsed) {
+            // What the last layout shaped no longer matches what the
+            // just-latched `elapsed` implies — relayout regardless of
+            // whether the style is still "running", which is exactly the
+            // settling frame `is_running` alone misses.
             ctx.request_layout();
         }
         if !reduce && self.config.style == NotFoundStyle::Terminal {
@@ -1550,8 +1633,8 @@ mod tests {
         }
     }
 
-    /// M2 regression: `LabelRun::set_content` (`text.rs`) drops the cached
-    /// shape it is called on, and `LabelRun::paint` is a no-op until the next
+    /// Regression coverage: `LabelRun::set_content` (`text.rs`) drops the
+    /// cached shape it is called on, and `LabelRun::paint` is a no-op until the next
     /// `layout` reshapes it — so mutating a run's content from `paint` itself
     /// paints nothing on a paint-only frame (no `layout` between). The
     /// Terminal's typed lines and the Glitch scramble's cells must instead be
@@ -1591,7 +1674,8 @@ mod tests {
 
         // Paint-only frames after that: no rebuild, no layout — the
         // production frame shape `request_frame`/`request_frame_class` drive,
-        // and exactly the shape the M2 bug's harness never exercised.
+        // and exactly the shape a harness that relayouts on every step never
+        // exercises.
         let (paint_only, _) = paint_frame(&mut h, 0.0);
         assert!(
             !paint_only.inks.is_empty(),
@@ -1619,7 +1703,7 @@ mod tests {
         );
     }
 
-    /// M2 regression, the Glitch half: `paint_glitch` used to mutate
+    /// The Glitch half of the same regression: `paint_glitch` used to mutate
     /// `self.scrambled` directly, so a paint-only frame mid-scramble (or
     /// right after it settles) painted nothing for the code row.
     #[test]
@@ -1703,8 +1787,15 @@ mod tests {
         // painted ink count is the same but the run is not settled yet...
         let (_, mid_frame) = paint_frame(&mut h, 100.0);
         assert!(mid_frame, "the scramble owes frames while it runs");
-        // ...and past the scramble it stops asking for them.
-        let (_, late_frame) = paint_frame(&mut h, 2_000.0);
+        // Two real (layout + paint) frames at the same clock, well past the
+        // scramble: the first is what latches `elapsed` for `layout` to
+        // substitute from, the second is the frame whose `layout` actually
+        // shapes the settled code from it (see the `elapsed` field doc).
+        h.step(2_000.0);
+        h.step(0.0);
+        // ...and only once the settled code has actually been shaped does a
+        // further paint-only frame ask for nothing more.
+        let (_, late_frame) = paint_frame(&mut h, 0.0);
         assert!(!late_frame, "the scramble kept running after it settled");
     }
 
@@ -1764,5 +1855,163 @@ mod tests {
         let now = h.clock;
         let outcome = h.root.paint(&mut rec, ft_ms(now));
         (rec, outcome.needs_frame)
+    }
+
+    // ---- The settling-frame relayout compare ---------------------------------
+    //
+    // `Harness::step` rebuilds and relayouts on every call, so it cannot tell
+    // whether `paint` itself asked for a relayout, and its `Recorder` only
+    // records a glyph run's color, never its text — neither is enough to
+    // pin the settling-frame regression. These tests instead drive a bare
+    // `NotFoundWidget` directly, calling `layout`/`paint` exactly when the
+    // test says to, and read the resolved text straight off the widget's own
+    // (crate-private) runs.
+
+    /// A bare [`NotFoundWidget`] in `style`, outside `Harness`/`RenderRoot`.
+    fn bare(style: NotFoundStyle) -> NotFoundWidget {
+        let view = not_found::<()>().style(style);
+        let mut counter = 0u64;
+        View::<()>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    /// Lay `w` out at [`WINDOW`], optionally under `theme`.
+    fn bare_layout(w: &mut NotFoundWidget, theme: Option<&Theme>) -> Size {
+        let mut tcx = TextContext::new();
+        let mut ctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        if let Some(t) = theme {
+            ctx = ctx.with_theme(t);
+        }
+        w.layout(&mut ctx, &BoxConstraints::new(Size::ZERO, WINDOW))
+    }
+
+    /// Paint `w` at the absolute frame time `ms`, optionally under `theme` —
+    /// no rebuild, no layout: exactly the paint-only frame the production
+    /// frame pipeline drives between relayouts. Returns what the frame asked
+    /// for next.
+    fn bare_paint(
+        w: &mut NotFoundWidget,
+        size: Size,
+        theme: Option<&Theme>,
+        ms: f64,
+    ) -> (Recorder, bool, bool) {
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(ms));
+        if let Some(t) = theme {
+            ctx = ctx.with_theme(t);
+        }
+        w.paint(&mut ctx, &mut rec);
+        (rec, ctx.needs_frame(), ctx.needs_layout())
+    }
+
+    #[test]
+    fn the_glitch_settles_its_code_after_paint_only_frames_run_past_the_scramble() {
+        let mut w = bare(NotFoundStyle::Glitch);
+        let size = bare_layout(&mut w, None);
+        // Mount: the first paint only latches `started`.
+        bare_paint(&mut w, size, None, 0.0);
+
+        // Paint-only frames, no layout between them, mid-scramble and then
+        // well past `GLITCH_SCRAMBLE` (700ms) — the shape the production
+        // frame pipeline drives between relayouts, and exactly the frame an
+        // `is_running` check alone let slip through unshaped: `is_running`
+        // is already false by the time this frame's `elapsed` is read, so a
+        // fix gated on it would never ask for the relayout this settling
+        // frame owes.
+        bare_paint(&mut w, size, None, 300.0);
+        let (_, _, past_scramble_needs_layout) = bare_paint(&mut w, size, None, 1_200.0);
+        assert!(
+            past_scramble_needs_layout,
+            "the frame that landed past the scramble did not request a relayout"
+        );
+
+        // Run the relayout it asked for.
+        bare_layout(&mut w, None);
+        for (index, cell) in w.cells.iter().enumerate() {
+            assert_eq!(
+                w.scrambled[index].content(),
+                cell.content(),
+                "glitch cell {index} did not resolve to its settled character"
+            );
+        }
+
+        // Settled: further paint-only frames ask for nothing more.
+        let (_, _, still_needs_layout) = bare_paint(&mut w, size, None, 1_700.0);
+        assert!(
+            !still_needs_layout,
+            "a settled glitch kept asking for relayouts"
+        );
+    }
+
+    #[test]
+    fn the_terminal_finishes_typing_every_line_after_paint_only_frames_run_past_it() {
+        let mut w = bare(NotFoundStyle::Terminal);
+        let size = bare_layout(&mut w, None);
+        bare_paint(&mut w, size, None, 0.0);
+
+        // A paint-only frame, no layout between, landing well past the third
+        // (slowest) line's own delay + stagger*len — the settling frame
+        // `is_running` alone misses, the same way it misses the Glitch one.
+        let (_, _, needs_layout) = bare_paint(&mut w, size, None, 1_600.0);
+        assert!(
+            needs_layout,
+            "the frame that landed past the typing did not request a relayout"
+        );
+
+        bare_layout(&mut w, None);
+        for (index, line) in w.lines.iter().enumerate() {
+            assert_eq!(
+                w.typed[index].content(),
+                line.content(),
+                "terminal line {index} did not finish typing"
+            );
+        }
+
+        let (_, _, still_needs_layout) = bare_paint(&mut w, size, None, 2_100.0);
+        assert!(
+            !still_needs_layout,
+            "a fully typed terminal kept asking for relayouts"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_shapes_the_settled_content_on_the_first_layout_and_asks_for_nothing() {
+        let theme = reduced();
+        for style in [NotFoundStyle::Glitch, NotFoundStyle::Terminal] {
+            let mut w = bare(style);
+            // The very first layout, before any paint has run at all, must
+            // already shape the settled content.
+            let size = bare_layout(&mut w, Some(&theme));
+            match style {
+                NotFoundStyle::Glitch => {
+                    for (index, cell) in w.cells.iter().enumerate() {
+                        assert_eq!(
+                            w.scrambled[index].content(),
+                            cell.content(),
+                            "{style:?}: glitch cell {index} was not settled on the first layout"
+                        );
+                    }
+                }
+                NotFoundStyle::Terminal => {
+                    for (index, line) in w.lines.iter().enumerate() {
+                        assert_eq!(
+                            w.typed[index].content(),
+                            line.content(),
+                            "{style:?}: terminal line {index} was not typed on the first layout"
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let (_, _, needs_layout) = bare_paint(&mut w, size, Some(&theme), 0.0);
+            assert!(
+                !needs_layout,
+                "{style:?}: reduced motion requested a relayout on mount"
+            );
+            let (_, _, later_needs_layout) = bare_paint(&mut w, size, Some(&theme), 5_000.0);
+            assert!(
+                !later_needs_layout,
+                "{style:?}: reduced motion requested a relayout later"
+            );
+        }
     }
 }
