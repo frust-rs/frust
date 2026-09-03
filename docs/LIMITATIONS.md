@@ -2855,8 +2855,9 @@ caption); `plugins/beui/src/components/tooltip.rs` module docs ("A press while t
    until the next press elsewhere blurs it, the same shape `overlay-no-auto-focus-on-appear`
    documents from the opposite direction. The close is a paint-only morph (the widget stays mounted
    and keeps its focus), so keystrokes and IME composition keep routing into the now-invisible field
-   for as long as the session stands — an app hosting a sensitive value in the message field clears
-   or reconstructs the field on close rather than relying on the panel's own dismissal to do it.
+   for as long as the session stands. Clearing the field on close discards what it holds but does
+   not end the capture; only unmounting the block, or an app-owned barrier that takes the next
+   press, ends the session — so an app hosting a sensitive value there unmounts it on close.
 3. **`hold_action_button`'s `on_complete` fires on the next event pass, not the instant the fill
    lands.** The fill is advanced during paint, which carries no `EventCtx` to call an app callback
    through; the completion is latched at paint and drained on the next pointer event the widget

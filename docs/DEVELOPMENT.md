@@ -222,8 +222,8 @@ cargo build --workspace --locked \
 
 `frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do
 the five design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`/
-`frust-shadcn`/`frust-beui`, `plugins/{glyph,material,cupertino,shadcn,beui}`) — root workspace members like any other plugin,
-with no separate feature-off build to gate (`frust` has no catalog feature left to
+`frust-shadcn`/`frust-beui`, `plugins/{glyph,material,cupertino,shadcn,beui}`) — root
+workspace members like any other plugin, with no separate feature-off build to gate (`frust` has no catalog feature left to
 unify or drop — see *Build*'s design-system note above).
 
 `ScrollView`/`ListView`'s default scroll feel is platform-adaptive
