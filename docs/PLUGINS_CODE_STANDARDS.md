@@ -40,6 +40,11 @@ is additional or different for a plugin.
   Reactivity Conventions); plugins sit beside the facade, never inside it
   ([ARCHITECTURE.md](ARCHITECTURE.md)'s facade/plugin boundary), and are not expected to
   migrate onto `frust::authoring`.
+- **A facade plugin that records its own GPU pass reaches `wgpu` only through `frust::gpu`'s
+  re-export, behind an optional, non-default cargo feature** (e.g. `gpu-effects =
+  ["frust/gpu"]`) — never a direct `wgpu` edge of its own. The default build stays on the
+  facade-plugin charter line above (`frust` alone, plus `kurbo`/`peniko` where sanctioned),
+  checkable with `cargo tree -p <crate> -e normal`.
 - **A store shared with the OS namespaces its keys `frust.`** (NSUserDefaults, Android
   SharedPreferences) so plugin keys can't collide with other libraries'.
 - **`dev.frust` is the embedding module's exclusive package; a plugin's Android Kotlin ships

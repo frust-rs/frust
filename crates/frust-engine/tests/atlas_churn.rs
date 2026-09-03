@@ -2813,7 +2813,12 @@ fn render_frames(scene: &Scene, atlas: bool, frames: usize) -> Vec<Vec<u8>> {
 
 /// How many pixels of `pixels` are not the untouched white backdrop.
 fn inked(pixels: &[u8]) -> usize {
-    pixels.chunks_exact(4).filter(|p| *p != [255; 4]).count()
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| **p != [255; 4])
+        .count()
 }
 
 /// The largest per-channel difference between two frames, and how many pixels
@@ -2821,7 +2826,7 @@ fn inked(pixels: &[u8]) -> usize {
 fn divergence(left: &[u8], right: &[u8]) -> (u8, usize) {
     let mut worst = 0_u8;
     let mut differing = 0_usize;
-    for (a, b) in left.chunks_exact(4).zip(right.chunks_exact(4)) {
+    for (a, b) in left.as_chunks::<4>().0.iter().zip(right.as_chunks::<4>().0) {
         if a != b {
             differing += 1;
         }

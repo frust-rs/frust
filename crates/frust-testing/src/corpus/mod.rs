@@ -247,7 +247,7 @@ pub fn straighten_alpha(image: &RenderedImage) -> RenderedImage {
         return image.clone();
     }
     let mut rgba8 = image.rgba8.clone();
-    for pixel in rgba8.chunks_exact_mut(4) {
+    for pixel in rgba8.as_chunks_mut::<4>().0 {
         let alpha = u32::from(pixel[3]);
         if alpha == 0 {
             pixel[0] = 0;

@@ -103,7 +103,9 @@ GPU-substrate vocabulary flat as `frust::gpu` (`Context`/`Texture`/`TextureDesc`
 `SceneTextureId`/`CommandBuffer`/`ShaderLibrary`/`RenderPipelineDesc`/`DeviceHandle`, plus
 `ExternalPass`/`ExternalFrame`/`register_external_pass`/`unregister_external_pass`, see below) so an
 app, or a future 3D-rendering crate sitting beside the facade, can reach the render engine's texture
-seam without a direct `frust-render`/`frust-gpu` dependency. `frust::gpu::with_context` reads back the
+seam without a direct `frust-render`/`frust-gpu` dependency — nor a direct `wgpu` one, since
+`frust::gpu` also re-exports `wgpu` itself under the same feature, for a crate recording an
+`ExternalPass`. `frust::gpu::with_context` reads back the
 shell's own live `DeviceHandle` through `frust-shell-common`'s process-wide install-once slot (see
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) rather than creating a second device; it answers
 `None` until a shell has published one.
@@ -127,7 +129,9 @@ once per frame, ahead of the engine's own scene pass and its shader-quad pre-pas
 crate depending on `frust` alone (the `gpu` feature), with no direct `frust-render`/`frust-gpu` edge.
 A pass renders into its own target, never the frame's — the frame's unconditional colour clear never
 touches it — and binds that target under a `SceneTextureId` (`ExternalFrame::bind_texture`) for a
-`Command::SceneTexture` naming the same id to composite. `ExternalFrame` exposes only the frame's
+`Command::SceneTexture` naming the same id to composite — the widget-side draw is
+`PaintScene::draw_scene_texture(id, dest)` (`SceneBuilder` forwards it to `scene_texture`; see
+CORE_ARCHITECTURE.md). `ExternalFrame` exposes only the frame's
 device, queue, encoder and frame index — never its depth view or `set_depth_pre_cleared` — so a pass
 never shares the frame's depth attachment and never owes the depth-clear rule; its composite is
 blended like every external texture (`engine-scene-texture-always-blended` in LIMITATIONS.md).

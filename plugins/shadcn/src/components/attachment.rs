@@ -218,9 +218,7 @@ impl Widget for AttachmentWidget {
             sizes.push(pod.layout_child(ctx, &loose));
         }
 
-        let content_w;
-        let content_h;
-        match self.orientation {
+        let (content_w, content_h) = match self.orientation {
             AttachmentOrientation::Horizontal => {
                 let mut w = sizes.iter().map(|s| s.width).sum::<f64>();
                 if !sizes.is_empty() {
@@ -232,8 +230,7 @@ impl Widget for AttachmentWidget {
                     pod.set_origin(Point::new(x, pad_y + (h - s.height) / 2.0));
                     x += s.width + gap;
                 }
-                content_w = w;
-                content_h = h;
+                (w, h)
             }
             AttachmentOrientation::Vertical => {
                 let mut h = sizes.iter().map(|s| s.height).sum::<f64>();
@@ -246,10 +243,9 @@ impl Widget for AttachmentWidget {
                     pod.set_origin(Point::new(pad_x, y));
                     y += s.height + gap;
                 }
-                content_w = w;
-                content_h = h;
+                (w, h)
             }
-        }
+        };
 
         let mut width = content_w + pad_x * 2.0;
         if self.orientation == AttachmentOrientation::Horizontal {
