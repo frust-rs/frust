@@ -1441,7 +1441,7 @@ impl WalletCardWidget {
             scene.fill_rounded_rect(
                 at,
                 pill,
-                style::RADIUS_CONTROL,
+                style::resolve_radius(style::RADIUS_CONTROL, pill.width, pill.height),
                 style::with_alpha(ink, WALLET_DELTA_WASH_ALPHA),
             );
             self.delta.paint(

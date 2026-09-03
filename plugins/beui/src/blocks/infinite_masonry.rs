@@ -1168,7 +1168,7 @@ fn paint_skeleton(scene: &mut dyn PaintScene, at: Point, size: Size, fill: Color
                 at.y + MASONRY_CARD_PADDING + row as f64 * MASONRY_SKELETON_PITCH,
             ),
             Size::new(width * fraction, height),
-            style::RADIUS_CONTROL,
+            style::resolve_radius(style::RADIUS_CONTROL, width * fraction, height),
             style::with_alpha(bar, MASONRY_SKELETON_BAR_ALPHA),
         );
     }
@@ -1214,14 +1214,9 @@ impl MasonryWidget {
             chrome.surface
         };
         let box_at = origin + button.origin().to_vec2();
-        scene.fill_rounded_rect(box_at, button.size(), style::RADIUS_CONTROL, tint);
-        paint_panel_hairline(
-            scene,
-            box_at,
-            button.size(),
-            style::RADIUS_CONTROL,
-            chrome.border,
-        );
+        let radius = style::resolve_radius(style::RADIUS_CONTROL, button.width(), button.height());
+        scene.fill_rounded_rect(box_at, button.size(), radius, tint);
+        paint_panel_hairline(scene, box_at, button.size(), radius, chrome.border);
         self.retry.paint(
             box_at + Vec2::new(style::PADDING_X_MD, (button.height() - label.height) / 2.0),
             chrome.ink,

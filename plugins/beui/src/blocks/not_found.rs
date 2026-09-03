@@ -986,9 +986,11 @@ impl Widget for NotFoundWidget {
             } else {
                 (chrome.surface, chrome.ink)
             };
-            scene.fill_rounded_rect(at, box_size, style::RADIUS_CONTROL, fill);
+            let radius =
+                style::resolve_radius(style::RADIUS_CONTROL, box_size.width, box_size.height);
+            scene.fill_rounded_rect(at, box_size, radius, fill);
             if index == 1 {
-                paint_panel_hairline(scene, at, box_size, style::RADIUS_CONTROL, chrome.border);
+                paint_panel_hairline(scene, at, box_size, radius, chrome.border);
             }
             let label = if index == 0 { &self.home } else { &self.browse };
             let text = label.size();

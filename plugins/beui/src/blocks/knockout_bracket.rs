@@ -1362,7 +1362,12 @@ fn paint_card(
             at.x + BRACKET_CARD_WIDTH - BRACKET_CARD_PADDING - pill.width,
             at.y + BRACKET_CARD_PADDING,
         );
-        scene.fill_rounded_rect(pill_at, pill, style::RADIUS_CONTROL, background);
+        scene.fill_rounded_rect(
+            pill_at,
+            pill,
+            style::resolve_radius(style::RADIUS_CONTROL, pill.width, pill.height),
+            background,
+        );
         badge.paint(
             Point::new(
                 pill_at.x + style::GAP_MD,

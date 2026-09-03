@@ -1256,17 +1256,17 @@ impl SwapWidget {
                 (token.width() - token_box_size.width) / 2.0,
                 (token.height() - token_box_size.height) / 2.0,
             );
-        scene.fill_rounded_rect(
-            token_box_at,
-            token_box_size,
+        let token_radius = style::resolve_radius(
             style::RADIUS_CONTROL,
-            chrome.surface,
+            token_box_size.width,
+            token_box_size.height,
         );
+        scene.fill_rounded_rect(token_box_at, token_box_size, token_radius, chrome.surface);
         paint_panel_hairline(
             scene,
             token_box_at,
             token_box_size,
-            style::RADIUS_CONTROL,
+            token_radius,
             chrome.border,
         );
         let symbol = self.symbols[index].size();
