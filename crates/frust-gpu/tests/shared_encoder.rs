@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use frust_gpu::{
     ColorAttachment, CommandBuffer, DepthAttachment, HeadlessTarget, PipelineCache,
-    RenderPipelineDesc, RenderTarget, ShaderLibrary,
+    RenderPipelineDesc, RenderTarget, ShaderLibrary, TierCaps, test_device_limits,
 };
 
 /// Target extent every case renders at. Both axes are a multiple of two so the
@@ -184,11 +184,12 @@ fn gpu() -> (wgpu::Device, wgpu::Queue) {
             .await
             .expect("no compatible GPU adapter");
         println!("frust-gpu shared encoder adapter: {:?}", adapter.get_info());
+        let caps = TierCaps::probe(&adapter);
         adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("frust-gpu shared encoder device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: test_device_limits(&adapter, &caps),
                 ..Default::default()
             })
             .await

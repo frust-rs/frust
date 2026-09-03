@@ -1981,7 +1981,7 @@ fn gpu() -> (wgpu::Device, wgpu::Queue, TierCaps) {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("frust-engine filter test device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: frust_gpu::test_device_limits(&adapter, &caps),
                 ..Default::default()
             })
             .await

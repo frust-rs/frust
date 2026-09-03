@@ -64,7 +64,7 @@
 
 use anyhow::{Result, anyhow};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
-use frust_gpu::{HeadlessTarget, TierCaps};
+use frust_gpu::{HeadlessTarget, TierCaps, test_device_limits};
 use frust_render::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR};
 use kurbo::Affine;
 
@@ -249,7 +249,7 @@ impl EngineOracle {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("frust-testing engine oracle device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: test_device_limits(&adapter, &caps),
             ..Default::default()
         }))
         .map_err(|err| {
