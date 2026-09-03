@@ -46,29 +46,54 @@
 //! `paint` asks for **layout** while the lane moves and once more on the frame
 //! its value changed — the same guard the catalog's accordion documents.
 //!
-//! # One decision per interactive episode
+//! # One decision per consent episode, on one predicate
 //!
 //! [`ApprovalCardAction::Approve`], [`RequestChanges`](ApprovalCardAction) and
-//! [`Reject`](ApprovalCardAction) fire **exactly once** per interactive
-//! episode: the press is up-inside, and the widget then latches until the app
-//! moves the status, which is what it is expected to do in the handler. The
-//! latch clears on any status change.
-//! [`Dismiss`](ApprovalCardAction) is deliberately **not** latched — it closes
-//! the surface rather than answering it, and is offered in every status.
+//! [`Reject`](ApprovalCardAction) fire **exactly once** per consent episode:
+//! the press is up-inside, and the widget then latches until a new episode
+//! opens. [`Dismiss`](ApprovalCardAction) is deliberately **not** latched — it
+//! closes the surface rather than answering it, and is offered in every
+//! status.
 //!
-//! # Payload swaps disarm an in-flight press
+//! What opens a new episode is **one predicate**, and it governs every piece
+//! of episode state together — the in-flight `Down` capture, the roving
+//! keyboard focus and the one-decision latch are cleared as a unit, never
+//! separately. An episode is new when the status changes *or* when any
+//! consent-bearing value changes: `title`, `description`, the offered button
+//! set (including [`approve_label`](ApprovalCardView::approve_label)),
+//! [`id`](ApprovalCardView::id), or the detail block's *identity* — its
+//! presence, and the [`content_key`](ApprovalCardView::content_key) the
+//! caller labels it with.
 //!
-//! `title`/`description`/`content`/the offered button set are the thing a
-//! decision is actually consent *for*. `rebuild` treats a change to any of
-//! them as a new episode the same way a status change is: it clears an
-//! in-flight `Down` capture and resets keyboard focus to the safe default, so
-//! a payload swap delivered between `Down` and `Up` disarms the press rather
-//! than letting the release fire against whatever is now displayed (mirrors
-//! [`citations`](super::citations)'s own item-list invalidation).
-//! [`ApprovalCardView::on_action_with_id`] additionally hands the callback the
-//! identity of the review actually shown ([`ApprovalCardView::id`], defaulting
-//! to `title`), so an app juggling more than one open review never has to
-//! assume an action answers whichever one it currently has in mind.
+//! So a payload swap delivered between `Down` and `Up` disarms the press
+//! rather than letting the release fire against whatever is now displayed
+//! (mirrors [`citations`](super::citations)'s own item-list invalidation), and
+//! a fresh review swapped in under an unchanged `Pending` status releases the
+//! latch too, so it is answerable rather than displayed-as-pending but
+//! permanently dead.
+//!
+//! The detail block's *repaints* are deliberately not part of that predicate.
+//! A [`content`](ApprovalCardView::content) child is an arbitrary view — a
+//! streaming response repaints every frame it grows, a theme change repaints
+//! every child there is — and disarming on a bubbled paint or layout flag
+//! would make a press impossible to complete and reset the keyboard cursor on
+//! every one of those frames, while saying nothing about whether the thing
+//! being consented to changed. A caller whose detail block *does* change what
+//! consent means labels it with [`content_key`](ApprovalCardView::content_key)
+//! (a diff hash, a revision, a request id); the card compares that value, not
+//! the child's flags.
+//!
+//! # Correlating an action with the review it answers
+//!
+//! [`ApprovalCardView::on_action_with_id`] hands the callback the identity of
+//! the review actually shown: `Some(id)` when [`ApprovalCardView::id`] was
+//! set, `None` when it was not. There is deliberately **no** derived fallback
+//! — `title` is not an identity (two reviews can share one), and correlating
+//! on a colliding value can route consent granted for one review to another.
+//! **Routing consent without an explicit `id` is unsafe whenever more than
+//! one review can be open**: an app that can have several in flight must set
+//! [`id`](ApprovalCardView::id) per review, and must treat a `None` identity
+//! as "this action cannot be correlated" rather than as a review name.
 //!
 //! # Degradations against the web original
 //!
@@ -81,6 +106,13 @@
 //!   `children` block on its own ramp inside the disclosure; here one reveal
 //!   drives the whole body, so the block arrives with the action row rather
 //!   than slightly before it.
+//! - **The title is bounded, and can never reach the status chip.** `title` is
+//!   agent-supplied, so it is wrapped into a column that reserves the chip's
+//!   box (and the dismiss affordance's, when offered) out of its own, and
+//!   painted under a clip of exactly that column. Agent glyphs therefore
+//!   cannot overdraw the status indicator the decision is read against, and an
+//!   unbreakable run that still overflows paints a trailing `…` cue rather
+//!   than being cut with no sign anything was elided.
 
 use std::rc::Rc;
 
@@ -96,7 +128,7 @@ use frust::authoring::{
 use crate::agents::code_block::{
     code_palette, draw_check, draw_cross, draw_spinner, spinner_angle,
 };
-use crate::agents::tool_approval::{WrappedRun, prose_style, strong_style};
+use crate::agents::tool_approval::{TRUNCATION_MARKER, WrappedRun, prose_style, strong_style};
 use crate::motion::Ramp;
 use crate::press::{Lane, draw_focus_ring, inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
@@ -255,17 +287,20 @@ pub struct ApprovalCardView<State: 'static> {
     title: String,
     description: Option<String>,
     content: Option<AnyView<State>>,
+    /// The caller's label for what the detail block currently shows (see
+    /// [`Self::content_key`]); `None` when the caller gave none.
+    content_key: Option<String>,
     result: Option<String>,
     status: ApprovalCardStatus,
     approve_label: String,
     request_changes: bool,
     reject: bool,
     dismissible: bool,
-    /// An explicit review identity (see [`Self::id`]); empty means "derive
-    /// from `title`".
-    id: String,
+    /// An explicit review identity (see [`Self::id`]). `None` when the caller
+    /// set none — there is no derived fallback.
+    id: Option<String>,
     on_action: Option<OnArg<State, ApprovalCardAction>>,
-    on_action_with_id: Option<OnArg<State, (ApprovalCardAction, String)>>,
+    on_action_with_id: Option<OnArg<State, (ApprovalCardAction, Option<String>)>>,
 }
 
 /// Create an approval card, pending and offering all three decisions.
@@ -277,13 +312,14 @@ pub fn approval_card<State: 'static>() -> ApprovalCardView<State> {
         title: "Approval required".to_owned(),
         description: None,
         content: None,
+        content_key: None,
         result: None,
         status: ApprovalCardStatus::default(),
         approve_label: ApprovalCardAction::Approve.label().to_owned(),
         request_changes: true,
         reject: true,
         dismissible: false,
-        id: String::new(),
+        id: None,
         on_action: None,
         on_action_with_id: None,
     }
@@ -304,8 +340,25 @@ impl<State: 'static> ApprovalCardView<State> {
 
     /// The detail block between the description and the action row
     /// (`children`) — a diff, a code block, a table, anything.
+    ///
+    /// A child's own repaints do **not** disarm the card's press; label the
+    /// block with [`Self::content_key`] when what it shows is part of what a
+    /// decision consents to. See the [module docs](self).
     pub fn content<V: View<State>>(mut self, content: V) -> Self {
         self.content = Some(any(content));
+        self
+    }
+
+    /// The identity of what the detail block currently shows — a diff hash, a
+    /// revision, a request id: anything that changes exactly when the block
+    /// starts meaning something different.
+    ///
+    /// A change to this value opens a new consent episode, the same way a new
+    /// title does. It exists because an arbitrary child view's paint and
+    /// layout flags say nothing about consent (a streaming block sets them
+    /// every frame), so they are not consulted — see the [module docs](self).
+    pub fn content_key(mut self, key: impl Into<String>) -> Self {
+        self.content_key = Some(key.into());
         self
     }
 
@@ -346,12 +399,14 @@ impl<State: 'static> ApprovalCardView<State> {
         self
     }
 
-    /// An explicit identity for this review (defaults to `title` when
-    /// unset). Passed to [`Self::on_action_with_id`] — see the [module
-    /// docs](self)'s "Payload swaps disarm an in-flight press" section for
-    /// why an app juggling more than one open review wants this.
+    /// An explicit identity for this review. Reported to
+    /// [`Self::on_action_with_id`] as `Some(id)`; a card that never sets one
+    /// reports `None`, since nothing else here is unique per review. See the
+    /// [module docs](self)'s "Correlating an action with the review it
+    /// answers" section — an app that can have more than one review open at
+    /// once must set this.
     pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
+        self.id = Some(id.into());
         self
     }
 
@@ -366,15 +421,17 @@ impl<State: 'static> ApprovalCardView<State> {
     }
 
     /// Like [`Self::on_action`], but also reports the identity of the review
-    /// actually shown when the action fired ([`Self::id`], or `title` when no
-    /// explicit id was set) — additive, so an existing `on_action` call site
-    /// keeps compiling unchanged. Both may be set; both fire.
-    pub fn on_action_with_id<F: Fn(&mut State, ApprovalCardAction, String) + 'static>(
+    /// actually shown when the action fired: `Some(id)` when [`Self::id`] was
+    /// set, `None` when it was not — there is no derived fallback, because a
+    /// `None` the caller can see is safer than a colliding one it cannot (see
+    /// the [module docs](self)). Additive, so an existing `on_action` call
+    /// site keeps compiling unchanged. Both may be set; both fire.
+    pub fn on_action_with_id<F: Fn(&mut State, ApprovalCardAction, Option<String>) + 'static>(
         mut self,
         on_action: F,
     ) -> Self {
         self.on_action_with_id = Some(Rc::new(
-            move |state: &mut State, (action, id): (ApprovalCardAction, String)| {
+            move |state: &mut State, (action, id): (ApprovalCardAction, Option<String>)| {
                 on_action(state, action, id);
             },
         ));
@@ -403,8 +460,15 @@ impl<State: 'static> ApprovalCardView<State> {
 
 /// The retained widget for an [`ApprovalCardView`].
 pub struct ApprovalCardWidget {
-    title: LabelRun,
+    /// Wrapped, not free: the title is agent-supplied, so it is bound to
+    /// [`Self::head_column_width`] and clipped to it in paint.
+    title: WrappedRun,
     title_text: String,
+    /// Whether the title overflowed its bounded column and paints the
+    /// truncation cue (see [`WrappedRun::overflowed`]).
+    title_truncated: bool,
+    /// That cue, shaped once.
+    head_marker: LabelRun,
     description: Option<WrappedRun>,
     description_text: Option<String>,
     result: WrappedRun,
@@ -412,6 +476,9 @@ pub struct ApprovalCardWidget {
     chip: LabelRun,
     buttons: Vec<(ApprovalCardAction, LabelRun)>,
     content: Option<ChildPod>,
+    /// The caller's identity for what `content` shows — the only thing about
+    /// the detail block the consent-episode predicate consults.
+    content_key: Option<String>,
     status: ApprovalCardStatus,
     approve_label: String,
     request_changes: bool,
@@ -419,8 +486,9 @@ pub struct ApprovalCardWidget {
     dismissible: bool,
     /// The body disclosure: `1` interactive, `0` collapsed into the outcome.
     reveal: Lane,
-    /// Raised once a decision has been reported for the current interactive
-    /// episode; cleared by any status change.
+    /// Raised once a decision has been reported for the current consent
+    /// episode; cleared with `captured` and `focused` whenever a new episode
+    /// opens (see the [module docs](self)).
     decided: bool,
     width: f64,
     head_height: f64,
@@ -431,13 +499,12 @@ pub struct ApprovalCardWidget {
     focused: ApprovalCardAction,
     hovered: Option<ApprovalCardAction>,
     captured: Option<ApprovalCardAction>,
-    /// The resolved review identity — [`ApprovalCardView::id`] when set,
-    /// otherwise `title`. Handed to an action so the app can tell which
-    /// review it answers even across a payload swap; see the [module
-    /// docs](self).
-    id: String,
+    /// The review identity an action reports: [`ApprovalCardView::id`] when
+    /// the caller set one, `None` otherwise. Never derived from `title` — see
+    /// the [module docs](self)'s correlation section.
+    id: Option<String>,
     on_action: Option<ErasedArgCallback<ApprovalCardAction>>,
-    on_action_with_id: Option<ErasedArgCallback<(ApprovalCardAction, String)>>,
+    on_action_with_id: Option<ErasedArgCallback<(ApprovalCardAction, Option<String>)>>,
 }
 
 /// The buttons a view offers, shaped.
@@ -455,16 +522,6 @@ fn build_buttons<State: 'static>(
             (action, LabelRun::new(label))
         })
         .collect()
-}
-
-/// Resolve the review identity an action reports: `id` when the view set one
-/// explicitly, else `title`.
-fn resolve_id(id: &str, title: &str) -> String {
-    if id.is_empty() {
-        title.to_owned()
-    } else {
-        id.to_owned()
-    }
 }
 
 /// The safe, least-permissive affordance keyboard activation defaults to:
@@ -485,8 +542,10 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ApprovalCardWidget {
         ApprovalCardWidget {
-            title: LabelRun::new(self.title.clone()),
+            title: WrappedRun::new(self.title.clone()),
             title_text: self.title.clone(),
+            title_truncated: false,
+            head_marker: LabelRun::new(TRUNCATION_MARKER),
             description: self.description.as_deref().map(WrappedRun::new),
             description_text: self.description.clone(),
             result: WrappedRun::new(self.result_text()),
@@ -494,6 +553,7 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             chip: LabelRun::new(self.status.label()),
             buttons: build_buttons(self),
             content: self.content.as_ref().map(|view| build_child(view, ctx)),
+            content_key: self.content_key.clone(),
             status: self.status,
             approve_label: self.approve_label.clone(),
             request_changes: self.request_changes,
@@ -517,7 +577,7 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             focused: safe_default_action(self.request_changes, self.reject),
             hovered: None,
             captured: None,
-            id: resolve_id(&self.id, &self.title),
+            id: self.id.clone(),
             on_action: self.on_action.as_ref().map(erase_callback_arg),
             on_action_with_id: self.on_action_with_id.as_ref().map(erase_callback_arg),
         }
@@ -532,27 +592,32 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
         element.on_action = self.on_action.as_ref().map(erase_callback_arg);
         element.on_action_with_id = self.on_action_with_id.as_ref().map(erase_callback_arg);
         let mut flags = ChangeFlags::NONE;
-        // Whether any consent-bearing field (what an action is actually
-        // *for*) changed this rebuild — see the [module docs](self)'s
-        // "Payload swaps disarm an in-flight press" section.
-        let mut content_changed = false;
+        // The one predicate: whether this rebuild opens a new consent episode.
+        // Every consent-bearing value feeds it — compared by value, or by the
+        // caller's own identity for the detail block, never by a child's
+        // paint/layout flags — and it resets `captured`, `focused` and
+        // `decided` together at the end. See the [module docs](self).
+        let mut new_episode = false;
 
         if element.title_text != self.title {
-            element.title = LabelRun::new(self.title.clone());
+            element.title = WrappedRun::new(self.title.clone());
             element.title_text = self.title.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
         if element.description_text != self.description {
             element.description = self.description.as_deref().map(WrappedRun::new);
             element.description_text = self.description.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
-        let next_id = resolve_id(&self.id, &self.title);
-        if element.id != next_id {
-            element.id = next_id;
-            content_changed = true;
+        if element.id != self.id {
+            element.id = self.id.clone();
+            new_episode = true;
+        }
+        if element.content_key != self.content_key {
+            element.content_key = self.content_key.clone();
+            new_episode = true;
         }
         if element.approve_label != self.approve_label
             || element.request_changes != self.request_changes
@@ -563,19 +628,19 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             element.reject = self.reject;
             element.buttons = build_buttons(self);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
         if element.dismissible != self.dismissible {
             element.dismissible = self.dismissible;
-            flags |= ChangeFlags::PAINT;
+            // The dismiss box is reserved out of the head column, so offering
+            // or dropping it re-bounds the title.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if element.status != self.status {
             element.status = self.status;
             element.chip = LabelRun::new(self.status.label());
-            // A new episode: the one-decision latch clears with the status that
-            // raised it.
-            element.decided = false;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            new_episode = true;
         }
         let result = self.result_text();
         if element.result_text != result {
@@ -597,30 +662,35 @@ impl<State: 'static> View<State> for ApprovalCardView<State> {
             element.content.as_mut(),
         ) {
             (Some(before), Some(after), Some(pod)) => {
-                let content_flags = rebuild_child(before, after, pod, ctx);
-                content_changed |= content_flags.needs_paint();
-                flags |= content_flags;
+                // The child's own flags propagate for painting and layout, but
+                // they are not consulted for consent: a streaming detail block
+                // reports PAINT|LAYOUT on every frame it grows, and disarming
+                // on that would make a press impossible to complete. Whether
+                // the block now means something different is the caller's
+                // `content_key`, compared above.
+                flags |= rebuild_child(before, after, pod, ctx);
             }
             (Some(before), None, Some(pod)) => {
                 teardown_child(before, pod, ctx);
                 element.content = None;
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-                content_changed = true;
+                new_episode = true;
             }
             (_, Some(after), None) => {
                 element.content = Some(build_child(after, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-                content_changed = true;
+                new_episode = true;
             }
             _ => {}
         }
-        if content_changed {
-            // A payload swap disarms whatever `Down` armed and re-arms
-            // keyboard focus at the safe default — mirrors citations.rs's
-            // own item-list invalidation. The next `Up` (captured now
-            // `None`) is a no-op regardless of where it lands.
+        if new_episode {
+            // One episode, one reset. Whatever `Down` armed is disarmed (the
+            // next `Up` is a no-op wherever it lands), keyboard focus re-arms
+            // at the safe default, and the one-decision latch is released so
+            // the review now displayed can actually be answered.
             element.captured = None;
             element.focused = safe_default_action(element.request_changes, element.reject);
+            element.decided = false;
             flags |= ChangeFlags::PAINT;
         }
         flags
@@ -664,6 +734,24 @@ impl ApprovalCardWidget {
     /// The content column's left edge, in widget-local space.
     fn column_x(&self) -> f64 {
         APPROVAL_CARD_PADDING + APPROVAL_CARD_GLYPH_BOX + APPROVAL_CARD_GAP
+    }
+
+    /// The status chip's painted width, from the last shaped chip label.
+    fn chip_width(&self) -> f64 {
+        self.chip.size().width + APPROVAL_CARD_CHIP_PADDING_X * 2.0
+    }
+
+    /// The head column's width: the content column with the status chip's box,
+    /// the dismiss affordance's when offered, and the gap before them reserved
+    /// out of it. The title is agent-supplied, so it is shaped *and* clipped
+    /// to this — the chip's space is not the title's to paint into.
+    fn head_column_width(&self) -> f64 {
+        let dismiss = if self.dismissible {
+            APPROVAL_CARD_DISMISS_BOX + style::GAP_MD
+        } else {
+            0.0
+        };
+        (self.column_width() - self.chip_width() - dismiss - style::GAP_MD).max(0.0)
     }
 
     /// How disclosed the body is, `0` collapsed to `1` interactive.
@@ -838,15 +926,23 @@ impl Widget for ApprovalCardWidget {
         self.width = bc.max().width;
         let column = self.column_width();
 
+        // The chip is shaped first because its box is reserved out of the
+        // head column: the title is bounded by what is left, so it cannot be
+        // laid into the status indicator's space in the first place.
+        self.chip
+            .layout(ctx, &strong_style(APPROVAL_CARD_CHIP_SIZE));
+        let title_style = strong_style(APPROVAL_CARD_TITLE_SIZE);
         let title = self
             .title
-            .layout(ctx, &strong_style(APPROVAL_CARD_TITLE_SIZE));
+            .layout(ctx, &title_style, self.head_column_width());
+        self.title_truncated = self.title.overflowed();
+        if self.title_truncated {
+            self.head_marker.layout(ctx, &title_style);
+        }
         self.head_height = title
             .height
             .max(APPROVAL_CARD_TITLE_LINE)
             .max(APPROVAL_CARD_CHIP_HEIGHT);
-        self.chip
-            .layout(ctx, &strong_style(APPROVAL_CARD_CHIP_SIZE));
         for (_, label) in &mut self.buttons {
             label.layout(ctx, &strong_style(style::TEXT_XS));
         }
@@ -1001,15 +1097,31 @@ impl Widget for ApprovalCardWidget {
             scene,
         );
 
+        // The title paints under a clip of exactly its reserved column, so
+        // agent-supplied text can never reach the status chip beside it — and
+        // an unbreakable run that overran the column says so with a trailing
+        // cue rather than being cut in silence.
         let title_size = self.title.size();
-        self.title.paint(
-            Point::new(
-                column_x,
-                origin.y + APPROVAL_CARD_PADDING + (self.head_height - title_size.height) / 2.0,
-            ),
-            palette.plain,
-            scene,
+        let head_column = self.head_column_width();
+        let head_at = Point::new(column_x, origin.y + APPROVAL_CARD_PADDING);
+        scene.push_clip(head_at, Size::new(head_column, self.head_height));
+        let title_at = Point::new(
+            column_x,
+            head_at.y + (self.head_height - title_size.height) / 2.0,
         );
+        self.title.paint(title_at, palette.plain, scene);
+        if self.title_truncated {
+            let marker = self.head_marker.size();
+            self.head_marker.paint(
+                Point::new(
+                    title_at.x + (head_column - marker.width).max(0.0),
+                    title_at.y + (title_size.height - marker.height).max(0.0),
+                ),
+                palette.plain,
+                scene,
+            );
+        }
+        scene.pop_clip();
 
         // ---- the body, under a clip of exactly the disclosed band -------------
         let head_bottom = origin.y + APPROVAL_CARD_PADDING + self.head_height;
@@ -1315,7 +1427,7 @@ mod tests {
         action: Option<ApprovalCardAction>,
         actions: u32,
         dismissals: u32,
-        action_id: Option<(ApprovalCardAction, String)>,
+        action_id: Option<(ApprovalCardAction, Option<String>)>,
         action_id_calls: u32,
     }
 
@@ -1337,10 +1449,12 @@ mod tests {
                     s.dismissals += 1;
                 }
             })
-            .on_action_with_id(|s: &mut Reviewed, action: ApprovalCardAction, id: String| {
-                s.action_id = Some((action, id));
-                s.action_id_calls += 1;
-            })
+            .on_action_with_id(
+                |s: &mut Reviewed, action: ApprovalCardAction, id: Option<String>| {
+                    s.action_id = Some((action, id));
+                    s.action_id_calls += 1;
+                },
+            )
     }
 
     fn build(v: &ApprovalCardView<Reviewed>) -> ApprovalCardWidget {
@@ -1484,7 +1598,11 @@ mod tests {
         let (rec, _, _) = paint_at(&mut w, size, None, 0.0);
         // card, chip, approve fill, request-changes fill (reject is a ghost).
         assert!(rec.rounded.len() >= 4, "filled {} boxes", rec.rounded.len());
-        assert_eq!(rec.clips.len(), 2, "the card clip plus the body clip");
+        assert_eq!(
+            rec.clips.len(),
+            3,
+            "the card clip, the head column's clip and the body clip"
+        );
         assert!(rec.strokes >= 3, "the question glyph, the chip hairline");
         assert!(
             rec.transforms.is_empty(),
@@ -1529,7 +1647,11 @@ mod tests {
         assert!(settled < interactive, "the card never collapsed");
         let (rec, _, still) = paint_at(&mut w, size, None, 5_100.0);
         assert!(!still, "a settled card asks for no more layout");
-        assert_eq!(rec.clips.len(), 2, "the card clip plus the outcome clip");
+        assert_eq!(
+            rec.clips.len(),
+            3,
+            "the card clip, the head column's clip and the outcome clip"
+        );
         assert!(w.button_rect(ApprovalCardAction::Approve).is_none());
     }
 
@@ -1593,7 +1715,7 @@ mod tests {
 
     /// A payload swap delivered between `Down` and `Up` disarms the in-flight
     /// press instead of firing an action against whatever is now displayed —
-    /// the tool-approval bait-and-switch M7 closes.
+    /// the tool-approval bait-and-switch.
     #[test]
     fn a_payload_swap_disarms_an_in_flight_press() {
         let (mut w, size) = laid_out(ApprovalCardStatus::Pending);
@@ -1658,10 +1780,12 @@ mod tests {
                 .id("review-7")
                 .title("Apply these changes?")
                 .status(ApprovalCardStatus::Pending)
-                .on_action_with_id(|s: &mut Reviewed, action: ApprovalCardAction, id: String| {
-                    s.action_id = Some((action, id));
-                    s.action_id_calls += 1;
-                }),
+                .on_action_with_id(
+                    |s: &mut Reviewed, action: ApprovalCardAction, id: Option<String>| {
+                        s.action_id = Some((action, id));
+                        s.action_id_calls += 1;
+                    },
+                ),
         );
         let size = layout(&mut w);
         paint_at(&mut w, size, None, 0.0);
@@ -1670,16 +1794,254 @@ mod tests {
         press(&mut w, size, approve.center(), &mut state);
         assert_eq!(
             state.action_id,
-            Some((ApprovalCardAction::Approve, "review-7".to_owned()))
+            Some((ApprovalCardAction::Approve, Some("review-7".to_owned())))
         );
         assert_eq!(state.action_id_calls, 1);
     }
 
-    /// With no explicit id, an action's identity falls back to `title`.
+    /// With no explicit id there is no identity to report: the callback gets
+    /// `None` rather than the title, which two open reviews can share and so
+    /// cannot correlate consent.
     #[test]
-    fn the_review_id_defaults_to_the_title() {
-        let (w, _) = laid_out(ApprovalCardStatus::Pending);
-        assert_eq!(w.id, "Apply these changes?");
+    fn an_action_without_an_explicit_id_reports_no_identity() {
+        let (mut w, size) = laid_out(ApprovalCardStatus::Pending);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        press(&mut w, size, approve, &mut state);
+        assert_eq!(
+            state.action_id,
+            Some((ApprovalCardAction::Approve, None)),
+            "the title is not an identity"
+        );
+        assert_eq!(state.action_id_calls, 1);
+    }
+
+    /// A fresh review delivered under an unchanged `Pending` status opens a
+    /// new consent episode: the latch the previous answer raised is released,
+    /// so the review now displayed can be answered — exactly once, and the
+    /// action reports the *new* review's identity.
+    #[test]
+    fn a_review_swapped_in_at_the_same_status_can_still_be_answered() {
+        let review = |id: &'static str, title: &'static str| {
+            approval_card::<Reviewed>()
+                .id(id)
+                .title(title)
+                .status(ApprovalCardStatus::Pending)
+                .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
+                    s.action = Some(action);
+                    s.actions += 1;
+                })
+                .on_action_with_id(
+                    |s: &mut Reviewed, action: ApprovalCardAction, id: Option<String>| {
+                        s.action_id = Some((action, id));
+                        s.action_id_calls += 1;
+                    },
+                )
+        };
+
+        let first = review("review-a", "Apply these changes?");
+        let mut w = build(&first);
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        press(&mut w, size, approve, &mut state);
+        assert_eq!(state.actions, 1);
+
+        // The app has not moved the status yet — a queue advancing to its
+        // next review while the answer round-trips.
+        let second = review("review-b", "Apply these OTHER changes?");
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        View::<Reviewed>::rebuild(&second, &first, &mut w, &mut ctx);
+        layout(&mut w);
+        paint_at(&mut w, size, None, 16.0);
+
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        press(&mut w, size, approve, &mut state);
+        assert_eq!(state.actions, 2, "the swapped-in review was answerable");
+        assert_eq!(
+            state.action_id,
+            Some((ApprovalCardAction::Approve, Some("review-b".to_owned()))),
+            "and the action named the review it answered"
+        );
+
+        // Still one decision per episode: the released latch re-armed.
+        press(&mut w, size, approve, &mut state);
+        assert_eq!(state.actions, 2);
+    }
+
+    /// A streaming detail block repaints and relayouts on every frame it
+    /// grows, and none of that is consent-bearing: the press that was armed
+    /// before the stream still completes, and the roving cursor stays where
+    /// the user put it.
+    #[test]
+    fn a_streaming_detail_block_never_disarms_the_card() {
+        let card = |body: &str| {
+            approval_card::<Reviewed>()
+                .title("Apply these changes?")
+                .description("The agent rewrote three files and wants to commit them.")
+                .content(text(body.to_owned()))
+                .status(ApprovalCardStatus::Pending)
+                .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
+                    s.action = Some(action);
+                    s.actions += 1;
+                })
+        };
+        let stream = [
+            "src/lib.rs, src/m",
+            "src/lib.rs, src/main.rs",
+            "src/lib.rs, src/main.rs, READ",
+            "src/lib.rs, src/main.rs, README.md",
+        ];
+
+        // The pointer leg: a press armed before the stream still completes.
+        let mut first = card("src/lib.rs");
+        let mut w = build(&first);
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Down, approve),
+            &mut state,
+        );
+        for (step, body) in stream.iter().enumerate() {
+            let next = card(body);
+            let mut counter = 0u64;
+            let mut ctx = BuildCtx::new(&mut counter);
+            View::<Reviewed>::rebuild(&next, &first, &mut w, &mut ctx);
+            first = next;
+            layout(&mut w);
+            paint_at(&mut w, size, None, 16.0 * (step + 1) as f64);
+        }
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Up, approve),
+            &mut state,
+        );
+        assert_eq!(
+            state.actions, 1,
+            "the press completed across the streaming rebuilds"
+        );
+        assert_eq!(state.action, Some(ApprovalCardAction::Approve));
+
+        // The keyboard leg: the roving cursor the user moved is still there.
+        let mut first = card("src/lib.rs");
+        let mut w = build(&first);
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+        dispatch(&mut w, size, &key(NamedKey::ArrowLeft), &mut state);
+        for body in stream {
+            let next = card(body);
+            let mut counter = 0u64;
+            let mut ctx = BuildCtx::new(&mut counter);
+            View::<Reviewed>::rebuild(&next, &first, &mut w, &mut ctx);
+            first = next;
+            layout(&mut w);
+            paint_at(&mut w, size, None, 16.0);
+        }
+        dispatch(&mut w, size, &key(NamedKey::Enter), &mut state);
+        assert_eq!(
+            state.action,
+            Some(ApprovalCardAction::RequestChanges),
+            "the cursor was reset to the safe default mid-stream"
+        );
+    }
+
+    /// A detail block the caller labels *is* consent-bearing: a changed
+    /// `content_key` opens a new episode and disarms an in-flight press, the
+    /// same way a changed title does.
+    #[test]
+    fn a_changed_content_key_disarms_an_in_flight_press() {
+        let card = |key: &'static str| {
+            approval_card::<Reviewed>()
+                .title("Apply these changes?")
+                .content(text("src/lib.rs"))
+                .content_key(key)
+                .status(ApprovalCardStatus::Pending)
+                .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
+                    s.action = Some(action);
+                    s.actions += 1;
+                })
+        };
+        let first = card("diff-rev-1");
+        let mut w = build(&first);
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Reviewed::default();
+        let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Down, approve),
+            &mut state,
+        );
+
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        View::<Reviewed>::rebuild(&card("diff-rev-2"), &first, &mut w, &mut ctx);
+        layout(&mut w);
+        paint_at(&mut w, size, None, 16.0);
+
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Up, approve),
+            &mut state,
+        );
+        assert_eq!(
+            state.actions, 0,
+            "the release fired against a detail block that had changed"
+        );
+    }
+
+    /// Agent-supplied title text is bounded by a column that reserves the
+    /// status chip's and the dismiss affordance's boxes, painted under a clip
+    /// of exactly that column, and marks its own overflow — so it can neither
+    /// deface the status indicator nor be cut in silence.
+    #[test]
+    fn a_long_title_is_bounded_away_from_the_chip_and_marks_the_cut() {
+        let mut short = build(
+            &approval_card::<Reviewed>()
+                .title("Apply these changes?")
+                .dismissible(true),
+        );
+        let short_size = layout(&mut short);
+        let (short_rec, _, _) = paint_at(&mut short, short_size, None, 0.0);
+
+        // One unbreakable token, so the run overflows its bound rather than
+        // wrapping — the case a clip would otherwise swallow in silence.
+        let overlong = format!("Apply{}", "a".repeat(300));
+        let mut long = build(
+            &approval_card::<Reviewed>()
+                .title(overlong)
+                .dismissible(true),
+        );
+        let long_size = layout(&mut long);
+        let (long_rec, _, _) = paint_at(&mut long, long_size, None, 0.0);
+
+        let chip = long_rec
+            .rounded
+            .iter()
+            .find(|(_, s, _)| s.height == APPROVAL_CARD_CHIP_HEIGHT)
+            .expect("the status chip painted");
+        let (head_at, head_size) = long_rec.clips[1];
+        assert!(
+            head_at.x + head_size.width <= chip.0.x,
+            "the head column ({head_at:?} + {head_size:?}) reaches the chip at {:?}",
+            chip.0
+        );
+        assert!(
+            long_rec.inks.len() > short_rec.inks.len(),
+            "the cut title painted an extra glyph run for the marker"
+        );
     }
 
     /// Keyboard activation with no explicit selection lands on the safe,

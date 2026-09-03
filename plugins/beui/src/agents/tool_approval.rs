@@ -17,31 +17,46 @@
 //! | `AnimatePresence` around the pending action row | one lane on [`TOOL_APPROVAL_ACTIONS_ENTER`] / [`TOOL_APPROVAL_ACTIONS_EXIT`] |
 //! | `Allow once` / `Always allow` / `Deny` | [`ToolApprovalDecision`] |
 //!
-//! # One decision per pending episode
+//! # One decision per consent episode, on one predicate
 //!
 //! The three buttons are the whole point of the component, so the firing rule
 //! is stated rather than left to the press machinery: a decision fires
-//! **exactly once** per pending episode. The press itself is up-inside like
+//! **exactly once** per consent episode. The press itself is up-inside like
 //! every control in this catalog, and on top of that the widget latches that a
-//! decision has been reported and refuses the next one until the app moves the
-//! status off `Pending` — which is what it is expected to do in the handler.
-//! The latch clears on any status change, so a caller that goes
-//! `Pending → Approving → Error → Pending` gets a fresh decision each time.
+//! decision has been reported and refuses the next one until a new episode
+//! opens.
 //!
-//! # Payload swaps disarm an in-flight press
+//! What opens a new episode is **one predicate**, and it governs every piece
+//! of episode state together — the in-flight `Down` capture, the roving
+//! keyboard focus and the one-decision latch are cleared as a unit, never
+//! separately. An episode is new when the status changes *or* when any
+//! consent-bearing value changes: `tool`, `title`, `description`,
+//! `parameters`, [`id`](ToolApprovalView::id), or the offered button set
+//! ([`always_allow`](ToolApprovalView::always_allow)) — everything
+//! agent/server-supplied that a decision is actually consent *for*.
 //!
-//! `tool`/`title`/`description`/`parameters` are agent/server-supplied — the
-//! content a decision is actually consent *for*. `rebuild` treats any change
-//! to one of them as a new episode the same way a status change is: it clears
-//! an in-flight `Down` capture and resets keyboard focus to the safe default,
-//! so a payload swap delivered between `Down` and `Up` disarms the press
-//! rather than letting the release fire against whatever is now displayed
-//! (mirrors [`citations`](super::citations)'s own item-list invalidation).
-//! [`ToolApprovalView::on_decision_with_id`] additionally hands the decision
-//! callback the identity of the request actually shown ([`ToolApprovalView::id`],
-//! defaulting to `tool`), so an app juggling more than one pending request
-//! never has to assume a decision answers whichever one it currently has in
-//! mind.
+//! Both halves follow from that single rule. A payload swap delivered between
+//! `Down` and `Up` disarms the press rather than letting the release fire
+//! against whatever is now displayed (mirrors
+//! [`citations`](super::citations)'s own item-list invalidation). And a fresh
+//! request swapped in under an unchanged `Pending` status — an app advancing
+//! a queue without cycling the status through a non-pending value — releases
+//! the latch too, so it is answerable rather than displayed-as-pending but
+//! permanently dead.
+//!
+//! # Correlating a decision with the request it answers
+//!
+//! [`ToolApprovalView::on_decision_with_id`] hands the decision callback the
+//! identity of the request actually shown: `Some(id)` when
+//! [`ToolApprovalView::id`] was set, `None` when it was not. There is
+//! deliberately **no** derived fallback — `tool` is not an identity (two
+//! concurrent `shell.exec` approvals would report the same string), and
+//! correlating on a colliding value can route consent granted for one call to
+//! another. **Routing consent without an explicit `id` is unsafe whenever
+//! more than one request can be open**: an app that can have several in
+//! flight must set [`id`](ToolApprovalView::id) per request, and must treat a
+//! `None` identity as "this decision cannot be correlated" rather than as a
+//! request name.
 //!
 //! The action row itself is staged by a lane carrying **two** ramps
 //! ([`TOOL_APPROVAL_ACTIONS_ENTER`] in, the faster
@@ -63,8 +78,17 @@
 //!   (`whitespace-pre-wrap break-words`, deliberately, since a narrow grid
 //!   column has nowhere to scroll on touch), so this matches — but a very long
 //!   single token is clipped rather than broken mid-word. The clip is never
-//!   silent: an overflowing value paints a trailing `…` cue rather than
-//!   eliding consent-bearing content with no sign anything was cut.
+//!   silent: an overflowing parameter *label* or *value* paints a trailing `…`
+//!   cue rather than eliding consent-bearing content with no sign anything was
+//!   cut.
+//! - **Head text is bounded, and can never reach the status chip.** `title`
+//!   and `tool` are agent/server-supplied too, so they are wrapped into a
+//!   column that reserves the chip's width out of its own
+//!   ([`ToolApprovalWidget`]'s head column) and painted under a clip of
+//!   exactly that column. Agent glyphs therefore cannot overdraw — or deface —
+//!   the `Approval required`/`Failed` indicator the decision is read against,
+//!   and an unbreakable run that still overflows paints the same trailing `…`
+//!   cue the parameter rows do.
 //! - **The `open` disclosure is controlled.** Upstream keeps an internal
 //!   `defaultOpen` and closes itself when the status leaves `pending`; this port
 //!   reports the requested value and lets the app decide, the catalog's rule.
@@ -322,10 +346,17 @@ impl WrappedRun {
 
     /// Whether the last shaped layout overflowed its `max_width` — an
     /// unbreakable run with no space to wrap on. A caller that clips this run
-    /// (the parameter panel) should paint a visible truncation cue instead of
-    /// silently cutting it off, since the value is consent-bearing content.
+    /// (the head column, the parameter panel) should paint a visible
+    /// truncation cue instead of silently cutting it off, since the run is
+    /// consent-bearing content.
     pub(crate) fn overflowed(&self) -> bool {
         self.overflowed
+    }
+
+    /// The measured size of the last shaped layout (`ZERO` before the first
+    /// [`layout`](Self::layout)).
+    pub(crate) fn size(&self) -> Size {
+        self.layout.as_ref().map_or(Size::ZERO, TextLayout::size)
     }
 
     /// Paint the run at `origin` in `color`, overriding the shaping ink.
@@ -367,11 +398,11 @@ pub struct ToolApprovalView<State: 'static> {
     status: ToolApprovalStatus,
     open: bool,
     always_allow: bool,
-    /// An explicit request identity (see [`Self::id`]); empty means "derive
-    /// from `tool`".
-    id: String,
+    /// An explicit request identity (see [`Self::id`]). `None` when the
+    /// caller set none — there is no derived fallback.
+    id: Option<String>,
     on_decision: Option<OnArg<State, ToolApprovalDecision>>,
-    on_decision_with_id: Option<OnArg<State, (ToolApprovalDecision, String)>>,
+    on_decision_with_id: Option<OnArg<State, (ToolApprovalDecision, Option<String>)>>,
     on_open_change: Option<OnArg<State, bool>>,
 }
 
@@ -388,7 +419,7 @@ pub fn tool_approval<State: 'static>(tool: impl Into<String>) -> ToolApprovalVie
         status: ToolApprovalStatus::default(),
         open: false,
         always_allow: true,
-        id: String::new(),
+        id: None,
         on_decision: None,
         on_decision_with_id: None,
         on_open_change: None,
@@ -432,12 +463,14 @@ impl<State: 'static> ToolApprovalView<State> {
         self
     }
 
-    /// An explicit identity for this request (defaults to `tool` when
-    /// unset). Passed to [`Self::on_decision_with_id`] — see the [module
-    /// docs](self)'s "Payload swaps disarm an in-flight press" section for
-    /// why an app juggling more than one pending request wants this.
+    /// An explicit identity for this request. Reported to
+    /// [`Self::on_decision_with_id`] as `Some(id)`; a card that never sets one
+    /// reports `None`, since nothing else here is unique per request. See the
+    /// [module docs](self)'s "Correlating a decision with the request it
+    /// answers" section — an app that can have more than one request open at
+    /// once must set this.
     pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
+        self.id = Some(id.into());
         self
     }
 
@@ -452,16 +485,20 @@ impl<State: 'static> ToolApprovalView<State> {
     }
 
     /// Like [`Self::on_decision`], but also reports the identity of the
-    /// request actually shown when the decision fired ([`Self::id`], or
-    /// `tool` when no explicit id was set) — additive, so an existing
-    /// `on_decision` call site keeps compiling unchanged. Both may be set;
-    /// both fire.
-    pub fn on_decision_with_id<F: Fn(&mut State, ToolApprovalDecision, String) + 'static>(
+    /// request actually shown when the decision fired: `Some(id)` when
+    /// [`Self::id`] was set, `None` when it was not — there is no derived
+    /// fallback, because a `None` the caller can see is safer than a
+    /// colliding one it cannot (see the [module docs](self)). Additive, so an
+    /// existing `on_decision` call site keeps compiling unchanged. Both may be
+    /// set; both fire.
+    pub fn on_decision_with_id<
+        F: Fn(&mut State, ToolApprovalDecision, Option<String>) + 'static,
+    >(
         mut self,
         on_decision: F,
     ) -> Self {
         self.on_decision_with_id = Some(Rc::new(
-            move |state: &mut State, (decision, id): (ToolApprovalDecision, String)| {
+            move |state: &mut State, (decision, id): (ToolApprovalDecision, Option<String>)| {
                 on_decision(state, decision, id);
             },
         ));
@@ -485,8 +522,10 @@ impl<State: 'static> ToolApprovalView<State> {
     }
 }
 
-/// The truncation cue glyph a clipped parameter value paints (`…`).
-const TRUNCATION_MARKER: char = '\u{2026}';
+/// The truncation cue glyph a clipped consent-bearing run paints (`…`) —
+/// shared with the sibling [approval card](super::approval_card), which
+/// bounds its own head text the same way.
+pub(crate) const TRUNCATION_MARKER: char = '\u{2026}';
 
 /// One retained parameter row.
 struct ParamRuns {
@@ -496,8 +535,15 @@ struct ParamRuns {
     /// Whether `value`'s last shaped layout overflowed its column (see
     /// [`WrappedRun::overflowed`]) — the row paints `marker` when set.
     truncated: bool,
-    /// The truncation cue, laid out once and painted only when `truncated`.
+    /// The same, for the narrower label column: a parameter's *name* is
+    /// consent-bearing too, so its cut is marked rather than silent.
+    label_truncated: bool,
+    /// The value column's truncation cue, laid out once and painted only when
+    /// `truncated`.
     marker: LabelRun,
+    /// The label column's truncation cue — its own run because the two
+    /// columns are shaped in different styles.
+    label_marker: LabelRun,
 }
 
 /// Which affordance the roving cursor sits on.
@@ -511,10 +557,19 @@ enum ApprovalTarget {
 
 /// The retained widget for a [`ToolApprovalView`].
 pub struct ToolApprovalWidget {
-    tool: LabelRun,
+    /// Wrapped, not free: the head runs are agent-supplied, so they are bound
+    /// to [`Self::head_column_width`] and clipped to it in paint.
+    tool: WrappedRun,
     tool_text: String,
-    title: LabelRun,
+    title: WrappedRun,
     title_text: String,
+    /// Whether the head runs overflowed their bounded column and paint the
+    /// truncation cue (see [`WrappedRun::overflowed`]).
+    title_truncated: bool,
+    tool_truncated: bool,
+    /// The head column's truncation cue, shared by both head runs — only one
+    /// of them is painted per line, and both shape in the same cue glyph.
+    head_marker: LabelRun,
     description: Option<WrappedRun>,
     description_text: Option<String>,
     details_label: LabelRun,
@@ -525,17 +580,17 @@ pub struct ToolApprovalWidget {
     status: ToolApprovalStatus,
     open: bool,
     always_allow: bool,
-    /// The resolved request identity — [`ToolApprovalView::id`] when set,
-    /// otherwise `tool`. Handed to a decision so the app can tell which
-    /// request it answers even across a payload swap; see the [module
-    /// docs](self).
-    id: String,
+    /// The request identity a decision reports: [`ToolApprovalView::id`] when
+    /// the caller set one, `None` otherwise. Never derived from `tool` — see
+    /// the [module docs](self)'s correlation section.
+    id: Option<String>,
     /// The parameter disclosure.
     reveal: Lane,
     /// The action row's enter/exit staging, on its two ramps.
     actions: Lane,
-    /// Raised once a decision has been reported for the current pending
-    /// episode; cleared by any status change.
+    /// Raised once a decision has been reported for the current consent
+    /// episode; cleared with `captured` and `focused` whenever a new episode
+    /// opens (see the [module docs](self)).
     decided: bool,
     width: f64,
     /// The measured heights the last layout pass resolved.
@@ -547,7 +602,7 @@ pub struct ToolApprovalWidget {
     hovered: Option<ApprovalTarget>,
     captured: Option<ApprovalTarget>,
     on_decision: Option<ErasedArgCallback<ToolApprovalDecision>>,
-    on_decision_with_id: Option<ErasedArgCallback<(ToolApprovalDecision, String)>>,
+    on_decision_with_id: Option<ErasedArgCallback<(ToolApprovalDecision, Option<String>)>>,
     on_open_change: Option<ErasedArgCallback<bool>>,
 }
 
@@ -556,10 +611,13 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ToolApprovalWidget {
         ToolApprovalWidget {
-            tool: LabelRun::new(self.tool.clone()),
+            tool: WrappedRun::new(self.tool.clone()),
             tool_text: self.tool.clone(),
-            title: LabelRun::new(self.title.clone()),
+            title: WrappedRun::new(self.title.clone()),
             title_text: self.title.clone(),
+            title_truncated: false,
+            tool_truncated: false,
+            head_marker: LabelRun::new(TRUNCATION_MARKER),
             description: self.description.as_deref().map(WrappedRun::new),
             description_text: self.description.clone(),
             details_label: LabelRun::new("View details"),
@@ -574,7 +632,7 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
             status: self.status,
             open: self.open,
             always_allow: self.always_allow,
-            id: resolve_id(&self.id, &self.tool),
+            id: self.id.clone(),
             reveal: Lane::at_rest(TOOL_APPROVAL_REVEAL, if self.open { 1.0 } else { 0.0 }),
             // Rests where it is built: an already-pending card shows its row
             // without playing an entrance.
@@ -610,39 +668,39 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
         element.on_decision_with_id = self.on_decision_with_id.as_ref().map(erase_callback_arg);
         element.on_open_change = self.on_open_change.as_ref().map(erase_callback_arg);
         let mut flags = ChangeFlags::NONE;
-        // Whether any consent-bearing field (what a decision is actually
-        // *for*) changed this rebuild — see the [module docs](self)'s
-        // "Payload swaps disarm an in-flight press" section.
-        let mut content_changed = false;
+        // The one predicate: whether this rebuild opens a new consent episode.
+        // Every consent-bearing value feeds it, the status included, and it
+        // resets `captured`, `focused` and `decided` together at the end —
+        // see the [module docs](self).
+        let mut new_episode = false;
 
         if element.tool_text != self.tool {
-            element.tool = LabelRun::new(self.tool.clone());
+            element.tool = WrappedRun::new(self.tool.clone());
             element.tool_text = self.tool.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
         if element.title_text != self.title {
-            element.title = LabelRun::new(self.title.clone());
+            element.title = WrappedRun::new(self.title.clone());
             element.title_text = self.title.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
         if element.description_text != self.description {
             element.description = self.description.as_deref().map(WrappedRun::new);
             element.description_text = self.description.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
         if element.parameters != self.parameters {
             element.params = build_params(&self.parameters);
             element.parameters = self.parameters.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            content_changed = true;
+            new_episode = true;
         }
-        let next_id = resolve_id(&self.id, &self.tool);
-        if element.id != next_id {
-            element.id = next_id;
-            content_changed = true;
+        if element.id != self.id {
+            element.id = self.id.clone();
+            new_episode = true;
         }
         if element.always_allow != self.always_allow {
             element.always_allow = self.always_allow;
@@ -651,25 +709,15 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
                 .into_iter()
                 .map(|decision| (decision, LabelRun::new(decision.label())))
                 .collect();
-            // The button set changed shape; the safe default holds here too.
-            element.focused = ApprovalTarget::Decision(ToolApprovalDecision::Deny);
+            // What the buttons grant changed, so this is a new episode by the
+            // same rule a swapped payload is — an in-flight press is disarmed
+            // rather than released against a set it was not aimed at.
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        if content_changed {
-            // A payload swap disarms whatever `Down` armed and re-arms
-            // keyboard focus at the safe default — mirrors citations.rs's
-            // own item-list invalidation. The next `Up` (captured now
-            // `None`) is a no-op regardless of where it lands.
-            element.captured = None;
-            element.focused = ApprovalTarget::Decision(ToolApprovalDecision::Deny);
-            flags |= ChangeFlags::PAINT;
+            new_episode = true;
         }
         if element.status != self.status {
             element.status = self.status;
             element.chip = LabelRun::new(self.status.label());
-            // A new episode: the one-decision latch clears with the status that
-            // raised it.
-            element.decided = false;
             if self.status.is_pending() {
                 element
                     .actions
@@ -680,6 +728,17 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
                     .retarget_with(TOOL_APPROVAL_ACTIONS_EXIT, 0.0);
             }
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            new_episode = true;
+        }
+        if new_episode {
+            // One episode, one reset. Whatever `Down` armed is disarmed (the
+            // next `Up` is a no-op wherever it lands), keyboard focus re-arms
+            // at the safe default, and the one-decision latch is released so
+            // the request now displayed can actually be answered.
+            element.captured = None;
+            element.focused = ApprovalTarget::Decision(ToolApprovalDecision::Deny);
+            element.decided = false;
+            flags |= ChangeFlags::PAINT;
         }
         if element.open != self.open {
             element.open = self.open;
@@ -694,16 +753,6 @@ impl<State: 'static> View<State> for ToolApprovalView<State> {
     }
 }
 
-/// Resolve the request identity a decision reports: `id` when the view set
-/// one explicitly, else `tool`.
-fn resolve_id(id: &str, tool: &str) -> String {
-    if id.is_empty() {
-        tool.to_owned()
-    } else {
-        id.to_owned()
-    }
-}
-
 /// Build the shape-cache carriers for every parameter row.
 fn build_params(parameters: &[ToolApprovalParameter]) -> Vec<ParamRuns> {
     parameters
@@ -713,7 +762,9 @@ fn build_params(parameters: &[ToolApprovalParameter]) -> Vec<ParamRuns> {
             value: WrappedRun::new(parameter.value.clone()),
             height: 0.0,
             truncated: false,
+            label_truncated: false,
             marker: LabelRun::new(TRUNCATION_MARKER),
+            label_marker: LabelRun::new(TRUNCATION_MARKER),
         })
         .collect()
 }
@@ -761,6 +812,41 @@ impl ToolApprovalWidget {
     /// The content column's left edge, in widget-local space.
     fn column_x(&self) -> f64 {
         TOOL_APPROVAL_PADDING + TOOL_APPROVAL_BADGE_BOX + TOOL_APPROVAL_GAP
+    }
+
+    /// The status chip's painted width, from the last shaped chip label.
+    fn chip_width(&self) -> f64 {
+        self.chip.size().width + TOOL_APPROVAL_CHIP_PADDING_X * 2.0
+    }
+
+    /// The head column's width: the content column with the status chip's own
+    /// box and the gap before it reserved out of it. Head text is
+    /// agent-supplied, so it is shaped *and* clipped to this — the chip's
+    /// space is not the head's to paint into.
+    fn head_column_width(&self) -> f64 {
+        (self.column_width() - self.chip_width() - style::GAP_MD).max(0.0)
+    }
+
+    /// Paint the head column's truncation cue at the right edge of `run`'s
+    /// last line — the visible sign that consent-bearing head text was cut,
+    /// the same contract a clipped parameter row carries.
+    fn paint_head_marker(
+        &self,
+        scene: &mut dyn PaintScene,
+        at: Point,
+        run: Size,
+        column: f64,
+        ink: Color,
+    ) {
+        let marker = self.head_marker.size();
+        self.head_marker.paint(
+            Point::new(
+                at.x + (column - marker.width).max(0.0),
+                at.y + (run.height - marker.height).max(0.0),
+            ),
+            ink,
+            scene,
+        );
     }
 
     /// Whether the details disclosure exists at all.
@@ -980,14 +1066,24 @@ impl Widget for ToolApprovalWidget {
         self.width = bc.max().width;
         let column = self.column_width();
 
-        let title_size = self
-            .title
-            .layout(ctx, &strong_style(TOOL_APPROVAL_TITLE_SIZE));
-        let tool_size = self.tool.layout(ctx, &code_style(CODE_TEXT_SIZE));
-        self.title_height = (title_size.height + tool_size.height + style::spacing(0.5))
-            .max(TOOL_APPROVAL_BADGE_BOX);
+        // The chip is shaped first because its box is reserved out of the head
+        // column: the head is bounded by what is left, so it cannot be laid
+        // into the status indicator's space in the first place.
         self.chip
             .layout(ctx, &strong_style(TOOL_APPROVAL_CHIP_SIZE));
+        let head_column = self.head_column_width();
+        let title_style = strong_style(TOOL_APPROVAL_TITLE_SIZE);
+        let title_size = self.title.layout(ctx, &title_style, head_column);
+        self.title_truncated = self.title.overflowed();
+        let tool_size = self
+            .tool
+            .layout(ctx, &code_style(CODE_TEXT_SIZE), head_column);
+        self.tool_truncated = self.tool.overflowed();
+        if self.title_truncated || self.tool_truncated {
+            self.head_marker.layout(ctx, &title_style);
+        }
+        self.title_height = (title_size.height + tool_size.height + style::spacing(0.5))
+            .max(TOOL_APPROVAL_BADGE_BOX);
         self.details_label
             .layout(ctx, &strong_style(style::TEXT_XS));
 
@@ -1007,6 +1103,10 @@ impl Widget for ToolApprovalWidget {
             let label = row
                 .label
                 .layout(ctx, &label_style, TOOL_APPROVAL_LABEL_COLUMN);
+            row.label_truncated = row.label.overflowed();
+            if row.label_truncated {
+                row.label_marker.layout(ctx, &label_style);
+            }
             let value = row.value.layout(ctx, &value_style, value_width);
             row.truncated = row.value.overflowed();
             if row.truncated {
@@ -1145,20 +1245,33 @@ impl Widget for ToolApprovalWidget {
             scene,
         );
 
+        // The head runs paint under a clip of exactly their reserved column,
+        // so agent-supplied text can never reach the status chip painted just
+        // above — and an unbreakable run that overran the column says so with
+        // the same cue a clipped parameter carries.
+        let head_column = self.head_column_width();
+        let head_at = Point::new(column_x, origin.y + TOOL_APPROVAL_PADDING);
+        scene.push_clip(head_at, Size::new(head_column, self.title_height));
         let title_size = self.title.size();
-        self.title.paint(
-            Point::new(column_x, origin.y + TOOL_APPROVAL_PADDING),
-            palette.plain,
-            scene,
+        self.title.paint(head_at, palette.plain, scene);
+        let tool_at = Point::new(
+            column_x,
+            head_at.y + title_size.height + style::spacing(0.5),
         );
-        self.tool.paint(
-            Point::new(
-                column_x,
-                origin.y + TOOL_APPROVAL_PADDING + title_size.height + style::spacing(0.5),
-            ),
-            palette.comment,
-            scene,
-        );
+        self.tool.paint(tool_at, palette.comment, scene);
+        if self.title_truncated {
+            self.paint_head_marker(scene, head_at, title_size, head_column, palette.plain);
+        }
+        if self.tool_truncated {
+            self.paint_head_marker(
+                scene,
+                tool_at,
+                self.tool.size(),
+                head_column,
+                palette.comment,
+            );
+        }
+        scene.pop_clip();
 
         let mut y = origin.y + TOOL_APPROVAL_PADDING + self.title_height;
         if let Some(description) = &self.description {
@@ -1235,6 +1348,20 @@ impl Widget for ToolApprovalWidget {
                     palette.plain,
                     scene,
                 );
+                if row.label_truncated {
+                    // A parameter's name is consent-bearing too, so its own
+                    // cut is marked at the label column's right edge.
+                    let marker_size = row.label_marker.size();
+                    row.label_marker.paint(
+                        Point::new(
+                            at.x + TOOL_APPROVAL_PANEL_PADDING + TOOL_APPROVAL_LABEL_COLUMN
+                                - marker_size.width,
+                            row_y,
+                        ),
+                        palette.comment,
+                        scene,
+                    );
+                }
                 if row.truncated {
                     // The value's own unbreakable run overran the column and
                     // the panel clip above cuts it off — this is
@@ -1519,7 +1646,7 @@ mod tests {
     struct Answered {
         decision: Option<ToolApprovalDecision>,
         decisions: u32,
-        decision_id: Option<(ToolApprovalDecision, String)>,
+        decision_id: Option<(ToolApprovalDecision, Option<String>)>,
         decision_id_calls: u32,
         open: Option<bool>,
         open_calls: u32,
@@ -1548,7 +1675,7 @@ mod tests {
                 s.decisions += 1;
             })
             .on_decision_with_id(
-                |s: &mut Answered, decision: ToolApprovalDecision, id: String| {
+                |s: &mut Answered, decision: ToolApprovalDecision, id: Option<String>| {
                     s.decision_id = Some((decision, id));
                     s.decision_id_calls += 1;
                 },
@@ -1703,7 +1830,11 @@ mod tests {
             rec.strokes >= 4,
             "card, badge and chip hairlines plus glyphs"
         );
-        assert_eq!(rec.clips.len(), 2, "the card clip plus the action-row clip");
+        assert_eq!(
+            rec.clips.len(),
+            3,
+            "the card clip, the head column's clip and the action-row clip"
+        );
         assert_eq!(rec.transforms.len(), 1, "only the details chevron");
         // title, tool, chip, description, details label, three button labels.
         assert!(rec.inks.len() >= 8, "painted {} runs", rec.inks.len());
@@ -1813,7 +1944,7 @@ mod tests {
 
     /// A payload swap delivered between `Down` and `Up` disarms the in-flight
     /// press instead of firing a decision against whatever is now displayed —
-    /// the tool-approval bait-and-switch M7 closes.
+    /// the tool-approval bait-and-switch.
     #[test]
     fn a_payload_swap_disarms_an_in_flight_press() {
         let (mut w, size) = laid_out(ToolApprovalStatus::Pending, false);
@@ -1877,7 +2008,7 @@ mod tests {
                 .title("Allow this tool to run?")
                 .status(ToolApprovalStatus::Pending)
                 .on_decision_with_id(
-                    |s: &mut Answered, decision: ToolApprovalDecision, id: String| {
+                    |s: &mut Answered, decision: ToolApprovalDecision, id: Option<String>| {
                         s.decision_id = Some((decision, id));
                         s.decision_id_calls += 1;
                     },
@@ -1890,16 +2021,200 @@ mod tests {
         press(&mut w, size, allow.center(), &mut state);
         assert_eq!(
             state.decision_id,
-            Some((ToolApprovalDecision::AllowOnce, "req-42".to_owned()))
+            Some((ToolApprovalDecision::AllowOnce, Some("req-42".to_owned())))
         );
         assert_eq!(state.decision_id_calls, 1);
     }
 
-    /// With no explicit id, a decision's identity falls back to `tool`.
+    /// With no explicit id there is no identity to report: the callback gets
+    /// `None` rather than the tool name, which is shared by every call to the
+    /// same tool and so cannot correlate consent.
     #[test]
-    fn the_request_id_defaults_to_the_tool_name() {
-        let (w, _) = laid_out(ToolApprovalStatus::Pending, false);
-        assert_eq!(w.id, "shell.exec");
+    fn a_decision_without_an_explicit_id_reports_no_identity() {
+        let (mut w, size) = laid_out(ToolApprovalStatus::Pending, false);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Answered::default();
+        let allow = w
+            .button_rect(ToolApprovalDecision::AllowOnce)
+            .unwrap()
+            .center();
+        press(&mut w, size, allow, &mut state);
+        assert_eq!(
+            state.decision_id,
+            Some((ToolApprovalDecision::AllowOnce, None)),
+            "the tool name is not an identity"
+        );
+        assert_eq!(state.decision_id_calls, 1);
+    }
+
+    /// A fresh request delivered under an unchanged `Pending` status opens a
+    /// new consent episode: the latch the previous answer raised is released,
+    /// so the request now displayed can be answered — exactly once, and the
+    /// decision reports the *new* request's identity.
+    #[test]
+    fn a_request_swapped_in_at_the_same_status_can_still_be_answered() {
+        let request = |id: &'static str, tool: &'static str| {
+            tool_approval::<Answered>(tool)
+                .id(id)
+                .title("Allow this tool to run?")
+                .status(ToolApprovalStatus::Pending)
+                .on_decision(|s: &mut Answered, decision: ToolApprovalDecision| {
+                    s.decision = Some(decision);
+                    s.decisions += 1;
+                })
+                .on_decision_with_id(
+                    |s: &mut Answered, decision: ToolApprovalDecision, id: Option<String>| {
+                        s.decision_id = Some((decision, id));
+                        s.decision_id_calls += 1;
+                    },
+                )
+        };
+
+        let first = request("req-a", "shell.exec");
+        let mut w = build(&first);
+        let size = layout(&mut w);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Answered::default();
+
+        let allow = w
+            .button_rect(ToolApprovalDecision::AllowOnce)
+            .unwrap()
+            .center();
+        press(&mut w, size, allow, &mut state);
+        assert_eq!(state.decisions, 1);
+
+        // The app has not moved the status yet — a queue advancing to its
+        // next request while the answer round-trips.
+        let second = request("req-b", "net.fetch");
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        View::<Answered>::rebuild(&second, &first, &mut w, &mut ctx);
+        layout(&mut w);
+        paint_at(&mut w, size, None, 16.0);
+
+        let allow = w
+            .button_rect(ToolApprovalDecision::AllowOnce)
+            .unwrap()
+            .center();
+        press(&mut w, size, allow, &mut state);
+        assert_eq!(state.decisions, 2, "the swapped-in request was answerable");
+        assert_eq!(
+            state.decision_id,
+            Some((ToolApprovalDecision::AllowOnce, Some("req-b".to_owned()))),
+            "and the decision named the request it answered"
+        );
+
+        // Still one decision per episode: the released latch re-armed.
+        press(&mut w, size, allow, &mut state);
+        assert_eq!(state.decisions, 2);
+    }
+
+    /// Changing what the buttons would grant is a new episode too: an
+    /// in-flight press is disarmed rather than released against a set it was
+    /// never aimed at.
+    #[test]
+    fn changing_the_offered_buttons_disarms_an_in_flight_press() {
+        let (mut w, size) = laid_out(ToolApprovalStatus::Pending, false);
+        paint_at(&mut w, size, None, 0.0);
+        let mut state = Answered::default();
+        let allow = w
+            .button_rect(ToolApprovalDecision::AllowOnce)
+            .unwrap()
+            .center();
+        dispatch(
+            &mut w,
+            size,
+            &pointer(PointerPhase::Down, allow),
+            &mut state,
+        );
+
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        View::<Answered>::rebuild(
+            &view(ToolApprovalStatus::Pending, false).always_allow(false),
+            &view(ToolApprovalStatus::Pending, false),
+            &mut w,
+            &mut ctx,
+        );
+        layout(&mut w);
+        paint_at(&mut w, size, None, 16.0);
+
+        dispatch(&mut w, size, &pointer(PointerPhase::Up, allow), &mut state);
+        assert_eq!(
+            state.decisions, 0,
+            "the release fired nothing after the offered set changed"
+        );
+    }
+
+    /// Agent-supplied head text is bounded by a column that reserves the
+    /// status chip's box, painted under a clip of exactly that column, and
+    /// marks its own overflow — so it can neither deface the status indicator
+    /// nor be cut in silence.
+    #[test]
+    fn a_long_title_is_bounded_away_from_the_chip_and_marks_the_cut() {
+        let mut short = build(
+            &tool_approval::<Answered>("shell.exec")
+                .title("Read config.yaml?")
+                .status(ToolApprovalStatus::Pending),
+        );
+        let short_size = layout(&mut short);
+        let (short_rec, _, _) = paint_at(&mut short, short_size, None, 0.0);
+
+        // One unbreakable token, so the run overflows its bound rather than
+        // wrapping — the case a clip would otherwise swallow in silence.
+        let overlong = format!("Read{}", "a".repeat(300));
+        let mut long = build(
+            &tool_approval::<Answered>("shell.exec")
+                .title(overlong)
+                .status(ToolApprovalStatus::Pending),
+        );
+        let long_size = layout(&mut long);
+        let (long_rec, _, _) = paint_at(&mut long, long_size, None, 0.0);
+
+        let chip = long_rec
+            .rounded
+            .iter()
+            .find(|(_, s, _)| s.height == TOOL_APPROVAL_CHIP_HEIGHT)
+            .expect("the status chip painted");
+        let (head_at, head_size) = long_rec.clips[1];
+        assert!(
+            head_at.x + head_size.width <= chip.0.x,
+            "the head column ({head_at:?} + {head_size:?}) reaches the chip at {:?}",
+            chip.0
+        );
+        assert!(
+            long_rec.inks.len() > short_rec.inks.len(),
+            "the cut head painted an extra glyph run for the marker"
+        );
+    }
+
+    /// A parameter's *name* is consent-bearing too: an unbreakable label wider
+    /// than its column paints the same truncation cue the value does.
+    #[test]
+    fn a_clipped_parameter_label_paints_the_truncation_marker() {
+        let mut short = build(
+            &tool_approval::<Answered>("shell.exec")
+                .parameters(vec![tool_approval_parameter("cwd", "/tmp")])
+                .status(ToolApprovalStatus::Pending)
+                .open(true),
+        );
+        let short_size = layout(&mut short);
+        let (short_rec, _, _) = paint_at(&mut short, short_size, None, 0.0);
+
+        let long_label = "cwd".repeat(80);
+        let mut long = build(
+            &tool_approval::<Answered>("shell.exec")
+                .parameters(vec![tool_approval_parameter(long_label, "/tmp")])
+                .status(ToolApprovalStatus::Pending)
+                .open(true),
+        );
+        let long_size = layout(&mut long);
+        let (long_rec, _, _) = paint_at(&mut long, long_size, None, 0.0);
+
+        assert!(
+            long_rec.inks.len() > short_rec.inks.len(),
+            "the truncated label painted an extra glyph run for the marker"
+        );
     }
 
     /// Keyboard activation with no explicit selection lands on the safe,
@@ -2017,7 +2332,11 @@ mod tests {
         assert_eq!(w.reveal.value(), 1.0);
         assert!(w.params_natural() > 0.0, "the panel has real rows");
         let (rec, _, _) = paint_at(&mut w, size, None, 6_000.0);
-        assert_eq!(rec.clips.len(), 3, "card, parameter panel, action row");
+        assert_eq!(
+            rec.clips.len(),
+            4,
+            "card, head column, parameter panel, action row"
+        );
     }
 
     /// A press on *View details* reports the disclosure it wants and never
