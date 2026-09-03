@@ -975,7 +975,9 @@ impl Widget for AgentActivityWidget {
         let size = ctx.size();
         let expanded = self.is_expanded();
         self.aim_reveal(expanded, reduce_motion);
-        let mut owes_layout = self.reveal.advance(now);
+        let before = self.reveal.value();
+        let moving = self.reveal.advance(now);
+        let mut owes_layout = moving || self.reveal.value() != before;
         let mut owes_frame = false;
 
         if self.is_working() {

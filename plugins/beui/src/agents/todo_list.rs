@@ -999,7 +999,9 @@ impl Widget for TodoListWidget {
         let open = self.is_open();
         self.aim_reveal(open, reduce_motion);
 
-        let mut owes_layout = self.reveal.advance(now);
+        let before = self.reveal.value();
+        let moving = self.reveal.advance(now);
+        let mut owes_layout = moving || self.reveal.value() != before;
         if reduce_motion {
             self.roll.snap();
             self.header_mark.snap();
