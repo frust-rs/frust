@@ -630,14 +630,15 @@ pub mod authoring {
 ///    already right; an id whose pass has not bound anything yet simply draws
 ///    nothing that frame, never an error.
 /// 4. **Unregister on teardown** with [`unregister_external_pass`] — in
-///    `Widget::teardown` (or `on_cleanup` for a `Component`), never a
-///    hand-rolled `Drop` (`docs/CODE_STANDARDS.md`'s State & Reactivity
-///    rule: `Drop` order across a component's state/element/owner triple is
-///    not a contract, `on_cleanup`/`teardown` are). The next *drained* frame
-///    clears the engine's binding for that id before it runs any pass, so no
-///    view is kept alive for a texture whose owner is gone — though
-///    unregistering is not itself a barrier: a drain already mid-flight when
-///    it runs may still call this pass's `record` once more, and the unbind
+///    `View::teardown` (a component's `ComponentWidget::teardown`) or
+///    `on_cleanup` for reactive state, never a hand-rolled `Drop`
+///    (`docs/CODE_STANDARDS.md`'s State & Reactivity rule: `Drop` order
+///    across a component's state/element/owner triple is not a contract,
+///    `on_cleanup`/`teardown` are). The next *drained* frame clears the
+///    engine's binding for that id before it runs any pass, so no view is
+///    kept alive for a texture whose owner is gone — though unregistering is
+///    not itself a barrier: a drain already mid-flight when it runs may still
+///    call this pass's `record` once more, and the unbind
 ///    lands only once a frame is actually drained, not while the surface is
 ///    idle.
 ///

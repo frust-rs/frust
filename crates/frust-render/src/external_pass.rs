@@ -57,14 +57,21 @@
 //! *accepted* frame composites whatever view was bound, whether or not the
 //! work that was meant to fill it ever ran.
 //!
+//! On a hand-over (one pass unregisters and a successor registers under the
+//! same id before the drain finishes), the queued unbind is NOT cancelled:
+//! it runs at the next drain before any pass, so an id between owners draws
+//! nothing until its new owner binds a view.
+//!
 //! # Lifetime of a registration
 //!
 //! A pass persists until [`unregister_external_pass`] takes it: the registry
 //! is iterated every frame, never drained. Unregistering queues the id for an
 //! `unbind_texture` the next drain performs *before* it runs any pass, so the
 //! engine never keeps a view alive for an id whose owner is gone. Registering
-//! the same id again before that flush cancels the queued unbind — the id has
-//! an owner again, and the incoming pass binds whatever it wants.
+//! the same id again before that flush does NOT cancel the queued unbind —
+//! the id has an owner again, and the incoming pass binds whatever it wants,
+//! but an id between owners draws nothing until its new owner records a
+//! binding.
 //!
 //! Unregistering is not a barrier. It removes the pass from the registry
 //! under the lock, but a drain that already snapshotted the pass before that
@@ -82,12 +89,14 @@
 //! # A panicking pass does not take the frame down
 //!
 //! `record` is called inside `catch_unwind`. A pass that panics is reported
-//! (`warn!` on the first panic of an id, `debug!` afterwards) and, *if* the
-//! id it panicked under still names the same pass (nothing else registered
-//! under it in the meantime — a pass handing its id to a successor inside
-//! its own `record` before panicking leaves that successor alone), removed
-//! from the registry and queued for the same unbind an explicit
-//! unregistration queues. Either way the frame goes on to record the scene.
+//! (`warn!` on the first panic under an id with a given Arc identity, `debug!`
+//! afterwards) and, *if* the id it panicked under still names the same pass
+//! (nothing else registered under it in the meantime — a pass handing its id
+//! to a successor inside its own `record` before panicking leaves that
+//! successor alone), removed from the registry and queued for the same unbind
+//! an explicit unregistration queues. If a successor already holds the id, the
+//! panic is still reported as a debug message saying the predecessor panicked
+//! after handing over. Either way the frame goes on to record the scene.
 //! This is the same no-panic posture the engine holds on the FFI boundary.
 //! It is a debug/dev net rather than a promise: the workspace's `release`
 //! profile is `panic = "abort"`, where the process is gone before any guard
@@ -108,7 +117,7 @@
 //! caller wants), but a queued unbind is consumed by whichever surface drains
 //! first. One engine-tier surface per process is what every shell does today.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -138,9 +147,13 @@ pub trait ExternalPass: Send + Sync {
     /// Record passes and staged uploads only — never a submit, and never a
     /// `wgpu::RenderPass` left open across the return (see
     /// `frust_gpu::encoder`'s borrowing contract, which the frame's encoder
-    /// is under for exactly the same reason). Bind whatever this frame should
-    /// composite through [`ExternalFrame::bind_texture`]; the engine draws it
-    /// wherever the frame's display list names the id.
+    /// is under for exactly the same reason). The shared encoder must be left
+    /// finishable on every exit path: no open render pass AND balanced
+    /// `push_debug_group`/`pop_debug_group` calls (an unbalanced group makes
+    /// `encoder.finish()` fail with wgpu's MissingPop and loses the frame;
+    /// the pass is retired so it self-heals next frame). Bind whatever this
+    /// frame should composite through [`ExternalFrame::bind_texture`]; the
+    /// engine draws it wherever the frame's display list names the id.
     fn record(&self, frame: &mut ExternalFrame<'_>);
 }
 
@@ -283,6 +296,13 @@ struct Registration {
     pass: Arc<dyn ExternalPass>,
 }
 
+/// A panic-report slot for one pass, alongside the identity of the pass that
+/// panicked: store the Arc's address as a usize to recognize when the same
+/// pass panics again versus when a fresh pass with a different id panics.
+struct PanicReport {
+    identity: usize,
+}
+
 /// The process-wide registry: the live passes, the ids awaiting an unbind,
 /// and which ids have already had a panic or a reserved-namespace refusal
 /// reported.
@@ -293,16 +313,17 @@ struct Registry {
     /// only with the number of *distinct* ids queued since the last drain,
     /// never with how many times any one of them is queued.
     pending_unbind: BTreeMap<u64, SceneTextureId>,
-    /// Ids a panic has already been reported at `warn!` for, so a pass
-    /// re-registered into a reproducing panic reports at `debug!` instead of
-    /// once per registration. Cleared for an id on its next successful
-    /// registration, so a fresh pass's first panic is a fresh `warn!` too.
-    reported_panics: BTreeSet<u64>,
-    /// Ids a reserved-namespace registration attempt has already been
-    /// reported at `warn!` for, for the same reason `reported_panics` exists
-    /// — a caller retrying the same doomed registration every frame reports
-    /// at `debug!` after the first.
-    reported_reserved: BTreeSet<u64>,
+    /// Ids a panic has already been reported at `warn!` for, alongside the
+    /// identity (Arc pointer) of the pass that panicked. If the same pass id
+    /// panics again with the same Arc, it reports at `debug!` instead of
+    /// `warn!`. If a different Arc binds to the same id, the warn-once flag
+    /// is cleared and the new pass's first panic is a fresh `warn!` too.
+    reported_panics: BTreeMap<u64, PanicReport>,
+    /// Flag for whether a reserved-namespace registration attempt has already
+    /// been reported at `warn!` level. Warn once process-wide (the refusal
+    /// reason is identical for every id), then report at `debug!` for any
+    /// further attempts.
+    reported_reserved: bool,
 }
 
 impl Registry {
@@ -310,8 +331,8 @@ impl Registry {
         Self {
             passes: BTreeMap::new(),
             pending_unbind: BTreeMap::new(),
-            reported_panics: BTreeSet::new(),
-            reported_reserved: BTreeSet::new(),
+            reported_panics: BTreeMap::new(),
+            reported_reserved: false,
         }
     }
 }
@@ -355,8 +376,15 @@ fn registry() -> MutexGuard<'static, Registry> {
 pub fn register_external_pass(id: SceneTextureId, pass: Arc<dyn ExternalPass>) -> bool {
     let raw = id.get();
     if id.is_shader_program() {
-        let mut registry = registry();
-        if registry.reported_reserved.insert(raw) {
+        let should_warn = {
+            let mut registry = registry();
+            let should_warn = !registry.reported_reserved;
+            if should_warn {
+                registry.reported_reserved = true;
+            }
+            should_warn
+        };
+        if should_warn {
             log::warn!(
                 "external pass registration for scene texture {raw} refused: the id is inside \
                  the reserved shader-program namespace (further attempts at this id are logged \
@@ -370,12 +398,22 @@ pub fn register_external_pass(id: SceneTextureId, pass: Arc<dyn ExternalPass>) -
         }
         return false;
     }
-    let mut registry = registry();
-    if registry.passes.contains_key(&raw) {
-        return false;
+    let pass_identity = Arc::as_ptr(&pass) as *const () as usize;
+    let should_clear_panic_flag = {
+        let registry = registry();
+        if registry.passes.contains_key(&raw) {
+            return false;
+        }
+        registry
+            .reported_panics
+            .get(&raw)
+            .is_some_and(|report| report.identity != pass_identity)
+    };
+    if should_clear_panic_flag {
+        let mut registry = registry();
+        registry.reported_panics.remove(&raw);
     }
-    registry.pending_unbind.remove(&raw);
-    registry.reported_panics.remove(&raw);
+    let mut registry = registry();
     registry.passes.insert(raw, Registration { id, pass });
     true
 }
@@ -470,22 +508,49 @@ pub fn run_external_passes(
 /// when the identity check confirms nothing has taken the id over since.
 fn drop_panicking_pass(id: SceneTextureId, pass: &Arc<dyn ExternalPass>) {
     let raw = id.get();
-    let mut registry = registry();
-    let still_registered = registry
-        .passes
-        .get(&raw)
-        .is_some_and(|registration| Arc::ptr_eq(&registration.pass, pass));
-    if still_registered {
-        registry.passes.remove(&raw);
-        registry.pending_unbind.insert(raw, id);
-    }
-    if registry.reported_panics.insert(raw) {
+    let pass_identity = Arc::as_ptr(pass) as *const () as usize;
+
+    let (still_registered, should_warn, was_different_pass) = {
+        let mut registry = registry();
+        let registration = registry.passes.get(&raw);
+        let still_registered = registration.is_some_and(|r| Arc::ptr_eq(&r.pass, pass));
+
+        let should_warn = registry
+            .reported_panics
+            .get(&raw)
+            .is_none_or(|report| report.identity != pass_identity);
+
+        let was_different_pass = registration.is_some_and(|r| !Arc::ptr_eq(&r.pass, pass));
+
+        if still_registered {
+            registry.passes.remove(&raw);
+            registry.pending_unbind.insert(raw, id);
+        }
+
+        if should_warn {
+            registry.reported_panics.insert(
+                raw,
+                PanicReport {
+                    identity: pass_identity,
+                },
+            );
+        }
+
+        (still_registered, should_warn, was_different_pass)
+    };
+
+    if was_different_pass && !still_registered {
+        log::debug!(
+            "external pass for scene texture {raw} panicked after handing over; \
+             the successor stays registered"
+        );
+    } else if still_registered && should_warn {
         log::warn!(
             "external pass for scene texture {raw} panicked and was unregistered; \
              the frame was recorded without it (further panics of this id are \
              logged at debug level)"
         );
-    } else {
+    } else if still_registered {
         log::debug!("external pass for scene texture {raw} panicked and was unregistered");
     }
 }
@@ -555,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn re_registering_before_the_drain_cancels_the_queued_unbind() {
+    fn re_registering_before_the_drain_queues_an_unbind_first() {
         let _serial = serial();
         let id = SceneTextureId::mint();
 
@@ -564,8 +629,8 @@ mod tests {
         assert!(register_external_pass(id, Arc::new(Inert)));
         assert_eq!(
             state(id),
-            (true, false),
-            "the id has an owner again, so nothing is unbound out from under it"
+            (true, true),
+            "handing an id over leaves a queued unbind (the id draws nothing until the new owner binds)"
         );
 
         assert!(unregister_external_pass(id));
@@ -614,15 +679,39 @@ mod tests {
 
         assert_eq!(
             state(id),
-            (true, false),
-            "the successor is left registered, and nothing was queued for unbind on its behalf"
+            (true, true),
+            "the successor is left registered, and the queued unbind from the hand-over persists"
+        );
+
+        assert!(unregister_external_pass(id));
+        registry().pending_unbind.remove(&id.get());
+    }
+
+    #[test]
+    fn a_fresh_registration_with_a_different_arc_clears_the_reported_panic_flag() {
+        let _serial = serial();
+        let id = SceneTextureId::mint();
+        let pass1: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&pass1)));
+
+        drop_panicking_pass(id, &pass1);
+        assert!(
+            registry().reported_panics.contains_key(&id.get()),
+            "the first panic of this id is recorded as already reported"
+        );
+
+        let pass2: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&pass2)));
+        assert!(
+            !registry().reported_panics.contains_key(&id.get()),
+            "registering a different Arc clears the flag, so a new pass's first panic warns again"
         );
 
         assert!(unregister_external_pass(id));
     }
 
     #[test]
-    fn a_fresh_registration_clears_the_reported_panic_flag() {
+    fn re_registering_the_same_arc_keeps_the_reported_panic_flag() {
         let _serial = serial();
         let id = SceneTextureId::mint();
         let pass: Arc<dyn ExternalPass> = Arc::new(Inert);
@@ -630,14 +719,42 @@ mod tests {
 
         drop_panicking_pass(id, &pass);
         assert!(
-            registry().reported_panics.contains(&id.get()),
-            "the first panic of this id is recorded as already reported"
+            registry().reported_panics.contains_key(&id.get()),
+            "the first panic is recorded"
         );
 
-        assert!(register_external_pass(id, Arc::new(Inert)));
+        // The panic removed the pass and queued an unbind; clean that up before re-registering
+        registry().pending_unbind.remove(&id.get());
+
+        // Re-register the same Arc: the panic flag stays since it's the same identity
+        assert!(register_external_pass(id, Arc::clone(&pass)));
         assert!(
-            !registry().reported_panics.contains(&id.get()),
-            "a fresh registration clears the flag, so a new pass's first panic warns again"
+            registry().reported_panics.contains_key(&id.get()),
+            "re-registering the same Arc keeps the panic flag (no warn on next panic)"
+        );
+
+        assert!(unregister_external_pass(id));
+    }
+
+    #[test]
+    fn panicking_pass_with_successor_already_registered_logs_debug() {
+        let _serial = serial();
+        let id = SceneTextureId::mint();
+        let original: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&original)));
+
+        // Hand over: unregister original, register successor
+        assert!(unregister_external_pass(id));
+        let successor: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&successor)));
+
+        // Original panics after handing over - successor stays registered
+        drop_panicking_pass(id, &original);
+
+        assert_eq!(
+            state(id),
+            (true, true),
+            "the successor is left registered and the queued unbind from the hand-over remains"
         );
 
         assert!(unregister_external_pass(id));
