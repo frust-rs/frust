@@ -76,10 +76,19 @@ pub struct TextureId(pub u64);
 pub struct SceneTextureId(u64);
 
 impl SceneTextureId {
-    /// Mints a fresh, process-unique id. Crate-private: the only place a
-    /// counted [`SceneTextureId`] comes from is [`Texture::new`], which stores
-    /// the minted value once and shares it across `Clone`.
-    pub(crate) fn mint() -> Self {
+    /// Mints a fresh, process-unique id.
+    ///
+    /// [`Texture::new`] mints one per texture and shares it across `Clone`,
+    /// and that stays the ordinary route. This is public for the caller that
+    /// has no [`Texture`] to mint from: a texture rendered *externally* — one
+    /// whose `wgpu::TextureView` its owner creates, re-creates and binds
+    /// itself every frame — still needs one stable id to be named by across
+    /// those re-creations, and minting here is what hands it one out of the
+    /// same process-wide counter. The shader-program id space stays reserved
+    /// against every such mint by construction (see
+    /// [`Self::for_shader_program`]).
+    #[must_use]
+    pub fn mint() -> Self {
         Self(NEXT_SCENE_TEXTURE_ID.fetch_add(1, Ordering::Relaxed))
     }
 
@@ -110,7 +119,8 @@ impl SceneTextureId {
     /// reason: the scene layer carries an externally owned texture as a plain
     /// `u64` so it depends on no GPU crate, and a caller that registered a
     /// [`Texture`] needs some way to say which one a display-list command
-    /// means. Minting stays private — this only reads back what was minted.
+    /// means. This only reads back what [`Self::mint`] handed out; it never
+    /// mints.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0

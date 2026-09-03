@@ -599,11 +599,106 @@ pub mod authoring {
 /// let adapter_name = frust::gpu::with_context(|handle| handle.caps.adapter_name.clone());
 /// assert!(adapter_name.is_none());
 /// ```
+///
+/// # Rendering your own texture every frame: [`ExternalPass`]
+///
+/// Everything above binds a texture whose *pixels* something else already
+/// produced. A caller whose pixels are produced by GPU work of its own — a 3D
+/// scene, a simulation, a video frame converted on the GPU — needs that work
+/// recorded inside the frame that samples it, and needs it recorded every
+/// frame. That is [`ExternalPass`]: implement it, register it under an id,
+/// and the engine tier's renderer calls it once per frame with the frame's
+/// own device, queue and `wgpu::CommandEncoder` ([`ExternalFrame`]) before
+/// anything of the scene is recorded.
+///
+/// The four steps a widget owning such a texture takes:
+///
+/// 1. **Mint an id**, once, and keep it: [`SceneTextureId::mint`] when the
+///    widget has no [`Texture`] to mint from (the usual case here — the pass
+///    creates and re-creates its own target), or
+///    [`Texture::as_scene_texture`] when it does. One id survives every
+///    re-creation of the underlying texture, which is what lets the display
+///    list keep naming the same thing across a resize.
+/// 2. **Register a pass** under it with [`register_external_pass`], handing
+///    over an `Arc<dyn ExternalPass>`. It answers `false` if that id already
+///    has a pass, and changes nothing — a registration is a claim, never a
+///    silent takeover.
+/// 3. **Paint the id.** In `Widget::paint`, record
+///    [`authoring::scene::SceneBuilder::scene_texture`] with
+///    `id.get()` and the destination rectangle. The pass's binding and the
+///    display list naming it meet inside one frame, so the ordering is
+///    already right; an id whose pass has not bound anything yet simply draws
+///    nothing that frame, never an error.
+/// 4. **Unregister on drop** with [`unregister_external_pass`]. The next
+///    frame clears the engine's binding for that id before it runs any pass,
+///    so no view is kept alive for a texture whose owner is gone.
+///
+/// A widget whose texture is *animating* asks for the next frame exactly as
+/// any other animating widget does — `PaintCtx::request_frame` (or
+/// `request_frame_paced` for a decorative loop). A pass is called once per
+/// frame the app actually renders; it does not drive the frame loop, and
+/// registering one does not by itself keep frames coming.
+///
+/// ```text
+/// struct Starfield { target: Mutex<Option<wgpu::Texture>> }
+///
+/// impl frust::gpu::ExternalPass for Starfield {
+///     fn record(&self, frame: &mut frust::gpu::ExternalFrame<'_>) {
+///         let texture = self.ensure_target(frame.device());   // my own target
+///         let view = texture.create_view(&Default::default());
+///         {
+///             let mut pass = frame.encoder().begin_render_pass(&/* … */);
+///             // … draw into `view` …
+///         }                                                    // pass ends here
+///         frame.bind_texture(self.id, (WIDTH, HEIGHT), view);  // engine draws it
+///     }
+/// }
+/// ```
+///
+/// Three rules that go with it:
+///
+/// - **A pass renders into its own target, never into the frame's.** The
+///   engine clears the frame's colour attachment when it records the scene,
+///   so pixels a pass wrote there are gone; what survives is what the scene
+///   composites from a bound texture. A pass also never submits — the
+///   renderer submits the whole frame, once, which is what puts the pass's
+///   work ahead of the scene's in a single command buffer.
+/// - **Touching the frame's depth attachment means owing
+///   `frust-gpu::encoder`'s two caller rules** — the module [`CommandBuffer`]
+///   comes from, and where they are stated in full: exactly one renderer clears the shared
+///   depth buffer and it is whichever records first, and the comparison,
+///   direction and extent have to agree with the engine's
+///   (`LessEqual`, `Depth24Plus`, far plane `1.0`, extent equal to the
+///   colour attachment's).
+/// - **The result is always composited blended**, never treated as opaque:
+///   the engine does not read the caller's texels, so it cannot know they are
+///   (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`). Return
+///   premultiplied colour, the convention every paint in an engine frame
+///   travels in.
+///
+/// The registry itself is shell-agnostic — a process-wide map with no device,
+/// window or platform in it, registerable from anywhere at any time — but it
+/// is drained on the engine tier's frame path, so a pass records where an
+/// engine-tier surface is presenting frames and nowhere else. That is the
+/// desktop shell today, for the same reason [`with_context`] answers `None`
+/// on mobile: registration there is accepted and simply never called.
+///
+/// A panic inside `record` is caught in a debug build: the pass is reported,
+/// unregistered and unbound, and the frame is recorded without it. The
+/// workspace's `release` profile is `panic = "abort"`, so that is a
+/// development net rather than a shipped guarantee — a pass must not panic.
 #[cfg(feature = "gpu")]
 pub mod gpu {
     pub use frust_gpu::{
         CommandBuffer, DeviceHandle, RenderContext as Context, RenderPipelineDesc, RenderTarget,
         SceneTextureId, ShaderLibrary, Texture, TextureDesc,
+    };
+    /// The pre-scene pass seam (see the module docs' *Rendering your own
+    /// texture every frame*), from the renderer that owns the frame the
+    /// passes are recorded into rather than from `frust-gpu`: the registry is
+    /// process-wide, but only an engine-tier frame drains it.
+    pub use frust_render::{
+        ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
     };
 
     /// Run `f` against the shell-owned live [`DeviceHandle`], or `None` if no
