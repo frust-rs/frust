@@ -22,6 +22,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how RENDER relates to the other units
 | `frust-render::renderer` | `SurfaceRenderer` drives per-frame encode/present on a dedicated render thread by default; `DeferredPresent` lets iOS present inside a platform-view transaction |
 | `frust-render::tier` | `engine_support` checks a real adapter's downlevel flags against `ENGINE_REQUIRED_DOWNLEVEL_FLAGS` (deliberately empty) and refuses one that cannot run the engine — the only renderer this crate contains, so there is no tier to select between |
 | `frust-render::headless` | `HeadlessRenderer`, an offscreen `frust-engine` renderer for goldens/oracles: env-aware adapter resolution (`WGPU_ADAPTER_NAME`/`WGPU_BACKEND`), an expect-adapter/expect-backend fail-fast before any pixel is produced, row-padded readback, and the same capability gate the live surface path resolves |
+| `frust-render::external_pass` | The reachable half of the GPU Seam (see below): a process-wide registry of caller-supplied `ExternalPass`es, each handed the live frame's device/queue/encoder (`ExternalFrame`) once per frame, ahead of the scene pass and its shader-quad pre-pass, into the same encoder the scene then records into; drained only by `SurfaceRenderer::submit_impl` on the engine tier, never by `HeadlessRenderer` |
 | `frust-text::context` | `TextContext` owns Parley's font context and a shape cache; `register_fonts` hot-swaps app fonts and invalidates it |
 | `frust-text::layout` | `TextLayout` is a finished, measurable shaped block converting to `frust_scene` `GlyphRun`s |
 | `frust-text::style` | `TextStyle` and related types form the styling vocabulary (the M3 type-scale surface) |
@@ -99,9 +100,10 @@ and everything downstream of them is a plain-value decision.
 
 The facade's non-default `gpu` feature (see [ARCHITECTURE.md](ARCHITECTURE.md)) re-exports the
 GPU-substrate vocabulary flat as `frust::gpu` (`Context`/`Texture`/`TextureDesc`/`RenderTarget`/
-`SceneTextureId`/`CommandBuffer`/`ShaderLibrary`/`RenderPipelineDesc`/`DeviceHandle`) so an app, or a
-future 3D-rendering crate sitting beside the facade, can reach the render engine's texture seam
-without a direct `frust-render`/`frust-gpu` dependency. `frust::gpu::with_context` reads back the
+`SceneTextureId`/`CommandBuffer`/`ShaderLibrary`/`RenderPipelineDesc`/`DeviceHandle`, plus
+`ExternalPass`/`ExternalFrame`/`register_external_pass`/`unregister_external_pass`, see below) so an
+app, or a future 3D-rendering crate sitting beside the facade, can reach the render engine's texture
+seam without a direct `frust-render`/`frust-gpu` dependency. `frust::gpu::with_context` reads back the
 shell's own live `DeviceHandle` through `frust-shell-common`'s process-wide install-once slot (see
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) rather than creating a second device; it answers
 `None` until a shell has published one.
@@ -113,6 +115,18 @@ the caller's texels to know. 3D content belongs in a **separate crate** built ov
 encoder, shared depth, `SceneTexture`), not inside `frust-engine` itself — the shape Flutter settled
 on after removing Impeller Scene in favour of a standalone `flutter_scene` over Flutter GPU.
 
+`register_external_pass`/`unregister_external_pass` (`frust-render::external_pass`) are that
+separate-crate seam made reachable today, not just theorized: a process-wide registry of
+caller-supplied `ExternalPass`es, each handed the live frame's device/queue/encoder (`ExternalFrame`)
+once per frame, ahead of the engine's own scene pass and its shader-quad pre-pass, into the very
+`wgpu::CommandEncoder` the scene then records into and the renderer submits once — reachable from a
+crate depending on `frust` alone (the `gpu` feature), with no direct `frust-render`/`frust-gpu` edge.
+A pass renders into its own target, never the frame's — the frame's unconditional colour clear never
+touches it — and binds that target under a `SceneTextureId` (`ExternalFrame::bind_texture`) for a
+`Command::SceneTexture` naming the same id to composite. A pass sharing the frame's depth attachment
+owes the two caller rules above like any other; its output is composited blended like every external
+texture (`engine-scene-texture-always-blended` in LIMITATIONS.md).
+
 ## Layer Dependencies
 
 Both crates depend on `frust-scene` (CORE) for the `Scene`/`Command`/`GlyphRun` types — the stable
@@ -123,14 +137,19 @@ every build of this crate carries both; `frust-text` depends on `parley`. `kurbo
 the geometry/color vocabulary shared across both crates' public APIs and `frust-scene`'s.
 `frust-render` also depends on `android_system_properties` on Android.
 
-`frust-render` confines every `wgpu` type behind its own API except two deliberate seams:
+`frust-render` confines every `wgpu` type behind its own API except three deliberate seams:
 `SurfaceRenderer::on_surface_created` and `SurfaceFactory::create_detached_surface` (the latter
 `frust-gpu`'s, re-exported here) each take a raw `wgpu::SurfaceTarget` (the render-thread split's
-surface-creation entry points — a shell must hand over a window either way). Beyond those two, the
-only two opaque wgpu wrappers that ever leave the crate are `DetachedSurface` and `DeferredPresent`,
-used for cross-thread/cross-transaction handoff — a bare `wgpu::Surface` or `wgpu::Device` never
-does. `DeviceHandle` is a third, but stays behind this crate's own `gpu` feature rather than the
-unconditional re-export, so a default build gains no new public symbol from it (see GPU Seam above).
+surface-creation entry points — a shell must hand over a window either way); `external_pass`'s
+`ExternalFrame` is the third, and the one that points outward rather than in — it hands a
+caller-registered `ExternalPass` the frame's own `wgpu::Device`/`Queue`/`CommandEncoder` so a pass can
+record its own work into the same encoder ahead of the scene (see GPU Seam above), unconditional in
+this crate's public API regardless of the `gpu` feature below. Beyond those three, the only two
+opaque wgpu wrappers that ever leave the crate are `DetachedSurface` and `DeferredPresent`, used for
+cross-thread/cross-transaction handoff — a bare `wgpu::Surface` or `wgpu::Device` never does.
+`DeviceHandle` is a fourth named exception, but stays behind this crate's own `gpu` feature rather
+than the unconditional re-export, so a default build gains no new public symbol from it (see GPU Seam
+above).
 `frust-text` mirrors this: `parley` never appears outside `TextContext`/`TextStyle`/
 `TextLayout`, and `TextEditor` is the sole owner of UTF-16↔byte index conversion — everything else
 in the crate works in byte offsets.

@@ -3954,3 +3954,69 @@ own Simulator execution is outstanding.
 
 **Trigger for removal**: the three suites run to completion on the Simulator (Mac rig) and the
 result is recorded in `benchmarks/RESULTS.md` or the raw README.
+
+### `facade-external-pass-desktop-only` — an `ExternalPass` has only ever run against a headless target, on desktop
+
+**Observed** (evidence: `crates/frust-render/src/renderer.rs`'s `submit_impl`, both
+`RenderPath::EngineDirect` and `RenderPath::EngineDirectUnpremultiply` arms call
+`external_pass::run_external_passes` immediately before `shader_quads.prepare`, into the same frame
+encoder; `crates/frust-render/tests/external_pass.rs`'s two `#[ignore]` GPU cases drive that identical
+drain→encode→submit sequence directly — against a `HeadlessTarget`, not a real swapchain — run on an
+NVIDIA T400 4GB/Vulkan adapter on 2026-09-03: a pass-rendered 64×64 solid target composited at its
+registered destination with the base colour intact outside it, and unregistering it stopped the draw
+the next frame): the registry itself is shell-agnostic (a process-wide map with no device, window, or
+platform in it), but a registered pass is only ever recorded where `SurfaceRenderer::submit_impl`
+drains it — no windowed run (desktop or otherwise) has exercised a pass yet, only the headless target
+above. Both mobile shells forward the facade's `gpu` feature (`crates/frust-shell-android/Cargo.toml`,
+`crates/frust-shell-ios/Cargo.toml`: `gpu = ["frust-shell-common/gpu", "frust-render/gpu"]`) and so
+compile the seam, but neither has driven a registered pass through its own frame loop. `HeadlessRenderer`
+never drains the registry at all (see the module docs). Output is always blended, never opaque
+(`engine-scene-texture-always-blended` above) — the same rule an unproven mobile pass would still be
+under.
+
+**Accepted because**: the seam's first and only exercised host is the engine-tier frame path itself,
+proven headless; a real window and a mobile shell need no new code in the registry, only a run.
+
+**Trigger for removal**: a windowed desktop run and a mobile-shell run (Pixel 5 / iPhone), each
+registering and driving a real `ExternalPass` through its own frame loop.
+
+### `external-pass-panic-isolation-dev-only` — a panicking `ExternalPass` is only isolated in a build that unwinds
+
+**Observed** (evidence: root `Cargo.toml`'s `[profile.release]` sets `panic = "abort"` (also recorded
+in `docs/DEVELOPMENT.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
+`run_external_passes` wraps each pass's `record` call in `catch_unwind`, reporting the first panic of
+an id at `warn!` and every later one at `debug!`, retiring the pass and queuing its binding for
+unbind): `catch_unwind` keeps a panicking pass from taking the frame's encoder — and every sibling
+pass, and the scene recorded after it — down with it, but only when the binary can actually unwind.
+Under this workspace's `release` profile, `panic = "abort"` means the process is gone before
+`catch_unwind` (or any other guard) ever runs, so a panicking pass aborts the process exactly like any
+other release-build panic; the isolation this module provides is a debug/dev-build net, not a shipped
+guarantee.
+
+**Accepted because**: `panic = "abort"` is workspace-wide release-profile policy that predates this
+seam; the shipped contract stays "a pass must not panic," and `catch_unwind` exists to make that
+easier to debug during development, not to promise recovery in a release binary.
+
+**Trigger for removal**: none planned — only a workspace-wide move off `panic = "abort"` in
+`[profile.release]` would change this, and no such change is proposed.
+
+### `external-pass-registry-process-wide` — one process-wide registry serves every live `EngineRenderer`, so a second surface can be left holding a stale binding
+
+**Observed** (evidence: `crates/frust-render/src/external_pass.rs`'s module docs, "Who reaches this";
+`static REGISTRY: Mutex<Registry>` is one process-wide map, while `run_external_passes` is called once
+per surface, each time with that surface's own `&mut EngineRenderer`): a registered pass is recorded
+into every live engine-tier surface's frame from one registration — the intended behaviour, so a
+caller registers a pass once for every surface it wants it on. `unregister_external_pass`, though,
+queues exactly one pending unbind per id in the shared map, and whichever surface's drain
+(`run_external_passes`) runs first for the next frame takes and clears the whole queue: only that
+surface's `EngineRenderer` unbinds the id. A second live surface's `EngineRenderer` keeps the stale
+`wgpu::TextureView` bound — the pass is gone from the registry, so nothing calls `record` again to
+refresh or clear that surface's own binding, and it stays stale until something re-registers under the
+same id (which restores `record` calls, and so re-binding, on every live surface again).
+
+**Accepted because**: a single-window desktop shell is the only engine-tier host any shell ships today
+(`desktop-single-window` above); a per-surface registry is real design work with no shipping consumer
+to prove it against yet.
+
+**Trigger for removal**: a per-surface registry keyed by surface identity, or the first shell that
+keeps two engine-tier surfaces live at once — whichever lands first.
