@@ -1330,7 +1330,11 @@ where
             AccessibilityWindowEvent::InitialTreeRequested => {
                 let update = self.root.semantics();
                 self.semantics_seen = self.root.semantics_generation();
-                adapter.update_if_active(|| build_tree_update(&update));
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor());
+                adapter.update_if_active(|| build_tree_update(&update, scale));
             }
             AccessibilityWindowEvent::ActionRequested(request) => {
                 // Same reactive-owner wrap as `dispatch`: the action is routed
@@ -1406,9 +1410,32 @@ fn event_under_owner<State: 'static, V: View<State>>(
 /// [`TreeId::ROOT`] and the update's already-root-defaulted focus id
 /// ([`SemanticsUpdate::focus_id`]). Pure and unit-testable without a live
 /// window/adapter.
-fn build_tree_update(update: &SemanticsUpdate) -> TreeUpdate {
+///
+/// # HiDPI: stamping the root transform
+///
+/// `RenderRoot::semantics` (`frust_core`'s `SemanticsCtx::bounds`) reports
+/// every node's `bounds` in LOGICAL pixels — the widget tree's own layout
+/// unit, the same one `RedrawRequested` lays out in before scaling the scene
+/// for paint. AccessKit itself expects PHYSICAL pixels: accesskit's
+/// `Node::transform` doc reads "AccessKit expects the final transformed
+/// coordinates to be relative to the origin of the tree's container (e.g.
+/// window), in physical pixels, with the y coordinate being top-down." The
+/// same doc says a node's `bounds` sit "in the coordinate space of the
+/// nearest ancestor with a non-`None` transform", so stamping a single
+/// `Affine::scale(scale)` on the ROOT node converts the whole tree — no
+/// per-node rescale needed. At `scale == 1.0` (the Linux/X11 default) this is
+/// a no-op: accesskit's own guidance is to leave `transform` as `None`
+/// ("This should be `None` if it would be set to the identity transform")
+/// rather than stamp an explicit identity, so the root is left untouched.
+fn build_tree_update(update: &SemanticsUpdate, scale: f64) -> TreeUpdate {
+    let mut nodes = update.nodes.clone();
+    if scale != 1.0
+        && let Some((_, root_node)) = nodes.iter_mut().find(|(id, _)| *id == update.root)
+    {
+        root_node.set_transform(Box::new(frust_core::accesskit::Affine::scale(scale)));
+    }
     TreeUpdate {
-        nodes: update.nodes.clone(),
+        nodes,
         tree: Some(Tree::new(update.root)),
         tree_id: TreeId::ROOT,
         focus: update.focus_id(),
@@ -1896,7 +1923,7 @@ where
                     && let Some(update) = self.root.semantics_if_changed(self.semantics_seen)
                 {
                     self.semantics_seen = self.root.semantics_generation();
-                    adapter.update_if_active(|| build_tree_update(&update));
+                    adapter.update_if_active(|| build_tree_update(&update, scale));
                 }
 
                 self.scene.reset();
@@ -2042,7 +2069,9 @@ mod tests {
         theme_after_override_poll, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
-    use frust_core::accesskit::{Node, NodeId, Role};
+    use frust_core::accesskit::{
+        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
+    };
     use frust_core::event::{
         CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
         ScrollDelta,
@@ -2715,7 +2744,7 @@ mod tests {
             focus: Some(child_id),
         };
 
-        let tree_update = build_tree_update(&update);
+        let tree_update = build_tree_update(&update, 1.0);
         assert_eq!(tree_update.nodes.len(), 2);
         assert_eq!(tree_update.tree, Some(Tree::new(root_id)));
         assert_eq!(tree_update.tree_id, TreeId::ROOT);
@@ -2731,10 +2760,79 @@ mod tests {
             focus: None,
         };
 
-        let tree_update = build_tree_update(&update);
+        let tree_update = build_tree_update(&update, 1.0);
         // SemanticsUpdate::focus_id() defaults to root — accesskit's `focus`
         // field is non-optional and must always name some target.
         assert_eq!(tree_update.focus, root_id);
+    }
+
+    // --- build_tree_update: HiDPI root transform ---
+    //
+    // `RenderRoot::semantics` reports bounds in LOGICAL pixels; AccessKit
+    // expects PHYSICAL pixels (see `build_tree_update`'s doc). These pin the
+    // scale-to-transform stamp: identity/no-op at 1.0 (the Linux/X11
+    // default), `Affine::scale(2.0)` on the root only at 2.0, with child
+    // bounds left untouched (they inherit the root's transform via
+    // accesskit's ancestor-chain coordinate-space rule instead of being
+    // rescaled directly).
+
+    #[test]
+    fn build_tree_update_at_scale_one_stamps_no_transform() {
+        let root_id = NodeId(1);
+        let update = SemanticsUpdate {
+            nodes: vec![(root_id, Node::new(Role::Window))],
+            root: root_id,
+            focus: None,
+        };
+
+        let tree_update = build_tree_update(&update, 1.0);
+        let (_, root_node) = &tree_update.nodes[0];
+        // accesskit's own guidance: `None` rather than an explicit identity
+        // transform for a node that doesn't need one — either reading is a
+        // no-op, but this pins which one `build_tree_update` produces.
+        assert!(
+            root_node.transform().is_none(),
+            "scale 1.0 must not stamp a transform onto the root"
+        );
+    }
+
+    #[test]
+    fn build_tree_update_at_scale_two_stamps_root_transform_only() {
+        let root_id = NodeId(1);
+        let child_id = NodeId(2);
+        let mut root_node = Node::new(Role::Window);
+        root_node.set_children(vec![child_id]);
+        let mut child_node = Node::new(Role::Button);
+        let child_bounds = AccessKitRect::new(1.0, 2.0, 3.0, 4.0);
+        child_node.set_bounds(child_bounds);
+
+        let update = SemanticsUpdate {
+            nodes: vec![(root_id, root_node), (child_id, child_node)],
+            root: root_id,
+            focus: None,
+        };
+
+        let tree_update = build_tree_update(&update, 2.0);
+
+        let (found_root_id, found_root_node) = &tree_update.nodes[0];
+        assert_eq!(*found_root_id, root_id);
+        assert_eq!(
+            found_root_node.transform(),
+            Some(&AccessKitAffine::scale(2.0)),
+            "scale 2.0 must stamp Affine::scale(2.0) onto the root"
+        );
+
+        let (found_child_id, found_child_node) = &tree_update.nodes[1];
+        assert_eq!(*found_child_id, child_id);
+        assert!(
+            found_child_node.transform().is_none(),
+            "only the root gets a transform — children inherit it through the \
+             ancestor chain rather than being rescaled directly"
+        );
+        // The child's own bounds stay in logical pixels — unrescaled by
+        // `build_tree_update` — because they're relative to the root's
+        // transform, not the tree's untransformed container.
+        assert_eq!(found_child_node.bounds(), Some(child_bounds));
     }
 
     // --- the default-theme precedence ladder (seed / appearance / override) ---
