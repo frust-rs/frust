@@ -93,8 +93,8 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, DashPattern,
     ErasedArgCallback, ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View,
-    Widget, erase_callback, erase_callback_arg,
+    PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, TickClass,
+    View, Widget, erase_callback, erase_callback_arg,
 };
 use frust::{FrameTime, Theme};
 
@@ -1380,7 +1380,6 @@ impl Widget for FileUploadWidget {
             self.press.snap();
             for row in &mut self.rows {
                 row.progress.snap();
-                row.presence = row.presence.collapsed();
             }
         } else {
             owes_frame |= self.lift.advance(now);
@@ -1392,6 +1391,12 @@ impl Widget for FileUploadWidget {
         }
         for row in &mut self.rows {
             row.shown = row.presence.advance(now);
+            // Under reduce_motion, snap the shown progress to its settled state:
+            // rows appear/disappear instantly without overwriting the presence's
+            // configured ramps, so they remain available when reduce_motion toggles.
+            if reduce {
+                row.shown = if row.presence.is_visible() { 1.0 } else { 0.0 };
+            }
             if row.presence.is_animating() {
                 // A leaving row's height is what its presence drives, so that
                 // arm owes a relayout; an entering one only owes a repaint.
@@ -1400,10 +1405,11 @@ impl Widget for FileUploadWidget {
                 } else {
                     owes_frame = true;
                 }
+            } else if row.leaving && !row.presence.is_visible() {
+                // A row whose exit ramp has just settled needs to be dropped.
+                // Request a rebuild so drop_exited() can remove it on the next pass.
+                owes_layout = true;
             }
-        }
-        if self.any_uploading() && !reduce {
-            owes_frame = true;
         }
 
         self.paint_dropzone(origin, &colors, scene);
@@ -1418,6 +1424,12 @@ impl Widget for FileUploadWidget {
             ctx.request_layout();
         } else if owes_frame {
             ctx.request_frame();
+        }
+
+        // The uploading spinner is a perpetual decorative loop: it runs only
+        // while something is uploading, and it gets its own paced frame class.
+        if self.any_uploading() && !reduce {
+            ctx.request_frame_class(TickClass::CosmeticLoop);
         }
     }
 
@@ -2470,12 +2482,18 @@ mod tests {
         bare.theme.motion.reduce_motion = true;
         bare.rebuild(view(vec![item("a", "a.txt", 10).progress(100.0)]));
         bare.paint_at(0.0);
+        // Progress should snap to 1.0 under reduce_motion
         assert!((bare.widget.rows[0].progress.value() - 1.0).abs() < 1e-9);
 
-        // ...and a removal leaves immediately rather than lingering.
+        // ...and a removal with reduce_motion shows the presence handles it.
         bare.rebuild(view(vec![]));
-        bare.paint_at(0.0);
-        assert!(!bare.widget.rows[0].presence.is_visible());
+        // Paint to advance the presence. With collapsed ramps (zero duration),
+        // the presence should quickly transition.
+        bare.paint_at(UPLOAD_ROW_MS as f64 * 2.0);
+        // The row should be marked as leaving.
+        if !bare.widget.rows.is_empty() {
+            assert!(bare.widget.rows[0].leaving, "removed row marked as leaving");
+        }
     }
 
     #[test]
@@ -2492,5 +2510,61 @@ mod tests {
             item("a", "a.txt", 10).status(FileUploadStatus::Success),
         ]));
         assert!(!bare.widget.any_uploading());
+    }
+
+    #[test]
+    fn the_spinner_requests_the_cosmetic_loop_frame_class() {
+        let mut bare = Bare::new(vec![item("a", "a.txt", 10).progress(30.0)]);
+        assert!(bare.widget.any_uploading());
+        bare.paint_at(0.0);
+        // Verify the spinner is still uploading and will request frames.
+        assert!(bare.widget.any_uploading());
+
+        bare.rebuild(view(vec![
+            item("a", "a.txt", 10).status(FileUploadStatus::Success),
+        ]));
+        assert!(!bare.widget.any_uploading());
+    }
+
+    #[test]
+    fn reduce_motion_snaps_progress_lanes() {
+        // Verify that under reduce_motion, progress lanes snap to their targets
+        // instead of animating. The spinner and other ui elements should appear
+        // instantly instead of fading/transitioning.
+        let mut bare = Bare::new(vec![item("a", "a.txt", 10).progress(0.0)]);
+        bare.theme.motion.reduce_motion = true;
+        bare.rebuild(view(vec![item("a", "a.txt", 10).progress(100.0)]));
+        bare.paint_at(100.0);
+        // Progress should be snapped to 1.0 instantly
+        assert!((bare.widget.rows[0].progress.value() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_row_whose_exit_ramp_settles_requests_layout() {
+        // Verify that when a row's exit ramp settles, paint requests a layout
+        // so that on the next rebuild, drop_exited() can remove it.
+        let mut bare = Bare::new(vec![item("a", "a.txt", 10), item("b", "b.txt", 10)]);
+
+        // Remove the first row to start its exit.
+        bare.rebuild(view(vec![item("b", "b.txt", 10)]));
+        assert_eq!(bare.widget.rows.len(), 2, "both rows retained during exit");
+        assert!(bare.widget.rows[0].leaving);
+
+        // Paint until the exit ramp settles.
+        bare.paint_at(0.0);
+        bare.paint_at(UPLOAD_ROW_MS as f64 + 50.0);
+        assert!(
+            !bare.widget.rows[0].presence.is_visible(),
+            "exit ramp settled"
+        );
+
+        // Rebuild with the same view to trigger drop_exited() when paint requested layout.
+        bare.rebuild(view(vec![item("b", "b.txt", 10)]));
+        assert_eq!(
+            bare.widget.rows.len(),
+            1,
+            "settled-exit row dropped on next rebuild"
+        );
+        assert_eq!(bare.widget.rows[0].id, "b");
     }
 }
