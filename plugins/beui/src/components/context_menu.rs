@@ -468,9 +468,10 @@ pub struct ContextMenuPanelWidget {
     reduced: Option<bool>,
     /// The row the pill sits on — hover or keyboard.
     active: Option<usize>,
-    /// The row a primary `Down` armed, so `Up` activates only that row and
-    /// only when the release re-hits it.
-    armed: Option<usize>,
+    /// The row a primary `Down` armed, with its snapshot to match identity at `Up`.
+    /// Stored as (index, item_snapshot) so a same-length swap between Down and Up
+    /// requires both geometric re-hit and identity match.
+    armed: Option<(usize, ContextMenuItem)>,
     /// The pill's travel between rows, `0.0` at `pill_from`, `1.0` at the active
     /// row (`SPRING_LAYOUT`, upstream's own shared-layout spring).
     pill: Lane,
@@ -513,10 +514,16 @@ impl ContextMenuPanelWidget {
                 current
             };
             self.pill_to = index.rect;
-            self.pill.retarget_with(Ramp::spring(SPRING_LAYOUT), 1.0);
+            // When endpoints change, snap the parameter to 0 and start a fresh spring
+            // run to 1.0. The pill_from captures the currently displayed rect, so
+            // mid-flight pills continue from their displayed position without jumping.
+            self.pill = Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0);
+            self.pill.retarget(1.0);
         } else {
             self.pill_from = current;
             self.pill_to = current;
+            // For hide, animate the value (opacity) from current to 0.0 while keeping
+            // the rect at current to fade out smoothly.
             self.pill.retarget_with(Ramp::spring(SPRING_LAYOUT), 0.0);
         }
         true
@@ -790,13 +797,22 @@ impl Widget for ContextMenuPanelWidget {
                         // Activation is armed-and-re-hit, not "wherever the Up
                         // lands": only a row a primary Down armed fires, and
                         // only when the release lands back on that same row —
-                        // a stray Up (no arming Down reached this widget) or a
-                        // secondary button (which never arms below) does
+                        // both geometric re-hit and identity match required to prevent
+                        // a same-length item swap between Down and Up from activating
+                        // a different action. A stray Up (no arming Down reached this
+                        // widget) or a secondary button (which never arms below) does
                         // nothing.
-                        if let Some(armed) = self.armed.take()
-                            && self.row_at(p.position) == Some(armed)
-                        {
-                            (self.on_select)(ctx, armed);
+                        if let Some((armed_index, armed_item)) = self.armed.take() {
+                            let item_at_index = self.rows.get(armed_index).map(|r| &r.item);
+                            let identity_match = item_at_index.is_some_and(|item| {
+                                item.label == armed_item.label
+                                    && item.tone == armed_item.tone
+                                    && item.disabled == armed_item.disabled
+                                    && item.kind == armed_item.kind
+                            });
+                            if self.row_at(p.position) == Some(armed_index) && identity_match {
+                                (self.on_select)(ctx, armed_index);
+                            }
                         }
                         EventResult::Handled
                     }
@@ -813,8 +829,11 @@ impl Widget for ContextMenuPanelWidget {
                         // Only a primary press arms a row for activation — a
                         // secondary press still claims focus (it is the panel's
                         // event either way) but starts no activation.
-                        if presses(p) {
-                            self.armed = self.row_at(p.position);
+                        if presses(p)
+                            && let Some(index) = self.row_at(p.position)
+                        {
+                            let item = self.rows[index].item.clone();
+                            self.armed = Some((index, item));
                         }
                         ctx.request_focus();
                         EventResult::Handled
@@ -844,7 +863,21 @@ impl Widget for ContextMenuPanelWidget {
                 if is_activation_key(key)
                     && let Some(index) = self.active
                 {
-                    (self.on_select)(ctx, index);
+                    // Re-check that the active row is still selectable before firing.
+                    // It may have become disabled or been replaced since navigation.
+                    if self
+                        .rows
+                        .get(index)
+                        .map(|r| r.item.selectable())
+                        .unwrap_or(false)
+                    {
+                        (self.on_select)(ctx, index);
+                    } else {
+                        self.active = None;
+                        if self.set_active(None) {
+                            ctx.request_redraw();
+                        }
+                    }
                     return EventResult::Handled;
                 }
                 // Escape and everything else is the host's.
