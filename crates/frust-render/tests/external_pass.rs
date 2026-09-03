@@ -618,7 +618,7 @@ fn a_registered_pass_renders_a_texture_the_scene_composites_and_unregistering_st
         "an unregistered id draws nothing, not a retained view"
     );
     assert!(
-        after.chunks_exact(4).all(|texel| texel == rgba(BLACK)),
+        after.as_chunks::<4>().0.iter().all(|texel| *texel == rgba(BLACK)),
         "the whole frame is the base colour once the pass is unregistered"
     );
 }
