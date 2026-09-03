@@ -1292,17 +1292,20 @@ impl SwapWidget {
         );
         if index == 0 && self.max_box.width() > 0.0 {
             let max_scale = self.affordance_scale(Target::Max);
+            let max_centre = origin + self.max_box.center().to_vec2();
+            // Scale the Max label about its box centre, not just offset it.
+            scene.push_transform(Affine::scale_about(max_scale, max_centre));
             let max = self.max.size();
-            let max_size = Size::new(max.width * max_scale, max.height * max_scale);
             self.max.paint(
                 origin
                     + Vec2::new(
-                        self.max_box.x0 + (self.max_box.width() - max_size.width) / 2.0,
-                        self.max_box.y0 + (self.max_box.height() - max_size.height) / 2.0,
+                        self.max_box.x0 + (self.max_box.width() - max.width) / 2.0,
+                        self.max_box.y0 + (self.max_box.height() - max.height) / 2.0,
                     ),
                 chrome.dim_ink,
                 scene,
             );
+            scene.pop_transform();
         }
     }
 
@@ -1552,6 +1555,7 @@ impl SwapWidget {
                 let Some(armed) = self.armed.take() else {
                     return EventResult::Ignored;
                 };
+                self.affordance_press_target = None;
                 self.flip_press.retarget(0.0);
                 self.action_press.retarget(0.0);
                 self.affordance_press.retarget(0.0);
@@ -1566,6 +1570,7 @@ impl SwapWidget {
                 if self.armed.take().is_none() {
                     return EventResult::Ignored;
                 }
+                self.affordance_press_target = None;
                 self.flip_press.retarget(0.0);
                 self.action_press.retarget(0.0);
                 self.affordance_press.retarget(0.0);
@@ -1717,9 +1722,8 @@ mod tests {
     fn a_multibyte_value_that_only_looks_like_a_full_address_in_bytes_is_never_sliced_mid_codepoint()
      {
         // 2 ASCII + twelve 3-byte codepoints + 4 ASCII = 42 *bytes*, but only
-        // 18 *characters* — the crafted input M8's review finding names,
-        // which panicked ("byte index 6 is not a char boundary") through the
-        // old byte-length check.
+        // 18 *characters* — a crafted multibyte address that panicked
+        // ("byte index 6 is not a char boundary") through the old byte-length check.
         let value = format!("0x{}{}", "日".repeat(12), ".eth");
         assert_eq!(value.len(), 42, "the crafted input is 42 bytes, not chars");
         assert_eq!(
@@ -2124,7 +2128,7 @@ mod tests {
         );
     }
 
-    // ---- M5: the destination reveal's relayout coverage ---------------------
+    // ---- The destination reveal's relayout coverage ----
 
     #[test]
     fn a_reduced_motion_destination_toggle_relayouts_on_the_next_paint_only_frame() {
@@ -2182,7 +2186,7 @@ mod tests {
         assert!(!resting, "a resting reveal keeps asking for a relayout");
     }
 
-    // ---- M1: the token/settings/`Max` press feedback -------------------------
+    // ---- The token/settings/`Max` press feedback ----
 
     fn build_swap() -> SwapWidget {
         let mut counter = 0u64;
