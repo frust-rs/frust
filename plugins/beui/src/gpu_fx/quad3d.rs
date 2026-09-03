@@ -161,7 +161,8 @@ pub struct Quad3d {
     /// left edge toward the camera.
     pub yaw: f32,
     /// Rotation about the horizontal axis, radians. Positive brings the
-    /// face's bottom edge toward the camera.
+    /// face's top edge toward the camera (pinned by the read-back cases in
+    /// `card3d` and `cylinder`).
     pub pitch: f32,
     /// Rotation in the face's own plane, radians, clockwise on screen.
     pub roll: f32,

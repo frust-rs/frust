@@ -86,25 +86,16 @@
 //!   acquisition answers `None` on Android and iOS today and every 3D
 //!   component renders flat there.
 //!
-//! # Gap: recording the rendered texture from a widget
+//! # The widget side
 //!
-//! The seam has two reachable halves and one missing one. A plugin can reach
-//! the device (`frust::gpu::with_context`) and can render and register a
-//! texture ahead of the frame's scene encode (`ExternalPass` +
-//! `ExternalFrame::bind_texture`) — both are what this module is built on.
-//! What a widget cannot do is *name* that texture in its own paint: a widget
-//! paints through `&mut dyn PaintScene`, and that trait has a `draw_shader`
-//! command but no scene-texture command, while `SceneBuilder::scene_texture`
-//! (the function the facade's own documentation points at) is reachable only
-//! from code holding a `SceneBuilder` — which a widget never does.
-//!
-//! Everything in this module is therefore complete and exercised on its own
-//! terms, and the rendered target is bound under a real id, but nothing in
-//! this catalog can draw that id until the paint trait carries the command.
-//! Closing it is a framework change of one defaulted trait method plus its
-//! forwarding implementation, not a redesign; it is recorded here so the
-//! variants built on this substrate inherit the constraint explicitly rather
-//! than discovering it.
+//! The seam has three reachable halves. A plugin reaches the device
+//! (`frust::gpu::with_context`), renders and registers a texture ahead of the
+//! frame's scene encode (`ExternalPass` + `ExternalFrame::bind_texture`), and
+//! names that texture from its own paint through
+//! `PaintScene::draw_scene_texture(id.get(), dest)` — the trait method every
+//! variant in this module composites with. An id whose pass has not bound
+//! anything yet draws nothing that frame; the engine composites the texture
+//! blended, never opaque.
 
 pub mod card3d;
 pub mod context;
