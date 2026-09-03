@@ -54,7 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`): a 43-role token system (34 baseline `ColorScheme` roles + a 9-role `MaterialTokens` extension) with runtime HCT seed-color generation (`from_seed`), a feature-point `RoundedPolygon`/`Morph` shape engine backing a 35-shape catalog (`shapes::` is the crate's only morph engine — the legacy `shape_morph` module was retired), a unified interaction core with a pluggable haptics hook, 88 generated Material Icons vector constants, bundled Roboto Flex/Mono fonts, the M3E core-control catalog at reference parity — buttons (5 variants × 5 sizes, gradient decoration, overflow strategies), icon buttons, toggle button + button groups + segmented buttons, FAB, selection controls (checkbox/radio/switch), chips, sliders (incl. range), and a text field wrapping the baseline editable — plus its own `overlay` hosting seam (anchored + modal hosts, a sibling port of `frust-shadcn`'s; see *Design-System Plugins* below) and the containment/overlay/feedback tier built on it: menus (incl. submenu) and dropdowns, tooltips and a snackbar host, dialogs/bottom sheets/side sheets, a selection host, a search bar/view, cards and list families (incl. expandable/dismissible), dividers and badges, a carousel, progress/loading/refresh indicators, and date/time pickers — and the navigation/structure tier: a 4-constructor app bar family (top/search/bottom/sliver, the last collapsible), primary/secondary tabs, a two-spring liquid-indicator navigation bar/rail/drawer family, floating/docked toolbars (scroll-hide + FAB 80→56 morph — see `material-fab-fixed-tier-icon-centering` in [LIMITATIONS.md](LIMITATIONS.md)), a shape-morphing FAB menu, and a two-pod split button (popup + bottom-sheet menu routes). Scroll-linked chrome (app-bar collapse, toolbar hide) has no widget-owned scroll handle: the app feeds `ScrollView::on_scroll` into the widget's own controlled collapse/hide prop — the pattern any future scroll-linked chrome follows |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 | `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
-| `plugins/beui` | The beUI design-system plugin (`frust-beui`), the tier's second external-origin catalog: a port of beUI v2 (81 upstream registry slugs — 42 `components`, 17 `agents`, 22 `blocks`, module-family-prefixed rather than flat re-exported), its own `BeuiTokens` extension over an oklch-transcribed palette, three glass recipes, and catalog motion tokens (`SPRING_*`/`EASE_*`), an `overlay` hosting seam mirroring shadcn's (see *Design-System Plugins* below), a dedicated per-character text-cell substrate (`motion::chars`) and stagger/pointer/scroll-effect drivers making motion the catalog's distinguishing layer, and its own bundled Geist + Geist Mono variable fonts (`plugins/beui/fonts`, OFL) |
+| `plugins/beui` | The beUI design-system plugin (`frust-beui`), the tier's second external-origin catalog: a port of beUI v2 (81 upstream registry slugs — 42 `components`, 17 `agents`, 22 `blocks`, module-family-prefixed rather than flat re-exported), its own `BeuiTokens` extension over an oklch-transcribed palette, three glass recipes, and catalog motion tokens (`SPRING_*`/`EASE_*`), an `overlay` hosting seam mirroring shadcn's (see *Design-System Plugins* below), a dedicated per-character text-cell substrate (`motion::chars`) and stagger/pointer/scroll-effect drivers making motion the catalog's distinguishing layer, its own bundled Geist + Geist Mono variable fonts (`plugins/beui/fonts`, OFL), and (behind the non-default `gpu-effects` feature) the `gpu_fx` perspective-quad substrate five components opt into (see *Design-System Plugins* below) |
 
 ## Desktop Backend Status
 
@@ -212,8 +212,30 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   upstream ground. Motion is this catalog's distinguishing layer over the other four: `motion::chars`
   (per-character shaped text cells), `motion::stagger`/`pointer`/`scroll_fx`, and `motion::presence`
   (the kept-mounted exit staging above) back nearly every component, against Glyph/Material/
-  Cupertino's and shadcn's mostly-static layouts. `examples/beui-demo` (desktop gallery, 18 pages) is
+  Cupertino's and shadcn's mostly-static layouts. `examples/beui-demo` (desktop gallery, 19 pages) is
   the reference consumer — see [ARCHITECTURE.md](ARCHITECTURE.md)'s Examples table.
+- **`frust-beui`'s non-default `gpu-effects` feature (`= ["frust/gpu"]`) adds `gpu_fx`, a
+  perspective-quad GPU substrate reaching `wgpu` only through `frust::gpu`'s re-export — the crate
+  carries no `wgpu` edge of its own.** `GpuFx::try_acquire` acquires the shell's live device and
+  degrades to `None` (no device installed yet, or the crate's own `FRUST_BEUI_NO_GPU_FX` kill
+  switch) so every consumer's 2D path stays both the default build's behaviour and the runtime
+  fallback. `quad3d` is the one renderer (`QuadFace` solid/gradient/texture faces, optional depth
+  test); `card3d`/`cylinder`/`fan` are three geometry families built on it that render a
+  component's own already-computed 2D placement rather than a second one; `pool` quantises
+  offscreen targets to 256px and reaps them unseen after 120 frames; `schedule::FxPass` is the
+  per-component `ExternalPass` the engine drains ahead of its own scene pass every frame (see
+  [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam).
+- **Five components take an explicit, never-auto-on opt-in onto that substrate** —
+  `TiltCardView::gpu_face`, `WalletCardView::gpu_fan`, `WheelPicker::gpu_drum`,
+  `CylinderCarouselView::gpu_cylinder`, `ProjectFolderView::gpu_fan` — each compositing the
+  projected face through `PaintScene::draw_scene_texture` alongside its existing 2D layout. The
+  boundary holds everywhere it's used: a 3D face is a colour, a gradient, or a caller-owned texture
+  the substrate itself renders, never a widget subtree — a component's own child content (text,
+  captions, avatars) keeps compositing un-perspectived under `Affine`, on top of the composited
+  face — and the composite is always blended, never opaque (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s
+  `PaintScene` row and `engine-scene-texture-always-blended` in [LIMITATIONS.md](LIMITATIONS.md)).
+  `examples/beui-demo`'s GPU Effects page is the reference consumer, pairing every opt-in's 2D and
+  3D path side by side.
 - **`frust-shadcn`'s `scroll_area` establishes the *deferred-erasure builder* pattern**, for any
   wrapper needing an owned-value builder method (`.physics(...)`-style) to reach its child after
   construction: the child sits un-erased in a `Cell<Option<...>>` until a memoized

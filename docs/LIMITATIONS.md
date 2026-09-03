@@ -2745,24 +2745,158 @@ plainly").
 
 ---
 
-### `beui-3d-degradations` — five components approximate a 3D upstream effect in 2D
+### `beui-3d-degradations` — the 2D approximation is the default build's behaviour and every opt-in's runtime fallback; five components lift it behind `gpu-effects`
 
 **Observed**: `tilt_card` (perspective tilt) paints an affine shadow slide instead of a true
 perspective transform; `wheel_picker` (an iOS-style drum) and `cylinder_carousel` render a 2D
 cylinder projection rather than a real 3D drum; `project_folder`'s file fan and `wallet_card`'s
-card-stack are 2D approximations of upstream's layered/perspective originals. None composites a
-real depth buffer or a perspective projection matrix.
+account-switcher fan are 2D approximations of upstream's layered/perspective originals — none
+composites a real depth buffer or a perspective projection matrix. That is still every one of the
+five's only behaviour in a default build and the runtime fallback of every opt-in: the non-default
+`gpu-effects` feature (`plugins/beui/src/gpu_fx`) adds a genuinely projected quad substrate, and
+each component takes it only through an explicit, never-auto-on opt-in
+(`TiltCardView::gpu_face`, `WheelPicker::gpu_drum`, `CylinderCarouselView::gpu_cylinder`,
+`ProjectFolderView::gpu_fan`, `WalletCardView::gpu_fan`). What stays true even with the feature on
+and a device reachable: a widget subtree is never perspective-transformed — the substrate tilts
+only a face it renders itself (a colour, a gradient, or a caller-owned texture), so every
+component's own text, avatars, and captions keep compositing flat under `Affine`, opt-in or not.
 
 **Applies to**: `frust_beui::components::tilt_card`/`wheel_picker`/`cylinder_carousel`,
-`frust_beui::blocks::project_folder`/`wallet_card`.
+`frust_beui::blocks::project_folder`/`wallet_card`, and their `gpu_face`/`gpu_drum`/`gpu_cylinder`/
+`gpu_fan` opt-ins.
 
-**Why accepted**: a genuine 3D transform/perspective pipeline is scoped to a later gpu-effects
-phase of the render tier, not something a design-system plugin builds itself; the 2D approximations
-read correctly at the sizes and interaction distances these components are used at.
+**Why accepted**: a widget subtree cannot be perspective-transformed by any path this substrate
+offers — that boundary is structural, not a scoping gap — and the 2D approximations read correctly
+on their own at the sizes and interaction distances these components are used at, which is why the
+3D surface stays an opt-in enhancement rather than becoming the default. Rig coverage is uneven:
+proven on Linux, an NVIDIA T400 over Vulkan, by `plugins/beui`'s own `#[ignore]`d GPU read-back
+tests (`gpu_fx::card3d`/`cylinder`/`fan`/`quad3d` test modules) and by a manual desktop pass of
+`examples/beui-demo`'s GPU Effects page on 2026-09-04 (every 3D pane live, the tilt face
+foreshortens on hover, the wallet switcher fans). Metal is expected to behave the same — the
+substrate reaches the GPU only through `frust::gpu`, with no backend-specific code of its own — but
+unverified until a Mac runs it. Acquisition answers `None` on Android and iOS today because no
+mobile shell installs a `DeviceHandle` yet (`facade-gpu-context-desktop-only` above), so every
+gpu-effects variant renders its 2D path there regardless of the opt-in.
 
 **Evidence**: `plugins/beui/src/components/tilt_card.rs`, `wheel_picker.rs`,
 `cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`, `wallet_card.rs` module docs'
-"Degradations" sections.
+"Degradations"/"The true-3D ..." sections; `plugins/beui/src/gpu_fx/mod.rs` module docs ("What it
+still cannot do"); commit `833e6d64` ("Verified on the T400 desktop"); `examples/beui-demo/README.md`'s
+"GPU Effects" section (T400 substrate coverage, Metal owed).
+
+**Trigger for removal**: the widget-subtree boundary is permanent (a new render-tier capability,
+not a fix, would lift it) and stays out of scope for removal; the rig-coverage half closes once
+both mobile shells install a `DeviceHandle` and a Mac records a Metal pass of the GPU Effects page.
+
+---
+
+### `beui-gpu-fx-face-fidelity` — every `gpu_fx` face is logical-resolution, square-cornered, and glare is a linear ramp
+
+**Observed**: three fidelity limits hold across every `gpu-effects` opt-in, all substrate-wide
+rather than per component: (1) a target is allocated in logical pixels — one texel per logical
+pixel, with no scale-factor axis at the paint seam — so the composite upscales like any other
+unscaled raster on a HiDPI surface; (2) a face is a `QuadFace::Solid`/`Gradient`/`Texture` fill
+only, and always square-cornered, since a rounded clip is a rectangle in scene space and a
+tilted or turned face is not one; (3) `tilt_card`'s pointer-tracking glare has no radial-gradient
+`QuadFace` to reach for, so it degrades to a linear ramp aimed at the pointer rather than a true
+radial falloff.
+
+**Applies to**: every `gpu_fx`-rendered face (`tilt_card::gpu_face`, `wheel_picker::gpu_drum`,
+`cylinder_carousel::gpu_cylinder`, `project_folder::gpu_fan`, `wallet_card::gpu_fan`) for (1) and
+(2); `tilt_card`'s glare specifically for (3).
+
+**Why accepted**: each is a primitive limit of the substrate itself, not a per-component
+shortcut — `PaintScene` publishes no HiDPI-aware scale factor at the external-texture seam,
+`QuadFace` has no rounded-rect clip that survives a projective transform, and `QuadFace` has no
+radial-gradient variant — and at card/plate scale the differences (a HiDPI upscale, a squared-off
+corner behind whatever rounded 2D clip sits around it, a linear rather than radial glare) read
+close enough that a bespoke fix per component was not justified.
+
+**Evidence**: `plugins/beui/src/gpu_fx/card3d.rs` module docs ("One target texel is one logical
+pixel", "The glare is a linear ramp, not a radial one"); `plugins/beui/src/gpu_fx/quad3d.rs`'s
+`QuadFace` enum; `plugins/beui/src/components/tilt_card.rs` ("The face is rendered at logical
+resolution", "The face has square corners"); `plugins/beui/src/components/wheel_picker.rs`,
+`plugins/beui/src/components/cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`
+(each "The plate(s) have square corners").
+
+**Trigger for removal**: a paint-seam scale-factor axis for offscreen targets, a projective
+rounded-rect clip in the substrate, and a `QuadFace::RadialGradient` variant — three independent
+render-tier additions, none currently planned.
+
+---
+
+### `beui-gpu-fx-depth-and-pooling` — a translucent face writes depth like an opaque one, and the target pool over-allocates small faces
+
+**Observed**: two mechanics bound every `gpu_fx` scene, substrate-wide. A `Quad3dScene::depth`
+attachment writes depth for a translucent face exactly as it would for an opaque one, so a scene
+wanting faces to blend over each other — rather than the farther one being rejected outright —
+has to submit them in the order that makes that true: `cylinder::drum_scene` (the wheel drum, the
+carousel wall) sorts its faces nearest-first, because a far-then-near submission blends a
+translucent drum twice and darkens every seam where two rows overlap; `fan::fan_scene` (the
+folder preview fan, the wallet account switcher) instead keeps the caller's own back-to-front
+order, because a fan's sheets want a nearer one blending *over* a further one — the same
+depth/blend interaction, resolved oppositely by the two geometries it applies to. Separately,
+`pool::TargetPool` quantises every offscreen target's extent up to a 256px square before keying
+it, so a small face still occupies a full 256px-square texture, and reaps a key that has gone
+unasked-for for 120 consecutive frames.
+
+**Applies to**: `cylinder_carousel::gpu_cylinder`/`wheel_picker::gpu_drum` for the nearest-first
+sort; `project_folder::gpu_fan`/`wallet_card::gpu_fan` for the back-to-front order; every
+`gpu_fx` consumer for the pool's quantization/reap policy.
+
+**Why accepted**: the sort direction is mode-specific by design — a drum's item order carries no
+meaning of its own (whichever face is nearest wins by distance), while a fan's caller-supplied
+stacking order is the only signal a translucent pile has — so one rule cannot serve both, and each
+geometry module owns its own resolution rather than pushing the decision onto a component. The
+pool's 256px quantization and 120-frame reap mirror `frust_gpu::effects`' own texture-pool policy
+value for value, so a small face's over-allocation is the same trade the engine already makes, and
+reuse across an animation is worth more than the wasted bytes.
+
+**Evidence**: `plugins/beui/src/gpu_fx/cylinder.rs` module docs ("Depth is the whole point, and it
+needs the nearest face first") and `drum_scene`; `plugins/beui/src/gpu_fx/fan.rs` module docs
+("Depth, and why the sheets are still submitted back-to-front"); `plugins/beui/src/gpu_fx/quad3d.rs`
+module docs ("Depth"); `plugins/beui/src/gpu_fx/pool.rs` (`TARGET_QUANTUM = 256`,
+`MAX_UNSEEN_FRAMES = 120`, module docs "Why a pool at all").
+
+**Trigger for removal**: none planned — both are structural consequences of a shared
+depth-tested-translucency primitive and a bounded texture pool, not a defect either geometry
+module could fix independently.
+
+---
+
+### `beui-gpu-fx-component-additions` — the true-3D opt-ins grow a surface, or a reading, upstream never had
+
+**Observed**: turning `gpu-effects` on changes what a component's surface *is*, per component.
+`wheel_picker::gpu_drum` and `cylinder_carousel::gpu_cylinder` seat a plate behind every row/ball
+that upstream's CSS 3D scene never paints at all — a deliberate departure, not a port, since a
+transparent drum or wall would project nothing — and the wheel's plate and its 2D label
+projection disagree by a few percent near the cutoff, because the plate is projected by the
+substrate's own camera while the label is scaled by the component's `PERSPECTIVE` constant (both
+are masked to near-zero alpha there, so the disagreement is not visible at the horizon itself).
+`project_folder::gpu_fan` composites every sheet's plate into one target before painting captions
+over it, so a caption a nearer sheet's translucent fill would dim in the flat 2D pile instead reads
+at full strength once the fan is projected. `wallet_card::gpu_fan` has no upstream card stack to
+fan at all — upstream's only run of stacked surfaces is the account switcher's own open panel — so
+what the 3D path fans is that panel's rows, not the card deck the porting card's premise described
+(see `wallet_card`'s own "A premise correction").
+
+**Applies to**: `wheel_picker::gpu_drum`, `cylinder_carousel::gpu_cylinder`,
+`project_folder::gpu_fan`, `wallet_card::gpu_fan`.
+
+**Why accepted**: each is a named, deliberate consequence of the one boundary every opt-in shares
+(`beui-3d-degradations` above) recorded at the point it was found, not an oversight — a plate is
+what makes a projected drum or wall visible at all; the caption-dimming loss and the card-stack
+substitution both follow directly from "a 3D face is a colour, a gradient, or a texture, never a
+widget subtree," stated once and true everywhere it applies.
+
+**Evidence**: `plugins/beui/src/components/wheel_picker.rs` ("The drum grows a surface it did not
+have", "The plate and its text disagree slightly at the horizon"); `plugins/beui/src/components/cylinder_carousel.rs`
+("The stage grows a wall it did not have"); `plugins/beui/src/blocks/project_folder.rs` ("An
+overlapped caption stops being dimmed"); `plugins/beui/src/blocks/wallet_card.rs` ("A premise
+correction"; "The 2D selected-row plate stands down while the fan is live").
+
+**Trigger for removal**: none planned — each is a direct consequence of the substrate-wide face
+boundary (`beui-3d-degradations` above), not an independent gap.
 
 ---
 
@@ -3037,7 +3171,10 @@ rendered by an adapter/device in this crate's own tests.
 
 **Why accepted**: verified instead by an out-of-tree device render run (T400/Vulkan) rather than an
 in-repo GPU test, the same verification split the engine's own downlevel/WebGL2 lints accept for
-shader correctness — a plugin-tier crate is not where a GPU-adapter test harness lives.
+shader correctness. This crate does carry an in-repo GPU-adapter harness now — the non-default
+`gpu-effects` feature's `#[ignore]`d `gpu_fx` tests (see `beui-3d-degradations` above and
+`examples/beui-demo`'s GPU Effects page) — but `shader_background` does not build on that feature
+or that harness, so its own WGSL sources stay string-checked here regardless.
 
 **Evidence**: on 2026-09-03 the conductor re-ran an out-of-tree wgpu harness that compiled all five
 WGSL programs and rendered each to an offscreen target on an NVIDIA T400 over Vulkan (headless
