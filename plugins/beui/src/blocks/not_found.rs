@@ -479,6 +479,20 @@ pub struct NotFoundWidget {
     press: [Lane; 2],
     /// The frame the style's own run started on, latched at first paint.
     started: Option<FrameTime>,
+    /// The elapsed time as of the last paint — what `layout` shapes the
+    /// Glitch scramble's and the Terminal's typed prefix from.
+    ///
+    /// Content that depends on the clock must be substituted at layout time
+    /// (this field is written at the end of `paint` for the *next* frame's
+    /// layout to read), never from inside `paint` itself: `LabelRun::set_content`
+    /// drops the cached shape immediately (`text.rs`), and `LabelRun::paint` is
+    /// a no-op until the next `layout` reshapes it — so a paint-only frame
+    /// (no relayout between) would paint nothing for a run mutated in the same
+    /// paint call that reads it. Shaping from this cached value instead means
+    /// the layout that ran earlier in the same frame always leaves `paint` with
+    /// a fresh, non-empty shape, and a paint-only frame simply keeps painting
+    /// whatever the last layout produced.
+    elapsed: Duration,
     /// The two actions' boxes in the widget's own space.
     actions: [Rect; 2],
     /// The action a `Down` armed.
@@ -586,6 +600,7 @@ impl<State: 'static> View<State> for NotFoundView<State> {
                 Lane::at_rest(Ramp::spring(SPRING_PRESS), 0.0),
             ],
             started: None,
+            elapsed: Duration::ZERO,
             actions: [Rect::ZERO; 2],
             armed: None,
             hovered: None,
@@ -618,6 +633,7 @@ impl<State: 'static> View<State> for NotFoundView<State> {
                     .map(|_| LabelRun::new(String::new()))
                     .collect();
                 element.started = None;
+                element.elapsed = Duration::ZERO;
                 element.armed = None;
             }
             element.title.set_content(self.config.title.clone());
@@ -674,6 +690,50 @@ impl Widget for NotFoundWidget {
             page_style(theme, NOT_FOUND_CODE_SIZE)
         };
         let terminal_style = mono_style(style::TEXT_SM);
+
+        // The Glitch scramble and the Terminal's typed prefix are substituted
+        // here, from `self.elapsed` (what the last `paint` observed), rather
+        // than from `paint` itself — see the field doc on `elapsed` for why: a
+        // run's content must never change without a layout pass shaping it
+        // before the next paint that reads it.
+        let reduce = theme.is_some_and(|t| t.motion.reduce_motion);
+        let elapsed = if reduce {
+            // A reduced-motion page is already finished: the scramble has
+            // resolved and the terminal has typed itself out (mirrors the
+            // same substitution `paint` makes for its own `elapsed`).
+            Duration::from_secs(60)
+        } else {
+            self.elapsed
+        };
+        match self.config.style {
+            NotFoundStyle::Glitch => {
+                let settled = glitch_settled(elapsed, self.cells.len());
+                let tick = glitch_tick(elapsed);
+                for (index, cell) in self.scrambled.iter_mut().enumerate() {
+                    let source = self.cells[index].content().to_string();
+                    let shown = if index < settled || source == " " {
+                        source
+                    } else {
+                        glitch_glyph(index, tick).to_string()
+                    };
+                    cell.set_content(shown);
+                }
+            }
+            NotFoundStyle::Terminal => {
+                for (index, (_, delay)) in TERMINAL_LINES.into_iter().enumerate() {
+                    let stagger = if index == 1 {
+                        TERMINAL_ERROR_STAGGER
+                    } else {
+                        TERMINAL_CHAR_STAGGER
+                    };
+                    let source: Vec<char> = self.lines[index].content().chars().collect();
+                    let typed = terminal_typed(elapsed, delay, stagger, source.len());
+                    let text: String = source.iter().take(typed).collect();
+                    self.typed[index].set_content(text);
+                }
+            }
+            NotFoundStyle::Magnetic | NotFoundStyle::Spotlight | NotFoundStyle::Stacked => {}
+        }
 
         self.title.layout(ctx, &title_style);
         self.description.layout(ctx, &body_style);
@@ -758,8 +818,14 @@ impl Widget for NotFoundWidget {
         } else {
             now.saturating_sub(started)
         };
+        // Latched for the *next* layout pass to shape the Glitch scramble's
+        // and the Terminal's typed prefix from — never mutated here, see the
+        // `elapsed` field doc.
+        self.elapsed = elapsed;
         if !reduce && self.is_running(elapsed) {
-            ctx.request_frame();
+            // The scramble/typing is still substituting content, which only a
+            // layout pass may reshape (`request_layout` implies a frame too).
+            ctx.request_layout();
         }
         if !reduce && self.config.style == NotFoundStyle::Terminal {
             // The caret is a decorative loop, not a transition — the frame gate
@@ -782,7 +848,7 @@ impl Widget for NotFoundWidget {
             ),
         );
         match self.config.style {
-            NotFoundStyle::Glitch => self.paint_glitch(scene, origin, band, elapsed, chrome.ink),
+            NotFoundStyle::Glitch => self.paint_glitch(scene, origin, band, chrome.ink),
             NotFoundStyle::Magnetic => self.paint_magnetic(scene, origin, band, chrome.ink),
             NotFoundStyle::Spotlight => self.paint_spotlight(scene, origin, band),
             NotFoundStyle::Stacked => self.paint_stack(
@@ -913,26 +979,11 @@ impl NotFoundWidget {
     }
 
     /// `glitch.tsx`: the scrambling code under two chromatic ghosts.
-    fn paint_glitch(
-        &mut self,
-        scene: &mut dyn PaintScene,
-        origin: Point,
-        band: Rect,
-        elapsed: Duration,
-        ink: Color,
-    ) {
-        let settled = glitch_settled(elapsed, self.cells.len());
-        let tick = glitch_tick(elapsed);
-        for (index, cell) in self.scrambled.iter_mut().enumerate() {
-            let source = self.cells[index].content().to_string();
-            let shown = if index < settled || source == " " {
-                source
-            } else {
-                glitch_glyph(index, tick).to_string()
-            };
-            cell.set_content(shown);
-        }
-
+    ///
+    /// The substituted glyphs are already shaped in `self.scrambled` — this
+    /// only paints them (see `Widget::layout`, which substitutes and reshapes
+    /// them from `self.elapsed` before every paint that could read them).
+    fn paint_glitch(&mut self, scene: &mut dyn PaintScene, origin: Point, band: Rect, ink: Color) {
         let width = self.code_width(0.0);
         let height = self.cells.first().map_or(0.0, |cell| cell.size().height);
         let base = origin
@@ -1143,16 +1194,12 @@ impl NotFoundWidget {
             style::with_alpha(Color::WHITE, TERMINAL_HAIRLINE_ALPHA),
         );
 
-        for (index, (_, delay)) in TERMINAL_LINES.into_iter().enumerate() {
-            let stagger = if index == 1 {
-                TERMINAL_ERROR_STAGGER
-            } else {
-                TERMINAL_CHAR_STAGGER
-            };
-            let source: Vec<char> = self.lines[index].content().chars().collect();
-            let typed = terminal_typed(elapsed, delay, stagger, source.len());
-            let text: String = source.iter().take(typed).collect();
-            self.typed[index].set_content(text);
+        // The typed prefix is already shaped in `self.typed` — this only
+        // paints it (see `Widget::layout`, which substitutes and reshapes it
+        // from `self.elapsed` before every paint that could read it). The
+        // caret's blink alone still reads the live `elapsed` below: it never
+        // changes what is shaped, only whether the same rect is drawn.
+        for index in 0..TERMINAL_LINES.len() {
             let line_at = Point::new(
                 at.x + FLAP_DOT_INSET,
                 at.y + TERMINAL_BAR_HEIGHT + style::GAP_MD + index as f64 * TERMINAL_LINE_HEIGHT,
@@ -1465,6 +1512,16 @@ mod tests {
     fn every_style_paints_its_stage_its_copy_and_both_actions() {
         for style in NotFoundStyle::ALL {
             let mut h = Harness::new(style);
+            // 600ms in: the scramble is still mid-run and two of the
+            // terminal's three lines have started typing, so every style's
+            // own code/line treatment has produced its own glyph runs on top
+            // of the shared title/description/home/browse labels — a bare
+            // `!rec.inks.is_empty()` would already pass on the four labels
+            // alone and miss a style that paints none of its own code. Two
+            // steps at the same clock: the first is what latches `elapsed`
+            // for `layout` to substitute from (see the field doc), the
+            // second is the real (layout + paint) frame that reads it.
+            h.step(600.0);
             let rec = h.step(0.0);
             let actions = rec
                 .rrects
@@ -1472,8 +1529,142 @@ mod tests {
                 .filter(|(_, size, _, _)| size.height == NOT_FOUND_ACTION_HEIGHT)
                 .count();
             assert_eq!(actions, 2, "{style:?} lost an action");
-            assert!(!rec.inks.is_empty(), "{style:?} drew no text");
+
+            // The title, description and both action labels are the floor
+            // every style shares (>= 1 run each, however a label's own
+            // shaping splits); each style's own code/line treatment adds its
+            // own runs on top — the code is `NOT_FOUND_CODE` ("404", 3
+            // cells), and the spotlight paints it twice (a dim base layer
+            // plus a bright layer clipped to the spotlight).
+            let code_runs = match style {
+                NotFoundStyle::Spotlight => 6,
+                NotFoundStyle::Terminal => 2,
+                NotFoundStyle::Glitch | NotFoundStyle::Magnetic | NotFoundStyle::Stacked => 3,
+            };
+            assert!(
+                rec.inks.len() >= 4 + code_runs,
+                "{style:?} drew {} glyph runs, expected at least {}",
+                rec.inks.len(),
+                4 + code_runs
+            );
         }
+    }
+
+    /// M2 regression: `LabelRun::set_content` (`text.rs`) drops the cached
+    /// shape it is called on, and `LabelRun::paint` is a no-op until the next
+    /// `layout` reshapes it — so mutating a run's content from `paint` itself
+    /// paints nothing on a paint-only frame (no `layout` between). The
+    /// Terminal's typed lines and the Glitch scramble's cells must instead be
+    /// substituted in `layout`, so a paint-only frame keeps painting whatever
+    /// the last layout shaped.
+    #[test]
+    fn a_paint_only_frame_after_typing_has_begun_still_paints_the_prefix_and_advances_the_caret() {
+        let mut h = Harness::new(NotFoundStyle::Terminal);
+
+        /// The caret's own `x`, identified by its distinctive `w-[0.55ch]`
+        /// size — the only rect this widget fills at that width.
+        fn caret_x(rec: &Recorder) -> f64 {
+            rec.rects
+                .iter()
+                .find(|(_, size, _)| size.width == TERMINAL_CARET_WIDTH)
+                .expect("no caret drawn")
+                .0
+                .x
+        }
+
+        // At rest nothing is typed yet, so the caret sits right after the
+        // prompt — the baseline `set_content` used to leave it stuck at.
+        let baseline = caret_x(&h.step(0.0));
+
+        // Two real (layout + paint) frames at the same clock, well past the
+        // third line's typing delay and lit within the caret's own blink
+        // cycle: the first latches `elapsed` for `layout` to substitute from
+        // (see the field doc), the second is the frame that actually reads
+        // the freshly-shaped run — these are the only frames here allowed to
+        // relayout.
+        h.step(2_200.0);
+        let typing = h.step(0.0);
+        assert!(
+            !typing.inks.is_empty(),
+            "the typing frame painted no glyphs"
+        );
+
+        // Paint-only frames after that: no rebuild, no layout — the
+        // production frame shape `request_frame`/`request_frame_class` drive,
+        // and exactly the shape the M2 bug's harness never exercised.
+        let (paint_only, _) = paint_frame(&mut h, 0.0);
+        assert!(
+            !paint_only.inks.is_empty(),
+            "a paint-only frame after typing began painted no glyphs"
+        );
+        let advanced = caret_x(&paint_only);
+        assert!(
+            advanced > baseline,
+            "the caret sat at a fixed x instead of tracking the typed prefix"
+        );
+
+        // A second paint-only frame in a row keeps painting the same
+        // already-typed prefix — it does not fall back to nothing once the
+        // run has gone one frame stale, and the caret does not move without
+        // a layout pass to reshape it.
+        let (still_painting, _) = paint_frame(&mut h, 100.0);
+        assert!(
+            !still_painting.inks.is_empty(),
+            "a second paint-only frame painted no glyphs"
+        );
+        assert_eq!(
+            caret_x(&still_painting),
+            advanced,
+            "the caret moved without a layout pass"
+        );
+    }
+
+    /// M2 regression, the Glitch half: `paint_glitch` used to mutate
+    /// `self.scrambled` directly, so a paint-only frame mid-scramble (or
+    /// right after it settles) painted nothing for the code row.
+    #[test]
+    fn paint_only_frames_keep_painting_the_glitch_code_row_mid_scramble_and_after_settle() {
+        let mut h = Harness::new(NotFoundStyle::Glitch);
+
+        // Mid-scramble: a real frame lays out the substituted glyphs...
+        let mid = h.step(200.0);
+        assert!(
+            !mid.inks.is_empty(),
+            "the mid-scramble frame painted no glyphs"
+        );
+        // ...and a paint-only frame right after keeps painting them, with the
+        // same run count (nothing was dropped, nothing was added).
+        let (mid_paint_only, _) = paint_frame(&mut h, 0.0);
+        assert!(
+            !mid_paint_only.inks.is_empty(),
+            "a paint-only frame mid-scramble painted no glyphs"
+        );
+        assert_eq!(
+            mid.inks.len(),
+            mid_paint_only.inks.len(),
+            "a paint-only frame changed how many glyph runs were drawn"
+        );
+
+        // Settle the scramble with one more real frame...
+        let settled = h.step(2_000.0);
+        assert!(
+            !settled.inks.is_empty(),
+            "the settled frame painted no glyphs"
+        );
+        // ...and paint-only frames after settling still paint the resolved
+        // code, permanently — not just the one frame the settle step landed
+        // on.
+        let (settled_paint_only, _) = paint_frame(&mut h, 0.0);
+        assert!(
+            !settled_paint_only.inks.is_empty(),
+            "a paint-only frame after settling painted no glyphs"
+        );
+        assert_eq!(settled.inks.len(), settled_paint_only.inks.len());
+        let (still_settled, _) = paint_frame(&mut h, 500.0);
+        assert!(
+            !still_settled.inks.is_empty(),
+            "a later paint-only frame after settling painted no glyphs"
+        );
     }
 
     #[test]
