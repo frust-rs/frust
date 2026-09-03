@@ -108,24 +108,29 @@ shell's own live `DeviceHandle` through `frust-shell-common`'s process-wide inst
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) rather than creating a second device; it answers
 `None` until a shell has published one.
 
-A caller sharing the engine's frame encoder or depth attachment owes `frust-gpu::encoder`'s two
-caller rules above; every externally bound texture the engine draws — `Command::SceneTexture` and
-`Command::ShaderQuad` alike — is always blended, never claimed opaque, since the engine never reads
-the caller's texels to know. 3D content belongs in a **separate crate** built over this seam (shared
-encoder, shared depth, `SceneTexture`), not inside `frust-engine` itself — the shape Flutter settled
-on after removing Impeller Scene in favour of a standalone `flutter_scene` over Flutter GPU.
+A pass records only into attachments it owns, so merely sharing the frame's encoder owes none of
+`frust-gpu::encoder`'s caller rules above; every externally bound texture the engine draws —
+`Command::SceneTexture` and `Command::ShaderQuad` alike — is always blended, never claimed opaque,
+since the engine never reads the caller's texels to know. A host that goes further and also shares
+the frame's *depth* attachment (`EngineTarget::depth` plus `EngineRenderer::set_depth_pre_cleared`,
+proven by `frust-engine`'s `shared_encoder` test suite, not by `ExternalPass`) owes the depth-clear
+rule above. 3D content belongs in a **separate crate** built over this seam (shared encoder, and, for
+occlusion against the 2D frame, shared depth, `SceneTexture`), not inside `frust-engine` itself — the
+shape Flutter settled on after removing Impeller Scene in favour of a standalone `flutter_scene` over
+Flutter GPU.
 
-`register_external_pass`/`unregister_external_pass` (`frust-render::external_pass`) are that
-separate-crate seam made reachable today, not just theorized: a process-wide registry of
+`register_external_pass`/`unregister_external_pass` (`frust-render::external_pass`) make the
+encoder-sharing half of that seam reachable today, not just theorized: a process-wide registry of
 caller-supplied `ExternalPass`es, each handed the live frame's device/queue/encoder (`ExternalFrame`)
 once per frame, ahead of the engine's own scene pass and its shader-quad pre-pass, into the very
 `wgpu::CommandEncoder` the scene then records into and the renderer submits once — reachable from a
 crate depending on `frust` alone (the `gpu` feature), with no direct `frust-render`/`frust-gpu` edge.
 A pass renders into its own target, never the frame's — the frame's unconditional colour clear never
 touches it — and binds that target under a `SceneTextureId` (`ExternalFrame::bind_texture`) for a
-`Command::SceneTexture` naming the same id to composite. A pass sharing the frame's depth attachment
-owes the two caller rules above like any other; its output is composited blended like every external
-texture (`engine-scene-texture-always-blended` in LIMITATIONS.md).
+`Command::SceneTexture` naming the same id to composite. `ExternalFrame` exposes only the frame's
+device, queue, encoder and frame index — never its depth view or `set_depth_pre_cleared` — so a pass
+never shares the frame's depth attachment and never owes the depth-clear rule; its composite is
+blended like every external texture (`engine-scene-texture-always-blended` in LIMITATIONS.md).
 
 ## Layer Dependencies
 

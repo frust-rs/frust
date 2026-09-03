@@ -3959,20 +3959,24 @@ result is recorded in `benchmarks/RESULTS.md` or the raw README.
 
 **Observed** (evidence: `crates/frust-render/src/renderer.rs`'s `submit_impl`, both
 `RenderPath::EngineDirect` and `RenderPath::EngineDirectUnpremultiply` arms call
-`external_pass::run_external_passes` immediately before `shader_quads.prepare`, into the same frame
-encoder; `crates/frust-render/tests/external_pass.rs`'s two `#[ignore]` GPU cases drive that identical
+`external_pass::run_external_passes` unconditionally (`renderer.rs` ~1165 and ~1294) immediately
+before `shader_quads.prepare`, into the same frame encoder; those are the only two arms `submit_impl`
+has, so the drain runs on every engine-tier `SurfaceRenderer` frame path with no platform gate —
+`crates/frust-shell-android/src/app/render.rs:174` calls `renderer.submit`, and
+`crates/frust-shell-ios/src/app/executor.rs:592`/`599` call `submit_deferred`/`submit`, both reaching
+the same unconditional drain: a pass registered while an Android or iOS shell is running is invoked
+every frame there, exactly as on desktop. What has actually been *exercised* is narrower:
+`crates/frust-render/tests/external_pass.rs`'s two `#[ignore]` GPU cases drive that identical
 drain→encode→submit sequence directly — against a `HeadlessTarget`, not a real swapchain — run on an
 NVIDIA T400 4GB/Vulkan adapter on 2026-09-03: a pass-rendered 64×64 solid target composited at its
 registered destination with the base colour intact outside it, and unregistering it stopped the draw
-the next frame): the registry itself is shell-agnostic (a process-wide map with no device, window, or
-platform in it), but a registered pass is only ever recorded where `SurfaceRenderer::submit_impl`
-drains it — no windowed run (desktop or otherwise) has exercised a pass yet, only the headless target
-above. Both mobile shells forward the facade's `gpu` feature (`crates/frust-shell-android/Cargo.toml`,
-`crates/frust-shell-ios/Cargo.toml`: `gpu = ["frust-shell-common/gpu", "frust-render/gpu"]`) and so
-compile the seam, but neither has driven a registered pass through its own frame loop. `HeadlessRenderer`
-never drains the registry at all (see the module docs). Output is always blended, never opaque
-(`engine-scene-texture-always-blended` above) — the same rule an unproven mobile pass would still be
-under.
+the next frame. No windowed run of any kind, and no mobile device run of any kind, has registered and
+driven a real pass yet — that is an untested surface, not a gated one; the `frust::gpu::with_context`/
+`install_gpu_handle` desktop-only slot (`facade-gpu-context-desktop-only` above) is the shared
+`DeviceHandle` facade accessor, a separate mechanism that `run_external_passes` does not consult and
+so does not gate this drain. `HeadlessRenderer` never drains the registry at all (see the module
+docs). Output is always blended, never opaque (`engine-scene-texture-always-blended` above) — the
+same rule an unproven mobile pass would still be under.
 
 **Accepted because**: the seam's first and only exercised host is the engine-tier frame path itself,
 proven headless; a real window and a mobile shell need no new code in the registry, only a run.
@@ -4000,6 +4004,31 @@ easier to debug during development, not to promise recovery in a release binary.
 **Trigger for removal**: none planned — only a workspace-wide move off `panic = "abort"` in
 `[profile.release]` would change this, and no such change is proposed.
 
+### `external-pass-bind-not-transactional-with-frame` — a refused engine frame still keeps every pass's `bind_texture` side effect
+
+**Observed** (evidence: `crates/frust-render/src/renderer.rs`'s `submit_impl`, both
+`RenderPath::EngineDirect` (~1234-1249) and `RenderPath::EngineDirectUnpremultiply` (~1360-1375) arms:
+on `EngineRenderer::encode_traced` returning `Err`, the arm returns `FrameOutcome::Skipped` and drops
+the encoder un-submitted, so nothing that frame's passes recorded ever reaches the GPU): the refusal
+variants are production-reachable, not test-only — `EngineError::AlphaCapacity`/`PaintCapacity` when a
+frame's coverage or paint data outgrows its GPU texture, `EngineError::SchedulerEscalation` when a
+layer shape exceeds what the scheduler serves (`crates/frust-engine/src/error.rs`). `run_external_passes`
+drains every registered pass, including its `ExternalFrame::bind_texture` calls, *before*
+`encode_traced` runs and can still refuse the frame; a bind is applied to the engine's
+`ExternalTextures` registry immediately, and `ExternalFrame::frame_index` has already advanced, so a
+refused frame leaves the registry holding a bind whose recorded GPU work was discarded with the
+dropped encoder — the pass's side effect and the frame it was recorded for are no longer the same
+frame from the registry's point of view.
+
+**Accepted because**: the engine's own shader-quad pre-pass shares this exact non-transactional
+shape (it also binds into the external-texture registry ahead of a frame that can still be refused),
+so this is an existing property of the seam rather than one `ExternalPass` introduces; a refused frame
+is followed by a retry on the next vsync, which re-runs every registered pass and re-applies its
+binds.
+
+**Trigger for removal**: staged binds applied only after a confirmed encode, or a pass-visible
+frame-outcome signal a pass can use to redo work a refusal discarded.
+
 ### `external-pass-registry-process-wide` — one process-wide registry serves every live `EngineRenderer`, so a second surface can be left holding a stale binding
 
 **Observed** (evidence: `crates/frust-render/src/external_pass.rs`'s module docs, "Who reaches this";
@@ -4013,6 +4042,15 @@ surface's `EngineRenderer` unbinds the id. A second live surface's `EngineRender
 `wgpu::TextureView` bound — the pass is gone from the registry, so nothing calls `record` again to
 refresh or clear that surface's own binding, and it stays stale until something re-registers under the
 same id (which restores `record` calls, and so re-binding, on every live surface again).
+
+The same one-registration-per-id design means the identical `Arc<dyn ExternalPass>` is what every live
+surface's `run_external_passes` calls `record` on, and `SurfaceRenderer` drives each surface's
+frame on its own dedicated render thread by default (`RENDER_ARCHITECTURE.md`'s Module Structure):
+with two engine-tier surfaces live at once, nothing serializes their drains against each other, so the
+same pass instance's `record` can be called from two threads at the same moment. `ExternalPass: Send +
+Sync` has to mean tolerating that concurrent invocation — a pass whose interior mutability assumes only
+sequential reuse (one surface's drain finishing before the next one starts) is unsound under two live
+surfaces, not merely stale.
 
 **Accepted because**: a single-window desktop shell is the only engine-tier host any shell ships today
 (`desktop-single-window` above); a per-surface registry is real design work with no shipping consumer
