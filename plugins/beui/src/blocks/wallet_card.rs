@@ -52,6 +52,42 @@
 //!   [`WalletCardView::on_copy_address`] hands the address to the app and the
 //!   icon still swaps to its check for [`WALLET_COPIED_HOLD`].
 //! - **No backdrop blur**, the catalog-wide absence.
+//!
+//! # The true-3D account fan, behind `gpu-effects`
+//!
+//! With the non-default `gpu-effects` feature on, [`WalletCardView::gpu_fan`]
+//! renders the open account switcher's rows as a genuine **depth-fanned
+//! stack**: one perspective-projected plate per account, the selected one
+//! lifted toward the viewer and its neighbours receding and leaning away in a
+//! curve, occluding each other by *distance* rather than by paint order
+//! ([`fan_scene`](crate::gpu_fx::card3d::fan_scene)).
+//!
+//! It stands where the porting card asked for a fanning card deck. Upstream
+//! ships none — see *A premise correction* above — and the account switcher's
+//! morph is the one place this block has a stack of cards at all: closed, the
+//! rows are collapsed behind the trigger; open, they are a run of card
+//! surfaces the selected one is picked out of. So that run is what the 3D
+//! path fans.
+//!
+//! The plates are the *surfaces* only. Every row's avatar, name, address and
+//! copy affordance keeps painting on the 2D path above the composite,
+//! unchanged, because a 3D face carries no widget content and no text — the
+//! boundary the whole substrate is under. Two consequences follow:
+//!
+//! - **The 2D selected-row plate stands down while the fan is live**, so the
+//!   selection is read off the lifted card rather than off two plates stacked
+//!   on each other.
+//! - **A row's stagger reveal rides on its plate's own alpha**, and a
+//!   translucent face writes depth like an opaque one, so mid-stagger a plate
+//!   behind another is rejected rather than showing through it. Over the
+//!   third of a second the list takes to arrive that is invisible; it is
+//!   recorded because it is the depth/blending interaction the substrate
+//!   warns about, not an accident.
+//!
+//! The runtime fallback is the ordinary contract: with the GPU unreachable —
+//! before a shell's first surface, on every platform whose shell installs no
+//! device, under the substrate's kill switch — the panel paints exactly the
+//! 2D rows it always did, `gpu_fan` set or not.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -65,12 +101,22 @@ use frust::authoring::{
 use frust::{FrameTime, Theme};
 
 use crate::components::popover::{PanelChrome, morph_rect, paint_panel_hairline, resolve_panel};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::card3d::{self, Card3d, FanCard};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::quad3d::QuadFace;
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::schedule::request_frame;
 use crate::motion::stagger::StaggerDirection;
 use crate::motion::{Presence, Ramp, Stagger};
 use crate::press::{Lane, inside, is_activation_key, press_scale, presses};
 use crate::style;
 use crate::text::LabelRun;
 use crate::tokens::motion::{EASE_OUT, SPRING_PANEL, SPRING_PRESS};
+
+/// The label this block's GPU pass is diagnosed under.
+#[cfg(feature = "gpu-effects")]
+const FX_LABEL: &str = "wallet-card";
 
 // ---- Metrics ---------------------------------------------------------------
 
@@ -174,6 +220,16 @@ pub const WALLET_PULSE_PERIOD: Duration = Duration::from_millis(1_000);
 
 /// How far past the dot the unread halo expands, as a multiple of its radius.
 pub const WALLET_PULSE_REACH: f64 = 2.0;
+
+/// How opaque an unselected card's plate is in the true-3D fan, relative to
+/// the selected one's.
+///
+/// The 2D panel paints a plate under the *selected* row only, so the fan needs
+/// a value for the rest: dim enough that the lifted card still reads as the
+/// selection, solid enough that the stack reads as a stack rather than as one
+/// card floating over nothing.
+#[cfg(feature = "gpu-effects")]
+pub const WALLET_FAN_PLATE_ALPHA: f32 = 0.45;
 
 /// The unread halo's scale and alpha at `elapsed` — `animate-ping`'s own shape:
 /// it grows from the dot to [`WALLET_PULSE_REACH`] times its size while fading
@@ -385,6 +441,10 @@ struct WalletConfig {
 pub struct WalletCardView<State: 'static> {
     accounts: Vec<WalletAccount>,
     config: WalletConfig,
+    /// Whether the open account switcher fans its rows in real depth. See the
+    /// [module docs](self)' *The true-3D account fan*.
+    #[cfg(feature = "gpu-effects")]
+    gpu_fan: bool,
     on_account_change: OnString<State>,
     on_action: OnAction<State>,
     on_search_submit: OnString<State>,
@@ -409,6 +469,8 @@ pub fn wallet_card<State: 'static>(
             search_recent: Vec::new(),
             search_empty_label: "No recent searches".to_string(),
         },
+        #[cfg(feature = "gpu-effects")]
+        gpu_fan: false,
         on_account_change: Rc::new(|_, _| {}),
         on_action: Rc::new(|_, _| {}),
         on_search_submit: Rc::new(|_, _| {}),
@@ -488,6 +550,20 @@ impl<State: 'static> WalletCardView<State> {
     /// Set the bell's callback (`onNotifications`).
     pub fn on_notifications<F: Fn(&mut State) + 'static>(mut self, f: F) -> Self {
         self.on_notifications = Rc::new(f);
+        self
+    }
+
+    /// Fan the open account switcher's rows in real depth through the true-3D
+    /// path.
+    ///
+    /// **Opt-in, and it replaces the rows' *surfaces* only** — their avatars,
+    /// names, addresses and copy affordances keep painting on the 2D path
+    /// above the composite. Read the [module docs](self)' *The true-3D account
+    /// fan* before reaching for it. With the GPU unreachable the panel renders
+    /// exactly its 2D rows, so a caller never has to branch on availability.
+    #[cfg(feature = "gpu-effects")]
+    pub fn gpu_fan(mut self, fan: bool) -> Self {
+        self.gpu_fan = fan;
         self
     }
 }
@@ -574,6 +650,13 @@ pub struct WalletCardWidget {
     recent_rects: Vec<Rect>,
     /// The affordance a `Down` armed.
     armed: Option<Target>,
+    /// Whether the account switcher fans its rows in real depth.
+    #[cfg(feature = "gpu-effects")]
+    gpu_fan: bool,
+    /// The fan's own claim on the GPU, held for the widget's life and released
+    /// from `View::teardown`.
+    #[cfg(feature = "gpu-effects")]
+    fan: Card3d,
     on_account_change: ErasedArgCallback<String>,
     on_action: ErasedArgCallback<WalletAction>,
     on_search_submit: ErasedArgCallback<String>,
@@ -645,6 +728,29 @@ impl WalletCardWidget {
             WalletPanel::Search => self.recent.len(),
             WalletPanel::None => 0,
         }
+    }
+
+    /// How far each open-panel row has been revealed, in row order.
+    ///
+    /// `delayChildren: 0.12` is measured from the frame the panel opened, so
+    /// the run is timed against that latch rather than against the clock. One
+    /// source of truth for it, because the flat rows and the 3D plates have to
+    /// arrive together.
+    fn row_reveals(&self, now: FrameTime, reduce: bool) -> Vec<f64> {
+        let stagger = self.list_stagger(reduce);
+        let elapsed = now
+            .saturating_sub(self.panel_start.unwrap_or(now))
+            .saturating_sub(WALLET_LIST_DELAY);
+        let count = self.row_count();
+        (0..count)
+            .map(|index| {
+                if reduce {
+                    1.0
+                } else {
+                    stagger.revealed(elapsed, index, count) * self.shown
+                }
+            })
+            .collect()
     }
 
     /// The open panel's own height, in logical px.
@@ -849,6 +955,10 @@ impl<State: 'static> View<State> for WalletCardView<State> {
             actions: [Rect::ZERO; 4],
             recent_rects: Vec::new(),
             armed: None,
+            #[cfg(feature = "gpu-effects")]
+            gpu_fan: self.gpu_fan,
+            #[cfg(feature = "gpu-effects")]
+            fan: Card3d::new(FX_LABEL),
             on_account_change: erase_callback_arg(&self.on_account_change),
             on_action: erase_callback_arg(&self.on_action),
             on_search_submit: erase_callback_arg(&self.on_search_submit),
@@ -911,6 +1021,16 @@ impl<State: 'static> View<State> for WalletCardView<State> {
             .get(element.selected)
             .map_or_else(String::new, |row| row.name.content().to_string());
         element.trigger_name.set_content(name);
+        #[cfg(feature = "gpu-effects")]
+        if element.gpu_fan != self.gpu_fan {
+            element.gpu_fan = self.gpu_fan;
+            if !self.gpu_fan {
+                // Withdrawn mid-life: the composite goes on the next drained
+                // frame, and the rows fall back to their 2D plate.
+                element.fan.clear();
+            }
+            flags |= ChangeFlags::PAINT;
+        }
         // Closures are not comparable; reinstalling the adapters is cheap.
         element.on_account_change = erase_callback_arg(&self.on_account_change);
         element.on_action = erase_callback_arg(&self.on_action);
@@ -920,7 +1040,11 @@ impl<State: 'static> View<State> for WalletCardView<State> {
         flags
     }
 
-    fn teardown(&self, _element: &mut WalletCardWidget, _ctx: &mut BuildCtx<'_>) {}
+    #[cfg_attr(not(feature = "gpu-effects"), allow(unused_variables))]
+    fn teardown(&self, element: &mut WalletCardWidget, _ctx: &mut BuildCtx<'_>) {
+        #[cfg(feature = "gpu-effects")]
+        element.fan.release();
+    }
 }
 
 /// The label family: the theme's own scale, with the catalog's sans stack as
@@ -1147,7 +1271,11 @@ impl Widget for WalletCardWidget {
         self.paint_balance(scene, origin, size, chrome, success, danger, now, reduce);
         self.paint_actions(scene, origin, chrome, muted);
         if self.shown > 0.0 {
-            self.paint_panel(scene, origin, chrome, accent, muted, now, reduce);
+            self.paint_panel(ctx, scene, origin, chrome, accent, muted, now, reduce);
+        } else {
+            // Nothing to fan while the panel is shut, and a pass left holding
+            // a scene would keep compositing one.
+            self.clear_fan();
         }
     }
 
@@ -1496,7 +1624,8 @@ impl WalletCardWidget {
     /// The open panel: the travelling box, its header and its staggered rows.
     #[allow(clippy::too_many_arguments)]
     fn paint_panel(
-        &self,
+        &mut self,
+        ctx: &mut PaintCtx,
         scene: &mut dyn PaintScene,
         origin: Point,
         chrome: PanelChrome,
@@ -1536,22 +1665,17 @@ impl WalletCardWidget {
         );
 
         // The rows, staggered in behind `delayChildren`.
-        let stagger = self.list_stagger(reduce);
-        // `delayChildren: 0.12` is measured from the frame the panel opened, so
-        // the run is timed against that latch rather than against the clock.
-        let elapsed = now
-            .saturating_sub(self.panel_start.unwrap_or(now))
-            .saturating_sub(WALLET_LIST_DELAY);
+        let reveals = self.row_reveals(now, reduce);
+        // The account rows as a genuinely fanned stack, when the 3D path is
+        // live: the plates then come from the composite rather than from the
+        // 2D fill below.
+        let fanned = self.paint_fan(ctx, scene, origin, &reveals, muted);
         let count = self.row_count();
         for index in 0..count {
             let Some(row_rect) = self.recent_rects.get(index) else {
                 continue;
             };
-            let reveal = if reduce {
-                1.0
-            } else {
-                stagger.revealed(elapsed, index, count) * self.shown
-            };
+            let reveal = reveals.get(index).copied().unwrap_or(0.0);
             if reveal <= 0.0 {
                 continue;
             }
@@ -1560,7 +1684,9 @@ impl WalletCardWidget {
             scene.push_layer(row_at, row_rect.size(), reveal.clamp(0.0, 1.0) as f32);
             match self.panel {
                 WalletPanel::Accounts => {
-                    if index == self.selected {
+                    // The fan draws every row's plate, the selected one lifted;
+                    // the flat path picks the selection out with this one.
+                    if index == self.selected && !fanned {
                         scene.fill_rounded_rect(row_at, row_rect.size(), style::RADIUS_XL, muted);
                     }
                     let row = &self.rows[index];
@@ -1700,6 +1826,115 @@ impl WalletCardWidget {
             }
         }
     }
+}
+
+#[cfg(feature = "gpu-effects")]
+impl WalletCardWidget {
+    /// Render the open account list as a depth-fanned stack of real
+    /// perspective plates, answering whether it took the rows' surfaces over.
+    ///
+    /// `false` — and therefore the ordinary 2D plate — whenever the caller did
+    /// not opt in, the open panel is not the account switcher, the GPU is
+    /// unreachable, the panel has no usable box, or no row has arrived yet.
+    /// Every one of those is an ordinary frame, not an error.
+    fn paint_fan(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        reveals: &[f64],
+        muted: Color,
+    ) -> bool {
+        if !self.gpu_fan || self.panel != WalletPanel::Accounts {
+            self.fan.clear();
+            return false;
+        }
+        if !self.fan.acquire() {
+            return false;
+        }
+        let panel = self.panel_box;
+        let size = panel.size();
+        let Some((dest, extent)) = card3d::target_for(origin + panel.origin().to_vec2(), size)
+        else {
+            self.fan.clear();
+            return false;
+        };
+        let cards = self.fan_cards(reveals, muted, extent);
+        if cards.is_empty() {
+            self.fan.clear();
+            return false;
+        }
+
+        // The pass binds during the frame *after* the paint that submitted, so
+        // a first submission owes one frame or the stack would wait for an
+        // unrelated repaint to appear.
+        let first = self.fan.submit(extent, card3d::fan_scene(cards));
+        request_frame(ctx, card3d::cadence(first));
+        let Some(id) = self.fan.scene_texture_id() else {
+            return false;
+        };
+        scene.draw_scene_texture(id, dest);
+        true
+    }
+
+    /// The plates the open account list fans, in **row order** — not depth
+    /// order, because a plate behind another is hidden by distance and that is
+    /// the whole point of the mode.
+    ///
+    /// A row that has not begun arriving contributes nothing; the rest carry
+    /// the stagger's own slide and its reveal as their alpha.
+    fn fan_cards(&self, reveals: &[f64], muted: Color, extent: (u32, u32)) -> Vec<FanCard> {
+        let panel = self.panel_box;
+        let size = panel.size();
+        reveals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, reveal)| {
+                let reveal = reveal.clamp(0.0, 1.0);
+                if reveal <= 0.0 {
+                    return None;
+                }
+                let rect = self.recent_rects.get(index)?;
+                let slide = WALLET_ITEM_TRAVEL * (1.0 - reveal);
+                let in_panel = *rect - panel.origin().to_vec2() + Vec2::new(0.0, slide);
+                let plate = if index == self.selected {
+                    1.0
+                } else {
+                    WALLET_FAN_PLATE_ALPHA
+                };
+                Some(FanCard {
+                    dest: card3d::in_target(extent, size, in_panel),
+                    face: QuadFace::Solid(style::with_alpha(muted, plate * reveal as f32)),
+                    slot: index as i32 - self.selected as i32,
+                })
+            })
+            .collect()
+    }
+
+    /// Drop whatever the fan is holding — the panel closed, or the mode was
+    /// switched off — without giving up the claim.
+    fn clear_fan(&self) {
+        self.fan.clear();
+    }
+}
+
+#[cfg(not(feature = "gpu-effects"))]
+impl WalletCardWidget {
+    /// Without the `gpu-effects` feature the account list has no 3D path at
+    /// all: every row keeps its ordinary 2D plate.
+    fn paint_fan(
+        &mut self,
+        _ctx: &mut PaintCtx,
+        _scene: &mut dyn PaintScene,
+        _origin: Point,
+        _reveals: &[f64],
+        _muted: Color,
+    ) -> bool {
+        false
+    }
+
+    /// Nothing to drop without the `gpu-effects` feature.
+    fn clear_fan(&self) {}
 }
 
 /// Paint the cells of one text run, centred on `centre_x`, each cell staged by
@@ -2271,5 +2506,225 @@ mod tests {
         let now = h.clock;
         let outcome = h.root.paint(&mut rec, ft_ms(now));
         assert!(outcome.needs_frame, "the unread halo stopped pulsing");
+    }
+
+    // ---- The true-3D account fan --------------------------------------------
+
+    /// A card built and laid out directly, with its account switcher already
+    /// open — the route the 3D cases need, since the mounted harness hands back
+    /// a scene rather than the widget behind it.
+    #[cfg(feature = "gpu-effects")]
+    fn opened(view: &WalletCardView<()>) -> WalletCardWidget {
+        let mut next_id = 0u64;
+        let mut widget = View::<()>::build(view, &mut frust_core::BuildCtx::new(&mut next_id));
+        widget.set_panel(WalletPanel::Accounts);
+        let mut tcx = TextContext::new();
+        let mut layout = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        widget.layout(&mut layout, &BoxConstraints::tight(WINDOW));
+        widget
+    }
+
+    /// A scene recording the two things the fan changes: the rounded rectangles
+    /// the flat rows fill, and the scene textures composited.
+    #[cfg(feature = "gpu-effects")]
+    #[derive(Default)]
+    struct FanScene {
+        rrects: Vec<(Point, Size, f64, Color)>,
+        textures: Vec<(u64, Rect)>,
+    }
+
+    #[cfg(feature = "gpu-effects")]
+    impl PaintScene for FanScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
+            self.rrects.push((origin, size, radius, color));
+        }
+        fn draw_scene_texture(&mut self, id: u64, dest: Rect) {
+            self.textures.push((id, dest));
+        }
+    }
+
+    /// The plates the fan submits: one per arrived row, in row order, the
+    /// selected one at slot zero and nearest, and the run leaning away on both
+    /// sides of it. Row order — not depth order — is what makes the depth
+    /// attachment do the occluding rather than paint order.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_account_fan_plates_every_arrived_row_in_row_order() {
+        let widget = opened(&wallet_card(accounts(), 100.0).gpu_fan(true));
+        let extent = (400, 400);
+
+        let cards = widget.fan_cards(&[1.0, 1.0], Color::WHITE, extent);
+        assert_eq!(cards.len(), 2, "both accounts get a plate");
+        assert_eq!(cards[0].slot, 0, "the selected account is the stack's zero");
+        assert_eq!(cards[1].slot, 1);
+        // Each plate keeps its own row's box, mapped into the target.
+        assert!((cards[0].dest.width() - widget.recent_rects[0].width()).abs() < 1e-9);
+        assert!(cards[1].dest.y0 > cards[0].dest.y0);
+
+        let scene = card3d::fan_scene(cards);
+        assert!(scene.depth, "a stack occludes by distance");
+        assert!(
+            scene.quads[0].depth_offset > scene.quads[1].depth_offset,
+            "the selected plate should sit nearest"
+        );
+        assert!(scene.quads[0].pitch.abs() < 1e-9);
+        assert!(
+            scene.quads[1].pitch > 0.0,
+            "the row behind should lean away"
+        );
+
+        // A row that has not begun arriving contributes no plate at all.
+        assert_eq!(widget.fan_cards(&[1.0, 0.0], Color::WHITE, extent).len(), 1);
+        assert!(
+            widget
+                .fan_cards(&[0.0, 0.0], Color::WHITE, extent)
+                .is_empty()
+        );
+    }
+
+    /// The fallback contract: a test process installs no shell device, so the
+    /// fan refuses and the panel paints *precisely* the 2D rows it always did —
+    /// selected plate included, no scene texture composited.
+    ///
+    /// This is the path every caller of `gpu_fan` gets on Android, on iOS, and
+    /// before a desktop shell's first surface, so it is the one the port is
+    /// judged on rather than the enhancement above it.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_account_fan_degrades_to_the_two_dimensional_rows() {
+        // Reduced motion collapses the morph, so one paint shows the panel
+        // fully open with every row arrived — a deterministic comparison.
+        let theme = reduced();
+        let paint = |gpu: bool| {
+            let mut widget = opened(&wallet_card(accounts(), 100.0).gpu_fan(gpu));
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(0.0)).with_theme(&theme);
+            let mut scene = FanScene::default();
+            widget.paint(&mut ctx, &mut scene);
+            (widget, scene)
+        };
+
+        let (widget, fanned) = paint(true);
+        assert!(
+            !widget.fan.is_active(),
+            "a device-less run recorded a claim as held"
+        );
+        assert!(
+            fanned.textures.is_empty(),
+            "a device-less run composited a fan"
+        );
+
+        let (_, flat) = paint(false);
+        assert_eq!(
+            fanned.rrects, flat.rrects,
+            "the opt-in changed the flat paint without a device"
+        );
+        assert!(
+            !fanned.rrects.is_empty(),
+            "the comparison painted no rounded rectangles at all"
+        );
+    }
+
+    /// The fan's own claim, read back off real hardware with the *widget's*
+    /// geometry rather than a synthetic stand-in: there are texels the card
+    /// behind takes by paint order and depth hands back to the lifted selected
+    /// card, even though the card behind is submitted after it.
+    ///
+    /// Counted rather than sampled at one coordinate, because where two lifted
+    /// plates overlap is a consequence of the fan's own tuning and would make a
+    /// fixed coordinate a test of the constants rather than of the occlusion.
+    ///
+    /// Ignored by default; see `crate::gpu_fx::test_gpu` for the invocation
+    /// and why a read-back is the only honest check here.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn the_account_fan_occludes_at_the_seam_by_depth() {
+        use crate::gpu_fx::card3d::test_render::{pixel, render};
+        use crate::gpu_fx::quad3d::Quad3dRenderer;
+        use crate::gpu_fx::test_gpu::with_device;
+
+        let widget = opened(&wallet_card(accounts(), 100.0).gpu_fan(true));
+        let panel = widget.panel_box;
+        let (_, extent) =
+            card3d::target_for(panel.origin(), panel.size()).expect("the panel has a box");
+        // Recoloured after the fact: the plates a wallet submits are all the
+        // one muted tone, which cannot say *which* of two won a texel.
+        let selected = Color::from_rgba8(255, 0, 0, 255);
+        let behind = Color::from_rgba8(0, 0, 255, 255);
+        let cards = || {
+            let mut cards = widget.fan_cards(&[1.0, 1.0], Color::WHITE, extent);
+            cards[0].face = QuadFace::Solid(selected);
+            cards[1].face = QuadFace::Solid(behind);
+            cards
+        };
+
+        // The selected row's own middle, where nothing contests it either way.
+        let plate = card3d::in_target(
+            extent,
+            panel.size(),
+            widget.recent_rects[0] - panel.origin().to_vec2(),
+        );
+        let (mid_x, mid_y) = (plate.center().x as u32, plate.center().y as u32);
+
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "wallet-fan");
+            let occluded = render(
+                device,
+                queue,
+                &mut renderer,
+                extent,
+                true,
+                &card3d::fan_scene(cards()),
+            );
+            let painted = render(
+                device,
+                queue,
+                &mut renderer,
+                extent,
+                false,
+                &card3d::fan_scene(cards()).with_depth(false),
+            );
+
+            assert_eq!(
+                pixel(&occluded, extent.0, mid_x, mid_y),
+                [255, 0, 0, 255],
+                "the selected plate did not render where it was laid out"
+            );
+
+            let contested = (0..extent.1)
+                .flat_map(|y| (0..extent.0).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    pixel(&painted, extent.0, *x, *y) == [0, 0, 255, 255]
+                        && pixel(&occluded, extent.0, *x, *y) == [255, 0, 0, 255]
+                })
+                .count();
+            println!("wallet fan: depth returned {contested} texels to the selected card");
+            assert!(
+                contested > 0,
+                "paint order never handed the card behind a texel the lifted one should own"
+            );
+        });
+    }
+
+    /// Switching the mode off is a repaint, and re-declaring it is not.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn toggling_the_fan_repaints_and_redeclaring_it_does_not() {
+        let mut next_id = 0u64;
+        let mut ctx = frust_core::BuildCtx::new(&mut next_id);
+        let on = wallet_card::<()>(accounts(), 100.0).gpu_fan(true);
+        let mut widget = View::<()>::build(&on, &mut ctx);
+        assert!(widget.gpu_fan);
+
+        let again = wallet_card::<()>(accounts(), 100.0).gpu_fan(true);
+        let flags = View::<()>::rebuild(&again, &on, &mut widget, &mut ctx);
+        assert!(!flags.contains(ChangeFlags::PAINT));
+
+        let off = wallet_card::<()>(accounts(), 100.0);
+        let flags = View::<()>::rebuild(&off, &again, &mut widget, &mut ctx);
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert!(!widget.gpu_fan);
     }
 }

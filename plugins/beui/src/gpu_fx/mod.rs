@@ -17,7 +17,7 @@
 //! target to the engine to composite. What tilts is what this substrate drew,
 //! not the widget tree.
 //!
-//! # The four pieces
+//! # The pieces
 //!
 //! - [`context`] — acquisition and the degrade contract. [`GpuFx::try_acquire`]
 //!   answers `Option<`[`GpuFxHandle`]`>`; `None` means paint 2D.
@@ -30,6 +30,9 @@
 //! - [`schedule`] — the `ExternalPass` the engine calls once per frame ahead
 //!   of the scene, and [`FxCadence`], the vocabulary a component asks for its
 //!   next repaint with.
+//! - [`card3d`] — the first geometry built on top of the four: card-shaped
+//!   tilt and depth-fanned stack, plus [`Card3d`], the handle lifecycle a
+//!   component holds rather than open-coding.
 //!
 //! # The shape a component uses it in
 //!
@@ -92,17 +95,19 @@
 //! variants built on this substrate inherit the constraint explicitly rather
 //! than discovering it.
 
+pub mod card3d;
 pub mod context;
 pub mod pool;
 pub mod quad3d;
 pub mod schedule;
 
-// Later 3D variant modules attach here as their own `pub mod` lines
-// (card/cylinder/fan geometry, each owning its component-facing view). This
+// Further 3D variant modules attach here as their own `pub mod` lines
+// (cylinder/wheel geometry, each owning its component-facing view). This
 // module deliberately declares none of them ahead of time: a `pub mod` line
 // without a file behind it does not compile, and an empty file declared here
 // would be an unused module rather than a reservation.
 
+pub use card3d::{Card3d, FanCard};
 pub use context::{FxAvailability, GpuFx, GpuFxHandle, KILL_SWITCH_ENV_VAR};
 pub use pool::{
     Binding, FxComponentId, FxTarget, MAX_TARGET_SIDE, MAX_UNSEEN_FRAMES, TARGET_QUANTUM,

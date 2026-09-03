@@ -77,6 +77,42 @@
 //! `motion.reduce_motion` the card paints flat, tracks nothing and asks for no
 //! frames. The touch guard is inherited from the framework instead — a captured
 //! pointer creates no hover, and this widget captures nothing.
+//!
+//! # The true-3D face, behind `gpu-effects`
+//!
+//! With the non-default `gpu-effects` feature on, [`TiltCardView::gpu_face`]
+//! adds a **genuinely projected** face under the card: a quad this crate
+//! renders through [`crate::gpu_fx::card3d`] into an offscreen target the
+//! engine composites, carrying the near-corner growth the affine above cannot.
+//! It is opt-in for one blunt reason, and the reason is the boundary the whole
+//! substrate is under:
+//!
+//! > **A 3D face is a colour, a ramp or a caller-owned texture — never a
+//! > widget subtree.** The card's `child` keeps compositing through
+//! > `push_transform` under the affine tilt above, exactly as it does without
+//! > the feature. What the 3D path replaces is the card's *surface*, not its
+//! > content, so a caller supplies that surface explicitly rather than having
+//! > one appear under its children.
+//!
+//! Three further consequences a caller should expect, none of them
+//! recoverable at this tier:
+//!
+//! - **The face has square corners.** [`TiltCardView::radius`] still clips the
+//!   child; a rounded clip is a rectangle in scene space and a tilted face is
+//!   not one.
+//! - **The glare moves onto the face.** Upstream's glare is a child of the
+//!   transformed element, so it genuinely tilts with the card — which is what
+//!   the 3D path gives it. The cost is painter order: the glare now sits with
+//!   the surface, *under* the child, rather than as an overlay above it. The
+//!   2D glare is suppressed while the 3D face is live so the two never stack.
+//! - **The face is rendered at logical resolution.** There is no scale factor
+//!   at the paint seam, so the target is allocated in logical pixels and the
+//!   composite is upscaled on a HiDPI surface.
+//!
+//! The runtime fallback is the ordinary contract: acquisition answers `None`
+//! before a shell's first surface, on every platform whose shell installs no
+//! device, and under the substrate's kill switch — and the card then paints
+//! precisely the 2D path it always did, `gpu_face` set or not.
 
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
@@ -84,14 +120,26 @@ use frust::authoring::{
     build_child, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{FrameTime, Theme};
+#[cfg(feature = "gpu-effects")]
+use kurbo::Rect;
 use kurbo::{Point, Size, Vec2};
 use peniko::{Brush, Color, ColorStop, Gradient};
 
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::card3d::{self, Card3d};
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::quad3d::QuadFace;
+#[cfg(feature = "gpu-effects")]
+use crate::gpu_fx::schedule::request_frame;
 use crate::motion::{PointerTracker, Ramp};
 use crate::press::{SpringScalar, inside, presses};
 use crate::style;
 use crate::tokens::BEUI_LIGHT;
 use crate::tokens::motion::SPRING_MOUSE;
+
+/// The label this component's GPU pass is diagnosed under.
+#[cfg(feature = "gpu-effects")]
+const FX_LABEL: &str = "tilt-card";
 
 /// The tilt's travel in degrees — upstream's `max = 12`. The card reaches
 /// `±max/2` on each axis at the box's edges, because upstream's `(px − 0.5)`
@@ -149,6 +197,10 @@ pub struct TiltCardView<State: 'static> {
     glare: bool,
     shadow: bool,
     radius: f64,
+    /// The true-3D surface, when the caller asked for one. See the
+    /// [module docs](self)' *The true-3D face*.
+    #[cfg(feature = "gpu-effects")]
+    gpu_face: Option<QuadFace>,
 }
 
 /// Wrap `child` in a tilt card with upstream's own defaults: [`DEFAULT_MAX_TILT`]
@@ -160,6 +212,8 @@ pub fn tilt_card<State: 'static, V: View<State>>(child: V) -> TiltCardView<State
         glare: true,
         shadow: false,
         radius: style::RADIUS_2XL,
+        #[cfg(feature = "gpu-effects")]
+        gpu_face: None,
     }
 }
 
@@ -195,6 +249,21 @@ impl<State: 'static> TiltCardView<State> {
         self.radius = radius.max(0.0);
         self
     }
+
+    /// Render `face` as the card's surface through the true-3D path.
+    ///
+    /// **Opt-in, and it is the card's *surface*, not its content** — the
+    /// child still composites under the affine tilt above it. Read the
+    /// [module docs](self)' *The true-3D face* before reaching for it: a face
+    /// carries no widget subtree, has square corners, takes the glare with it
+    /// under the child, and is rendered at logical resolution. With the GPU
+    /// unreachable the card renders exactly its 2D path, so a caller never has
+    /// to branch on availability.
+    #[cfg(feature = "gpu-effects")]
+    pub fn gpu_face(mut self, face: QuadFace) -> Self {
+        self.gpu_face = Some(face);
+        self
+    }
 }
 
 /// The retained widget for a [`TiltCardView`].
@@ -215,6 +284,13 @@ pub struct TiltCardWidget {
     tilt_x: SpringScalar,
     /// The rotation about the vertical axis, in degrees — upstream's `sry`.
     tilt_y: SpringScalar,
+    /// The surface the true-3D path renders, when the caller declared one.
+    #[cfg(feature = "gpu-effects")]
+    gpu_face: Option<QuadFace>,
+    /// The 3D path's own claim on the GPU, held for the widget's life and
+    /// released from `View::teardown`.
+    #[cfg(feature = "gpu-effects")]
+    fx: Card3d,
 }
 
 impl TiltCardWidget {
@@ -303,6 +379,10 @@ impl<State: 'static> View<State> for TiltCardView<State> {
             pressed: false,
             tilt_x: SpringScalar::new(0.0, ramp),
             tilt_y: SpringScalar::new(0.0, ramp),
+            #[cfg(feature = "gpu-effects")]
+            gpu_face: self.gpu_face.clone(),
+            #[cfg(feature = "gpu-effects")]
+            fx: Card3d::new(FX_LABEL),
         }
     }
 
@@ -332,10 +412,23 @@ impl<State: 'static> View<State> for TiltCardView<State> {
             element.radius = self.radius;
             flags |= ChangeFlags::PAINT;
         }
+        #[cfg(feature = "gpu-effects")]
+        if !same_gpu_face(element.gpu_face.as_ref(), self.gpu_face.as_ref()) {
+            // A face withdrawn mid-life drops the composited surface on the
+            // next drained frame; one merely changed is picked up by the next
+            // paint's own submission.
+            if self.gpu_face.is_none() {
+                element.fx.clear();
+            }
+            element.gpu_face = self.gpu_face.clone();
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 
     fn teardown(&self, element: &mut TiltCardWidget, ctx: &mut BuildCtx<'_>) {
+        #[cfg(feature = "gpu-effects")]
+        element.fx.release();
         teardown_child(&self.child, &mut element.child, ctx);
     }
 }
@@ -363,6 +456,10 @@ impl Widget for TiltCardWidget {
             // Upstream's `enabled` gate: the whole effect is off, and the card
             // is a plain clipped surface.
             self.flatten();
+            // The 3D face is part of the effect, so it goes too — the claim is
+            // kept, since `reduce_motion` can be switched back off.
+            #[cfg(feature = "gpu-effects")]
+            self.fx.clear();
             scene.push_clip_rounded(origin, size, self.radius);
             self.child.paint_child(ctx, scene);
             scene.pop_clip();
@@ -380,6 +477,12 @@ impl Widget for TiltCardWidget {
         let (rx, ry) = self.tilt();
         let reach = if self.max > 0.0 { self.max / 2.0 } else { 1.0 };
         let lean = ((rx.abs() + ry.abs()) / (2.0 * reach)).clamp(0.0, 1.0);
+
+        // The true-3D surface, resolved before the shadow so the shadow can be
+        // the softer one a genuinely projected face throws and still paint
+        // underneath the composite.
+        let face = self.face_3d(ctx, ink);
+        let projected = face.is_some();
         if self.shadow && lean > 0.0 {
             // Away from the lift: a card leaning its top edge toward the viewer
             // throws its shadow down. A flat card casts nothing at all, so a
@@ -389,9 +492,14 @@ impl Widget for TiltCardWidget {
                 origin + slide,
                 size,
                 self.radius,
-                SHADOW_BLUR,
+                shadow_blur(projected, lean),
                 style::with_alpha(shadow_ink, SHADOW_ALPHA * lean as f32),
             );
+        }
+        if let Some((id, dest)) = face {
+            // Outside the affine tilt: the face carries its own projection, and
+            // composing the two would tilt it twice.
+            scene.draw_scene_texture(id, dest);
         }
 
         // `overflow-hidden rounded-2xl`, pushed *under* the tilt so the clip
@@ -399,7 +507,9 @@ impl Widget for TiltCardWidget {
         scene.push_transform(self.tilt_transform(size));
         scene.push_clip_rounded(origin, size, self.radius);
         self.child.paint_child(ctx, scene);
-        if self.glare {
+        // A live 3D face carries the glare itself, so the 2D overlay stands
+        // down rather than stacking a second one on top of it.
+        if self.glare && !projected {
             paint_glare(scene, origin, size, self.glare_centre(), ink);
         }
         scene.pop_clip();
@@ -449,6 +559,77 @@ impl Widget for TiltCardWidget {
     visit_children!(child);
 }
 
+#[cfg(feature = "gpu-effects")]
+impl TiltCardWidget {
+    /// Render this paint's true-3D surface, answering the scene-texture id and
+    /// the destination to composite it over.
+    ///
+    /// `None` — and therefore the plain 2D card — whenever the caller declared
+    /// no face, the GPU is unreachable, or the card has no usable box. Every
+    /// one of those is an ordinary frame, not an error.
+    fn face_3d(&mut self, ctx: &mut PaintCtx, ink: Color) -> Option<(u64, Rect)> {
+        let face = self.gpu_face.clone()?;
+        if !self.fx.acquire() {
+            return None;
+        }
+        let size = ctx.size();
+        let (dest, extent) = card3d::target_for(ctx.origin(), size)?;
+        let quad = card3d::face_rect(extent, size);
+        let (rx, ry) = self.tilt();
+        let glare = self
+            .glare
+            .then(|| card3d::glare_quad(quad, rx, ry, self.pointer.offset(), ink, GLARE_OPACITY));
+        // The pass binds during the frame *after* the paint that submitted, so
+        // a first submission owes one frame or the face would wait for an
+        // unrelated repaint to appear.
+        let first = self.fx.submit(
+            extent,
+            card3d::tilt_scene(card3d::face_quad(quad, face, rx, ry), glare),
+        );
+        let animating = self.tilt_x.is_animating() || self.tilt_y.is_animating();
+        request_frame(ctx, card3d::cadence(animating || first));
+        self.fx.scene_texture_id().map(|id| (id, dest))
+    }
+}
+
+#[cfg(not(feature = "gpu-effects"))]
+impl TiltCardWidget {
+    /// Without the `gpu-effects` feature there is no 3D path to take at all:
+    /// the card is its 2D path and nothing else.
+    fn face_3d(&mut self, _ctx: &mut PaintCtx, _ink: Color) -> Option<(u64, kurbo::Rect)> {
+        None
+    }
+}
+
+/// The elevation shadow's blur: softened with the lean once the face is
+/// genuinely projected, since a card whose far edge has rotated into depth
+/// throws a wider shadow than the flat one an affine tilt casts.
+#[cfg(feature = "gpu-effects")]
+fn shadow_blur(projected: bool, lean: f64) -> f64 {
+    if projected {
+        card3d::shadow_blur(SHADOW_BLUR, lean)
+    } else {
+        SHADOW_BLUR
+    }
+}
+
+/// The elevation shadow's blur, which without a projected face is simply
+/// [`SHADOW_BLUR`].
+#[cfg(not(feature = "gpu-effects"))]
+fn shadow_blur(_projected: bool, _lean: f64) -> f64 {
+    SHADOW_BLUR
+}
+
+/// Whether two declared 3D surfaces would render identically.
+#[cfg(feature = "gpu-effects")]
+fn same_gpu_face(a: Option<&QuadFace>, b: Option<&QuadFace>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => card3d::same_face(a, b),
+        _ => false,
+    }
+}
+
 /// Paint the cursor-tracked glare: upstream's
 /// `radial-gradient(circle at gx% gy%, var(--foreground), transparent 50%)`
 /// composited at [`GLARE_OPACITY`].
@@ -490,9 +671,10 @@ mod tests {
     struct Recorder {
         transforms: Vec<Affine>,
         brushes: Vec<Brush>,
-        shadows: Vec<(Point, Color)>,
+        shadows: Vec<(Point, Color, f64)>,
         layers: Vec<f32>,
         clips: usize,
+        scene_textures: Vec<(u64, kurbo::Rect)>,
     }
 
     impl PaintScene for Recorder {
@@ -515,10 +697,13 @@ mod tests {
             origin: Point,
             _size: Size,
             _radius: f64,
-            _std_dev: f64,
+            std_dev: f64,
             color: Color,
         ) {
-            self.shadows.push((origin, color));
+            self.shadows.push((origin, color, std_dev));
+        }
+        fn draw_scene_texture(&mut self, id: u64, dest: kurbo::Rect) {
+            self.scene_textures.push((id, dest));
         }
     }
 
@@ -750,9 +935,12 @@ mod tests {
         settle(&mut lifted);
         let (recorder, _) = painted(&mut lifted, 5_000, None);
         assert_eq!(recorder.shadows.len(), 1);
-        let (at, colour) = recorder.shadows[0];
+        let (at, colour, blur) = recorder.shadows[0];
         assert!(at.x < 0.0 && at.y > 0.0, "the shadow did not slide: {at:?}");
         assert!(colour.components[3] > 0.0, "the shadow was fully clear");
+        // With no projected face the blur is the flat path's own constant —
+        // the softening only applies once a real perspective face is live.
+        assert!((blur - SHADOW_BLUR).abs() < 1e-9);
     }
 
     /// `reduce_motion` is upstream's `enabled` gate: no tilt, no glare, no
@@ -789,6 +977,102 @@ mod tests {
         settle(&mut widget);
         let (_, needs_frame) = painted(&mut widget, 9_000, None);
         assert!(!needs_frame, "a settled spring kept asking");
+    }
+
+    /// The declared 3D surface degrades to the *exact* 2D path: a test process
+    /// installs no shell device, so acquisition refuses and the card paints its
+    /// affine tilt, its 2D glare overlay and no scene texture whatsoever.
+    ///
+    /// This is the path every caller of `gpu_face` gets on Android, on iOS, and
+    /// before a desktop shell's first surface — so it is the one the port is
+    /// judged on, not the enhancement above it.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_declared_face_degrades_to_the_two_dimensional_path() {
+        let mut widget = laid_out(&card().gpu_face(QuadFace::Solid(Color::WHITE)));
+        send(&mut widget, PointerPhase::Move, 199.0, 0.0);
+        settle(&mut widget);
+
+        let (recorder, _) = painted(&mut widget, 5_000, None);
+        assert!(
+            recorder.scene_textures.is_empty(),
+            "a device-less run composited a face"
+        );
+        assert_eq!(recorder.brushes.len(), 1, "the 2D glare still stands in");
+        assert_eq!(
+            recorder.transforms.len(),
+            1,
+            "the affine tilt still applies"
+        );
+        assert!(
+            !widget.fx.is_active(),
+            "a refused claim was recorded as held"
+        );
+
+        // ...and it is the same paint a card that declared no face produces.
+        let mut plain = laid_out(&card());
+        send(&mut plain, PointerPhase::Move, 199.0, 0.0);
+        settle(&mut plain);
+        let (bare, _) = painted(&mut plain, 5_000, None);
+        assert_eq!(recorder.transforms, bare.transforms);
+        assert_eq!(recorder.layers, bare.layers);
+        assert_eq!(recorder.clips, bare.clips);
+    }
+
+    /// The sprung `rx`/`ry` the 2D path shears with are the same degrees the 3D
+    /// face rotates by — one mapping, not two tunings that drift apart.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn the_settled_tilt_is_the_faces_own_pitch_and_yaw() {
+        let mut widget = laid_out(&card().gpu_face(QuadFace::Solid(Color::WHITE)));
+        // The top-right corner: upstream's `(px − 0.5)` and `(0.5 − py)` both
+        // positive, which brings the top and the left edges toward the viewer.
+        send(&mut widget, PointerPhase::Move, 199.0, 0.0);
+        settle(&mut widget);
+        let (rx, ry) = widget.tilt();
+        assert!(rx > 0.0 && ry > 0.0, "the spring never reached the target");
+
+        let quad = card3d::face_quad(
+            Rect::new(0.0, 0.0, BOX.width, BOX.height),
+            QuadFace::Solid(Color::WHITE),
+            rx,
+            ry,
+        );
+        assert!((f64::from(quad.pitch) - rx.to_radians()).abs() < 1e-6);
+        assert!((f64::from(quad.yaw) - ry.to_radians()).abs() < 1e-6);
+        assert!(quad.pitch > 0.0, "the top edge should come forward");
+        assert!(quad.yaw > 0.0, "the left edge should come forward");
+    }
+
+    /// A re-declared identical face is not a change; a different one is, and a
+    /// withdrawn one is too.
+    #[cfg(feature = "gpu-effects")]
+    #[test]
+    fn a_redeclared_face_is_compared_by_value() {
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let white = card().gpu_face(QuadFace::Solid(Color::WHITE));
+        let mut widget = View::<()>::build(&white, &mut ctx);
+
+        let same = card().gpu_face(QuadFace::Solid(Color::WHITE));
+        let flags = View::<()>::rebuild(&same, &white, &mut widget, &mut ctx);
+        assert!(
+            !flags.contains(ChangeFlags::PAINT),
+            "an identical face repainted"
+        );
+
+        let black = card().gpu_face(QuadFace::Solid(Color::BLACK));
+        let flags = View::<()>::rebuild(&black, &same, &mut widget, &mut ctx);
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert!(matches!(
+            widget.gpu_face,
+            Some(QuadFace::Solid(colour)) if colour == Color::BLACK
+        ));
+
+        let none = card();
+        let flags = View::<()>::rebuild(&none, &black, &mut widget, &mut ctx);
+        assert!(flags.contains(ChangeFlags::PAINT));
+        assert!(widget.gpu_face.is_none(), "a withdrawn face was kept");
     }
 
     /// A zero-extent card produces no glare and no division by zero.
