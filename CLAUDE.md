@@ -13,7 +13,7 @@ cold.
 | Architecture (root index, cross-unit shape) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | CORE — view/widget lifecycle, layout, reactive, facade | [docs/CORE_ARCHITECTURE.md](docs/CORE_ARCHITECTURE.md) |
 | RENDER — GPU render pipeline, text shaping | [docs/RENDER_ARCHITECTURE.md](docs/RENDER_ARCHITECTURE.md) |
-| WIDGETS — baseline widget set, theme (Material/Cupertino/Glyph ship as sibling plugin crates) | [docs/WIDGETS_ARCHITECTURE.md](docs/WIDGETS_ARCHITECTURE.md) |
+| WIDGETS — baseline widget set, theme (Material/Cupertino/Glyph/shadcn/beUI ship as sibling plugin crates) | [docs/WIDGETS_ARCHITECTURE.md](docs/WIDGETS_ARCHITECTURE.md) |
 | SHELLS — desktop/Android/iOS host integration | [docs/SHELLS_ARCHITECTURE.md](docs/SHELLS_ARCHITECTURE.md) |
 | PLUGINS — OS-capability plugins | [docs/PLUGINS_ARCHITECTURE.md](docs/PLUGINS_ARCHITECTURE.md) |
 | NATIVE_WIDGETS — native-control plugin | [docs/NATIVE_WIDGETS_ARCHITECTURE.md](docs/NATIVE_WIDGETS_ARCHITECTURE.md) |

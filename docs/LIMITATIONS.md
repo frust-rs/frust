@@ -2395,18 +2395,20 @@ upstream-parity requirement forcing it into v1.
 
 **Observed**: the framework exposes no auto-focus-on-appear hook a widget can call on mount —
 `EventCtx::request_focus` is reachable only from a widget's own event pass, which never runs for
-something nobody has touched yet. Two independent consequences: (1) neither `frust-shadcn`'s
-`modal`/`anchored` hosts nor `frust_material::dialog` claim focus when they appear — both claim
-focus only in response to a `Down` inside themselves, so Escape (wired to fire only once the host
-holds focus) does nothing until a caller completes one pointer interaction with the overlay first;
-(2) `frust::TextInputView` has no `autofocus`/`request_focus` builder either, so
+something nobody has touched yet. Two independent consequences: (1) neither `frust-shadcn`'s or
+`frust-beui`'s `modal`/`anchored` hosts, nor `frust_material::dialog`, claim focus when they
+appear — each claims focus only in response to a `Down` inside itself, so Escape (wired to fire
+only once the host holds focus) does nothing until a caller completes one pointer interaction with
+the overlay first; (2) `frust::TextInputView` has no `autofocus`/`request_focus` builder either, so
 `frust_material::search`'s full-screen view — whose upstream reference opens with `autoFocus: true`
 to raise the keyboard immediately — instead opens with no IME up until the user taps its field once.
 
 **Applies to**: `frust_shadcn::overlay::modal`/`anchored` and every component built on them
 (dialog, alert-dialog, sheet, drawer, command, popover, dropdown/context menu, select, combobox);
-`frust_material::dialog` (same gap); `frust_material::search`'s header field (IME-autofocus
-manifestation — no widget anywhere can claim focus programmatically on mount, text input included).
+`frust_beui::overlay::modal`/`anchored` and every beUI component built on them (same list shape,
+see PLUGINS_ARCHITECTURE.md's Design-System Plugins); `frust_material::dialog` (same gap);
+`frust_material::search`'s header field (IME-autofocus manifestation — no widget anywhere can claim
+focus programmatically on mount, text input included).
 
 **Why accepted**: a framework-level focus-management primitive (claim focus, or the text-input-
 specific `autofocus`, on mount) does not exist yet; every current design-system caller works around
@@ -2415,8 +2417,10 @@ needs a `frust-widgets` seam on `TextInputView` (an `autofocus` builder or a rea
 `request_focus`); closing the general half needs a framework-wide claim-on-mount hook.
 
 **Evidence**: `plugins/shadcn/src/overlay/modal.rs` and `plugins/shadcn/src/overlay/anchored.rs`
-module docs ("there is no auto-focus-on-appear hook in the framework"); `plugins/material/src/search/mod.rs`
-module doc's "IME: no programmatic focus" section (explicitly names this as "the same framework gap").
+module docs ("there is no auto-focus-on-appear hook in the framework");
+`plugins/beui/src/overlay/anchored.rs` module docs (same line, "there is no auto-focus-on-appear
+hook in the framework"); `plugins/material/src/search/mod.rs` module doc's "IME: no programmatic
+focus" section (explicitly names this as "the same framework gap").
 
 ---
 
@@ -2430,20 +2434,27 @@ non-event pass (e.g. a hover-delay timer observed only in `paint`) has no way to
 cannot hold app state at all for that decision. `frust-shadcn`'s hover tooltip/hover-card is built
 around this exact hole: the open/close decision lives entirely in a widget-local, non-reactive
 `Rc<Cell<_>>` latch instead of app state, specifically because a resting pointer sends no event to
-carry `&mut State` through and the framework offers no alternate route to queue one.
+carry `&mut State` through and the framework offers no alternate route to queue one. `frust-beui`'s
+`todo_list`/`agent_activity` hit the rebuild-driven variant of the same hole: upstream's
+`collapseOnComplete` reports the auto-collapse through a callback the instant it fires; a rebuild
+dispatches no event either, so each port flips its own internal open flag silently instead of
+reporting it, and a host that must know passes the flag itself (`TodoListView::open`/
+`AgentActivityView::open`) rather than reading a callback.
 
-**Applies to**: any plugin-tier widget wanting to drive app state from a non-event, per-frame pass
-(paint-clock-driven delays, in particular); `frust_shadcn::tooltip`/`hover_card` today.
+**Applies to**: any plugin-tier widget wanting to drive app state from a non-event pass — a
+paint-clock-driven delay (`frust_shadcn::tooltip`/`hover_card`) or a rebuild-driven state flip
+(`frust_beui::todo_list`, `frust_beui::agent_activity`) alike.
 
-**Why accepted**: the workaround (a shared, non-reactive latch plus an input-transparent top layer)
-fully covers shadcn's own tooltip/hover-card needs; widening the public seam is framework-level
-work with no second caller yet to justify it.
+**Why accepted**: the workaround (a shared, non-reactive latch plus an input-transparent top layer
+for shadcn; an owned, host-driven flag for beUI's two lists) fully covers each current caller's
+needs; widening the public seam is framework-level work with no caller it blocks today.
 
 **Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("the framework exposes no way
 for a plugin-tier widget to queue a state-bearing callback onto the next frame");
 `crates/frust-widgets/src/authoring.rs` (`mark_pending_result_flush`'s shape, not the function
 itself, documented there); `crates/frust/src/lib.rs`'s `authoring` module (no
-`mark_pending_result_flush` re-export).
+`mark_pending_result_flush` re-export); `plugins/beui/src/agents/todo_list.rs` module docs ("The
+automatic collapse reports nothing").
 
 ---
 
@@ -2537,22 +2548,26 @@ past the rebuild that unmounts it, so an exit animation is only reachable for a 
 instead mounts the host only while its own flag is set and drops it when the flag clears gets the
 entrance ramp but no exit — the widget is gone by the next frame, so any in-flight ramp is simply
 truncated. This is a framework gap, not a per-catalog one: `frust_shadcn::overlay::anchored`
-originated it, and `frust_material::overlay::anchored` (a Phase-3 sibling port, ported rather than
-depended on) hits the identical gap and cites this same id as "the framework-wide gap it is".
+originated it, `frust_material::overlay::anchored` (a Phase-3 sibling port, ported rather than
+depended on) hits the identical gap and cites this same id as "the framework-wide gap it is", and
+`frust_beui::overlay::anchored` (an independently-authored third instance of the same shape, not a
+port of either) hits it too.
 
-**Applies to**: every component built on either catalog's `overlay::anchored` host — shadcn's
-popover, tooltip, hover-card, dropdown/context menu, select, combobox; material's menu (incl.
-submenu), dropdown, tooltip, and the search view's docked panel. Each catalog's `modal` host is
-unaffected, since its exit is staged through the navigator's own pop-result/back-press machinery
-instead of a mount flag.
+**Applies to**: every component built on any of the three catalogs' `overlay::anchored` host —
+shadcn's popover, tooltip, hover-card, dropdown/context menu, select, combobox; material's menu
+(incl. submenu), dropdown, tooltip, and the search view's docked panel; beUI's tooltip, popover,
+context menu, and the dropdown panels of select/combobox/multi_select. Each catalog's `modal` host
+is unaffected, since its exit is staged through the navigator's own pop-result/back-press machinery
+(shadcn, material) or through `StagedPop`'s own depth-guarded close (beUI) instead of a mount flag.
 
 **Why accepted**: this is the framework-level trade the pattern makes explicit, not an oversight — a
-kept-mounted host costs one layout of its content per frame while closed and nothing else, which
-both catalogs accept as the price of a real exit ramp with no framework support for outliving a
+kept-mounted host costs one layout of its content per frame while closed and nothing else, which all
+three catalogs accept as the price of a real exit ramp with no framework support for outliving a
 rebuild.
 
-**Evidence**: `plugins/shadcn/src/overlay/anchored.rs` and `plugins/material/src/overlay/anchored.rs`
-module docs ("Mounting, and what an exit animation costs" — "The framework has no seam for keeping a
+**Evidence**: `plugins/shadcn/src/overlay/anchored.rs`, `plugins/material/src/overlay/anchored.rs`,
+and `plugins/beui/src/overlay/anchored.rs` module docs ("Mounting, and what an exit animation
+costs"/"Mounting, and what an exit costs" — "The framework has no seam for keeping a
 conditionally-mounted view alive past the rebuild that unmounts it").
 
 ---
@@ -2608,6 +2623,408 @@ future round rather than a permanent exclusion.
 **Evidence**: `workflow/plans/research/shadcn-round-2/RESEARCH.md`'s component sweep ("DEFERRED:
 calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner … chart … direction").
 
+---
+
+### `beui-components-not-ported` — sixteen `shader_background` variants, and named gaps across five other components
+
+**Observed**: `frust-beui` (beUI v2 port) leaves several upstream pieces out, each named at the
+point it was found:
+
+- `shader_background` ports 5 of 21 upstream shader slugs (`mesh-gradient`, `dot-grid`, `waves`,
+  `static-radial-gradient`, `static-mesh-gradient`); the other 16 —
+  `grain-gradient`, `dot-orbit`, `warp`, `water`, `voronoi`, `swirl`, `smoke-ring`, `neuro-noise`,
+  `metaballs`, `god-rays`, `spiral`, `dithering`, `pulsing-border`, `color-panels`,
+  `simplex-noise`, `perlin-noise` — are `DEFERRED_VARIANTS`: each is a distinct hand-written WGSL
+  fragment program this task did not write. The five that *are* ported are semantic
+  approximations of `@paper-design/shaders-react`'s GLSL, not pixel ports — that source is neither
+  vendored nor readable from here — and `dot-grid`'s cell/dot metrics are device pixels (the shader
+  reads the target's texel resolution, not the window's scale factor), where upstream's grid is CSS
+  px.
+- `smooth-scroll`/`scroll-to`'s Lenis provider is not ported at all — frust owns its own scroll
+  physics (`crate::physics`, see WIDGETS_ARCHITECTURE.md) and a second physics engine bolted on top
+  would fight it; `scroll_to` ports only the eased-value half (see
+  `scroll-view-no-external-offset-seam` below).
+- `message_bubble` ships no `MessageBubbleCollapsible` (needs a line-cap-over-arbitrary-subtree or
+  a mask brush, neither of which the framework's text stack exposes) and no `render`-slot/
+  interactive bubble.
+- `message_scroller` ships no preview rail (no seam to read a rendered child subtree's text back
+  out of a widget tree).
+- `prompt_input` ships no model selector and no prompt-actions popover.
+- `streaming_response` ships no completion action row (needs a clipboard seam the framework does
+  not publish) and no sources disclosure (upstream folds `citations`' components into its footer;
+  here `citations` composes above `streaming_response` instead, as its own slug).
+- `approval_card` ships the review surface but not the multi-step question wizard (a distinct,
+  larger surface the porting card scoped out).
+
+**Applies to**: `frust_beui::components::shader_background` and the five components above; no other
+module in the 81-slug catalog has a named not-ported gap of this kind.
+
+**Why accepted**: each is a named dependency or scope boundary recorded at the point it was found,
+not a regression — sixteen more hand-written WGSL programs (each needing its own GPU verification),
+a second scroll-physics engine, and a multi-step wizard surface are all real follow-up scope, not
+oversights baked into the ones that shipped.
+
+**Evidence**: `plugins/beui/src/components/shader_background.rs` module docs and
+`DEFERRED_VARIANTS`; `plugins/beui/src/agents/message_bubble.rs`, `message_scroller.rs`,
+`prompt_input.rs`, `streaming_response.rs`, and `approval_card.rs` module docs' "Degradations"
+sections.
+
+---
+
+### `beui-backdrop-blur-degraded` — no blur filter anywhere in the port, catalog-wide
+
+**Observed**: `PaintScene` publishes no blur filter a widget can reach (`frust-engine` renders
+Gaussian blur/drop-shadow filter passes internally — `docs/RENDER_ARCHITECTURE.md`'s GPU Substrate,
+`frust-engine::filters` — but there is no `frust_scene::Command` exposing one to a plugin-tier
+widget yet). Every one of upstream's `backdrop-filter`/`filter: blur(...)` effects therefore
+degrades the same way catalog-wide: a frosted backdrop (drawer, bottom sheet, popover, morphing
+modal, center-morph modal, command palette, expandable action bar, project folder, wallet card,
+morphing search) becomes a flat wash with no blur behind it; a text/badge/number roll's blur half
+(animated badge, number ticker, action-swap's `Blur` variant, checkbox exit, tooltip, select item
+entrance, text-reveal/chromatic-reveal, preview rail entrance, adaptive stepper) is dropped and the
+opacity/scale/translate half is kept; and the one filter-driven merge effect — adaptive stepper's
+upstream `Liquid` gooey metaball surface (an SVG blur + contrast filter fusing three pills into one
+blob) — has no primitive to approximate at all, so each pill paints on its own instead.
+`morphing_tabs` is not a blur casualty: its own module doc corrects the porting card's premise —
+upstream's `morphing-tabs.tsx` has no gooey SVG filter to begin with, so the port's analytic
+rounded-rect morph path is not a degradation of anything upstream actually did.
+
+**Applies to**: every `frust-beui` component whose upstream source names a `filter`/
+`backdrop-filter` CSS property — dozens across `components`, `agents`, and `blocks`; see each
+component's own "Degradations" section for its specific blur.
+
+**Why accepted**: this is the same framework gap `frust-shadcn`'s and `frust-material`'s drawer/
+sheet/dialog/popover scrims already accept (no LIMITATIONS entry exists for those catalogs' own
+instances yet, since no gate has needed one); a filter layer's scene-level `Command` is a later
+render-tier plan (`frust-engine::filters` already builds and schedules the passes internally), not
+something a facade-only plugin can add.
+
+**Evidence**: `plugins/beui/src/components/adaptive_stepper.rs`, `drawer.rs`, `bottom_sheet.rs`,
+`popover.rs`, `morphing_modal.rs`, `center_morph_modal.rs`, `theme_toggle.rs`,
+`components/animated_badge.rs`, `number.rs`, `action_swap.rs`, `checkbox.rs`, `tooltip.rs`,
+`select.rs`, `text_animation.rs`, `preview_rail.rs`; `plugins/beui/src/blocks/command_palette.rs`,
+`expandable_action_bar.rs`, `project_folder.rs`, `wallet_card.rs`, `morphing_search.rs`,
+`overflow_actions.rs`, `not_found.rs`, `feedback_widget.rs`, `dynamic_island.rs`,
+`availability_scheduler.rs`, `swap.rs`, `expandable_tabs.rs`, `infinite_masonry.rs`,
+`prediction_market.rs`, `otp_input.rs` (each "No blur" or "No backdrop blur" degradation);
+`plugins/beui/src/blocks/morphing_tabs.rs` (the gooey-filter premise correction);
+`docs/RENDER_ARCHITECTURE.md`'s GPU Substrate table (`frust-engine::filters`).
+
+---
+
+### `beui-per-char-text-shaping` — cross-cell typographic relationships are lost in effect text, and per-letter text_animation currently drops word spaces
+
+**Observed**: `motion::chars` shapes every grapheme cell independently so it can be individually
+transformed, which means every cross-cell typographic relationship a single shaped run would keep
+is lost: kerning pairs no longer tighten, ligatures no longer form, and a cursive or complex script
+(Arabic, Devanagari) loses the joining/reordering that makes it legible. This is inherent to the
+effect, not an implementation shortcut, and the module docs restrict its own use to short display
+strings for exactly this reason — never body text. Separately, and not yet recorded in that
+module's own docs: the per-letter `text_animation` variants (`Reveal`, `Cascade`) currently also
+drop word spaces when run on the desktop shell — an open component bug in the port, not a
+documented degradation, found running the `beui-demo` gallery's Motion · Text page.
+
+**Applies to**: `motion::chars::CharCells`/`CharCellsView` and every component built on it (the
+per-letter `action_swap` cascade, `text_animation`'s `Reveal`/`Cascade` arms, `citations`' cascade);
+the word-space bug is specific to `text_animation`'s two per-letter arms.
+
+**Why accepted**: the shaping compromise is structural — the effect requires independently
+transformable letters, and a single shaped run has none — and upstream (`inline-block` spans per
+letter) carries the identical compromise for the identical reason. The word-space bug is tracked
+here as a known, unfixed defect rather than silently shipped; it is not yet reflected in
+`text_animation.rs`'s own module doc.
+
+**Evidence**: `plugins/beui/src/motion/chars.rs` module docs ("The shaping compromise, stated
+plainly"); `plugins/beui/src/components/text_animation.rs` module docs ("Per-letter" rendering
+route); `examples/beui-demo`'s Motion · Text page (`pages/motion/text.rs`), on-device observation.
+
+---
+
+### `beui-3d-degradations` — five components approximate a 3D upstream effect in 2D
+
+**Observed**: `tilt_card` (perspective tilt) paints an affine shadow slide instead of a true
+perspective transform; `wheel_picker` (an iOS-style drum) and `cylinder_carousel` render a 2D
+cylinder projection rather than a real 3D drum; `project_folder`'s file fan and `wallet_card`'s
+card-stack are 2D approximations of upstream's layered/perspective originals. None composites a
+real depth buffer or a perspective projection matrix.
+
+**Applies to**: `frust_beui::components::tilt_card`/`wheel_picker`/`cylinder_carousel`,
+`frust_beui::blocks::project_folder`/`wallet_card`.
+
+**Why accepted**: a genuine 3D transform/perspective pipeline is scoped to a later gpu-effects
+phase of the render tier, not something a design-system plugin builds itself; the 2D approximations
+read correctly at the sizes and interaction distances these components are used at.
+
+**Evidence**: `plugins/beui/src/components/tilt_card.rs`, `wheel_picker.rs`,
+`cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`, `wallet_card.rs` module docs'
+"Degradations" sections.
+
+---
+
+### `beui-otp-no-paste` — `otp_input` accepts only typed entry, no clipboard paste
+
+**Observed**: `blocks::otp_input` delivers no clipboard event a widget can read, so a multi-character
+paste into the code field is not supported — the same platform gap `shadcn-otp-table-button-api-gaps`
+already documents for `frust_shadcn::input_otp`.
+
+**Applies to**: `frust_beui::blocks::otp_input`.
+
+**Why accepted**: inherited platform gap, not a beUI-specific one — see
+`shadcn-otp-table-button-api-gaps` for the accepted reasoning, which applies unchanged here.
+
+**Evidence**: `plugins/beui/src/blocks/otp_input.rs` module docs (no paste path); see
+`shadcn-otp-table-button-api-gaps` above for the shared platform cause.
+
+---
+
+### `beui-substituted-springs` — an upstream ad hoc spring resolves to the nearest catalog spring
+
+**Observed**: several upstream components author a one-off, per-component spring
+(`{ stiffness, damping, mass }`) that is not one of `tokens::motion`'s six named springs
+(`SPRING_PRESS`, `SPRING_LAYOUT`, ...). The port substitutes the nearest catalog spring rather than
+adding a seventh token per caller — e.g. `message_bubble`'s `BUBBLE_POP` (upstream
+`520/27/0.52`) resolves to `SPRING_PRESS` (`500/30/0.6`); `text_animation`'s `Reveal` spring
+(upstream `140/26/1.2`) resolves to `SPRING_LAYOUT`.
+
+**Applies to**: any component whose module docs name a substituted spring — `message_bubble`,
+`text_animation`, and others sharing the same token-budget rationale.
+
+**Why accepted**: keeping the token set closed to six named springs is a deliberate charter choice
+(`tokens::motion`, cited from `lib.rs`'s Charter) — motion tokens are catalog-level, not
+per-component numbers — and the nearest catalog spring reads indistinguishably close at these
+timings.
+
+**Evidence**: `plugins/beui/src/agents/message_bubble.rs` module docs ("`BUBBLE_POP` is
+substituted"); `plugins/beui/src/components/text_animation.rs` module docs ("Reveal's spring is
+substituted").
+
+---
+
+### `beui-overlay-seam` — the anchored host needs bounded constraints, and has no input-transparent mode
+
+**Observed**: two named gaps in `overlay::anchored`, beUI's non-modal trigger-relative host (see
+PLUGINS_ARCHITECTURE.md's Design-System Plugins for the seam itself, and
+`shadcn-anchored-exit-needs-kept-mounted` for its kept-mounted exit ramp, which beUI's anchored host
+shares): (1) the host fills whatever area it is given and expects bounded constraints, so it cannot
+sit inside a `frust::scroll_view` (whose child gets an unbounded max on the scroll axis) — the
+`beui-demo` gallery hits this directly: `citations`' hover preview is documented to mount through
+`overlay::anchored`, but the gallery's page slot is itself a scroll view, so the demo instead reads
+the hover through `on_hover_change` and paints the same preview panel inline, in a page-owned slot
+the caption names as the workaround. (2) the host has no input-transparent mode: `tooltip`'s
+hover-only label is hosted on `overlay::anchored`, and the host consumes every `Down` outside its
+content as a light-dismiss — so the first press after a label has appeared is swallowed rather than
+reaching whatever it landed on, once per hover session (the trigger is suppressed until the pointer
+leaves it and re-arms).
+
+**Applies to**: every component mounted through `overlay::anchored` for constraint (1) — popover,
+tooltip, hover-card, context menu, the dropdown panels of select/combobox/multi_select, citations'
+preview; `tooltip` alone for the swallowed-press gap (2), since it is the catalog's only hover-only
+trigger on this host.
+
+**Why accepted**: (1) is the same bounded-constraints/no-scroll-view mounting contract
+`frust_shadcn`'s and `frust_material`'s `overlay::anchored` hosts already carry (`overlay/mod.rs`'s
+"scroll-view trap" in all three catalogs) — the remedy is at the mount site, not the host, and the
+gallery demonstrates the correct workaround rather than avoiding the case. (2) is a deliberate
+scope line: an input-transparent mode is new host surface with no second caller yet to justify it,
+and consuming the press is the documented, tested behavior in the meantime.
+
+**Evidence**: `plugins/beui/src/overlay/mod.rs` ("The scroll-view trap");
+`plugins/beui/src/agents/citations.rs` module docs (the `overlay::anchored` mounting sequence);
+`examples/beui-demo/src/pages/agents/panels.rs`'s `citation_panel` (the inline workaround and its
+caption); `plugins/beui/src/components/tooltip.rs` module docs ("A press while the label is up",
+"One swallowed press per hover session").
+
+---
+
+### `beui-focus-and-keys` — four named focus/keyboard gaps across the catalog
+
+**Observed**: four related gaps, each named in its component's own source:
+
+1. **No type-ahead or keyboard list navigation.** `select`, `combobox`, and `multi_select` ship none
+   of Radix's jump-to-typed-match or arrow-key row traversal — a wrapped editable owns the focus
+   path instead, the same v1 boundary `shadcn-select-no-typeahead-fixed-height` already documents
+   for `frust_shadcn`.
+2. **A container cannot release a descendant's focus session.** `feedback_widget` does not blur its
+   message field when the panel closes while the field holds focus — the framework gates the orphan
+   mark on a live focus chain a rebuild cannot see (`docs/CODE_STANDARDS.md`), so the session stands
+   until the next press elsewhere blurs it, the same shape `overlay-no-auto-focus-on-appear`
+   documents from the opposite direction.
+3. **`hold_action_button`'s `on_complete` fires on the next event pass, not the instant the fill
+   lands.** The fill is advanced during paint, which carries no `EventCtx` to call an app callback
+   through; the completion is latched at paint and drained on the next pointer event the widget
+   sees (release, for a real hold gesture) — the same paint-vs-event boundary
+   `no-plugin-reachable-deferred-state-callback` documents, with no `Housekeeping` flush seam on the
+   public facade to close it. Keyboard activation (`Enter`/`Space`) is not ported either, for
+   `hold_action_button` and `slide_action_button` alike.
+4. **No widget-side auto-dismiss timer.** `animated_toast_stack` ports no timer at all — upstream's
+   lives in a React hook, and a widget-side timer could only fire on the user's next input event,
+   which is not what auto-dismiss means; the app owns the dismiss schedule instead.
+
+**Applies to**: `frust_beui::components::select`/`combobox`/`multi_select`,
+`frust_beui::blocks::feedback_widget`, `frust_beui::components::expanding_arrow_button` (both
+`hold_action_button` and `slide_action_button`), `frust_beui::components::animated_toast_stack`.
+
+**Why accepted**: (1) mirrors an already-accepted shadcn boundary; (2) and (3) are framework-level
+gaps with no plugin-tier fix available, already accepted for their originating catalogs/entries;
+(4) is a correct reading of what a widget can own versus what only the app's own clock can drive.
+
+**Evidence**: `plugins/beui/src/components/select.rs`, `combobox.rs`, `multi_select.rs` module docs
+("No type-ahead"/"No type-ahead, and no keyboard list navigation");
+`plugins/beui/src/blocks/feedback_widget.rs` module docs ("Closing does not blur the message
+field"); `plugins/beui/src/components/expanding_arrow_button.rs` module docs ("fires on the next
+event pass", "Keyboard activation is not ported"); `plugins/beui/src/components/animated_toast_stack.rs`
+module docs ("No timer").
+
+---
+
+### `beui-no-file-drop` — `file_upload` has no file-drop/drag-session input, only programmatic add
+
+**Observed**: no shell in this repository publishes a file-drop signal for a widget to read, and
+frust delivers no drag-session or path type at all, so `blocks::file_upload`'s dropzone is a prop
+(`on_browse`/`add_files`), never an observed drag-and-drop state.
+
+**Applies to**: `frust_beui::blocks::file_upload`.
+
+**Why accepted**: no shell-level file-drop input exists anywhere in the framework yet; this is a
+platform-input gap, not something a facade-only plugin can add.
+
+**Evidence**: `plugins/beui/src/blocks/file_upload.rs` module docs and
+`FileUploadView::add_files`/`on_browse` (no drag-session or path type reaches a widget).
+
+---
+
+### `beui-agents-degradations` — named gaps across the `agents` catalog beyond the not-ported items above
+
+**Observed**: recurring, named gaps across `frust_beui::agents`, each a platform or scope boundary
+rather than an oversight:
+
+- **No syntax highlighting.** `code_block` and `tool_approval`'s optional code value ship no shiki
+  equivalent — every line is one monochrome `CodeTokenClass::Plain` run, with a token-class seam
+  left for a future highlighter rather than colors baked per-theme the way shiki's are.
+- **`file_diff` takes a pre-parsed `FileDiffModel`.** The caller supplies hunks/lines already split;
+  no diff algorithm runs in this crate.
+- **No scroll viewports in agent lists.** `code_block`, `file_diff`, `tool_result`, and
+  `agent_activity` clip rather than scroll their bounded-height bodies — none reads a scrollable
+  viewport, only a "bounded and following" one.
+- **No favicons.** `citations` renders numbered chips instead of `useFavicon`'s fetched/fallback
+  images; `CitationStack`'s overlapping-favicon cluster is dropped with it.
+- **`streaming_response`'s reveal ramp is this port's own** — upstream does not animate streamed
+  text arriving at all.
+- **Clipboard is the app's.** `tool_result` and `code_block`'s copy actions have no clipboard to
+  copy to (that is the app's own clipboard plugin's job), so both report a copy request rather than
+  performing one.
+- **Avatars are text, not a slot.** `message`'s avatar takes initials text, not upstream's
+  arbitrary `ReactNode`.
+- **`image_generation` drops blur** on its media-reveal states, the catalog-wide blur absence (see
+  `beui-backdrop-blur-degraded`).
+- **`ai_sidebar` has no drag-and-drop and no inline rename** — the same missing drag protocol
+  `beui-no-file-drop` names, and no reachable seam to swap a row's label for a live text field.
+- **Agent lists auto-collapse silently** — `todo_list`'s and `agent_activity`'s automatic
+  `collapseOnComplete` flips an internal flag rather than reporting through a callback, the
+  rebuild-driven variant `no-plugin-reachable-deferred-state-callback` now also documents.
+- **`chat_app`'s user bubble is `Soft`, not upstream's default variant** — a deliberate visual
+  choice for the assembled example, named in its own module doc.
+
+**Applies to**: `frust_beui::agents::code_block`/`tool_approval`/`file_diff`/`tool_result`/
+`agent_activity`/`citations`/`streaming_response`/`message`/`image_generation`/`ai_sidebar`/
+`todo_list`/`chat_app`.
+
+**Why accepted**: each is either an inherited platform gap already accepted elsewhere (clipboard,
+drag-and-drop, deferred-callback), a named scope line (shiki, pre-parsed diff model, favicons), or
+a deliberate design choice recorded in its own module doc (the reveal ramp, the bubble variant).
+
+**Evidence**: `plugins/beui/src/agents/code_block.rs`, `tool_approval.rs`, `file_diff.rs`,
+`tool_result.rs`, `agent_activity.rs`, `citations.rs`, `streaming_response.rs`, `message.rs`,
+`image_generation.rs`, `ai_sidebar.rs`, `todo_list.rs`, `chat_app.rs` — each module's own
+"Degradations against upstream" section.
+
+---
+
+### `beui-blocks-degradations` — named gaps across the `blocks` catalog
+
+**Observed**: recurring, named gaps across `frust_beui::blocks`, each a platform or scope boundary:
+
+- **`notification_stack` animates its own height** (no out-of-flow layer to pop a card out of, so
+  the box resizes with the stack instead), and ships no upward overflow handling, no per-card
+  dismiss, and no grouping — none of which upstream's own source has either, per the porting card's
+  premise correction.
+- **`swipeable_list`'s thresholds are distance-only.** Upstream's release rules pair a distance arm
+  with a velocity arm; `frust::input` publishes no `PointerEvent` velocity a swipe gesture can read,
+  so only the distance arm is ported (the velocity arm's constants are recorded, unused, so it can
+  be restored later) and there is no full-swipe dismiss.
+- **No outside-press dismissal for `expandable_tabs`/`notification_stack`.**
+- **No pointer-type distinction** anywhere in the catalog — a mouse and a touch press are handled
+  identically, since frust's input events do not carry pointer type.
+- **`morphing_tabs`' active-tab order commits on release, not after the neighbours settle** — a
+  named simplification, not a bug.
+- **Text narrowing (`ReactNode` → `String`) in stack/list rows** — `notification_stack` and similar
+  row-based blocks take plain text where upstream takes arbitrary content, the same narrowing
+  `shadcn-otp-table-button-api-gaps` names for `table`'s header/footer.
+- **`availability_scheduler` is per-day time ranges only** — upstream has no drag-to-select grid
+  either, so this is parity, not a gap the port introduced.
+- **`dynamic_island`'s shell radius is a constant** (`RADIUS = 32`, browser-clamped upstream to half
+  the height); the port passes the same constant through rather than deriving it from measured
+  height.
+- **`marquee` is not interactive** — a press does not pause it; only hover does, since the
+  framework's hover link ends when a scene it's watching is torn down, which a press does not do.
+- **`theme_toggle`'s reveal is scoped to the toggle itself**, not the full viewport upstream's View
+  Transition API sweeps.
+- **`loader` keeps its reduced-motion pulse deliberately** — a loader frozen mid-spin reads as hung,
+  so reduced motion here paints the rest pose modulated by upstream's own `[1, 0.4, 1]` opacity
+  pulse rather than dropping all motion.
+
+**Applies to**: `frust_beui::blocks::notification_stack`/`swipeable_list`/`expandable_tabs`/
+`morphing_tabs`/`availability_scheduler`/`dynamic_island`; `frust_beui::components::marquee`/
+`theme_toggle`/`loader`; no-pointer-type-distinction applies catalog-wide.
+
+**Why accepted**: each is a named platform gap (no velocity, no pointer type, no out-of-flow
+layout) or a documented parity/premise correction against upstream's own source, not a regression
+found later.
+
+**Evidence**: `plugins/beui/src/blocks/notification_stack.rs`, `swipeable_list.rs`,
+`expandable_tabs.rs`, `morphing_tabs.rs`, `availability_scheduler.rs`, `dynamic_island.rs`,
+`plugins/beui/src/components/marquee.rs`, `theme_toggle.rs`, `loader.rs` — each module's own
+"Premise correction"/"Degradations" sections.
+
+---
+
+### `beui-shader-background-verification` — the five ported shader variants are string-checked, not GPU-verified, in-repo
+
+**Observed**: `frust-beui` carries no GPU dev-dependency (`plugins/beui/Cargo.toml` — `frust-widgets`
+`test-support` and `frust-core` `test-support` only, both host-side fixtures), so
+`shader_background`'s WGSL sources are checked as strings by the host test suite, never compiled or
+rendered by an adapter/device in this crate's own tests.
+
+**Applies to**: `frust_beui::components::shader_background`'s five ported WGSL programs.
+
+**Why accepted**: verified instead by an out-of-tree device render run (T400/Vulkan) rather than an
+in-repo GPU test, the same verification split the engine's own downlevel/WebGL2 lints accept for
+shader correctness — a plugin-tier crate is not where a GPU-adapter test harness lives.
+
+**Evidence**: `plugins/beui/Cargo.toml` (no GPU dev-dependency);
+`plugins/beui/src/components/shader_background.rs` (WGSL sources as `&str` constants, compiled only
+by the engine at runtime).
+
+---
+
+### `beui-modal-untested-on-device` — `show_modal`/navigator-hosted modal exercised only in-process so far
+
+**Observed**: `overlay::modal`'s navigator-hosted path (`show_modal`,
+`NavigatorController::push_with_options`) is exercised by this crate's in-process host tests only;
+the `beui-demo` desktop gallery pass covered the `Stack`-mounted overlay pages (the hover/anchored
+family) but not a device run of the navigator-pushed modal path specifically.
+
+**Applies to**: `frust_beui::overlay::modal`'s `show_modal` route and every modal-hosted component
+(morphing_modal, center_morph_modal, command_palette, drawer, animated_sidebar, bottom_sheet).
+
+**Why accepted**: the mechanism is shared with `frust_shadcn`'s and `frust_material`'s already
+device-verified `show_modal` routes (same `NavigatorController::push_with_options` seam), so the
+residual risk is component-specific paint, not the navigator mechanism; a dedicated device pass is
+still owed before this is closed out.
+
+**Evidence**: `plugins/beui/src/overlay/modal.rs` test module (in-process only);
+`examples/beui-demo/README.md`'s "Verifying it" section (headless dev rig, no device run recorded
+for the modal-hosted pages specifically).
 
 ---
 
@@ -2616,23 +3033,33 @@ calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner �
 **Observed**: the baseline scroll surface exposes neither an offset-write path usable outside event
 dispatch (needed to advance a fling/glide during *paint*, or to pin a live edge during *layout*) nor
 a wrapper-readable offset (needed to derive stickiness/distance-from-end state). `frust-shadcn`'s
-`message_scroller` therefore owns its own offset field, wheel/drag consumption, and fling/glide
-physics in parallel with `ScrollView`'s — two independent scroll-gesture implementations whose feel
-(slop thresholds, wheel line height, decay curves) must be kept consistent by hand.
+`message_scroller` and `frust-beui`'s `message_scroller` (same registry slug, ported independently,
+same seam rationale recorded in both module docs) therefore each own their own offset field,
+wheel/drag consumption, and fling/glide physics in parallel with `ScrollView`'s — three independent
+scroll-gesture implementations (baseline plus the two ports) whose feel (slop thresholds, wheel line
+height, decay curves) must be kept consistent by hand. `frust-beui`'s `scroll_to` hits the write half
+of the same gap from the other direction: it ports only upstream's *animation* (an eased offset
+ramp), publishing each frame's value into a caller-owned signal rather than applying it to a scroll
+surface directly, since there is no programmatic-scroll seam to apply it through.
 
-**Applies to**: any "sticky bottom" or offset-derived-state scroll surface, in any catalog; a
-baseline `ScrollView` feel/physics tuning has no mechanism to propagate into the parallel copy and
-will silently drift.
+**Applies to**: any "sticky bottom" or offset-derived-state scroll surface, in any catalog —
+`frust-shadcn`'s and `frust-beui`'s `message_scroller` today; `frust-beui`'s `scroll_to` for the
+read/apply half. A baseline `ScrollView` feel/physics tuning has no mechanism to propagate into a
+parallel copy and will silently drift. Neither `message_scroller` port gets overscroll rubber-band
+or pull-to-refresh either, for the same reason: a transcript's live edge is not `ScrollView`'s own
+rubber-band surface, and riding the baseline surface is what would have brought it.
 
-**Why accepted**: the two missing seams are baseline `ScrollView` API design work, not something a
-facade-only plugin can add; the parallel implementation was the honest v1 route and is tested on its
-own terms. The remedy path is a baseline seam pair — an external offset-write valid outside a
-dispatch, and a read seam for wrappers — after which `message_scroller` (and any successor) can
-compose instead of re-implementing.
+**Why accepted**: the missing seams are baseline `ScrollView` API design work, not something a
+facade-only plugin can add; each parallel implementation was the honest v1 route and is tested on
+its own terms. The remedy path is a baseline seam pair — an external offset-write valid outside a
+dispatch, and a read seam for wrappers — after which either `message_scroller` (and any successor,
+`scroll_to` included) can compose instead of re-implementing.
 
-**Evidence**: `plugins/shadcn/src/components/message_scroller.rs` (its own offset/fling/glide state
-machines and the module docs' seam rationale); `crates/frust-widgets/src/scroll.rs` (no external
-write/read offset surface).
+**Evidence**: `plugins/shadcn/src/components/message_scroller.rs` and
+`plugins/beui/src/agents/message_scroller.rs` (each its own offset/fling/glide state machines and
+matching seam rationale in its module docs, the beUI one crediting the shadcn port's write-up);
+`plugins/beui/src/components/scroll_animation.rs` (`scroll_to`'s "animates an offset it cannot
+apply" degradation); `crates/frust-widgets/src/scroll.rs` (no external write/read offset surface).
 
 ---
 

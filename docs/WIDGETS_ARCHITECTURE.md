@@ -199,7 +199,7 @@ build from.
 |------|---------|
 | `Theme` / `DesignLanguage` / `ThemeBuilder` | `frust-theme`'s aggregate design-token bundle, tagged by baseline (Material3/Cupertino/Glyph), plus a fluent editor |
 | `ColorScheme`, `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme`, `GlassScale`, `StatusPalette` | Individual token-group types composed into `Theme`; `frust-theme` ships only each one's `neutral()` floor — a design system assembles its own values via `ThemeBuilder`'s per-group editors |
-| `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()` and `frust-material::baseline()` both do (as does `frust-shadcn::theme()`) — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
+| `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no baseline `frust-theme` value attaches it — `frust-glyph::baseline()`, `frust-material::baseline()`, `frust-shadcn::theme()`, and `frust-beui::theme()` all do — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
@@ -243,7 +243,10 @@ installer built on `frust`'s public API alone (see ARCHITECTURE.md's Examples ta
 finding, that `Widget::semantics` cannot be exercised from out of tree, is registered in
 LIMITATIONS.md. `plugins/shadcn` (`frust-shadcn`, PLUGINS unit) is the production-scale companion
 proof: a 55-component port of a real third-party design system (shadcn/ui) built on this same
-seam, not a sample — see PLUGINS_ARCHITECTURE.md's Design-System Plugins.
+seam, not a sample. `plugins/beui` (`frust-beui`) is a second external-origin port on the same
+seam — beUI, an 81-part motion-first web catalog — proving the contract holds for a design system
+whose whole premise is per-component animation, not just static layout. See
+PLUGINS_ARCHITECTURE.md's Design-System Plugins for both.
 
 Three more seams are part of the same public authoring surface: opt-in hover claiming
 (`EventCtx::claim_hover`/`PaintCtx::is_hovered`) for state-layer-style interaction chrome, cursor
