@@ -1904,14 +1904,18 @@ mod tests {
     }
 
     /// Appending a row to an open stream requests layout while the entrance runs
-    /// and on the frame it settles; after layout, the stream height includes the row.
+    /// and on the frame it settles; after layout, the content height includes
+    /// the row. (The widget's own height is not the observable here: while the
+    /// stream is working the viewport holds its full cap by design, so only
+    /// the content it scrolls grows.)
     #[test]
     fn appending_a_row_to_an_open_stream_requests_layout_during_and_after_entrance() {
         let initial = agent_activity::<Opened>(vec![activity_step("a", "First")])
             .open(true)
             .collapse_on_complete(false);
         let (mut widget, size) = laid_out(&initial);
-        let initial_height = layout(&mut widget);
+        layout(&mut widget);
+        let initial_content = widget.content_height();
         painted(&mut widget, size, 0, None);
 
         // Append a new row via rebuild.
@@ -1936,11 +1940,26 @@ mod tests {
             "row entrance animation must request layout during entrance"
         );
 
-        // After layout is applied, the stream height should include the row.
-        let new_height = layout(&mut widget);
+        // After layout is applied, the content height includes the row (at
+        // whatever fraction of its entrance the last paint reached), and the
+        // settled row eventually takes its full height.
+        layout(&mut widget);
         assert!(
-            new_height.height > initial_height.height,
-            "new row must increase stream height"
+            widget.content_height() > initial_content,
+            "new row must increase the content height"
+        );
+        for ms in [1_000u64, 2_000] {
+            step_paint_only(&mut widget, size, ms, None);
+        }
+        layout(&mut widget);
+        let settled = widget.content_height();
+        assert!(
+            settled > initial_content + ACTIVITY_ROW_MIN_HEIGHT * 0.99,
+            "a settled row takes its full height"
+        );
+        assert!(
+            !step_paint_only(&mut widget, size, 3_000, None),
+            "a settled stream asks for no more layout"
         );
     }
 
@@ -1954,7 +1973,8 @@ mod tests {
         .open(true)
         .collapse_on_complete(false);
         let (mut widget, size) = laid_out(&initial);
-        let initial_height = layout(&mut widget);
+        layout(&mut widget);
+        let initial_content = widget.content_height();
         painted(&mut widget, size, 0, None);
 
         // Remove the row via rebuild.
@@ -1976,11 +1996,24 @@ mod tests {
             "row exit animation must request layout during exit"
         );
 
-        // After layout, height should decrease.
-        let new_height = layout(&mut widget);
+        // After layout, the content height has started to shrink; once the
+        // exit settles the row is gone from the content entirely.
+        layout(&mut widget);
         assert!(
-            new_height.height < initial_height.height,
-            "removed row must decrease stream height"
+            widget.content_height() < initial_content,
+            "removed row must decrease the content height"
+        );
+        for ms in [1_000u64, 2_000] {
+            step_paint_only(&mut widget, size, ms, None);
+        }
+        layout(&mut widget);
+        assert!(
+            widget.content_height() < initial_content - ACTIVITY_ROW_MIN_HEIGHT * 0.99,
+            "a settled exit releases the row's full height"
+        );
+        assert!(
+            !step_paint_only(&mut widget, size, 3_000, None),
+            "a settled stream asks for no more layout"
         );
     }
 
