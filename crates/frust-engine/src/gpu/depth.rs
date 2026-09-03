@@ -20,15 +20,53 @@
 //! The texture itself is plain `RENDER_ATTACHMENT`, single mip, single sample:
 //! nothing ever samples or copies it, so it needs no other usage, and a
 //! downlevel target could not offer one anyway.
+//!
+//! # What a caller sharing the buffer has to agree with
+//!
+//! Three facts, and together they are the whole contract — a renderer that
+//! honours them records its own passes into the same encoder, against this
+//! same attachment, and gets correct occlusion in either order.
+//!
+//! - **The comparison, and which end is near.** [`DEPTH_COMPARE`] is
+//!   `LessEqual` and [`DEPTH_CLEAR`] is the far plane, so a *nearer* fragment
+//!   carries a *smaller* z. The engine's own draws sit at the back of that
+//!   range — `strip.wgsl` maps the backmost draw to `z = 1.0` and the rest
+//!   towards `1.0 - painter_index / 2^24` — so anything a caller writes in
+//!   front of the far plane occludes the 2D frame wherever it lands.
+//! - **The extent.** A depth attachment must match its colour attachment's
+//!   extent exactly; wgpu refuses the pass otherwise.
+//!   [`depth_texture_descriptor`] is the descriptor the engine itself would
+//!   have used, so a caller allocating the shared buffer through it agrees by
+//!   construction rather than by arithmetic of its own.
+//! - **Who clears.** Whichever pass runs first owns the clear and the other
+//!   loads; the engine's half of that statement is
+//!   [`DepthAttachment::set_pre_cleared`]. The frame's *colour* clear is not
+//!   negotiable the same way — a frame always clears its colour target to the
+//!   base colour — so content painted into that target ahead of the frame
+//!   keeps its depth and loses its pixels, and a host that needs it visible
+//!   records it after the frame rather than before.
 
-use super::pipelines::DEPTH_FORMAT;
+pub use super::pipelines::DEPTH_FORMAT;
 
 /// The depth value a frame clears its attachment to.
 ///
 /// `strip.wgsl` maps the backmost draw to `z = 1.0` and every draw in front of
 /// it to a smaller z, so the far plane is the only clear value under which the
-/// backmost draw still passes a `LessEqual` test.
+/// backmost draw still passes a [`DEPTH_COMPARE`] test.
 pub const DEPTH_CLEAR: f32 = 1.0;
+
+/// The comparison every depth-testing engine pipeline runs.
+///
+/// Named beside [`DEPTH_CLEAR`] because the two together are what a caller
+/// sharing the attachment builds its own pipeline against: the comparison, and
+/// which end of the range is near. `LessEqual` rather than `Less` so the
+/// backmost draw still passes against a buffer cleared to [`DEPTH_CLEAR`], and
+/// so two draws quantized to the same 24-bit depth both land.
+///
+/// The pipelines state it in their own depth state as well; the engine's
+/// integration suite pins the two to agree rather than leaving a second copy
+/// free to drift.
+pub const DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::LessEqual;
 
 /// The usage every depth attachment is created with.
 ///
@@ -147,6 +185,11 @@ impl DepthAttachment {
     ///
     /// Sticky across frames: a host compositing 2D over 3D does so every
     /// frame, so it states this once rather than per frame.
+    ///
+    /// It is a statement about *ordering*, not about the buffer's contents: it
+    /// is `true` when the caller's own pass ran first in the encoder and the
+    /// frame must test against what that pass left, and `false` when the frame
+    /// runs first and the caller's pass loads the depth the frame establishes.
     pub fn set_pre_cleared(&mut self, pre_cleared: bool) {
         self.pre_cleared = pre_cleared;
     }

@@ -3853,31 +3853,104 @@ limits half of the question.
 **Trigger for removal**: the Web Shell plan reaching its own wasm/browser
 measurement pass.
 
-### `engine-shader-quad-unwired` — `draw_shader`/`Command::ShaderQuad` paints nothing on the only renderer
+### `engine-shader-quad-goldens-uncomparable` — a shader quad renders on the engine but no golden oracle can score it
 
-**Observed** (evidence: `crates/frust-engine/src/compile/mod.rs`'s
-`Command::ShaderQuad { .. } => note_shader_quad_skip()` arm;
-`examples/shadertoy` shows a blank effect area on the engine tier): the
-vello-classic-era encode-time shader pre-pass died with vello's removal as a
-render tier, and `frust-render/src/shader_effects.rs` is explicitly
-documented `Currently UNWIRED` — nothing calls it. The compiler's own
-`ShaderQuad` arm recognises the command and still draws nothing, but the drop
-is no longer silent: it raises a `log::warn!` naming the command and this
-entry, latched to once per process so a scene that keeps recording shader
-quads does not repeat it every frame. `crates/frust-testing`'s
-`unit-shader-quad` corpus case is covered by neither golden arm: it sits in
-`engine_goldens.rs`'s `DEFERRED_CASES` rather than its scored set, because a
-compiled engine frame would legitimately omit its subject, and it also names
-itself in its own case spec's backend skip list for the CPU oracle, so
-`oracle_cpu.rs`'s own opaque placeholder stand-in color is never even
-produced for this case.
+**Observed** (evidence: `crates/frust-engine/src/effects/shader_quad.rs`
+renders each frame's `ShaderProgram`s in a pre-pass and the compiler lowers
+`Command::ShaderQuad` through the external-texture path; `examples/shadertoy`
+renders its showcase on the engine tier): the command now draws, but neither
+golden arm can compare it — `CpuOracle` has no shader compiler and keeps its
+opaque placeholder stand-in, and `EngineOracle` encodes straight through
+`EngineRenderer` without driving the pre-pass, so the quad's id resolves to
+nothing there. `crates/frust-testing/tests/engine_goldens.rs` therefore keeps
+`unit-shader-quad` in `DEFERRED_CASES` and still lists `ShaderQuad` in
+`engine_skipped_commands`, now attributed to the oracles rather than the
+compiler. `FRUST_ENGINE_NO_SHADER_EFFECTS` disables the pre-pass and the draw;
+its runtime effect is covered by a manual negative run, not by a same-binary
+test, because the switch is a process-global `OnceLock`.
 
-**Accepted because**: this is an interim registration, not a fix — the
-GPU-seam work that would wire `Command::ShaderQuad` through the engine
-renderer needs `frust-render/src/shader_effects.rs` rebuilt against the
-engine's own pipeline, and drawing nothing stays strictly safer than drawing
-wrong pixels while that is outstanding.
+**Accepted because**: a golden for a user-supplied fragment shader would pin
+the shader's own output, not the engine's; the engine-side invariants (target
+sizing, premultiplied compositing, reaping, run batching) are pinned by
+`crates/frust-engine/tests/shader_quad.rs` on a real device instead.
 
-**Trigger for removal**: the GPU-seam work wiring `Command::ShaderQuad`
-through to the engine renderer, at which point this entry, the corpus
-deferral, and the latched warning all come out together.
+**Trigger for removal**: an oracle that drives the pre-pass (or a
+device-backed golden class for shader quads), at which point the deferral and
+the skip-list row come out together.
+
+### `engine-scene-texture-always-blended` — an external texture never joins the opaque depth-writing pass
+
+**Observed** (evidence: `crates/frust-engine/src/compile/external.rs` sets
+`may_have_transparency` unconditionally; `Command::SceneTexture` and the
+`bind_texture` registration carry no opacity statement): the engine never
+reads a caller's texels, so every `SceneTexture` and `ShaderQuad` draw takes
+the blended painter-order path even when the texture is fully opaque (a video
+frame, an opaque 3D render), paying the blend and forgoing depth occlusion of
+what lies beneath it. Sampling is also unconditionally bilinear
+(`ImageQuality::Medium`): the whole-pixel-translation nearest downgrade
+`Command::Image` gets from `compile::paint` is not shared with the external
+path; at a 1:1 pixel-aligned mapping the difference rounds away in `u8`.
+
+**Accepted because**: claiming opacity the engine cannot verify would let a
+translucent texture occlude what it should have blended over; drawing
+correctly and slowly beats drawing wrong.
+
+**Trigger for removal**: an opacity hint on the scene command or on
+registration, and a shared sampling-quality resolver for image and external
+paints.
+
+### `engine-frame-clears-colour-unconditionally` — content painted into the target ahead of the frame keeps its depth and loses its pixels
+
+**Observed** (evidence: `crates/frust-gpu/src/encoder.rs`'s caller rules;
+`crates/frust-engine/tests/shared_encoder.rs`): a foreign pass may share the
+frame's encoder and depth attachment — depth-clear ownership belongs to
+whoever records first — but `EngineTarget` has no colour load-op axis, so the
+frame always clears its colour target. A 3D pass recorded *before* the 2D
+frame therefore still occludes the frame where it wrote nearer depth, yet its
+own pixels are gone; the working shape for 3D-under-2D today is to record the
+3D pass *after* the frame (nearer fragments draw over it).
+
+**Accepted because**: the colour clear is what keeps a surface frame
+self-contained; adding a load-op axis is a contract change that belongs with
+the first real 3D consumer.
+
+**Trigger for removal**: a colour load-op on `EngineTarget` proven by the
+shared-encoder tests in both recording orders.
+
+### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` answers `None` on Android and iOS
+
+**Observed** (evidence: `crates/frust-shell-desktop/src/render.rs`
+`publish_gpu_handle` installs the shared `DeviceHandle` at both
+device-creation sites; `crates/frust-shell-android/src/lib.rs` and
+`crates/frust-shell-ios/src/lib.rs` forward the `gpu` feature but never call
+`frust_shell_common::gpu::install_gpu_handle`): a `gpu`-feature app reaches
+the shared device on desktop only. The mobile shells' device-creation sites
+(their JNI/FFI glue and executors) are not yet wired to the slot.
+
+**Accepted because**: the seam's first consumers are desktop-first; the slot
+and the facade accessor are platform-free, so wiring a mobile shell is a
+local change at its device-creation site.
+
+**Trigger for removal**: both mobile shells install the handle and a device
+run (Pixel 5, iPhone) reads it back through `with_context`.
+
+### `engine-ios-sim-seam-suites-unrun` — the engine's seam test suites have not been executed on the iOS Simulator
+
+**Observed** (evidence: `benchmarks/raw/mac/README.md`'s iOS Simulator table, gate
+`engine-p9-ios-sim-seam`): the `frust-engine` `scene_texture`/`shader_quad`/`shared_encoder`
+suites have not yet been run on the iOS Simulator. Before `p9-f2`, their fixtures were refused at
+`request_device` (`LimitsExceeded { max_inter_stage_shader_variables: requested 16, allowed 15 }`)
+against the Simulator's Apple2 adapter, which reports only 15. The fixture fix is in —
+`frust_gpu::test_device_limits` now derives the request from the adapter/`TierCaps` the same way
+`create_device` does — but the Simulator re-run itself is still owed to the Mac rig, so gate
+`engine-p9-ios-sim-seam` is recorded skipped for these three suites. `ShaderQuad`/`SceneTexture` on
+the Simulator is proven only by the shadertoy app path (gate
+`engine-p9-ios-sim-shadertoy-app`), not by the suites themselves.
+
+**Accepted because**: the refusal was a fixture bug, not an engine or Metal deviation —
+`ios_sim.rs`'s own device passes on the same adapter because it already derived its limits this
+way — and the app-path run already exercises the same commands end to end; only the suites'
+own Simulator execution is outstanding.
+
+**Trigger for removal**: the three suites run to completion on the Simulator (Mac rig) and the
+result is recorded in `benchmarks/RESULTS.md` or the raw README.

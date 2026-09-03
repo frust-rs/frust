@@ -34,7 +34,7 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | Example | What it shows |
 |---------|---------------|
 | `examples/huddle` | clean-signals clean-architecture showcase; the sole full example app |
-| `examples/shadertoy` | Fragment-shader effects showcase — currently renders nothing: `draw_shader` is a registered no-op until the GPU seam wires `ShaderQuad` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md) `engine-shader-quad-unwired`) |
+| `examples/shadertoy` | Fragment-shader effects showcase — `draw_shader` records a `Command::ShaderQuad`, rendered by the engine's shader-quad pre-pass (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam) |
 | `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
 | `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
 | `examples/design-system-sample` | Out-of-tree design-system proof, built on `frust`'s public API alone; standalone workspace |
@@ -87,7 +87,10 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   the device/surface foundation (adapter/device creation, surface lifecycle, pipeline-cache
   framing) that `frust-render` re-exports under its own names so no shell file has to know where
   any of it moved to; `frust-engine` depends on `frust-gpu` + `frust-scene` for the scene-to-strip
-  compiler and GPU pipelines; nothing above RENDER depends on either.
+  compiler and GPU pipelines; nothing above RENDER depends on either. The one sanctioned exception:
+  the facade's non-default `gpu` feature adds an optional `frust-gpu` edge, re-exported flat as
+  `frust::gpu`, forwarded by the three shell crates so `frust::gpu::with_context` can read back a
+  shell-published device handle — see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam.
 
 ```
 frust-reactive (leaf)              frust-paths (leaf)      tooling: frust-cli/-drive/-tui/-mcp/-dap

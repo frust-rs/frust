@@ -291,9 +291,11 @@ pub enum Command {
     /// a transform.
     ///
     /// `program` is compiled (and cache-keyed on [`ShaderProgram::id`]) by
-    /// `frust-render` — see [`ShaderProgram`]'s v1 opaque-output contract.
-    /// `time` is seconds, app-supplied (from `PaintCtx::frame_time` at the
-    /// widget layer), threaded into the shader's uniform buffer.
+    /// `frust-engine`'s effects module. Output is treated as premultiplied
+    /// alpha. `time` is seconds, app-supplied (from `PaintCtx::frame_time` at
+    /// the widget layer), threaded into the shader's uniform buffer. This
+    /// command lives at the scene layer to preserve purity: the render backend
+    /// interprets the compiled shader output.
     ShaderQuad {
         program: ShaderProgram,
         dest: Rect,
@@ -337,6 +339,18 @@ pub enum Command {
     /// Pop the most recently pushed snapshot bracket (see
     /// [`Command::PushSnapshot`]).
     PopSnapshot,
+    /// Draw an externally owned GPU texture scaled to fill `dest` under
+    /// `transform`.
+    ///
+    /// `id` is opaque scene-layer data (precedent: [`ShaderProgram`]'s opaque
+    /// id, `shader.rs`) — only the render backend resolves it against
+    /// textures registered with the GPU context; an unregistered id draws
+    /// nothing.
+    SceneTexture {
+        id: u64,
+        dest: Rect,
+        transform: Affine,
+    },
 }
 
 /// Renderer-agnostic, immediate-mode display list.

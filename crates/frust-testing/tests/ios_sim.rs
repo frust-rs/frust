@@ -60,7 +60,13 @@
 //! `EngineOracle::new`'s device request should likely derive its limits from
 //! `TierCaps`/the adapter the same way `frust_gpu::context::create_device`
 //! does, so a future test that DOES want the full `SceneRenderer` trait
-//! object on the Simulator does not hit this same refusal.
+//! object on the Simulator does not hit this same refusal. **Resolved** by
+//! `p9-f2-fixture-limits`: `EngineOracle::new` and every device-suite fixture
+//! now request [`frust_gpu::context::test_device_limits`], the same
+//! adapter/`TierCaps`-derived limits `create_device` itself requests, so the
+//! `SceneRenderer` trait object is no longer refused here either — this
+//! file's own device stays a deliberate, direct `frust_gpu::RenderContext`
+//! build for the reasons above, not a `EngineOracle` workaround any more.
 //!
 //! # Why the CPU reference is embedded bytes, not a live oracle
 //!

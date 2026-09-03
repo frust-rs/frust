@@ -63,6 +63,12 @@
 //!   so an unparseable blob would otherwise panic the oracle. The sniff is
 //!   deliberately shallow (see [`looks_like_sfnt`]); a structurally valid but
 //!   internally corrupt font is still `glifo`'s to reject.
+//! - [`frust_scene::Command::SceneTexture`] has no CPU equivalent — resolving
+//!   an externally owned GPU texture against a registered-texture set is a
+//!   render-backend concern this oracle has no GPU context to perform, and
+//!   the engine compiler does not resolve it either yet. It draws nothing,
+//!   matching the command's own unresolved-id contract, and is counted in
+//!   [`SkipReport::scene_textures`].
 //!
 //! # Determinism
 //!
@@ -139,6 +145,10 @@ pub struct SkipReport {
     /// dimension, or one larger than `u16::MAX` (which `vello_cpu`'s
     /// `ImageSource::from_peniko_image_data` panics on).
     pub unrenderable_images: usize,
+    /// [`Command::SceneTexture`]s encountered — there is no CPU equivalent
+    /// for an externally owned GPU texture, so the oracle draws nothing for
+    /// it (an unresolved id draws nothing by the command's own contract).
+    pub scene_textures: usize,
 }
 
 impl SkipReport {
@@ -890,6 +900,17 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     }
                 }
             }
+            Command::SceneTexture { .. } => {
+                // No CPU equivalent: resolving an externally owned GPU
+                // texture against the render backend's registered-texture
+                // set requires a GPU context this oracle does not have.
+                // Drawing nothing matches the command's own contract for an
+                // unresolved id, so this is a faithful skip, not a
+                // placeholder — still reported through `SkipReport` so a
+                // corpus knows the frame did not exercise real texture
+                // content.
+                painter.skips.scene_textures += 1;
+            }
         }
     }
 
@@ -1043,7 +1064,7 @@ mod tests {
     /// Every [`Command`] variant's name.
     ///
     /// The match is EXHAUSTIVE on purpose: it is the tripwire that fails the
-    /// build the moment a 17th variant is added to `frust-scene` without the
+    /// build the moment a new variant is added to `frust-scene` without the
     /// oracle learning to route it.
     fn variant_name(command: &Command) -> &'static str {
         match command {
@@ -1063,11 +1084,12 @@ mod tests {
             Command::ShaderQuad { .. } => "ShaderQuad",
             Command::PushSnapshot { .. } => "PushSnapshot",
             Command::PopSnapshot => "PopSnapshot",
+            Command::SceneTexture { .. } => "SceneTexture",
         }
     }
 
     /// The complete variant list, in `Command`'s own declaration order.
-    const ALL_VARIANTS: [&str; 16] = [
+    const ALL_VARIANTS: [&str; 17] = [
         "FillRect",
         "RoundedRect",
         "Line",
@@ -1084,6 +1106,7 @@ mod tests {
         "ShaderQuad",
         "PushSnapshot",
         "PopSnapshot",
+        "SceneTexture",
     ];
 
     /// A 4x4 opaque-red RGBA8 image, the smallest thing `Command::Image` can
@@ -1157,6 +1180,7 @@ mod tests {
                 Brush::Solid(RED),
             );
             builder.clear_rect(Rect::new(6.0, 6.0, 10.0, 10.0));
+            builder.scene_texture(1, Rect::new(2.0, 2.0, 12.0, 12.0));
             builder.pop_snapshot();
             builder.pop_layer();
             builder.pop_clip();
@@ -1191,7 +1215,7 @@ mod tests {
             .expect("the coverage scene renders");
 
         // Every command in the scene reached the walk's dispatch — the
-        // operational meaning of "all 16 variants routed".
+        // operational meaning of "every variant routed".
         assert_eq!(
             oracle.routed_commands(),
             scene.commands().len(),
@@ -1209,6 +1233,10 @@ mod tests {
         );
         assert_eq!(skips.image_brush_fills, 0);
         assert_eq!(skips.unrenderable_images, 0);
+        assert_eq!(
+            skips.scene_textures, 1,
+            "the scene texture is a reported gap"
+        );
     }
 
     #[test]

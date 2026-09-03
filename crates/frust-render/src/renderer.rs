@@ -8,11 +8,15 @@
 //! when the swapchain reports `Lost` mid-frame.
 //!
 //! The frame — there is one renderer and one path family — is:
-//! encode copies the frame's scene, then acquire → one
+//! encode copies the frame's scene, then acquire → the scene's fragment-shader
+//! quads rendered into their own offscreen targets
+//! (`frust_engine::ShaderQuadPass`, a no-op for a scene drawing none) → one
 //! `EngineRenderer::encode` into the acquired swapchain view and its
 //! surface-owned depth attachment
 //! ([`RenderPath::EngineDirect`](crate::context::RenderPath::EngineDirect)) → submit → present →
-//! `end_frame`. No intermediate and no blit. A swapchain whose compositor
+//! `end_frame`. Every one of those passes goes into a single encoder, which is
+//! what puts a shader quad's own pass ahead of the frame that samples it. No
+//! intermediate and no blit. A swapchain whose compositor
 //! genuinely reads it as STRAIGHT alpha takes the same shape with one pass
 //! appended and one indirection added: the frame is encoded into a
 //! surface-owned intermediate and un-premultiplied into the acquired view from
@@ -93,6 +97,16 @@ enum TierBackend {
         /// once, and the running total keeps surfacing on the periodic debug
         /// bump afterwards.
         refused_frames: u32,
+        /// The frame's fragment-shader pre-pass: every
+        /// `frust_scene::Command::ShaderQuad` this surface draws, rendered
+        /// into a pooled offscreen target and registered with `engine` as a
+        /// scene texture before the frame that samples it is compiled.
+        ///
+        /// Per surface, beside the renderer whose registry it writes and
+        /// seeded from the same persisted `wgpu::PipelineCache`: its targets
+        /// and compiled user programs are device-bound, so they die with the
+        /// surface exactly as the engine's own resources do.
+        shader_quads: Box<frust_engine::ShaderQuadPass>,
         /// This surface's GPU timestamp ring — real per-pass GPU time, rather
         /// than the CPU wall-clock spans around `encode`/`submit`.
         ///
@@ -674,6 +688,7 @@ impl SurfaceRenderer {
             TierBackend::Engine {
                 engine: Box::new(engine),
                 refused_frames: 0,
+                shader_quads: Box::new(frust_engine::ShaderQuadPass::new(pipeline_cache.clone())),
                 timestamps,
             }
         };
@@ -1127,6 +1142,7 @@ impl SurfaceRenderer {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
+                    shader_quads,
                     timestamps,
                 } = backend;
                 // Set in `encode`; a well-formed frame always encoded first —
@@ -1138,6 +1154,20 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine"),
                         });
+                // The frame's shader quads, rendered into this SAME encoder
+                // ahead of the scene's own passes and registered with the
+                // engine before it compiles: a quad's target must already be
+                // bound when the display list naming it is walked, and must be
+                // written before the pass that samples it runs. One encoder
+                // gives both orderings for free.
+                shader_quads.prepare(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine_scene,
+                    Affine::IDENTITY,
+                    engine,
+                );
                 // Opens this frame's ring slot and harvests whatever an earlier
                 // frame left mapped in it — the one place a reading becomes
                 // visible to `gpu_pass_timings`. A no-op on an inert ring.
@@ -1229,6 +1259,7 @@ impl SurfaceRenderer {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
+                    shader_quads,
                     timestamps,
                 } = backend;
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1238,6 +1269,17 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine unpremultiply"),
                         });
+                // The same pre-pass the direct arm records, for the same two
+                // orderings — the conversion pass appended after the frame
+                // changes neither of them.
+                shader_quads.prepare(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine_scene,
+                    Affine::IDENTITY,
+                    engine,
+                );
                 timestamps.begin_frame(&device_handle.device);
                 let result = engine.encode_traced(
                     &device_handle.device,

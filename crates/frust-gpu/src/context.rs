@@ -460,27 +460,10 @@ async fn create_device(
     let caps = TierCaps::probe(&adapter);
 
     // The device request is built from the resolved downlevel profile, not
-    // unconditionally from the adapter's raw limits: under
-    // `DownlevelProfile::WebGl2` (a real `Gl` backend, or
-    // `FRUST_ENGINE_DOWNLEVEL=1` rehearsing it) the request itself must ask
-    // for the GLES-3.0/WebGL2 downlevel default shape, or the override would
-    // only relabel a full desktop device rather than actually exercising it.
-    // `using_resolution` folds in the adapter's own texture-dimension limits
-    // so the request never asks for a resolution the adapter cannot satisfy
-    // (the swapchain may need more than the downlevel default allows) while
-    // every other WebGL2 default limit is requested as-is. Under
-    // `DownlevelProfile::Full` — every shipping device — this reads the adapter
-    // directly rather than going through `caps`: the summarised capabilities
-    // carry the individual limits decisions are made from, not the struct
-    // `request_device` requires, and feeding the *adapter's* limits (rather
-    // than `Limits::default()`) is what keeps the request from over-asking and
-    // failing on a constrained mobile adapter — or on the iOS Simulator, whose
-    // macOS-Metal-backed device refuses `Limits::default()` outright.
-    let base_limits = if caps.downlevel_profile == DownlevelProfile::WebGl2 {
-        wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
-    } else {
-        adapter.limits()
-    };
+    // unconditionally from the adapter's raw limits — see `base_device_limits`
+    // for the shared derivation, and `effective_limits` for the iOS Simulator
+    // alignment mitigation layered on top of it.
+    let base_limits = base_device_limits(caps.downlevel_profile, adapter.limits());
     let required_limits = effective_limits(base_limits, is_ios_simulator());
     let required_features =
         device_features(adapter.features(), &caps, cfg!(feature = "perf-trace"));
@@ -553,6 +536,62 @@ async fn create_device(
         caps,
         first_uncaptured_error: first_error,
     })
+}
+
+/// Given the resolved downlevel profile and the adapter's own reported
+/// limits, the `wgpu::Limits` a device request should ask for — the pure half
+/// of the derivation this module's `create_device` uses, extracted so both it
+/// and [`test_device_limits`] share exactly one implementation rather than two
+/// that could drift apart.
+///
+/// Under `DownlevelProfile::WebGl2` (a real `Gl` backend, or
+/// `FRUST_ENGINE_DOWNLEVEL=1` rehearsing it) this asks for the GLES-3.0/WebGL2
+/// downlevel default shape — or the override would only relabel a full
+/// desktop device rather than actually exercising it — with
+/// `using_resolution` folding in `adapter_limits`' own texture-dimension
+/// limits so the request never asks for a resolution the adapter cannot
+/// satisfy (the swapchain may need more than the downlevel default allows)
+/// while every other WebGL2 default limit is requested as-is. Under
+/// `DownlevelProfile::Full` — every shipping device — `adapter_limits` is
+/// returned unchanged: feeding the *adapter's* limits (rather than
+/// `Limits::default()`) is what keeps the request from over-asking and
+/// failing on a constrained mobile adapter — or on the iOS Simulator, whose
+/// macOS-Metal-backed device refuses `Limits::default()` outright.
+///
+/// Pure decision logic over plain values, mirroring [`effective_limits`]'s
+/// split of pure decision vs. platform lookup: `adapter_limits` is already
+/// `wgpu::Adapter::limits()`'s output by the time this runs, so the function
+/// itself needs no adapter and is unit-testable on any host with no GPU.
+fn base_device_limits(profile: DownlevelProfile, adapter_limits: wgpu::Limits) -> wgpu::Limits {
+    if profile == DownlevelProfile::WebGl2 {
+        wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter_limits)
+    } else {
+        adapter_limits
+    }
+}
+
+/// The `wgpu::Limits` a test fixture's own `request_device` call should ask
+/// for, given `adapter` and its already-probed `caps` — exactly the
+/// derivation [`create_device`] uses for the production device request
+/// (shared via [`base_device_limits`] plus [`effective_limits`]), so a
+/// fixture requesting these limits can never over-ask relative to what the
+/// production path would request for the very same adapter.
+///
+/// This is the fix for the iOS Simulator's constrained Apple2 Metal profile
+/// (15 inter-stage shader variables, where `wgpu::Limits::default()` demands
+/// 16): a fixture that hard-codes `Limits::default()` panics with
+/// `LimitsExceeded` there even though the production path — which always
+/// requests the adapter's own limits — never would. Every fixture already
+/// probes `TierCaps::probe(&adapter)` before requesting its device, so `caps`
+/// is available at the same call site this replaces.
+///
+/// Public (not test-only/`#[cfg(test)]`) because the fixtures that need it
+/// live in other crates' `tests/` integration binaries and
+/// `frust-testing`'s own `EngineOracle`, none of which can reach a
+/// `#[cfg(test)]` item in this crate.
+pub fn test_device_limits(adapter: &wgpu::Adapter, caps: &TierCaps) -> wgpu::Limits {
+    let base_limits = base_device_limits(caps.downlevel_profile, adapter.limits());
+    effective_limits(base_limits, is_ios_simulator())
 }
 
 /// Given the build-config-derived instance flags and whether the process is
@@ -926,6 +965,35 @@ mod tests {
             device_features(wgpu::Features::PIPELINE_CACHE, &caps, true),
             wgpu::Features::PIPELINE_CACHE | wgpu::Features::TIMESTAMP_QUERY
         );
+    }
+
+    #[test]
+    fn base_device_limits_full_profile_passes_adapter_limits_through_unclamped() {
+        // The iOS Simulator shape: an adapter reporting fewer inter-stage
+        // shader variables than `wgpu::Limits::default()` demands (15 vs 16).
+        // Under `Full`, `base_device_limits` must request no more than what
+        // the adapter itself reported, never `Limits::default()`.
+        let adapter_limits = wgpu::Limits {
+            max_inter_stage_shader_variables: 15,
+            ..wgpu::Limits::default()
+        };
+        let limits = base_device_limits(DownlevelProfile::Full, adapter_limits.clone());
+        assert!(limits.max_inter_stage_shader_variables <= 15);
+        assert_eq!(limits, adapter_limits);
+    }
+
+    #[test]
+    fn base_device_limits_webgl2_profile_never_exceeds_the_constrained_adapter() {
+        // The WebGL2 downlevel-default shape already asks for 15 inter-stage
+        // shader variables (lower than `Limits::default()`'s 16), so folding
+        // in a constrained adapter's own limits must still land at or below
+        // what that adapter reports.
+        let adapter_limits = wgpu::Limits {
+            max_inter_stage_shader_variables: 15,
+            ..wgpu::Limits::default()
+        };
+        let limits = base_device_limits(DownlevelProfile::WebGl2, adapter_limits);
+        assert!(limits.max_inter_stage_shader_variables <= 15);
     }
 
     #[test]

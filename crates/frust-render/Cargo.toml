@@ -53,6 +53,16 @@ frust-gpu.workspace = true
 # feature that makes them live.
 perf-trace = ["frust-engine/perf-trace", "frust-gpu/perf-trace"]
 
+# Opt-in: re-exports `frust_gpu::DeviceHandle` (the device/queue/adapter
+# handle a shell's render executor hands off through `frust-shell-common`'s
+# process-wide slot — see that crate's `gpu` module) from this crate's root,
+# alongside the always-public `RenderContext`. `frust-gpu` is NOT optional
+# above (see its dependency comment), so this feature adds no new
+# dependency — it only gates a re-export, keeping a default (non-`gpu`)
+# build of this crate at zero new public symbols. Forwarded into by every
+# shell's own `gpu` feature and by `frust`'s.
+gpu = []
+
 # Nothing in this crate reads an Android system property any more: the emulator
 # probe that did (`is_android_emulator`, which strips the instance's DEBUG flags
 # there) moved to `frust-gpu` with the rest of the device bring-up, and

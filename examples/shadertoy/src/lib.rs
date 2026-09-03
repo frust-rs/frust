@@ -121,7 +121,7 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
     );
 
     let hint =
-        text("Fragment shader rendered offscreen and composited via vello's texture override.")
+        text("Fragment shader rendered offscreen by the engine's ShaderQuad pass and drawn as a SceneTexture.")
             .size(12.0)
             .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3));
 

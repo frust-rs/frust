@@ -10,6 +10,48 @@
 //! types so a caller never hand-assembles a `wgpu::RenderPassDescriptor`, and
 //! [`CommandBuffer::encoder_mut`] is the escape hatch for whatever recording
 //! this type does not model (staged uploads, a renderer's own pass shape).
+//!
+//! # The two caller rules
+//!
+//! Sharing one encoder between two renderers — a 3D pass of the caller's own
+//! and the 2D strip renderer above this crate — turns on two rules the
+//! borrowing invariant below cannot express by itself. Both are stated here
+//! because both are things a caller otherwise gets wrong silently.
+//!
+//! ## 1. Depth-clear ownership
+//!
+//! When both renderers attach the same depth buffer, **exactly one of them
+//! clears it, and it is whichever records first**; every pass after that loads
+//! what the previous one stored. Clearing twice throws the first pass's
+//! occlusion away, and does it with no diagnostic at all — the image simply
+//! comes back with the wrong half of it drawn. The 2D renderer's half of the
+//! statement is its `set_depth_pre_cleared` switch, which turns its own
+//! frame-opening depth clear into a load.
+//!
+//! Two facts ride along with the clear, because an attachment is only really
+//! shared if both sides read it the same way. The **comparison and the
+//! direction** must agree: the 2D renderer tests `LessEqual` against a
+//! `Depth24Plus` buffer whose far plane is `1.0`, so nearer geometry carries
+//! the smaller z, and a pass that inverted either would be occluded exactly
+//! where it should not be. And the depth attachment's **extent must equal the
+//! colour attachment's** — wgpu refuses the pass outright otherwise, which is
+//! at least a loud failure, but sizing the shared buffer against the target is
+//! still the caller's job.
+//!
+//! Colour is not shared on those terms: the 2D renderer clears its colour
+//! target every frame, so a caller's earlier pass keeps its depth and loses its
+//! pixels. Content that has to stay visible is recorded *after* the frame
+//! rather than before it.
+//!
+//! ## 2. Atlas uploads may submit their own encoder before the scene pass
+//!
+//! "Never submits" holds for scene work, and glyph-atlas upload is the one
+//! carve-out: the atlas is replayed on an encoder of *its own*, submitted ahead
+//! of the scene pass, so its content is committed before the pass that samples
+//! it reads it (vello_hybrid render/wgpu/mod.rs:428-430). That replay touches
+//! neither this buffer nor the caller's and records no scene draw — which is
+//! why a caller must not read "the renderer issued a submit" as a contract
+//! violation on its own. Any submit that is not this one is.
 
 use crate::texture::RenderTarget;
 
@@ -24,6 +66,10 @@ use crate::texture::RenderTarget;
 /// passes before and after and submit once. Exception: glyph-atlas uploads
 /// may submit their OWN encoder so atlas content is committed before the
 /// scene pass reads it (vello_hybrid render/wgpu/mod.rs:428-430).
+///
+/// A caller recording depth-writing passes of its own around a renderer's owes
+/// the module-level *two caller rules* on top of this: depth-clear ownership,
+/// with the comparison, direction and extent that ride along with it.
 pub struct CommandBuffer {
     encoder: wgpu::CommandEncoder,
 }

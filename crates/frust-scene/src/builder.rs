@@ -300,11 +300,9 @@ impl<'a> SceneBuilder<'a> {
     /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
     /// under the current transform (see [`Command::ShaderQuad`]).
     ///
-    /// **Currently paints nothing**: the engine renderer recognises the
-    /// command and drops it with a once-per-process warning — see
-    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` for the evidence
-    /// and the trigger that removes this caveat (the GPU-seam work wiring the
-    /// command through the engine).
+    /// The engine renders the fragment program in a pre-pass into an offscreen
+    /// target and draws it over `dest`. Output is treated as premultiplied
+    /// alpha. The rendering is disabled by `FRUST_ENGINE_NO_SHADER_EFFECTS`.
     ///
     /// `program` is cloned into the command — cheap, since [`ShaderProgram`]
     /// clones its id and its `Arc<str>` source handle, never the source
@@ -316,6 +314,21 @@ impl<'a> SceneBuilder<'a> {
             dest,
             transform,
             time,
+        });
+    }
+
+    /// Records an externally owned GPU texture, scaled to fill `dest`, under
+    /// the current transform (see [`Command::SceneTexture`]).
+    ///
+    /// `id` is opaque scene-layer data — only the render backend resolves it
+    /// against textures registered with the GPU context; an unregistered id
+    /// draws nothing.
+    pub fn scene_texture(&mut self, id: u64, dest: Rect) {
+        let transform = self.current_transform();
+        self.scene.push(Command::SceneTexture {
+            id,
+            dest,
+            transform,
         });
     }
 }
@@ -1028,6 +1041,41 @@ mod tests {
                 );
             }
             other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scene_texture_round_trips_id_and_dest_under_identity_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let dest = Rect::new(0.0, 0.0, 30.0, 40.0);
+        builder.scene_texture(42, dest);
+
+        match &scene.commands()[0] {
+            Command::SceneTexture {
+                id,
+                dest: got_dest,
+                transform,
+            } => {
+                assert_eq!(*id, 42);
+                assert_eq!(*got_dest, dest);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected SceneTexture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scene_texture_composes_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((5.0, 6.0));
+        builder.push_transform(translate);
+        builder.scene_texture(7, Rect::new(0.0, 0.0, 4.0, 4.0));
+
+        match &scene.commands()[0] {
+            Command::SceneTexture { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected SceneTexture, got {other:?}"),
         }
     }
 

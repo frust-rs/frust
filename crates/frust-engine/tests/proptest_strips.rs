@@ -1322,21 +1322,23 @@ fn non_finite_geometry_is_refused_field_by_field() {
     }
 }
 
-/// A command the compiler recognises but does not lower carries no geometry
-/// into the frame, so a non-finite number in one is skipped with the command
-/// rather than refusing the whole frame.
+/// A shader quad's destination rectangle is geometry the frame is refused for,
+/// like every other command the compiler lowers.
 ///
-/// The distinction is the difference between drawing less and drawing nothing:
-/// a shader quad the compiler has not implemented yet must not be able to
-/// blank a frame the geometry beside it would have rendered.
+/// It joined that set when the quad started drawing: its `dest` is now
+/// flattened and mapped exactly as an image's or an external texture's is, and
+/// a non-finite rectangle handed to the flattener is the hazard the check
+/// exists to stop — subdivision against a number that never converges. Being
+/// refused *before* anything is recorded is what keeps that from being reached
+/// at all.
 ///
-/// A clip is deliberately not the case here any more, and neither is a layer, a
-/// snapshot bracket, a clear, an image or a blurred rounded rectangle: the
-/// compiler lowers all six now, so each one's own numbers are geometry the
-/// frame is refused for, pinned by `tests/clips.rs`, `tests/layers.rs`,
-/// `tests/images.rs` and `tests/blur_rrect.rs` respectively.
+/// Every command the compiler recognises now carries geometry of its own, so
+/// there is no skipped-command case left to contrast this with; the clip,
+/// layer, snapshot, clear, image and blurred-rounded-rect counterparts are
+/// pinned by `tests/clips.rs`, `tests/layers.rs`, `tests/images.rs` and
+/// `tests/blur_rrect.rs` respectively.
 #[test]
-fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
+fn a_non_finite_shader_quad_destination_refuses_the_frame() {
     let scene = scene_of(&[
         Op::ShaderQuad {
             dest: Rect::new(f64::NAN, 0.0, f64::INFINITY, 16.0),
@@ -1348,9 +1350,35 @@ fn non_finite_geometry_in_a_skipped_command_does_not_refuse_the_frame() {
         },
     ]);
 
+    assert!(matches!(
+        SceneCompiler::new(VIEWPORT.0, VIEWPORT.1).compile(&scene, Affine::IDENTITY, VIEWPORT),
+        Err(EngineError::InvalidGeometry)
+    ));
+}
+
+/// A finite shader quad whose program has no rendered target draws nothing and
+/// leaves the rest of the frame alone.
+///
+/// The compiler on its own never runs the pre-pass that renders a fragment
+/// program, so this is the shape every device-free compile of a shader quad
+/// takes: one skipped draw, and the geometry beside it still rendered. Drawing
+/// less, never wrong.
+#[test]
+fn a_shader_quad_without_a_rendered_target_skips_its_own_draw_only() {
+    let scene = scene_of(&[
+        Op::ShaderQuad {
+            dest: Rect::new(0.0, 0.0, 16.0, 16.0),
+            time: 0.0,
+        },
+        Op::FillRect {
+            rect: Rect::new(0.0, 0.0, 16.0, 16.0),
+            brush: Brush::Solid(RED),
+        },
+    ]);
+
     let frame = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1)
         .compile(&scene, Affine::IDENTITY, VIEWPORT)
-        .expect("a skipped command's geometry does not refuse the frame");
+        .expect("an unrendered shader quad does not refuse the frame");
     assert_eq!(frame.draws().len(), 1);
 }
 

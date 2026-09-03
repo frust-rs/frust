@@ -81,6 +81,13 @@ cargo test -p frust-gpu
 WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
 ```
 
+Every device-suite fixture — this crate's own `--ignored` arm, `frust-engine`'s, and
+`frust-testing`'s `EngineOracle::new` — requests its device limits through
+`frust_gpu::test_device_limits(&adapter, &caps)`, the same derivation `create_device` uses for the
+production device request (WebGL2 downlevel defaults on that profile, else the adapter's own
+limits), never a bare `wgpu::Limits::default()`. This is what lets the seam suites run on the iOS
+Simulator's 15-inter-stage-variable Apple2 adapter; see the iOS Simulator engine gate below.
+
 `bytemuck` (`derive` feature) is a `[workspace.dependencies]` row for `frust-gpu`'s
 plain-old-data GPU vertex/uniform types (`Pod`/`Zeroable`); `derive` is the only feature the
 workspace needs.
@@ -158,6 +165,10 @@ black on by construction (the Simulator's Apple2 Metal feature set lacks `INDIRE
 Drives `EngineRenderer` directly against the Simulator's own real adapter and compares seven
 unit-corpus cases against the embedded `testing/goldens/cpu/` baseline (`include_bytes!`, not a
 filesystem read — the Simulator process has no path back to this checkout); no new golden class.
+Its own device request already uses the same `test_device_limits` derivation the GPU Substrate
+section above describes, which is why it never over-asks the Simulator's constrained adapter the
+way the `scene_texture`/`shader_quad`/`shared_encoder` seam suites' fixtures did before that fix —
+see [LIMITATIONS.md](LIMITATIONS.md) `engine-ios-sim-seam-suites-unrun`.
 Run recipe: [DEVELOPMENT.md](DEVELOPMENT.md)'s Manual/gated tests.
 
 `docs/TESTING.md` is the canonical golden-image/oracle/class runbook; the commands above are the

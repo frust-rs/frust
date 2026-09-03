@@ -36,7 +36,11 @@
 //! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`]) each mobile
 //! shell publishes the live surface's actual verdict
 //! into, so app code can observe a `RefusedTranslucent` platform refusal
-//! instead of an invisible native sibling.
+//! instead of an invisible native sibling. Behind the non-default `gpu`
+//! cargo feature, [`gpu`] carries the process-wide GPU-device slot
+//! ([`gpu::install_gpu_handle`]/[`gpu::gpu_handle`]) a shell's render
+//! executor installs its device into once, type-erased so this crate still
+//! names no GPU type — see the module's own docs.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -58,6 +62,14 @@ pub mod devtools;
 mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;
+/// The process-wide GPU-device slot — [`gpu::install_gpu_handle`]/
+/// [`gpu::gpu_handle`] — a shell's render executor installs its device into
+/// once, and the facade's `frust::gpu::with_context` (see
+/// `crates/frust/src/lib.rs`) reads it back. Compiled only under the `gpu`
+/// cargo feature; absent entirely otherwise, and type-erased even then so
+/// this crate names no GPU type (see the module's own docs).
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod perf;
 pub mod platform_view;
 pub mod render_split;

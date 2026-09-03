@@ -2,17 +2,17 @@
 //!
 //! ## Contract
 //!
-//! Each fragment source below is compiled after `frust-render`'s own fixed
-//! prelude (`crates/frust-render/src/shader_effects.rs`'s `VERTEX_PRELUDE`),
-//! which already declares the `Uniforms` struct and the fullscreen-triangle
-//! vertex stage. A source here therefore must **not** redeclare `Uniforms` or
-//! a `@vertex` stage — it only defines the fragment entry point `fs_main`
-//! (`@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32>`) and
-//! reads the uniforms as `frust_u.resolution` / `frust_u.time`. Every shader
-//! here writes **opaque** output (`vec4<f32>(color, 1.0)`) — the v1
-//! [`frust::authoring::scene::ShaderProgram`] contract (vello's
-//! image-override copy only agrees with Frust's premultiplied render target
-//! at alpha = 1.0).
+//! Each fragment source below is compiled after the fixed prelude from
+//! `frust_gpu::effects`, which already declares the `Uniforms` struct and the
+//! fullscreen-triangle vertex stage. A source here therefore must **not**
+//! redeclare `Uniforms` or a `@vertex` stage — it only defines the fragment
+//! entry point `fs_main` (`@fragment fn fs_main(in: FrustVsOut) ->
+//! @location(0) vec4<f32>`) and reads the uniforms as `frust_u.resolution` /
+//! `frust_u.time`. Every shader here writes **opaque** output
+//! (`vec4<f32>(color, 1.0)`) — the v1 [`frust::authoring::scene::ShaderProgram`]
+//! contract (the engine draws the program's texture as a premultiplied
+//! `SceneTexture`, and opaque output is the one case where straight and
+//! premultiplied colour agree).
 
 use frust::authoring::scene::ShaderProgram;
 

@@ -55,16 +55,6 @@ mod context;
 // still leaking no `wgpu` type (see its module docs).
 mod headless;
 mod renderer;
-// The size-clamp policy half of the shader-showcase feature (its GPU half is
-// `frust_gpu::effects`). Currently UNWIRED: the only caller of either half was
-// the vello-classic tier's encode-time pre-pass, which registered each
-// rendered quad with `vello::Renderer` as an image override — a seam that died
-// with vello, and one the engine tier has no counterpart for until the
-// GPU-seam phase builds one. Retained (rather than deleted) because that phase
-// needs exactly this policy back; the `allow` is what keeps the module intact
-// without an unused-code failure meanwhile.
-#[allow(dead_code)]
-mod shader_effects;
 mod tier;
 
 // The device/surface foundation, re-exported name for name from `frust-gpu`:
@@ -74,6 +64,14 @@ pub use frust_gpu::{
     AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext,
     SurfaceAlphaRequest, SurfaceFactory, SurfacePhase,
 };
+// `DeviceHandle` (the cheap-to-clone device/queue/adapter pair a shell hands
+// off to `frust-shell-common`'s process-wide GPU slot — see that crate's
+// `gpu` module) stays behind this crate's own `gpu` feature rather than
+// joining the unconditional re-export above: `frust-gpu` itself is not
+// optional, so gating costs nothing but keeps a default build of this crate
+// (the only one most apps ever produce) at zero new public symbols.
+#[cfg(feature = "gpu")]
+pub use frust_gpu::DeviceHandle;
 pub use headless::{
     GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
     HeadlessOptions, HeadlessRenderer, HeadlessSpec,

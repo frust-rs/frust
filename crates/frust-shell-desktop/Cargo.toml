@@ -63,3 +63,10 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
 # profile builds only).
 devtools = ["frust-shell-common/devtools"]
+# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
+# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
+# `frust-shell-common/gpu` carries the process-wide slot `render.rs` installs
+# the live device into once a surface (and so a device) exists. Empty
+# otherwise (no new dependency, just two features on already-unconditional
+# deps), the same additive-unification shape as `perf-trace`/`devtools`.
+gpu = ["frust-shell-common/gpu", "frust-render/gpu"]

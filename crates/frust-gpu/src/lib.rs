@@ -34,7 +34,7 @@ pub mod texture;
 
 pub use arena::{BufferSlice, BufferUploader, HostBuffer};
 pub use caps::{DownlevelProfile, TierCaps};
-pub use context::{ContextOptions, DeviceHandle, RenderContext};
+pub use context::{ContextOptions, DeviceHandle, RenderContext, test_device_limits};
 pub use diag::{GpuFrameSpans, TimestampRing};
 pub use effects::ShaderEffects;
 pub use encoder::CommandBuffer;
