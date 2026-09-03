@@ -1,16 +1,19 @@
 # beui-demo
 
-The `frust-beui` design-system plugin's desktop gallery: eighteen pages that
+The `frust-beui` design-system plugin's desktop gallery: nineteen pages that
 show every ported component interactively — a home page with the upstream
 attribution, nine Motion pages (text effects, buttons, controls, selection,
 overlays, navigation, surfaces, data, and the WGSL shader backgrounds), three
 Agents pages (chat primitives, agent-output panels, the assembled chat app
 over a mock streaming driver), four Blocks pages (command surfaces, morphing
-tabs and stacks, forms and upload, showcase blocks), and a Theming page.
+tabs and stacks, forms and upload, showcase blocks), a Theming page, and a
+GPU Effects page.
 
 Root-workspace member (covered by the `examples/*` glob in the root
 `Cargo.toml`, not standalone) — desktop-only, no Android/iOS output. Mirrors
-`examples/shadcn-demo`'s manifest shape exactly: no `[features]` table.
+`examples/shadcn-demo`'s manifest shape closely, with one addition: a single
+non-default `gpu-effects` feature row (see "GPU Effects" below) forwarding to
+`frust-beui/gpu-effects`; the default build carries none of it.
 
 ## Run
 
@@ -48,7 +51,7 @@ rather than inventing a group-header widget here. `nav.rs`'s module docs carry
 the same note; the upgrade to a genuinely grouped rail is future work for
 whichever task next touches `animated_sidebar` itself.
 
-Eighteen pages, in nav order:
+Nineteen pages, in nav order:
 
 - **Home** — title, upstream attribution (MIT, rev
   `10c283e433a8f4f0ac0736684d4426ab612b9f55`), and a category-overview card
@@ -67,6 +70,12 @@ Eighteen pages, in nav order:
   Geist/Geist Mono typography specimen. The motion-token visualizer is a
   stub — it names `frust_beui::tokens::motion`'s curve/spring surface without
   wiring a live timeline against it yet.
+- **GPU Effects** — the non-default `gpu-effects` feature, live: five 2D/3D
+  pairs (`tilt_card`, `wheel_picker`, `cylinder_carousel`, `project_folder`,
+  `wallet_card`), each the same component twice — its ordinary 2D path next
+  to the true-3D opt-in the feature adds — plus a three-tile
+  `shader_background` showcase (unconditional; not behind this feature). See
+  "GPU Effects" below.
 
 Content swaps under `frust::motion::switcher::pattern_switcher` with the
 `FadeThrough` pattern — non-directional, the idiomatic choice for a
@@ -87,9 +96,43 @@ Theming) alongside the active page's title.
   one (see "Nav shell" above); every section page hosts its state in a
   page-local component, so a page starts fresh each time it is opened.
 
+## GPU Effects
+
+```
+cargo run -p beui-demo --features gpu-effects
+```
+
+Compiles the catalog's `gpu_fx` substrate in and turns on the five true-3D
+opt-ins the GPU Effects page pairs against their 2D path
+(`TiltCardView::gpu_face`, `WalletCardView::gpu_fan`, `WheelPicker::gpu_drum`,
+`CylinderCarouselView::gpu_cylinder`, `ProjectFolderView::gpu_fan`). The
+default build (`cargo run -p beui-demo`, no flag) never compiles `gpu_fx` at
+all — the page still shows, with a placeholder in every 3D pane naming this
+command.
+
+Compiling the feature in is not the same as rendering 3D: a device is only
+reachable once the desktop shell has opened its first surface
+(`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only` — Android/iOS have
+none yet), and `FRUST_BEUI_NO_GPU_FX=1` turns the whole path back off
+regardless of the build. Every component already carries that degrade in its
+own contract, so a `--features gpu-effects` build with no reachable device
+renders exactly the default build's 2D panes — the GPU Effects page states
+which of the three cases the current run is in.
+
+The `gpu_fx` substrate itself is GPU-verified on Vulkan against a T400
+(`plugins/beui`'s own `#[ignore]`d cases — see that crate's `gpu_fx` module
+docs). This page's own run is owed: the dockur Linux desktop rig this gallery
+is otherwise verified on (`run-on-desktop.sh`, which runs the release binary
+headless and captures a screenshot) has not yet run the `--features
+gpu-effects` build. Metal is expected to behave the same once a Mac runs it —
+the substrate reaches the GPU only through `frust::gpu`, which carries no
+backend-specific code of its own — but that run is owed too.
+
 ## Verifying it
 
 This dev rig is headless — the binary is never run here. `cargo build -p
-beui-demo` is the runtime check; a desktop container (dockur linux-native,
-`run-on-desktop.sh`) runs `cargo run -p beui-demo` and captures the
-screenshot separately.
+beui-demo` is the runtime check, and `cargo check -p beui-demo --features
+gpu-effects` covers the feature-gated build compiling; a desktop container
+(dockur linux-native, `run-on-desktop.sh`) runs `cargo run -p beui-demo` (and,
+for the GPU Effects page, `cargo run -p beui-demo --features gpu-effects`)
+and captures the screenshot separately.

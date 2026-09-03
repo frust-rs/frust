@@ -18,6 +18,11 @@
 //! `Theming`) still read in the rail without inventing a group-header widget
 //! here. A real grouped rail is future work for whichever task next touches
 //! `frust_beui::components::animated_sidebar` itself.
+//!
+//! [`Page::GpuEffects`] joins `Home` and `Theming` as a third page standing
+//! outside every section — it is always in the rail, whether or not the
+//! crate was built with the `gpu-effects` feature; the page itself explains
+//! what is on when the feature is off.
 
 use frust::{
     AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, IconSource, Padding, SizedBox, View,
@@ -53,12 +58,13 @@ pub enum Page {
     BlocksForms,
     BlocksShowcase,
     Theming,
+    GpuEffects,
 }
 
 impl Page {
     /// Every page, in nav order — the rail's item list, and the array the
     /// rail's `on_select` index looks back into.
-    pub const ALL: [Page; 18] = [
+    pub const ALL: [Page; 19] = [
         Page::Home,
         Page::MotionText,
         Page::MotionButtons,
@@ -77,13 +83,14 @@ impl Page {
         Page::BlocksForms,
         Page::BlocksShowcase,
         Page::Theming,
+        Page::GpuEffects,
     ];
 
-    /// The section this page belongs to, or `None` for the two pages that
+    /// The section this page belongs to, or `None` for the three pages that
     /// stand outside every section.
     fn section(self) -> Option<&'static str> {
         match self {
-            Page::Home | Page::Theming => None,
+            Page::Home | Page::Theming | Page::GpuEffects => None,
             Page::MotionText
             | Page::MotionButtons
             | Page::MotionControls
@@ -121,6 +128,7 @@ impl Page {
             Page::BlocksForms => "Forms",
             Page::BlocksShowcase => "Showcase",
             Page::Theming => "Theming",
+            Page::GpuEffects => "GPU Effects",
         }
     }
 
@@ -155,6 +163,7 @@ impl Page {
             Page::BlocksForms => icons::EDIT,
             Page::BlocksShowcase => icons::CONTENT_COPY,
             Page::Theming => icons::LIGHT_MODE,
+            Page::GpuEffects => icons::GLOBE,
         }
     }
 }

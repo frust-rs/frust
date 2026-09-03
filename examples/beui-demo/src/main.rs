@@ -76,6 +76,7 @@ fn page_body(page: Page, state: &mut AppState) -> AnyView<AppState> {
         Page::BlocksMorph => any(pages::blocks::morph::page()),
         Page::BlocksForms => any(pages::blocks::forms::page()),
         Page::BlocksShowcase => any(pages::blocks::showcase::page()),
+        Page::GpuEffects => any(pages::gpu_effects::page()),
     }
 }
 

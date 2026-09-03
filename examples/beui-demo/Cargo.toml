@@ -22,3 +22,13 @@ publish = false
 [dependencies]
 frust = { workspace = true }
 frust-beui = { path = "../../plugins/beui" }
+
+[features]
+# Off by default — a default build carries none of `frust_beui::gpu_fx` and
+# every true-3D component variant in the gallery renders exactly its 2D
+# path. Turns on the catalog's own `gpu-effects` feature (see
+# `plugins/beui/Cargo.toml`), which reaches `wgpu` only through the facade's
+# `frust/gpu` re-export. How to run: `cargo run -p beui-demo --features
+# gpu-effects` — see the `pages::gpu_effects` page and `README.md`'s GPU
+# Effects section for what to expect.
+gpu-effects = ["frust-beui/gpu-effects"]
