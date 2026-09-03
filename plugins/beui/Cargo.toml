@@ -1,7 +1,8 @@
 # `frust-beui`: the beUI design-system catalog plugin — the tier's second
 # external-origin design system (ported from beUI v2, not authored here;
-# upstream is MIT-licensed, © 2026 Saurabh Chauhan, and the attribution record
-# lives in the crate root's docs).
+# upstream is MIT-licensed, © 2026 Saurabh Chauhan; the vendored licence text is
+# LICENSE-beui.md beside this manifest, and the attribution record lives in the
+# crate root's docs).
 # Production deps are the frust facade plus kurbo/peniko for the geometry/color
 # vocabulary its widgets paint with, the same pins frust-widgets carries and the
 # same shape frust-glyph/frust-material/frust-cupertino/frust-shadcn carry;

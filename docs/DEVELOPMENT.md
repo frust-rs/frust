@@ -221,8 +221,8 @@ cargo build --workspace --locked \
 ```
 
 `frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do
-the three design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`,
-`plugins/{glyph,material,cupertino}`) — root workspace members like any other plugin,
+the five design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`/
+`frust-shadcn`/`frust-beui`, `plugins/{glyph,material,cupertino,shadcn,beui}`) — root workspace members like any other plugin,
 with no separate feature-off build to gate (`frust` has no catalog feature left to
 unify or drop — see *Build*'s design-system note above).
 

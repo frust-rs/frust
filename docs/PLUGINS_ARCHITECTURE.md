@@ -203,8 +203,8 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   `shadcn-anchored-exit-needs-kept-mounted` consumer — and its `modal` host's `StagedPop` is an
   advisory one-frame depth guard: it snapshots the navigator's page-stack depth when an exit ramp is
   staged and refuses to fire the pop if that depth moved before the ramp settles — the same
-  identity-guard shape `frust-material`'s staged pop already carries; the two independently
-  authored hosts converged on the same guard under the same name, `StagedPop`.
+  identity-guard shape `frust-material`'s staged pop already carries; the two hosts carry the
+  same guard under the same name, `StagedPop`.
 - **`frust-beui`'s three catalogs (`components`/`agents`/`blocks`) mirror upstream beUI's own
   registry split** — 42 `components` (incl. `shader_background`'s five WGSL variants), 17 `agents`,
   22 `blocks`, 81 slugs total; public symbols stay module-prefixed rather than flat re-exported at

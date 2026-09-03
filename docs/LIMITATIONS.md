@@ -2731,8 +2731,7 @@ transformed, which means every cross-cell typographic relationship a single shap
 is lost: kerning pairs no longer tighten, ligatures no longer form, and a cursive or complex script
 (Arabic, Devanagari) loses the joining/reordering that makes it legible. This is inherent to the
 effect, not an implementation shortcut, and the module docs restrict its own use to short display
-strings for exactly this reason — never body text. The substrate itself round-trips whitespace as
-its own cell, so a cascade can leave a gap where a space is.
+strings for exactly this reason — never body text.
 
 **Applies to**: `motion::chars::CharCells`/`CharCellsView` and every component built on it (the
 per-letter `action_swap` cascade, `text_animation`'s `Reveal`/`Cascade` arms, `citations`' cascade).
@@ -2742,7 +2741,7 @@ transformable letters, and a single shaped run has none — and upstream (`inlin
 letter) carries the identical compromise for the identical reason.
 
 **Evidence**: `plugins/beui/src/motion/chars.rs` module docs ("The shaping compromise, stated
-plainly") and its `whitespace_is_preserved_as_its_own_cell` test.
+plainly").
 
 ---
 
@@ -3071,7 +3070,8 @@ shared-mechanism argument at all.)
 `:1308`) and its test module (in-process only); `plugins/material/src/overlay/modal.rs:1146`
 (`show_overlay_modal`);
 `plugins/shadcn/src/overlay/modal.rs:655` (`push_transparent_for_result`);
-`crates/frust-widgets/src/nav/controller.rs:388-395` (`push_impl(BackPolicy::Pop)`);
+`crates/frust-widgets/src/nav/controller.rs:388-395` (`push_transparent_for_result`) and `:438`
+(`push_impl` setting `BackPolicy::Pop`);
 `examples/beui-demo/README.md`'s "Verifying it" section (headless dev rig, no device run recorded
 for the modal-hosted pages specifically).
 

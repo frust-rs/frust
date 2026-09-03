@@ -76,7 +76,7 @@ build from.
   children; a hand-rolled child list (a row/slot struct behind an enum) implements `VisitPods`
   by hand instead and stays on the same seam. Both the baseline set and the three design-system
   plugins use it; see WIDGETS_CODE_STANDARDS.md for the authoring convention this obliges.
-- Design-system layering: the three built-in design systems (PLUGINS unit) sit above the baseline
+- Design-system layering: the five design-system plugins (PLUGINS unit) sit above the baseline
   set and the authoring seam, each an ordinary sibling crate assembling its own `Theme` via
   `ThemeBuilder`'s editors over `frust-theme`'s neutral floor rather than consuming a token module
   `frust-theme` ships for it.
