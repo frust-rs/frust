@@ -1,6 +1,6 @@
-//! The Motion section: 9 pages — 8 mirroring the component-port tasks
-//! `b-04`..`b-11`, plus the [`shader`] page `b-11b` fills in once the engine's
-//! `ShaderQuad` lands (see that task's gating note).
+//! The Motion section: 9 pages — eight component groups (text, buttons,
+//! controls, selection, overlays, navigation, surfaces, data) plus the
+//! [`shader`] page, which rides the engine's `ShaderQuad` seam.
 
 pub mod buttons;
 pub mod controls;
