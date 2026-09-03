@@ -477,6 +477,11 @@ pub struct ContextMenuPanelWidget {
     pill: Lane,
     pill_from: Rect,
     pill_to: Rect,
+    /// The pill's opacity — `1.0` while a row is active, springing to `0.0`
+    /// when none is. Kept apart from `pill` so a row-to-row move restarts the
+    /// travel and never the alpha: the pill slides at its resting alpha and
+    /// only fades when it is shown from, or sent to, hidden.
+    pill_alpha: Lane,
     /// When the current entrance started, for the row stagger.
     entered_at: Option<FrameTime>,
     on_select: ErasedArgCallback<usize>,
@@ -508,23 +513,27 @@ impl ContextMenuPanelWidget {
         if let Some(index) = next.and_then(|i| self.rows.get(i)) {
             // A pill arriving from nowhere starts on its own row rather than
             // sliding in from the panel origin.
-            self.pill_from = if self.pill.target() == 0.0 && current.is_zero_area() {
+            self.pill_from = if self.pill_alpha.target() == 0.0 && current.is_zero_area() {
                 index.rect
             } else {
                 current
             };
             self.pill_to = index.rect;
-            // When endpoints change, snap the parameter to 0 and start a fresh spring
-            // run to 1.0. The pill_from captures the currently displayed rect, so
-            // mid-flight pills continue from their displayed position without jumping.
+            // New endpoints: the travel restarts at 0 — `pill_from` holds the
+            // displayed rect, so a mid-flight pill continues from where it
+            // is — and springs to 1. The alpha lane is not touched by a
+            // row-to-row move; it only climbs when the pill was hidden.
             self.pill = Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0);
             self.pill.retarget(1.0);
+            self.pill_alpha
+                .retarget_with(Ramp::spring(SPRING_LAYOUT), 1.0);
         } else {
+            // Hide: the rect stays put and only the alpha fades out.
             self.pill_from = current;
             self.pill_to = current;
-            // For hide, animate the value (opacity) from current to 0.0 while keeping
-            // the rect at current to fade out smoothly.
-            self.pill.retarget_with(Ramp::spring(SPRING_LAYOUT), 0.0);
+            self.pill = Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 1.0);
+            self.pill_alpha
+                .retarget_with(Ramp::spring(SPRING_LAYOUT), 0.0);
         }
         true
     }
@@ -608,6 +617,7 @@ impl<State: 'static> View<State> for ContextMenuPanelView<State> {
             pill: Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0),
             pill_from: Rect::ZERO,
             pill_to: Rect::ZERO,
+            pill_alpha: Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0),
             entered_at: None,
             on_select: erase_callback_arg(&self.on_select),
         }
@@ -644,8 +654,10 @@ impl<State: 'static> View<State> for ContextMenuPanelView<State> {
                 element.entered_at = None;
                 element.active = None;
                 element.armed = None;
-                element.pill.retarget_with(Ramp::spring(SPRING_LAYOUT), 0.0);
-                element.pill.snap();
+                element.pill = Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0);
+                element.pill_alpha = Lane::at_rest(Ramp::spring(SPRING_LAYOUT), 0.0);
+                element.pill_from = Rect::ZERO;
+                element.pill_to = Rect::ZERO;
             }
             flags |= ChangeFlags::PAINT;
         }
@@ -749,7 +761,9 @@ impl Widget for ContextMenuPanelWidget {
             self.entered_at = None;
             return;
         }
-        if self.pill.advance(now) {
+        let travelled = self.pill.advance(now);
+        let faded = self.pill_alpha.advance(now);
+        if travelled || faded {
             ctx.request_frame();
         }
 
@@ -829,11 +843,13 @@ impl Widget for ContextMenuPanelWidget {
                         // Only a primary press arms a row for activation — a
                         // secondary press still claims focus (it is the panel's
                         // event either way) but starts no activation.
-                        if presses(p)
-                            && let Some(index) = self.row_at(p.position)
-                        {
-                            let item = self.rows[index].item.clone();
-                            self.armed = Some((index, item));
+                        // Every primary press re-arms: a press that misses a
+                        // selectable row clears a stale arm, so a lost release
+                        // can never leave one behind to fire later.
+                        if presses(p) {
+                            self.armed = self
+                                .row_at(p.position)
+                                .map(|index| (index, self.rows[index].item.clone()));
                         }
                         ctx.request_focus();
                         EventResult::Handled
@@ -873,7 +889,9 @@ impl Widget for ContextMenuPanelWidget {
                     {
                         (self.on_select)(ctx, index);
                     } else {
-                        self.active = None;
+                        // `set_active` owns the transition — writing
+                        // `self.active` first would trip its own diff guard
+                        // and leave the pill painted on a dead row.
                         if self.set_active(None) {
                             ctx.request_redraw();
                         }
@@ -935,7 +953,7 @@ impl ContextMenuPanelWidget {
         }
 
         // The shared active pill, under the rows — `layoutId` in one rect.
-        if self.active.is_some() || self.pill.value() > 0.0 {
+        if self.active.is_some() || self.pill_alpha.value() > 0.0 {
             let tone = self
                 .active
                 .and_then(|i| self.rows.get(i))
@@ -950,7 +968,7 @@ impl ContextMenuPanelWidget {
                     origin + pill.origin().to_vec2(),
                     pill.size(),
                     style::RADIUS_LG,
-                    style::with_alpha(base, alpha * self.pill.value().clamp(0.0, 1.0) as f32),
+                    style::with_alpha(base, alpha * self.pill_alpha.value().clamp(0.0, 1.0) as f32),
                 );
             }
         }
@@ -1172,8 +1190,8 @@ mod tests {
     use crate::components::popover::tests::{
         Recorder, WINDOW, escape, ft_ms, light, pointer, reduced, secondary,
     };
-    use frust::SizedBox;
     use frust::authoring::text::TextContext;
+    use frust::{Color, SizedBox};
     use frust_core::RenderRoot;
     use std::any::Any;
 
@@ -1182,12 +1200,28 @@ mod tests {
         open: bool,
         opens: Vec<bool>,
         selected: Vec<usize>,
+        /// Rebuild with `Back` disabled — a row going dead under the pill.
+        disable_back: bool,
+        /// Rebuild with `Back` replaced by another item at the same index.
+        rename_back: bool,
     }
 
     /// The trigger region, inset inside the window so a published anchor point
     /// proves it is absolute rather than region-local.
     const INSET: f64 = 24.0;
     const REGION: Size = Size::new(520.0, 400.0);
+
+    /// The fixture rows, with the state's mutations applied.
+    fn s_items(s: &App) -> Vec<ContextMenuItem> {
+        let mut list = items();
+        if s.disable_back {
+            list[1] = context_menu_item("Back").disabled(true);
+        }
+        if s.rename_back {
+            list[1] = context_menu_item("Backwards");
+        }
+        list
+    }
 
     fn items() -> Vec<ContextMenuItem> {
         vec![
@@ -1242,7 +1276,7 @@ mod tests {
                         }),
                     )),
                     any(
-                        context_menu(items(), |s: &mut App, index| s.selected.push(index))
+                        context_menu(s_items(s), |s: &mut App, index| s.selected.push(index))
                             .anchor(&anchor)
                             .open(s.open)
                             .on_open_change(|s: &mut App, open| {
@@ -1510,6 +1544,120 @@ mod tests {
         assert!(
             h.state.selected.is_empty(),
             "a release off the armed row must not re-hit a different one"
+        );
+    }
+
+    /// The `rounded-lg` pill in a paint, if any: its window-space origin and
+    /// its color.
+    fn pill_of(rec: &Recorder) -> Option<(Point, Color)> {
+        let mut pills = rec
+            .rrects
+            .iter()
+            .filter(|(_, _, r, _)| *r == style::RADIUS_LG);
+        let pill = pills.next().map(|(o, _, _, c)| (*o, *c));
+        assert!(pills.next().is_none(), "at most one pill per paint");
+        pill
+    }
+
+    /// Focus the panel through a primary press on the (unselectable) section
+    /// label, so the arrow keys reach the rows without arming anything.
+    fn focus_panel(h: &mut Harness) {
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        h.event(pointer(
+            PointerPhase::Down,
+            INSET + 40.0,
+            panel_top + CONTEXT_MENU_LABEL_HEIGHT / 2.0,
+        ));
+    }
+
+    #[test]
+    fn a_row_to_row_move_slides_the_pill_without_fading_it() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        focus_panel(&mut h);
+        h.event(arrow_down());
+        h.frame(2_016.0);
+        h.frame(3_000.0);
+        let (start, settled_color) =
+            pill_of(&h.paint_at(3_000.0)).expect("the pill sits on `Back`");
+        assert_eq!(settled_color.components[3], CONTEXT_MENU_PILL_ALPHA);
+
+        // `Back` -> `Reload`, sampled across the whole spring.
+        h.event(arrow_down());
+        let mut last_y = start.y;
+        for ms in [3_016.0, 3_060.0, 3_120.0, 3_200.0, 3_400.0, 5_000.0] {
+            let (origin, color) =
+                pill_of(&h.paint_at(ms)).expect("the pill never disappears mid-move");
+            assert_eq!(
+                color.components[3], CONTEXT_MENU_PILL_ALPHA,
+                "at {ms}ms the pill slides at its resting alpha — a move is not a fade"
+            );
+            assert!(
+                origin.y >= last_y,
+                "at {ms}ms the pill only travels towards `Reload`"
+            );
+            last_y = origin.y;
+        }
+        assert!(
+            last_y >= start.y + CONTEXT_MENU_ITEM_HEIGHT,
+            "the pill arrived on a lower row"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_row_that_became_unselectable_selects_nothing_and_hides_the_pill() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        focus_panel(&mut h);
+        h.event(arrow_down());
+        h.frame(2_016.0);
+        h.frame(3_000.0);
+        assert!(
+            pill_of(&h.paint_at(3_000.0)).is_some(),
+            "the pill sits on `Back`"
+        );
+
+        h.state.disable_back = true;
+        h.frame(3_016.0);
+        h.event(enter());
+        assert!(
+            h.state.selected.is_empty(),
+            "a row that went dead never fires"
+        );
+        h.frame(3_032.0);
+        h.frame(8_000.0);
+        assert!(
+            pill_of(&h.paint_at(8_000.0)).is_none(),
+            "the pill faded out once its row was refused"
+        );
+    }
+
+    #[test]
+    fn a_primary_press_that_misses_a_row_clears_a_stale_arm() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        let back_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT / 2.0;
+        h.event(pointer(PointerPhase::Down, INSET + 40.0, back_y));
+        // Its release was lost; the next primary press lands on the label.
+        focus_panel(&mut h);
+        h.event(pointer(PointerPhase::Up, INSET + 40.0, back_y));
+        assert!(h.state.selected.is_empty(), "the miss disarmed `Back`");
+    }
+
+    #[test]
+    fn a_same_index_item_swap_between_down_and_up_selects_nothing() {
+        let mut h = Harness::new();
+        h.open_at(INSET + 10.0, INSET + 10.0);
+        let panel_top = INSET + 10.0 + CONTEXT_MENU_PADDING;
+        let back_y = panel_top + CONTEXT_MENU_LABEL_HEIGHT + CONTEXT_MENU_ITEM_HEIGHT / 2.0;
+        h.event(pointer(PointerPhase::Down, INSET + 40.0, back_y));
+        h.state.rename_back = true;
+        h.frame(2_016.0);
+        h.event(pointer(PointerPhase::Up, INSET + 40.0, back_y));
+        assert!(
+            h.state.selected.is_empty(),
+            "the row under the release is not the row that was armed"
         );
     }
 

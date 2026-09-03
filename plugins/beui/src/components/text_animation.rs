@@ -96,6 +96,31 @@ fn grapheme_count(content: &str) -> usize {
     CharCells::split(content).len()
 }
 
+/// Whether `cells` graphemes of `variant` exceed the budget — the one
+/// predicate the plain-run fallback and its debug notice are both keyed on.
+fn over_budget(variant: TextAnimationVariant, cells: usize) -> bool {
+    variant.is_per_letter() && cells > TEXT_ANIMATION_CELL_BUDGET
+}
+
+/// Debug-only notice that a per-letter variant fell back to a plain run.
+/// Raised by the retained [`TextAnimationWidget`] — once when it is built
+/// over an over-budget `(content, variant)` and again only when a rebuild
+/// changes those inputs — so a redundant rebuild never repeats it. Compiled
+/// out of release builds entirely.
+#[cfg(debug_assertions)]
+fn note_over_budget(variant: TextAnimationVariant, cells: usize) {
+    if over_budget(variant, cells) {
+        eprintln!(
+            "frust-beui: text_animation {variant:?} content is {cells} graphemes, past the \
+             {TEXT_ANIMATION_CELL_BUDGET}-grapheme cell budget — falling back to a plain run \
+             instead of one cell per character",
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn note_over_budget(_variant: TextAnimationVariant, _cells: usize) {}
+
 /// Per-letter delay of the reveal — `stagger = 0.09` (`text-reveal.tsx`).
 const REVEAL_STAGGER: Duration = Duration::from_millis(90);
 
@@ -210,9 +235,6 @@ pub struct TextAnimationView<State: 'static> {
     /// an input it depends on changes. Always present (empty for the whole-run
     /// variants) so a variant swap never has to create or drop a pod.
     cells: AnyView<State>,
-    /// Last (content, variant) pair for which we logged an over-budget notice,
-    /// to avoid logging repeatedly on every rebuild.
-    last_logged_over_budget: Option<(String, TextAnimationVariant)>,
 }
 
 /// Create a text effect over `content`, playing
@@ -227,7 +249,6 @@ pub fn text_animation<State: 'static>(content: impl Into<String>) -> TextAnimati
         repeat: true,
         glyphs: SCRAMBLE_GLYPHS.to_string(),
         cells: any(char_cascade::<State>("")),
-        last_logged_over_budget: None,
     };
     view.restage();
     view
@@ -294,21 +315,8 @@ impl<State: 'static> TextAnimationView<State> {
     /// stages no cells at all — [`TextAnimationWidget`] falls back to
     /// painting a plain run instead (see the [module docs](self)).
     fn restage(&mut self) {
-        let count = grapheme_count(&self.content);
-        let in_budget = self.variant.is_per_letter() && count <= TEXT_ANIMATION_CELL_BUDGET;
-        if self.variant.is_per_letter() && !in_budget {
-            let current = (self.content.clone(), self.variant);
-            if self.last_logged_over_budget.as_ref() != Some(&current) {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "frust-beui: text_animation {:?} content is {} graphemes, past the \
-                     {TEXT_ANIMATION_CELL_BUDGET}-grapheme cell budget — falling back to a \
-                     plain run instead of one cell per character",
-                    self.variant, count,
-                );
-                self.last_logged_over_budget = Some(current);
-            }
-        }
+        let in_budget = self.variant.is_per_letter()
+            && !over_budget(self.variant, grapheme_count(&self.content));
         let content: &str = if in_budget { &self.content } else { "" };
         let mut cells: CharCellsView<State> = char_cascade(content);
         cells = cells.size(self.size);
@@ -376,7 +384,7 @@ impl TextAnimationWidget {
     /// falls back to painting a plain, non-animating run instead of one
     /// animatable leaf per character (see the [module docs](self)).
     pub fn renders_per_letter(&self) -> bool {
-        self.variant.is_per_letter() && self.split.len() <= TEXT_ANIMATION_CELL_BUDGET
+        self.variant.is_per_letter() && !over_budget(self.variant, self.split.len())
     }
 
     /// The string currently on screen: the scramble's live sample, or the
@@ -445,6 +453,8 @@ impl<State: 'static> View<State> for TextAnimationView<State> {
     type Element = TextAnimationWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> TextAnimationWidget {
+        let split = CharCells::split(&self.content);
+        note_over_budget(self.variant, split.len());
         TextAnimationWidget {
             content: self.content.clone(),
             cells: build_child(&self.cells, ctx),
@@ -454,7 +464,7 @@ impl<State: 'static> View<State> for TextAnimationView<State> {
             duration: self.duration,
             repeat: self.repeat,
             glyphs: self.glyphs.chars().collect(),
-            split: CharCells::split(&self.content),
+            split,
             run: None,
             shaped: None,
             display: self.content.clone(),
@@ -470,6 +480,9 @@ impl<State: 'static> View<State> for TextAnimationView<State> {
     ) -> ChangeFlags {
         let mut flags = rebuild_child(&prev.cells, &self.cells, &mut element.cells, ctx);
 
+        // The budget notice is keyed on the retained inputs, so only a
+        // rebuild that changes them can raise it again.
+        let inputs_changed = element.content != self.content || element.variant != self.variant;
         if element.content != self.content {
             element.content = self.content.clone();
             element.split = CharCells::split(&self.content);
@@ -480,6 +493,9 @@ impl<State: 'static> View<State> for TextAnimationView<State> {
             element.variant = self.variant;
             element.restart();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if inputs_changed {
+            note_over_budget(element.variant, element.split.len());
         }
         if element.size != self.size {
             element.size = self.size;
@@ -942,6 +958,42 @@ mod tests {
         let short =
             laid_out(&text_animation::<()>("Ship it").variant(TextAnimationVariant::Cascade));
         assert!(short.renders_per_letter());
+    }
+
+    /// The budget predicate the fallback and its debug notice share: only a
+    /// per-letter variant can be over budget, and the ceiling is exclusive.
+    #[test]
+    fn only_a_per_letter_variant_past_the_budget_is_over_budget() {
+        assert!(over_budget(
+            TextAnimationVariant::Reveal,
+            TEXT_ANIMATION_CELL_BUDGET + 1
+        ));
+        assert!(over_budget(
+            TextAnimationVariant::Cascade,
+            TEXT_ANIMATION_CELL_BUDGET + 1
+        ));
+        assert!(!over_budget(
+            TextAnimationVariant::Reveal,
+            TEXT_ANIMATION_CELL_BUDGET
+        ));
+        assert!(!over_budget(TextAnimationVariant::Scramble, usize::MAX));
+        assert!(!over_budget(TextAnimationVariant::Shimmer, usize::MAX));
+    }
+
+    /// A rebuild with unchanged inputs changes nothing on the retained widget
+    /// — the over-budget notice is keyed on those inputs, so it cannot fire
+    /// again either.
+    #[test]
+    fn a_redundant_rebuild_of_an_over_budget_widget_changes_nothing() {
+        let long = "x".repeat(TEXT_ANIMATION_CELL_BUDGET + 1);
+        let view = text_animation::<()>(long.clone()).variant(TextAnimationVariant::Reveal);
+        let mut widget = laid_out(&view);
+        let mut next_id = 0u64;
+        let flags =
+            View::<()>::rebuild(&view, &view, &mut widget, &mut BuildCtx::new(&mut next_id));
+        assert_eq!(flags, ChangeFlags::NONE);
+        assert_eq!(widget.content(), long);
+        assert!(!widget.renders_per_letter());
     }
 
     /// A per-letter variant splits the string into one cell per grapheme —
