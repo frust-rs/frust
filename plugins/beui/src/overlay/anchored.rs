@@ -911,20 +911,29 @@ impl Widget for AnchoredOverlayWidget {
             }
             if self.presence.is_visible()
                 && let InputEvent::Pointer(p) = event
-                && p.phase == PointerPhase::Down
             {
-                // A press inside `rect` belongs to the panel regardless of
-                // what the content answers (the barrier's widening), but a
-                // press outside `rect` that the content itself consumed is
-                // still `Handled` — its own answer isn't discarded just
-                // because it fell outside the panel's own bounds.
-                let content_handled =
-                    route_event_single(&mut self.content, ctx, event) == EventResult::Handled;
-                return if self.rect.contains(p.position) || content_handled {
-                    EventResult::Handled
-                } else {
-                    EventResult::Ignored
-                };
+                match p.phase {
+                    PointerPhase::Down => {
+                        // A press inside `rect` belongs to the panel regardless of
+                        // what the content answers (the barrier's widening), but a
+                        // press outside `rect` that the content itself consumed is
+                        // still `Handled` — its own answer isn't discarded just
+                        // because it fell outside the panel's own bounds.
+                        let content_handled = route_event_single(&mut self.content, ctx, event)
+                            == EventResult::Handled;
+                        return if self.rect.contains(p.position) || content_handled {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        };
+                    }
+                    PointerPhase::Up | PointerPhase::Cancel => {
+                        // Forward Up/Cancel to allow captures from Down to be released.
+                        route_event_single(&mut self.content, ctx, event);
+                        return EventResult::Ignored;
+                    }
+                    _ => {}
+                }
             }
             return EventResult::Ignored;
         }

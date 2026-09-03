@@ -434,14 +434,17 @@ impl Widget for MarqueeWidget {
         scene.push_clip(origin, size);
         let vertical = self.direction.is_vertical();
         let extent = if vertical { size.height } else { size.width };
-        let copies = if self.track > 0.0 {
-            ((extent / self.track).ceil() as usize + 1).min(MAX_TRACK_COPIES)
+        let (copies, paint_track) = if self.track > 0.0 {
+            let min_effective_track = extent / (MAX_TRACK_COPIES - 1) as f64;
+            let effective_track = min_effective_track.max(self.track);
+            let copies = ((extent / effective_track).ceil() as usize + 1).min(MAX_TRACK_COPIES);
+            (copies, effective_track)
         } else {
-            1
+            (1, 0.0)
         };
         let first = self.first_copy();
         for copy in 0..copies {
-            let shift = first + copy as f64 * self.track;
+            let shift = first + copy as f64 * paint_track;
             let translation = if vertical {
                 Vec2::new(0.0, shift)
             } else {

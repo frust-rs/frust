@@ -736,7 +736,6 @@ impl ModalWidget {
             return;
         }
         let was_exiting = self.panel.phase() == PresencePhase::Exiting;
-        let was_present = self.panel.phase() == PresencePhase::Present;
         let closing = was_exiting || (self.staged && !self.closed);
         self.reduced = Some(reduce);
         let panel = Presence::new(self.config.enter, self.config.exit);
@@ -754,14 +753,17 @@ impl ModalWidget {
         }
         panel.set_open(open);
         scrim.set_open(open);
-        if was_present && open {
-            // Two `advance` calls per driver — one to latch the fresh driver's
-            // own clock, one at (or past) its settle time — land each on
-            // `Present` with no frame of visible motion.
-            for driver in [&mut panel, &mut scrim] {
+        for (driver, was_driver_present) in [
+            (&mut panel, self.panel.phase() == PresencePhase::Present),
+            (&mut scrim, self.scrim.phase() == PresencePhase::Present),
+        ] {
+            if was_driver_present && open {
+                // Two `advance` calls per driver — one to latch the fresh driver's
+                // own clock, one at (or past) its settle time — land each on
+                // `Present` with no frame of visible motion.
                 let settle = driver.active_ramp().settle();
-                let settled_at =
-                    FrameTime::from_nanos(now.as_nanos().saturating_add(settle.as_nanos() as u64));
+                let settle_nanos = u64::try_from(settle.as_nanos()).unwrap_or(u64::MAX);
+                let settled_at = FrameTime::from_nanos(now.as_nanos().saturating_add(settle_nanos));
                 driver.advance(now);
                 driver.advance(settled_at);
             }

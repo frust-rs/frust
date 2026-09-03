@@ -210,6 +210,9 @@ pub struct TextAnimationView<State: 'static> {
     /// an input it depends on changes. Always present (empty for the whole-run
     /// variants) so a variant swap never has to create or drop a pod.
     cells: AnyView<State>,
+    /// Last (content, variant) pair for which we logged an over-budget notice,
+    /// to avoid logging repeatedly on every rebuild.
+    last_logged_over_budget: Option<(String, TextAnimationVariant)>,
 }
 
 /// Create a text effect over `content`, playing
@@ -224,6 +227,7 @@ pub fn text_animation<State: 'static>(content: impl Into<String>) -> TextAnimati
         repeat: true,
         glyphs: SCRAMBLE_GLYPHS.to_string(),
         cells: any(char_cascade::<State>("")),
+        last_logged_over_budget: None,
     };
     view.restage();
     view
@@ -290,17 +294,20 @@ impl<State: 'static> TextAnimationView<State> {
     /// stages no cells at all — [`TextAnimationWidget`] falls back to
     /// painting a plain run instead (see the [module docs](self)).
     fn restage(&mut self) {
-        let in_budget = self.variant.is_per_letter()
-            && grapheme_count(&self.content) <= TEXT_ANIMATION_CELL_BUDGET;
-        #[cfg(debug_assertions)]
+        let count = grapheme_count(&self.content);
+        let in_budget = self.variant.is_per_letter() && count <= TEXT_ANIMATION_CELL_BUDGET;
         if self.variant.is_per_letter() && !in_budget {
-            eprintln!(
-                "frust-beui: text_animation {:?} content is {} graphemes, past the \
-                 {TEXT_ANIMATION_CELL_BUDGET}-grapheme cell budget — falling back to a \
-                 plain run instead of one cell per character",
-                self.variant,
-                grapheme_count(&self.content),
-            );
+            let current = (self.content.clone(), self.variant);
+            if self.last_logged_over_budget.as_ref() != Some(&current) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "frust-beui: text_animation {:?} content is {} graphemes, past the \
+                     {TEXT_ANIMATION_CELL_BUDGET}-grapheme cell budget — falling back to a \
+                     plain run instead of one cell per character",
+                    self.variant, count,
+                );
+                self.last_logged_over_budget = Some(current);
+            }
         }
         let content: &str = if in_budget { &self.content } else { "" };
         let mut cells: CharCellsView<State> = char_cascade(content);
