@@ -1154,6 +1154,20 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine"),
                         });
+                // Whatever the process registered ahead of the scene:
+                // caller-supplied passes recorded into this SAME encoder and
+                // binding their own targets into the engine's external-texture
+                // registry, plus the unbind of any id whose pass was
+                // unregistered since the last frame (see
+                // `crate::external_pass`). Ahead of the shader quads for the
+                // same two orderings they need, and a no-op — one lock, no
+                // encoder work — on the process that registered none.
+                crate::external_pass::run_external_passes(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine,
+                );
                 // The frame's shader quads, rendered into this SAME encoder
                 // ahead of the scene's own passes and registered with the
                 // engine before it compiles: a quad's target must already be
@@ -1269,6 +1283,20 @@ impl SurfaceRenderer {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frust-render engine unpremultiply"),
                         });
+                // Whatever the process registered ahead of the scene:
+                // caller-supplied passes recorded into this SAME encoder and
+                // binding their own targets into the engine's external-texture
+                // registry, plus the unbind of any id whose pass was
+                // unregistered since the last frame (see
+                // `crate::external_pass`). Ahead of the shader quads for the
+                // same two orderings they need, and a no-op — one lock, no
+                // encoder work — on the process that registered none.
+                crate::external_pass::run_external_passes(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    &mut encoder,
+                    engine,
+                );
                 // The same pre-pass the direct arm records, for the same two
                 // orderings — the conversion pass appended after the frame
                 // changes neither of them.
