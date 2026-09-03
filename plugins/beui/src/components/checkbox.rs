@@ -56,8 +56,12 @@ use frust::authoring::{
 };
 use frust::{FrameTime, Theme};
 
-use super::switch::{self, Lane, draw_focus_ring, inside, is_activation_key, lerp_color, presses};
+use super::switch;
 use crate::motion::Ramp;
+use crate::press::{
+    Lane, draw_focus_ring, inside_inclusive as inside, is_activation_key, lerp_color, press_scale,
+    presses,
+};
 use crate::style;
 use crate::tokens::BeuiTokens;
 use crate::tokens::motion::{EASE_OUT, SPRING_PRESS};
@@ -488,8 +492,7 @@ impl Widget for CheckboxWidget {
         let blend = self.blend.value().clamp(0.0, 1.0);
 
         // `whileTap` scales the whole control about its own centre.
-        let press = self.press.value().clamp(0.0, 1.0);
-        let scale = 1.0 - (1.0 - CHECKBOX_PRESS_SCALE) * press;
+        let scale = press_scale(CHECKBOX_PRESS_SCALE, self.press.value());
         let pivot = origin + (box_size.to_vec2() / 2.0);
         scene.push_transform(
             Affine::translate(pivot.to_vec2())

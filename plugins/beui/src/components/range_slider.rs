@@ -82,10 +82,10 @@ use frust::authoring::{
 };
 use frust::{FrameTime, SpringDescription, Theme};
 
-use super::input::ShapedText;
-use super::switch::{Lane, inside, presses};
 use crate::motion::Ramp;
+use crate::press::{Lane, inside_inclusive as inside, presses};
 use crate::style;
+use crate::text::Label as ShapedText;
 use crate::tokens::motion::{SPRING_GLIDE, SPRING_PANEL, SPRING_PRESS};
 use crate::tokens::sans_family;
 

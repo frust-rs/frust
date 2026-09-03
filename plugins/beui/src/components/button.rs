@@ -57,227 +57,25 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     Action, Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton,
-    PointerEvent, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget,
-    erase_callback, scene::arc_path,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
+    SemanticsCtx, Size, Vec2, View, Widget, erase_callback, scene::arc_path,
 };
 use frust::{FrameTime, Theme};
 use peniko::{ColorStop, Gradient, color::DynamicColor};
 
 use crate::motion::{PointerTracker, Ramp};
+use crate::press::{SpringScalar, inside, presses, stroke_outline};
 use crate::style::{
-    ACTIVE_CURSOR, BORDER_WIDTH, DISABLED_OPACITY, GAP_MD, GAP_SM, HEIGHT_LG, HEIGHT_MD, HEIGHT_SM,
-    HOVER_SCALE, HOVER_SOLID_ALPHA, HOVER_WASH_ALPHA, ICON_SIZE, PADDING_X_LG, PADDING_X_MD,
-    PADDING_X_SM, PATH_TOLERANCE, PRESS_SCALE, RADIUS_CONTROL, RADIUS_ICON_BUTTON,
-    SIZE_ICON_BUTTON, TEXT_BASE, TEXT_SM, TEXT_XS, disabled_tint, resolve_radius, scale_alpha,
-    with_alpha,
+    ACTIVE_CURSOR, DISABLED_OPACITY, GAP_MD, GAP_SM, HEIGHT_LG, HEIGHT_MD, HEIGHT_SM, HOVER_SCALE,
+    HOVER_SOLID_ALPHA, HOVER_WASH_ALPHA, ICON_SIZE, PADDING_X_LG, PADDING_X_MD, PADDING_X_SM,
+    PRESS_SCALE, RADIUS_CONTROL, RADIUS_ICON_BUTTON, SIZE_ICON_BUTTON, TEXT_BASE, TEXT_SM, TEXT_XS,
+    disabled_tint, resolve_radius, scale_alpha, with_alpha,
 };
+use crate::text::{LabelRun, label_style};
 use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_MOUSE, SPRING_PRESS, SPRING_SWAP};
-
-// ---- Catalog-shared leaf helpers -------------------------------------------
-//
-// The catalog has no `hit`/`text` module of its own, so the three pieces every
-// interactive component in it needs — the pointer admission tests, a shaped text
-// run, and a spring-driven scalar — are homed here and shared crate-internally.
-// They are component-agnostic and belong beside `motion` once the catalog grows
-// a home for them.
-
-/// Whether widget-local `pos` lies inside a `size`-shaped box.
-///
-/// Half-open on both axes, matching `kurbo::Rect::contains`, so two adjacent
-/// boxes sharing a seam never both claim the same pointer.
-pub(crate) fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
-/// Whether `p` carries a button that may begin a press.
-///
-/// A press machine — pressed chrome, a pointer capture, an up-inside callback —
-/// starts on the primary button alone (the left mouse button, or any touch/pen
-/// contact, which every shell reports as `Primary`). A secondary press is a
-/// context gesture and no component in this catalog activates on one. Move arms
-/// never consult this: hover chrome and cursors are position-driven.
-pub(crate) fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
-/// The ink [`Label`] shapes with. Never painted — keeping it constant keeps the
-/// shape cache from missing when only the color changes.
-pub(crate) const SHAPING_INK: Color = Color::BLACK;
-
-/// A cached, lazily-shaped text run whose ink is applied at **paint** time.
-///
-/// The catalog's components recolor their text on hover, on a press, and across
-/// a state morph — all repaint-only changes — so a run that baked its color into
-/// the shaped layout would need a relayout for each of them. This shapes once
-/// with [`SHAPING_INK`] and re-brushes every glyph run as it paints.
-pub(crate) struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    /// A run holding `content`, unshaped until the first [`layout`](Self::layout).
-    pub(crate) fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    /// Replace the text, dropping the cached layout only if it actually changed.
-    pub(crate) fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    /// The text this run holds.
-    pub(crate) fn content(&self) -> &str {
-        &self.content
-    }
-
-    /// The measured size of the last shaped run (`ZERO` before the first
-    /// layout).
-    pub(crate) fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, TextLayout::size)
-    }
-
-    /// Shape (or reuse) the run in `style` and return its measured size.
-    pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    /// Paint the run at `origin` in `color`. A run that has never been laid out
-    /// paints nothing.
-    pub(crate) fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
-
-/// The catalog's text style at `size`, in beUI's own family and the medium
-/// weight every control label upstream carries (`font-medium`).
-pub(crate) fn label_style(size: f64) -> TextStyle {
-    TextStyle {
-        family: crate::tokens::sans_family(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
-}
-
-/// One scalar following a target along a [`Ramp`] — the driver behind every
-/// press scale, magnetic pull, expand width and thumb return in this catalog.
-///
-/// Retargeting mid-flight restarts the ramp from the **current value** toward
-/// the new target: value-continuous, never velocity-continuous, the same
-/// simplification [`Presence`](crate::motion::Presence) documents (nothing
-/// exposes an in-flight ramp's instantaneous velocity to seed the next one
-/// with). For a cursor-follow retargeted on every pointer sample this reads as
-/// smooth lag rather than a series of restarts, because each restart begins
-/// exactly where the last left off.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SpringScalar {
-    value: f64,
-    from: f64,
-    target: f64,
-    ramp: Ramp,
-    started: Option<FrameTime>,
-    animating: bool,
-}
-
-impl SpringScalar {
-    /// A scalar resting at `value`, following `ramp` when retargeted.
-    pub(crate) const fn new(value: f64, ramp: Ramp) -> Self {
-        Self {
-            value,
-            from: value,
-            target: value,
-            ramp,
-            started: None,
-            animating: false,
-        }
-    }
-
-    /// The value as of the last [`advance`](Self::advance).
-    pub(crate) const fn value(&self) -> f64 {
-        self.value
-    }
-
-    /// The value it is heading for.
-    pub(crate) const fn target(&self) -> f64 {
-        self.target
-    }
-
-    /// Whether a ramp is in flight, so the stepping widget owes another frame.
-    pub(crate) const fn is_animating(&self) -> bool {
-        self.animating
-    }
-
-    /// Aim at `target`, restarting the ramp from the current value. Returns
-    /// whether anything changed.
-    pub(crate) fn set_target(&mut self, target: f64) -> bool {
-        if self.target == target {
-            return false;
-        }
-        self.from = self.value;
-        self.target = target;
-        self.started = None;
-        self.animating = true;
-        true
-    }
-
-    /// Snap to `target` with no motion — the `reduce_motion` collapse, and what
-    /// a widget calls when it wants a value placed rather than animated.
-    pub(crate) fn jump_to(&mut self, target: f64) {
-        self.value = target;
-        self.from = target;
-        self.target = target;
-        self.started = None;
-        self.animating = false;
-    }
-
-    /// Step to `now` and return the current value. The first call after a
-    /// retarget latches its start time, so a ramp is timed from the frame it
-    /// first painted rather than from the rebuild that staged it.
-    pub(crate) fn advance(&mut self, now: FrameTime) -> f64 {
-        if !self.animating {
-            return self.value;
-        }
-        let started = *self.started.get_or_insert(now);
-        let elapsed = now.saturating_sub(started);
-        if self.ramp.is_settled(elapsed) {
-            let target = self.target;
-            self.jump_to(target);
-            return self.value;
-        }
-        let progress = self.ramp.progress(elapsed);
-        self.value = self.from + (self.target - self.from) * progress;
-        self.value
-    }
-}
 
 // ---- Public axes -----------------------------------------------------------
 
@@ -686,7 +484,7 @@ impl<State: 'static> ButtonView<State> {
 pub struct ButtonWidget {
     /// The four state labels, in [`ButtonState`] order. A non-stateful button
     /// shapes only the first.
-    labels: [Label; 4],
+    labels: [LabelRun; 4],
     variant: ButtonVariant,
     tone: ButtonTone,
     size: ButtonSize,
@@ -732,7 +530,7 @@ impl ButtonWidget {
     }
 
     /// The label run for `state`.
-    fn label(&self, state: ButtonState) -> &Label {
+    fn label(&self, state: ButtonState) -> &LabelRun {
         &self.labels[state as usize]
     }
 }
@@ -743,10 +541,10 @@ impl<State: 'static> View<State> for ButtonView<State> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ButtonWidget {
         ButtonWidget {
             labels: [
-                Label::new(self.label.clone()),
-                Label::new(self.loading_label.clone()),
-                Label::new(self.success_label.clone()),
-                Label::new(self.error_label.clone()),
+                LabelRun::new(self.label.clone()),
+                LabelRun::new(self.loading_label.clone()),
+                LabelRun::new(self.success_label.clone()),
+                LabelRun::new(self.error_label.clone()),
             ],
             variant: self.variant,
             tone: self.tone,
@@ -1251,31 +1049,6 @@ impl ButtonWidget {
     }
 }
 
-/// Stroke a control's 1px outline, inset by half the stroke so it lands inside
-/// the box rather than straddling it.
-pub(crate) fn stroke_outline(
-    scene: &mut dyn PaintScene,
-    origin: Point,
-    size: Size,
-    radius: f64,
-    color: Color,
-) {
-    let half = BORDER_WIDTH / 2.0;
-    let rect = RoundedRect::new(
-        half,
-        half,
-        (size.width - half).max(half),
-        (size.height - half).max(half),
-        (radius - half).max(0.0),
-    );
-    scene.stroke_path(
-        origin,
-        &rect.to_path(PATH_TOLERANCE),
-        BORDER_WIDTH,
-        &Brush::Solid(color),
-    );
-}
-
 /// Paint the stateful button's leading icon: a spinner while loading, a check on
 /// success, a cross on error — all stroked in `ink`, scaled in by `enter`.
 fn paint_state_icon(
@@ -1325,6 +1098,8 @@ fn paint_state_icon(
 mod tests {
     use super::*;
     use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{PointerButton, PointerEvent};
     use std::any::Any;
 
     #[derive(Default)]
@@ -1672,39 +1447,10 @@ mod tests {
     }
 
     // ---- The spring scalar --------------------------------------------------
-
-    #[test]
-    fn a_spring_scalar_runs_from_its_current_value_to_its_target_and_settles() {
-        let mut scalar = SpringScalar::new(0.0, Ramp::spring(SPRING_PRESS));
-        assert!(!scalar.is_animating());
-        assert!(scalar.set_target(10.0));
-        assert!(
-            !scalar.set_target(10.0),
-            "re-aiming at the same target is a no-op"
-        );
-        assert!(scalar.is_animating());
-
-        let at = |ms: u64| FrameTime::from_nanos(ms * 1_000_000);
-        assert_eq!(scalar.advance(at(0)), 0.0);
-        let mid = scalar.advance(at(40));
-        assert!(mid > 0.0 && mid < 10.0, "mid-flight: {mid}");
-        let settled = scalar.advance(at(5_000));
-        assert_eq!(settled, 10.0);
-        assert!(!scalar.is_animating());
-
-        // Retargeting mid-flight restarts from where it had reached.
-        scalar.set_target(0.0);
-        scalar.advance(at(5_000));
-        let part = scalar.advance(at(5_040));
-        assert!(part < 10.0 && part > 0.0);
-        scalar.set_target(20.0);
-        assert_eq!(
-            scalar.value(),
-            part,
-            "the new ramp starts at the current value"
-        );
-        assert_eq!(scalar.target(), 20.0);
-    }
+    //
+    // `SpringScalar`'s own contract (retarget/jump/advance) is exercised in
+    // `crate::press`'s test module; the test below is button-behavioral, not
+    // a leaf test.
 
     /// The press scale springs down on a press and back on release, and a
     /// reduced-motion theme flattens it to a constant 1.
@@ -2037,46 +1783,7 @@ mod tests {
         assert!(!w.inert());
     }
 
-    // ---- Shared leaf helpers -------------------------------------------------
-
-    #[test]
-    fn the_hit_test_is_half_open_and_only_the_primary_button_presses() {
-        let size = Size::new(40.0, 20.0);
-        assert!(inside(Point::new(0.0, 0.0), size));
-        assert!(inside(Point::new(39.9, 19.9), size));
-        assert!(!inside(Point::new(40.0, 10.0), size));
-        assert!(!inside(Point::new(-0.1, 10.0), size));
-
-        let at = |button| PointerEvent {
-            phase: PointerPhase::Down,
-            position: Point::ORIGIN,
-            button,
-        };
-        assert!(presses(&at(PointerButton::Primary)));
-        assert!(!presses(&at(PointerButton::Secondary)));
-        assert!(!presses(&at(PointerButton::Middle)));
-    }
-
-    #[test]
-    fn a_label_shapes_once_and_repaints_in_any_ink() {
-        let mut text_ctx = TextContext::new();
-        let mut ctx = LayoutCtx::with_resources(Some(&mut text_ctx as &mut dyn Any), None);
-        let mut label = Label::new("Ship");
-        let style = label_style(TEXT_SM);
-        let measured = label.layout(&mut ctx, &style);
-        assert!(measured.width > 0.0);
-        assert_eq!(label.size(), measured);
-
-        let ink = Color::from_rgb8(1, 2, 3);
-        let mut rec = Recorder::default();
-        label.paint(Point::ORIGIN, ink, &mut rec);
-        assert!(rec.inks.iter().all(|c| *c == ink));
-
-        label.set_content("Ship");
-        assert_eq!(
-            label.size(),
-            measured,
-            "an identical string re-uses the run"
-        );
-    }
+    // `inside`/`presses` (the hit-test and pointer-admission leaf helpers) and
+    // `LabelRun`/`label_style` (the shaped-run cache) each carry their own
+    // leaf tests in `crate::press` / `crate::text` now.
 }

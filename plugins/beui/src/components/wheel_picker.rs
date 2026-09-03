@@ -78,9 +78,9 @@ use frust::authoring::{
 };
 use frust::{FrameTime, Theme};
 
-use super::input::ShapedText;
-use super::switch::{inside, presses};
+use crate::press::{inside_inclusive as inside, presses};
 use crate::style;
+use crate::text::Label as ShapedText;
 use crate::tokens::sans_family;
 
 /// Width used when the incoming constraints are horizontally unbounded — the

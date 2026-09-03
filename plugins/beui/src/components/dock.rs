@@ -104,17 +104,19 @@ use std::rc::Rc;
 
 use frust::authoring::{
     Action, Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton,
-    PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any, build_child,
-    erase_callback_arg, rebuild_children, route_event, teardown_child,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
+    Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback_arg, rebuild_children,
+    route_event, teardown_child,
+    text::{FontWeight, TextStyle},
     visit_children,
 };
 use frust::{ChildKey, FrameTime, Theme};
 
 use crate::motion::pointer::PointerTracker;
 use crate::motion::{Presence, Ramp};
+use crate::press::presses;
 use crate::style;
+use crate::text::LabelRun;
 use crate::tokens::motion::{SPRING_LAYOUT, SPRING_MOUSE};
 
 /// One dock icon's box, in logical px — upstream's `size` prop default (`44`).
@@ -172,51 +174,6 @@ pub fn dock_falloff(distance: f64, reach: f64) -> f64 {
         return 0.0;
     }
     0.5 * (1.0 + (std::f64::consts::PI * d / reach).cos())
-}
-
-/// A cached text run whose colour is applied at paint time.
-struct Run {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl Run {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let laid = ctx
-            .text_context::<TextContext>()
-            .layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
 }
 
 /// One dock entry: an icon view, an optional accessible/hover label, and whether
@@ -366,11 +323,6 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// Whether `p` carries a button that may begin a press.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
 /// Linear interpolation between two rects, `t` unclamped.
 fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
     let lerp = |a: f64, b: f64| a + (b - a) * t;
@@ -384,7 +336,7 @@ fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
 
 /// One retained entry: its metadata plus the geometry layout resolved.
 struct Entry {
-    label: Option<Run>,
+    label: Option<LabelRun>,
     name: Option<String>,
     active: bool,
     disabled: bool,
@@ -398,7 +350,7 @@ struct Entry {
 impl Entry {
     fn from_item<State: 'static>(item: &DockItem<State>) -> Self {
         Self {
-            label: item.label.clone().map(Run::new),
+            label: item.label.clone().map(LabelRun::new),
             name: item.label.clone(),
             active: item.active,
             disabled: item.disabled,
@@ -453,7 +405,7 @@ impl<State: 'static> View<State> for DockView<State> {
             let active_before = element.active_index();
             for (entry, item) in element.entries.iter_mut().zip(self.items.iter()) {
                 if entry.name != item.label {
-                    entry.label = item.label.clone().map(Run::new);
+                    entry.label = item.label.clone().map(LabelRun::new);
                     entry.name = item.label.clone();
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -929,7 +881,8 @@ impl Widget for DockWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::BezPath;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{BezPath, PointerButton, PointerEvent};
     use frust::text;
     use std::any::Any;
 

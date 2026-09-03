@@ -63,7 +63,8 @@ use crate::style::{
 use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_PRESS};
 
-use super::button::{Label, SpringScalar, inside, label_style, presses, stroke_outline};
+use crate::press::{SpringScalar, inside, presses, stroke_outline};
+use crate::text::{LabelRun, label_style};
 
 // ---- Shared CTA metrics ----------------------------------------------------
 
@@ -252,7 +253,7 @@ impl<State: 'static> ExpandingArrowButtonView<State> {
 
 /// The retained widget for an [`ExpandingArrowButtonView`].
 pub struct ExpandingArrowButtonWidget {
-    label: Label,
+    label: LabelRun,
     disabled: bool,
     on_press: ErasedCallback,
     hovered: bool,
@@ -279,7 +280,7 @@ impl<State: 'static> View<State> for ExpandingArrowButtonView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ExpandingArrowButtonWidget {
         ExpandingArrowButtonWidget {
-            label: Label::new(self.label.clone()),
+            label: LabelRun::new(self.label.clone()),
             disabled: self.disabled,
             on_press: erase_callback(&self.on_press),
             hovered: false,
@@ -706,7 +707,7 @@ impl<State: 'static> HoldActionButtonView<State> {
 /// The retained widget for a [`HoldActionButtonView`].
 pub struct HoldActionButtonWidget {
     /// The idle, holding and completed labels, in [`HoldPhase`] order.
-    labels: [Label; 3],
+    labels: [LabelRun; 3],
     direction: HoldActionDirection,
     hold_duration: Duration,
     disabled: bool,
@@ -726,7 +727,7 @@ pub struct HoldActionButtonWidget {
 
 impl HoldActionButtonWidget {
     /// The label the current phase shows.
-    fn label(&self) -> &Label {
+    fn label(&self) -> &LabelRun {
         &self.labels[self.phase as usize]
     }
 
@@ -743,9 +744,9 @@ impl<State: 'static> View<State> for HoldActionButtonView<State> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> HoldActionButtonWidget {
         HoldActionButtonWidget {
             labels: [
-                Label::new(self.label.clone()),
-                Label::new(self.holding_label.clone()),
-                Label::new(self.complete_label.clone()),
+                LabelRun::new(self.label.clone()),
+                LabelRun::new(self.holding_label.clone()),
+                LabelRun::new(self.complete_label.clone()),
             ],
             direction: self.direction,
             hold_duration: self.hold_duration,
@@ -1104,8 +1105,8 @@ impl<State: 'static> SlideActionButtonView<State> {
 
 /// The retained widget for a [`SlideActionButtonView`].
 pub struct SlideActionButtonWidget {
-    label: Label,
-    complete_label: Label,
+    label: LabelRun,
+    complete_label: LabelRun,
     threshold: f64,
     reset_delay: Duration,
     on_complete: ErasedCallback,
@@ -1147,8 +1148,8 @@ impl<State: 'static> View<State> for SlideActionButtonView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> SlideActionButtonWidget {
         SlideActionButtonWidget {
-            label: Label::new(self.label.clone()),
-            complete_label: Label::new(self.complete_label.clone()),
+            label: LabelRun::new(self.label.clone()),
+            complete_label: LabelRun::new(self.complete_label.clone()),
             threshold: self.threshold,
             reset_delay: self.reset_delay,
             on_complete: erase_callback(&self.on_complete),

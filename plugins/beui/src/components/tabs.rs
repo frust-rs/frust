@@ -74,17 +74,19 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene,
-    Point, PointerButton, PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget,
-    any, build_child, erase_callback_arg, rebuild_children, route_event_single, teardown_child,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    Action, Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,
+    EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any, build_child,
+    erase_callback_arg, rebuild_children, route_event_single, teardown_child,
+    text::{FontWeight, TextStyle},
     visit_children,
 };
 use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 
 use crate::motion::Ramp;
+use crate::press::{is_activation_key, presses};
 use crate::style;
+use crate::text::LabelRun;
 use crate::tokens::motion::EASE_OUT;
 
 /// The gap between triggers, in logical px (`gap-1`; the segment variant packs
@@ -183,60 +185,6 @@ impl TabsVariant {
     /// Whether the strip paints a filled background behind its triggers.
     const fn has_strip_fill(self) -> bool {
         matches!(self, TabsVariant::Pill | TabsVariant::Segment)
-    }
-}
-
-/// A cached text run whose colour is applied at paint time, so a hover recolour
-/// costs a repaint rather than a relayout.
-struct Run {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl Run {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let laid = ctx
-            .text_context::<TextContext>()
-            .layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
     }
 }
 
@@ -374,15 +322,6 @@ fn label_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// Whether `key` activates the focused trigger.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 /// Which way an arrow key moves along the strip, or `None`.
 fn arrow_step(key: &KeyEvent) -> Option<isize> {
     match &key.key {
@@ -390,12 +329,6 @@ fn arrow_step(key: &KeyEvent) -> Option<isize> {
         Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(-1),
         _ => None,
     }
-}
-
-/// Whether `p` carries a button that may begin a press: the primary one, which
-/// is what every shell also reports for a touch or pen contact.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
 }
 
 /// Linear interpolation between two rects, `t` **unclamped** so a spring's
@@ -414,7 +347,7 @@ fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
 struct TriggerEntry {
     value: String,
     label: String,
-    run: Run,
+    run: LabelRun,
     disabled: bool,
     /// Local x of the trigger's left edge (filled at layout).
     x: f64,
@@ -427,7 +360,7 @@ impl TriggerEntry {
         Self {
             value: tab.value.clone(),
             label: tab.label.clone(),
-            run: Run::new(tab.label.clone()),
+            run: LabelRun::new(tab.label.clone()),
             disabled: tab.disabled,
             x: 0.0,
             width: 0.0,
@@ -983,7 +916,10 @@ impl Widget for TabsWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::{BezPath, Modifiers, PointerEvent, SemanticsUpdate};
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{
+        BezPath, Brush, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
+    };
     use frust::text;
     use std::any::Any;
 

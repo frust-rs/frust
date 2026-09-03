@@ -63,9 +63,9 @@ use crate::style::{
 };
 use crate::tokens::motion::{EASE_IN_OUT, EASE_OUT, SPRING_PRESS, SPRING_SWAP};
 
-use super::button::{
-    ButtonTone, Label, SpringScalar, inside, label_style, presses, stroke_outline,
-};
+use super::button::ButtonTone;
+use crate::press::{SpringScalar, inside, presses, stroke_outline};
+use crate::text::{LabelRun, label_style};
 
 /// The blur swap's timing: `BLUR_TRANSITION = { duration: 0.2, ease: "easeInOut" }`,
 /// resolved against beUI's own symmetric curve rather than the CSS keyword the
@@ -281,8 +281,8 @@ impl<State: 'static> ActionSwapView<State> {
 /// One item's shaped runs: the whole label, plus its per-grapheme cells for the
 /// cascade.
 struct ItemRuns {
-    whole: Label,
-    cells: Vec<Label>,
+    whole: LabelRun,
+    cells: Vec<LabelRun>,
     /// Each cell's x offset from the label's left edge, and the summed width the
     /// cascade lays the cells out to.
     offsets: Vec<f64>,
@@ -293,11 +293,11 @@ impl ItemRuns {
     fn new(label: &str) -> Self {
         let split = CharCells::split(label);
         Self {
-            whole: Label::new(label),
+            whole: LabelRun::new(label),
             cells: split
                 .cells()
                 .iter()
-                .map(|cell| Label::new(cell.text()))
+                .map(|cell| LabelRun::new(cell.text()))
                 .collect(),
             offsets: Vec::new(),
             cells_width: 0.0,

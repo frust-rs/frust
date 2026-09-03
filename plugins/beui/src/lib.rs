@@ -107,7 +107,14 @@ pub mod motion;
 /// on: anchored (trigger-relative) placement and modal (scrim + panel) hosting,
 /// both staged by [`motion::Presence`].
 pub mod overlay;
+/// The ramp-driven scalars, pointer/key admission tests, and small paint
+/// helpers every interactive component in this catalog shares — see the
+/// [module docs](press).
+pub(crate) mod press;
 pub mod style;
+/// The cached shaped-text run types every text-bearing component in this
+/// catalog shapes its labels through — see the [module docs](text).
+pub(crate) mod text;
 pub mod tokens;
 
 /// The design language itself, flattened to the root: the assembled

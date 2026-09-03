@@ -75,6 +75,7 @@ use peniko::{Brush, Color, ColorStop, Gradient};
 
 use crate::motion::{CellEffect, CharCells, CharCellsView, Ramp, Stagger, char_cascade};
 use crate::style::{TEXT_BASE, with_alpha};
+use crate::text::paint_glyph_run as paint_run;
 use crate::tokens::motion::{EASE_IN_OUT, SPRING_LAYOUT};
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -607,16 +608,6 @@ impl Widget for TextAnimationWidget {
     }
 
     visit_children!(cells);
-}
-
-/// Emit `run`'s glyphs at `origin` under `brush`, overriding whatever ink the
-/// run was shaped with. A run that has never been laid out paints nothing.
-fn paint_run(run: Option<&TextLayout>, origin: Point, brush: &Brush, scene: &mut dyn PaintScene) {
-    let Some(run) = run else { return };
-    for mut glyphs in run.to_scene_runs(origin) {
-        glyphs.brush = brush.clone();
-        scene.draw_glyph_run(glyphs);
-    }
 }
 
 /// `elapsed` folded into `[0, 1)` of a `period`-long loop. A zero period has no

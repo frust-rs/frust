@@ -74,7 +74,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, CursorIcon,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
@@ -84,9 +84,11 @@ use frust::authoring::{
 use frust::{Curve, FrameTime, Theme, text_input};
 
 use super::checkbox::{ICON_VIEWBOX, mark_path};
-use super::switch::{self, Lane, inside, keyframes_at, lerp_color};
+use super::switch;
 use crate::motion::Ramp;
+use crate::press::{Lane, inside_inclusive as inside, keyframes_at, lerp_color};
 use crate::style;
+use crate::text::Label as ShapedText;
 use crate::tokens::{BeuiTokens, sans_family};
 
 /// Field width used when the incoming constraints are horizontally unbounded —
@@ -155,77 +157,6 @@ const FALLBACK_BORDER: Color = crate::BEUI_LIGHT.border;
 const FALLBACK_FOREGROUND: Color = crate::BEUI_LIGHT.foreground;
 /// Unthemed fallback error hue — the light table's `--destructive`.
 const FALLBACK_DESTRUCTIVE: Color = crate::BEUI_LIGHT.destructive;
-
-/// A shaped, cached text run: this catalog's minimal counterpart to a text
-/// widget, for a control that lays out its own label instead of nesting one.
-///
-/// Shaping happens in `layout` (the only pass carrying a [`TextContext`]) and
-/// the colour is baked into the layout, so a colour change re-shapes — the
-/// framework's layout-time-baked-colour contract. A run whose colour animates
-/// therefore fades through a `push_layer` alpha rather than through its style.
-///
-/// `pub(crate)` and living here for the same reason [`Lane`] lives in
-/// [`switch`]: `input` is the first form control that shapes its own text and
-/// its siblings reuse it verbatim.
-pub(crate) struct ShapedText {
-    content: String,
-    layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-}
-
-impl ShapedText {
-    /// A run of `content`, unshaped until the first [`ShapedText::layout`].
-    pub(crate) fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            laid_out_style: None,
-        }
-    }
-
-    /// Replace the content, invalidating the cached shape if it changed.
-    /// Reports whether anything changed.
-    pub(crate) fn set_content(&mut self, content: impl Into<String>) -> bool {
-        let content = content.into();
-        if self.content == content {
-            return false;
-        }
-        self.content = content;
-        self.layout = None;
-        true
-    }
-
-    /// Shape (or reuse the cached shape of) this run at `style`, unbounded and
-    /// single-line, returning its size.
-    pub(crate) fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        size
-    }
-
-    /// The size of the cached shape, or zero before the first layout.
-    pub(crate) fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, TextLayout::size)
-    }
-
-    /// Emit this run's glyphs at absolute `origin`. A no-op before the first
-    /// [`ShapedText::layout`].
-    pub(crate) fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
 
 /// The interaction state a beUI field's chrome is painted from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -871,6 +802,7 @@ impl Widget for InputWidget {
 mod tests {
     use super::*;
     use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::TextContext;
     use frust::authoring::{BezPath, PointerButton, PointerEvent};
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
@@ -1441,15 +1373,7 @@ mod tests {
         paint_field_frame(&mut rec, Point::ORIGIN, size, idle);
         assert_eq!(rec.strokes.len(), 1, "the border alone");
         assert_eq!(rec.border().1, style::BORDER_WIDTH);
-
-        // A shaped run is reusable on its own too.
-        let mut tcx = TextContext::new();
-        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
-        let mut run = ShapedText::new("Email");
-        let measured = run.layout(&mut lctx, &label_style(Color::BLACK));
-        assert!(measured.width > 0.0 && measured.height > 0.0);
-        assert_eq!(run.size(), measured);
-        assert!(run.set_content("Password"), "a real change re-shapes");
-        assert!(!run.set_content("Password"), "an identical one does not");
     }
+    // `ShapedText` (aliasing `crate::text::Label`) carries its own leaf test
+    // in `crate::text`'s test module now.
 }

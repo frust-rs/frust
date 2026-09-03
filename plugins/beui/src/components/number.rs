@@ -601,7 +601,12 @@ impl Widget for NumberWidget {
                             || visible.get(column_index - 1).copied().flatten().is_some();
                         if carries {
                             let y = origin.y + (self.cell.height - run.size().height) / 2.0;
-                            draw_run(run, Point::new(x, y), &brush, scene);
+                            crate::text::paint_glyph_run(
+                                Some(run),
+                                Point::new(x, y),
+                                &brush,
+                                scene,
+                            );
                         }
                         x += run.size().width;
                     }
@@ -766,17 +771,9 @@ fn draw_column(
             origin.x + (cell.width - glyph.width) / 2.0,
             origin.y + offset + (cell.height - glyph.height) / 2.0,
         );
-        draw_run(run, at, brush, scene);
+        crate::text::paint_glyph_run(Some(run), at, brush, scene);
     }
     scene.pop_clip();
-}
-
-/// Emit `run`'s glyphs at `origin` under `brush`.
-fn draw_run(run: &TextLayout, origin: Point, brush: &Brush, scene: &mut dyn PaintScene) {
-    for mut glyphs in run.to_scene_runs(origin) {
-        glyphs.brush = brush.clone();
-        scene.draw_glyph_run(glyphs);
-    }
 }
 
 #[cfg(test)]

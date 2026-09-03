@@ -60,14 +60,14 @@ use std::time::Duration;
 
 use frust::authoring::{
     Action, Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color,
-    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
-    PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, Toggled, TypedArgCallback, View, Widget,
-    erase_callback_arg,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Toggled, TypedArgCallback,
+    View, Widget, erase_callback_arg,
 };
 use frust::{Brightness, FrameTime, Theme};
 
 use crate::motion::Ramp;
+use crate::press::{inside, is_activation_key, presses};
 use crate::style::{
     ACTIVE_CURSOR, PATH_TOLERANCE, PRESS_SCALE, RADIUS_ICON_BUTTON, SIZE_ICON_BUTTON,
     resolve_radius, scale_alpha,
@@ -423,26 +423,6 @@ impl ThemeToggleWidget {
         self.resolved = next;
         ctx.request_redraw();
     }
-}
-
-/// Whether `key` activates the control: `Space` (which arrives as typed text)
-/// or `Enter`.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
-/// Whether widget-local `pos` lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
-/// Whether `p` carries a button that may begin a press.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
 }
 
 impl<State: 'static> View<State> for ThemeToggleView<State> {
@@ -860,7 +840,7 @@ fn rotate_about(point: Point, pivot: Point, angle: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::Modifiers;
+    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent};
     use frust_core::{BuildCtx, EventCtx, PaintCtx};
     use std::any::Any;
 

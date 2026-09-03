@@ -62,7 +62,8 @@ use crate::style::{
 use crate::tokens::color_scheme_light;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT, SPRING_PRESS};
 
-use super::button::{Label, SpringScalar, inside, label_style, presses, stroke_outline};
+use crate::press::{SpringScalar, inside, presses, stroke_outline};
+use crate::text::{LabelRun, label_style};
 
 /// The expandable button's height: `h-11`, which is also its collapsed width
 /// (`min-w-11`).
@@ -174,8 +175,8 @@ impl<State: 'static> ExpandableButtonView<State> {
 
 /// The retained widget for an [`ExpandableButtonView`].
 pub struct ExpandableButtonWidget {
-    icon: Label,
-    label: Label,
+    icon: LabelRun,
+    label: LabelRun,
     expanded: bool,
     disabled: bool,
     on_expanded_change: ErasedArgCallback<bool>,
@@ -208,8 +209,8 @@ impl<State: 'static> View<State> for ExpandableButtonView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ExpandableButtonWidget {
         ExpandableButtonWidget {
-            icon: Label::new(self.icon.clone()),
-            label: Label::new(self.label.clone()),
+            icon: LabelRun::new(self.icon.clone()),
+            label: LabelRun::new(self.label.clone()),
             expanded: self.expanded,
             disabled: self.disabled,
             on_expanded_change: erase_callback_arg(&self.on_expanded_change),
@@ -522,8 +523,8 @@ enum ChipRegion {
 
 /// The retained widget for an [`ExpandableChipView`].
 pub struct ExpandableChipWidget {
-    label: Label,
-    action_icon: Label,
+    label: LabelRun,
+    action_icon: LabelRun,
     action_label: String,
     expanded: bool,
     disabled: bool,
@@ -573,8 +574,8 @@ impl<State: 'static> View<State> for ExpandableChipView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ExpandableChipWidget {
         ExpandableChipWidget {
-            label: Label::new(self.label.clone()),
-            action_icon: Label::new(self.action_icon.clone()),
+            label: LabelRun::new(self.label.clone()),
+            action_icon: LabelRun::new(self.action_icon.clone()),
             action_label: self.action_label.clone(),
             expanded: self.expanded,
             disabled: self.disabled,

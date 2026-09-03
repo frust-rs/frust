@@ -96,17 +96,18 @@ use std::time::Duration;
 
 use frust::authoring::{
     Action, Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod,
-    Color, CornerRadii, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
-    PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase, Rect, Role,
-    SemanticsCtx, Size, View, Widget, any, build_child, erase_callback_arg, rebuild_children,
-    route_event, teardown_child,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    Color, CornerRadii, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
+    PaintScene, Point, PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any,
+    build_child, erase_callback_arg, rebuild_children, route_event, teardown_child,
+    text::{FontWeight, TextStyle},
     visit_children,
 };
 use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 
 use crate::motion::Ramp;
+use crate::press::{is_activation_key, presses};
 use crate::style;
+use crate::text::LabelRun;
 use crate::tokens::motion::EASE_OUT;
 
 /// A header row's height, in logical px (`min-h-[54px]`).
@@ -167,51 +168,6 @@ pub const ACCORDION_CHEVRON_SPRING: SpringDescription = SpringDescription {
 /// recorded number; see the [module docs](self)' degradations for why the
 /// content's opacity rides the reveal instead.
 pub const ACCORDION_CONTENT_FADE: Ramp = Ramp::eased(Duration::from_millis(180), EASE_OUT);
-
-/// A cached text run whose colour is applied at paint time.
-struct Run {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl Run {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let laid = ctx
-            .text_context::<TextContext>()
-            .layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
 
 /// One accordion panel: its identity, its header title, and the content the
 /// panel discloses.
@@ -331,20 +287,6 @@ fn title_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// Whether `p` carries a button that may begin a press.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
-/// Whether `key` activates the focused header.
-fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
 /// One row's reveal: where it is, where it is going, and the ramp between.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Reveal {
@@ -417,7 +359,7 @@ impl Reveal {
 /// One retained panel.
 struct Entry {
     value: String,
-    title: Run,
+    title: LabelRun,
     title_text: String,
     disabled: bool,
     reveal: Reveal,
@@ -435,7 +377,7 @@ impl<State: 'static> View<State> for BouncyAccordionView<State> {
                 .iter()
                 .map(|item| Entry {
                     value: item.value.clone(),
-                    title: Run::new(item.title.clone()),
+                    title: LabelRun::new(item.title.clone()),
                     title_text: item.title.clone(),
                     disabled: item.disabled,
                     reveal: Reveal::at_rest(self.value.as_deref() == Some(item.value.as_str())),
@@ -472,7 +414,7 @@ impl<State: 'static> View<State> for BouncyAccordionView<State> {
                 .iter()
                 .map(|item| Entry {
                     value: item.value.clone(),
-                    title: Run::new(item.title.clone()),
+                    title: LabelRun::new(item.title.clone()),
                     title_text: item.title.clone(),
                     disabled: item.disabled,
                     reveal: Reveal::at_rest(self.value.as_deref() == Some(item.value.as_str())),
@@ -485,7 +427,7 @@ impl<State: 'static> View<State> for BouncyAccordionView<State> {
         } else {
             for (entry, item) in element.entries.iter_mut().zip(self.items.iter()) {
                 if entry.title_text != item.title {
-                    entry.title = Run::new(item.title.clone());
+                    entry.title = LabelRun::new(item.title.clone());
                     entry.title_text = item.title.clone();
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -956,7 +898,8 @@ impl Widget for BouncyAccordionWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::Modifiers;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent};
     use frust::text;
     use std::any::Any;
 

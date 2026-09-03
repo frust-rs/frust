@@ -51,7 +51,7 @@
 use std::f64::consts::{PI, TAU};
 use std::time::Duration;
 
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     BezPath, BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Role,
     SemanticsCtx, Shape, TickClass, View, Widget,
@@ -65,6 +65,7 @@ use crate::style::{
     BORDER_WIDTH, PATH_TOLERANCE, RADIUS_CONTROL, TEXT_XS, resolve_radius, scale_alpha, spacing,
     with_alpha,
 };
+use crate::text::LabelRun;
 use crate::tokens::motion::SPRING_SWAP;
 use crate::tokens::{BEUI_LIGHT, BeuiTokens};
 
@@ -263,52 +264,11 @@ impl<State: 'static> AnimatedBadgeView<State> {
     }
 }
 
-/// A cached, lazily-shaped label whose ink is applied at paint — the roll
-/// changes a part's alpha every frame, which must never cost a re-shape.
-#[derive(Default)]
-struct BadgeLabel {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl BadgeLabel {
-    fn new(content: impl Into<String>) -> Self {
-        BadgeLabel {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, TextLayout::size)
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if self.layout.is_some() && self.shaped.as_ref() == Some(style) {
-            return self.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        self.layout = Some(text_ctx.layout(&self.content, style, None));
-        self.shaped = Some(style.clone());
-        self.size()
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        let Some(layout) = &self.layout else { return };
-        for mut run in layout.to_scene_runs(origin) {
-            run.brush = Brush::Solid(color);
-            scene.draw_glyph_run(run);
-        }
-    }
-}
-
 /// The retained widget for an [`AnimatedBadgeView`].
 pub struct AnimatedBadgeWidget {
-    label: BadgeLabel,
+    label: LabelRun,
     /// The label being rolled out, kept alive for the length of its exit.
-    outgoing: Option<BadgeLabel>,
+    outgoing: Option<LabelRun>,
     status: AnimatedBadgeStatus,
     /// The status being rolled out, for the icon slot's own exit.
     outgoing_status: Option<AnimatedBadgeStatus>,
@@ -334,7 +294,7 @@ struct BadgeColors {
 impl AnimatedBadgeWidget {
     /// The label this badge carries.
     pub fn label(&self) -> &str {
-        &self.label.content
+        self.label.content()
     }
 
     /// Its tone.
@@ -409,7 +369,7 @@ impl<State: 'static> View<State> for AnimatedBadgeView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> AnimatedBadgeWidget {
         AnimatedBadgeWidget {
-            label: BadgeLabel::new(self.label.clone()),
+            label: LabelRun::new(self.label.clone()),
             outgoing: None,
             status: self.status,
             outgoing_status: None,
@@ -429,12 +389,12 @@ impl<State: 'static> View<State> for AnimatedBadgeView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
-        if element.label.content != self.label {
+        if element.label.content() != self.label {
             // The old label is kept alive for the length of its exit — the
             // catalog's own presence rule, applied to one text slot.
             element.outgoing = Some(std::mem::replace(
                 &mut element.label,
-                BadgeLabel::new(self.label.clone()),
+                LabelRun::new(self.label.clone()),
             ));
             element.label_roll = None;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -622,7 +582,7 @@ impl Widget for AnimatedBadgeWidget {
         // A status badge announces its own text; the icon is `aria-hidden`
         // upstream and contributes nothing here either.
         ctx.push_node(Role::Status, |node| {
-            node.set_label(self.label.content.as_str());
+            node.set_label(self.label.content());
         });
     }
 }
@@ -808,6 +768,7 @@ fn ping_pong(phase: f64) -> f64 {
 mod tests {
     use super::*;
     use frust::authoring::scene::GlyphRun;
+    use frust::authoring::text::TextContext;
     use frust_core::{BuildCtx, PaintCtx};
     use std::any::Any;
 

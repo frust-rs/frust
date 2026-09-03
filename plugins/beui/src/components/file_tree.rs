@@ -77,14 +77,15 @@ use std::time::Duration;
 use frust::authoring::{
     Action, Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx,
     EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerButton, PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget,
-    erase_callback_arg,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, erase_callback_arg,
+    text::{FontWeight, TextStyle},
 };
 use frust::{FrameTime, Theme};
 
 use crate::motion::Ramp;
+use crate::press::presses;
 use crate::style;
+use crate::text::LabelRun;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// One row's height, in logical px (`h-9`).
@@ -198,51 +199,6 @@ impl FileTreeNode {
     }
 }
 
-/// A cached text run whose colour is applied at paint time.
-struct Run {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl Run {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let laid = ctx
-            .text_context::<TextContext>()
-            .layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
-
 /// A view-held string callback, erased on build.
 type OnValue<State> = Rc<dyn Fn(&mut State, String)>;
 
@@ -349,11 +305,6 @@ fn name_style(theme: Option<&Theme>, selected: bool) -> TextStyle {
     }
 }
 
-/// Whether `p` carries a button that may begin a press.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
 /// Linear interpolation between two rects, `t` unclamped.
 fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
     let lerp = |a: f64, b: f64| a + (b - a) * t;
@@ -368,7 +319,7 @@ fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
 /// One flattened, visible row.
 struct Row {
     value: String,
-    name: Run,
+    name: LabelRun,
     kind: FileTreeKind,
     disabled: bool,
     depth: usize,
@@ -391,7 +342,7 @@ fn flatten(
         let expandable = node.kind == FileTreeKind::Folder && !node.children.is_empty();
         out.push(Row {
             value: node.value.clone(),
-            name: Run::new(node.name.clone()),
+            name: LabelRun::new(node.name.clone()),
             kind: node.kind,
             disabled: node.disabled,
             depth,
@@ -1039,7 +990,7 @@ impl Widget for FileTreeWidget {
             |ctx| {
                 for row in &self.rows {
                     ctx.push_node(Role::TreeItem, |node| {
-                        node.set_label(row.name.content.as_str());
+                        node.set_label(row.name.content());
                         node.set_selected(self.selected.as_deref() == Some(row.value.as_str()));
                         if row.expandable {
                             node.set_expanded(self.is_open(&row.value));
@@ -1133,7 +1084,8 @@ impl FileTreeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::Modifiers;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{Modifiers, PointerButton, PointerEvent};
     use std::any::Any;
 
     #[derive(Default)]

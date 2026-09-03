@@ -81,17 +81,19 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent,
-    PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any, build_child,
-    erase_callback_arg, rebuild_children, route_event, teardown_child,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, SemanticsCtx,
+    Size, View, Widget, any, build_child, erase_callback_arg, rebuild_children, route_event,
+    teardown_child,
+    text::{FontWeight, TextStyle},
     visit_children,
 };
 use frust::{ChildKey, FrameTime, SpringDescription, Theme};
 
 use crate::motion::{Ramp, Stagger};
+use crate::press::presses;
 use crate::style;
+use crate::text::LabelRun;
 use crate::tokens::motion::{EASE_OUT, SPRING_LAYOUT};
 
 /// The expanded rail's width, in logical px (`--sidebar-width: 16rem`).
@@ -144,51 +146,6 @@ pub const SIDEBAR_MORPH_SPRING: SpringDescription = SpringDescription {
     stiffness: 380.0,
     damping: 35.0,
 };
-
-/// A cached text run whose colour is applied at paint time.
-struct Run {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped: Option<TextStyle>,
-}
-
-impl Run {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let laid = ctx
-            .text_context::<TextContext>()
-            .layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
 
 /// One menu entry: an icon view, its label, an optional trailing badge, and
 /// whether it is the active one.
@@ -327,11 +284,6 @@ fn badge_style(theme: Option<&Theme>) -> TextStyle {
     }
 }
 
-/// Whether `p` carries a button that may begin a press.
-fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
 /// Linear interpolation between two rects, `t` unclamped.
 fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
     let lerp = |a: f64, b: f64| a + (b - a) * t;
@@ -345,9 +297,9 @@ fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
 
 /// One retained entry.
 struct Entry {
-    label: Run,
+    label: LabelRun,
     name: String,
-    badge: Option<Run>,
+    badge: Option<LabelRun>,
     badge_text: Option<String>,
     active: bool,
     disabled: bool,
@@ -356,9 +308,9 @@ struct Entry {
 impl Entry {
     fn from_item<State: 'static>(item: &SidebarItem<State>) -> Self {
         Self {
-            label: Run::new(item.label.clone()),
+            label: LabelRun::new(item.label.clone()),
             name: item.label.clone(),
-            badge: item.badge.clone().map(Run::new),
+            badge: item.badge.clone().map(LabelRun::new),
             badge_text: item.badge.clone(),
             active: item.active,
             disabled: item.disabled,
@@ -409,12 +361,12 @@ impl<State: 'static> View<State> for AnimatedSidebarView<State> {
             let active_before = element.active_index();
             for (entry, item) in element.entries.iter_mut().zip(self.items.iter()) {
                 if entry.name != item.label {
-                    entry.label = Run::new(item.label.clone());
+                    entry.label = LabelRun::new(item.label.clone());
                     entry.name = item.label.clone();
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 if entry.badge_text != item.badge {
-                    entry.badge = item.badge.clone().map(Run::new);
+                    entry.badge = item.badge.clone().map(LabelRun::new);
                     entry.badge_text = item.badge.clone();
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -851,7 +803,8 @@ impl Widget for AnimatedSidebarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::BezPath;
+    use frust::authoring::text::TextContext;
+    use frust::authoring::{BezPath, Brush, PointerButton, PointerEvent};
     use frust::text;
     use std::any::Any;
 

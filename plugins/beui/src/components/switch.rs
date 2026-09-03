@@ -56,14 +56,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx,
-    EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
-    PointerButton, PointerEvent, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
-    Toggled, View, Widget, erase_callback_arg,
+    Action, Affine, BoxConstraints, BuildCtx, ChangeFlags, Color, CursorIcon, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
+    SemanticsCtx, Size, Toggled, View, Widget, erase_callback_arg,
 };
-use frust::{FrameTime, SpringDescription, Theme, Tween};
+use frust::{FrameTime, SpringDescription, Theme};
 
 use crate::motion::Ramp;
+use crate::press::{
+    Lane, draw_focus_ring, inside_inclusive, is_activation_key, keyframes_at, lerp_color, presses,
+};
 use crate::style;
 use crate::tokens::BeuiTokens;
 use crate::tokens::motion::{EASE_OUT, SPRING_PRESS};
@@ -148,188 +150,6 @@ const FALLBACK_PRIMARY: Color = crate::BEUI_LIGHT.primary;
 const FALLBACK_MUTED_FOREGROUND: Color = crate::BEUI_LIGHT.muted_foreground;
 /// Unthemed fallback thumb — the light table's `--background`.
 const FALLBACK_BACKGROUND: Color = crate::BEUI_LIGHT.background;
-
-/// One `from → to` animation lane: a [`Ramp`], the endpoints it interpolates
-/// between, and the frame the current run started on.
-///
-/// The endpoint pair (rather than a bare progress value) is what lets a
-/// freshly-built control rest at its confirmed state with no entry animation,
-/// and a mid-flight reversal start from what is actually on screen.
-///
-/// `pub(crate)` and living here because `switch` is the first form control in
-/// the catalog to need it and its siblings reuse it verbatim;
-/// [`crate::motion`] — which already owns [`Ramp`],
-/// [`Stagger`](crate::motion::Stagger) and
-/// [`Presence`](crate::motion::Presence) — is its natural long-term home.
-pub(crate) struct Lane {
-    ramp: Ramp,
-    from: f64,
-    to: f64,
-    /// The frame the current run started on; `None` while at rest.
-    start: Option<FrameTime>,
-    /// What [`Lane::advance`] last computed — the value paint reads.
-    displayed: f64,
-}
-
-impl Lane {
-    /// An idle lane resting at `value`.
-    pub(crate) fn at_rest(ramp: Ramp, value: f64) -> Self {
-        Self {
-            ramp,
-            from: value,
-            to: value,
-            start: None,
-            displayed: value,
-        }
-    }
-
-    /// Re-aim at `to`, starting from whatever is on screen now. A no-op when
-    /// the lane already rests on that target, so a redundant `rebuild` cannot
-    /// restart a settled run.
-    pub(crate) fn retarget(&mut self, to: f64) {
-        if self.to == to && self.start.is_none() {
-            return;
-        }
-        self.from = self.displayed;
-        self.to = to;
-        self.start = None;
-        if self.from == to {
-            self.displayed = to;
-        }
-    }
-
-    /// Re-aim at `to` **on a different ramp** — for a control whose entrance
-    /// and exit are timed differently, which is the ordinary shape upstream
-    /// (`animate` a spring, `exit` a short tween).
-    pub(crate) fn retarget_with(&mut self, ramp: Ramp, to: f64) {
-        if self.ramp == ramp && self.to == to && self.start.is_none() {
-            return;
-        }
-        self.from = self.displayed;
-        self.ramp = ramp;
-        self.to = to;
-        self.start = None;
-        if self.from == to {
-            self.displayed = to;
-        }
-    }
-
-    /// Land on the target immediately, cancelling any flight — the
-    /// `reduce_motion` path.
-    pub(crate) fn snap(&mut self) {
-        self.from = self.to;
-        self.displayed = self.to;
-        self.start = None;
-    }
-
-    /// Advance to frame time `now`, returning whether the lane is still in
-    /// flight (in which case the caller owes another frame).
-    pub(crate) fn advance(&mut self, now: FrameTime) -> bool {
-        if self.from == self.to {
-            self.displayed = self.to;
-            self.start = None;
-            return false;
-        }
-        let start = *self.start.get_or_insert(now);
-        let elapsed = now.saturating_sub(start);
-        if self.ramp.is_settled(elapsed) {
-            self.from = self.to;
-            self.displayed = self.to;
-            self.start = None;
-            return false;
-        }
-        self.displayed = self.from + (self.to - self.from) * self.ramp.progress(elapsed);
-        true
-    }
-
-    /// The current value. A spring lane may pass its endpoints, which is what
-    /// makes it read as a spring; a caller driving a bounded quantity clamps at
-    /// the point of use.
-    pub(crate) fn value(&self) -> f64 {
-        self.displayed
-    }
-
-    /// The value this lane is heading for.
-    pub(crate) fn target(&self) -> f64 {
-        self.to
-    }
-}
-
-/// Interpolate `begin` → `end` at `t`, snapping exactly to an endpoint at (or
-/// past) `0.0`/`1.0` rather than routing it through [`Tween::lerp`]'s `f32`
-/// arithmetic, which can land a few ULPs off `end`. Keeps a resting control
-/// pixel-identical to its resting token.
-pub(crate) fn lerp_color(begin: Color, end: Color, t: f64) -> Color {
-    if t <= 0.0 {
-        begin
-    } else if t >= 1.0 {
-        end
-    } else {
-        Tween::new(begin, end).lerp(t)
-    }
-}
-
-/// Sample an evenly-spaced keyframe array at `t` in `0..=1`, linearly between
-/// neighbours — Motion's own default for an array target.
-pub(crate) fn keyframes_at(frames: &[f64], t: f64) -> f64 {
-    match frames.len() {
-        0 => 0.0,
-        1 => frames[0],
-        len => {
-            let spans = (len - 1) as f64;
-            let scaled = t.clamp(0.0, 1.0) * spans;
-            let index = (scaled.floor() as usize).min(len - 2);
-            let local = scaled - index as f64;
-            frames[index] + (frames[index + 1] - frames[index]) * local
-        }
-    }
-}
-
-/// Whether `p` is the primary press this catalog activates on — the crate's own
-/// copy of the shared rule (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
-pub(crate) fn presses(p: &PointerEvent) -> bool {
-    p.button == PointerButton::Primary
-}
-
-/// Whether a local `point` falls inside a box of `size` anchored at the origin.
-pub(crate) fn inside(point: Point, size: Size) -> bool {
-    point.x >= 0.0 && point.y >= 0.0 && point.x <= size.width && point.y <= size.height
-}
-
-/// Whether `key` activates a control: `Space` (arriving as typed text — there
-/// is no `NamedKey::Space`) or `Enter`, the two keys the native `<button>`
-/// upstream renders activates on.
-pub(crate) fn is_activation_key(key: &KeyEvent) -> bool {
-    match &key.key {
-        Key::Named(NamedKey::Enter) => true,
-        Key::Character(text) => text == " ",
-        _ => false,
-    }
-}
-
-/// Paint a focus ring of [`style::FOCUS_RING_WIDTH`] around a box, `offset`
-/// logical px clear of it — Tailwind's `ring-N ring-offset-N`, a pair of
-/// non-inset box shadows and therefore wholly outside the border box.
-pub(crate) fn draw_focus_ring(
-    scene: &mut dyn PaintScene,
-    origin: Point,
-    size: Size,
-    radius: f64,
-    offset: f64,
-    color: Color,
-) {
-    let out = offset + style::FOCUS_RING_WIDTH / 2.0;
-    let ring = RoundedRect::from_rect(
-        Rect::from_origin_size(Point::ORIGIN, size).inset(out),
-        radius + out,
-    );
-    scene.stroke_path(
-        origin,
-        &Shape::to_path(&ring, style::PATH_TOLERANCE),
-        style::FOCUS_RING_WIDTH,
-        &Brush::Solid(color),
-    );
-}
 
 /// A view-held, typed change callback (erased on build).
 type OnCheckedChange<State> = Rc<dyn Fn(&mut State, bool)>;
@@ -645,7 +465,7 @@ impl Widget for SwitchWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if !presses(p) || !inside(p.position, size) {
+                        if !presses(p) || !inside_inclusive(p.position, size) {
                             return EventResult::Ignored;
                         }
                         if self.disabled {
@@ -666,7 +486,7 @@ impl Widget for SwitchWidget {
                     }
                     PointerPhase::Move => {
                         if !self.captured {
-                            if inside(p.position, size) {
+                            if inside_inclusive(p.position, size) {
                                 ctx.claim_hover();
                                 ctx.set_cursor(self.cursor());
                             }
@@ -677,7 +497,11 @@ impl Widget for SwitchWidget {
                         // which here is the stretch releasing once the pointer
                         // wanders off the control.
                         ctx.set_cursor(self.cursor());
-                        let want = if inside(p.position, size) { 1.0 } else { 0.0 };
+                        let want = if inside_inclusive(p.position, size) {
+                            1.0
+                        } else {
+                            0.0
+                        };
                         if self.squish.target() != want {
                             self.squish.retarget(want);
                             ctx.request_redraw();
@@ -690,7 +514,7 @@ impl Widget for SwitchWidget {
                         }
                         self.captured = false;
                         self.squish.retarget(0.0);
-                        if inside(p.position, size) {
+                        if inside_inclusive(p.position, size) {
                             (self.on_checked_change)(ctx, !self.checked);
                         }
                         ctx.request_redraw();
@@ -730,7 +554,11 @@ impl Widget for SwitchWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::{BezPath, EventOutcome, Modifiers, SemanticsUpdate};
+    use frust::authoring::{
+        BezPath, Brush, EventOutcome, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+        PointerEvent, SemanticsUpdate,
+    };
+    use kurbo::Shape;
     use std::any::Any;
 
     /// Records the rounded-rect fills (track, then thumb), stroked paths,
@@ -827,73 +655,9 @@ mod tests {
         w.event(&mut ctx, event)
     }
 
-    // ---- The shared lane --------------------------------------------------
-
-    #[test]
-    fn a_lane_rests_where_it_was_built_and_settles_on_its_target() {
-        let mut lane = Lane::at_rest(Ramp::spring(SWITCH_THUMB_SPRING), 0.0);
-        assert_eq!(lane.value(), 0.0);
-        assert!(!lane.advance(ft_ms(0.0)), "a resting lane owes no frame");
-
-        lane.retarget(1.0);
-        assert!(lane.advance(ft_ms(0.0)));
-        assert!(lane.value() < 1.0, "the first frame seeds the clock");
-        assert!(lane.advance(ft_ms(40.0)));
-        let mid = lane.value();
-        assert!(mid > 0.0 && mid < 1.0, "mid-flight: {mid}");
-        assert!(!lane.advance(ft_ms(5_000.0)));
-        assert_eq!(lane.value(), 1.0, "settles exactly on the target");
-        assert_eq!(lane.target(), 1.0);
-    }
-
-    #[test]
-    fn a_reversal_starts_from_what_is_on_screen_and_a_snap_lands_at_once() {
-        let mut lane = Lane::at_rest(Ramp::spring(SWITCH_THUMB_SPRING), 0.0);
-        lane.retarget(1.0);
-        lane.advance(ft_ms(0.0));
-        lane.advance(ft_ms(40.0));
-        let caught = lane.value();
-        lane.retarget(0.0);
-        lane.advance(ft_ms(40.0));
-        assert!(
-            (lane.value() - caught).abs() < 1e-6,
-            "a reversal starts from {caught}, not from 1.0"
-        );
-
-        lane.snap();
-        assert_eq!(lane.value(), 0.0);
-        assert!(!lane.advance(ft_ms(41.0)));
-    }
-
-    /// A lane can change ramps mid-life, which is what an entrance-spring /
-    /// exit-tween pair needs.
-    #[test]
-    fn retarget_with_swaps_the_ramp_as_well_as_the_target() {
-        let quick = Ramp::eased(Duration::from_millis(20), EASE_OUT);
-        let mut lane = Lane::at_rest(Ramp::spring(SWITCH_THUMB_SPRING), 0.0);
-        lane.retarget_with(quick, 1.0);
-        lane.advance(ft_ms(0.0));
-        assert!(
-            !lane.advance(ft_ms(21.0)),
-            "the 20ms exit ramp is done, not the spring's settle time"
-        );
-        assert_eq!(lane.value(), 1.0);
-    }
-
-    #[test]
-    fn keyframes_interpolate_evenly_across_the_timeline() {
-        let frames = SWITCH_REFUSAL_KEYFRAMES;
-        assert_eq!(keyframes_at(&frames, 0.0), 0.0);
-        assert_eq!(keyframes_at(&frames, 0.25), -2.0);
-        assert_eq!(keyframes_at(&frames, 0.5), 2.0);
-        assert_eq!(keyframes_at(&frames, 1.0), 0.0);
-        // Halfway between two keyframes is halfway between their values.
-        assert!((keyframes_at(&frames, 0.125) + 1.0).abs() < 1e-9);
-        // Out-of-range samples clamp rather than extrapolate.
-        assert_eq!(keyframes_at(&frames, 5.0), 0.0);
-        assert_eq!(keyframes_at(&[], 0.5), 0.0);
-        assert_eq!(keyframes_at(&[7.0], 0.5), 7.0);
-    }
+    // `Lane`'s own contract (rest/retarget/retarget_with/snap/advance) and
+    // `keyframes_at` each carry their leaf tests in `crate::press`'s test
+    // module now.
 
     // ---- Metrics / paint --------------------------------------------------
 
