@@ -5,12 +5,13 @@
 //! # The split
 //!
 //! Every GPU resource the effect needs — the lazily compiled per-program
-//! pipeline, the per-`(program, size)` target pool, the fullscreen-triangle
-//! pass, the age-based reap and the churn detector — lives one layer down in
-//! [`frust_gpu::effects`], which speaks `(id, wgsl, size, time)` primitives and
-//! knows nothing about scenes. What lives here is the half that reads a display
-//! list: which programs a frame draws, how big a target each one may ask for,
-//! and the id its rendered result is registered under.
+//! pipeline, the per-`(program, quantized size)` target pool, the
+//! fullscreen-triangle pass, the age-based reaps and the churn detector —
+//! lives one layer down in [`frust_gpu::effects`], which speaks `(id, wgsl,
+//! size, time)` primitives and knows nothing about scenes. What lives here is
+//! the half that reads a display list: which programs a frame draws, how big
+//! a target each one may ask for, and the id its rendered result is
+//! registered under.
 //!
 //! # How a quad reaches the screen
 //!
@@ -20,17 +21,24 @@
 //!
 //! 1. walk the display list for its [`Command::ShaderQuad`]s
 //!    ([`frame_demands`]), collapsing every quad of one program into a single
-//!    demand;
-//! 2. compile the program if it is new, size a pooled target for it, and
-//!    record its fullscreen-triangle pass into the encoder;
-//! 3. register that target with the [`EngineRenderer`] under
+//!    demand and dropping one whose device rectangle does not intersect the
+//!    frame's own target at all, when that extent is known (see
+//!    [`ShaderQuadPass::set_target_extent`]);
+//! 2. compile the program if it is new, size a pooled (quantized) target for
+//!    it, and record its fullscreen-triangle pass into the encoder, confined
+//!    to the sub-rect of that target matching the quad's own exact device
+//!    size — see `frust_gpu::effects::ShaderEffects::encode_pass`;
+//! 3. register that sub-rect with the [`EngineRenderer`] under
 //!    [`SceneTextureId::for_shader_program`], the id the compiler's own
 //!    lowering derives from the same program.
 //!
 //! The draw itself is then nothing special: the compiler lowers the quad to an
 //! external-texture paint over its destination rectangle, exactly as it lowers
 //! [`Command::SceneTexture`](frust_scene::Command::SceneTexture) — same
-//! natural-pixels-onto-destination mapping, same blended pass.
+//! natural-pixels-onto-destination mapping, same blended pass — reading only
+//! the registered sub-rect of what may be a larger, quantized texture (see
+//! `crate::compile::external`/`crate::gpu::bindings`'s offset source-region
+//! support).
 //!
 //! # One target per program per frame
 //!
@@ -43,6 +51,38 @@
 //! that the smaller of two quads samples a larger target — a resample, not a
 //! wrong pixel. The `time` the program renders at is the one its first quad in
 //! painter order carries.
+//!
+//! # Target stability under resize
+//!
+//! A quad's `dest` changing by a fraction of a device pixel every frame — a
+//! window resize drag, an animated scale, a spring layout — used to mint a
+//! fresh GPU texture, view, uniform buffer and bind group on
+//! [`frust_gpu::effects::ShaderEffects`] every single such frame, immediately
+//! evicting the previous one. Two changes fix that, both living in
+//! [`frust_gpu::effects`] and reused here rather than reinvented:
+//!
+//! - **Quantization**: a target's true size is rounded up to the next 256px
+//!   quantum before it becomes a key
+//!   (`frust_gpu::effects::quantized_target_key`, reusing
+//!   `frust_gpu::pool`'s own quantum), so a resize drag mints a new texture
+//!   only when it crosses a 256px boundary. The pass still renders — and the
+//!   shader still sees `frust_u.resolution` as — the quad's own *exact*
+//!   requested size, confined to that sub-rect of the (possibly larger)
+//!   texture via a `wgpu` viewport; the target's true extent is never handed
+//!   to the shader or to the frame's own paint mapping.
+//! - **Age-based target reap**: a size a still-drawn program has resized away
+//!   from is no longer reclaimed the instant it is not asked for (the old
+//!   frame-scoped eviction, which actively fought quantization — two nearby
+//!   requests sharing one quantized texture would otherwise evict each other
+//!   every frame); it ages out over its own window, independent of the
+//!   program id's own (wider) unseen-frame window.
+//!
+//! Registration itself ([`ShaderQuadPass::register`]) still only re-binds the
+//! renderer's own external-texture slot — the strip pipeline's group-1 bind
+//! group — when a program's *demanded* extent actually changes from the
+//! previous frame, which is every frame for a quad genuinely resizing but
+//! none for one holding steady; what quantization removes is the GPU-resource
+//! churn one layer down, which used to happen on every such frame regardless.
 //!
 //! # Alpha
 //!
@@ -72,11 +112,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use frust_gpu::effects::quantized_target_key;
 use frust_gpu::{SceneTextureId, ShaderEffects};
 use frust_scene::{Command, Scene, ShaderProgram};
 use kurbo::{Affine, Rect};
 
 use crate::config;
+use crate::gpu::atlas::x_y_advances;
 use crate::renderer::EngineRenderer;
 
 /// The conservative upper bound on a shader-effect target's own dimensions,
@@ -115,9 +157,23 @@ fn clamp_size(requested: (u32, u32), adapter_max: u32) -> (u32, u32) {
     (clamp(requested.0), clamp(requested.1))
 }
 
-/// The target extent a quad over `dest` under `transform` asks for: the device
-/// -space bounding box of the destination rectangle, rounded up so a fractional
-/// edge is covered rather than cropped, and clamped by [`clamp_size`].
+/// The target extent a quad over `dest` under `transform` asks for: `dest`'s
+/// own width/height scaled by the transform's linear magnitudes — the
+/// lengths of its transformed unit axes ([`x_y_advances`]) — rounded up so a
+/// fractional edge is covered rather than cropped, and clamped by
+/// [`clamp_size`].
+///
+/// Sized from `dest`'s own dimensions rather than the device-space
+/// axis-aligned bounding box a plain `transform_rect_bbox` would give: a
+/// rotated or skewed quad's bbox is both larger than and a different aspect
+/// from the quad itself, so a target sized from it would squash the rendered
+/// content when the frame later resamples it back onto `dest` (a 100x50
+/// rectangle rotated 45 degrees has a ~106x106 bbox, mapped non-uniformly —
+/// (0.943, 0.472) per axis — onto the 100x50 destination it is actually drawn
+/// into). The transform's own linear magnitudes are exactly the per-axis
+/// scale `dest`'s W/H is stretched by on the way to device space, aspect-true
+/// regardless of rotation or skew — a pure rotation leaves both magnitudes at
+/// 1.0, so the target keeps `dest`'s own aspect exactly.
 ///
 /// Rounded up rather than to nearest because the target is *resampled* onto
 /// `dest`: a target a fraction of a pixel too small is a visibly softer edge,
@@ -131,8 +187,10 @@ fn requested_size(dest: Rect, transform: Affine, adapter_max: u32) -> Option<(u3
     if !dest.is_finite() || !transform.as_coeffs().iter().all(|c| c.is_finite()) {
         return None;
     }
-    let device = transform.transform_rect_bbox(dest);
-    if !device.is_finite() {
+    let (x_advance, y_advance) = x_y_advances(transform);
+    let width = dest.width() * x_advance.hypot();
+    let height = dest.height() * y_advance.hypot();
+    if !width.is_finite() || !height.is_finite() {
         return None;
     }
     // Saturating on both ends: a huge-but-finite rectangle becomes the cap
@@ -147,10 +205,7 @@ fn requested_size(dest: Rect, transform: Affine, adapter_max: u32) -> Option<(u3
             ceiled as u32
         }
     };
-    Some(clamp_size(
-        (axis(device.width()), axis(device.height())),
-        adapter_max,
-    ))
+    Some(clamp_size((axis(width), axis(height)), adapter_max))
 }
 
 /// Every fragment program `scene` draws, in painter order of first appearance,
@@ -166,9 +221,29 @@ fn requested_size(dest: Rect, transform: Affine, adapter_max: u32) -> Option<(u3
 /// applied to a body's *rendered* pixels, so a quad inside one is rendered at
 /// its own device size and resampled by the bracket, exactly like every other
 /// command in that body.
-fn frame_demands(scene: &Scene, root: Affine, adapter_max: u32) -> Vec<QuadDemand<'_>> {
+///
+/// `target_extent`, when given, culls a quad whose device-space rectangle
+/// does not overlap `(0, 0)..target_extent` at all — an off-screen or fully
+/// clipped quad then demands no target and is neither rendered nor
+/// re-rendered every frame purely to go unseen. The check is conservative
+/// (the quad's axis-aligned bounding box, not its exact rotated/skewed
+/// footprint, and — via [`kurbo::Rect::overlaps`] — inclusive of a shared
+/// edge), so it never culls a quad that is even partly visible. Clip-stack
+/// awareness (culling a quad hidden entirely behind an unrelated clip) is
+/// deliberately out of scope: the frame's own clip stack is a compile-time
+/// concept this walk runs ahead of, so only whole-target intersection is
+/// checked. `None` applies no culling at all — see
+/// [`ShaderQuadPass::set_target_extent`] for why a caller may have nothing to
+/// pass here today.
+fn frame_demands(
+    scene: &Scene,
+    root: Affine,
+    adapter_max: u32,
+    target_extent: Option<(u32, u32)>,
+) -> Vec<QuadDemand<'_>> {
     let mut order: Vec<u64> = Vec::new();
     let mut demands: HashMap<u64, QuadDemand<'_>> = HashMap::new();
+    let target_rect = target_extent.map(|(w, h)| Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
 
     for command in scene.commands() {
         let Command::ShaderQuad {
@@ -180,7 +255,17 @@ fn frame_demands(scene: &Scene, root: Affine, adapter_max: u32) -> Vec<QuadDeman
         else {
             continue;
         };
-        let Some(size) = requested_size(*dest, root * *transform, adapter_max) else {
+        let device_transform = root * *transform;
+        if let Some(target_rect) = target_rect {
+            let device_bbox = device_transform.transform_rect_bbox(*dest);
+            if device_bbox.is_finite() && !device_bbox.overlaps(target_rect) {
+                // Entirely outside the frame's own target: no target needed.
+                // A non-finite bbox falls through to `requested_size` below,
+                // which drops it on its own terms instead.
+                continue;
+            }
+        }
+        let Some(size) = requested_size(*dest, device_transform, adapter_max) else {
             continue;
         };
         match demands.get_mut(&program.id()) {
@@ -223,12 +308,17 @@ pub struct ShaderQuadPass {
     /// The extent each program's target is currently registered with the
     /// renderer at, keyed by program id.
     ///
-    /// What makes registration incremental: a program whose target is unchanged
-    /// is left bound, so the frame's bind groups naming it survive instead of
-    /// being dropped and rebuilt every frame. An entry here is always matched
-    /// by a live registration on the renderer, which is what lets a reap unbind
-    /// exactly what it reaped.
+    /// What makes registration incremental: a program whose *demanded* extent
+    /// is unchanged frame to frame is left bound, so the frame's bind groups
+    /// naming it survive instead of being dropped and rebuilt every frame —
+    /// the steady-state (by far most common) case for a quad that is not
+    /// actively resizing. An entry here is always matched by a live
+    /// registration on the renderer, which is what lets a reap unbind exactly
+    /// what it reaped.
     registered: HashMap<u64, (u32, u32)>,
+    /// The frame's own render-target extent, in device pixels — see
+    /// [`Self::set_target_extent`].
+    target_extent: Option<(u32, u32)>,
 }
 
 impl ShaderQuadPass {
@@ -240,6 +330,7 @@ impl ShaderQuadPass {
         Self {
             effects: ShaderEffects::new(pipeline_cache),
             registered: HashMap::new(),
+            target_extent: None,
         }
     }
 
@@ -247,6 +338,26 @@ impl ShaderQuadPass {
     #[must_use]
     pub fn registered_len(&self) -> usize {
         self.registered.len()
+    }
+
+    /// Sets the frame's own render-target extent, in device pixels, so the
+    /// next [`Self::prepare`] call can cull a quad whose device-space
+    /// rectangle does not intersect it at all (see [`frame_demands`]'s doc
+    /// comment for the exact rule). `None` (the default a fresh
+    /// [`Self::new`] starts with) applies no culling.
+    ///
+    /// Opt-in rather than inferred: `prepare`'s own signature is fixed by its
+    /// external caller (`frust-render`'s `SurfaceRenderer`, which records the
+    /// pre-pass ahead of `EngineRenderer::encode` — see the module header),
+    /// and nothing reachable from `prepare`'s existing parameters names the
+    /// frame's target extent today (`EngineRenderer` learns it only when
+    /// `encode` itself is called, afterward). Adding a required parameter to
+    /// `prepare` to carry it through would break that caller — out of scope
+    /// here — so a caller that knows its target extent ahead of time calls
+    /// this setter first instead. Wiring `frust-render`'s own call site to do
+    /// so is a follow-up outside this module.
+    pub fn set_target_extent(&mut self, extent: Option<(u32, u32)>) {
+        self.target_extent = extent;
     }
 
     /// Renders every fragment program `scene` draws into its own pooled target,
@@ -277,50 +388,69 @@ impl ShaderQuadPass {
             return;
         }
 
-        let demands = frame_demands(scene, root, device.limits().max_texture_dimension_2d);
+        let adapter_max = device.limits().max_texture_dimension_2d;
+        let demands = frame_demands(scene, root, adapter_max, self.target_extent);
         let mut live_ids: HashSet<u64> = HashSet::with_capacity(demands.len());
         let mut live_keys: HashSet<(u64, u32, u32)> = HashSet::with_capacity(demands.len());
 
         for demand in demands {
             let id = demand.program.id();
             let (w, h) = demand.size;
+            let quantized = quantized_target_key(w, h, adapter_max);
             live_ids.insert(id);
-            live_keys.insert((id, w, h));
+            live_keys.insert((id, quantized.0, quantized.1));
 
             self.effects
                 .ensure_pipeline(device, id, demand.program.source());
             self.effects.ensure_target(device, id, w, h);
             self.effects
-                .encode_pass(encoder, queue, id, (w, h), demand.time);
-            self.register(engine, id, (w, h));
+                .encode_pass(encoder, queue, device, id, (w, h), demand.time);
+            self.register(engine, device, id, (w, h));
         }
 
-        // Frame-scoped first — the sizes a still-drawn program resized away
-        // from — then the age-based whole-program reap, which is the one that
-        // has registrations to withdraw. `mark_seen` is called on every frame,
-        // empty demand list included: that is the clock a vanished program ages
-        // against.
-        self.effects.evict_stale_targets(&live_keys);
-        let stale = self.effects.mark_seen(&live_ids);
+        // The one clock tick per frame — including a frame drawing no quad at
+        // all — that ages both a program id absent from `live_ids` towards
+        // its whole-program reap and a target key absent from `live_keys`
+        // towards its own, shorter, target-level reap (see
+        // `frust_gpu::effects::ShaderEffects::mark_seen`). Only the
+        // whole-program reap has registrations to withdraw: a target-level
+        // reap frees GPU memory for a size this id has resized away from
+        // without touching what is currently registered.
+        let stale = self.effects.mark_seen(&live_ids, &live_keys);
         self.effects.reap(&stale);
         for id in stale {
             self.unregister(engine, id);
         }
     }
 
-    /// Registers program `id`'s `(w, h)` target with `engine`, or withdraws any
-    /// earlier registration when there is no such target to register.
+    /// Registers program `id`'s `(w, h)`-requested target with `engine`, or
+    /// withdraws any earlier registration when there is no such target to
+    /// register.
     ///
-    /// A no-op when the program is already registered at the extent its target
-    /// was built at, which is the common case on every frame after the first:
-    /// re-registering would drop the frame's bind groups naming the view and
-    /// rebuild them for an identical binding.
-    fn register(&mut self, engine: &mut EngineRenderer, id: u64, size: (u32, u32)) {
+    /// A no-op when the program is already registered at the extent its
+    /// demand resolved to this call, which is the common (steady-state) case
+    /// on every frame a quad is not actively resizing: re-registering would
+    /// drop the frame's bind groups naming the view and rebuild them for an
+    /// identical binding. The registered extent is the *requested* sub-rect
+    /// (see `frust_gpu::effects::ShaderEffects::target_extent`), never the
+    /// quantized target's own larger size, so the compiler still maps `dest`
+    /// onto exactly the quad's own device pixels — a quad resizing pixel by
+    /// pixel still re-registers every such frame (its demand genuinely
+    /// changes), but the expensive part — a fresh GPU texture, view, uniform
+    /// buffer and bind group — no longer does, since quantization keeps the
+    /// underlying target the same across an entire 256px band.
+    fn register(
+        &mut self,
+        engine: &mut EngineRenderer,
+        device: &wgpu::Device,
+        id: u64,
+        size: (u32, u32),
+    ) {
         let (w, h) = size;
         let Some((extent, view)) = self
             .effects
-            .target_extent(id, w, h)
-            .zip(self.effects.target_view(id, w, h).cloned())
+            .target_extent(device, id, w, h)
+            .zip(self.effects.target_view(device, id, w, h).cloned())
         else {
             // No target: the program failed to compile, or its size was
             // refused. Either way it must stop drawing whatever it drew last.
@@ -461,6 +591,30 @@ mod tests {
     }
 
     #[test]
+    fn a_rotated_quad_sizes_from_dest_dimensions_not_the_axis_aligned_bbox() {
+        // A pure rotation has unit-magnitude axes, so the aspect-true target
+        // keeps dest's own 100x50 exactly — the axis-aligned bbox of a 100x50
+        // rectangle rotated 45 degrees is instead ~106x106, which would
+        // squash the rendered content non-uniformly when resampled back onto
+        // the (still 100x50) destination.
+        let dest = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let transform = Affine::rotate(std::f64::consts::FRAC_PI_4);
+
+        assert_eq!(requested_size(dest, transform, 8192), Some((100, 50)));
+    }
+
+    #[test]
+    fn a_scaled_and_rotated_quad_sizes_aspect_true_too() {
+        // The transform's linear magnitude folds in uniform scale the same
+        // way plain `Affine::scale` already did before this fix; rotation on
+        // top of it changes nothing about the sizing, only the bbox.
+        let dest = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let transform = Affine::rotate(std::f64::consts::FRAC_PI_4) * Affine::scale(2.0);
+
+        assert_eq!(requested_size(dest, transform, 8192), Some((200, 100)));
+    }
+
+    #[test]
     fn a_scene_without_shader_quads_demands_nothing() {
         let scene = scene_of(|builder| {
             builder.fill_rect(
@@ -469,7 +623,7 @@ mod tests {
             );
         });
 
-        assert!(frame_demands(&scene, Affine::IDENTITY, 8192).is_empty());
+        assert!(frame_demands(&scene, Affine::IDENTITY, 8192, None).is_empty());
     }
 
     #[test]
@@ -482,7 +636,7 @@ mod tests {
             builder.draw_shader(&first, Rect::new(0.0, 0.0, 8.0, 8.0), 0.0);
         });
 
-        let demands = frame_demands(&scene, Affine::IDENTITY, 8192);
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, None);
 
         assert_eq!(demands.len(), 2);
         assert_eq!(demands[0].program.id(), first.id());
@@ -497,7 +651,7 @@ mod tests {
             builder.draw_shader(&program, Rect::new(0.0, 0.0, 10.0, 30.0), 0.0);
         });
 
-        let demands = frame_demands(&scene, Affine::IDENTITY, 8192);
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, None);
 
         assert_eq!(demands.len(), 1, "one target serves both quads");
         assert_eq!(demands[0].size, (40, 30));
@@ -511,7 +665,7 @@ mod tests {
             builder.draw_shader(&program, Rect::new(0.0, 0.0, 8.0, 8.0), 9.0);
         });
 
-        let demands = frame_demands(&scene, Affine::IDENTITY, 8192);
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, None);
 
         assert_eq!(demands[0].time, 1.5);
     }
@@ -523,7 +677,7 @@ mod tests {
             builder.draw_shader(&program, Rect::new(0.0, 0.0, f64::NAN, 8.0), 0.0);
         });
 
-        assert!(frame_demands(&scene, Affine::IDENTITY, 8192).is_empty());
+        assert!(frame_demands(&scene, Affine::IDENTITY, 8192, None).is_empty());
     }
 
     #[test]
@@ -533,7 +687,7 @@ mod tests {
             builder.draw_shader(&program, Rect::new(0.0, 0.0, 100.0, 50.0), 0.0);
         });
 
-        let demands = frame_demands(&scene, Affine::scale(3.0), 8192);
+        let demands = frame_demands(&scene, Affine::scale(3.0), 8192, None);
 
         assert_eq!(demands[0].size, (300, 150));
     }
@@ -545,7 +699,7 @@ mod tests {
             builder.draw_shader(&program, Rect::new(0.0, 0.0, 6000.0, 6000.0), 0.0);
         });
 
-        let demands = frame_demands(&scene, Affine::IDENTITY, 4096);
+        let demands = frame_demands(&scene, Affine::IDENTITY, 4096, None);
 
         assert_eq!(demands[0].size, (4096, 4096));
     }
@@ -560,5 +714,101 @@ mod tests {
             SceneTextureId::for_shader_program(program.id()).get(),
             crate::compile::shader_quad_texture_id(program.id())
         );
+    }
+
+    #[test]
+    fn with_no_target_extent_a_far_off_screen_quad_still_demands() {
+        // `None` (a fresh `ShaderQuadPass`'s default) applies no culling at
+        // all — see `ShaderQuadPass::set_target_extent`'s doc comment for why.
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(
+                &program,
+                Rect::new(10_000.0, 10_000.0, 10_008.0, 10_008.0),
+                0.0,
+            );
+        });
+
+        assert_eq!(frame_demands(&scene, Affine::IDENTITY, 8192, None).len(), 1);
+    }
+
+    #[test]
+    fn a_quad_entirely_outside_the_target_extent_demands_nothing() {
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(
+                &program,
+                Rect::new(10_000.0, 10_000.0, 10_008.0, 10_008.0),
+                0.0,
+            );
+        });
+
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, Some((64, 64)));
+
+        assert!(demands.is_empty());
+    }
+
+    #[test]
+    fn a_quad_straddling_the_target_edge_still_demands() {
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(&program, Rect::new(-8.0, -8.0, 8.0, 8.0), 0.0);
+        });
+
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, Some((64, 64)));
+
+        assert_eq!(
+            demands.len(),
+            1,
+            "a quad straddling the target boundary is still partly visible"
+        );
+    }
+
+    #[test]
+    fn a_quad_touching_the_target_edge_still_demands() {
+        // `Rect::overlaps` treats a shared edge as overlapping — deliberately
+        // conservative, so a quad exactly abutting the target boundary is
+        // never wrongly culled.
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(&program, Rect::new(64.0, 0.0, 80.0, 16.0), 0.0);
+        });
+
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, Some((64, 64)));
+
+        assert_eq!(demands.len(), 1);
+    }
+
+    #[test]
+    fn a_quad_fully_inside_the_target_extent_still_demands() {
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(&program, Rect::new(4.0, 4.0, 12.0, 12.0), 0.0);
+        });
+
+        let demands = frame_demands(&scene, Affine::IDENTITY, 8192, Some((64, 64)));
+
+        assert_eq!(demands.len(), 1);
+    }
+
+    #[test]
+    fn a_quad_with_non_finite_geometry_is_dropped_by_requested_size_not_by_culling() {
+        // A non-finite device bbox falls through the target-extent check
+        // (which only culls a *finite* bbox proven not to overlap) rather
+        // than being treated as "outside", so `requested_size`'s own
+        // non-finite handling is what actually drops it — proven here by
+        // still getting an empty result, not a panic or a false demand.
+        let program = ShaderProgram::new(SOURCE);
+        let scene = scene_of(|builder| {
+            builder.draw_shader(&program, Rect::new(0.0, 0.0, f64::NAN, 8.0), 0.0);
+        });
+
+        assert!(frame_demands(&scene, Affine::IDENTITY, 8192, Some((64, 64))).is_empty());
+    }
+
+    #[test]
+    fn set_target_extent_defaults_to_none() {
+        let pass = ShaderQuadPass::new(None);
+        assert_eq!(pass.target_extent, None);
     }
 }

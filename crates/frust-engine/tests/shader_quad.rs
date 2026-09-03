@@ -106,6 +106,40 @@ fn reports_resolution(expected: f32) -> String {
     )
 }
 
+/// A fragment source encoding the `resolution` uniform it was handed
+/// directly into its output colour (`resolution.x/255`, `resolution.y/255`)
+/// rather than comparing it against a value baked into the WGSL source at
+/// compile time. This lets one compiled program (one program id, one
+/// pipeline) be reused across a resize — a read-back recovers the exact
+/// extent the shader saw at each size from the pixel bytes themselves,
+/// proving a shared (quantized) target renders the correct sub-rect after a
+/// resize rather than being sized, or sampled, from the target's own true
+/// (larger, quantized) extent.
+fn reports_resolution_as_color() -> String {
+    "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> { \
+     return vec4<f32>(frust_u.resolution.x / 255.0, frust_u.resolution.y / 255.0, 0.0, 1.0); }"
+        .to_string()
+}
+
+/// A fragment source answering green when the `resolution` uniform's own
+/// aspect ratio (`resolution.x / resolution.y`) is within `tolerance` of
+/// `expected`, red otherwise — a device-verified proxy for "the target was
+/// sized aspect-true from `dest`'s own dimensions, not the rotated
+/// axis-aligned bounding box": a 40x20 `dest` (aspect 2.0) rotated 45 degrees
+/// has a ~42.4x42.4 bbox (aspect ~1.0), so a target sized from the bbox
+/// instead of `dest` would report the wrong aspect here. A direct
+/// circle-stays-a-circle read-back would prove the same fact but is far more
+/// sensitive to edge anti-aliasing and rotated-sampling error than an aspect
+/// comparison is.
+fn reports_aspect(expected: f32) -> String {
+    format!(
+        "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {{ \
+         let aspect = frust_u.resolution.x / frust_u.resolution.y; \
+         if (abs(aspect - {expected:?}) < 0.05) {{ return vec4<f32>(0.0, 1.0, 0.0, 1.0); }} \
+         return vec4<f32>(1.0, 0.0, 0.0, 1.0); }}"
+    )
+}
+
 /// Blocks on `future` by polling it to completion.
 ///
 /// wgpu's native adapter and device requests resolve without an executor
@@ -541,4 +575,67 @@ fn a_program_the_scene_stops_drawing_is_reaped_and_unregistered() {
     // And the same scene now draws nothing rather than a stale target.
     let after = harness.render_without_prepass(&scene_drawing(&program, DEST));
     assert_frame_is_base(&after, BLACK);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test shader_quad -- --ignored`"]
+fn a_resized_quad_reads_back_the_correct_exact_size_from_the_shared_quantized_target() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    let program = ShaderProgram::new(reports_resolution_as_color());
+
+    let first = harness.render_over(&scene_drawing(&program, DEST), BLACK);
+    let before = pixel(&first, 20, 20);
+    assert_eq!(before[0], 32, "the shader reads back the exact 32px width");
+    assert_eq!(before[1], 32, "the shader reads back the exact 32px height");
+    assert_eq!(harness.shader_quads.registered_len(), 1);
+
+    // Resized within the same 256x256 quantized target (see
+    // `frust_gpu::effects::quantized_target_key`): the same pooled texture is
+    // reused underneath, but the pass renders — and the shader reads back —
+    // the new exact device size, 48x48, never the old 32x32 or the target's
+    // true (quantized) extent.
+    let resized_dest = Rect::new(8.0, 8.0, 56.0, 56.0);
+    let second = harness.render_over(&scene_drawing(&program, resized_dest), BLACK);
+    let after = pixel(&second, 30, 30);
+    assert_eq!(
+        after[0], 48,
+        "after the resize the shader reads back 48px width"
+    );
+    assert_eq!(
+        after[1], 48,
+        "after the resize the shader reads back 48px height"
+    );
+    assert_eq!(
+        harness.shader_quads.registered_len(),
+        1,
+        "still one registration: the same program, a new exact demanded size"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test shader_quad -- --ignored`"]
+fn a_rotated_quad_sizes_its_target_from_dest_not_the_rotated_bbox() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    // A 40x20 dest (aspect 2.0), recorded rotated 45 degrees around its own
+    // centre so it stays inside the 64x64 frame: the axis-aligned bbox of a
+    // 40x20 rectangle rotated 45 degrees is ~42.4x42.4 (aspect ~1.0), which
+    // is what an un-fixed bbox-based sizing would report here instead.
+    let program = ShaderProgram::new(reports_aspect(2.0));
+    let local_dest = Rect::new(-20.0, -10.0, 20.0, 10.0);
+    let scene = scene_of(|builder| {
+        builder.push_transform(
+            Affine::translate((32.0, 32.0)) * Affine::rotate(std::f64::consts::FRAC_PI_4),
+        );
+        builder.draw_shader(&program, local_dest, 0.0);
+        builder.pop_transform();
+    });
+
+    let frame = harness.render_over(&scene, BLACK);
+
+    // Probe near the centre of the rotated quad, away from its edges (which
+    // an aspect check does not depend on rotated-sampling precision at all —
+    // every rendered texel already carries the same colour).
+    assert_eq!(pixel(&frame, 32, 32), SHADER_GREEN);
 }
