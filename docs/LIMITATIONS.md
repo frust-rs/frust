@@ -3933,3 +3933,24 @@ local change at its device-creation site.
 
 **Trigger for removal**: both mobile shells install the handle and a device
 run (Pixel 5, iPhone) reads it back through `with_context`.
+
+### `engine-ios-sim-seam-suites-unrun` — the engine's seam test suites have not been executed on the iOS Simulator
+
+**Observed** (evidence: `benchmarks/raw/mac/README.md`'s iOS Simulator table, gate
+`engine-p9-ios-sim-seam`): the `frust-engine` `scene_texture`/`shader_quad`/`shared_encoder`
+suites have not yet been run on the iOS Simulator. Before `p9-f2`, their fixtures were refused at
+`request_device` (`LimitsExceeded { max_inter_stage_shader_variables: requested 16, allowed 15 }`)
+against the Simulator's Apple2 adapter, which reports only 15. The fixture fix is in —
+`frust_gpu::test_device_limits` now derives the request from the adapter/`TierCaps` the same way
+`create_device` does — but the Simulator re-run itself is still owed to the Mac rig, so gate
+`engine-p9-ios-sim-seam` is recorded skipped for these three suites. `ShaderQuad`/`SceneTexture` on
+the Simulator is proven only by the shadertoy app path (gate
+`engine-p9-ios-sim-shadertoy-app`), not by the suites themselves.
+
+**Accepted because**: the refusal was a fixture bug, not an engine or Metal deviation —
+`ios_sim.rs`'s own device passes on the same adapter because it already derived its limits this
+way — and the app-path run already exercises the same commands end to end; only the suites'
+own Simulator execution is outstanding.
+
+**Trigger for removal**: the three suites run to completion on the Simulator (Mac rig) and the
+result is recorded in `benchmarks/RESULTS.md` or the raw README.

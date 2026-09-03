@@ -257,6 +257,14 @@ the bare theme cap regardless of any longer per-request interval (see
   fires nothing. Android additionally reads the app's resolved brightness back over JNI — after
   every appearance change and once per frame — so a theme forced from Rust reaches the status bar
   without waiting for a platform event.
+- **Accessibility:** `frust-core`'s semantics pass reports every node's `bounds` in logical
+  pixels — the same layout unit paint scales from — while accesskit expects physical pixels. The
+  desktop shell's `build_tree_update` stamps a root `Affine::scale(window.scale_factor())`
+  transform onto the accesskit `TreeUpdate` it pushes (left `None` at scale 1.0, matching
+  accesskit's own identity-transform guidance), converting the whole tree through accesskit's
+  ancestor-transform rule so an assistive-technology client reads physical-pixel bounds matching
+  the DPR-scaled paint pass. The mobile shells own their own accessibility bridges
+  (`accesskit_android`, `accesskit_ios`) rather than sharing this path.
 - **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
   watches the animator duration scale via a `ContentObserver` plus an `onResume` re-read, iOS the
   UIKit reduce-motion notification plus an activation re-read, and desktop has no source at all (a
