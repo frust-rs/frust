@@ -112,11 +112,13 @@ fn only_image_entry(frame: &CompiledFrame) -> &vello_common::encode::EncodedImag
 fn record_texels(paint: &GpuEncodedPaint) -> Vec<[u32; 4]> {
     let bytes = paint.as_bytes();
     bytes
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|texel| {
             let mut words = [0_u32; 4];
-            for (word, chunk) in words.iter_mut().zip(texel.chunks_exact(4)) {
-                *word = u32::from_le_bytes(chunk.try_into().expect("four bytes"));
+            for (word, chunk) in words.iter_mut().zip(texel.as_chunks::<4>().0) {
+                *word = u32::from_le_bytes(*chunk);
             }
             words
         })

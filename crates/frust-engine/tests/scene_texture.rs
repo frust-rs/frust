@@ -363,7 +363,11 @@ fn an_unregistered_id_draws_only_the_base_colour() {
     let frame = harness.render(&scene_drawing(source.as_scene_texture(), DEST));
 
     assert!(
-        frame.as_chunks::<4>().0.iter().all(|texel| *texel == rgba(BLACK)),
+        frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|texel| *texel == rgba(BLACK)),
         "an unregistered id leaves the frame as its base colour"
     );
 }
@@ -385,7 +389,11 @@ fn unbinding_a_texture_stops_the_very_next_frame_drawing_it() {
     let after = harness.render(&scene);
 
     assert!(
-        after.as_chunks::<4>().0.iter().all(|texel| *texel == rgba(BLACK)),
+        after
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|texel| *texel == rgba(BLACK)),
         "an unbound texture is not drawn from a retained bind group"
     );
 }
