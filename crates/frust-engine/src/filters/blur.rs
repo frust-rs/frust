@@ -184,12 +184,9 @@ impl LinearKernel {
         let positive_side = kernel
             .get(radius.saturating_add(1)..kernel_size)
             .unwrap_or(&[]);
-        let pairs = positive_side.chunks_exact(2);
-        let remainder = pairs.remainder();
+        let (pairs, remainder) = positive_side.as_chunks::<2>();
 
-        for (k, pair) in pairs.enumerate() {
-            let [w1, w2] = pair else { continue };
-            let (w1, w2) = (*w1, *w2);
+        for (k, &[w1, w2]) in pairs.iter().enumerate() {
             let merged_weight = w1 + w2;
             let offset1 = (2 * k + 1) as f32;
             // The merged sample sits at the weighted mean of the two taps it
