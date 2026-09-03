@@ -27,6 +27,13 @@
 //! resolving its adapter and limits exactly as a real device does and asking
 //! the same capability gate.
 //!
+//! [`external_pass`] is the third `wgpu`-typed seam, and the one that points
+//! outward: an app or a crate beside the facade registers an [`ExternalPass`],
+//! and [`SurfaceRenderer`] hands it the frame's own device, queue and encoder
+//! ahead of the scene pass so it can render into a target of its own and bind
+//! the result for a `Command::SceneTexture` to composite. See that module's
+//! docs for the contract; `HeadlessRenderer` does not drain that registry.
+//!
 //! Surface lifecycle is a first-class state machine: see [`SurfaceRenderer`]
 //! and [`SurfacePhase`]/[`FrameOutcome`], whose pure transition tables live in
 //! `frust_gpu::lifecycle` and are re-exported here.
@@ -49,6 +56,12 @@
 //! engine's own capability gate, and [`SurfaceRenderer`] itself.
 
 mod context;
+// The pre-scene GPU seam: caller-supplied passes recorded into the frame's own
+// encoder ahead of the scene, binding their results into the engine's
+// external-texture registry. Public as a module (rather than only through the
+// flat re-export below) so its own docs — the whole contract a pass is written
+// against — are reachable under one heading.
+pub mod external_pass;
 // Offscreen (no surface, no swapchain) engine rendering: the harness the
 // pixel-regression tests render through. Reachable from outside the crate,
 // unlike the effects module below, because those tests live outside it — and
@@ -72,6 +85,11 @@ pub use frust_gpu::{
 // (the only one most apps ever produce) at zero new public symbols.
 #[cfg(feature = "gpu")]
 pub use frust_gpu::DeviceHandle;
+// Flat, alongside every other name a caller reaches this crate by; the module
+// above stays public for its docs.
+pub use external_pass::{
+    ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
+};
 pub use headless::{
     GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage, HeadlessMeta,
     HeadlessOptions, HeadlessRenderer, HeadlessSpec,
