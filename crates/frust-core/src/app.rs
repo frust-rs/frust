@@ -1772,6 +1772,7 @@ mod tests {
         fn draw_text(&mut self, origin: Point, text: &str) {
             self.texts.push((origin, text.to_string()));
         }
+        fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {}
     }
 
     fn app_logic(state: &mut AppState) -> MockTextView {

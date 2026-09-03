@@ -59,6 +59,11 @@ frust-render = { workspace = true }
 # layer boundary) — optional and off by default, so an ordinary app build
 # still carries none of it.
 frust-gpu = { workspace = true, optional = true }
+# The wgpu GPU graphics library, re-exported flat through `frust::gpu` under
+# the `gpu` feature so a plugin recording an ExternalPass needs no direct
+# wgpu edge. Optional and off by default; workspace-pinned to keep the
+# version in sync with the rest of the stack.
+wgpu = { workspace = true, optional = true }
 # Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
 # can shape its own glyph runs without naming `frust-text`. Already in the
 # graph transitively via frust-widgets/frust-theme; named here (promoted from
@@ -188,6 +193,7 @@ devtools = [
 # but do not install yet — an accepted gap, see each shell's own crate docs.
 gpu = [
     "dep:frust-gpu",
+    "dep:wgpu",
     "frust-shell-common/gpu",
     "frust-shell-desktop/gpu",
     "frust-shell-android/gpu",

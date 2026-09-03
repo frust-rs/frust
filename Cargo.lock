@@ -2096,6 +2096,7 @@ dependencies = [
  "kurbo",
  "peniko",
  "reactive_graph",
+ "wgpu",
 ]
 
 [[package]]

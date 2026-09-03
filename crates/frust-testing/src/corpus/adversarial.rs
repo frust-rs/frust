@@ -408,7 +408,7 @@ fn ten_thousand_glyphs() -> CorpusCase {
 /// probe an `Exact` rather than an `AtLeast`.
 fn solid_image(width: u32, height: u32, color: [u8; 4]) -> ImageData {
     let mut data = vec![0_u8; (width as usize) * (height as usize) * 4];
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&color);
     }
     ImageData {
