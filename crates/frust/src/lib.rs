@@ -629,9 +629,17 @@ pub mod authoring {
 ///    display list naming it meet inside one frame, so the ordering is
 ///    already right; an id whose pass has not bound anything yet simply draws
 ///    nothing that frame, never an error.
-/// 4. **Unregister on drop** with [`unregister_external_pass`]. The next
-///    frame clears the engine's binding for that id before it runs any pass,
-///    so no view is kept alive for a texture whose owner is gone.
+/// 4. **Unregister on teardown** with [`unregister_external_pass`] — in
+///    `Widget::teardown` (or `on_cleanup` for a `Component`), never a
+///    hand-rolled `Drop` (`docs/CODE_STANDARDS.md`'s State & Reactivity
+///    rule: `Drop` order across a component's state/element/owner triple is
+///    not a contract, `on_cleanup`/`teardown` are). The next *drained* frame
+///    clears the engine's binding for that id before it runs any pass, so no
+///    view is kept alive for a texture whose owner is gone — though
+///    unregistering is not itself a barrier: a drain already mid-flight when
+///    it runs may still call this pass's `record` once more, and the unbind
+///    lands only once a frame is actually drained, not while the surface is
+///    idle.
 ///
 /// A widget whose texture is *animating* asks for the next frame exactly as
 /// any other animating widget does — `PaintCtx::request_frame` (or
@@ -650,12 +658,12 @@ pub mod authoring {
 ///             let mut pass = frame.encoder().begin_render_pass(&/* … */);
 ///             // … draw into `view` …
 ///         }                                                    // pass ends here
-///         frame.bind_texture(self.id, (WIDTH, HEIGHT), view);  // engine draws it
+///         frame.bind_texture((WIDTH, HEIGHT), view);  // engine draws it, under this pass's own id
 ///     }
 /// }
 /// ```
 ///
-/// Three rules that go with it:
+/// Four rules that go with it:
 ///
 /// - **A pass renders into its own target, never into the frame's.** The
 ///   engine clears the frame's colour attachment when it records the scene,
@@ -663,25 +671,39 @@ pub mod authoring {
 ///   composites from a bound texture. A pass also never submits — the
 ///   renderer submits the whole frame, once, which is what puts the pass's
 ///   work ahead of the scene's in a single command buffer.
-/// - **Touching the frame's depth attachment means owing
-///   `frust-gpu::encoder`'s two caller rules** — the module [`CommandBuffer`]
-///   comes from, and where they are stated in full: exactly one renderer clears the shared
-///   depth buffer and it is whichever records first, and the comparison,
-///   direction and extent have to agree with the engine's
-///   (`LessEqual`, `Depth24Plus`, far plane `1.0`, extent equal to the
-///   colour attachment's).
+/// - **A pass never shares the frame's own depth attachment.** It records
+///   only into attachments it owns, on a target it owns, sized however that
+///   target needs to be — [`ExternalFrame`] hands out no depth view of its
+///   own. `frust-gpu::encoder`'s two depth caller rules — the module
+///   [`CommandBuffer`] comes from — are for a *host* sharing one depth buffer
+///   across renderers of its own; they have nothing to do with a pass
+///   registered here.
 /// - **The result is always composited blended**, never treated as opaque:
 ///   the engine does not read the caller's texels, so it cannot know they are
 ///   (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`). Return
 ///   premultiplied colour, the convention every paint in an engine frame
 ///   travels in.
+/// - **A pass's recorded work is submitted only if the frame is** — a
+///   refused engine frame drops the encoder unsubmitted, and every command a
+///   pass recorded into it goes with it — **but [`ExternalFrame::bind_texture`]
+///   is not part of that encoder**; it writes the engine's registry directly,
+///   inside `record`, so its side effect survives a refusal the recorded draw
+///   commands do not. A pass whose target must never be sampled half-written
+///   binds only once that target genuinely holds something, rather than
+///   relying on the frame that was meant to fill it having been accepted.
 ///
 /// The registry itself is shell-agnostic — a process-wide map with no device,
-/// window or platform in it, registerable from anywhere at any time — but it
-/// is drained on the engine tier's frame path, so a pass records where an
-/// engine-tier surface is presenting frames and nowhere else. That is the
-/// desktop shell today, for the same reason [`with_context`] answers `None`
-/// on mobile: registration there is accepted and simply never called.
+/// window or platform in it, registerable from anywhere at any time. The
+/// gate is which frame path drains it: any engine-tier `SurfaceRenderer`
+/// frame, `submit` and `submit_deferred` alike, which is what the Android and
+/// iOS shells call exactly as desktop does — a registered pass is not
+/// desktop-only by construction, unlike [`with_context`], which genuinely
+/// does answer `None` on mobile today (no shell there has installed a
+/// [`DeviceHandle`] yet). Only the desktop headless path has actually been
+/// *exercised* so far (`docs/LIMITATIONS.md`'s
+/// `facade-external-pass-desktop-only`) — mobile is wired and compiles the
+/// seam, but no registered pass has been driven through either shell's own
+/// frame loop yet.
 ///
 /// A panic inside `record` is caught in a debug build: the pass is reported,
 /// unregistered and unbound, and the frame is recorded without it. The

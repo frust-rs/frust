@@ -2,17 +2,21 @@
 //! device-free, and the whole path on real hardware.
 //!
 //! The device-free cases pin what a caller can observe without a GPU at all —
-//! that a registration is a claim on an id rather than a silent takeover, and
-//! that unregistering an id nothing holds is an honest `false`. They run
-//! everywhere.
+//! that a registration is a claim on an id rather than a silent takeover,
+//! that unregistering an id nothing holds is an honest `false`, and that an
+//! id inside the reserved shader-program namespace is refused outright. They
+//! run everywhere.
 //!
-//! The `#[ignore]`d case is the one that matters, and it is the one only a
-//! real queue can make: a pass recording into the *frame's own* encoder, ahead
-//! of the scene, binding a target it created itself, and the engine
-//! compositing that target where the display list names its id. Nothing about
-//! that produces a wrong value when it is wrong — it produces an untouched
-//! target, a validation error, or the base colour where the texture should be
-//! — so it takes a read-back to tell those apart:
+//! The `#[ignore]`d cases are the ones that matter, and they are the ones
+//! only a real queue can make: a pass recording into the *frame's own*
+//! encoder, ahead of the scene, binding a target it created itself, and the
+//! engine compositing that target where the display list names its id — plus
+//! a pass that panics with its own render pass still open, proving an unwind
+//! through that open borrow leaves the frame's encoder just as usable for
+//! whatever records after it. Nothing about any of that produces a wrong
+//! value when it is wrong — it produces an untouched target, a validation
+//! error, or the base colour where the texture should be — so it takes a
+//! read-back to tell those apart:
 //!
 //! ```text
 //! WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
@@ -172,6 +176,49 @@ fn an_id_freed_by_unregistering_can_be_claimed_again() {
     assert!(unregister_external_pass(id));
 }
 
+#[test]
+fn a_reserved_shader_program_namespace_id_is_refused_registration() {
+    let _serial = serial();
+    // Derived from a minted id's own ordinal rather than a literal: any
+    // ordinal works, `for_shader_program` is what puts it in the reserved
+    // range, and this keeps the case from depending on a hardcoded number.
+    let id = SceneTextureId::for_shader_program(SceneTextureId::mint().get());
+    let _ = take_log();
+
+    assert!(
+        !register_external_pass(id, Arc::new(Inert)),
+        "an id inside the reserved shader-program namespace is refused"
+    );
+    assert!(
+        !unregister_external_pass(id),
+        "nothing was ever registered, so there is nothing to unregister"
+    );
+
+    // Retrying the same doomed registration reports at warn the first time
+    // and debug afterward — the same posture a reproducing panic gets.
+    assert!(!register_external_pass(id, Arc::new(Inert)));
+    let reports = take_log()
+        .into_iter()
+        .filter(|record| {
+            record.contains("reserved shader-program namespace")
+                && record.contains(&id.get().to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reports.len(),
+        2,
+        "both refused registrations are reported: {reports:?}"
+    );
+    assert!(
+        reports[0].starts_with("WARN"),
+        "the first refusal of an id is a warning: {reports:?}"
+    );
+    assert!(
+        reports[1].starts_with("DEBUG"),
+        "repeat refusals of the same id are logged at debug: {reports:?}"
+    );
+}
+
 // --------------------------------------------------------------------- GPU --
 
 /// A pass that clears a target of its own to `color` and binds it — the
@@ -198,6 +245,11 @@ impl SolidPass {
 
 impl ExternalPass for SolidPass {
     fn record(&self, frame: &mut ExternalFrame<'_>) {
+        assert_eq!(
+            frame.id(),
+            self.id,
+            "the frame handed to a pass is scoped to that pass's own registered id"
+        );
         let texture = frame.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("external pass target"),
             size: wgpu::Extent3d {
@@ -233,7 +285,7 @@ impl ExternalPass for SolidPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-        frame.bind_texture(self.id, (TEXTURE, TEXTURE), view);
+        frame.bind_texture((TEXTURE, TEXTURE), view);
         self.recorded.store(true, Ordering::Relaxed);
     }
 }
@@ -244,6 +296,57 @@ struct PanickingPass;
 impl ExternalPass for PanickingPass {
     fn record(&self, _frame: &mut ExternalFrame<'_>) {
         panic!("this pass panics on purpose");
+    }
+}
+
+/// A pass that opens a render pass on its own target and panics with it still
+/// open — never reaching the point where the `wgpu::RenderPass` borrow of the
+/// frame's encoder would end on its own. What this exercises is the unwind
+/// itself dropping that open borrow: `catch_unwind` only recovers *after*
+/// unwinding has run every local's `Drop`, so by the time it returns the
+/// render pass this struct opened has already been ended by its own
+/// destructor, and the frame's encoder is left exactly as usable for the
+/// pass recorded after it as it would be following an ordinary return.
+struct PanicMidRenderPass;
+
+impl ExternalPass for PanicMidRenderPass {
+    fn record(&self, frame: &mut ExternalFrame<'_>) {
+        let texture = frame.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("panic mid render pass target"),
+            size: wgpu::Extent3d {
+                width: TEXTURE,
+                height: TEXTURE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let _open = frame
+            .encoder()
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("panic mid render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(GREEN),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        // `_open` is still alive (not dropped) at this point — the panic
+        // unwinds straight through it.
+        panic!("this pass panics with its own render pass still open");
     }
 }
 
@@ -576,5 +679,64 @@ fn a_panicking_pass_is_retired_without_taking_the_frame_or_its_siblings_down() {
     // Leave the registry as this case found it: the queued unbinds are the
     // next drain's work, and this harness is the only thing that would run
     // one.
+    let _ = harness.frame(&Scene::new());
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test external_pass -- --ignored`"]
+fn a_pass_panicking_with_its_own_render_pass_open_still_lets_the_frame_submit() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let panicking = SceneTextureId::mint();
+    let solid = SceneTextureId::mint();
+    let survivor = Arc::new(SolidPass::new(solid, BLUE));
+    assert!(register_external_pass(
+        panicking,
+        Arc::new(PanicMidRenderPass)
+    ));
+    assert!(register_external_pass(
+        solid,
+        Arc::clone(&survivor) as Arc<dyn ExternalPass>
+    ));
+
+    let mut scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.scene_texture(panicking.get(), DEST);
+        builder.scene_texture(solid.get(), SECOND_DEST);
+    }
+
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    // `Harness::frame` itself asserts the frame's validation error scope is
+    // empty — the whole point of this case is that an unwind through an open
+    // `wgpu::RenderPass` borrow of the encoder raises nothing there and
+    // still lets the frame submit.
+    let drawn = harness.frame(&scene);
+    std::panic::set_hook(hook);
+
+    assert!(
+        survivor.recorded.load(Ordering::Relaxed),
+        "a sibling pass after the mid-render-pass panic still ran"
+    );
+    let (x, y) = centre(SECOND_DEST);
+    assert_eq!(
+        pixel(&drawn, x, y),
+        cleared(BLUE),
+        "the surviving pass's texture was composited — the frame submitted at all"
+    );
+    let (px, py) = centre(DEST);
+    assert_eq!(
+        pixel(&drawn, px, py),
+        rgba(BLACK),
+        "the panicking pass's own render pass never reached bind_texture, so its id draws nothing"
+    );
+    assert_corners_are_base_colour(&drawn);
+    assert!(
+        !unregister_external_pass(panicking),
+        "the panicking pass was retired by the drain itself"
+    );
+
+    assert!(unregister_external_pass(solid));
     let _ = harness.frame(&Scene::new());
 }

@@ -125,6 +125,18 @@ impl SceneTextureId {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Whether `self` carries the bit [`Self::for_shader_program`] sets —
+    /// i.e. whether it names a shader program's own offscreen target rather
+    /// than something an ordinary caller minted.
+    ///
+    /// Lets a caller outside this module test which namespace an id belongs
+    /// to without the reserved bit itself being exported — a check on the id
+    /// stays valid even if the bit's exact value ever changed.
+    #[must_use]
+    pub const fn is_shader_program(self) -> bool {
+        self.0 & SHADER_PROGRAM_NAMESPACE != 0
+    }
 }
 
 /// A GPU texture: the underlying texture/view pair, the [`TextureDesc`] it
@@ -320,6 +332,14 @@ mod tests {
             assert_eq!(minted.get() & SHADER_PROGRAM_NAMESPACE, 0);
             assert_ne!(minted, SceneTextureId::for_shader_program(minted.get()));
         }
+    }
+
+    #[test]
+    fn is_shader_program_distinguishes_the_two_namespaces() {
+        let minted = fake_texture().as_scene_texture();
+        let shader = SceneTextureId::for_shader_program(minted.get());
+        assert!(!minted.is_shader_program());
+        assert!(shader.is_shader_program());
     }
 
     #[test]

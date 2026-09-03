@@ -31,10 +31,13 @@
 //! A pass records only — it never submits. That is [`crate::SurfaceRenderer`]'s
 //! job, once, at the end of the frame; a pass that submits the frame's encoder
 //! cannot (the encoder is only borrowed) and one that submits work of its own
-//! on its own encoder breaks the ordering it came here for. A pass sharing the
-//! frame's depth attachment additionally owes `frust_gpu::encoder`'s two
-//! caller rules — depth-clear ownership, and the comparison/direction/extent
-//! that ride along with it.
+//! on its own encoder breaks the ordering it came here for. A pass never
+//! shares the frame's own depth attachment — it renders into attachments it
+//! owns, on a target it owns, sized however that target needs to be.
+//! `frust_gpu::encoder`'s two depth caller rules (clear ownership, and
+//! matching comparison/direction) are for a *host* sharing one depth buffer
+//! across renderers of its own; they have nothing to do with a pass
+//! registered here, which the frame's depth attachment is never handed to.
 //!
 //! # Binding, and what the engine does with it
 //!
@@ -46,6 +49,14 @@
 //! claimed opaque — the engine never reads the caller's texels, so it cannot
 //! know (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`).
 //!
+//! Binding happens inside `record`, immediately — it does not wait for the
+//! frame to actually submit. So work a pass recorded is submitted only if the
+//! frame is (a refused frame's encoder is dropped unsubmitted, taking every
+//! command a pass recorded with it), but the bind side effect already landed
+//! in the engine's registry and survives the refusal regardless: the next
+//! *accepted* frame composites whatever view was bound, whether or not the
+//! work that was meant to fill it ever ran.
+//!
 //! # Lifetime of a registration
 //!
 //! A pass persists until [`unregister_external_pass`] takes it: the registry
@@ -55,16 +66,32 @@
 //! the same id again before that flush cancels the queued unbind — the id has
 //! an owner again, and the incoming pass binds whatever it wants.
 //!
+//! Unregistering is not a barrier. It removes the pass from the registry
+//! under the lock, but a drain that already snapshotted the pass before that
+//! call runs is still mid-flight against its own copy of the `Arc` and will
+//! still call `record` on it once more — no drain that *starts* after
+//! [`unregister_external_pass`] returns ever will. The unbind itself is
+//! queued, not immediate: it lands on the next frame something actually
+//! drains, so it does not happen while the surface presenting it is idle — a
+//! caller that needs the binding gone right now, rather than whenever the
+//! surface next presents, has to make sure a frame gets requested. The queue
+//! it lands in is a map keyed by id, so its size is bounded by the number of
+//! *distinct* ids unregistered since the last drain, never by how many times
+//! any one of them is unregistered.
+//!
 //! # A panicking pass does not take the frame down
 //!
 //! `record` is called inside `catch_unwind`. A pass that panics is reported
-//! (`warn!` on the first panic of an id, `debug!` afterwards), removed from
-//! the registry, queued for the same unbind an explicit unregistration
-//! queues, and the frame goes on to record the scene. This is the same
-//! no-panic posture the engine holds on the FFI boundary. It is a debug/dev
-//! net rather than a promise: the workspace's `release` profile is
-//! `panic = "abort"`, where the process is gone before any guard runs, so the
-//! shipped contract is still that a pass must not panic.
+//! (`warn!` on the first panic of an id, `debug!` afterwards) and, *if* the
+//! id it panicked under still names the same pass (nothing else registered
+//! under it in the meantime — a pass handing its id to a successor inside
+//! its own `record` before panicking leaves that successor alone), removed
+//! from the registry and queued for the same unbind an explicit
+//! unregistration queues. Either way the frame goes on to record the scene.
+//! This is the same no-panic posture the engine holds on the FFI boundary.
+//! It is a debug/dev net rather than a promise: the workspace's `release`
+//! profile is `panic = "abort"`, where the process is gone before any guard
+//! runs, so the shipped contract is still that a pass must not panic.
 //!
 //! # Who reaches this
 //!
@@ -98,8 +125,13 @@ use frust_gpu::SceneTextureId;
 ///
 /// `Send + Sync` because the registry is process-wide and the call happens on
 /// the render thread, which is not the thread that registered the pass on any
-/// shell that splits the two. `record` takes `&self`, so a pass mutating
-/// state across frames owns its own interior mutability.
+/// shell that splits the two — and, with two engine-tier surfaces live in one
+/// process at once (each presenting through its own render thread), the same
+/// pass can be called by both at the same time: `record` genuinely may run
+/// concurrently on two threads, not merely sequentially from a changing one.
+/// `record` takes `&self`, so a pass mutating state across frames owns its
+/// own interior mutability, and that interior mutability has to tolerate the
+/// concurrent case, not just the sequential one.
 pub trait ExternalPass: Send + Sync {
     /// Records this pass's work for one frame.
     ///
@@ -118,7 +150,20 @@ pub trait ExternalPass: Send + Sync {
 ///
 /// Borrowed for the duration of one `record` call and never longer — nothing
 /// here can be stashed across frames, which is what keeps a pass from
-/// out-living the surface whose device it was handed.
+/// out-living the surface whose device it was handed. `wgpu::Device` and
+/// `wgpu::Queue` are cheaply `Clone` (both `Arc`-backed underneath), so
+/// [`Self::device`]/[`Self::queue`] returning a borrow does not itself stop a
+/// pass from cloning one and stashing the owned handle past this call —
+/// doing that is a contract violation regardless of whether the borrow
+/// checker catches it: the shell that owns the real device may drop and
+/// recreate it (surface loss, a GPU reset), and a clone a pass kept past
+/// that point references a device that looks alive but is not the one
+/// backing any future frame, so GPU work built against it fails or panics
+/// rather than silently rebinding to the shell's current one.
+///
+/// Built fresh for *each* pass a drain runs, scoped to that one pass's own
+/// registered id ([`Self::id`]) — a pass never sees another pass's id, and
+/// [`Self::bind_texture`]/[`Self::unbind_texture`] act only on its own.
 pub struct ExternalFrame<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
@@ -129,17 +174,22 @@ pub struct ExternalFrame<'a> {
     /// `resize`) belongs to the renderer driving it, and a pass reaching it
     /// would be recording a second frame inside this one.
     engine: &'a mut frust_engine::EngineRenderer,
+    /// The id the pass being recorded this call is registered under — what
+    /// [`Self::id`]/[`Self::bind_texture`]/[`Self::unbind_texture`] act on.
+    id: SceneTextureId,
     frame_index: u64,
 }
 
 impl<'a> ExternalFrame<'a> {
-    /// Wraps one frame's resources. Crate-private: an `ExternalFrame` is only
-    /// ever built by [`run_external_passes`], around a real in-flight frame.
+    /// Wraps one pass's resources for one frame. Crate-private: an
+    /// `ExternalFrame` is only ever built by [`run_external_passes`], fresh
+    /// per pass, around a real in-flight frame.
     pub(crate) fn new(
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
         encoder: &'a mut wgpu::CommandEncoder,
         engine: &'a mut frust_engine::EngineRenderer,
+        id: SceneTextureId,
         frame_index: u64,
     ) -> Self {
         Self {
@@ -147,6 +197,7 @@ impl<'a> ExternalFrame<'a> {
             queue,
             encoder,
             engine,
+            id,
             frame_index,
         }
     }
@@ -172,6 +223,13 @@ impl<'a> ExternalFrame<'a> {
         self.encoder
     }
 
+    /// The id the pass being recorded this call is registered under —
+    /// what [`Self::bind_texture`]/[`Self::unbind_texture`] act on.
+    #[must_use]
+    pub fn id(&self) -> SceneTextureId {
+        self.id
+    }
+
     /// How many frames this process has drained passes in, counting from
     /// zero.
     ///
@@ -184,31 +242,33 @@ impl<'a> ExternalFrame<'a> {
         self.frame_index
     }
 
-    /// Registers `view` under `id` so this frame's
-    /// `Command::SceneTexture` naming that id composites it, returning
-    /// whatever was bound under `id` before.
+    /// Registers `view` under this pass's own id ([`Self::id`]) so this
+    /// frame's `Command::SceneTexture` naming that id composites it,
+    /// returning whatever was bound under it before.
     ///
     /// `size` is the view's extent in texels — the rectangle the display
-    /// list's destination is mapped onto. `view` must be a non-array 2D view
-    /// of a float-sampleable texture carrying
+    /// list's destination is mapped onto. It is a pass's own choice, read
+    /// however its owner reads layout (a widget's own size, typically); this
+    /// type carries no target extent of its own to hand back. `view` must be
+    /// a non-array 2D view of a float-sampleable texture carrying
     /// `wgpu::TextureUsages::TEXTURE_BINDING`. A zero extent, or one past
     /// `u16::MAX` on either axis, registers nothing and leaves scenes naming
     /// the id drawing nothing; so does an id nothing ever bound. Re-binding
-    /// an id replaces its view.
+    /// replaces the previous view.
     pub fn bind_texture(
         &mut self,
-        id: SceneTextureId,
         size: (u32, u32),
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
-        self.engine.bind_texture(id, size, view)
+        self.engine.bind_texture(self.id, size, view)
     }
 
-    /// Removes the view bound under `id`, returning it. A pass tearing its
-    /// own target down mid-run does this itself; a pass that simply stops
-    /// being registered has it done for it (see the module docs).
-    pub fn unbind_texture(&mut self, id: SceneTextureId) -> Option<wgpu::TextureView> {
-        self.engine.unbind_texture(id)
+    /// Removes the view bound under this pass's own id ([`Self::id`]),
+    /// returning it. A pass tearing its own target down mid-run does this
+    /// itself; a pass that simply stops being registered has it done for it
+    /// (see the module docs).
+    pub fn unbind_texture(&mut self) -> Option<wgpu::TextureView> {
+        self.engine.unbind_texture(self.id)
     }
 }
 
@@ -224,16 +284,25 @@ struct Registration {
 }
 
 /// The process-wide registry: the live passes, the ids awaiting an unbind,
-/// and which ids have already had a panic reported.
+/// and which ids have already had a panic or a reserved-namespace refusal
+/// reported.
 struct Registry {
     passes: BTreeMap<u64, Registration>,
     /// Ids whose pass is gone — unregistered, or removed after a panic — and
-    /// whose engine binding the next drain clears.
+    /// whose engine binding the next drain clears. Keyed by id, so this grows
+    /// only with the number of *distinct* ids queued since the last drain,
+    /// never with how many times any one of them is queued.
     pending_unbind: BTreeMap<u64, SceneTextureId>,
     /// Ids a panic has already been reported at `warn!` for, so a pass
     /// re-registered into a reproducing panic reports at `debug!` instead of
-    /// once per registration.
+    /// once per registration. Cleared for an id on its next successful
+    /// registration, so a fresh pass's first panic is a fresh `warn!` too.
     reported_panics: BTreeSet<u64>,
+    /// Ids a reserved-namespace registration attempt has already been
+    /// reported at `warn!` for, for the same reason `reported_panics` exists
+    /// — a caller retrying the same doomed registration every frame reports
+    /// at `debug!` after the first.
+    reported_reserved: BTreeSet<u64>,
 }
 
 impl Registry {
@@ -242,6 +311,7 @@ impl Registry {
             passes: BTreeMap::new(),
             pending_unbind: BTreeMap::new(),
             reported_panics: BTreeSet::new(),
+            reported_reserved: BTreeSet::new(),
         }
     }
 }
@@ -268,15 +338,45 @@ fn registry() -> MutexGuard<'static, Registry> {
 /// component's pass would leave it registered from its own point of view and
 /// never called. Unregister first to hand an id over deliberately.
 ///
+/// Also answers `false` and changes nothing when `id` is inside the reserved
+/// shader-program namespace (`SceneTextureId::is_shader_program`) — that
+/// range belongs to the engine's own offscreen shader-effect targets, and a
+/// caller-registered pass claiming one would silently steal a shader
+/// program's target out from under it. Reported at `warn!` the first time a
+/// given id is refused this way, `debug!` on every later attempt, so a
+/// caller retrying the same doomed registration every frame does not spam
+/// the log.
+///
 /// A `register` landing before the drain has flushed the same id's queued
-/// unbind cancels that unbind: the id has an owner again.
+/// unbind cancels that unbind: the id has an owner again. A successful
+/// registration also clears any panic already reported for `id`, so a fresh
+/// pass's first panic is reported fresh rather than silently downgraded by
+/// a predecessor's history.
 pub fn register_external_pass(id: SceneTextureId, pass: Arc<dyn ExternalPass>) -> bool {
-    let mut registry = registry();
-    if registry.passes.contains_key(&id.get()) {
+    let raw = id.get();
+    if id.is_shader_program() {
+        let mut registry = registry();
+        if registry.reported_reserved.insert(raw) {
+            log::warn!(
+                "external pass registration for scene texture {raw} refused: the id is inside \
+                 the reserved shader-program namespace (further attempts at this id are logged \
+                 at debug level)"
+            );
+        } else {
+            log::debug!(
+                "external pass registration for scene texture {raw} refused: reserved \
+                 shader-program namespace"
+            );
+        }
         return false;
     }
-    registry.pending_unbind.remove(&id.get());
-    registry.passes.insert(id.get(), Registration { id, pass });
+    let mut registry = registry();
+    if registry.passes.contains_key(&raw) {
+        return false;
+    }
+    registry.pending_unbind.remove(&raw);
+    registry.reported_panics.remove(&raw);
+    registry.passes.insert(raw, Registration { id, pass });
     true
 }
 
@@ -338,25 +438,47 @@ pub fn run_external_passes(
     }
 
     let frame_index = FRAME_INDEX.fetch_add(1, Ordering::Relaxed);
-    let mut frame = ExternalFrame::new(device, queue, encoder, engine, frame_index);
     for (id, pass) in passes {
+        // Built fresh per pass, scoped to that pass's own id — `device`,
+        // `encoder` and `engine` are reborrowed each iteration rather than
+        // moved, so the outer `&mut` references stay usable for the next
+        // pass once this one's `ExternalFrame` goes out of scope.
+        let mut frame =
+            ExternalFrame::new(device, queue, &mut *encoder, &mut *engine, id, frame_index);
         // A pass is caller code on the render thread: unwinding out of it
         // would abandon the frame's encoder mid-recording and take the
         // surface's whole frame loop with it.
         if catch_unwind(AssertUnwindSafe(|| pass.record(&mut frame))).is_err() {
-            drop_panicking_pass(id);
+            drop_panicking_pass(id, &pass);
         }
     }
 }
 
-/// Retires the pass registered under `id` after it panicked: report it once,
-/// take it out of the registry, and queue its binding for the next drain to
-/// clear.
-fn drop_panicking_pass(id: SceneTextureId) {
+/// Retires the pass registered under `id` after it panicked, *if* `pass` is
+/// still the one registered there: report it once, take it out of the
+/// registry, and queue its binding for the next drain to clear.
+///
+/// `pass` is the `Arc` [`run_external_passes`] snapshotted before calling
+/// `record` on it — compared against whatever is registered under `id` right
+/// now via [`Arc::ptr_eq`] rather than blindly removed by id. A pass is
+/// caller code, free to hand its own id to a successor (unregister, then
+/// register a replacement) from inside the very `record` call that then
+/// panics; retiring by id alone would tear that successor out along with the
+/// pass that actually failed, even though it was never in the unwind at all.
+/// The panic is still reported either way — it happened regardless of what
+/// is registered under `id` now — but the registry itself is only touched
+/// when the identity check confirms nothing has taken the id over since.
+fn drop_panicking_pass(id: SceneTextureId, pass: &Arc<dyn ExternalPass>) {
     let raw = id.get();
     let mut registry = registry();
-    registry.passes.remove(&raw);
-    registry.pending_unbind.insert(raw, id);
+    let still_registered = registry
+        .passes
+        .get(&raw)
+        .is_some_and(|registration| Arc::ptr_eq(&registration.pass, pass));
+    if still_registered {
+        registry.passes.remove(&raw);
+        registry.pending_unbind.insert(raw, id);
+    }
     if registry.reported_panics.insert(raw) {
         log::warn!(
             "external pass for scene texture {raw} panicked and was unregistered; \
@@ -453,9 +575,10 @@ mod tests {
     fn a_panicking_pass_is_retired_and_queued_for_unbind() {
         let _serial = serial();
         let id = SceneTextureId::mint();
+        let pass: Arc<dyn ExternalPass> = Arc::new(Inert);
 
-        assert!(register_external_pass(id, Arc::new(Inert)));
-        drop_panicking_pass(id);
+        assert!(register_external_pass(id, Arc::clone(&pass)));
+        drop_panicking_pass(id, &pass);
         assert_eq!(
             state(id),
             (false, true),
@@ -465,8 +588,81 @@ mod tests {
         // The second retirement reports at debug rather than warn; what is
         // checked here is that reporting twice is not itself a panic and
         // leaves the state alone.
-        drop_panicking_pass(id);
+        drop_panicking_pass(id, &pass);
         assert_eq!(state(id), (false, true));
+
+        registry().pending_unbind.remove(&id.get());
+    }
+
+    #[test]
+    fn retiring_a_panic_leaves_a_successor_registered_under_the_same_id_alone() {
+        let _serial = serial();
+        let id = SceneTextureId::mint();
+        let original: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&original)));
+
+        // What a pass handing its own id to a replacement inside `record`
+        // does before it panics: unregister, then register the successor —
+        // both while the drain's snapshot still holds `original`.
+        assert!(unregister_external_pass(id));
+        let successor: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&successor)));
+
+        // The drain retires by comparing the snapshot it took (`original`)
+        // against whatever is registered now, not by id alone.
+        drop_panicking_pass(id, &original);
+
+        assert_eq!(
+            state(id),
+            (true, false),
+            "the successor is left registered, and nothing was queued for unbind on its behalf"
+        );
+
+        assert!(unregister_external_pass(id));
+    }
+
+    #[test]
+    fn a_fresh_registration_clears_the_reported_panic_flag() {
+        let _serial = serial();
+        let id = SceneTextureId::mint();
+        let pass: Arc<dyn ExternalPass> = Arc::new(Inert);
+        assert!(register_external_pass(id, Arc::clone(&pass)));
+
+        drop_panicking_pass(id, &pass);
+        assert!(
+            registry().reported_panics.contains(&id.get()),
+            "the first panic of this id is recorded as already reported"
+        );
+
+        assert!(register_external_pass(id, Arc::new(Inert)));
+        assert!(
+            !registry().reported_panics.contains(&id.get()),
+            "a fresh registration clears the flag, so a new pass's first panic warns again"
+        );
+
+        assert!(unregister_external_pass(id));
+    }
+
+    #[test]
+    fn pending_unbind_grows_with_distinct_ids_not_with_repeat_unregisters() {
+        let _serial = serial();
+        let id = SceneTextureId::mint();
+        // Other cases in this module may leave their own residual entries
+        // (under their own distinct ids) in this same process-wide map, so
+        // what is asserted is the delta this case itself causes, not an
+        // absolute length.
+        let before = registry().pending_unbind.len();
+
+        assert!(register_external_pass(id, Arc::new(Inert)));
+        assert!(unregister_external_pass(id));
+        // The same id again finds nothing left to remove, so this queues no
+        // second entry — the map is keyed by id, not appended to per call.
+        assert!(!unregister_external_pass(id));
+        assert_eq!(
+            registry().pending_unbind.len(),
+            before + 1,
+            "repeat unregistration of one id does not grow the queue past one entry"
+        );
 
         registry().pending_unbind.remove(&id.get());
     }
