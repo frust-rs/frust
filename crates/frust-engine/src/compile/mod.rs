@@ -349,6 +349,14 @@ pub struct SceneCompiler {
     /// which the renderer calls alongside its own view registry so the two
     /// halves are always registered together.
     externals: ExternalExtents,
+    /// The frame's own target extent — the `(width, height)` most recently
+    /// passed to [`Self::compile`] (or, before the first call, this
+    /// compiler's own construction size). Kept only so the `ShaderQuad` arm
+    /// can tell a quad deliberately culled by the shader-quad pre-pass's own
+    /// target-extent check (`crate::effects::shader_quad`) apart from one
+    /// whose pre-pass genuinely never ran — see [`shader_quad_is_culled`] and
+    /// [`note_shader_quad_unrendered`]/[`note_shader_quad_culled`].
+    frame_extent: (u16, u16),
 }
 
 impl SceneCompiler {
@@ -418,6 +426,7 @@ impl SceneCompiler {
             run_glyph_ids: HashSet::new(),
             hint_text: false,
             externals: ExternalExtents::new(),
+            frame_extent: (width, height),
         }
     }
 
@@ -605,6 +614,7 @@ impl SceneCompiler {
         }
 
         self.generator.reset(width, height);
+        self.frame_extent = (width, height);
         self.clips.reset();
         self.groups.reset();
         self.snapshots.reset();
@@ -1118,11 +1128,20 @@ impl SceneCompiler {
                 }
                 let id = shader_quad_texture_id(program.id());
                 if self.externals.get(id).is_none() {
-                    // No pre-pass ran for this program, or its shader failed
-                    // to compile. Reported in its own words rather than as an
-                    // unregistered scene texture, whose id would name nothing
-                    // a reader could look up.
-                    note_shader_quad_unrendered(program.id());
+                    // No pre-pass ran for this program, its shader failed to
+                    // compile, or this exact quad was deliberately culled by
+                    // the pre-pass's own target-extent check (see
+                    // `shader_quad_is_culled`) — an expected, routine outcome
+                    // told apart from the other two so it is never reported
+                    // through the missing-pre-pass warning below.
+                    if shader_quad_is_culled(*dest, combined * *transform, self.frame_extent) {
+                        note_shader_quad_culled(program.id());
+                    } else {
+                        // Reported in its own words rather than as an
+                        // unregistered scene texture, whose id would name
+                        // nothing a reader could look up.
+                        note_shader_quad_unrendered(program.id());
+                    }
                     frame.skipped_externals = frame.skipped_externals.saturating_add(1);
                     return;
                 }
@@ -1733,7 +1752,8 @@ pub fn shader_quad_texture_id(program_id: u64) -> u64 {
 /// pre-pass (a host encoding frames straight through
 /// [`crate::EngineRenderer`], or a program whose shader failed to compile)
 /// produces this on every frame forever, and the second report says nothing
-/// the first did not.
+/// the first did not. Never raised for a quad [`shader_quad_is_culled`]
+/// reports deliberately culled — that case is [`note_shader_quad_culled`]'s.
 fn note_shader_quad_unrendered(program_id: u64) {
     SHADER_QUAD_SKIP_WARNING.call_once(|| {
         log::warn!(
@@ -1742,6 +1762,57 @@ fn note_shader_quad_unrendered(program_id: u64) {
              program failed to compile (logged once per process)"
         );
     });
+}
+
+/// Whether a [`Command::ShaderQuad`] at `dest` under `transform` (the
+/// command's own transform composed with the frame's) is entirely outside
+/// `frame_extent` — the same target-extent overlap test
+/// `crate::effects::shader_quad::frame_demands`/`culled_program_ids` apply to
+/// decide whether the pre-pass renders this program's quad at all this frame,
+/// restated independently here (the compiler and the pre-pass share no
+/// channel for "this id was culled, not missing") so an id nothing is
+/// registered under can be told apart from one whose pre-pass genuinely never
+/// ran — see [`note_shader_quad_unrendered`]/[`note_shader_quad_culled`].
+///
+/// Conservative on the same terms as the pre-pass's own check: a non-finite
+/// `bbox` answers `false` (never treated as culled — some other refusal
+/// accounts for it), and a shared edge counts as overlapping via
+/// [`kurbo::Rect::overlaps`]. Unlike the pre-pass's walk, this has no
+/// [`Command::PushSnapshot`]-bracket exemption to make: it is asked only
+/// about the one quad instance actually being compiled right now, under its
+/// own already-composed `transform` (which, inside a bracket, already
+/// includes the enclosing snapshot's own presentation correction — see
+/// `compile_command`'s `combined`) — there is no separate "the bracket might
+/// still move it" case to guard against here, only the geometry this exact
+/// draw is about to be attempted at.
+fn shader_quad_is_culled(dest: Rect, transform: Affine, frame_extent: (u16, u16)) -> bool {
+    let frame_rect = Rect::new(
+        0.0,
+        0.0,
+        f64::from(frame_extent.0),
+        f64::from(frame_extent.1),
+    );
+    let bbox = transform.transform_rect_bbox(dest);
+    bbox.is_finite() && !bbox.overlaps(frame_rect)
+}
+
+/// Report a [`Command::ShaderQuad`] dropped because the shader-quad pre-pass
+/// (`crate::effects::shader_quad`) deliberately culled every one of the
+/// program's quads this frame — its device rectangle does not intersect the
+/// frame's own target at all — rather than because no pre-pass ran for it at
+/// all.
+///
+/// Debug-level and unlatched (unlike [`note_shader_quad_unrendered`]): a
+/// culled quad is an expected, routine outcome of a scene drawing an
+/// off-screen or fully clipped program, not a signal that something is
+/// missing, so it does not need the once-per-process rate limit a genuine
+/// "nothing rendered this" warning does.
+fn note_shader_quad_culled(program_id: u64) {
+    log::debug!(
+        "ShaderQuad draws nothing: fragment program {program_id} was culled by the \
+         shader-quad pre-pass — its destination does not intersect this frame's target \
+         (expected; not a missing pre-pass)"
+    );
 }
 
 /// Report a [`Command::ShaderQuad`] dropped because
@@ -2256,5 +2327,68 @@ mod tests {
             shader_quad_texture_id(7),
             SceneTextureId::for_shader_program(7).get()
         );
+    }
+
+    #[test]
+    fn shader_quad_is_culled_true_when_entirely_outside_the_frame() {
+        assert!(shader_quad_is_culled(
+            Rect::new(1000.0, 1000.0, 1008.0, 1008.0),
+            Affine::IDENTITY,
+            (64, 64)
+        ));
+    }
+
+    #[test]
+    fn shader_quad_is_culled_false_when_overlapping_the_frame() {
+        assert!(!shader_quad_is_culled(
+            Rect::new(0.0, 0.0, 8.0, 8.0),
+            Affine::IDENTITY,
+            (64, 64)
+        ));
+    }
+
+    #[test]
+    fn shader_quad_is_culled_false_touching_the_frame_edge() {
+        // A shared edge counts as overlapping (kurbo::Rect::overlaps), so a
+        // quad exactly abutting the frame boundary is never wrongly reported
+        // culled.
+        assert!(!shader_quad_is_culled(
+            Rect::new(64.0, 0.0, 80.0, 16.0),
+            Affine::IDENTITY,
+            (64, 64)
+        ));
+    }
+
+    #[test]
+    fn shader_quad_is_culled_false_for_a_non_finite_bbox() {
+        assert!(!shader_quad_is_culled(
+            Rect::new(0.0, 0.0, f64::NAN, 8.0),
+            Affine::IDENTITY,
+            (64, 64)
+        ));
+    }
+
+    #[test]
+    fn a_culled_shader_quad_is_reported_at_debug_level_not_through_the_unrendered_warning() {
+        // `note_shader_quad_culled` carries no process-latch to observe the
+        // way `SHADER_QUAD_SKIP_WARNING` does above — it is meant to fire
+        // every time, unlike the once-per-process missing-pre-pass report.
+        // What is asserted here is the compile-time distinction itself: a
+        // quad `shader_quad_is_culled` reports true for must never also read
+        // as "un-rendered" by the same geometry.
+        let frame_extent = (64, 64);
+        let culled_dest = Rect::new(1000.0, 1000.0, 1008.0, 1008.0);
+        let unrendered_dest = Rect::new(0.0, 0.0, 8.0, 8.0);
+
+        assert!(shader_quad_is_culled(
+            culled_dest,
+            Affine::IDENTITY,
+            frame_extent
+        ));
+        assert!(!shader_quad_is_culled(
+            unrendered_dest,
+            Affine::IDENTITY,
+            frame_extent
+        ));
     }
 }

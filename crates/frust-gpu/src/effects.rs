@@ -46,6 +46,16 @@
 //!   detection aid pointing at the `ShaderProgram::new` cache-once contract,
 //!   not itself a bound on growth; the age-based reap above is what actually
 //!   bounds it.
+//! - **Per-id target count bound** ([`MAX_TARGETS_PER_ID`]): a program id may
+//!   hold at most this many quantized target keys at once, evicting its own
+//!   least-recently-seen key immediately — before the age-based reap above
+//!   ever gets a turn — the moment a new key would push it past the cap. This
+//!   bounds a single frame's worth of accumulation (a multi-band resize drag
+//!   minting one key per band per frame) independent of the age window: the
+//!   accepted peak per program is `MAX_TARGETS_PER_ID` × (the largest
+//!   quantized target area it currently holds) × 4 bytes/texel, e.g. two
+//!   1024×1024 `Rgba8Unorm` targets is 8 MiB, not the unbounded run of bands a
+//!   fast drag could otherwise mint before any of them aged out.
 //!
 //! It is deliberately decoupled from any scene vocabulary: the API speaks
 //! `(id: u64, wgsl: &str, size, time)` primitives, never a display list or a
@@ -60,11 +70,31 @@
 //! through: the target carries `TEXTURE_BINDING`, so the view it hands back is
 //! registered as a scene texture and sampled by the frame's own passes. The
 //! texture itself is reachable through [`ShaderEffects::target_texture`] for a
-//! read-back, and its true (clamped) extent through
-//! [`ShaderEffects::target_extent`] — the extent a registration must state,
-//! since it is the texture's own rather than whatever size was asked for.
-//! Nothing is registered with a foreign renderer and nothing is handed back on
-//! eviction: the pool owns the texture and a consumer borrows it.
+//! read-back — the whole (possibly larger, quantized) attachment, never only
+//! the sub-rect actually rendered into it. [`ShaderEffects::target_extent`]
+//! answers with that sub-rect instead: the requested, device-clamped extent
+//! actually rendered this call — the extent a registration must state — never
+//! the whole texture's own (larger, quantized) extent, which is never itself
+//! exposed for registration. Nothing is registered with a foreign renderer and
+//! nothing is handed back on eviction: the pool owns the texture and a
+//! consumer borrows it.
+//!
+//! ## Target identity
+//!
+//! A `targets` entry also carries a **generation**
+//! ([`ShaderEffects::target_generation`]): a per-key counter bumped every time
+//! [`ShaderEffects::ensure_target`] actually creates a new texture at that
+//! key, rather than reusing an existing one. A caller that only compares
+//! `(id, requested extent)` to decide whether to re-register cannot tell a
+//! steady-state target apart from one silently recreated behind it — the
+//! per-target reap above (or the per-id cap just above it) can drop and
+//! recreate a target at the identical requested extent between two frames,
+//! and a registration keyed on extent alone would then keep sampling the
+//! *old* (still-alive, now-orphaned) texture forever. Comparing generation
+//! too is what lets this crate's caller
+//! (`frust_engine::effects::shader_quad::ShaderQuadPass::register`) tell the
+//! two cases apart and rebind whenever either the extent or the generation
+//! changed.
 //!
 //! ## Alpha
 //!
@@ -136,6 +166,23 @@ pub const MAX_UNSEEN_FRAMES: u64 = 120;
 /// wider [`MAX_UNSEEN_FRAMES`] window) is a rarer, coarser event worth a more
 /// generous grace period.
 pub const MAX_UNSEEN_TARGET_FRAMES: u64 = DEFAULT_MAX_UNUSED_FRAMES;
+
+/// How many quantized target keys one program `id` may hold resident at once,
+/// enforced immediately by [`ShaderEffects::ensure_target`] the moment a new
+/// key would push `id` past it — evicting `id`'s own least-recently-seen key
+/// ([`oldest_target_key_for_id`]) before minting the new one, rather than
+/// waiting for [`MAX_UNSEEN_TARGET_FRAMES`]'s age-based reap to catch up.
+///
+/// 2 — the current quantized band and the immediately preceding one — is
+/// chosen so a resize drag straddling one 256px boundary back and forth does
+/// not thrash a target it only just evicted, while a drag through many bands
+/// in one frame (an animated scale snapping across a wide range, a
+/// multi-band resize) cannot accumulate one target per band with no pressure:
+/// [`MAX_UNSEEN_TARGET_FRAMES`]'s window alone would let such a sweep mint
+/// dozens of resident targets before any of them aged out. See the module
+/// header's "Per-id target count bound" bullet for the accepted peak this
+/// bounds.
+pub const MAX_TARGETS_PER_ID: usize = 2;
 
 /// The `(width, height)` a shader-effect target requested at `(w, h)` is
 /// actually keyed and created at: `w`/`h` quantized up to the next multiple
@@ -252,6 +299,12 @@ struct TargetEntry {
     /// The quantized, device-clamped height this entry's texture was
     /// actually created at.
     used_h: u32,
+    /// This entry's own generation — see [`ShaderEffects::target_generation`]
+    /// and the module header's "Target identity" section. Stamped once, from
+    /// the struct's own generation counter, when the entry is created and
+    /// never changed afterward; a key re-created later (after an
+    /// eviction/reap) gets a fresh, strictly greater value.
+    generation: u64,
 }
 
 /// Owns every GPU resource the shader-showcase feature needs: lazily-compiled
@@ -300,6 +353,13 @@ pub struct ShaderEffects {
     /// rest of its state, which is both the "brand new again" contract and the
     /// bound on this set's growth.
     warned_clamped: HashSet<(u64, u32, u32)>,
+    /// The generation the next `targets` entry [`Self::ensure_target`] creates
+    /// will be stamped with — monotonically incremented on every actual
+    /// texture creation (never on a cache hit), so two entries ever alive at
+    /// the same key over time carry strictly increasing values. See
+    /// [`TargetEntry::generation`] and the module header's "Target identity"
+    /// section.
+    next_generation: u64,
 }
 
 /// Pack the 16-byte uniform buffer contents: `resolution.x`, `resolution.y`,
@@ -401,6 +461,27 @@ where
         .collect()
 }
 
+/// The `targets` key belonging to `id` with the oldest `target_last_seen`
+/// entry, or `None` if `id` holds none — the eviction candidate
+/// [`ShaderEffects::ensure_target`] drops immediately when minting a new key
+/// would push `id` past [`MAX_TARGETS_PER_ID`]. Pure: operates on the age map
+/// alone, mirroring [`reapable_target_ages`]'s shape, so the eviction choice
+/// is unit-testable without a device by simulating a sweep of mints against
+/// `target_last_seen` alone. Ties (equal `seen` values) resolve to the key
+/// [`HashMap::iter`] happens to visit last among them — the cap-enforcement
+/// call site never mints two keys for one id in the same frame, so a tie
+/// among genuinely distinct ages does not arise in practice.
+fn oldest_target_key_for_id(
+    target_last_seen: &HashMap<(u64, u32, u32), u64>,
+    id: u64,
+) -> Option<(u64, u32, u32)> {
+    target_last_seen
+        .iter()
+        .filter(|&(&(key_id, _, _), _)| key_id == id)
+        .min_by_key(|&(_, &seen)| seen)
+        .map(|(&key, _)| key)
+}
+
 impl ShaderEffects {
     /// Create an empty engine seeded with an optional clone of the surface's
     /// [`wgpu::PipelineCache`] (used as `RenderPipelineDescriptor.cache` so a
@@ -418,6 +499,7 @@ impl ShaderEffects {
             last_seen: HashMap::new(),
             target_last_seen: HashMap::new(),
             warned_clamped: HashSet::new(),
+            next_generation: 0,
         }
     }
 
@@ -626,10 +708,17 @@ impl ShaderEffects {
     /// repeats only if the request changes. A freshly created entry's
     /// `target_last_seen` row is stamped at the current frame so it starts
     /// with a valid age even if the caller's own [`Self::mark_seen`] call for
-    /// this frame has not run yet.
+    /// this frame has not run yet, and its `generation` is stamped from
+    /// [`Self::next_generation`] — see the module header's "Target identity"
+    /// section.
+    ///
+    /// Before minting a genuinely new key, enforces [`MAX_TARGETS_PER_ID`]:
+    /// if `id` already holds the cap's worth of resident keys, its own
+    /// least-recently-seen one ([`oldest_target_key_for_id`]) is evicted
+    /// immediately, ahead of and independent of [`Self::mark_seen`]'s
+    /// age-based reap — see [`MAX_TARGETS_PER_ID`]'s own doc for why.
     pub fn ensure_target(&mut self, device: &wgpu::Device, id: u64, w: u32, h: u32) {
-        let ceiling = device.limits().max_texture_dimension_2d;
-        let (used_w, used_h) = quantized_target_key(w, h, ceiling);
+        let (used_w, used_h, ceiling) = Self::target_key(device, w, h);
         let key = (id, used_w, used_h);
         if self.targets.contains_key(&key) {
             return;
@@ -648,6 +737,20 @@ impl ShaderEffects {
                  {used_w}x{used_h} (the device's max_texture_dimension_2d ceiling {ceiling})",
             );
         }
+
+        // A genuinely new key: enforce the per-id resident cap before
+        // minting it, evicting the id's own oldest key immediately rather
+        // than letting it ride until the age-based reap catches it.
+        let resident_for_id = self.targets.keys().filter(|k| k.0 == id).count();
+        if resident_for_id >= MAX_TARGETS_PER_ID
+            && let Some(evict_key) = oldest_target_key_for_id(&self.target_last_seen, id)
+        {
+            self.targets.remove(&evict_key);
+            self.target_last_seen.remove(&evict_key);
+        }
+
+        let generation = self.next_generation;
+        self.next_generation += 1;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("frust shader-effect target"),
@@ -690,6 +793,7 @@ impl ShaderEffects {
                 bind_group,
                 used_w,
                 used_h,
+                generation,
             },
         );
         self.target_last_seen.insert(key, self.frame);
@@ -719,9 +823,8 @@ impl ShaderEffects {
         requested: (u32, u32),
         time: f32,
     ) {
-        let ceiling = device.limits().max_texture_dimension_2d;
         let (req_w, req_h) = (requested.0.max(1), requested.1.max(1));
-        let (used_w, used_h) = quantized_target_key(req_w, req_h, ceiling);
+        let (used_w, used_h, _ceiling) = Self::target_key(device, req_w, req_h);
         let (Some(pipeline_entry), Some(target)) = (
             self.pipelines.get(&id),
             self.targets.get(&(id, used_w, used_h)),
@@ -786,10 +889,9 @@ impl ShaderEffects {
         w: u32,
         h: u32,
     ) -> Option<&wgpu::Texture> {
-        let ceiling = device.limits().max_texture_dimension_2d;
-        let key = quantized_target_key(w, h, ceiling);
+        let (used_w, used_h, _ceiling) = Self::target_key(device, w, h);
         self.targets
-            .get(&(id, key.0, key.1))
+            .get(&(id, used_w, used_h))
             .map(|entry| &entry.texture)
     }
 
@@ -811,10 +913,9 @@ impl ShaderEffects {
         w: u32,
         h: u32,
     ) -> Option<&wgpu::TextureView> {
-        let ceiling = device.limits().max_texture_dimension_2d;
-        let key = quantized_target_key(w, h, ceiling);
+        let (used_w, used_h, _ceiling) = Self::target_key(device, w, h);
         self.targets
-            .get(&(id, key.0, key.1))
+            .get(&(id, used_w, used_h))
             .map(|entry| &entry.view)
     }
 
@@ -838,10 +939,41 @@ impl ShaderEffects {
         w: u32,
         h: u32,
     ) -> Option<(u32, u32)> {
-        let ceiling = device.limits().max_texture_dimension_2d;
-        let (used_w, used_h) = quantized_target_key(w, h, ceiling);
+        let (used_w, used_h, _ceiling) = Self::target_key(device, w, h);
         let target = self.targets.get(&(id, used_w, used_h))?;
         Some((w.max(1).min(target.used_w), h.max(1).min(target.used_h)))
+    }
+
+    /// The generation program `id`'s `(w, h)`-requested target was created at
+    /// — bumped by [`Self::ensure_target`] every time it actually creates a
+    /// new texture at the resolved key, never on a cache hit — or `None` on
+    /// the same terms as [`Self::target_texture`] (no target exists for this
+    /// id/extent at all).
+    ///
+    /// The identity half of a registration alongside [`Self::target_extent`]:
+    /// two targets can share an identical requested extent yet be genuinely
+    /// different GPU resources (one reaped and recreated behind a caller that
+    /// only compared extents), and this is what lets a caller (e.g.
+    /// `frust_engine::effects::shader_quad::ShaderQuadPass::register`) tell
+    /// them apart — see the module header's "Target identity" section.
+    #[must_use]
+    pub fn target_generation(&self, device: &wgpu::Device, id: u64, w: u32, h: u32) -> Option<u64> {
+        let (used_w, used_h, _ceiling) = Self::target_key(device, w, h);
+        self.targets
+            .get(&(id, used_w, used_h))
+            .map(|entry| entry.generation)
+    }
+
+    /// Derive the `(quantized w, quantized h, ceiling)` a `(w, h)` request
+    /// resolves to on `device`: `device.limits().max_texture_dimension_2d` as
+    /// [`quantized_target_key`]'s own ceiling parameter. The single place
+    /// every method needing both the resolved key and the raw ceiling
+    /// computes them — factored out of the five call sites that used to
+    /// repeat this pair (hygiene).
+    fn target_key(device: &wgpu::Device, w: u32, h: u32) -> (u32, u32, u32) {
+        let ceiling = device.limits().max_texture_dimension_2d;
+        let (used_w, used_h) = quantized_target_key(w, h, ceiling);
+        (used_w, used_h, ceiling)
     }
 }
 
@@ -1088,6 +1220,69 @@ mod tests {
         let keys = [(1, 100, 100)];
         let stale_ids: HashSet<u64> = HashSet::new();
         assert!(reapable_target_keys(keys.iter().copied(), &stale_ids).is_empty());
+    }
+
+    #[test]
+    fn oldest_target_key_for_id_picks_the_least_recently_seen_of_that_id_alone() {
+        let target_last_seen: HashMap<(u64, u32, u32), u64> = [
+            ((1, 256, 256), 10),
+            ((1, 512, 512), 5),
+            ((1, 768, 768), 20),
+            // A different id's older entry must never be picked.
+            ((2, 256, 256), 0),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            oldest_target_key_for_id(&target_last_seen, 1),
+            Some((1, 512, 512))
+        );
+    }
+
+    #[test]
+    fn oldest_target_key_for_id_none_when_the_id_holds_nothing() {
+        let target_last_seen: HashMap<(u64, u32, u32), u64> =
+            [((2, 256, 256), 0)].into_iter().collect();
+        assert_eq!(oldest_target_key_for_id(&target_last_seen, 1), None);
+    }
+
+    /// Device-free proof of [`MAX_TARGETS_PER_ID`]'s whole point: mirrors
+    /// [`ShaderEffects::ensure_target`]'s own evict-before-insert order using
+    /// the same production [`oldest_target_key_for_id`] helper, without a
+    /// `wgpu::Device` — a sweep across 5 distinct quantized bands for one
+    /// program id never leaves more than the cap resident.
+    #[test]
+    fn a_sweep_across_five_bands_leaves_at_most_the_cap_resident_for_one_id() {
+        let id = 1u64;
+        let mut resident: HashSet<(u64, u32, u32)> = HashSet::new();
+        let mut target_last_seen: HashMap<(u64, u32, u32), u64> = HashMap::new();
+
+        for band in 0..5u32 {
+            let key = (id, band, band);
+            if resident.len() >= MAX_TARGETS_PER_ID
+                && let Some(evict) = oldest_target_key_for_id(&target_last_seen, id)
+            {
+                resident.remove(&evict);
+                target_last_seen.remove(&evict);
+            }
+            resident.insert(key);
+            target_last_seen.insert(key, u64::from(band));
+
+            assert!(
+                resident.len() <= MAX_TARGETS_PER_ID,
+                "band {band}: must never exceed the per-id cap"
+            );
+        }
+
+        assert_eq!(
+            resident.len(),
+            MAX_TARGETS_PER_ID,
+            "exactly the cap remains resident after the sweep"
+        );
+        // The two most recent bands survive; the earlier three were evicted.
+        assert!(resident.contains(&(id, 3, 3)));
+        assert!(resident.contains(&(id, 4, 4)));
     }
 
     #[test]
@@ -1567,6 +1762,73 @@ mod tests {
             assert!(
                 !fx.warned_clamped.contains(&(1, requested, requested)),
                 "reap must drop the id's warn-latch entries"
+            );
+        }
+    }
+
+    /// End-to-end (real device) confirmation of the target-identity fix: a
+    /// target's generation stays put across a cache hit (the common,
+    /// steady-state `ensure_target` call), but strictly increases when a key
+    /// is genuinely recreated after being reaped — the signal
+    /// `frust_engine::effects::shader_quad::ShaderQuadPass::register` needs
+    /// to tell a frozen, orphaned old target apart from a fresh one at the
+    /// same requested extent (see the module header's "Target identity"
+    /// section and [`Self::target_generation`]'s own doc).
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-gpu -- --ignored`"]
+    fn target_generation_bumps_only_when_a_target_is_actually_recreated() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            let (device, _queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-gpu effects target-generation test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+
+            const FRAGMENT: &str = "@fragment fn fs_main(in: FrustVsOut) -> \
+                @location(0) vec4<f32> { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }";
+
+            let mut fx = ShaderEffects::new(None);
+            fx.ensure_pipeline(&device, 1, FRAGMENT);
+
+            fx.ensure_target(&device, 1, 4, 4);
+            let first_generation = fx
+                .target_generation(&device, 1, 4, 4)
+                .expect("created target has a generation");
+
+            // A cache hit (the same key already resident) must not bump it.
+            fx.ensure_target(&device, 1, 4, 4);
+            assert_eq!(
+                fx.target_generation(&device, 1, 4, 4),
+                Some(first_generation),
+                "a cache hit leaves the generation untouched"
+            );
+
+            // Force the target out (as a whole-id reap would) and recreate it
+            // at the identical requested extent.
+            fx.reap(&[1]);
+            fx.ensure_pipeline(&device, 1, FRAGMENT);
+            fx.ensure_target(&device, 1, 4, 4);
+            let second_generation = fx
+                .target_generation(&device, 1, 4, 4)
+                .expect("recreated target has a generation");
+
+            assert!(
+                second_generation > first_generation,
+                "a target recreated at the same extent must carry a strictly \
+                 greater generation ({second_generation} was not > {first_generation})"
             );
         }
     }

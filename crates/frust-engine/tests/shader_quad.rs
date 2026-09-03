@@ -33,6 +33,13 @@
 //! - **A program the scene stops drawing is unregistered.** The age-based reap
 //!   has to withdraw the registration too, or a reaped target stays bound to a
 //!   view nothing owns.
+//! - **A target reaped on its own (shorter) per-target clock — the program id
+//!   itself still well under its own reap window — is rebuilt, not frozen.**
+//!   The regression this file exists to pin: registration has to track the
+//!   underlying target's own identity (its generation), not merely the
+//!   requested extent, or a program idled past `MAX_UNSEEN_TARGET_FRAMES`
+//!   frames and then redrawn at the identical size keeps sampling whatever
+//!   the pre-idle frame rendered forever.
 //!
 //! The whole file runs under a validation error scope, so a bind group built
 //! against the wrong layout, or an attachment `wgpu` refuses, names itself
@@ -118,6 +125,18 @@ fn reports_resolution(expected: f32) -> String {
 fn reports_resolution_as_color() -> String {
     "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> { \
      return vec4<f32>(frust_u.resolution.x / 255.0, frust_u.resolution.y / 255.0, 0.0, 1.0); }"
+        .to_string()
+}
+
+/// A fragment source encoding the `time` uniform directly into its red
+/// channel, alpha 1: a distinct, unambiguous colour per distinct `time` a
+/// program renders at, so a read-back can tell "this frame's render" apart
+/// from "whatever an earlier frame's render left behind" — the signal the
+/// target-identity regression test needs (a frozen texture reads back the
+/// *old* time's colour, not the new one).
+fn reports_time_as_color() -> String {
+    "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> { \
+     return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }"
         .to_string()
 }
 
@@ -575,6 +594,48 @@ fn a_program_the_scene_stops_drawing_is_reaped_and_unregistered() {
     // And the same scene now draws nothing rather than a stale target.
     let after = harness.render_without_prepass(&scene_drawing(&program, DEST));
     assert_frame_is_base(&after, BLACK);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test shader_quad -- --ignored`"]
+fn a_target_reaped_after_idling_past_its_own_window_is_rebuilt_not_frozen() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    // Distinct, unambiguous colours per `time` — the read-back that tells
+    // "this frame's render" apart from "whatever an idle-out earlier frame's
+    // render left behind".
+    let program = ShaderProgram::new(reports_time_as_color());
+
+    let before_scene = scene_of(|builder| builder.draw_shader(&program, DEST, 0.0));
+    let before = harness.render_over(&before_scene, BLUE);
+    assert_dest_is(&before, [0, 0, 0, 255]);
+    assert_eq!(harness.shader_quads.registered_len(), 1);
+
+    // Idle for longer than the per-target reap window
+    // (MAX_UNSEEN_TARGET_FRAMES, 60) but well under the whole-program reap
+    // window (MAX_UNSEEN_FRAMES, 120): the *registration* survives this age —
+    // the program id itself is nowhere near its own reap — but the
+    // underlying GPU target does not; `ensure_target` mints a brand new one
+    // when the program is asked for again. (`MAX_UNSEEN_TARGET_FRAMES` is
+    // documented shorter than `MAX_UNSEEN_FRAMES` — see their own doc
+    // comments in `frust_gpu::effects` — so this age crosses only the
+    // former.)
+    harness.age(
+        &Scene::new(),
+        frust_gpu::effects::MAX_UNSEEN_TARGET_FRAMES as usize + 1,
+    );
+
+    // Redrawn at the identical destination (so the requested extent is
+    // unchanged) but a different `time`. The regression this pins: a
+    // registration that only compares extent leaves the renderer's bind
+    // group pointing at the orphaned pre-idle texture — still `time` 0.0 —
+    // forever, since `register` would see the same extent and skip
+    // rebinding. Comparing the target's own generation too is what forces
+    // the rebind onto the freshly rendered texture instead.
+    let after_scene = scene_of(|builder| builder.draw_shader(&program, DEST, 1.0));
+    let after = harness.render_over(&after_scene, BLUE);
+
+    assert_dest_is(&after, [255, 0, 0, 255]);
 }
 
 #[test]
