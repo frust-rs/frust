@@ -179,7 +179,7 @@ const FALLBACK_DESTRUCTIVE: Color = crate::BEUI_LIGHT.destructive;
 // ---- The value model -------------------------------------------------------
 
 /// The form's five values — upstream's `SignUpValues`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SignupValues {
     /// The `name` field.
     pub name: String,
@@ -191,6 +191,18 @@ pub struct SignupValues {
     pub confirm_password: String,
     /// The `terms` checkbox.
     pub terms: bool,
+}
+
+impl std::fmt::Debug for SignupValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignupValues")
+            .field("name", &self.name)
+            .field("email", &self.email)
+            .field("password", &"<redacted>")
+            .field("confirm_password", &"<redacted>")
+            .field("terms", &self.terms)
+            .finish()
+    }
 }
 
 /// Which of the five inputs a value, an error or a touch belongs to.
@@ -686,6 +698,8 @@ pub struct SignupFormWidget {
     form_error_shown: bool,
     strength: u8,
     shows_strength: bool,
+    /// Whether the strength meter was visible on the previous paint.
+    strength_was_visible: bool,
     submitting: bool,
     /// The strength group's presence.
     strength_presence: Presence,
@@ -758,6 +772,7 @@ impl<State: 'static> View<State> for SignupFormView<State> {
             form_error_shown: self.error_message.is_some(),
             strength,
             shows_strength,
+            strength_was_visible: strength_presence.is_visible(),
             submitting: self.status.is_submitting(),
             strength_presence,
             terms_error_presence,
@@ -1089,8 +1104,11 @@ impl Widget for SignupFormWidget {
             }
             y += size.height;
             if field == SignupField::Password {
-                let shown = self.strength_presence.presence(FrameTime::ZERO);
-                let height = self.strength_height() * if shown > 0.0 { 1.0 } else { 0.0 };
+                let height = if self.strength_presence.is_visible() {
+                    self.strength_height()
+                } else {
+                    0.0
+                };
                 self.strength_rect = Rect::from_origin_size(
                     Point::new(FORM_PADDING + STRENGTH_PADDING_X, y + STRENGTH_GAP),
                     Size::new((content - STRENGTH_PADDING_X * 2.0).max(1.0), height),
@@ -1179,6 +1197,15 @@ impl Widget for SignupFormWidget {
         owes_frame |= self.strength_presence.is_animating()
             || self.terms_error_presence.is_animating()
             || self.form_error_presence.is_animating();
+
+        // Request layout when the strength meter's visibility state changes
+        // (entering or exiting), so the layout is recomputed on the frame it
+        // becomes visible and on the frame it settles away.
+        let strength_is_visible = self.strength_presence.is_visible();
+        if self.strength_was_visible != strength_is_visible {
+            ctx.request_layout();
+        }
+        self.strength_was_visible = strength_is_visible;
 
         // The card itself.
         let size = Size::new(self.width, self.height);
@@ -1679,6 +1706,20 @@ mod tests {
         fn paint(&mut self) -> Recorder {
             self.paint_at(0.0)
         }
+
+        /// Paint one frame with no rebuild or layout in between — the
+        /// production frame shape — and report whether it asked for layout.
+        fn paint_only(&mut self, millis: f64) -> bool {
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(millis)).needs_layout
+        }
+
+        /// Run layout alone (no rebuild), the way the shell answers a
+        /// `request_layout`, and return the laid-out size.
+        fn relayout(&mut self) -> Size {
+            self.root
+                .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any)
+        }
     }
 
     fn build(view: &SignupFormView<App>) -> SignupFormWidget {
@@ -2146,5 +2187,135 @@ mod tests {
         assert_eq!(SignupStatus::Loading.button_state(), ButtonState::Loading);
         assert_eq!(SignupStatus::Success.button_state(), ButtonState::Success);
         assert_eq!(SignupStatus::Error.button_state(), ButtonState::Error);
+    }
+
+    // ---- Strength meter layout with presence -------
+
+    #[test]
+    fn strength_meter_height_reserved_only_while_visible() {
+        // Without any password, the strength meter is not shown and reserves
+        // no height.
+        let view: SignupFormView<App> = signup_form(SignupValues::default(), |_s: &mut App, _v| {});
+        let mut w = build(&view);
+        layout(&mut w);
+        assert_eq!(
+            w.strength_rect.height(),
+            0.0,
+            "strength meter reserves no height when not shown"
+        );
+        assert!(!w.strength_was_visible);
+
+        // With a password typed, the meter is shown and reserves height.
+        let view: SignupFormView<App> = signup_form(
+            SignupValues {
+                password: "abcdefgh".to_string(),
+                ..SignupValues::default()
+            },
+            |_s: &mut App, _v| {},
+        );
+        let mut w = build(&view);
+        layout(&mut w);
+        assert!(
+            w.strength_rect.height() > 0.0,
+            "strength meter reserves height when shown"
+        );
+    }
+
+    #[test]
+    fn strength_meter_layout_requests_on_visibility_change() {
+        // Typing the first character opens the strength meter. The layout
+        // that follows the rebuild must reserve its height at once (the
+        // phase, not a progress sample, decides), the entrance keeps asking
+        // for layout while it runs, and a settled meter goes quiet — all on
+        // paint-only frames.
+        let mut h = Harness::new(SignupValues::default());
+        h.paint_at(0.0);
+        let empty = h.relayout();
+        assert!(!h.paint_only(100.0), "an idle form asks for no layout");
+
+        h.state.values.password = "a".to_string();
+        h.pass();
+        let entering = h.relayout();
+        assert!(
+            entering.height > empty.height,
+            "the strength group takes its height from the first Entering layout"
+        );
+        assert!(h.paint_only(101.0), "an entering meter asks for layout");
+        assert!(h.paint_only(150.0), "so does every frame of the entrance");
+        h.relayout();
+        // Well past the entrance and the bars' own springs.
+        assert!(
+            !h.paint_only(2_000.0),
+            "a settled meter asks for no more layout"
+        );
+    }
+
+    #[test]
+    fn strength_meter_layout_requests_on_clearing_password() {
+        // Clearing the password sends the meter out. It keeps its height
+        // while exiting, asks for layout on the frame the exit settles, and
+        // the layout that answers releases the height.
+        let mut h = Harness::new(SignupValues {
+            password: "abcdefgh".to_string(),
+            ..SignupValues::default()
+        });
+        h.paint_at(0.0);
+        h.paint_at(500.0);
+        let with_meter = h.relayout();
+        assert!(!h.paint_only(500.0), "a resting meter asks for no layout");
+
+        h.state.values.password = String::new();
+        h.pass();
+        assert!(h.paint_only(501.0), "an exiting meter asks for layout");
+        assert!(
+            h.paint_only(681.0),
+            "the frame the exit settles asks for layout"
+        );
+        let after = h.relayout();
+        assert!(
+            after.height < with_meter.height,
+            "the strength height is released once the exit settles"
+        );
+        // Well past the exit and the bars' own springs.
+        assert!(
+            !h.paint_only(2_000.0),
+            "an absent meter asks for no more layout"
+        );
+    }
+
+    #[test]
+    fn signup_values_debug_redacts_passwords() {
+        let values = SignupValues {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.com".to_string(),
+            password: "secret123".to_string(),
+            confirm_password: "secret123".to_string(),
+            terms: true,
+        };
+
+        let debug_str = format!("{:?}", values);
+
+        // The Debug output should contain the public fields.
+        assert!(
+            debug_str.contains("Ada Lovelace"),
+            "Debug should include name"
+        );
+        assert!(
+            debug_str.contains("ada@example.com"),
+            "Debug should include email"
+        );
+        assert!(debug_str.contains("true"), "Debug should include terms");
+
+        // The Debug output should NOT contain the actual passwords.
+        assert!(
+            !debug_str.contains("secret123"),
+            "Debug should not include password plaintext"
+        );
+
+        // The Debug output should contain redaction markers.
+        assert!(
+            debug_str.contains("<redacted>"),
+            "Debug should mark passwords as redacted"
+        );
     }
 }
