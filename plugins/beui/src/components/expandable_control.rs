@@ -288,6 +288,7 @@ impl Widget for ExpandableButtonWidget {
 
         let target_width = self.width_for(self.expanded);
         let target_reveal = if self.expanded { 1.0 } else { 0.0 };
+        let width_before = self.width.value();
         if reduce {
             self.width.jump_to(target_width);
             self.reveal.jump_to(target_reveal);
@@ -353,8 +354,14 @@ impl Widget for ExpandableButtonWidget {
             scene.pop_transform();
         }
 
-        if self.width.is_animating() {
-            // A layout-affecting animation: `request_layout` implies the frame.
+        // A layout-affecting animation still owes a relayout on the frame it
+        // lands: `SpringScalar::advance` clears `is_animating` the instant it
+        // settles (inside the same call that produces the final value), and
+        // `jump_to` under `reduce_motion` never sets it at all — so the flag
+        // alone misses both the settle frame and the reduced-motion snap.
+        // Comparing against the pre-advance value catches whichever of those
+        // moved the width this frame.
+        if self.width.is_animating() || self.width.value() != width_before {
             ctx.request_layout();
         } else if self.reveal.is_animating() || self.scale.is_animating() {
             ctx.request_frame();
@@ -657,6 +664,7 @@ impl Widget for ExpandableChipWidget {
 
         let target_width = self.width_for(self.expanded);
         let target_reveal = if self.expanded { 1.0 } else { 0.0 };
+        let width_before = self.width.value();
         if reduce {
             self.width.jump_to(target_width);
             self.reveal.jump_to(target_reveal);
@@ -727,7 +735,9 @@ impl Widget for ExpandableChipWidget {
             scene.pop_transform();
         }
 
-        if self.width.is_animating() {
+        // See the button's paint for why the flag alone cannot catch the
+        // landing frame or the reduced-motion snap.
+        if self.width.is_animating() || self.width.value() != width_before {
             ctx.request_layout();
         } else if self.reveal.is_animating() || self.scale.is_animating() {
             ctx.request_frame();
@@ -973,7 +983,10 @@ mod tests {
     }
 
     /// The morph runs through layout: the paint that advances the spring asks
-    /// for a relayout, and the next layout is the one that is wider.
+    /// for a relayout, and the next layout is the one that is wider. The
+    /// landing frame — where the spring settles inside `advance` and its
+    /// `is_animating` flag drops in that same call — still owes a relayout,
+    /// because the width value itself is what moved.
     #[test]
     fn the_width_morph_drives_a_relayout_until_it_settles() {
         let collapsed = expandable_button::<Log>("+", "Add item", |_, _| {});
@@ -992,14 +1005,23 @@ mod tests {
         let opening = lay_out(&mut w);
         assert!(opening.width > narrow.width, "and then it opens");
 
+        // The landing frame: the ramp settles inside this very `advance`, so
+        // `is_animating` is already false by the time paint reads it — the
+        // relayout has to come from the value having moved this frame.
         let (_, _, relayout) = paint_at(&mut w, opening, &theme(), 5_000);
-        assert!(!relayout, "and stops once settled");
+        assert!(relayout, "the landing frame still owes a relayout");
         let settled = lay_out(&mut w);
         assert_eq!(settled.width, w.width_for(true));
+
+        // Now it has actually settled: nothing more is owed.
+        let (_, _, relayout) = paint_at(&mut w, settled, &theme(), 5_100);
+        assert!(!relayout, "and stops once settled");
     }
 
-    /// Reduced motion lands on the settled width on the first paint, with no
-    /// frames or relayouts owed.
+    /// Reduced motion lands on the settled width on the first paint. The snap
+    /// still moves the width in one shot, so it owes exactly the one
+    /// relayout that reveals it (which itself implies the frame) — nothing
+    /// further once settled.
     #[test]
     fn reduced_motion_lands_the_morph_immediately() {
         let collapsed = expandable_button::<Log>("+", "Add item", |_, _| {});
@@ -1009,8 +1031,12 @@ mod tests {
         rebuild_button(&collapsed, &expanded, &mut w);
 
         let (_, more, relayout) = paint_at(&mut w, narrow, &reduced_theme(), 0);
-        assert!(!more && !relayout);
-        assert_eq!(lay_out(&mut w).width, w.width_for(true));
+        assert!(more && relayout, "the snap owes its one relayout");
+        let settled = lay_out(&mut w);
+        assert_eq!(settled.width, w.width_for(true));
+
+        let (_, more, relayout) = paint_at(&mut w, settled, &reduced_theme(), 100);
+        assert!(!more && !relayout, "and nothing more once settled");
     }
 
     /// Controlled: a press reports the flag it wants and changes nothing on its

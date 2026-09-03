@@ -98,7 +98,9 @@ use frust::authoring::{
     Rect, Role, SemanticsCtx, Size, Vec2, View, Widget, any, build_child, erase_callback,
     rebuild_child, route_event_single, teardown_child, visit_children,
 };
-use frust::{BackPolicy, NavigatorController, PopResult, PushOptions, Theme, TransitionSpec};
+use frust::{
+    BackPolicy, FrameTime, NavigatorController, PopResult, PushOptions, Theme, TransitionSpec,
+};
 
 use super::finite_or_zero;
 use crate::motion::{Presence, PresencePhase, Ramp};
@@ -722,12 +724,19 @@ impl ModalWidget {
     /// [`Presence::collapsed`] is a constructor, not a switch, so a live toggle
     /// has to replace the drivers. One replaced mid-*exit* is re-opened and
     /// re-closed on the spot, which keeps a staged close reachable instead of
-    /// stranding the modal at zero presence over a page it never popped.
-    fn sync_motion(&mut self, reduce: bool) {
+    /// stranding the modal at zero presence over a page it never popped. One
+    /// replaced while fully [`PresencePhase::Present`] is parked back there
+    /// directly rather than restarted from [`PresencePhase::Absent`] — see
+    /// `overlay::anchored`'s `sync_motion`, which this mirrors: a naive rebuild
+    /// here would replay the whole entrance over a panel the user is already
+    /// looking at, every time a ramp/config/`reduce_motion` change lands on a
+    /// modal that was simply sitting open.
+    fn sync_motion(&mut self, reduce: bool, now: FrameTime) {
         if self.reduced == Some(reduce) {
             return;
         }
         let was_exiting = self.panel.phase() == PresencePhase::Exiting;
+        let was_present = self.panel.phase() == PresencePhase::Present;
         let closing = was_exiting || (self.staged && !self.closed);
         self.reduced = Some(reduce);
         let panel = Presence::new(self.config.enter, self.config.exit);
@@ -745,6 +754,18 @@ impl ModalWidget {
         }
         panel.set_open(open);
         scrim.set_open(open);
+        if was_present && open {
+            // Two `advance` calls per driver — one to latch the fresh driver's
+            // own clock, one at (or past) its settle time — land each on
+            // `Present` with no frame of visible motion.
+            for driver in [&mut panel, &mut scrim] {
+                let settle = driver.active_ramp().settle();
+                let settled_at =
+                    FrameTime::from_nanos(now.as_nanos().saturating_add(settle.as_nanos() as u64));
+                driver.advance(now);
+                driver.advance(settled_at);
+            }
+        }
         self.panel = panel;
         self.scrim = scrim;
     }
@@ -988,10 +1009,10 @@ impl Widget for ModalWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let reduce = Theme::from_paint_ctx(ctx).is_some_and(|theme| theme.motion.reduce_motion);
-        self.sync_motion(reduce);
+        let now = ctx.frame_time();
+        self.sync_motion(reduce, now);
         self.observe_dismiss_signal(ctx);
 
-        let now = ctx.frame_time();
         let progress = self.panel.advance(now);
         let veil = self.scrim.advance(now).clamp(0.0, 1.0);
         if self.panel.is_animating() || self.scrim.is_animating() {
@@ -1084,6 +1105,14 @@ impl Widget for ModalWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A focus release deferred from a pointer-driven dismissal (see
+        // `request_dismiss`) has to be delivered on every pass this host still
+        // receives, including once the exit ramp has fully settled below —
+        // that settled-closed pass is exactly the `Key`/`Scroll`/`Ime` a user
+        // can type right after a backdrop tap, with no intervening pointer
+        // event to have carried the release instead. Draining it ahead of the
+        // early return is what keeps that path from going unreachable.
+        self.drain_focus_release(ctx, event);
         // A settled-closed host is inert: a broadcast still reaches the content
         // (which is what keeps its pods live), and nothing else does. It stays a
         // barrier for as long as it is visible, exit included — a press on a
@@ -1094,7 +1123,6 @@ impl Widget for ModalWidget {
             }
             return EventResult::Ignored;
         }
-        self.drain_focus_release(ctx, event);
         // Claim focus on every `Down` — what makes Escape reachable, and what
         // keeps the root's focus session alive while the modal is up.
         // Re-claiming while focused is a no-op.
@@ -1783,6 +1811,45 @@ mod tests {
         );
     }
 
+    /// The same deferred release, but reaching it only after the exit ramp has
+    /// fully settled the host closed — driven by paint passes alone, with no
+    /// `Key`/`Scroll`/`Ime` dispatch landing in between to have carried the
+    /// release early. The settled-closed guard in `event` must not skip the
+    /// drain, or a keystroke typed right after a backdrop tap goes swallowed.
+    #[test]
+    fn a_backdrop_dismissal_still_releases_focus_once_settled_closed() {
+        let mut h = Harness::new(ModalConfig::centered());
+        h.settle();
+        h.pointer(PointerPhase::Down, 2.0, 2.0);
+        assert!(
+            h.root.is_focus_active(),
+            "the down seated the focus session"
+        );
+        h.pointer(PointerPhase::Up, 2.0, 2.0);
+        assert_eq!(h.state.dismissed, 1);
+
+        // A rebuild syncs the closed `open` flag onto the widget and starts
+        // the exit; settle it with paint passes only.
+        h.pass();
+        h.paint(SETTLED);
+        h.paint(SETTLED + EXIT_SPAN);
+        assert!(
+            h.root.is_focus_active(),
+            "no honoured dispatch has come through yet"
+        );
+
+        // Nothing here is left to answer a key — the host is gone — but the
+        // pending release still has to land.
+        assert!(
+            !h.escape(),
+            "the settled-closed host has nothing left to swallow with"
+        );
+        assert!(
+            !h.root.is_focus_active(),
+            "the deferred release lands on this settled-closed pass"
+        );
+    }
+
     #[test]
     fn a_non_dismissable_modal_answers_neither_escape_nor_the_backdrop() {
         let mut h = Harness::new(ModalConfig::centered().dismissable(false));
@@ -1978,6 +2045,38 @@ mod tests {
         assert_eq!(h.closed.get(), 1);
         h.paint(2);
         assert_eq!(h.closed.get(), 1);
+    }
+
+    /// A rebuild whose config (or `reduce_motion`) changes forces
+    /// `sync_motion` to replace both drivers — `ModalView::rebuild` clears
+    /// `element.reduced` for either kind of change alike. One replaced while
+    /// the host is fully `Present` must land back on `Present` with no
+    /// visible motion, not replay the whole entrance over a panel the user is
+    /// already looking at.
+    #[test]
+    fn a_config_change_while_open_does_not_replay_the_entrance() {
+        let mut h = Harness::new(ModalConfig::centered());
+        h.settle();
+        let before = h.paint(SETTLED + 1);
+        assert!(
+            before.alphas.is_empty(),
+            "fully present, no fade layer needed"
+        );
+
+        // A ramp/config change while sitting open — the same path a
+        // `reduce_motion` flip takes.
+        h.config = ModalConfig::centered().scrim_fade(Duration::from_millis(600));
+        h.pass();
+
+        let rebuilt = h.paint(SETTLED + 2);
+        assert!(
+            rebuilt.alphas.is_empty(),
+            "the rebuilt driver must land on Present with no layer, not restart the entrance"
+        );
+        assert!(
+            (rebuilt.scrim_alpha.unwrap() - super::super::SCRIM_ALPHA).abs() < 1e-6,
+            "the scrim stays at its settled alpha rather than fading back in"
+        );
     }
 
     #[test]
