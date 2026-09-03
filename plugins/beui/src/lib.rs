@@ -94,10 +94,50 @@
 //! registers both faces and the theme binds Geist into the `NativeTypefaces`
 //! slots native controls read; [`font_data`] exposes the raw bytes for a host
 //! that wants them directly.
+//!
+//! # The `gpu-effects` feature
+//!
+//! Non-default, and the only feature this crate has. It adds `gpu_fx`, the
+//! GPU substrate the catalog's true-3D component variants render through: a
+//! perspective quad renderer driven from an `ExternalPass` the engine calls
+//! once per frame ahead of its own scene pass, writing into a pooled offscreen
+//! target the engine then composites. Turning it on pulls in the facade's
+//! `gpu` feature and a `wgpu` edge of this crate's own (the facade re-exports
+//! the GPU types but not `wgpu`, so a caller recording its own render pass
+//! names it directly). A default build carries none of that and behaves
+//! exactly as it did before the feature existed.
+//!
+//! What it buys is **real perspective**, which nothing above the render tier
+//! can otherwise express: a scene texture composites under an `Affine`, so a
+//! 2D "3D card" is a shear no matter how it is tuned, while a face this
+//! substrate draws is projected through an actual frustum.
+//!
+//! What it still cannot do, and will not be made to:
+//!
+//! - **Arbitrary child subtrees are never perspective-transformed.** The
+//!   substrate tilts faces *it* renders — a colour, a gradient, or a texture
+//!   the caller produced. A widget subtree is composited under `Affine` and
+//!   stays that way, so a 3D face carries no text and no child widgets.
+//! - **Every 3D component keeps its 2D path.** Acquisition answers `None`
+//!   whenever the GPU is unreachable — before a shell's first surface, on
+//!   Android and iOS today, or with the substrate's kill switch set — and the
+//!   component renders flat. The 3D path is an enhancement, never the only
+//!   way a component draws.
+//!
+//! See `gpu_fx`'s own module docs for the acquisition/degrade contract, the
+//! camera tuning, the pooling policy, and the one seam gap the variants built
+//! on it inherit.
+//!
 
 pub mod agents;
 pub mod blocks;
 pub mod components;
+/// The GPU-effect substrate behind the non-default `gpu-effects` feature —
+/// perspective quad rendering, offscreen target pooling, and the per-frame
+/// pass the engine records it through. See the crate docs' *The `gpu-effects`
+/// feature* for what it adds and what it deliberately does not.
+#[cfg(feature = "gpu-effects")]
+pub mod gpu_fx;
 /// The animation substrate every component in this catalog animates with:
 /// stagger driving, per-character text cells, pointer tracking, scroll-effect
 /// adaptation, and kept-mounted exit presence. The motion *tokens* it is timed
