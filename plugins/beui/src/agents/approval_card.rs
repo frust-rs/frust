@@ -128,7 +128,9 @@ use frust::authoring::{
 use crate::agents::code_block::{
     code_palette, draw_check, draw_cross, draw_spinner, spinner_angle,
 };
-use crate::agents::tool_approval::{TRUNCATION_MARKER, WrappedRun, prose_style, strong_style};
+use crate::agents::tool_approval::{
+    TRUNCATION_MARKER, WrappedRun, consent_text, prose_style, strong_style,
+};
 use crate::motion::Ramp;
 use crate::press::{Lane, draw_focus_ring, inside, is_activation_key, presses};
 use crate::style::{self, with_alpha};
@@ -326,27 +328,40 @@ pub fn approval_card<State: 'static>() -> ApprovalCardView<State> {
 }
 
 impl<State: 'static> ApprovalCardView<State> {
-    /// The card's heading (`title`).
+    /// The card's heading (`title`). Agent-supplied text is neutralised on
+    /// the way in — see [`consent_text`].
     pub fn title(mut self, title: impl Into<String>) -> Self {
-        self.title = title.into();
+        self.title = consent_text(&title.into());
         self
     }
 
-    /// The paragraph under the heading (`description`).
+    /// The paragraph under the heading (`description`), neutralised like the
+    /// title.
     pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
+        self.description = Some(consent_text(&description.into()));
         self
     }
 
     /// The detail block between the description and the action row
     /// (`children`) — a diff, a code block, a table, anything.
     ///
-    /// A child's own repaints do **not** disarm the card's press; label the
-    /// block with [`Self::content_key`] when what it shows is part of what a
-    /// decision consents to. See the [module docs](self).
+    /// A child's own repaints do **not** disarm the card's press, and its
+    /// paint/layout flags say nothing about consent. So a card whose block has
+    /// no identity **does not answer decisions at all**: the approve, request
+    /// changes and reject affordances stay disabled until the block is keyed
+    /// with [`Self::content_key`] (or given through [`Self::content_keyed`]),
+    /// which is what turns a change of substance into a new consent episode.
+    /// A dismiss still works. See the [module docs](self).
     pub fn content<V: View<State>>(mut self, content: V) -> Self {
         self.content = Some(any(content));
         self
+    }
+
+    /// A detail block together with the identity of what it shows — the
+    /// form a consent-bearing block takes. Equivalent to
+    /// [`Self::content`] followed by [`Self::content_key`].
+    pub fn content_keyed<V: View<State>>(self, key: impl Into<String>, content: V) -> Self {
+        self.content(content).content_key(key)
     }
 
     /// The identity of what the detail block currently shows — a diff hash, a
@@ -867,8 +882,17 @@ impl ApprovalCardWidget {
     ///
     /// A decision fires at most once per interactive episode; a dismiss is not
     /// a decision and is never latched — see the [module docs](self).
+    /// Whether a decision can be answered right now: not once one has been
+    /// given, not outside a pending status, and never while an unkeyed detail
+    /// block is showing (its substance would be outside the consent episode).
+    fn decisions_locked(&self) -> bool {
+        self.decided
+            || !self.status.accepts_decision()
+            || (self.content.is_some() && self.content_key.is_none())
+    }
+
     fn activate(&mut self, ctx: &mut EventCtx, target: ApprovalCardAction) {
-        if target.is_decision() && (self.decided || !self.status.accepts_decision()) {
+        if target.is_decision() && self.decisions_locked() {
             return;
         }
         // Both callbacks, when set, report the same fired action — the plain
@@ -1344,7 +1368,7 @@ impl Widget for ApprovalCardWidget {
             for (_, label) in &self.buttons {
                 ctx.push_node(Role::Button, |node| {
                     node.set_label(label.content());
-                    if self.decided || !self.status.accepts_decision() {
+                    if self.decisions_locked() {
                         node.set_disabled();
                     } else {
                         node.add_action(Action::Click);
@@ -1439,7 +1463,7 @@ mod tests {
         approval_card::<Reviewed>()
             .title("Apply these changes?")
             .description("The agent rewrote three files and wants to commit them.")
-            .content(text("src/lib.rs, src/main.rs, README.md"))
+            .content_keyed("changeset-7", text("src/lib.rs, src/main.rs, README.md"))
             .status(status)
             .dismissible(true)
             .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
@@ -1736,7 +1760,7 @@ mod tests {
         let swapped = approval_card::<Reviewed>()
             .title("Apply these OTHER changes?")
             .description("A different agent turn swapped the review mid-press.")
-            .content(text("src/other.rs"))
+            .content_keyed("changeset-7", text("src/other.rs"))
             .status(ApprovalCardStatus::Pending)
             .dismissible(true)
             .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
@@ -1873,6 +1897,50 @@ mod tests {
         assert_eq!(state.actions, 2);
     }
 
+    /// A detail block with no identity is outside the consent episode, so a
+    /// card showing one answers no decision until it is keyed.
+    #[test]
+    fn an_unkeyed_detail_block_makes_decisions_unanswerable() {
+        let card = |keyed: bool| {
+            let base = approval_card::<Reviewed>()
+                .title("Apply these changes?")
+                .status(ApprovalCardStatus::Pending)
+                .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
+                    s.action = Some(action);
+                    s.actions += 1;
+                });
+            if keyed {
+                base.content_keyed("changeset-7", text("src/lib.rs"))
+            } else {
+                base.content(text("src/lib.rs"))
+            }
+        };
+        for (keyed, expected) in [(false, 0), (true, 1)] {
+            let view = card(keyed);
+            let mut w = build(&view);
+            let size = layout(&mut w);
+            paint_at(&mut w, size, None, 0.0);
+            let mut state = Reviewed::default();
+            let approve = w.button_rect(ApprovalCardAction::Approve).unwrap().center();
+            dispatch(
+                &mut w,
+                size,
+                &pointer(PointerPhase::Down, approve),
+                &mut state,
+            );
+            dispatch(
+                &mut w,
+                size,
+                &pointer(PointerPhase::Up, approve),
+                &mut state,
+            );
+            assert_eq!(
+                state.actions, expected,
+                "keyed = {keyed}: an unkeyed block answers nothing, a keyed one once"
+            );
+        }
+    }
+
     /// A streaming detail block repaints and relayouts on every frame it
     /// grows, and none of that is consent-bearing: the press that was armed
     /// before the stream still completes, and the roving cursor stays where
@@ -1883,7 +1951,8 @@ mod tests {
             approval_card::<Reviewed>()
                 .title("Apply these changes?")
                 .description("The agent rewrote three files and wants to commit them.")
-                .content(text(body.to_owned()))
+                // One change set streaming in: the same key throughout.
+                .content_keyed("changeset-7", text(body.to_owned()))
                 .status(ApprovalCardStatus::Pending)
                 .on_action(|s: &mut Reviewed, action: ApprovalCardAction| {
                     s.action = Some(action);

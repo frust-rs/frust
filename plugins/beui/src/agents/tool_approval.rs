@@ -412,7 +412,7 @@ pub struct ToolApprovalView<State: 'static> {
 /// [`ToolApprovalView::on_decision`] to hear the user's answer.
 pub fn tool_approval<State: 'static>(tool: impl Into<String>) -> ToolApprovalView<State> {
     ToolApprovalView {
-        tool: tool.into(),
+        tool: consent_text(&tool.into()),
         title: "Allow this tool to run?".to_owned(),
         description: None,
         parameters: Vec::new(),
@@ -427,21 +427,31 @@ pub fn tool_approval<State: 'static>(tool: impl Into<String>) -> ToolApprovalVie
 }
 
 impl<State: 'static> ToolApprovalView<State> {
-    /// The question the card asks (`title`).
+    /// The question the card asks (`title`). Agent-supplied text is
+    /// neutralised on the way in — see [`consent_text`].
     pub fn title(mut self, title: impl Into<String>) -> Self {
-        self.title = title.into();
+        self.title = consent_text(&title.into());
         self
     }
 
-    /// The paragraph under the question (`description`).
+    /// The paragraph under the question (`description`), neutralised like the
+    /// title.
     pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
+        self.description = Some(consent_text(&description.into()));
         self
     }
 
-    /// The arguments the details disclosure lists (`parameters`).
+    /// The arguments the details disclosure lists (`parameters`); every label
+    /// and value is neutralised like the title.
     pub fn parameters(mut self, parameters: impl Into<Vec<ToolApprovalParameter>>) -> Self {
-        self.parameters = parameters.into();
+        self.parameters = parameters
+            .into()
+            .into_iter()
+            .map(|parameter| ToolApprovalParameter {
+                label: consent_text(&parameter.label),
+                value: consent_text(&parameter.value),
+            })
+            .collect();
         self
     }
 
@@ -526,6 +536,31 @@ impl<State: 'static> ToolApprovalView<State> {
 /// shared with the sibling [approval card](super::approval_card), which
 /// bounds its own head text the same way.
 pub(crate) const TRUNCATION_MARKER: char = '\u{2026}';
+
+/// Neutralise directional and control characters in agent- or server-supplied
+/// consent text before it is compared, shaped or read out: every control
+/// other than a newline or tab, and every Unicode bidi override, embedding,
+/// isolate and mark, becomes U+FFFD, so no field can reorder itself — or hide
+/// part of itself — into a misleading rendering of what is being consented to.
+pub(crate) fn consent_text(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            let bidi = matches!(
+                c,
+                '\u{061C}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            );
+            if bidi || (c.is_control() && c != '\n' && c != '\t') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
 
 /// One retained parameter row.
 struct ParamRuns {
@@ -2437,5 +2472,30 @@ mod tests {
         layout(&mut w);
         let (_, needs_frame, _) = paint_at(&mut w, size, None, 2_000.0);
         assert!(needs_frame, "the spinner asks for its next tick");
+    }
+
+    /// Agent-supplied consent text cannot carry directional overrides or
+    /// control characters into the card: they are neutralised on ingestion,
+    /// while newlines and tabs survive.
+    #[test]
+    fn directional_and_control_characters_in_consent_text_are_neutralised() {
+        let view = tool_approval::<Answered>("rm\u{202E}fr -")
+            .title("Delete\u{0007} nothing?\u{2066}")
+            .description("line one\nline\ttwo\u{200F}")
+            .parameters(vec![tool_approval_parameter(
+                "pa\u{202D}th",
+                "/\u{0000}etc",
+            )]);
+        assert_eq!(view.tool, "rm\u{FFFD}fr -");
+        assert_eq!(view.title, "Delete\u{FFFD} nothing?\u{FFFD}");
+        assert_eq!(
+            view.description.as_deref(),
+            Some("line one\nline\ttwo\u{FFFD}")
+        );
+        assert_eq!(view.parameters[0].label, "pa\u{FFFD}th");
+        assert_eq!(view.parameters[0].value, "/\u{FFFD}etc");
+        let w = build(&view);
+        assert!(!w.title_text.contains('\u{0007}'));
+        assert!(!w.tool_text.contains('\u{202E}'));
     }
 }

@@ -974,8 +974,10 @@ impl Widget for AgentActivityWidget {
         let origin = ctx.origin();
         let size = ctx.size();
         let expanded = self.is_expanded();
-        self.aim_reveal(expanded, reduce_motion);
+        // Sampled before the aim: a reduce_motion snap inside it is itself a
+        // change the last layout has not seen, so it must count as movement.
         let before = self.reveal.value();
+        self.aim_reveal(expanded, reduce_motion);
         let moving = self.reveal.advance(now);
         let mut owes_layout = moving || self.reveal.value() != before;
         let mut owes_frame = false;
@@ -1867,6 +1869,36 @@ mod tests {
         let (rec, _, _) = painted(&mut widget, size, 5_000, Some(&theme));
         assert!(!rec.inks.is_empty());
         assert_eq!(widget.row_presence(2, at(5_000)), 1.0);
+    }
+
+    /// An uncontrolled, completed stream toggled under `reduce_motion` snaps
+    /// its reveal in the aim; the paint that follows must still ask for the
+    /// layout that resizes the widget.
+    #[test]
+    fn reduce_motion_toggle_of_an_uncontrolled_stream_requests_layout() {
+        let theme = reduced();
+        let view = agent_activity::<Opened>(vec![activity_step("a", "First")])
+            .status(AgentActivityStatus::Complete)
+            .collapse_on_complete(false);
+        let (mut widget, size) = laid_out(&view);
+        assert!(widget.controlled.is_none(), "uncontrolled fixture");
+        painted(&mut widget, size, 0, Some(&theme));
+        painted(&mut widget, size, 100, Some(&theme));
+        assert!(
+            !step_paint_only(&mut widget, size, 200, Some(&theme)),
+            "a settled stream asks for nothing"
+        );
+
+        widget.internal_open = !widget.internal_open;
+        assert!(
+            step_paint_only(&mut widget, size, 300, Some(&theme)),
+            "the snapped reveal asks for the layout that resizes the widget"
+        );
+        layout(&mut widget);
+        assert!(
+            !step_paint_only(&mut widget, size, 400, Some(&theme)),
+            "and is quiet once laid out"
+        );
     }
 
     /// The stream publishes its one composed child — the shimmer row — so an

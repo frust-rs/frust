@@ -1254,6 +1254,13 @@ impl Widget for FileUploadWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let colors = resolve_colors(theme);
+        // A row whose exit has settled — or, under reduce_motion, any row that
+        // is leaving — is dropped here, on the layout pass paint asks for when
+        // it notices the settle, so the queue collapses without waiting for an
+        // unrelated `View::rebuild` and paint reaches a resting frame.
+        let reduce = theme.is_some_and(|t| t.motion.reduce_motion);
+        self.rows
+            .retain(|row| !row.leaving || (!reduce && row.presence.is_visible()));
         let width = if bc.max().width.is_finite() {
             bc.max().width
         } else {
@@ -1403,7 +1410,11 @@ impl Widget for FileUploadWidget {
                     row.shown = if row.presence.is_visible() { 1.0 } else { 0.0 };
                 }
             }
-            if row.presence.is_animating() {
+            if reduce && row.leaving {
+                // Its slot is already released; the layout this asks for drops
+                // the row, so this fires once and the ramp clock is left alone.
+                owes_layout = true;
+            } else if row.presence.is_animating() {
                 // A leaving row's height is what its presence drives, so that
                 // arm owes a relayout; an entering one only owes a repaint.
                 if row.leaving {
@@ -1412,10 +1423,9 @@ impl Widget for FileUploadWidget {
                     owes_frame = true;
                 }
             } else if row.leaving && !row.presence.is_visible() {
-                // A row whose exit ramp has just settled needs a relayout for the
-                // queue to collapse visually. A subsequent View::rebuild still calls
-                // drop_exited() to remove it from self.rows, but layout alone does
-                // not trigger that rebuild-only cleanup.
+                // The exit has settled: one more layout collapses the queue and
+                // drops the row (layout retains only visible or staying rows),
+                // after which nothing here fires again.
                 owes_layout = true;
             }
         }
@@ -2016,6 +2026,16 @@ mod tests {
             self.paint_at(0.0)
         }
 
+        /// Paint one frame and report `(needs_frame, needs_layout)`.
+        fn paint_flags_at(&mut self, millis: f64) -> (bool, bool) {
+            let mut rec = Recorder::default();
+            let size = Size::new(WIDTH, 900.0);
+            let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(millis))
+                .with_theme(&self.theme as &dyn Any);
+            self.widget.paint(&mut ctx, &mut rec);
+            (ctx.needs_frame(), ctx.needs_layout())
+        }
+
         fn dispatch(&mut self, event: &InputEvent) -> EventResult {
             let size = Size::new(WIDTH, 900.0);
             let state: &mut dyn Any = &mut self.state;
@@ -2493,35 +2513,35 @@ mod tests {
         // Progress should snap to 1.0 under reduce_motion
         assert!((bare.widget.rows[0].progress.value() - 1.0).abs() < 1e-9);
 
-        // A removal with reduce_motion releases the row's slot immediately.
+        // A removal with reduce_motion releases the row's slot at once: the
+        // layout the rebuild runs drops it before any paint.
         bare.rebuild(view(vec![]));
-        bare.paint_at(0.0);
-        // Under reduce_motion, the row is marked as leaving and its shown
-        // progress is immediately snapped to 0.0, releasing the height slot.
-        assert!(bare.widget.rows[0].leaving, "removed row marked as leaving");
         assert!(
-            (bare.widget.rows[0].shown - 0.0).abs() < 1e-9,
-            "removed row released its slot immediately under reduce_motion"
+            bare.widget.rows.is_empty(),
+            "removed row gone on the first layout"
         );
 
-        // Ramps survive toggling reduce_motion off: when toggled off while leaving,
-        // shown should not be 0.0 anymore.
+        // Ramps survive the toggle: an arriving row snaps shown under
+        // reduce_motion, resumes its (untouched) entrance ramp when the
+        // theme flips back, and snaps again when it is re-enabled.
+        bare.rebuild(view(vec![item("c", "c.txt", 10).progress(100.0)]));
+        bare.paint_at(0.0);
+        assert!(
+            (bare.widget.rows[0].shown - 1.0).abs() < 1e-9,
+            "an arriving row shows at once under reduce_motion"
+        );
         bare.theme.motion.reduce_motion = false;
-        bare.paint_at(1.0); // Paint at 1ms into the exit ramp
+        bare.paint_at(1.0);
         let shown_without_reduce = bare.widget.rows[0].shown;
-        // With reduce_motion off and at 1ms into the exit, shown should be
-        // slightly less than 1.0 (exiting), not 0.0 (snapped).
         assert!(
             shown_without_reduce > 0.0 && shown_without_reduce < 1.0,
-            "presence ramp not snapped when reduce_motion is off"
+            "the entrance ramp was never overwritten: it is 1ms in"
         );
-
-        // Toggle reduce_motion back on and verify it snaps again.
         bare.theme.motion.reduce_motion = true;
-        bare.paint_at(1.0); // Paint at the same time but with reduce_motion on
+        bare.paint_at(1.0);
         assert!(
-            (bare.widget.rows[0].shown - 0.0).abs() < 1e-9,
-            "toggling reduce_motion back on snaps the row to invisible again"
+            (bare.widget.rows[0].shown - 1.0).abs() < 1e-9,
+            "toggling reduce_motion back on snaps the row visible again"
         );
     }
 
@@ -2575,32 +2595,70 @@ mod tests {
         );
     }
 
+    /// A settled exit asks for one layout, that layout drops the row, and the
+    /// widget then rests — no rebuild, no further frame or layout requests.
     #[test]
-    fn a_row_whose_exit_ramp_settles_requests_layout() {
-        // Verify that when a row's exit ramp settles, paint requests a layout
-        // so that on the next rebuild, drop_exited() can remove it.
-        let mut bare = Bare::new(vec![item("a", "a.txt", 10), item("b", "b.txt", 10)]);
-
-        // Remove the first row to start its exit.
-        bare.rebuild(view(vec![item("b", "b.txt", 10)]));
+    fn a_settled_exit_is_dropped_by_layout_and_the_widget_rests() {
+        // Finished uploads, so no spinner loop is owed and rest is observable.
+        let mut bare = Bare::new(vec![
+            item("a", "a.txt", 10).status(FileUploadStatus::Success),
+            item("b", "b.txt", 10).status(FileUploadStatus::Success),
+        ]);
+        bare.rebuild(view(vec![
+            item("b", "b.txt", 10).status(FileUploadStatus::Success),
+        ]));
         assert_eq!(bare.widget.rows.len(), 2, "both rows retained during exit");
         assert!(bare.widget.rows[0].leaving);
 
-        // Paint until the exit ramp settles.
         bare.paint_at(0.0);
-        bare.paint_at(UPLOAD_ROW_MS as f64 + 50.0);
+        let (_, settling) = bare.paint_flags_at(UPLOAD_ROW_MS as f64 + 50.0);
+        assert!(settling, "the settled exit asks for a layout");
         assert!(
             !bare.widget.rows[0].presence.is_visible(),
             "exit ramp settled"
         );
 
-        // Rebuild with the same view to trigger drop_exited() when paint requested layout.
-        bare.rebuild(view(vec![item("b", "b.txt", 10)]));
+        bare.layout();
+        assert_eq!(bare.widget.rows.len(), 1, "layout dropped the settled row");
+        assert_eq!(bare.widget.rows[0].id, "b");
+        let (_, layout_owed) = bare.paint_flags_at(UPLOAD_ROW_MS as f64 + 100.0);
+        assert!(!layout_owed, "nothing owes a layout once the row is gone");
+        // Well past every remaining lane's own settle.
+        for ms in [2_000.0, 10_000.0] {
+            assert_eq!(
+                bare.paint_flags_at(ms),
+                (false, false),
+                "at {ms}ms the widget rests: no frame, no layout"
+            );
+        }
+    }
+
+    /// Under `reduce_motion` a removed row asks for one layout on the frame of
+    /// the removal, that layout drops it, and the ramps are never touched.
+    #[test]
+    fn reduce_motion_drops_a_removed_row_on_its_first_layout() {
+        let mut bare = Bare::new(vec![
+            item("a", "a.txt", 10).status(FileUploadStatus::Success),
+            item("b", "b.txt", 10).status(FileUploadStatus::Success),
+        ]);
+        bare.theme.motion.reduce_motion = true;
+        bare.rebuild(view(vec![
+            item("b", "b.txt", 10).status(FileUploadStatus::Success),
+        ]));
+        // `rebuild` already ran one layout under the reduced theme: the
+        // leaving row is gone before any paint.
         assert_eq!(
             bare.widget.rows.len(),
             1,
-            "settled-exit row dropped on next rebuild"
+            "the removal released its slot at once"
         );
         assert_eq!(bare.widget.rows[0].id, "b");
+        for ms in [0.0, 100.0, 1_000.0] {
+            assert_eq!(
+                bare.paint_flags_at(ms),
+                (false, false),
+                "at {ms}ms the widget rests"
+            );
+        }
     }
 }
