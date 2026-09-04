@@ -2795,11 +2795,13 @@ both mobile shells install a `DeviceHandle` and a Mac records a Metal pass of th
 **Observed**: three fidelity limits hold across every `gpu-effects` opt-in, all substrate-wide
 rather than per component: (1) a target is allocated in logical pixels — one texel per logical
 pixel, with no scale-factor axis at the paint seam — so the composite upscales like any other
-unscaled raster on a HiDPI surface; (2) a face is a `QuadFace::Solid`/`Gradient`/`Texture` fill
-only, and always square-cornered, since a rounded clip is a rectangle in scene space and a
-tilted or turned face is not one; (3) `tilt_card`'s pointer-tracking glare has no radial-gradient
-`QuadFace` to reach for, so it degrades to a linear ramp aimed at the pointer rather than a true
-radial falloff.
+unscaled raster on a HiDPI surface; placement itself is exact, not part of this gap —
+`card3d::target_for` forces each axis's overscan margin to an even texel count
+(`even_margin`), so a zero-tilt face's texel grid lands on the device pixel grid with no
+half-texel offset; (2) a face is a `QuadFace::Solid`/`Gradient`/`Texture` fill only, and always
+square-cornered, since a rounded clip is a rectangle in scene space and a tilted or turned face
+is not one; (3) `tilt_card`'s pointer-tracking glare has no radial-gradient `QuadFace` to reach
+for, so it degrades to a linear ramp aimed at the pointer rather than a true radial falloff.
 
 **Applies to**: every `gpu_fx`-rendered face (`tilt_card::gpu_face`, `wheel_picker::gpu_drum`,
 `cylinder_carousel::gpu_cylinder`, `project_folder::gpu_fan`, `wallet_card::gpu_fan`) for (1) and
@@ -2813,9 +2815,10 @@ corner behind whatever rounded 2D clip sits around it, a linear rather than radi
 close enough that a bespoke fix per component was not justified.
 
 **Evidence**: `plugins/beui/src/gpu_fx/card3d.rs` module docs ("One target texel is one logical
-pixel", "The glare is a linear ramp, not a radial one"); `plugins/beui/src/gpu_fx/quad3d.rs`'s
-`QuadFace` enum; `plugins/beui/src/components/tilt_card.rs` ("The face is rendered at logical
-resolution", "The face has square corners"); `plugins/beui/src/components/wheel_picker.rs`,
+pixel", "The glare is a linear ramp, not a radial one") and `target_for`/`even_margin` (the
+even-margin, no-half-texel-offset guarantee); `plugins/beui/src/gpu_fx/quad3d.rs`'s `QuadFace`
+enum; `plugins/beui/src/components/tilt_card.rs` ("The face is rendered at logical resolution",
+"The face has square corners"); `plugins/beui/src/components/wheel_picker.rs`,
 `plugins/beui/src/components/cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`
 (each "The plate(s) have square corners").
 
@@ -2827,40 +2830,76 @@ render-tier additions, none currently planned.
 
 ### `beui-gpu-fx-depth-and-pooling` — a translucent face writes depth like an opaque one, and the target pool over-allocates small faces
 
-**Observed**: two mechanics bound every `gpu_fx` scene, substrate-wide. A `Quad3dScene::depth`
-attachment writes depth for a translucent face exactly as it would for an opaque one, so a scene
-wanting faces to blend over each other — rather than the farther one being rejected outright —
-has to submit them in the order that makes that true: `cylinder::drum_scene` (the wheel drum, the
-carousel wall) sorts its faces nearest-first, because a far-then-near submission blends a
-translucent drum twice and darkens every seam where two rows overlap; `fan::fan_scene` (the
-folder preview fan, the wallet account switcher) instead keeps the caller's own back-to-front
-order, because a fan's sheets want a nearer one blending *over* a further one — the same
-depth/blend interaction, resolved oppositely by the two geometries it applies to. Separately,
-`pool::TargetPool` quantises every offscreen target's extent up to a 256px square before keying
-it, so a small face still occupies a full 256px-square texture, and reaps a key that has gone
-unasked-for for 120 consecutive frames.
+**Observed**: three mechanics bound every `gpu_fx` scene, substrate-wide, not per component.
+(a) A `Quad3dScene::depth` attachment writes depth for a translucent face exactly as it would for
+an opaque one, so a scene wanting faces to blend over each other — rather than the farther one
+being rejected outright — has to submit them in the order that makes that true, and the rule
+splits by geometry, not by which component reaches for it: `cylinder::drum_scene` (the wheel
+drum, the carousel wall) and `card3d::fan_scene` (the wallet account switcher) both sort their
+faces nearest-first — a far-then-near submission would blend a translucent plate twice and darken
+every seam two rows or cards overlap, and the sort is stable with a non-finite depth sorted to the
+back — while `fan::fan_scene` (the folder preview fan) instead keeps the caller's own
+back-to-front order, because a fan's sheets want a nearer one blending *over* a further one and
+its caller-supplied stacking order is the only signal that pile has. (b) `FxPass`'s `Binding` —
+the bookkeeping deciding whether a frame owes `ExternalFrame::bind_texture`/`unbind_texture` —
+lives once per pass inside the same `Mutex<PassState>` every `record` call locks, not once per
+surface: with two engine-tier surfaces live at once, each surface's own drain calls `record` on
+the identical `FxPass`, and the second call's `Binding::needs_rebind` sees the generation the
+first call already recorded and answers `false`, so the second surface's `ExternalFrame` never
+receives the bind and composites nothing under that `SceneTextureId`. (c) `pool::TargetPool`
+quantises every offscreen target's extent up to a 256px square before keying it — so a small face
+still occupies a full 256px-square texture — reaps a key that has gone unasked-for for 120
+consecutive frames, checks a key's quantized extent against
+`min(4096, device.limits().max_texture_dimension_2d)` before allocating, and wraps the
+`create_texture` calls in a `Validation` error scope, refusing (`None`, nothing inserted) rather
+than caching a target the device rejected. Each component owns its own pool with no aggregate
+budget across components, so a colour + `Depth24Plus` target at the 4096px ceiling — on the order
+of 100 MB — is a per-component worst case, not a substrate-wide one. Separately,
+`Quad3dRenderer` (the compiled pipelines and uniform buffer a pass records through) is built once
+per component *instance* on the first frame that instance has content rather than shared per
+device, so two live instances of the same component (two `tilt_card`s on screen at once) each pay
+their own pipeline-compile cost on their own first frame.
 
-**Applies to**: `cylinder_carousel::gpu_cylinder`/`wheel_picker::gpu_drum` for the nearest-first
-sort; `project_folder::gpu_fan`/`wallet_card::gpu_fan` for the back-to-front order; every
-`gpu_fx` consumer for the pool's quantization/reap policy.
+**Applies to**: `cylinder_carousel::gpu_cylinder`/`wheel_picker::gpu_drum` and
+`wallet_card::gpu_fan` for the nearest-first sort; `project_folder::gpu_fan` for the
+back-to-front order; every `gpu_fx` consumer for (b) whenever a process drives two engine-tier
+surfaces at once, and for the pool's quantization/reap/ceiling policy and the per-instance
+renderer compile in (c).
 
-**Why accepted**: the sort direction is mode-specific by design — a drum's item order carries no
-meaning of its own (whichever face is nearest wins by distance), while a fan's caller-supplied
-stacking order is the only signal a translucent pile has — so one rule cannot serve both, and each
-geometry module owns its own resolution rather than pushing the decision onto a component. The
-pool's 256px quantization and 120-frame reap mirror `frust_gpu::effects`' own texture-pool policy
-value for value, so a small face's over-allocation is the same trade the engine already makes, and
-reuse across an animation is worth more than the wasted bytes.
+**Why accepted**: the sort direction in (a) is mode-specific by design — a drum's or fan-of-cards'
+item order carries no meaning of its own (whichever face is nearest wins by distance), while the
+folder fan's caller-supplied stacking order is the only signal that pile has — so one rule cannot
+serve both, and each geometry module owns its own resolution rather than pushing the decision onto
+a component. (b) is accepted because every shipped shell drives one engine-tier surface per
+process — see `external-pass-registry-process-wide` above, which the same one-process-wide-state
+shape traces back to; a per-surface `Binding` is real design work with no shipping consumer to
+prove it against yet. In (c), the pool's 256px quantization and 120-frame reap mirror
+`frust_gpu::effects`' own texture-pool policy value for value, so a small face's over-allocation
+is the same trade the engine already makes; the device-ceiling check and error-scoped allocation
+turn an out-of-range or refused request into "draw nothing this frame" instead of a validation
+panic, and the missing aggregate budget is accepted because no shipped component drives more than
+a handful of resident targets at once. `Quad3dRenderer`'s per-instance compile is accepted in its
+own module docs as a documented cost: sharing one renderer per device would serialize the
+concurrent `record` calls two live engine-tier surfaces are allowed to make, and would collapse
+every pass's diagnostic label into one.
 
 **Evidence**: `plugins/beui/src/gpu_fx/cylinder.rs` module docs ("Depth is the whole point, and it
-needs the nearest face first") and `drum_scene`; `plugins/beui/src/gpu_fx/fan.rs` module docs
-("Depth, and why the sheets are still submitted back-to-front"); `plugins/beui/src/gpu_fx/quad3d.rs`
-module docs ("Depth"); `plugins/beui/src/gpu_fx/pool.rs` (`TARGET_QUANTUM = 256`,
-`MAX_UNSEEN_FRAMES = 120`, module docs "Why a pool at all").
+needs the nearest face first") and `drum_scene`; `plugins/beui/src/gpu_fx/card3d.rs`'s `fan_scene`
+doc; `plugins/beui/src/gpu_fx/fan.rs` module docs ("Depth, and why the sheets are still submitted
+back-to-front"); `plugins/beui/src/gpu_fx/quad3d.rs` module docs ("Depth") and its
+`Quad3dRenderer` doc ("Accepted as a documented per-instance cost for now rather than solved");
+`plugins/beui/src/gpu_fx/schedule.rs` (`PassState`'s single `binding: Binding` field, `FxPass`'s
+`Mutex<PassState>`, `ExternalPass::record`'s `needs_rebind`/`record_bind` call); `docs/LIMITATIONS.md`'s
+own `external-pass-registry-process-wide` entry; `plugins/beui/src/gpu_fx/pool.rs`
+(`TARGET_QUANTUM = 256`, `MAX_UNSEEN_FRAMES = 120`, `MAX_TARGET_SIDE = 4096`, `TargetPool::acquire`'s
+device-ceiling check, `create_target`'s `push_error_scope`/`drain_error_scope`, module docs "Why a
+pool at all").
 
-**Trigger for removal**: none planned — both are structural consequences of a shared
-depth-tested-translucency primitive and a bounded texture pool, not a defect either geometry
-module could fix independently.
+**Trigger for removal**: none planned for (a) or (c) — both are structural consequences of a
+shared depth-tested-translucency primitive and a bounded per-component texture pool, not a defect
+either geometry module could fix independently. (b) shares its trigger with
+`external-pass-registry-process-wide`: a per-surface `Binding` keyed by surface identity, or the
+first shell that keeps two engine-tier surfaces live at once, whichever lands first.
 
 ---
 
