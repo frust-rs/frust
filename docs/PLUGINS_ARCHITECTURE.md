@@ -22,16 +22,17 @@ bundle loading, locale-aware message resolution, system-locale detection, and (b
 `formatting` feature) ICU4X number/date/currency formatting — reaching no OS capability beyond
 a locale read.
 
-A tenth through thirteenth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`,
-`plugins/shadcn` (`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`) — are the tier's
-**design-system plugins**: four widget catalogs (Glyph, Material 3, Cupertino, shadcn/ui), the
-first three extracted in-tree from what used to be feature-gated `frust-widgets` modules and now
-shipping as ordinary sibling crates, each an app dependency beside `frust` rather than a cargo
-feature on it. `plugins/shadcn` (`frust-shadcn`) is the tier's first **external-origin** catalog —
-a port of the third-party shadcn/ui v4 registry rather than an in-tree extraction — and so the
-tier's proof case that the external design-system contract holds for a catalog authored outside
-this repo. They reach no OS capability at all and share nothing with the OS-capability plugins
-above beyond sitting in the same tier; see *Design-System Plugins* below.
+A tenth through fourteenth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`,
+`plugins/shadcn`, `plugins/beui` (`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`/
+`frust-beui`) — are the tier's **design-system plugins**: five widget catalogs (Glyph, Material 3,
+Cupertino, shadcn/ui, beUI), the first three extracted in-tree from what used to be feature-gated
+`frust-widgets` modules and now shipping as ordinary sibling crates, each an app dependency beside
+`frust` rather than a cargo feature on it. `plugins/shadcn` (`frust-shadcn`) and `plugins/beui`
+(`frust-beui`) are the tier's **external-origin** catalogs — ports of third-party web registries
+(shadcn/ui v4, beUI v2) rather than in-tree extractions — the tier's proof case that the external
+design-system contract holds for a catalog authored outside this repo. They reach no OS capability
+at all and share nothing with the OS-capability plugins above beyond sitting in the same tier; see
+*Design-System Plugins* below.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other units.
 
@@ -53,6 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`): a 43-role token system (34 baseline `ColorScheme` roles + a 9-role `MaterialTokens` extension) with runtime HCT seed-color generation (`from_seed`), a feature-point `RoundedPolygon`/`Morph` shape engine backing a 35-shape catalog (`shapes::` is the crate's only morph engine — the legacy `shape_morph` module was retired), a unified interaction core with a pluggable haptics hook, 88 generated Material Icons vector constants, bundled Roboto Flex/Mono fonts, the M3E core-control catalog at reference parity — buttons (5 variants × 5 sizes, gradient decoration, overflow strategies), icon buttons, toggle button + button groups + segmented buttons, FAB, selection controls (checkbox/radio/switch), chips, sliders (incl. range), and a text field wrapping the baseline editable — plus its own `overlay` hosting seam (anchored + modal hosts, a sibling port of `frust-shadcn`'s; see *Design-System Plugins* below) and the containment/overlay/feedback tier built on it: menus (incl. submenu) and dropdowns, tooltips and a snackbar host, dialogs/bottom sheets/side sheets, a selection host, a search bar/view, cards and list families (incl. expandable/dismissible), dividers and badges, a carousel, progress/loading/refresh indicators, and date/time pickers — and the navigation/structure tier: a 4-constructor app bar family (top/search/bottom/sliver, the last collapsible), primary/secondary tabs, a two-spring liquid-indicator navigation bar/rail/drawer family, floating/docked toolbars (scroll-hide + FAB 80→56 morph — see `material-fab-fixed-tier-icon-centering` in [LIMITATIONS.md](LIMITATIONS.md)), a shape-morphing FAB menu, and a two-pod split button (popup + bottom-sheet menu routes). Scroll-linked chrome (app-bar collapse, toolbar hide) has no widget-owned scroll handle: the app feeds `ScrollView::on_scroll` into the widget's own controlled collapse/hide prop — the pattern any future scroll-linked chrome follows |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 | `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
+| `plugins/beui` | The beUI design-system plugin (`frust-beui`), the tier's second external-origin catalog: a port of beUI v2 (81 upstream registry slugs — 42 `components`, 17 `agents`, 22 `blocks`, module-family-prefixed rather than flat re-exported), its own `BeuiTokens` extension over an oklch-transcribed palette, three glass recipes, and catalog motion tokens (`SPRING_*`/`EASE_*`), an `overlay` hosting seam mirroring shadcn's (see *Design-System Plugins* below), a dedicated per-character text-cell substrate (`motion::chars`) and stagger/pointer/scroll-effect drivers making motion the catalog's distinguishing layer, its own bundled Geist + Geist Mono variable fonts (`plugins/beui/fonts`, OFL), and (behind the non-default `gpu-effects` feature) the `gpu_fx` perspective-quad substrate five components opt into (see *Design-System Plugins* below) |
 
 ## Desktop Backend Status
 
@@ -73,7 +75,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
-| `glyph` / `material` / `cupertino` / `shadcn` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
+| `glyph` / `material` / `cupertino` / `shadcn` / `beui` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
 | `native-widgets` (NATIVE_WIDGETS unit) | unavailable | no desktop backend of any kind — Android/iOS only (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
 
 ## Layer Dependencies
@@ -118,7 +120,7 @@ plugin whose "platform" is the filesystem — which the charter accommodates rat
 still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
-The four design-system plugins are a further, distinct shape the charter above accommodates rather
+The five design-system plugins are a further, distinct shape the charter above accommodates rather
 than covers: no `frust-plugin`, no FFI crate, and — unlike every OS-capability plugin — a direct
 `frust` facade dependency, since a widget catalog's whole job is building against `frust::authoring`
 (see *Design-System Plugins* below).
@@ -138,33 +140,34 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
 ## Design-System Plugins
 
 `frust-glyph`/`frust-material`/`frust-cupertino` are the three built-in widget catalogs, extracted
-from `frust-widgets` into sibling plugin crates; `frust-shadcn` is the fourth, a port of the
-third-party shadcn/ui v4 registry rather than an in-tree extraction (see
-[WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)'s External Design-System Contract for the
-toolkit they all build against). Their shared charter:
+from `frust-widgets` into sibling plugin crates; `frust-shadcn` and `frust-beui` are the fourth and
+fifth, external-origin ports of third-party web registries (shadcn/ui v4, beUI v2) rather than
+in-tree extractions (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)'s External
+Design-System Contract for the toolkit they all build against). Their shared charter:
 
 - **Production deps: `frust` (`default-features = false`) plus `kurbo`/`peniko` only, never
   another `frust-*` crate.** This is what makes each one a real proof of the external
   design-system contract rather than a special-cased in-tree exception — an app depends on any of
-  the four exactly the way it would depend on a third-party catalog.
+  the five exactly the way it would depend on a third-party catalog.
 - **`frust-widgets` (`test-support` feature) and `frust-core` (test-only) are dev-dependencies,
   never production ones.** The sanctioned test-fixture/`RenderRoot` route: a catalog's own tests
   need a real `RenderRoot` to paint against and `frust-widgets`' GPU-free container fixtures, both
   of which the facade deliberately does not re-export to production code.
 - **`install()` is the one-line entry point, called from `app!`'s `setup = { .. }` block —
   before shell construction, the one point a shell reads the default-theme slot.** Each `install()`
-  calls `frust::set_default_theme(baseline())` (`frust_shadcn::install()` names its seed `theme()`
-  instead, but the shape is the same); `frust_glyph::install()`, `frust_material::install()`, and
-  `frust_shadcn::install()` additionally call `frust::register_app_fonts` for their bundled fonts —
-  Glyph's OFL monospace faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's
-  bundled Roboto Flex (OFL-1.1) and Roboto Mono (OFL-1.1, `plugins/material/fonts/`), shadcn's
-  bundled Inter Variable and JetBrains Mono Variable (OFL-1.1, no Reserved Font Name,
-  `plugins/shadcn/fonts/`) — each registered unconditionally, not behind a feature, since none of
-  the three crates has a feature to gate them with. A call after shell construction takes effect
-  only on a later theme reseed, which may never happen.
-- **`frust_glyph::baseline()`, `frust_material::baseline()`, and `frust_shadcn::theme()` all attach
-  the `NativeTypefaces` theme extension** — the bundled faces reach `frust-native-widgets`' native
-  controls through this attach, not through any
+  calls `frust::set_default_theme(baseline())` (`frust_shadcn::install()` and `frust_beui::install()`
+  name their seed `theme()` instead, but the shape is the same); every crate but Cupertino
+  additionally calls `frust::register_app_fonts` for its bundled fonts — Glyph's OFL monospace faces
+  (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's bundled Roboto Flex (OFL-1.1) and
+  Roboto Mono (OFL-1.1, `plugins/material/fonts/`), shadcn's bundled Inter Variable and JetBrains
+  Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/shadcn/fonts/`), beUI's bundled Geist
+  Variable and Geist Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/beui/fonts/`) — each
+  registered unconditionally, not behind a feature, since none of the four crates has a feature to
+  gate them with. A call after shell construction takes effect only on a later theme reseed, which
+  may never happen.
+- **`frust_glyph::baseline()`, `frust_material::baseline()`, `frust_shadcn::theme()`, and
+  `frust_beui::theme()` all attach the `NativeTypefaces` theme extension** — the bundled faces reach
+  `frust-native-widgets`' native controls through this attach, not through any
   `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
   theme ladder). Cupertino's `baseline()` attaches no font extension.
 - **`frust-shadcn` and `frust-material` each carry a cross-component `overlay` seam** — the only
@@ -191,24 +194,48 @@ toolkit they all build against). Their shared charter:
   than unmount it, since the framework has no seam for keeping a conditionally-mounted view alive
   past the rebuild that drops it (the *kept-mounted pattern*, documented in each plugin's own
   `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
-  [LIMITATIONS.md](LIMITATIONS.md), which now has both plugins as consumers).
-  theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
-- **`frust-shadcn`'s one cross-component seam is its `overlay` module** — a full-area top-layer
-  widget pattern standing in for the DOM portal shadcn/ui itself relies on: an `anchored` host
-  (trigger-relative placement in window space, light-dismiss, no scrim — popover, tooltip,
-  hover-card, the menu/select/combobox family) and a `modal` host (scrim + centered/edge-pinned
-  panel over `NavigatorController::push_transparent_for_result` — dialog, alert-dialog, sheet,
-  drawer, command). Every other component paints inside its own box; only these reach through this
-  seam.
-- **Both overlay hosts animate their exit, not just their entrance.** The `modal` host stages every
-  dismiss (scrim tap, Escape, close button, drag) as a reverse ramp and fires the app's dismissal
-  only once it settles; the drawer additionally supports drag-to-close on all four pinned edges with
-  a velocity-flick threshold and Base UI-style snap points. The `anchored` host takes the same shape
-  through a builder-level `.open(bool)`: an app that wants an exit ramp must keep the host mounted
-  and toggle `open` rather than unmount it, since the framework has no seam for keeping a
-  conditionally-mounted view alive past the rebuild that drops it (the *kept-mounted pattern*,
-  documented in `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
   [LIMITATIONS.md](LIMITATIONS.md)).
+- **`frust-beui` carries a third, independently-shaped `overlay` seam** — its own `anchored`/`modal`
+  hosts (not ported from `frust-shadcn`'s), staged by the catalog's own `motion::Presence` driver,
+  with the same *which-component-mounts-through-which-host* table discipline (`overlay/mod.rs`'s own
+  doc table) and the same bounded-constraints/no-scroll-view mounting contract as shadcn/material's.
+  Its `anchored` host takes the identical kept-mounted `.open(bool)` shape — a third
+  `shadcn-anchored-exit-needs-kept-mounted` consumer — and its `modal` host's `StagedPop` is an
+  advisory one-frame depth guard: it snapshots the navigator's page-stack depth when an exit ramp is
+  staged and refuses to fire the pop if that depth moved before the ramp settles — the same
+  identity-guard shape `frust-material`'s staged pop already carries; the two hosts carry the
+  same guard under the same name, `StagedPop`.
+- **`frust-beui`'s three catalogs (`components`/`agents`/`blocks`) mirror upstream beUI's own
+  registry split** — 42 `components` (incl. `shader_background`'s five WGSL variants), 17 `agents`,
+  22 `blocks`, 81 slugs total; public symbols stay module-prefixed rather than flat re-exported at
+  the crate root (`ButtonVariant`, not a bare `Variant`) since the three families cover overlapping
+  upstream ground. Motion is this catalog's distinguishing layer over the other four: `motion::chars`
+  (per-character shaped text cells), `motion::stagger`/`pointer`/`scroll_fx`, and `motion::presence`
+  (the kept-mounted exit staging above) back nearly every component, against Glyph/Material/
+  Cupertino's and shadcn's mostly-static layouts. `examples/beui-demo` (desktop gallery, 19 pages) is
+  the reference consumer — see [ARCHITECTURE.md](ARCHITECTURE.md)'s Examples table.
+- **`frust-beui`'s non-default `gpu-effects` feature (`= ["frust/gpu"]`) adds `gpu_fx`, a
+  perspective-quad GPU substrate reaching `wgpu` only through `frust::gpu`'s re-export — the crate
+  carries no `wgpu` edge of its own.** `GpuFx::try_acquire` acquires the shell's live device and
+  degrades to `None` (no device installed yet, or the crate's own `FRUST_BEUI_NO_GPU_FX` kill
+  switch) so every consumer's 2D path stays both the default build's behaviour and the runtime
+  fallback. `quad3d` is the one renderer (`QuadFace` solid/gradient/texture faces, optional depth
+  test); `card3d`/`cylinder`/`fan` are three geometry families built on it that render a
+  component's own already-computed 2D placement rather than a second one; `pool` quantises
+  offscreen targets to 256px and reaps them unseen after 120 frames; `schedule::FxPass` is the
+  per-component `ExternalPass` the engine drains ahead of its own scene pass every frame (see
+  [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam).
+- **Five components take an explicit, never-auto-on opt-in onto that substrate** —
+  `TiltCardView::gpu_face`, `WalletCardView::gpu_fan`, `WheelPicker::gpu_drum`,
+  `CylinderCarouselView::gpu_cylinder`, `ProjectFolderView::gpu_fan` — each compositing the
+  projected face through `PaintScene::draw_scene_texture` alongside its existing 2D layout. The
+  boundary holds everywhere it's used: a 3D face is a colour, a gradient, or a caller-owned texture
+  the substrate itself renders, never a widget subtree — a component's own child content (text,
+  captions, avatars) keeps compositing un-perspectived under `Affine`, on top of the composited
+  face — and the composite is always blended, never opaque (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s
+  `PaintScene` row and `engine-scene-texture-always-blended` in [LIMITATIONS.md](LIMITATIONS.md)).
+  `examples/beui-demo`'s GPU Effects page is the reference consumer, pairing every opt-in's 2D and
+  3D path side by side.
 - **`frust-shadcn`'s `scroll_area` establishes the *deferred-erasure builder* pattern**, for any
   wrapper needing an owned-value builder method (`.physics(...)`-style) to reach its child after
   construction: the child sits un-erased in a `Cell<Option<...>>` until a memoized
