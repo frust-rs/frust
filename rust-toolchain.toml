@@ -1,0 +1,6 @@
+# The Rust toolchain this workspace builds and lints with. Pinned so a stable
+# auto-update cannot change what `cargo clippy --workspace -- -D warnings`
+# accepts under everyone's feet (docs/DEVELOPMENT.md § Version-Pin Policy).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

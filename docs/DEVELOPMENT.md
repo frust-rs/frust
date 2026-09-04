@@ -457,9 +457,14 @@ owns them:
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
+| The Rust toolchain itself (`rust-toolchain.toml`: stable 1.98.1 with `rustfmt` + `clippy`) | this section, rule below |
 
 The rules below bind every pin, wherever its row lives:
 
+- **The toolchain is a pin too.** `rust-toolchain.toml` names the exact stable release the
+  gates run on; rustup installs it on first use. Bump it in its own change, only after
+  `cargo clippy --workspace --all-targets -- -D warnings` passes on the candidate — a stable
+  auto-update once turned new lints on under untouched code and failed the gate everywhere.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a **standalone package**
   (own `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`),
   git+rev-pinning the `clean-signals` core crate to its public repo (see
