@@ -107,8 +107,49 @@ pub mod schedule;
 
 use frust::gpu::wgpu;
 
-/// Synchronously drains a `wgpu` validation error scope, returning the first
-/// captured error if any.
+/// How many `device.poll` rounds [`drain_error_scope`] drives a pending pop
+/// through before giving up on it.
+///
+/// The scope's `pop` future is ordinarily ready after the first poll — see
+/// [`drain_error_scope`]'s own doc — so this is not a budget the ordinary
+/// path is expected to approach; it exists so a device that never resolves
+/// the pop (wedged, or torn down mid-poll) fails the caller's allocation or
+/// bind group rather than hanging the render thread forever.
+const DRAIN_POLL_LIMIT: u32 = 1_000;
+
+/// The result of draining a `wgpu` error scope: a real captured error, a
+/// clean pop, or the scope never resolving — which carries no [`wgpu::Error`]
+/// of its own but is exactly as fatal to whatever the scope guarded.
+#[derive(Debug)]
+pub(crate) enum ScopeOutcome {
+    /// The scope popped with nothing captured.
+    Clean,
+    /// The scope caught a real `wgpu` error.
+    ///
+    /// Never matched out — every caller only asks [`Self::is_failure`] — but
+    /// carried so this outcome's own `{:?}` names the actual error a failing
+    /// assertion is reporting, not just "yes, this failed".
+    #[allow(dead_code, reason = "read only through the derived Debug impl")]
+    Error(wgpu::Error),
+    /// The pop did not resolve within [`DRAIN_POLL_LIMIT`] polls, or
+    /// `Device::poll` itself answered an error while draining it. A device
+    /// this unresponsive cannot be trusted to have finished the operation
+    /// the scope guarded, so this is treated exactly like a captured error
+    /// by every caller.
+    Exhausted,
+}
+
+impl ScopeOutcome {
+    /// Whether the caller should treat this as a failure — an allocation to
+    /// refuse or a bind group to drop, never the whole frame.
+    #[must_use]
+    pub(crate) const fn is_failure(&self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+}
+
+/// Synchronously drains a `wgpu` error scope, bounded so a device that never
+/// resolves the pop cannot hang the caller forever.
 ///
 /// The same blocking-poll pattern `frust_gpu::effects::drain_error_scope`
 /// uses, replicated here because that helper is private to `frust-gpu` and
@@ -116,27 +157,34 @@ use frust::gpu::wgpu;
 /// crate docs' *The `gpu-effects` feature*). On native `wgpu` the scope's
 /// `pop` future resolves as soon as the synchronously-captured creation error
 /// is recorded, so this needs no async runtime; the `device.poll` fallback
-/// drives any residual pending state to completion rather than spinning.
-/// Never panics — [`pool::TargetPool::acquire`] and
+/// drives any residual pending state to completion rather than spinning, up
+/// to [`DRAIN_POLL_LIMIT`] rounds, breaking out early the moment `poll`
+/// itself answers an error. Never panics — `pool::create_target` and
 /// [`quad3d::Quad3dRenderer::record`] are both the callers, and both treat a
-/// `Some` answer as "drop this allocation/quad, not the whole frame."
+/// failing [`ScopeOutcome`] as "drop this allocation/quad, not the whole
+/// frame."
 pub(crate) fn drain_error_scope(
     device: &wgpu::Device,
     scope: wgpu::ErrorScopeGuard,
-) -> Option<wgpu::Error> {
+) -> ScopeOutcome {
     use std::task::{Context, Poll, Waker};
 
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     let mut future = std::pin::pin!(scope.pop());
-    loop {
+    for _ in 0..DRAIN_POLL_LIMIT {
         match future.as_mut().poll(&mut cx) {
-            Poll::Ready(error) => return error,
+            Poll::Ready(error) => {
+                return error.map_or(ScopeOutcome::Clean, ScopeOutcome::Error);
+            }
             Poll::Pending => {
-                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+                    return ScopeOutcome::Exhausted;
+                }
             }
         }
     }
+    ScopeOutcome::Exhausted
 }
 
 pub use card3d::{Card3d, FanCard};

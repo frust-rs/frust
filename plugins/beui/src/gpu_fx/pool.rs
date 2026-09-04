@@ -341,9 +341,14 @@ impl TargetPool {
     /// Drops every key that has gone unasked-for for more than
     /// [`MAX_UNSEEN_FRAMES`], answering the keys it dropped.
     ///
-    /// The answer is what lets the caller notice that the key currently bound
-    /// under the pass's `SceneTextureId` is gone and unbind it, rather than
-    /// leaving the engine sampling a texture nothing writes.
+    /// The returned keys are retained for observability — what a test reads
+    /// to pin exactly which entries a reap reclaimed
+    /// (`a_pooled_target_is_reaped_after_the_unseen_window`) — not a signal
+    /// [`crate::gpu_fx::schedule::FxPass::record`] itself acts on: the key it
+    /// just acquired this frame can never be among what a same-call `reap`
+    /// reclaims, so whether *that* binding is stale is already answered by
+    /// comparing [`FxTarget::generation`] against [`Binding::needs_rebind`],
+    /// not by consulting this return value.
     pub fn reap(&mut self) -> Vec<TargetKey> {
         let now = self.frame;
         let reaped: Vec<TargetKey> = self
@@ -380,15 +385,18 @@ impl TargetPool {
 /// Allocates one target's colour texture (and, when asked, its depth
 /// attachment) at `key`'s quantized extent.
 ///
-/// Wrapped in a `Validation` error scope (the
+/// Wrapped in both a `Validation` and an `OutOfMemory` error scope (the
 /// `frust_gpu::effects::drain_error_scope` pattern, replicated as
 /// [`super::drain_error_scope`] since that helper is private to
-/// `frust-gpu`): [`TargetPool::acquire`] has already checked `key`'s extent
-/// against this device's real ceiling before calling here, so a failure at
-/// this point is something else the device refused (an out-of-memory
-/// condition, most plausibly), and it is reported the same way — `None`,
-/// with nothing inserted into the pool — rather than left to become an
-/// uncaptured error.
+/// `frust-gpu`), drained in the reverse of the order they were pushed —
+/// `wgpu` scopes nest, so the last one pushed is the first one popped.
+/// [`TargetPool::acquire`] has already checked `key`'s extent against this
+/// device's real ceiling before calling here, so a `Validation` failure at
+/// this point is something else the device refused; `OutOfMemory` catches
+/// the class that check cannot: this device genuinely has no room left for a
+/// texture whose size it otherwise supports. Either is reported the same
+/// way — `None`, with nothing inserted into the pool — rather than left to
+/// become an uncaptured error.
 fn create_target(
     device: &wgpu::Device,
     key: TargetKey,
@@ -405,7 +413,8 @@ fn create_target(
         height,
         depth_or_array_layers: 1,
     };
-    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let oom_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let color = device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("frust-beui gpu_fx colour: {label}")),
@@ -432,7 +441,11 @@ fn create_target(
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     });
-    if super::drain_error_scope(device, scope).is_some() {
+    // Popped out of number order (out-of-memory, then validation): the scope
+    // pushed last is on top of `wgpu`'s stack and has to come off first.
+    let oom_outcome = super::drain_error_scope(device, oom_scope);
+    let validation_outcome = super::drain_error_scope(device, validation_scope);
+    if oom_outcome.is_failure() || validation_outcome.is_failure() {
         return None;
     }
     Some(FxTarget {
@@ -639,10 +652,13 @@ mod gpu_tests {
     /// *this* device's own (downgraded) `max_texture_dimension_2d` is refused
     /// by `acquire` itself — never reaching `wgpu::Device::create_texture` at
     /// a size the device does not support, which would trip validation
-    /// instead of answering `None`. `required_limits` downgrades the ceiling
-    /// to a small, fast-to-allocate value so the case stays cheap while still
-    /// exercising the real clamp against a real device, mirroring
-    /// `frust_gpu::effects`'s own
+    /// instead of answering `None`. `required_limits` starts from *this
+    /// adapter's own* limits and downgrades only the one field the case needs
+    /// small — never `wgpu::Limits::default()`, which a downlevel or
+    /// constrained adapter (a WebGL2 profile, the iOS Simulator's Metal
+    /// backend) can refuse outright — so the case stays cheap to allocate
+    /// while still exercising the real clamp against a real device,
+    /// mirroring `frust_gpu::effects`'s own
     /// `ensure_target_clamps_an_oversized_request_to_the_device_ceiling`.
     #[test]
     #[ignore = "needs a real GPU adapter"]
@@ -671,7 +687,7 @@ mod gpu_tests {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits {
                         max_texture_dimension_2d: CEILING,
-                        ..wgpu::Limits::default()
+                        ..adapter.limits()
                     },
                     ..Default::default()
                 })

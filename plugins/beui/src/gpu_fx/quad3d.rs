@@ -399,13 +399,42 @@ pub struct Quad3dRenderer {
     capacity: u64,
     label: String,
     /// A [`QuadFace::Texture`] bind group, keyed by the view's `Arc` pointer
-    /// identity and the opacity bits sampled with it. Rebuilt every
-    /// [`Self::record`] call from whichever entries the current scene's
-    /// faces actually touch (reusing a hit, creating a miss) rather than
-    /// grown forever: a caller animating opacity mints a new key every frame,
-    /// and this is what keeps that case from leaking one stale bind group per
-    /// frame instead of amortising the static case.
-    texture_cache: HashMap<(usize, u32), wgpu::BindGroup>,
+    /// identity and the opacity bits sampled with it — and holding the
+    /// retained `Arc` itself alongside the bind group it built.
+    ///
+    /// The `Arc` is retained, not just its address, because an address alone
+    /// is not identity: a caller's view can be dropped and a *different*
+    /// texture's view can land at that same allocation on a later frame, and
+    /// a key built from the address alone would read that as a hit. A cache
+    /// hit therefore always `Arc::ptr_eq`s the retained `Arc` against the
+    /// face's own before reusing its bind group; a mismatch is a miss, the
+    /// same as an absent key — mirroring the identity check
+    /// `crates/frust-render/src/external_pass.rs`'s registry runs on the
+    /// `Arc` it retains for a registered pass.
+    ///
+    /// Rebuilt every [`Self::record`] call from whichever entries the
+    /// current scene's faces actually touch (reusing a hit, creating a
+    /// miss), consulting entries this same call has already promoted before
+    /// falling back to the previous frame's cache, so `N` faces sharing one
+    /// `(view, opacity)` in a scene resolve to exactly one bind group rather
+    /// than minting one per face. Never grown forever: a caller animating
+    /// opacity mints a new key every frame, and rebuilding from only what
+    /// the current scene touches is what keeps that case from leaking one
+    /// stale bind group per frame instead of amortising the static case.
+    /// [`Self::clear_texture_cache`] drops every entry — retained `Arc`
+    /// included — on a path that abandons a frame before drawing anything,
+    /// so a caller's texture is never kept alive by a cache entry no frame
+    /// will ever look at again.
+    texture_cache: HashMap<(usize, u32), (Arc<wgpu::TextureView>, wgpu::BindGroup)>,
+    /// How many times [`Self::record`] has built a texture bind group fresh
+    /// (a cache miss) since this renderer was created.
+    ///
+    /// Observability only — nothing here reads it back to make a decision —
+    /// kept so a test can tell a genuine cache *reuse* apart from two
+    /// records that merely happened to leave the same number of entries
+    /// resident, which the resident count alone cannot: see
+    /// [`Self::resident_texture_bind_groups`]'s own doc.
+    texture_cache_misses: u64,
 }
 
 impl Quad3dRenderer {
@@ -496,6 +525,7 @@ impl Quad3dRenderer {
             capacity,
             label: label.to_owned(),
             texture_cache: HashMap::new(),
+            texture_cache_misses: 0,
         }
     }
 
@@ -523,6 +553,12 @@ impl Quad3dRenderer {
         } = target;
         let (width, height) = requested;
         if width == 0 || height == 0 {
+            // This call draws nothing, so its cache would only go stale
+            // waiting for a scene that may never resubmit the same faces;
+            // clearing it here matches the other paths that abandon a frame
+            // (`crate::gpu_fx::schedule::FxPass::record`'s withdraw and
+            // acquire-failure branches).
+            self.texture_cache.clear();
             return;
         }
         let aspect = width as f32 / height as f32;
@@ -548,43 +584,73 @@ impl Quad3dRenderer {
         // offsets are indexed against this surviving list, never against
         // `renderable`, so a dropped quad never leaves a gap.
         let mut faces: Vec<(&Quad3d, wgpu::BindGroup)> = Vec::with_capacity(renderable.len());
-        let mut next_cache: HashMap<(usize, u32), wgpu::BindGroup> =
+        let mut next_cache: HashMap<(usize, u32), (Arc<wgpu::TextureView>, wgpu::BindGroup)> =
             HashMap::with_capacity(renderable.len());
         for quad in renderable {
             let group = match &quad.face {
                 QuadFace::Texture { view, opacity } => {
                     let key = (Arc::as_ptr(view) as usize, opacity.to_bits());
-                    let group = match self.texture_cache.remove(&key) {
+                    // Consult this call's own promotions first: a second (or
+                    // third) face sharing one (view, opacity) with an
+                    // earlier one in this same scene resolves to the group
+                    // that face already promoted, rather than missing
+                    // (`self.texture_cache` no longer holds it, having been
+                    // moved into `next_cache`) and minting a second group
+                    // for an identical key.
+                    let promoted = next_cache
+                        .get(&key)
+                        .filter(|(cached_view, _)| Arc::ptr_eq(cached_view, view))
+                        .map(|(_, group)| group.clone());
+                    let group = match promoted {
                         Some(group) => Some(group),
                         None => {
-                            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("frust-beui gpu_fx face"),
-                                layout: &self.texture_layout,
-                                entries: &[
-                                    wgpu::BindGroupEntry {
-                                        binding: 0,
-                                        resource: wgpu::BindingResource::TextureView(view),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 1,
-                                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                                    },
-                                ],
-                            });
-                            // A caller-supplied view can fail validation (the
-                            // wrong format, missing TEXTURE_BINDING usage);
-                            // dropping only this quad keeps that a face-level
-                            // failure rather than a scene-wide one.
-                            if super::drain_error_scope(device, scope).is_some() {
-                                None
-                            } else {
-                                Some(group)
+                            let carried =
+                                self.texture_cache
+                                    .remove(&key)
+                                    .and_then(|(cached_view, group)| {
+                                        Arc::ptr_eq(&cached_view, view).then_some(group)
+                                    });
+                            match carried {
+                                Some(group) => Some(group),
+                                None => {
+                                    self.texture_cache_misses += 1;
+                                    let scope =
+                                        device.push_error_scope(wgpu::ErrorFilter::Validation);
+                                    let group =
+                                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                            label: Some("frust-beui gpu_fx face"),
+                                            layout: &self.texture_layout,
+                                            entries: &[
+                                                wgpu::BindGroupEntry {
+                                                    binding: 0,
+                                                    resource: wgpu::BindingResource::TextureView(
+                                                        view,
+                                                    ),
+                                                },
+                                                wgpu::BindGroupEntry {
+                                                    binding: 1,
+                                                    resource: wgpu::BindingResource::Sampler(
+                                                        &self.sampler,
+                                                    ),
+                                                },
+                                            ],
+                                        });
+                                    // A caller-supplied view can fail
+                                    // validation (the wrong format, missing
+                                    // TEXTURE_BINDING usage); dropping only
+                                    // this quad keeps that a face-level
+                                    // failure rather than a scene-wide one.
+                                    if super::drain_error_scope(device, scope).is_failure() {
+                                        None
+                                    } else {
+                                        Some(group)
+                                    }
+                                }
                             }
                         }
                     };
                     if let Some(group) = &group {
-                        next_cache.insert(key, group.clone());
+                        next_cache.insert(key, (Arc::clone(view), group.clone()));
                     }
                     group
                 }
@@ -672,6 +738,44 @@ impl Quad3dRenderer {
     #[must_use]
     pub const fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    /// Drops every cached texture bind group, and the `Arc` retained
+    /// alongside each one, without touching anything else this renderer
+    /// owns.
+    ///
+    /// Called on every path that abandons a frame before drawing anything —
+    /// this renderer's own zero-extent return in [`Self::record`], and
+    /// `crate::gpu_fx::schedule::FxPass::record`'s withdraw and
+    /// acquire-failure branches — so a caller's texture is never kept alive
+    /// by a cache entry no later frame will ever look at again. See
+    /// [`Self::texture_cache`]'s own doc.
+    pub(crate) fn clear_texture_cache(&mut self) {
+        self.texture_cache.clear();
+    }
+
+    /// How many texture bind groups are currently cached — what a test reads
+    /// to confirm several faces sharing one `(view, opacity)` in one scene
+    /// resolved to exactly one bind group rather than minting one per face.
+    ///
+    /// `#[cfg(test)]`: no production caller needs this count, only the
+    /// `gpu_tests` in this module tree.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn resident_texture_bind_groups(&self) -> usize {
+        self.texture_cache.len()
+    }
+
+    /// How many texture bind groups this renderer has built fresh (a cache
+    /// miss) since it was created — see the `texture_cache_misses` field's
+    /// own doc.
+    ///
+    /// `#[cfg(test)]` for the same reason as
+    /// [`Self::resident_texture_bind_groups`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn texture_cache_misses(&self) -> u64 {
+        self.texture_cache_misses
     }
 }
 
@@ -1207,6 +1311,8 @@ mod tests {
 /// only honest check here.
 #[cfg(test)]
 mod gpu_tests {
+    use std::sync::Arc;
+
     use frust::authoring::Rect;
     use frust::gpu::wgpu;
     use peniko::Color;
@@ -1259,6 +1365,29 @@ mod gpu_tests {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// A minimal texture view usable as a [`QuadFace::Texture`] face: a
+    /// float-sampleable 2D texture carrying `TEXTURE_BINDING`, the two
+    /// properties [`QuadFace::Texture`] requires. Content is never sampled
+    /// by the cache tests below — they check which bind group a face
+    /// resolves to, never what it renders.
+    fn face_view(device: &wgpu::Device, label: &str) -> Arc<wgpu::TextureView> {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()))
     }
 
     /// Renders one scene and hands back the target's texels.
@@ -1454,11 +1583,11 @@ mod gpu_tests {
                     &scene,
                 );
                 queue.submit([encoder.finish()]);
-                let error = crate::gpu_fx::drain_error_scope(device, scope);
+                let outcome = crate::gpu_fx::drain_error_scope(device, scope);
                 assert!(
-                    error.is_none(),
+                    !outcome.is_failure(),
                     "scene.depth={scene_depth}: the pipeline and the attachment disagreed: \
-                     {error:?}"
+                     {outcome:?}"
                 );
 
                 let frame = read_back(device, queue, &texture, SIDE, SIDE);
@@ -1523,6 +1652,147 @@ mod gpu_tests {
                 "a recreated target is a different generation, which is what \
                  makes a stale binding detectable at an unchanged extent"
             );
+        });
+    }
+
+    /// The cache's whole point: resubmitting the identical `Arc` and opacity
+    /// across two records hits, not rebuilds. [`Quad3dRenderer::texture_cache_misses`]
+    /// is what tells that apart from the two records merely leaving the same
+    /// resident count by coincidence — the resident count alone (still
+    /// checked here) cannot.
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn a_repeated_arc_and_opacity_reuses_its_bind_group_across_records() {
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "cache-reuse");
+            let view = face_view(device, "cache-reuse face");
+            let dest = Rect::new(4.0, 4.0, 20.0, 20.0);
+            let scene = Quad3dScene::new().with(Quad3d::new(
+                dest,
+                QuadFace::Texture {
+                    view: Arc::clone(&view),
+                    opacity: 0.5,
+                },
+            ));
+
+            render(device, queue, &mut renderer, None, &scene);
+            assert_eq!(renderer.resident_texture_bind_groups(), 1);
+            assert_eq!(
+                renderer.texture_cache_misses(),
+                1,
+                "the first record has nothing to reuse yet"
+            );
+
+            render(device, queue, &mut renderer, None, &scene);
+            assert_eq!(renderer.resident_texture_bind_groups(), 1);
+            assert_eq!(
+                renderer.texture_cache_misses(),
+                1,
+                "the identical Arc and opacity should hit the cache, not build a second group"
+            );
+        });
+    }
+
+    /// `N` faces sharing one `(view, opacity)` in a single scene resolve to
+    /// one bind group, not `N` — the second face has to consult what the
+    /// first one already promoted this call, since the first face's lookup
+    /// already moved the entry out of the previous frame's cache.
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn two_faces_sharing_one_view_and_opacity_create_exactly_one_bind_group() {
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "cache-share");
+            let view = face_view(device, "cache-share face");
+            let scene = Quad3dScene::new()
+                .with(Quad3d::new(
+                    Rect::new(0.0, 0.0, 16.0, 16.0),
+                    QuadFace::Texture {
+                        view: Arc::clone(&view),
+                        opacity: 0.25,
+                    },
+                ))
+                .with(Quad3d::new(
+                    Rect::new(20.0, 20.0, 36.0, 36.0),
+                    QuadFace::Texture {
+                        view: Arc::clone(&view),
+                        opacity: 0.25,
+                    },
+                ));
+
+            render(device, queue, &mut renderer, None, &scene);
+            assert_eq!(
+                renderer.resident_texture_bind_groups(),
+                1,
+                "one (view, opacity) key resolves to one bind group"
+            );
+            assert_eq!(
+                renderer.texture_cache_misses(),
+                1,
+                "the second face should promote the first's group, never build its own"
+            );
+        });
+    }
+
+    /// The identity check the cache exists for: an entry keyed by an address
+    /// whose retained `Arc` does not `Arc::ptr_eq` the current face's own is
+    /// a miss, even though the address matches — exactly what a caller's
+    /// view being dropped and a *different* texture's view landing on the
+    /// freed allocation would leave behind. Seeded directly rather than by
+    /// an actual drop-then-allocate: a real allocator is not guaranteed to
+    /// reuse a freed address on its very next allocation of the same size,
+    /// so a test relying on that would only exercise this path when the
+    /// allocator happened to cooperate.
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn a_retained_arc_mismatch_at_a_matching_address_is_treated_as_a_miss() {
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "cache-identity");
+            let stale_view = face_view(device, "cache-identity stale");
+            let live_view = face_view(device, "cache-identity live");
+            let opacity = 0.5_f32;
+
+            // Seed the cache as though an earlier, since-dropped `Arc` had
+            // once lived at `live_view`'s own address and been cached under
+            // it: the exact shape a genuine address reuse would leave, built
+            // directly against the renderer's own fields (this test module
+            // is a descendant of `quad3d` and so shares its privacy) rather
+            // than left to chance.
+            let key = (Arc::as_ptr(&live_view) as usize, opacity.to_bits());
+            let stale_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("frust-beui gpu_fx cache-identity seed"),
+                layout: &renderer.texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&stale_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&renderer.sampler),
+                    },
+                ],
+            });
+            renderer
+                .texture_cache
+                .insert(key, (Arc::clone(&stale_view), stale_group));
+            assert_eq!(renderer.resident_texture_bind_groups(), 1);
+
+            let scene = Quad3dScene::new().with(Quad3d::new(
+                Rect::new(4.0, 4.0, 20.0, 20.0),
+                QuadFace::Texture {
+                    view: Arc::clone(&live_view),
+                    opacity,
+                },
+            ));
+            render(device, queue, &mut renderer, None, &scene);
+
+            assert_eq!(
+                renderer.texture_cache_misses(),
+                1,
+                "the seeded entry's Arc does not ptr_eq the face's own, so an \
+                 address-only match must miss"
+            );
+            assert_eq!(renderer.resident_texture_bind_groups(), 1);
         });
     }
 }

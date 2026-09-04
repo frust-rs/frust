@@ -38,6 +38,17 @@
 //! tilt has room to grow into. The cost is the margin's texels, which is the
 //! price of an unclipped near edge.
 //!
+//! That pixel-exactness claim holds for a card whose own side is an integral
+//! number of texels — every laid-out box this catalog actually renders.
+//! [`target_for`] still answers a target for a fractional side (a caller
+//! passing an unrounded layout size), and [`even_margin`]'s parity guarantee
+//! still holds *between the two integral extents it actually compares* (the
+//! target's own texel count against the card's side rounded up to the next
+//! texel), but placing that fractional side inside an integral target
+//! necessarily leaves a sub-texel remainder [`in_target`] cannot close —
+//! texel-exactness at rest is a property of an integral card, not a
+//! guarantee this module extends to a fractional one.
+//!
 //! # Rotation signs
 //!
 //! Upstream's transforms are CSS `rotateX(rx) rotateY(ry)`. Both map straight
@@ -236,12 +247,14 @@ impl Card3d {
 /// signal to paint 2D, since a clamped target would map the destination onto
 /// the wrong texels rather than merely rendering something smaller.
 ///
-/// Each axis's margin (the extent minus the card's own side) is forced to an
-/// even number of texels — see [`even_margin`] — because [`in_target`] halves
-/// it onto each side: an odd margin would put the card's own box at a
-/// half-texel offset inside the target, which is exactly what this module's
-/// "one target texel is one logical pixel" pixel-exactness claim depends on
-/// not happening.
+/// Each axis's margin (the extent minus the card's own side, rounded up to
+/// the next texel) is forced to an even number of texels — see
+/// [`even_margin`] — because [`in_target`] halves it onto each side: an odd
+/// margin would put the card's own box at a half-texel offset inside the
+/// target, which is exactly what this module's "one target texel is one
+/// logical pixel" pixel-exactness claim depends on not happening for a card
+/// whose own side is itself an integral number of texels. A fractional side
+/// is never texel-exact regardless — see the [module docs](self).
 #[must_use]
 pub fn target_for(origin: Point, size: Size) -> Option<(Rect, (u32, u32))> {
     if !(size.width.is_finite() && size.height.is_finite())
@@ -264,18 +277,24 @@ pub fn target_for(origin: Point, size: Size) -> Option<(Rect, (u32, u32))> {
 }
 
 /// Bumps `scaled` up by one texel when the margin it would leave around
-/// `original` (`scaled - original`) is not an even number of texels.
+/// `original` (`scaled - original.ceil()`) is not an even number of texels.
 ///
 /// [`in_target`] halves this margin onto each side of the card, so an odd
 /// margin would land the card's own box at a half-texel offset — a face at
 /// zero tilt no longer pixel-exact, which is the one property [`target_for`]
-/// exists to guarantee. `margin` is rounded before its parity is read, since
-/// `scaled` and `original` are each already at most one floating-point ULP
-/// off an integer at the sizes this pool allocates.
+/// exists to guarantee for an *integral* card side (see the module docs'
+/// note on a fractional one). `original` is rounded up to the next texel
+/// before the margin is taken, not read raw: `scaled` is already integral
+/// (its caller always passes a `ceil`), and subtracting a fractional
+/// `original` straight from it gives a fractional margin whose rounded
+/// parity can disagree with the parity the two integral extents (`scaled`
+/// texels of target against `original`'s own texel footprint) actually have
+/// — the case a raw subtraction got wrong for a card side that is not
+/// already texel-aligned.
 #[must_use]
 fn even_margin(scaled: f64, original: f64) -> f64 {
-    let margin = (scaled - original).round();
-    if (margin as i64).rem_euclid(2) == 0 {
+    let margin = scaled - original.ceil();
+    if (margin.round() as i64).rem_euclid(2) == 0 {
         scaled
     } else {
         scaled + 1.0
@@ -551,6 +570,40 @@ mod tests {
                 (height_margin / 2.0).fract().abs() < 1e-9,
                 "side {side}: height margin {height_margin} is not even"
             );
+        }
+    }
+
+    /// The same guarantee as the integral sweep above, extended across a
+    /// fractional card side: the margin between the target's own extent and
+    /// the side rounded up to the next texel is still even, which a margin
+    /// taken against the raw fractional side (rather than against its
+    /// `ceil`) could get wrong.
+    #[test]
+    fn the_overscan_margin_is_even_for_a_fractional_card_side_too() {
+        for side in 1..=400_u32 {
+            for fraction in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
+                let side = f64::from(side) + fraction;
+
+                let width_size = Size::new(side, 120.0);
+                let (_, extent) = super::target_for(Point::ORIGIN, width_size)
+                    .expect("a card with area has a target");
+                let width_margin = f64::from(extent.0) - side.ceil();
+                assert!(
+                    (width_margin / 2.0).fract().abs() < 1e-9,
+                    "side {side}: width margin {width_margin} (against the rounded-up side) \
+                     is not even"
+                );
+
+                let height_size = Size::new(160.0, side);
+                let (_, extent) = super::target_for(Point::ORIGIN, height_size)
+                    .expect("a card with area has a target");
+                let height_margin = f64::from(extent.1) - side.ceil();
+                assert!(
+                    (height_margin / 2.0).fract().abs() < 1e-9,
+                    "side {side}: height margin {height_margin} (against the rounded-up side) \
+                     is not even"
+                );
+            }
         }
     }
 

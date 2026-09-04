@@ -214,7 +214,7 @@ impl ExternalPass for FxPass {
         pool.begin_frame(frame.frame_index());
 
         let Some((scene, extent)) = pending.as_ref().filter(|(scene, _)| !scene.is_empty()) else {
-            withdraw(binding, pool, frame);
+            withdraw(binding, pool, renderer, frame);
             return;
         };
         let extent = *extent;
@@ -247,7 +247,7 @@ impl ExternalPass for FxPass {
                 )
             })
         else {
-            withdraw(binding, pool, frame);
+            withdraw(binding, pool, renderer, frame);
             return;
         };
 
@@ -280,11 +280,26 @@ impl ExternalPass for FxPass {
     }
 }
 
-/// Drops whatever a pass had registered and ages its pool by one frame — the
-/// path for a frame with nothing to draw.
-fn withdraw(binding: &mut Binding, pool: &mut TargetPool, frame: &mut ExternalFrame<'_>) {
+/// Drops whatever a pass had registered, clears any built renderer's texture
+/// cache, and ages the pool by one frame — the path for a frame with nothing
+/// to draw (no content submitted, or the pool refused this frame's target).
+///
+/// The texture cache is cleared here, not merely left to age out on its own:
+/// a frame this call abandons draws nothing, so any `Arc` a previous frame's
+/// cache is holding onto is a caller's texture kept alive by an entry no
+/// frame is left to refresh or reuse — see
+/// [`Quad3dRenderer::clear_texture_cache`]'s own doc.
+fn withdraw(
+    binding: &mut Binding,
+    pool: &mut TargetPool,
+    renderer: &mut Option<Quad3dRenderer>,
+    frame: &mut ExternalFrame<'_>,
+) {
     if binding.take() {
         frame.unbind_texture();
+    }
+    if let Some(renderer) = renderer {
+        renderer.clear_texture_cache();
     }
     pool.reap();
 }
