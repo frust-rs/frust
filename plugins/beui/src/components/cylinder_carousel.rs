@@ -891,9 +891,8 @@ impl CylinderCarouselWidget {
             return false;
         }
 
-        // The pass binds during the frame *after* the paint that submitted, so
-        // a first submission owes one frame or the wall would wait for an
-        // unrelated repaint to appear.
+        // See `Card3d::submit`'s doc for bind timing and why a `true` answer
+        // asks for a frame.
         let first = self.fx.submit(extent, cylinder::drum_scene(faces));
         request_frame(ctx, card3d::cadence(first));
         let Some(id) = self.fx.scene_texture_id() else {

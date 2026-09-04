@@ -1865,9 +1865,8 @@ impl WalletCardWidget {
             return false;
         }
 
-        // The pass binds during the frame *after* the paint that submitted, so
-        // a first submission owes one frame or the stack would wait for an
-        // unrelated repaint to appear.
+        // See `Card3d::submit`'s doc for bind timing and why a `true` answer
+        // asks for a frame.
         let first = self.fan.submit(extent, card3d::fan_scene(cards));
         request_frame(ctx, card3d::cadence(first));
         let Some(id) = self.fan.scene_texture_id() else {
@@ -1878,8 +1877,11 @@ impl WalletCardWidget {
     }
 
     /// The plates the open account list fans, in **row order** — not depth
-    /// order, because a plate behind another is hidden by distance and that is
-    /// the whole point of the mode.
+    /// order. That is not merely tolerated: `card3d::fan_scene` sorts them
+    /// nearest-first itself before they reach the renderer (translucent
+    /// plates need that order, not just the depth attachment, to occlude
+    /// without darkening at a seam), so this caller's own order is free to
+    /// carry no depth meaning at all.
     ///
     /// A row that has not begun arriving contributes nothing; the rest carry
     /// the stagger's own slide and its reveal as their alpha.
@@ -2547,8 +2549,9 @@ mod tests {
 
     /// The plates the fan submits: one per arrived row, in row order, the
     /// selected one at slot zero and nearest, and the run leaning away on both
-    /// sides of it. Row order — not depth order — is what makes the depth
-    /// attachment do the occluding rather than paint order.
+    /// sides of it. Row order here happens to already be nearest-first for
+    /// two accounts; `card3d::fan_scene`'s own sort is what makes that true in
+    /// general rather than an accident of this fixture.
     #[cfg(feature = "gpu-effects")]
     #[test]
     fn the_account_fan_plates_every_arrived_row_in_row_order() {

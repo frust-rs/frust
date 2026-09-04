@@ -70,10 +70,22 @@ pub const TARGET_QUANTUM: u32 = 256;
 /// seconds rather than holding them for the session.
 pub const MAX_UNSEEN_FRAMES: u64 = 120;
 
-/// Largest side, in texels, this pool will allocate. A request past it is
-/// clamped rather than refused: an oversized target is a component asking for
-/// more than any adapter guarantees, and drawing it slightly softer beats
-/// drawing nothing.
+/// Largest side, in texels, a *key* will quantize or clamp to
+/// ([`quantize`], [`clamp_requested`]) — a policy ceiling applied the same on
+/// every device, regardless of what any particular one actually supports. A
+/// request past it is clamped rather than refused at that stage: an oversized
+/// target is a component asking for more than any adapter guarantees, and
+/// drawing it slightly softer beats drawing nothing.
+///
+/// [`TargetPool::acquire`] applies a *second*, device-specific ceiling on top
+/// of this one — `min(`[`MAX_TARGET_SIDE`]`,
+/// device.limits().max_texture_dimension_2d)` — since a key already clamped
+/// to this constant can still exceed what the device in hand actually
+/// supports (a downlevel profile's `max_texture_dimension_2d` can sit below
+/// 4096). That second ceiling is checked, not clamped past: a key already
+/// this constant's own worth of texels does not get silently shrunk a second
+/// time, so acquiring past it answers `None` — "draw nothing this frame" —
+/// rather than allocate a texture at a size the key no longer agrees with.
 pub const MAX_TARGET_SIDE: u32 = 4096;
 
 /// Process-wide counter behind [`FxComponentId::mint`].
@@ -219,6 +231,18 @@ impl FxTarget {
 struct Entry {
     target: FxTarget,
     last_seen: u64,
+    /// Whether this entry's target **has a depth attachment available** —
+    /// not whether the frame that is currently reusing it actually wants
+    /// depth testing on. Those are different questions: this field only
+    /// decides [`TargetPool::acquire`]'s reuse-vs-recreate rule (a
+    /// depth-capable target serves a depth-free frame perfectly well, so it
+    /// is kept rather than rebuilt), while whether *this* frame's render
+    /// pass actually gets a depth attachment is decided downstream, per
+    /// frame, by filtering [`FxTarget::depth`] against the scene's own flag
+    /// (`crate::gpu_fx::schedule`'s `FxPass::record`). Conflating the two
+    /// would hand a depth-off frame a depth attachment (and the wrong
+    /// pipeline to match it) merely because an earlier frame on the same key
+    /// wanted one.
     has_depth: bool,
 }
 
@@ -265,11 +289,20 @@ impl TargetPool {
     /// The target for `key`, creating it if this is a size the component has
     /// not asked for lately, and marking it seen this frame either way.
     ///
-    /// Answers `None` only when the device refuses the allocation, which the
-    /// caller treats as "draw nothing this frame" rather than as an error.
-    /// An existing entry allocated *without* depth is replaced when depth is
-    /// now wanted (and kept when it is not — a target with a depth attachment
-    /// serves a depth-free frame perfectly well).
+    /// Answers `None` when the device refuses the allocation (caught by a
+    /// validation error scope around the actual `create_texture` calls — see
+    /// [`create_target`]) or when `key`'s quantized extent exceeds this
+    /// device's own real ceiling — `min(`[`MAX_TARGET_SIDE`]`,
+    /// device.limits().max_texture_dimension_2d)`, checked here before a
+    /// creation is even attempted, since [`MAX_TARGET_SIDE`] alone is a
+    /// policy cap this pool imposes on every device and says nothing about
+    /// what a *particular* one actually supports. Either case is "draw
+    /// nothing this frame" to the caller, never an error. An existing entry
+    /// allocated *without* depth is replaced when depth is now wanted (and
+    /// kept when it is not — a target with a depth attachment serves a
+    /// depth-free frame perfectly well; see [`Entry::has_depth`]'s own doc
+    /// for why that reuse rule is a different question from whether *this*
+    /// frame's render pass gets the attachment).
     pub fn acquire(
         &mut self,
         device: &wgpu::Device,
@@ -283,6 +316,11 @@ impl TargetPool {
             .get(&key)
             .is_some_and(|entry| entry.has_depth || !want_depth);
         if !reuse {
+            let ceiling = MAX_TARGET_SIDE.min(device.limits().max_texture_dimension_2d);
+            let (width, height) = key.allocated();
+            if width > ceiling || height > ceiling {
+                return None;
+            }
             let generation = self.next_generation;
             self.next_generation = self.next_generation.wrapping_add(1);
             let target = create_target(device, key, want_depth, generation, label)?;
@@ -341,6 +379,16 @@ impl TargetPool {
 
 /// Allocates one target's colour texture (and, when asked, its depth
 /// attachment) at `key`'s quantized extent.
+///
+/// Wrapped in a `Validation` error scope (the
+/// `frust_gpu::effects::drain_error_scope` pattern, replicated as
+/// [`super::drain_error_scope`] since that helper is private to
+/// `frust-gpu`): [`TargetPool::acquire`] has already checked `key`'s extent
+/// against this device's real ceiling before calling here, so a failure at
+/// this point is something else the device refused (an out-of-memory
+/// condition, most plausibly), and it is reported the same way — `None`,
+/// with nothing inserted into the pool — rather than left to become an
+/// uncaptured error.
 fn create_target(
     device: &wgpu::Device,
     key: TargetKey,
@@ -357,6 +405,7 @@ fn create_target(
         height,
         depth_or_array_layers: 1,
     };
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let color = device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("frust-beui gpu_fx colour: {label}")),
@@ -383,6 +432,9 @@ fn create_target(
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     });
+    if super::drain_error_scope(device, scope).is_some() {
+        return None;
+    }
     Some(FxTarget {
         color,
         depth,
@@ -569,5 +621,80 @@ mod tests {
             binding.needs_rebind((64, 64), 3),
             "the identical target has to be bound again after an unbind"
         );
+    }
+}
+
+/// The device-ceiling guard against real hardware. Ignored by default; see
+/// [`crate::gpu_fx::test_gpu`] for why a real device is needed at all — here,
+/// specifically, to prove the refusal against `wgpu` validation rather than
+/// merely against the pool's own arithmetic.
+#[cfg(test)]
+mod gpu_tests {
+    use frust::gpu::wgpu;
+
+    use super::{FxComponentId, TargetKey, TargetPool};
+    use crate::gpu_fx::test_gpu::{block_on, serial};
+
+    /// A key that quantizes well inside [`super::MAX_TARGET_SIDE`] but past
+    /// *this* device's own (downgraded) `max_texture_dimension_2d` is refused
+    /// by `acquire` itself — never reaching `wgpu::Device::create_texture` at
+    /// a size the device does not support, which would trip validation
+    /// instead of answering `None`. `required_limits` downgrades the ceiling
+    /// to a small, fast-to-allocate value so the case stays cheap while still
+    /// exercising the real clamp against a real device, mirroring
+    /// `frust_gpu::effects`'s own
+    /// `ensure_target_clamps_an_oversized_request_to_the_device_ceiling`.
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn acquire_refuses_a_key_past_this_devices_own_ceiling() {
+        // Not `test_gpu::with_device`: that harness's device carries whatever
+        // limits the adapter defaults to, and this case needs a deliberately
+        // small one instead. Taken here, around the whole `block_on` rather
+        // than inside the polled future, so it is never held across an
+        // await point: this crate's `block_on` never actually suspends
+        // across threads (it busy-polls the current one with a no-op
+        // waker), but holding a lock across a genuine await is still the
+        // wrong shape to write even where nothing here can deadlock on it.
+        let _serial = serial();
+        block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            const CEILING: u32 = 256;
+            let (device, _queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-beui gpu_fx pool ceiling test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: CEILING,
+                        ..wgpu::Limits::default()
+                    },
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            assert_eq!(device.limits().max_texture_dimension_2d, CEILING);
+
+            let mut pool = TargetPool::new();
+            pool.begin_frame(1);
+            let component = FxComponentId::mint();
+
+            let oversized = TargetKey::new(component, CEILING * 2, CEILING * 2);
+            assert!(
+                pool.acquire(&device, oversized, false, "ceiling").is_none(),
+                "a key past the device's own ceiling must not reach wgpu validation"
+            );
+            assert!(pool.is_empty(), "the refused acquire inserted nothing");
+
+            let within = TargetKey::new(component, CEILING / 2, CEILING / 2);
+            assert!(
+                pool.acquire(&device, within, false, "ceiling").is_some(),
+                "a key within the device's own ceiling still allocates"
+            );
+        });
     }
 }

@@ -102,9 +102,10 @@
 //! perspective quad renderer driven from an `ExternalPass` the engine calls
 //! once per frame ahead of its own scene pass, writing into a pooled offscreen
 //! target the engine then composites. Turning it on pulls in the facade's
-//! `gpu` feature and a `wgpu` edge of this crate's own (the facade re-exports
-//! the GPU types but not `wgpu`, so a caller recording its own render pass
-//! names it directly). A default build carries none of that and behaves
+//! `gpu` feature only — this crate names no `wgpu` dependency of its own; the
+//! substrate reaches every `wgpu` type exclusively through `frust::gpu`'s own
+//! re-export (`frust::gpu::wgpu`), so there is no direct `wgpu` edge in this
+//! crate's manifest at all. A default build carries none of that and behaves
 //! exactly as it did before the feature existed.
 //!
 //! What it buys is **real perspective**, which nothing above the render tier

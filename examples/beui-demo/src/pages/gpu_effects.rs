@@ -16,10 +16,10 @@
 //! colour, a ramp, or a caller-owned texture, and every component's ordinary
 //! content — text, icons, avatars, captions — keeps compositing on the 2D
 //! path above it, opt-in or not. There is no route from a widget's own paint
-//! to a 3D face today (see `frust_beui::gpu_fx`'s module docs, the "Gap:
-//! recording the rendered texture from a widget" section), so a tilted card,
-//! a fanned account row or a spread preview sheet still shows nothing but
-//! what its component already draws for it — never arbitrary children.
+//! to a 3D face today (see `frust_beui::gpu_fx`'s module docs, "The widget
+//! side" section), so a tilted card, a fanned account row or a spread
+//! preview sheet still shows nothing but what its component already draws
+//! for it — never arbitrary children.
 //!
 //! # Compiling both ways
 //!

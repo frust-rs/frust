@@ -1095,9 +1095,8 @@ impl ProjectFolderWidget {
             return false;
         }
 
-        // The pass binds during the frame *after* the paint that submitted, so
-        // a first submission owes one frame or the pile would wait for an
-        // unrelated repaint to appear.
+        // See `Card3d::submit`'s doc for bind timing and why a `true` answer
+        // asks for a frame.
         let first = self
             .fx
             .submit(extent, fan::fan_scene(&sheets, self.fan_progress()));

@@ -188,11 +188,19 @@ impl Card3d {
     /// Hands `scene` to the pass, answering whether this was the pass's
     /// *first* content.
     ///
-    /// That answer is the one frame a component owes: a texture is bound
-    /// during the frame after the paint that submitted it, so the paint that
-    /// first submits composites an unbound id and draws nothing. Asking for a
-    /// frame on a `true` is what makes the face appear rather than waiting
-    /// for the next unrelated repaint.
+    /// Bind timing, stated exactly once for this whole catalog: the pass's
+    /// drain runs on the render thread *ahead of* that same frame's own
+    /// scene compile (`crate::gpu_fx::schedule`'s *The paint/record split*),
+    /// so the ordinary case is no lag at all — a paint's own submission is
+    /// picked up and bound before the very display list naming its id is
+    /// compiled. The exception is a submission that lands *after* that
+    /// frame's drain has already started (a paint racing the render thread,
+    /// or a second engine-tier surface), which is not caught until the next
+    /// drain — a "latest-wins" skew, not a guarantee. Requesting a frame on a
+    /// `true` answer is the guard against exactly that skew on a component's
+    /// first appearance, not a promise the ordinary case needs it. Every
+    /// call site in this catalog asks for one on `true` for that reason
+    /// rather than restating it here.
     pub fn submit(&self, extent: (u32, u32), scene: Quad3dScene) -> bool {
         let Some(handle) = self.handle.as_ref() else {
             return false;
@@ -227,6 +235,13 @@ impl Card3d {
 /// extent would exceed [`MAX_TARGET_SIDE`] — all three are the component's
 /// signal to paint 2D, since a clamped target would map the destination onto
 /// the wrong texels rather than merely rendering something smaller.
+///
+/// Each axis's margin (the extent minus the card's own side) is forced to an
+/// even number of texels — see [`even_margin`] — because [`in_target`] halves
+/// it onto each side: an odd margin would put the card's own box at a
+/// half-texel offset inside the target, which is exactly what this module's
+/// "one target texel is one logical pixel" pixel-exactness claim depends on
+/// not happening.
 #[must_use]
 pub fn target_for(origin: Point, size: Size) -> Option<(Rect, (u32, u32))> {
     if !(size.width.is_finite() && size.height.is_finite())
@@ -236,8 +251,8 @@ pub fn target_for(origin: Point, size: Size) -> Option<(Rect, (u32, u32))> {
     {
         return None;
     }
-    let width = (size.width * OVERSCAN).ceil();
-    let height = (size.height * OVERSCAN).ceil();
+    let width = even_margin((size.width * OVERSCAN).ceil(), size.width);
+    let height = even_margin((size.height * OVERSCAN).ceil(), size.height);
     if width > f64::from(MAX_TARGET_SIDE) || height > f64::from(MAX_TARGET_SIDE) {
         return None;
     }
@@ -246,6 +261,25 @@ pub fn target_for(origin: Point, size: Size) -> Option<(Rect, (u32, u32))> {
         Rect::from_center_size(centre, Size::new(width, height)),
         (width as u32, height as u32),
     ))
+}
+
+/// Bumps `scaled` up by one texel when the margin it would leave around
+/// `original` (`scaled - original`) is not an even number of texels.
+///
+/// [`in_target`] halves this margin onto each side of the card, so an odd
+/// margin would land the card's own box at a half-texel offset — a face at
+/// zero tilt no longer pixel-exact, which is the one property [`target_for`]
+/// exists to guarantee. `margin` is rounded before its parity is read, since
+/// `scaled` and `original` are each already at most one floating-point ULP
+/// off an integer at the sizes this pool allocates.
+#[must_use]
+fn even_margin(scaled: f64, original: f64) -> f64 {
+    let margin = (scaled - original).round();
+    if (margin as i64).rem_euclid(2) == 0 {
+        scaled
+    } else {
+        scaled + 1.0
+    }
 }
 
 /// Maps `rect`, given in the card's own space (origin at the card's top-left),
@@ -352,9 +386,16 @@ pub struct FanCard {
 /// [`FAN_PITCH`] a step, so the run reads as a curve bending away at both
 /// ends.
 ///
-/// Depth is **on**, and the cards are submitted in the caller's own order
-/// rather than sorted back-to-front: that is the whole point of the mode —
-/// a card behind another is hidden by distance, not by when it was drawn.
+/// Depth is **on**, and the plates are **translucent**, so — like
+/// [`cylinder::drum_scene`](super::cylinder::drum_scene) — this sorts them
+/// nearest first before handing them to the renderer rather than trusting the
+/// caller's own order: a translucent, depth-tested face writes depth like an
+/// opaque one, so submitting the far plate before the near one would have the
+/// near plate blend a second time over a pixel the far one already wrote,
+/// darkening every seam two plates overlap at. The sort is stable, so plates
+/// at equal depth keep the caller's own order, and a non-finite depth sorts
+/// rather than poisoning the comparison — the caller's own submission order
+/// no longer has to be depth-ordered for the fan to occlude correctly.
 #[must_use]
 pub fn fan_scene(cards: impl IntoIterator<Item = FanCard>) -> Quad3dScene {
     let mut scene = Quad3dScene::new().with_depth(true);
@@ -363,6 +404,9 @@ pub fn fan_scene(cards: impl IntoIterator<Item = FanCard>) -> Quad3dScene {
         let depth = FAN_LIFT - card.slot.unsigned_abs() as f32 * FAN_STEP;
         scene.push(face_quad(card.dest, card.face, steps * FAN_PITCH, 0.0).depth_offset(depth));
     }
+    scene
+        .quads
+        .sort_by(|a, b| b.depth_offset.total_cmp(&a.depth_offset));
     scene
 }
 
@@ -481,6 +525,35 @@ mod tests {
         assert!((mapped.width() - row.width()).abs() < 1e-9);
     }
 
+    /// The property [`even_margin`] exists for: every axis's margin is an
+    /// even number of texels, for every card side from one to a few hundred
+    /// px, so halving it in [`in_target`] never lands the card's own box on
+    /// a half-texel offset.
+    #[test]
+    fn the_overscan_margin_is_always_an_even_number_of_texels() {
+        for side in 1..=400_u32 {
+            let side = f64::from(side);
+
+            let width_size = Size::new(side, 120.0);
+            let (_, extent) = super::target_for(Point::ORIGIN, width_size)
+                .expect("a card with area has a target");
+            let width_margin = f64::from(extent.0) - side;
+            assert!(
+                (width_margin / 2.0).fract().abs() < 1e-9,
+                "side {side}: width margin {width_margin} is not even"
+            );
+
+            let height_size = Size::new(160.0, side);
+            let (_, extent) = super::target_for(Point::ORIGIN, height_size)
+                .expect("a card with area has a target");
+            let height_margin = f64::from(extent.1) - side;
+            assert!(
+                (height_margin / 2.0).fract().abs() < 1e-9,
+                "side {side}: height margin {height_margin} is not even"
+            );
+        }
+    }
+
     /// Every degenerate box answers `None`, which is the component's own
     /// signal to paint 2D rather than a case it has to special-case.
     #[test]
@@ -582,7 +655,9 @@ mod tests {
     }
 
     /// The selected card is nearest, its neighbours recede a step at a time,
-    /// and the run leans away at both ends — a curve, not a shear.
+    /// and the run leans away at both ends — a curve, not a shear. Read off
+    /// each quad's own depth rather than a fixed index, since [`fan_scene`]
+    /// now sorts nearest-first instead of preserving submission order.
     #[test]
     fn a_fan_lifts_the_selected_card_and_leans_its_neighbours_away() {
         let dest = Rect::new(0.0, 0.0, 60.0, 24.0);
@@ -594,27 +669,75 @@ mod tests {
 
         assert!(scene.depth, "a stack occludes by distance");
         assert_eq!(scene.len(), 5);
+        for pair in scene.quads.windows(2) {
+            assert!(
+                pair[0].depth_offset >= pair[1].depth_offset,
+                "the fan is not sorted nearest first"
+            );
+        }
 
-        let depths: Vec<f32> = scene.quads.iter().map(|quad| quad.depth_offset).collect();
-        assert!(
-            (depths[2] - FAN_LIFT).abs() < 1e-6,
-            "the selected card lifts"
-        );
-        assert!(depths[1] < depths[2] && depths[3] < depths[2]);
-        assert!((depths[1] - depths[0] - FAN_STEP).abs() < 1e-6);
-        assert!((depths[1] - depths[3]).abs() < 1e-6, "the fan is symmetric");
+        // The selected card sits nearest, unrotated.
+        assert!((scene.quads[0].depth_offset - FAN_LIFT).abs() < 1e-6);
+        assert!(scene.quads[0].pitch.abs() < 1e-9);
 
-        // A card ahead of the selected one leans its top away; one behind it
-        // leans its bottom away. Positive pitch brings the top forward, so the
-        // signs mirror about the selected card.
-        assert!(scene.quads[2].pitch.abs() < 1e-9);
-        assert!(scene.quads[1].pitch < 0.0);
-        assert!(scene.quads[3].pitch > 0.0);
-        assert!(
-            (f64::from(scene.quads[3].pitch) - FAN_PITCH.to_radians()).abs() < 1e-6,
-            "one step is one FAN_PITCH"
-        );
+        // A card ahead of the selected one leans its top away (negative
+        // pitch); one behind it leans its bottom away (positive pitch).
+        // Positive pitch brings the top forward, so the signs mirror about
+        // the selected card at every step back.
+        for steps in [1, 2] {
+            let at_step: Vec<&super::Quad3d> = scene
+                .quads
+                .iter()
+                .filter(|quad| {
+                    (quad.depth_offset - (FAN_LIFT - steps as f32 * FAN_STEP)).abs() < 1e-6
+                })
+                .collect();
+            assert_eq!(at_step.len(), 2, "one step ahead, one step behind");
+            assert!(at_step.iter().any(|quad| quad.pitch < 0.0));
+            assert!(at_step.iter().any(|quad| quad.pitch > 0.0));
+            for quad in &at_step {
+                assert!(
+                    (f64::from(quad.pitch.abs()) - steps as f64 * FAN_PITCH.to_radians()).abs()
+                        < 1e-6,
+                    "{steps} step(s) back is {steps} times FAN_PITCH"
+                );
+            }
+        }
         assert!(scene.quads.iter().all(super::Quad3d::is_renderable));
+    }
+
+    /// [`fan_scene`]'s own sort is what makes the caller's submission order
+    /// irrelevant to occlusion — furthest-first still resolves to a
+    /// nearest-first scene, and equal depths keep the caller's own order,
+    /// mirroring `cylinder::drum_scene`'s own
+    /// `a_drum_scene_is_depth_tested_nearest_first`.
+    #[test]
+    fn fan_scene_sorts_nearest_first_regardless_of_caller_order() {
+        let dest = |y: f64| Rect::new(0.0, y, 60.0, y + 24.0);
+
+        // Submitted furthest-first — the reverse of the sort's own output.
+        let furthest_first = fan_scene((-2..=2).rev().map(|slot| super::FanCard {
+            dest: dest(0.0),
+            face: solid(),
+            slot,
+        }));
+        assert_eq!(furthest_first.len(), 5);
+        for pair in furthest_first.quads.windows(2) {
+            assert!(pair[0].depth_offset >= pair[1].depth_offset);
+        }
+
+        // Equal depths keep the caller's own order.
+        let flat = fan_scene((0..3).map(|i| super::FanCard {
+            dest: dest(f64::from(i) * 20.0),
+            face: solid(),
+            slot: 0,
+        }));
+        let tops: Vec<f64> = flat.quads.iter().map(|quad| quad.dest.y0).collect();
+        assert_eq!(
+            tops,
+            vec![0.0, 20.0, 40.0],
+            "equal depths keep the caller's own order"
+        );
     }
 
     #[test]

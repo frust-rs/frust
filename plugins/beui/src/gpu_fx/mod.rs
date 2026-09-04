@@ -75,8 +75,8 @@
 //!   a texture the caller produced with `wgpu` itself.
 //! - **Widget-painted content cannot become a face today.** The engine can
 //!   render a display list into an offscreen texture, but the widget-facing
-//!   paint trait exposes no route to one — see the *Gap* note below. Until
-//!   that exists, a 3D face carries no text and no child widgets.
+//!   paint trait exposes no route to one — see *The widget side* below.
+//!   Until that exists, a 3D face carries no text and no child widgets.
 //! - **The composite is always blended, never opaque**
 //!   (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`), so a
 //!   fully opaque face still pays the blend and never occludes 2D content
@@ -104,6 +104,40 @@ pub mod fan;
 pub mod pool;
 pub mod quad3d;
 pub mod schedule;
+
+use frust::gpu::wgpu;
+
+/// Synchronously drains a `wgpu` validation error scope, returning the first
+/// captured error if any.
+///
+/// The same blocking-poll pattern `frust_gpu::effects::drain_error_scope`
+/// uses, replicated here because that helper is private to `frust-gpu` and
+/// this substrate reaches `wgpu` only through the facade's re-export (see the
+/// crate docs' *The `gpu-effects` feature*). On native `wgpu` the scope's
+/// `pop` future resolves as soon as the synchronously-captured creation error
+/// is recorded, so this needs no async runtime; the `device.poll` fallback
+/// drives any residual pending state to completion rather than spinning.
+/// Never panics — [`pool::TargetPool::acquire`] and
+/// [`quad3d::Quad3dRenderer::record`] are both the callers, and both treat a
+/// `Some` answer as "drop this allocation/quad, not the whole frame."
+pub(crate) fn drain_error_scope(
+    device: &wgpu::Device,
+    scope: wgpu::ErrorScopeGuard,
+) -> Option<wgpu::Error> {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = std::pin::pin!(scope.pop());
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(error) => return error,
+            Poll::Pending => {
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
+    }
+}
 
 pub use card3d::{Card3d, FanCard};
 pub use context::{FxAvailability, GpuFx, GpuFxHandle, KILL_SWITCH_ENV_VAR};
@@ -153,14 +187,23 @@ pub(crate) mod test_gpu {
     /// siblings.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    fn serial() -> MutexGuard<'static, ()> {
+    /// Takes the serial lock every GPU case in this binary is under — not
+    /// only [`with_device`]'s own cases: a case that builds its device by
+    /// hand (e.g. to request non-default `wgpu::Limits`, which `with_device`
+    /// has no seam for) still has to hold this before requesting an adapter,
+    /// or it races `with_device`'s own teardown against a second live
+    /// device. `pub(crate)` so a sibling `gpu_tests` module can take it.
+    pub(crate) fn serial() -> MutexGuard<'static, ()> {
         SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Polls `future` to completion — wgpu's native adapter and device
     /// requests resolve without an executor driving them, and this crate has
-    /// no async runtime.
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    /// no async runtime. `pub(crate)` so a sibling `gpu_tests` module that
+    /// builds its own device (rather than going through [`with_device`]) can
+    /// still drive its own adapter/device requests without an executor of
+    /// its own.
+    pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker};
 
         let waker = Waker::noop();

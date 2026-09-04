@@ -30,6 +30,19 @@
 //! painted once and went still keeps rendering the same faces rather than
 //! blinking out.
 //!
+//! Bind timing follows from that split, and this is the one true statement of
+//! it: the drain that calls `record` runs on the render thread *ahead of*
+//! that same frame's own scene compile (see *Where a 3D pass sits in a
+//! frame* above), so a [`FxPass::submit`] made during a UI-thread paint
+//! reaches the engine in *that* frame's drain when it lands before the drain
+//! starts, and only in the next drain otherwise — the "latest-wins" skew a
+//! paint racing the render thread, or a second engine-tier surface, can
+//! produce. The ordinary case is no skew and no lag at all.
+//! [`crate::gpu_fx::card3d::Card3d::submit`]'s own doc is the one place this
+//! substrate justifies asking for an extra frame on a component's first
+//! submission as a guard against that skew; every call site in this catalog
+//! names it rather than restating it.
+//!
 //! # Rules this pass is under
 //!
 //! - **It renders into its own target, never the frame's.** The engine clears
@@ -220,7 +233,16 @@ impl ExternalPass for FxPass {
             .map(|target| {
                 (
                     target.color().clone(),
-                    target.depth().cloned(),
+                    // The target *has* a depth attachment whenever the pool
+                    // decided one is available (see `pool`'s own doc on
+                    // `TargetPool::acquire`'s reuse rule) — that is not the
+                    // same question as whether *this* scene wants depth
+                    // testing. Filtering by `scene.depth` here is what keeps
+                    // the attachment `Quad3dRenderer::record` is handed and
+                    // the pipeline it picks in step: a reused, depth-capable
+                    // target reused for a depth-off frame must not still
+                    // carry a depth attachment into that frame's render pass.
+                    target.depth().filter(|_| scene.depth).cloned(),
                     target.generation(),
                 )
             })
@@ -248,13 +270,13 @@ impl ExternalPass for FxPass {
             binding.record_bind(extent, generation);
         }
 
-        // Reaping runs after the frame's own key has been marked seen, so
-        // this can only reclaim sizes the component has moved away from.
-        // Losing the bound key to a reap would leave the engine sampling a
-        // texture nothing writes, so that case unbinds too.
-        if pool.reap().contains(&key) && binding.take() {
-            frame.unbind_texture();
-        }
+        // `key` was just marked seen by `acquire` above, so it can never be
+        // among what `reap` reclaims here — only a size the component has
+        // moved away from ages out on this call. The binding this frame owns
+        // is never at risk from it: a rebind for `key`, when one is owed, was
+        // already applied by the generation compare just above, not by an
+        // unbind-then-rebind here.
+        pool.reap();
     }
 }
 

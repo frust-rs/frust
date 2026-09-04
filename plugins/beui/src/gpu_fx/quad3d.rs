@@ -60,6 +60,7 @@
 //! non-finite transform is dropped, an empty scene records nothing, and no
 //! indexing is unchecked.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use frust::gpu::wgpu;
@@ -363,10 +364,29 @@ pub struct Quad3dTarget<'a> {
 /// The compiled pipelines, the uniform buffer every quad's transform is
 /// staged through, and the placeholder texture a non-textured face binds.
 ///
-/// Built once per component, on the first frame that has a device, and reused
-/// for the component's whole life. Both depth variants are built up front:
-/// a scene can turn depth on and off between frames, and compiling a pipeline
-/// mid-frame is exactly the stall this substrate exists to avoid.
+/// Built once per **component instance**, on the first frame that has a
+/// device, and reused for the component's whole life — not shared per
+/// device. Two live instances of the same 3D component (two `tilt_card`s on
+/// screen at once) each compile their own copy of both pipelines on their
+/// own first frame. A device-wide shared renderer (one `Quad3dRenderer`
+/// handed out to every pass on a given `wgpu::Device`) would remove that
+/// duplicate compile, but is not what this does: sharing would serialize
+/// otherwise-independent passes' `record` calls behind one lock — this
+/// substrate's own contract explicitly allows two engine-tier surfaces to
+/// call `record` concurrently on two threads at once
+/// (`crate::gpu_fx::schedule`'s *The paint/record split*) — and would hand
+/// every pass sharing it the *same* diagnostic `label`, losing the
+/// per-component attribution this struct's own field promises. Accepted as a
+/// documented per-instance cost for now rather than solved.
+///
+/// Both depth variants are built up front: a scene can turn depth on and off
+/// between frames, and compiling a pipeline mid-frame is exactly the stall
+/// this substrate exists to avoid. [`Self::texture_cache`] is the renderer's
+/// other per-frame cost worth naming here: a [`QuadFace::Texture`] face's
+/// bind group is cached by the view's `Arc` identity and its opacity bits, so
+/// a caller resubmitting the identical texture and opacity every frame (the
+/// common case — a static thumbnail, an unanimated overlay) does not pay for
+/// a fresh bind group on each one.
 pub struct Quad3dRenderer {
     no_depth: wgpu::RenderPipeline,
     with_depth: wgpu::RenderPipeline,
@@ -378,6 +398,14 @@ pub struct Quad3dRenderer {
     uniform_group: wgpu::BindGroup,
     capacity: u64,
     label: String,
+    /// A [`QuadFace::Texture`] bind group, keyed by the view's `Arc` pointer
+    /// identity and the opacity bits sampled with it. Rebuilt every
+    /// [`Self::record`] call from whichever entries the current scene's
+    /// faces actually touch (reusing a hit, creating a miss) rather than
+    /// grown forever: a caller animating opacity mints a new key every frame,
+    /// and this is what keeps that case from leaking one stale bind group per
+    /// frame instead of amortising the static case.
+    texture_cache: HashMap<(usize, u32), wgpu::BindGroup>,
 }
 
 impl Quad3dRenderer {
@@ -467,6 +495,7 @@ impl Quad3dRenderer {
             uniform_group,
             capacity,
             label: label.to_owned(),
+            texture_cache: HashMap::new(),
         }
     }
 
@@ -508,8 +537,67 @@ impl Quad3dRenderer {
             .collect();
         self.reserve(device, renderable.len() as u64);
 
-        let mut bytes = Vec::with_capacity(renderable.len() * UNIFORM_STRIDE as usize);
-        for quad in &renderable {
+        // Face bind groups are resolved before the uniform buffer is written
+        // and before the pass is opened, and they decide which quads
+        // actually draw: a texture bind group is reused from
+        // `self.texture_cache` by (view identity, opacity) when the caller
+        // resubmitted the same face, built fresh (and cached) on a miss, and
+        // — wrapped in a validation error scope — a caller-supplied view that
+        // fails validation (wrong format, wrong usage) drops only its own
+        // quad rather than the whole scene. The uniform buffer's dynamic
+        // offsets are indexed against this surviving list, never against
+        // `renderable`, so a dropped quad never leaves a gap.
+        let mut faces: Vec<(&Quad3d, wgpu::BindGroup)> = Vec::with_capacity(renderable.len());
+        let mut next_cache: HashMap<(usize, u32), wgpu::BindGroup> =
+            HashMap::with_capacity(renderable.len());
+        for quad in renderable {
+            let group = match &quad.face {
+                QuadFace::Texture { view, opacity } => {
+                    let key = (Arc::as_ptr(view) as usize, opacity.to_bits());
+                    let group = match self.texture_cache.remove(&key) {
+                        Some(group) => Some(group),
+                        None => {
+                            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("frust-beui gpu_fx face"),
+                                layout: &self.texture_layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                    },
+                                ],
+                            });
+                            // A caller-supplied view can fail validation (the
+                            // wrong format, missing TEXTURE_BINDING usage);
+                            // dropping only this quad keeps that a face-level
+                            // failure rather than a scene-wide one.
+                            if super::drain_error_scope(device, scope).is_some() {
+                                None
+                            } else {
+                                Some(group)
+                            }
+                        }
+                    };
+                    if let Some(group) = &group {
+                        next_cache.insert(key, group.clone());
+                    }
+                    group
+                }
+                QuadFace::Solid(_) | QuadFace::Gradient { .. } => Some(self.placeholder.clone()),
+            };
+            if let Some(group) = group {
+                faces.push((quad, group));
+            }
+        }
+        self.texture_cache = next_cache;
+
+        let mut bytes = Vec::with_capacity(faces.len() * UNIFORM_STRIDE as usize);
+        for (quad, _) in &faces {
             let mvp = multiply(&view_projection, &model(quad, width, height));
             encode_uniform(&mut bytes, &mvp, &quad.face);
             bytes.resize(bytes.len().next_multiple_of(UNIFORM_STRIDE as usize), 0);
@@ -517,31 +605,6 @@ impl Quad3dRenderer {
         if !bytes.is_empty() {
             queue.write_buffer(&self.uniforms, 0, &bytes);
         }
-
-        // Face bind groups are built before the pass so each one outlives the
-        // borrow the pass takes of it.
-        let faces: Vec<wgpu::BindGroup> = renderable
-            .iter()
-            .map(|quad| match &quad.face {
-                QuadFace::Texture { view, .. } => {
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("frust-beui gpu_fx face"),
-                        layout: &self.texture_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                        ],
-                    })
-                }
-                QuadFace::Solid(_) | QuadFace::Gradient { .. } => self.placeholder.clone(),
-            })
-            .collect();
 
         let depth_attachment = depth.map(|view| wgpu::RenderPassDepthStencilAttachment {
             view,
@@ -567,17 +630,24 @@ impl Quad3dRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        if renderable.is_empty() {
+        if faces.is_empty() {
             return;
         }
         pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
         pass.set_scissor_rect(0, 0, width, height);
-        pass.set_pipeline(if depth.is_some() && scene.depth {
+        // The attachment this pass was actually given decides the pipeline —
+        // never a second read of `scene.depth`, which the caller has already
+        // folded into whether `depth` is `Some` at all (see
+        // `crate::gpu_fx::schedule`'s own doc on that filter). A pipeline
+        // compiled with no depth-stencil state and a pass with a depth
+        // attachment (or the reverse) is a validation error, so the two must
+        // always be read off the same value.
+        pass.set_pipeline(if depth.is_some() {
             &self.with_depth
         } else {
             &self.no_depth
         });
-        for (index, face) in faces.iter().enumerate() {
+        for (index, (_, face)) in faces.iter().enumerate() {
             let offset = index as u64 * UNIFORM_STRIDE;
             pass.set_bind_group(0, &self.uniform_group, &[offset as u32]);
             pass.set_bind_group(1, face, &[]);
@@ -1333,6 +1403,71 @@ mod gpu_tests {
                 [0, 0, 255, 255],
                 "without depth the same order is plain painter order"
             );
+        });
+    }
+
+    /// The MAJOR fix this pins: the render pass's depth attachment and its
+    /// pipeline are read off the *same* value, so a target that merely *has*
+    /// a depth attachment available never leaves the two disagreeing on a
+    /// frame whose scene turned depth off. `crate::gpu_fx::schedule`'s
+    /// `FxPass::record` is what applies that filter in production
+    /// (`target.depth().filter(|_| scene.depth)`) before handing this
+    /// renderer a [`Quad3dTarget`] — reproduced directly here, on one
+    /// renderer and one pair of attachments held across two frames at an
+    /// unchanged extent, since an `ExternalFrame` is out of this crate's
+    /// reach from a unit test. Before the fix, a depth attachment present
+    /// unconditionally alongside a pipeline gated on `scene.depth` is exactly
+    /// the pipeline/attachment mismatch `wgpu` validates against.
+    #[test]
+    #[ignore = "needs a real GPU adapter"]
+    fn toggling_depth_across_frames_at_an_unchanged_extent_stays_valid_and_composites() {
+        with_device(|device, queue| {
+            let mut renderer = Quad3dRenderer::new(device, "depth-toggle");
+            let texture = color_target(device);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let depth = depth_target(device);
+            let dest = Rect::new(8.0, 8.0, f64::from(SIDE - 8), f64::from(SIDE - 8));
+            let red = Color::from_rgba8(255, 0, 0, 255);
+
+            for scene_depth in [true, false] {
+                let scene = Quad3dScene::new()
+                    .with_depth(scene_depth)
+                    .with(Quad3d::new(dest, QuadFace::Solid(red)));
+                // The same filter `FxPass::record` applies: the attachment
+                // this pass is given is `Some` iff *this* scene wants depth,
+                // whatever the target itself has available.
+                let attachment = scene_depth.then_some(&depth);
+
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frust-beui gpu_fx depth-toggle"),
+                });
+                renderer.record(
+                    device,
+                    queue,
+                    &mut encoder,
+                    Quad3dTarget {
+                        color: &view,
+                        depth: attachment,
+                        requested: (SIDE, SIDE),
+                    },
+                    &scene,
+                );
+                queue.submit([encoder.finish()]);
+                let error = crate::gpu_fx::drain_error_scope(device, scope);
+                assert!(
+                    error.is_none(),
+                    "scene.depth={scene_depth}: the pipeline and the attachment disagreed: \
+                     {error:?}"
+                );
+
+                let frame = read_back(device, queue, &texture, SIDE, SIDE);
+                assert_eq!(
+                    pixel(&frame, SIDE / 2, SIDE / 2),
+                    [255, 0, 0, 255],
+                    "scene.depth={scene_depth}: the face did not composite"
+                );
+            }
         });
     }
 

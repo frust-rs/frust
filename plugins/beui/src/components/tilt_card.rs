@@ -573,15 +573,17 @@ impl TiltCardWidget {
             return None;
         }
         let size = ctx.size();
-        let (dest, extent) = card3d::target_for(ctx.origin(), size)?;
+        let Some((dest, extent)) = card3d::target_for(ctx.origin(), size) else {
+            self.fx.clear();
+            return None;
+        };
         let quad = card3d::face_rect(extent, size);
         let (rx, ry) = self.tilt();
         let glare = self
             .glare
             .then(|| card3d::glare_quad(quad, rx, ry, self.pointer.offset(), ink, GLARE_OPACITY));
-        // The pass binds during the frame *after* the paint that submitted, so
-        // a first submission owes one frame or the face would wait for an
-        // unrelated repaint to appear.
+        // See `Card3d::submit`'s doc for bind timing and why a `true` answer
+        // asks for a frame.
         let first = self.fx.submit(
             extent,
             card3d::tilt_scene(card3d::face_quad(quad, face, rx, ry), glare),

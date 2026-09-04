@@ -34,9 +34,8 @@
 //! angle, and the four combinations follow from that one rule plus the two
 //! substrate conventions ([`Quad3d::yaw`] positive brings the *left* edge
 //! toward the camera, [`Quad3d::pitch`] positive brings the *top* edge toward
-//! it — the pitch half read back off hardware by
-//! `card3d`'s `a_pitched_face_lifts_its_top_edge`, since the field's own doc
-//! comment states the opposite):
+//! it — the pitch half read back off hardware by `card3d`'s
+//! `a_pitched_face_lifts_its_top_edge`):
 //!
 //! | axis | side | face at `+angle` | rotation |
 //! |---|---|---|---|
@@ -383,8 +382,7 @@ mod tests {
 
     /// A horizontal axis pitches its faces and a vertical one yaws them, and
     /// the signs are the ones the module's table sets out — the mapping the
-    /// whole port hangs on, and the one a reader of `Quad3d::pitch`'s own doc
-    /// comment would get backwards.
+    /// whole port hangs on.
     #[test]
     fn the_axis_decides_whether_a_face_pitches_or_yaws() {
         let extent_height = 240.0;
