@@ -2795,13 +2795,17 @@ both mobile shells install a `DeviceHandle` and a Mac records a Metal pass of th
 **Observed**: three fidelity limits hold across every `gpu-effects` opt-in, all substrate-wide
 rather than per component: (1) a target is allocated in logical pixels — one texel per logical
 pixel, with no scale-factor axis at the paint seam — so the composite upscales like any other
-unscaled raster on a HiDPI surface; placement itself is exact, not part of this gap —
-`card3d::target_for` forces each axis's overscan margin to an even texel count
-(`even_margin`), so a zero-tilt face's texel grid lands on the device pixel grid with no
-half-texel offset; (2) a face is a `QuadFace::Solid`/`Gradient`/`Texture` fill only, and always
-square-cornered, since a rounded clip is a rectangle in scene space and a tilted or turned face
-is not one; (3) `tilt_card`'s pointer-tracking glare has no radial-gradient `QuadFace` to reach
-for, so it degrades to a linear ramp aimed at the pointer rather than a true radial falloff.
+unscaled raster on a HiDPI surface; placement is texel-exact only when the card's own sides are
+integral — `card3d::target_for` forces each axis's overscan margin to an even texel count
+(`even_margin`, which rounds the card's own side up (`original.ceil()`) before taking the margin,
+so the margin comes out an even texel count even for a fractional side), so a zero-tilt face's
+texel grid lands on the device pixel grid with no half-texel offset when the card's side is
+already integral — but flex layout can hand a component a fractional side, and for one of those
+the composite resamples like any other fractional-origin paint; (2) a face is a
+`QuadFace::Solid`/`Gradient`/`Texture` fill only, and always square-cornered, since a rounded clip
+is a rectangle in scene space and a tilted or turned face is not one; (3) `tilt_card`'s
+pointer-tracking glare has no radial-gradient `QuadFace` to reach for, so it degrades to a linear
+ramp aimed at the pointer rather than a true radial falloff.
 
 **Applies to**: every `gpu_fx`-rendered face (`tilt_card::gpu_face`, `wheel_picker::gpu_drum`,
 `cylinder_carousel::gpu_cylinder`, `project_folder::gpu_fan`, `wallet_card::gpu_fan`) for (1) and
@@ -2815,12 +2819,13 @@ corner behind whatever rounded 2D clip sits around it, a linear rather than radi
 close enough that a bespoke fix per component was not justified.
 
 **Evidence**: `plugins/beui/src/gpu_fx/card3d.rs` module docs ("One target texel is one logical
-pixel", "The glare is a linear ramp, not a radial one") and `target_for`/`even_margin` (the
-even-margin, no-half-texel-offset guarantee); `plugins/beui/src/gpu_fx/quad3d.rs`'s `QuadFace`
-enum; `plugins/beui/src/components/tilt_card.rs` ("The face is rendered at logical resolution",
-"The face has square corners"); `plugins/beui/src/components/wheel_picker.rs`,
-`plugins/beui/src/components/cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`
-(each "The plate(s) have square corners").
+pixel", "and why a face is still pixel-exact at rest" — the integral-side qualifier, "The glare is
+a linear ramp, not a radial one") and `target_for`/`even_margin` (the even-margin,
+no-half-texel-offset guarantee, and `even_margin`'s `original.ceil()` before taking the margin);
+`plugins/beui/src/gpu_fx/quad3d.rs`'s `QuadFace` enum; `plugins/beui/src/components/tilt_card.rs`
+("The face is rendered at logical resolution", "The face has square corners");
+`plugins/beui/src/components/wheel_picker.rs`, `plugins/beui/src/components/cylinder_carousel.rs`,
+`plugins/beui/src/blocks/project_folder.rs` (each "The plate(s) have square corners").
 
 **Trigger for removal**: a paint-seam scale-factor axis for offscreen targets, a projective
 rounded-rect clip in the substrate, and a `QuadFace::RadialGradient` variant — three independent
@@ -2849,10 +2854,19 @@ first call already recorded and answers `false`, so the second surface's `Extern
 receives the bind and composites nothing under that `SceneTextureId`. (c) `pool::TargetPool`
 quantises every offscreen target's extent up to a 256px square before keying it — so a small face
 still occupies a full 256px-square texture — reaps a key that has gone unasked-for for 120
-consecutive frames, checks a key's quantized extent against
-`min(4096, device.limits().max_texture_dimension_2d)` before allocating, and wraps the
-`create_texture` calls in a `Validation` error scope, refusing (`None`, nothing inserted) rather
-than caching a target the device rejected. Each component owns its own pool with no aggregate
+consecutive frames, and checks a key's quantized extent against
+`min(4096, device.limits().max_texture_dimension_2d)` before allocating; `create_target` wraps the
+`create_texture` calls in both a `Validation` and an `OutOfMemory` error scope, drains each
+(bounded to `DRAIN_POLL_LIMIT` polls, with a drain that never resolves counted as a failure), and
+refuses (`None`, nothing inserted) rather than caching a target either scope rejected. That
+device-ceiling check runs only inside `TargetPool::acquire`, on the render thread — the component
+itself already committed to the 3D path earlier, on the UI thread, because `card3d::target_for`
+checks the same quantised extent only against the pool's own `MAX_TARGET_SIDE` policy cap (4096),
+not the device's real `max_texture_dimension_2d`. So when the quantised extent exceeds
+`min(4096, the device's max_texture_dimension_2d)`, `acquire` answers `None` on the render thread
+after the component has already committed to the 3D path in paint — it composites under a
+`SceneTextureId` that never gets bound, and the face silently never appears, with no 2D fallback
+for that extent. Each component owns its own pool with no aggregate
 budget across components, so a colour + `Depth24Plus` target at the 4096px ceiling — on the order
 of 100 MB — is a per-component worst case, not a substrate-wide one. Separately,
 `Quad3dRenderer` (the compiled pipelines and uniform buffer a pass records through) is built once
@@ -2863,8 +2877,9 @@ their own pipeline-compile cost on their own first frame.
 **Applies to**: `cylinder_carousel::gpu_cylinder`/`wheel_picker::gpu_drum` and
 `wallet_card::gpu_fan` for the nearest-first sort; `project_folder::gpu_fan` for the
 back-to-front order; every `gpu_fx` consumer for (b) whenever a process drives two engine-tier
-surfaces at once, and for the pool's quantization/reap/ceiling policy and the per-instance
-renderer compile in (c).
+surfaces at once, and for the pool's quantization/reap/ceiling policy, the two-scope error-scoped
+allocation, the render-thread-only device-ceiling refusal, and the per-instance renderer compile
+in (c).
 
 **Why accepted**: the sort direction in (a) is mode-specific by design — a drum's or fan-of-cards'
 item order carries no meaning of its own (whichever face is nearest wins by distance), while the
@@ -2875,9 +2890,13 @@ process — see `external-pass-registry-process-wide` above, which the same one-
 shape traces back to; a per-surface `Binding` is real design work with no shipping consumer to
 prove it against yet. In (c), the pool's 256px quantization and 120-frame reap mirror
 `frust_gpu::effects`' own texture-pool policy value for value, so a small face's over-allocation
-is the same trade the engine already makes; the device-ceiling check and error-scoped allocation
-turn an out-of-range or refused request into "draw nothing this frame" instead of a validation
-panic, and the missing aggregate budget is accepted because no shipped component drives more than
+is the same trade the engine already makes; the device-ceiling check and the two-scope
+error-scoped allocation turn an out-of-range or refused request into "draw nothing this frame"
+instead of a validation panic. The render-thread-only device-ceiling refusal itself is accepted
+because every desktop adapter this port currently targets reports a `max_texture_dimension_2d` of
+at least 4096, and a paint-side check that could catch it before the component commits to the 3D
+path would need the shell's live device limits published through the facade, which nothing does
+yet. The missing aggregate budget is accepted because no shipped component drives more than
 a handful of resident targets at once. `Quad3dRenderer`'s per-instance compile is accepted in its
 own module docs as a documented cost: sharing one renderer per device would serialize the
 concurrent `record` calls two live engine-tier surfaces are allowed to make, and would collapse
@@ -2892,12 +2911,18 @@ back-to-front"); `plugins/beui/src/gpu_fx/quad3d.rs` module docs ("Depth") and i
 `Mutex<PassState>`, `ExternalPass::record`'s `needs_rebind`/`record_bind` call); `docs/LIMITATIONS.md`'s
 own `external-pass-registry-process-wide` entry; `plugins/beui/src/gpu_fx/pool.rs`
 (`TARGET_QUANTUM = 256`, `MAX_UNSEEN_FRAMES = 120`, `MAX_TARGET_SIDE = 4096`, `TargetPool::acquire`'s
-device-ceiling check, `create_target`'s `push_error_scope`/`drain_error_scope`, module docs "Why a
-pool at all").
+device-ceiling check, `create_target`'s `push_error_scope`/`drain_error_scope` over both
+`wgpu::ErrorFilter::Validation` and `wgpu::ErrorFilter::OutOfMemory`, module docs "Why a pool at
+all"); `plugins/beui/src/gpu_fx/mod.rs`'s `DRAIN_POLL_LIMIT` and `drain_error_scope` (the bounded
+poll, exhaustion-as-failure behaviour `create_target` relies on); `plugins/beui/src/gpu_fx/card3d.rs`'s
+`target_for` (its `MAX_TARGET_SIDE`-only check, not the device's real `max_texture_dimension_2d`).
 
-**Trigger for removal**: none planned for (a) or (c) — both are structural consequences of a
-shared depth-tested-translucency primitive and a bounded per-component texture pool, not a defect
-either geometry module could fix independently. (b) shares its trigger with
+**Trigger for removal**: none planned for (a) or the pool's quantization/reap/per-instance-compile
+shape in (c) — both are structural consequences of a shared depth-tested-translucency primitive
+and a bounded per-component texture pool, not a defect either geometry module could fix
+independently. The device-ceiling refusal within (c) has a real trigger: the facade exposing the
+live device's limits to widgets, so a paint-side check can refuse before the component ever
+commits to the 3D path. (b) shares its trigger with
 `external-pass-registry-process-wide`: a per-surface `Binding` keyed by surface identity, or the
 first shell that keeps two engine-tier surfaces live at once, whichever lands first.
 
