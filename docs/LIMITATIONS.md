@@ -2861,8 +2861,9 @@ consecutive frames, and checks a key's quantized extent against
 refuses (`None`, nothing inserted) rather than caching a target either scope rejected. That
 device-ceiling check runs only inside `TargetPool::acquire`, on the render thread — the component
 itself already committed to the 3D path earlier, on the UI thread, because `card3d::target_for`
-checks the same quantised extent only against the pool's own `MAX_TARGET_SIDE` policy cap (4096),
-not the device's real `max_texture_dimension_2d`. So when the quantised extent exceeds
+checks only the raw overscanned side against the pool's own `MAX_TARGET_SIDE` policy cap (4096) —
+quantisation to a 256-texel multiple happens later, in `pool::quantize` / `TargetKey::new` — and
+never the device's real `max_texture_dimension_2d`. So when the quantised extent exceeds
 `min(4096, the device's max_texture_dimension_2d)`, `acquire` answers `None` on the render thread
 after the component has already committed to the 3D path in paint — it composites under a
 `SceneTextureId` that never gets bound, and the face silently never appears, with no 2D fallback

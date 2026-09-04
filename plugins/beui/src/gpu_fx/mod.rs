@@ -112,9 +112,14 @@ use frust::gpu::wgpu;
 ///
 /// The scope's `pop` future is ordinarily ready after the first poll — see
 /// [`drain_error_scope`]'s own doc — so this is not a budget the ordinary
-/// path is expected to approach; it exists so a device that never resolves
-/// the pop (wedged, or torn down mid-poll) fails the caller's allocation or
-/// bind group rather than hanging the render thread forever.
+/// path is expected to approach. It bounds *rounds*, not wall-clock time:
+/// each round parks in `device.poll` with no deadline of its own, so a device
+/// that wedges inside a poll is not rescued by it. What it does guarantee is
+/// that a backend whose `poll` returns promptly while the pop stays pending
+/// fails the caller's allocation or bind group (`ScopeOutcome::Exhausted`)
+/// instead of spinning forever — and on a backend whose `poll` is a no-op
+/// (a browser event loop) that same exhaustion would refuse every target,
+/// which is why such a host is not one this feature ships to.
 const DRAIN_POLL_LIMIT: u32 = 1_000;
 
 /// The result of draining a `wgpu` error scope: a real captured error, a

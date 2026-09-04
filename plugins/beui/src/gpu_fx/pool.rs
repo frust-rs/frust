@@ -289,9 +289,9 @@ impl TargetPool {
     /// The target for `key`, creating it if this is a size the component has
     /// not asked for lately, and marking it seen this frame either way.
     ///
-    /// Answers `None` when the device refuses the allocation (caught by a
-    /// validation error scope around the actual `create_texture` calls — see
-    /// [`create_target`]) or when `key`'s quantized extent exceeds this
+    /// Answers `None` when the device refuses the allocation (caught by the
+    /// validation and out-of-memory error scopes around the actual
+    /// `create_texture` calls — see [`create_target`]) or when `key`'s quantized extent exceeds this
     /// device's own real ceiling — `min(`[`MAX_TARGET_SIDE`]`,
     /// device.limits().max_texture_dimension_2d)`, checked here before a
     /// creation is even attempted, since [`MAX_TARGET_SIDE`] alone is a
