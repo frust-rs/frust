@@ -405,14 +405,16 @@ by scenario without any other coupling to the app.
 > `pixel5` and `iphone_se` all still match `RESULTS.md`'s published tables to
 > the digit).
 >
-> **Consumers that still match the name-only literal.** `parse_marker_line`
-> handles both shapes, so everything routed through `stats.py` is covered,
-> but two places grep the marker text directly and will not match an indexed
-> line: `summarize.py`'s S3 cycle-health count
-> (`"bench-scenario-start s3-create1k" in l`) and `matrix.sh`'s per-scenario
-> presence check (`grep -q "bench-scenario-start $s"`). Both need to allow an
-> optional `n=<u64>` token before the name before the next indexed capture is
-> taken; neither affects a series already committed under `benchmarks/raw`.
+> **Consumers that grep the marker text directly, fixed in `198d3eb8`.**
+> `parse_marker_line` handles both shapes, so everything routed through
+> `stats.py` is covered. The two places that grep the marker text directly
+> instead of going through it — `summarize.py`'s S3 cycle-health count and
+> `matrix.sh`'s per-scenario presence check — now both accept an optional
+> `n=<u64>` token before the name, so an indexed line matches too:
+> `summarize.py` defines
+> `S3_CREATE1K_START_RE = re.compile(r"bench-scenario-start(?: n=\d+)? s3-create1k")`,
+> and `matrix.sh` checks `grep -Eq "bench-scenario-start( n=[0-9]+)? $s"`.
+> Neither change affects a series already committed under `benchmarks/raw`.
 
 ### Flutter: required equivalent
 
@@ -496,45 +498,54 @@ when any op errors, one line, matching S8's shape:
 <app>-perf plugin <scenario>-errors <key>=<count> [<key>=<count> ...]
 ```
 
-**S8's shipped lines** (already shipping —
-`frust_bench/src/scenarios/s8_prefs.rs`,
-`flutter_bench/lib/scenarios/s8_prefs.dart`) predate this formalization
-and differ from the canonical shape above in two ways, both **grandfathered
-as-is by this document — S8's emitters are unchanged by this doc edit**:
+**S8's shipped lines** — `frust_bench/src/scenarios/s8_prefs.rs`,
+`flutter_bench/lib/scenarios/s8_prefs.dart` — predate this formalization
+and keep one lasting difference from the canonical shape above on both
+sides: the marker's second token is `plugin`, not the canonical `op`
+token, since S8 groups all plugin-boundary scenarios under one token,
+distinct from the frame-line family's `raw`/`startup` tokens. Since
+`198d3eb8`, Frust's two emitters also carry the canonical inline
+`scenario=` key, self-identifying the same way `d1`/`d2`'s lines do:
 
 ```
-frust-perf plugin op=<write|read> type=<tag> n=<i> us=<us> err=<0|1>
+frust-perf plugin scenario=s8-write op=write type=<tag> n=<i> us=<us> err=<0|1>
+frust-perf plugin scenario=s8-read op=read type=<tag> n=<i> us=<us> err=<0|1>
 flutter-perf plugin op=<write|read_cached|read_crossing> type=<tag> n=<i> us=<us> err=<0|1>
 frust-perf plugin s8-errors write_errors=<n> read_unexpected_none=<n> read_value_mismatch=<n>
 ```
 
-1. The marker's second token is `plugin`, not the canonical `op` token —
-   S8 groups all plugin-boundary scenarios under one token, distinct from
-   the frame-line family's `raw`/`startup` tokens.
-2. There is no inline `scenario=` key. The scenario id is supplied only by
-   the bracketing `bench-scenario-start s8-write`/`s8-read` marker pair —
-   a line read outside that bracket cannot self-identify its scenario.
+Flutter's line keeps the pre-retrofit shape shown above — no inline
+`scenario=` — and stays attributed to `s8-write`/`s8-read` only by the
+bracketing `bench-scenario-start`/`-end` marker pair; that is safe there
+because Flutter's markers are name-only and logged inline (see "Flutter:
+required equivalent" above), so there is no frame-index hazard to work
+around. A Frust S8 series already committed under `benchmarks/raw` (every
+one, as of this change) predates `198d3eb8` and still carries the
+pre-retrofit shape (`frust-perf plugin op=<write|read> type=<tag> n=<i>
+us=<us> err=<0|1>`, no inline `scenario=`); `slice_op_scenario` continues
+to attribute those lines by the same bracketing marker pair, exactly as it
+always did.
 
-> **Consequence of the 2026-09-06 marker change — S8 only, action needed
-> before the next S8 capture.** A marker is no longer logged where it is
-> raised; it is logged by the frame that carried it, which for S8's
-> same-build bracket is *after* the op lines it used to enclose. Positional
-> bracketing therefore no longer attributes S8's grandfathered lines, and
-> `slice_op_scenario` will find none of them in a capture taken after that
-> change. `d1`/`d2` are unaffected — their canonical-shape lines carry
-> `scenario=` inline and self-identify regardless of bracket position — and
-> every S8 series already committed under `benchmarks/raw` is unaffected too
-> (its markers were logged inline, in the old name-only shape). The fix is
-> the retrofit this section already anticipates: give S8's two emitters the
-> inline `scenario=` key. That is an S8-emitter change, out of scope for the
-> marker rework itself.
+> **Consequence of the 2026-09-06 marker change on S8, fixed by
+> `198d3eb8`.** A marker is no longer logged where it is raised; it is
+> logged by the frame that carried it, which for S8's same-build bracket is
+> *after* the op lines it used to enclose. Positional bracketing therefore
+> stopped attributing Frust's S8 lines for a capture taken between the
+> marker change and the retrofit. `d1`/`d2` were never exposed to this —
+> their canonical-shape lines carry `scenario=` inline and self-identify
+> regardless of bracket position — and every S8 series already committed
+> under `benchmarks/raw` is unaffected too, since its markers were logged
+> inline, in the old name-only shape. `198d3eb8` closed the gap by giving
+> Frust's two emitters the inline `scenario=` key shown above.
 
 **Canonical going forward** is the `op`-token / inline-`scenario=` shape
 above — every new per-op-emitting scenario (starting with `d1`/`d2`, §9)
-speaks it. S8's `plugin`-token lines are **not** retrofitted by this doc
-edit; reconciling them (either teaching a per-op parser both shapes, or
-updating the two S8 emitters to the canonical form) is the harness task's
-job, tracked as a methodology deviation (also recorded in `RESULTS.md`).
+speaks it. S8's `plugin` token is a permanent grandfathered exception on
+both sides. Flutter's lines keep the bracket-only attribution described
+above; reconciling them to the canonical inline-`scenario=` form (Frust's
+side already reconciled) remains the harness task's job if ever
+undertaken, tracked as a methodology deviation (also recorded in
+`RESULTS.md`).
 
 **Methodology-deviations note (also recorded in `RESULTS.md`):**
 `benchmarks/harness/stats.py` today parses only `*-perf raw` per-frame
@@ -545,6 +556,24 @@ script, predating any shared-script parsing of per-op lines. The `d*`
 scenarios (§9) are the first to require it; extending `stats.py` (or an
 equivalent) to parse per-op lines — both S8's shipped shape and the
 canonical shape — is the harness task's job.
+
+### Frust: `frust-perf s5 …` (S5 content diagnostic, opt-in)
+
+`ImageStreamWidget::paint` (`frust_bench/src/scenarios/s5_image.rs`) can
+emit one `format_s5_diag_line` `frust-perf s5 …` line per frame, reporting
+the materialized window, the offset it was computed at, and the painted
+image/placeholder counts — see the module's own "Content diagnostics" doc
+comment for what each field answers and how to correlate a line against a
+screencap. The line is emitted only when the bench is built with
+`--define FRUST_S5_DIAG=1` **and** perf is enabled (`FRUST_TRACE`/
+`FRUST_TRACE_RAW`); default is off, so an ordinary measurement capture
+never pays for computing or emitting it. A capture taken with the define
+on is diagnostic, not publication-grade — the 2026-09-05 19:03-19:13Z S5
+diagnosis runs were — because the line is emitted from inside the same
+paint span the per-frame series times, so turning it on perturbs that
+frame's own `paint_us`. Its `frust-perf s5` prefix (not `frust-perf raw`)
+means `stats.py` skips it while `run.sh`'s capture whitelist still keeps
+it in the log.
 
 ## 8. Scenarios (S1–S8)
 
