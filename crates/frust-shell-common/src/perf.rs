@@ -18,9 +18,14 @@
 //!   [`enabled`], makes [`FrameStats::record`] additionally emit one
 //!   `frust-perf raw` line per recorded frame (instead of only the
 //!   rate-limited ~2s `frust-perf frame` summary [`FrameStats::emit_log`]
-//!   already produces), plus [`mark_scenario_start`]/[`mark_scenario_end`]
-//!   for a benchmark harness to slice that per-frame series into named
-//!   scenarios.
+//!   already produces).
+//! - [`mark_scenario_start`]/[`mark_scenario_end`] — the benchmark
+//!   scenario-window edges a harness slices that per-frame series by. They
+//!   ride [`enabled`] alone (not the raw dial), and they are *queued* rather
+//!   than logged: [`FrameStats::record`] emits each one stamped with the
+//!   number of the frame that actually carried it, so a window survives the
+//!   render-thread split's UI/render interleaving. See
+//!   [`mark_scenario_start`] for the route and the half-open window rule.
 //!
 //! # Layering choice
 //!
@@ -40,9 +45,12 @@
 //! shells each construct and feed a [`FrameStats`]/[`StartupSpans`] of
 //! their own.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 #[cfg(feature = "perf-trace")]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Ring-buffer capacity for [`FrameStats`] — roughly 2 seconds of frames at
@@ -431,6 +439,16 @@ pub struct FrameStats {
     /// construction) — how [`Self::should_emit`] rate-limits without
     /// needing its own clock (see [`EMIT_INTERVAL`]'s docs).
     since_last_emit: Duration,
+    /// Test-only mirror of every scenario-marker line [`Self::record`] has
+    /// logged, in emission order — the seam the marker tests assert against
+    /// so they never have to install a global `log` sink (which would make
+    /// them order-dependent on every other test in the process). Absent
+    /// from any non-test build, so it costs a shipped binary nothing, and
+    /// absent from a feature-off test build too — with the emission itself
+    /// compiled out there, a buffer of emitted lines would be a field
+    /// nothing ever writes.
+    #[cfg(all(test, feature = "perf-trace"))]
+    marker_log: Vec<String>,
 }
 
 impl FrameStats {
@@ -496,6 +514,8 @@ impl FrameStats {
             over_60hz: 0,
             over_120hz: 0,
             since_last_emit: Duration::ZERO,
+            #[cfg(all(test, feature = "perf-trace"))]
+            marker_log: Vec::new(),
         }
     }
 
@@ -506,6 +526,14 @@ impl FrameStats {
     /// frame (`passes.skipped`) still gets a line (all-zero pass durations,
     /// `skipped=1`) so a harness can compute honest frame pacing across the
     /// mobile frame gate.
+    ///
+    /// This is also the single point where a benchmark scenario marker is
+    /// emitted: every marker this frame carries (see [`stage_markers`] and
+    /// [`take_pending_markers`]) is logged, in the order it was raised,
+    /// stamped with **this** frame's `n` and immediately ahead of this
+    /// frame's own `frust-perf raw` line — so a marker's frame number names
+    /// the recorded frame that actually carried it, not a guess made on
+    /// whichever thread raised it (see [`mark_scenario_start`]).
     pub fn record(&mut self, passes: FramePasses) {
         // Devtools frame stats fan out BEFORE the perf switch below: a devtools
         // client subscribing to them is its own opt-in, independent of
@@ -522,6 +550,14 @@ impl FrameStats {
         }
 
         self.total_frames += 1;
+
+        // Ahead of everything else this frame emits (the `frust-perf raw`
+        // line below): a window's `start n=k` must precede frame k's own raw
+        // line in the log, and the harness's half-open `[start_n, end_n)`
+        // rule reads the numbers, not the positions.
+        #[cfg(feature = "perf-trace")]
+        self.emit_scenario_markers();
+
         if passes.skipped {
             self.skipped_frames += 1;
         }
@@ -545,6 +581,52 @@ impl FrameStats {
             self.ring.pop_front();
         }
         self.ring.push_back(passes);
+    }
+
+    /// Emit every scenario marker riding this frame, stamped with the frame
+    /// number [`Self::record`] just assigned it.
+    ///
+    /// Two sources, and which of them applies is decided by whether this
+    /// process ever handed a frame across [`crate::render_split`]:
+    ///
+    /// - [`STAGED_MARKERS`] — this (render) thread's markers, put there by
+    ///   [`stage_markers`] when the render channel handed over the very frame
+    ///   now being recorded. Always drained.
+    /// - [`PENDING_MARKERS`] — the process-wide raise queue, drained here
+    ///   **only** while [`MARKERS_VIA_CHANNEL`] is still `false`, i.e. the
+    ///   inline (no render thread) executor, where the thread that raises a
+    ///   marker is the same one that records the frame. Once a channel has
+    ///   carried a frame, that queue belongs to [`RenderSender::send_scene`]
+    ///   alone and draining it here would steal a later frame's markers.
+    ///
+    /// Both drains are `is_empty` fast paths: a frame carrying no marker
+    /// allocates nothing.
+    ///
+    /// [`RenderSender::send_scene`]: crate::render_split::RenderSender::send_scene
+    #[cfg(feature = "perf-trace")]
+    fn emit_scenario_markers(&mut self) {
+        let mut markers = take_staged_markers();
+        if !MARKERS_VIA_CHANNEL.load(Ordering::Relaxed) {
+            let pending = take_pending_markers();
+            if !pending.is_empty() {
+                markers.extend(pending);
+            }
+        }
+        for marker in markers {
+            let line = format_scenario_marker(marker.edge, &marker.name, self.total_frames);
+            log::info!("{line}");
+            #[cfg(test)]
+            self.marker_log.push(line);
+        }
+    }
+
+    /// Test-only view of the scenario-marker lines [`Self::record`] has
+    /// emitted so far, in order — see [`Self::marker_log`]'s docs.
+    /// `pub(crate)` so `render_split`'s channel tests can assert the lines a
+    /// frame carried across the handoff.
+    #[cfg(all(test, feature = "perf-trace"))]
+    pub(crate) fn marker_log(&self) -> &[String] {
+        &self.marker_log
     }
 
     /// Total frames ever recorded (including skipped), regardless of the
@@ -742,9 +824,10 @@ fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
 }
 
 /// Which edge of a benchmark scenario window [`mark_scenario_start`]/
-/// [`mark_scenario_end`] stamps. Its `bench-scenario-*` prefixes are gated
-/// string literals, so the whole enum compiles only under `perf-trace`.
-#[cfg(feature = "perf-trace")]
+/// [`mark_scenario_end`] raises. Compiled unconditionally — a
+/// [`ScenarioMarker`] carries one, and that type crosses into
+/// [`crate::render_split`]'s inbox in every build; only the
+/// `bench-scenario-*` string literals it maps to live behind `perf-trace`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarkerEdge {
     Start,
@@ -761,39 +844,338 @@ impl MarkerEdge {
     }
 }
 
-/// Formats one scenario-marker line — separated from the `mark_scenario_*`
-/// functions' logging call for the same directly-unit-testable reason
-/// [`format_raw_frame_line`] is. Compiled only under `perf-trace` (it emits
-/// the `bench-scenario-*` prefixes).
+/// One raised-but-not-yet-emitted scenario-window edge: what
+/// [`mark_scenario_start`]/[`mark_scenario_end`] queue and
+/// [`FrameStats::record`] eventually logs, stamped with the frame that
+/// carried it.
+///
+/// Deliberately opaque — a caller can only move one of these along the
+/// route ([`take_pending_markers`] → [`stage_markers`]); it can neither read
+/// the edge nor rewrite the name, so the emitted line's shape stays this
+/// module's business alone. `Box<str>` rather than `String`: a marker name
+/// is never appended to after it is raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioMarker {
+    /// Read only by the `perf-trace`-gated emission path
+    /// ([`FrameStats::record`]), so it is dead in a release-lean
+    /// (feature-off) build — the field stays (the route still carries it)
+    /// but the lint is silenced there, the same way [`FrameStats::raw_buf`]
+    /// handles it.
+    #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
+    edge: MarkerEdge,
+    /// The scenario name, read only by the same gated emission path — see
+    /// [`Self::edge`].
+    #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
+    name: Box<str>,
+}
+
+/// The process-wide queue every raised marker lands in first
+/// ([`mark_scenario_start`]/[`mark_scenario_end`] push, nothing else does).
+///
+/// A marker is raised by benchmark scenario code (`s3_table.rs` and
+/// friends) from whichever thread is building the frame the marker belongs
+/// to; it must come out attached to the *recorded* frame that carried that
+/// build's scene through the pipeline. This queue is the first leg of that
+/// route. Its second leg depends on the executor:
+///
+/// - **render-thread split** — [`RenderSender::send_scene`] drains it into
+///   the inbox alongside the scene it is handing over (and flips
+///   [`MARKERS_VIA_CHANNEL`]), so the markers travel with that handoff.
+/// - **inline** (no render thread) — nothing ever drains it there, so
+///   [`FrameStats::record`] drains it directly, on the same thread that
+///   raised it, for the frame it is recording right now.
+///
+/// A `Mutex` (not an atomic) because the payload is a list; contention is
+/// nil in practice — one raiser thread, one drainer — and the lock is only
+/// ever taken while perf is enabled. Lock order is **inbox → this**, never
+/// the reverse: `render_split` takes this one while holding its inbox lock,
+/// and [`FrameStats::record`] takes no inbox lock at all.
+///
+/// [`RenderSender::send_scene`]: crate::render_split::RenderSender::send_scene
+static PENDING_MARKERS: Mutex<Vec<ScenarioMarker>> = Mutex::new(Vec::new());
+
+/// Whether [`PENDING_MARKERS`] is worth locking — the lock-free fast path
+/// [`take_pending_markers`] checks first.
+///
+/// [`RenderSender::send_scene`] calls that function on **every** frame,
+/// including in a release-lean build where perf is compiled out entirely, so
+/// the empty case must cost a relaxed load and nothing more: a marker-only
+/// mutex acquired once per frame forever would be exactly the kind of
+/// always-on cost the `perf-trace` gating exists to avoid.
+///
+/// Set under the lock after a push, cleared under the lock before a drain,
+/// so a pusher waiting on the lock always ends up re-setting it. Relaxed is
+/// enough — a missed flip on a foreign thread only defers that marker to the
+/// next handoff, which is the documented best-effort behaviour for a marker
+/// raised off the frame-producing thread anyway.
+///
+/// [`RenderSender::send_scene`]: crate::render_split::RenderSender::send_scene
+static ANY_PENDING_MARKER: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// The markers handed to *this* thread for the very next frame it
+    /// records — the render thread's leg of the route (see
+    /// [`PENDING_MARKERS`]). [`stage_markers`] appends,
+    /// [`FrameStats::record`] drains. Thread-local rather than shared: the
+    /// draining thread is by construction the one that took the batch out of
+    /// the inbox and is about to render and record it, so no lock is needed
+    /// and no other thread's frame can pick these up by accident.
+    static STAGED_MARKERS: RefCell<Vec<ScenarioMarker>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Set once the first frame crosses [`crate::render_split`] (see
+/// [`markers_route_via_channel`]) and never cleared: from then on
+/// [`PENDING_MARKERS`] belongs to the channel's handoff, and
+/// [`FrameStats::record`] must not drain it itself — doing so would attach a
+/// marker raised for a *future* frame to whatever frame the render thread
+/// happens to be recording now, which is precisely the cross-thread guess
+/// this whole route exists to remove.
+///
+/// One-way and process-wide because the choice is: a shell either runs the
+/// render-thread split for its whole life or runs inline for its whole life
+/// (`render_thread_enabled`), and a benchmark process has exactly one
+/// enabled [`FrameStats`] (the single-emitter contract in
+/// [`FramePasses::from_split`]'s docs). Relaxed ordering: it guards no other
+/// memory, and the store happens on the UI thread before the same frame's
+/// markers reach the render thread through the inbox mutex, which supplies
+/// the ordering that actually matters.
+static MARKERS_VIA_CHANNEL: AtomicBool = AtomicBool::new(false);
+
+/// Declare that scenario markers now travel with the scene handoff rather
+/// than being drained at [`FrameStats::record`] — called by
+/// [`RenderSender::send_scene`] on every send (cheap, idempotent, relaxed;
+/// there is no un-declaring it).
+///
+/// [`RenderSender::send_scene`]: crate::render_split::RenderSender::send_scene
+pub fn markers_route_via_channel() {
+    // Load first: after the first frame this is a clean read of a shared
+    // line every frame instead of a store that dirties it.
+    if !MARKERS_VIA_CHANNEL.load(Ordering::Relaxed) {
+        MARKERS_VIA_CHANNEL.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Drain every marker raised since the last drain, oldest first — the
+/// second leg of the route [`PENDING_MARKERS`] documents. Returns an empty
+/// `Vec` (no allocation, and no lock — see [`ANY_PENDING_MARKER`]) when
+/// nothing is pending, so a caller may call this once per frame
+/// unconditionally.
+pub fn take_pending_markers() -> Vec<ScenarioMarker> {
+    if !ANY_PENDING_MARKER.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let mut pending = PENDING_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ANY_PENDING_MARKER.store(false, Ordering::Relaxed);
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    std::mem::take(&mut *pending)
+}
+
+/// Hand markers to the calling thread's next recorded frame, appending to
+/// whatever is already staged there (see [`STAGED_MARKERS`]). Called by the
+/// render thread as it takes a scene out of the inbox; the frame it records
+/// next is the one that scene belongs to.
+///
+/// **Accepted best-effort edge**: a batch taken but then *not* rendered (the
+/// render loop's [`RenderPhase`] cannot render it — a paused or
+/// surface-less phase) records no frame, so its markers stay staged and
+/// attach to the next frame this thread does record. A scenario window
+/// bracketed across such a gap is therefore attributed to the first frame
+/// that really rendered after it, which is the closest honest answer
+/// available without inventing a frame that was never drawn.
+///
+/// [`RenderPhase`]: crate::render_split::RenderPhase
+pub fn stage_markers(markers: Vec<ScenarioMarker>) {
+    if markers.is_empty() {
+        return;
+    }
+    STAGED_MARKERS.with(|staged| staged.borrow_mut().extend(markers));
+}
+
+/// Take this thread's staged markers, leaving the slot empty. `is_empty`
+/// fast path first: the overwhelmingly common frame carries no marker and
+/// must not allocate. Only the `perf-trace` emission path drains this.
 #[cfg(feature = "perf-trace")]
-fn format_scenario_marker(edge: MarkerEdge, name: &str) -> String {
-    format!("{} {name}", edge.prefix())
+fn take_staged_markers() -> Vec<ScenarioMarker> {
+    STAGED_MARKERS.with(|staged| {
+        let mut staged = staged.borrow_mut();
+        if staged.is_empty() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut *staged)
+        }
+    })
 }
 
-/// Stamps a `bench-scenario-start <name>` marker into the same raw-export
-/// stream [`FrameStats::record`]'s per-frame lines land in, so an external
-/// benchmark harness can slice the per-frame series into named scenarios
-/// without needing to hold a [`FrameStats`] handle itself (a marker is a
-/// scenario-boundary event, not a per-frame one, so it is a free function
-/// rather than a method). A no-op unless both [`enabled`] and
-/// [`raw_enabled`] are `true` — the same two-dial gating
-/// [`FrameStats::new`]'s raw path uses.
-#[cfg_attr(not(feature = "perf-trace"), allow(unused_variables))]
+/// Test-only override of [`markers_enabled`]: [`enabled`] caches a process
+/// environment read in a `OnceLock` and can never be flipped back, so a test
+/// that needs a marker actually queued sets this instead of relaxing
+/// production gating. Only ever touched while [`MARKER_TEST_LOCK`] is held —
+/// see [`marker_test_guard`].
+#[cfg(test)]
+static MARKERS_FORCE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Serializes every test that touches the process-wide marker route
+/// ([`PENDING_MARKERS`], [`MARKERS_VIA_CHANNEL`], [`MARKERS_FORCE_ENABLED`]
+/// and this thread's [`STAGED_MARKERS`]) — the crate's established
+/// convention for a global the code under test owns (`theme_override`'s
+/// `TEST_LOCK`). `cargo test` runs test functions on parallel threads, so a
+/// participant that skips this lock can corrupt another's queue; take it via
+/// [`marker_test_guard`], never by hand.
+#[cfg(test)]
+static MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// The RAII handle [`marker_test_guard`] returns: holds
+/// [`MARKER_TEST_LOCK`] and restores the marker route to its pristine state
+/// on drop, so one test's leftovers can never leak into the next.
+#[cfg(test)]
+pub(crate) struct MarkerTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for MarkerTestGuard {
+    fn drop(&mut self) {
+        MARKERS_FORCE_ENABLED.store(false, Ordering::Relaxed);
+        reset_marker_route();
+    }
+}
+
+/// Clear every piece of marker state this thread and this process can see.
+#[cfg(test)]
+fn reset_marker_route() {
+    PENDING_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    ANY_PENDING_MARKER.store(false, Ordering::Relaxed);
+    STAGED_MARKERS.with(|staged| staged.borrow_mut().clear());
+    MARKERS_VIA_CHANNEL.store(false, Ordering::Relaxed);
+}
+
+/// Take exclusive use of the marker route for the duration of a test,
+/// starting from a pristine queue and (when `force_enabled`) with markers
+/// queueing as though `FRUST_TRACE` were set. `pub(crate)` because
+/// `render_split`'s channel tests drive the same route from the other end.
+///
+/// A poisoned lock is adopted rather than propagated: one failing test must
+/// not cascade into every later one.
+#[cfg(test)]
+pub(crate) fn marker_test_guard(force_enabled: bool) -> MarkerTestGuard {
+    let lock = MARKER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    reset_marker_route();
+    MARKERS_FORCE_ENABLED.store(force_enabled, Ordering::Relaxed);
+    MarkerTestGuard { _lock: lock }
+}
+
+/// Whether a raised marker is queued at all. The one-dial gate
+/// ([`enabled`], not [`enabled`]-and-[`raw_enabled`]): a marker is now
+/// emitted by [`FrameStats::record`] itself, which runs whenever perf is on,
+/// so tying markers to the raw-export dial would mean a scenario window that
+/// exists in one capture and silently not in another. When perf is off this
+/// folds to a `false` constant and every caller below it disappears.
+#[inline]
+fn markers_enabled() -> bool {
+    #[cfg(test)]
+    if MARKERS_FORCE_ENABLED.load(Ordering::Relaxed) {
+        return true;
+    }
+    enabled()
+}
+
+/// Queue one marker onto [`PENDING_MARKERS`] — the single body behind both
+/// [`mark_scenario_start`] and [`mark_scenario_end`], so the two edges can
+/// never drift apart.
+fn push_marker(edge: MarkerEdge, name: &str) {
+    if !markers_enabled() {
+        return;
+    }
+    let mut pending = PENDING_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.push(ScenarioMarker {
+        edge,
+        name: name.into(),
+    });
+    ANY_PENDING_MARKER.store(true, Ordering::Relaxed);
+}
+
+/// Formats one scenario-marker line — separated from the emission call for
+/// the same directly-unit-testable reason [`format_raw_frame_line`] is.
+/// Compiled only under `perf-trace` (it emits the `bench-scenario-*`
+/// prefixes).
+///
+/// **Shape (2026-09-06):** `<prefix> n=<frame> <name>`, where `frame` is the
+/// 1-indexed counter of the frame that carried this marker through the
+/// pipeline — the very same counter [`format_raw_frame_line`] writes as a
+/// raw line's own `n=`, because both are stamped by the same
+/// [`FrameStats::record`] call. There is no config toggle back to the older
+/// name-only `<prefix> <name>` shape; a series captured before this change
+/// is still name-only and a harness parsing it falls back to log-position
+/// bracketing (`benchmarks/harness/stats.py`'s `slice_scenario`).
+#[cfg(feature = "perf-trace")]
+fn format_scenario_marker(edge: MarkerEdge, name: &str, frame: u64) -> String {
+    format!("{} n={frame} {name}", edge.prefix())
+}
+
+/// Raise a `bench-scenario-start` marker for `name` — the opening edge of a
+/// benchmark scenario window, so an external harness can slice the
+/// per-frame `frust-perf raw` series into named scenarios without holding a
+/// [`FrameStats`] handle itself (a marker is a scenario-boundary event, not
+/// a per-frame one, hence a free function rather than a method).
+///
+/// # What the emitted `n` means
+///
+/// Raising a marker does **not** log it. The marker is queued, travels with
+/// the frame the calling build hands off, and is logged by
+/// [`FrameStats::record`] as `bench-scenario-start n=<frame> <name>` where
+/// `<frame>` is the number of the frame that actually carried it through
+/// the pipeline — immediately ahead of that frame's own `frust-perf raw`
+/// line. Nothing here guesses a frame number across a thread boundary,
+/// which is the whole point: on the render-thread split the UI thread that
+/// raises a marker cannot know whether the render thread has recorded the
+/// previous frame yet.
+///
+/// The window is **half-open**. `start` is raised in the build that also
+/// applies the operation being measured, so `start n=k` names the window's
+/// first frame; `end` is raised in the *next* build (the S3 convention —
+/// `benchmarks/frust_bench/src/scenarios/s3_table.rs`), so `end n=k+1`
+/// names the first frame *after* the window. A harness attributes the
+/// frames with `start_n <= n < end_n` to the window — one frame, for the S3
+/// shape (see `benchmarks/PROTOCOL.md` §7).
+///
+/// Two consequences worth knowing:
+///
+/// - Under the channel's depth-1 latest-wins slot, a build whose scene is
+///   replaced before the render thread takes it never becomes a frame of
+///   its own; its markers ride the frame that superseded it — the frame
+///   that actually drew that build's result. If a window's `start` and
+///   `end` both land on that one frame, the half-open window is empty,
+///   which is the honest answer: the operation's own frame was dropped.
+/// - A marker raised on a thread that hands no frame off (neither the UI
+///   thread of a split executor nor the inline executor's own thread)
+///   attaches to the next frame handed off after it — best effort, and the
+///   only case where the attribution is approximate.
+///
+/// A no-op unless [`enabled`] is `true`; unlike the raw per-frame line it
+/// does **not** additionally require [`raw_enabled`], so a scenario window
+/// is present in every perf-enabled capture.
 pub fn mark_scenario_start(name: &str) {
-    #[cfg(feature = "perf-trace")]
-    if enabled() && raw_enabled() {
-        log::info!("{}", format_scenario_marker(MarkerEdge::Start, name));
-    }
+    push_marker(MarkerEdge::Start, name);
 }
 
-/// Stamps a `bench-scenario-end <name>` marker — see
-/// [`mark_scenario_start`]'s docs (gating and rationale are identical).
-#[cfg_attr(not(feature = "perf-trace"), allow(unused_variables))]
+/// Raise a `bench-scenario-end` marker — the closing edge of the window
+/// [`mark_scenario_start`] opened; see its docs, which cover the gating, the
+/// emitted `n`, and the half-open `[start_n, end_n)` rule identically. In
+/// the S3 convention this is raised in the build *after* the measured one,
+/// so its `n` is one past the window's last frame.
 pub fn mark_scenario_end(name: &str) {
-    #[cfg(feature = "perf-trace")]
-    if enabled() && raw_enabled() {
-        log::info!("{}", format_scenario_marker(MarkerEdge::End, name));
-    }
+    push_marker(MarkerEdge::End, name);
 }
 
 /// Emit one already-formatted benchmark trace line into the same
@@ -1643,23 +2025,167 @@ mod tests {
     #[test]
     fn scenario_marker_format_start_and_end() {
         assert_eq!(
-            format_scenario_marker(MarkerEdge::Start, "cold_start"),
-            "bench-scenario-start cold_start"
+            format_scenario_marker(MarkerEdge::Start, "cold_start", 5),
+            "bench-scenario-start n=5 cold_start"
         );
         assert_eq!(
-            format_scenario_marker(MarkerEdge::End, "cold_start"),
-            "bench-scenario-end cold_start"
+            format_scenario_marker(MarkerEdge::End, "cold_start", 6),
+            "bench-scenario-end n=6 cold_start"
         );
     }
 
     #[test]
-    fn mark_scenario_functions_do_not_panic_when_disabled() {
-        // Process env has neither FRUST_TRACE nor FRUST_TRACE_RAW set in a
-        // normal test run, so these are no-ops; the assertion here is just
-        // that calling them is safe (no capture harness to check the log
-        // line against — see format_scenario_marker's direct test above).
+    fn markers_raised_while_perf_is_disabled_accumulate_nothing() {
+        // Perf off (the guard leaves the force switch clear, and no test-run
+        // process sets FRUST_TRACE): raising markers must be safe AND must
+        // queue nothing at all — an unbounded queue nobody ever drains is
+        // the one way this route could leak in a shipped build.
+        let _guard = marker_test_guard(false);
+
         mark_scenario_start("smoke");
         mark_scenario_end("smoke");
+
+        assert!(
+            take_pending_markers().is_empty(),
+            "a disabled marker must never reach the queue"
+        );
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn inline_executor_drains_the_pending_queue_at_record_on_its_own_thread() {
+        // The inline (no render thread) path: nothing ever calls
+        // `markers_route_via_channel`, so `record` itself drains the queue —
+        // on the very thread that raised the markers, for the frame it is
+        // recording right now.
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
+
+        mark_scenario_start("s3-create1k");
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(
+            stats.marker_log(),
+            ["bench-scenario-start n=1 s3-create1k"],
+            "the marker rides the frame being recorded when it was raised"
+        );
+
+        // The next build closes the window: S3 raises `end` one build later,
+        // so it lands on frame 2 and the half-open window is exactly frame 1.
+        mark_scenario_end("s3-create1k");
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(
+            stats.marker_log(),
+            [
+                "bench-scenario-start n=1 s3-create1k",
+                "bench-scenario-end n=2 s3-create1k",
+            ]
+        );
+
+        // A frame carrying no marker adds no line.
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(stats.marker_log().len(), 2);
+        assert_eq!(stats.total_frames(), 3);
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn markers_are_emitted_with_raw_export_off() {
+        // The raw-export dial gates the per-frame line, not the markers: a
+        // window must exist in every perf-enabled capture, not only in the
+        // ones a harness asked for raw frames in.
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, false);
+
+        mark_scenario_start("s8-write");
+        stats.record(passes(10, 2, 2, 2));
+
+        assert_eq!(stats.marker_log(), ["bench-scenario-start n=1 s8-write"]);
+        assert!(
+            stats.raw_buf.is_empty(),
+            "raw export stays off — only the marker line was emitted"
+        );
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_disabled_recorder_emits_no_marker_line() {
+        // `record`'s own disabled early-return covers the markers too: a
+        // recorder that counts no frames can stamp no frame number.
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, false, true);
+
+        mark_scenario_start("s3-update");
+        stats.record(passes(10, 2, 2, 2));
+
+        assert!(stats.marker_log().is_empty());
+        assert_eq!(stats.total_frames(), 0);
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn record_leaves_the_pending_queue_alone_once_markers_route_via_channel() {
+        // Once a frame has crossed `render_split`, the queue belongs to
+        // `send_scene`; draining it at `record` would attach a marker raised
+        // for a frame still being built to whatever the render thread is
+        // recording now — the cross-thread guess this route removes.
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
+
+        markers_route_via_channel();
+        mark_scenario_start("s3-update");
+        stats.record(passes(10, 2, 2, 2));
+
+        assert!(
+            stats.marker_log().is_empty(),
+            "record must not steal a channel-routed marker"
+        );
+        assert_eq!(
+            take_pending_markers().len(),
+            1,
+            "the marker is still queued for send_scene to carry"
+        );
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn staged_markers_ride_the_next_recorded_frame_in_order() {
+        // The render thread's leg: whatever `stage_markers` was handed comes
+        // out on the next frame this thread records, in the order it was
+        // raised, and only once.
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
+
+        markers_route_via_channel();
+        mark_scenario_start("s3-clear");
+        mark_scenario_end("s3-clear");
+        stage_markers(take_pending_markers());
+
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(
+            stats.marker_log(),
+            [
+                "bench-scenario-start n=1 s3-clear",
+                "bench-scenario-end n=1 s3-clear",
+            ],
+            "both edges collapsing onto one frame is the empty half-open \
+             window a dropped op frame honestly produces"
+        );
+
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(stats.marker_log().len(), 2, "staged markers emit once");
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn stage_markers_of_an_empty_batch_is_a_no_op() {
+        let _guard = marker_test_guard(true);
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
+
+        markers_route_via_channel();
+        stage_markers(take_pending_markers());
+        stats.record(passes(10, 2, 2, 2));
+
+        assert!(stats.marker_log().is_empty());
     }
 
     #[test]

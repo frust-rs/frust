@@ -79,7 +79,7 @@ use std::time::Duration;
 
 use frust_core::anim::FrameTime;
 
-use crate::perf::UiSpans;
+use crate::perf::{ScenarioMarker, UiSpans};
 
 // ---------------------------------------------------------------------
 // Kill switch
@@ -469,6 +469,19 @@ struct Inbox<S, W> {
     dropped: u64,
     /// Pending lifecycle commands in FIFO order.
     commands: Vec<RenderCommand<W>>,
+    /// Benchmark scenario markers raised on the UI thread since the render
+    /// thread last took a scene, waiting to travel with the next one
+    /// ([`crate::perf::mark_scenario_start`]).
+    ///
+    /// They live here rather than on [`SceneFrame`] deliberately: the shells
+    /// build that struct by literal and destructure [`RenderBatch`], so a new
+    /// field there would be a breaking edit to three shell crates for a
+    /// benchmark-only concern. Keeping them beside the slot also gives the
+    /// right latest-wins behaviour for free — when a newer scene replaces an
+    /// un-taken one, the replaced build's markers stay queued and ride the
+    /// frame that supersedes it, which is the frame that actually drew that
+    /// build's result.
+    pending_markers: Vec<ScenarioMarker>,
     /// Cleared when the [`RenderSender`] is dropped, so a blocked
     /// [`RenderReceiver::wait_next`] wakes and reports disconnection (the render
     /// loop's clean-exit signal).
@@ -535,6 +548,7 @@ pub fn render_channel<S, W>() -> (RenderSender<S, W>, RenderReceiver<S, W>) {
             latest: None,
             dropped: 0,
             commands: Vec::new(),
+            pending_markers: Vec::new(),
             sender_alive: true,
             receiver_alive: true,
         }),
@@ -558,6 +572,11 @@ impl<S, W> RenderSender<S, W> {
     /// empty. A pure widening of the original fire-and-forget signature — a
     /// caller that doesn't care may still ignore the return value. Wakes the
     /// render thread's [`RenderReceiver::wait_next`].
+    ///
+    /// Also picks up any benchmark scenario markers the UI thread raised
+    /// since the last send ([`Inbox::pending_markers`]), so they cross with
+    /// this handoff instead of being stamped with a frame number guessed on
+    /// this side of the split.
     pub fn send_scene(&self, frame: SceneFrame<S>) -> Option<SceneFrame<S>> {
         let mut inbox = self.channel.inbox.lock().unwrap();
         if !inbox.receiver_alive {
@@ -566,6 +585,17 @@ impl<S, W> RenderSender<S, W> {
             // back so the caller can still reclaim its buffer. `frame` carries no
             // `Ack`, so nothing else needs firing either way.
             return Some(frame);
+        }
+        // Before the slot is written: every marker raised up to this moment
+        // belongs to the build being handed off now (or to an earlier one
+        // whose scene this send replaces — same frame, once it is recorded).
+        // Declaring the route on every send is cheap and idempotent; it is
+        // what stops `FrameStats::record` from draining the same queue behind
+        // this thread's back (see `perf::markers_route_via_channel`).
+        crate::perf::markers_route_via_channel();
+        let markers = crate::perf::take_pending_markers();
+        if !markers.is_empty() {
+            inbox.pending_markers.extend(markers);
         }
         let stale = inbox.latest.replace(frame);
         if stale.is_some() {
@@ -645,6 +675,9 @@ impl<S, W> Drop for RenderReceiver<S, W> {
         inbox.receiver_alive = false;
         let commands = std::mem::take(&mut inbox.commands);
         let latest = inbox.latest.take();
+        // No thread will ever record a frame for these, so they are dropped
+        // rather than staged — a marker with no frame to name is nothing.
+        inbox.pending_markers.clear();
         drop(inbox);
         // Drop the drained work *after* releasing the inbox lock — dropping an
         // `Ack` locks its own (separate) mutex to signal, so ordering here avoids
@@ -693,7 +726,18 @@ impl<S, W> RenderReceiver<S, W> {
 /// Drain the inbox into a [`RenderBatch`]: all pending commands (FIFO), the
 /// freshest scene (latest-wins), and the disconnection flag. Shared by
 /// [`RenderReceiver::wait_next`]/[`RenderReceiver::try_next`].
+///
+/// When a scene comes out, the markers queued alongside it
+/// ([`Inbox::pending_markers`]) are staged on the **calling** thread — the
+/// render thread, which is about to render this scene and record the frame
+/// that [`crate::perf::FrameStats::record`] will stamp them with. They are
+/// staged rather than returned on the batch so [`RenderBatch`] keeps the
+/// exact shape the shells destructure. When no scene comes out they stay
+/// queued for the next one.
 fn drain<S, W>(inbox: &mut Inbox<S, W>) -> RenderBatch<S, W> {
+    if inbox.latest.is_some() && !inbox.pending_markers.is_empty() {
+        crate::perf::stage_markers(std::mem::take(&mut inbox.pending_markers));
+    }
     RenderBatch {
         commands: std::mem::take(&mut inbox.commands),
         scene: inbox.latest.take(),
@@ -1362,6 +1406,190 @@ mod tests {
         assert!(
             !waiter.wait_timeout(Duration::from_millis(20)),
             "wait_timeout must return false when the ack never fires"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Scenario markers riding the handoff
+    //
+    // The channel is generic, so these drive `render_channel::<u32, ()>()`
+    // with the same cheap stand-in payload every other test here uses — no
+    // GPU, no platform, no real scene. Every one takes `perf`'s marker test
+    // guard: the queue is process-wide and `cargo test` runs test functions
+    // in parallel.
+    // ---------------------------------------------------------------
+
+    /// A `FrameStats` in the shape a benchmark process runs: enabled, raw
+    /// export on, small ring.
+    #[cfg(feature = "perf-trace")]
+    fn bench_stats() -> crate::perf::FrameStats {
+        crate::perf::FrameStats::with_capacity_enabled_and_raw(8, true, true)
+    }
+
+    /// One recorded frame's worth of pass durations — the values are
+    /// irrelevant here, only the recording is.
+    #[cfg(feature = "perf-trace")]
+    fn record_one(stats: &mut crate::perf::FrameStats) {
+        stats.record(crate::perf::FramePasses::from_split(
+            UiSpans::default(),
+            crate::perf::RenderSpans::default(),
+        ));
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn markers_land_on_the_frames_that_carried_them_across_the_split() {
+        // The interleaving that motivated this whole route: the UI thread
+        // raises BOTH edges of an S3 window before the render thread has
+        // emitted a single line, so no frame number the UI side could have
+        // guessed would have been right. `start` is raised in the build that
+        // applies the op (frame 1), `end` in the build after it (frame 2) —
+        // the harness window is the half-open [1, 2), i.e. exactly frame 1.
+        let _guard = crate::perf::marker_test_guard(true);
+        let (tx, rx) = render_channel::<u32, ()>();
+        let mut stats = bench_stats();
+
+        // Build k: open the window and hand its scene off.
+        crate::perf::mark_scenario_start("s3-create1k");
+        tx.send_scene(frame(1));
+        // The render thread takes the batch but has not recorded it yet —
+        // this is the window where the UI thread runs ahead.
+        let batch1 = rx.try_next();
+        assert!(batch1.scene.is_some(), "the render thread took build k");
+
+        // Build k+1: close the window and hand its scene off, still before
+        // any raw line exists.
+        crate::perf::mark_scenario_end("s3-create1k");
+        tx.send_scene(frame(2));
+
+        // Now the render thread catches up: frame 1, then frame 2.
+        record_one(&mut stats);
+        let batch2 = rx.try_next();
+        assert!(batch2.scene.is_some(), "the render thread took build k+1");
+        record_one(&mut stats);
+
+        assert_eq!(
+            stats.marker_log(),
+            [
+                "bench-scenario-start n=1 s3-create1k",
+                "bench-scenario-end n=2 s3-create1k",
+            ],
+            "each edge names the recorded frame that actually carried it"
+        );
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_marker_whose_scene_is_replaced_lands_on_the_first_recorded_frame() {
+        // Latest-wins: build k's scene is superseded before the render thread
+        // takes it, so build k never becomes a frame of its own. Its marker
+        // rides the frame that did draw that build's result — frame 1, the
+        // first frame recorded — rather than naming a frame that was never
+        // drawn or being dropped outright.
+        let _guard = crate::perf::marker_test_guard(true);
+        let (tx, rx) = render_channel::<u32, ()>();
+        let mut stats = bench_stats();
+
+        crate::perf::mark_scenario_start("s3-update");
+        tx.send_scene(frame(1));
+        let stale = tx.send_scene(frame(2));
+        assert!(stale.is_some(), "build k's scene was replaced, not taken");
+
+        let batch = rx.try_next();
+        assert_eq!(batch.scene.map(|f| f.scene), Some(2));
+        record_one(&mut stats);
+
+        assert_eq!(stats.marker_log(), ["bench-scenario-start n=1 s3-update"]);
+        assert_eq!(rx.dropped_frames(), 1);
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn markers_wait_in_the_inbox_until_a_scene_is_actually_taken() {
+        // A drain that yields no scene must leave the queue alone: there is
+        // no frame for those markers to name yet. (A command-only wakeup is
+        // exactly this case.)
+        let _guard = crate::perf::marker_test_guard(true);
+        let (tx, rx) = render_channel::<u32, ()>();
+        let mut stats = bench_stats();
+
+        // One ordinary frame first, so the process is on the channel route
+        // (`send_scene` declares it) rather than still looking inline.
+        tx.send_scene(frame(1));
+        assert!(rx.try_next().scene.is_some());
+        record_one(&mut stats);
+        assert!(stats.marker_log().is_empty(), "frame 1 carried no marker");
+
+        crate::perf::mark_scenario_start("s3-swap");
+        tx.send_command(RenderCommand::SurfaceChanged { size: test_size() });
+
+        let batch = rx.try_next();
+        assert!(
+            batch.scene.is_none(),
+            "a command-only wakeup takes no scene"
+        );
+        record_one(&mut stats);
+        assert!(
+            stats.marker_log().is_empty(),
+            "no scene was taken, so nothing may be attributed to frame 2"
+        );
+
+        // The next real handoff carries it, onto frame 3.
+        tx.send_scene(frame(2));
+        assert!(rx.try_next().scene.is_some());
+        record_one(&mut stats);
+        assert_eq!(stats.marker_log(), ["bench-scenario-start n=3 s3-swap"]);
+    }
+
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn a_frame_carrying_no_marker_emits_no_marker_line() {
+        let _guard = crate::perf::marker_test_guard(true);
+        let (tx, rx) = render_channel::<u32, ()>();
+        let mut stats = bench_stats();
+
+        tx.send_scene(frame(1));
+        assert!(rx.try_next().scene.is_some());
+        record_one(&mut stats);
+
+        assert!(stats.marker_log().is_empty());
+        assert_eq!(
+            stats.total_frames(),
+            1,
+            "the frame itself is still recorded"
+        );
+    }
+
+    #[test]
+    fn receiver_death_discards_markers_no_frame_will_ever_name() {
+        // Symmetric with the orphaned-ack drain in `Drop for RenderReceiver`:
+        // the render thread is gone, so no frame will ever be recorded for
+        // the markers riding its inbox. They are discarded there rather than
+        // left to accumulate in a channel nobody reads. Not `perf-trace`
+        // gated — the route itself is compiled in every build, only the
+        // emitted line is behind the feature.
+        let _guard = crate::perf::marker_test_guard(true);
+        let (tx, rx) = render_channel::<u32, ()>();
+
+        crate::perf::mark_scenario_start("s3-clear");
+        tx.send_scene(frame(1));
+        assert!(
+            crate::perf::take_pending_markers().is_empty(),
+            "send_scene moved the marker out of the raise queue"
+        );
+
+        drop(rx);
+
+        // A send after the receiver's death takes its early return before
+        // touching the queue, so a marker raised afterwards simply stays
+        // raised — there is no live inbox to move it into and no frame left
+        // to name it. Nothing panics and nothing is lost twice.
+        crate::perf::mark_scenario_end("s3-clear");
+        assert!(tx.send_scene(frame(2)).is_some());
+        assert_eq!(
+            crate::perf::take_pending_markers().len(),
+            1,
+            "the post-mortem marker is still just queued, never attributed"
         );
     }
 }

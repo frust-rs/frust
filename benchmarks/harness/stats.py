@@ -63,21 +63,66 @@ snapshots and `graphics_kb_series`/`mean_graphics_mb` average it across a
 run set — the arithmetic behind RESULTS.md's `Graphics avg (MB)` column,
 which was previously done by hand outside this script.
 
-- `bench-scenario-start <name>` / `bench-scenario-end <name>` — identical
-  marker strings on both sides (see `perf::mark_scenario_start`/
-  `mark_scenario_end`).
+- `bench-scenario-start <name>` / `bench-scenario-end <name>` — Flutter's
+  shape, unchanged, and every Frust series captured before 2026-09-06.
+  `bench-scenario-start n=<frame> <name>` / `bench-scenario-end n=<frame>
+  <name>` — Frust's shape from 2026-09-06 on (see
+  `perf::mark_scenario_start`/`mark_scenario_end`), carrying the 1-indexed
+  number of the frame that **carried** the marker through the pipeline —
+  the same counter a `frust-perf raw` line's own `n=` uses, stamped by the
+  same emitter (`FrameStats::record`) immediately ahead of that frame's raw
+  line. Both shapes are `bench-scenario-*` strings either side recognizes
+  identically at the prefix; only the tail differs, and `parse_marker_line`
+  reports the frame index as `None` when a line carries no `n=` token.
+
+# Marker attribution: index-based vs. position-based (PROTOCOL §7)
+
+A window is **half-open**: `[start_n, end_n)`. `start n=k` names the
+window's first frame — the build that raised it also applied the operation
+being measured — and `end` is raised in the *next* build (the S3
+convention), so `end n=k+1` names the first frame after the window. For the
+S3 shape that makes the window exactly frame k, one frame, which is the
+point.
+
+When *both* of a window's markers carry a frame index, `slice_scenario`
+attributes every raw frame with `start_n <= n < end_n` to that window by
+frame identity alone — immune to which physical line comes first in the
+log. That immunity is what the indexed shape exists for: on the
+render-thread split (`crates/frust-shell-common/src/render_split.rs`) the
+markers are emitted by the render thread that records the frame, while the
+rest of the log (per-op `frust-perf plugin` lines, app logging) is still
+written by the UI thread running ahead of it, so a marker's *line position*
+in a captured log is not a reliable proxy for which frames it brackets.
+Before that emitter change the marker was logged by the UI thread outright
+and position-based slicing gave `s3-create1k` zero frames and shifted every
+other S3 op by one (action item `act_000001a070c818837NtGqevW`).
+
+When either of a window's markers carries no index (Flutter's markers,
+always; a Frust series captured before this change), `slice_scenario` falls
+back to the original **position**-based bracketing: every raw-frame line
+between that start marker's line and its matching end marker's line, by log
+order — exactly what it always computed, so an old capture reproduces the
+identical series it always did (see `test_every_committed_v3_series_still_
+parses`-adjacent reproduction: `summarize.py` over `benchmarks/raw/oneplus9`
+still matches `RESULTS.md`'s published tables to the digit).
+
+A degenerate indexed window is possible and is not an error: if the render
+channel's depth-1 latest-wins slot dropped the operation's own build, both
+edges land on the single frame that superseded it, `[k, k)` is empty, and
+the operation contributes no frames — the honest reading of "the frame that
+op mutated was never drawn".
 
 # Repeated same-name marker pairs (S3 continuous cycling)
 
-`slice_scenario` toggles an `active` flag purely off the *last-seen* marker
-matching the requested name — it has no notion of "already saw this
-scenario once" — so a marker name that opens and closes more than once in
-the same log (S3's continuous-cycling redesign: `s3-create1k`/`s3-update`/
-etc. repeat once per cycle, see `benchmarks/PROTOCOL.md`'s S3 row) just
-accumulates frames from every bracketed window into one combined series,
-the same as if the caller had run each op once for a very long single
-window. No special-casing was needed for this — verified by
-`test_stats.py`'s `test_repeated_marker_pairs_aggregate_across_cycles`.
+A marker name that opens and closes more than once in the same log (S3's
+continuous-cycling redesign: `s3-create1k`/`s3-update`/etc. repeat once per
+cycle, see `benchmarks/PROTOCOL.md`'s S3 row) produces one window per
+occurrence; `slice_scenario` accumulates every occurrence's frames into one
+combined series, the same as if the caller had run each op once for a very
+long single window — whether each occurrence's window is attributed by
+index or by position. Verified by `test_stats.py`'s
+`test_repeated_marker_pairs_aggregate_across_cycles` (name-only) and
+`test_repeated_indexed_windows_accumulate_across_cycles` (indexed).
 
 # Per-op lines (d1/d2, and S8 backward-compat) — a second parse path
 
@@ -350,11 +395,17 @@ def gpu_spans(record: FrameRecord) -> dict[str, int] | None:
     return spans
 
 
-def parse_marker_line(line: str) -> tuple[str, str] | None:
-    """Parses a `bench-scenario-start/end <name>` line into `(edge, name)`
-    (`edge` is `"start"`/`"end"`), or `None` if `line` isn't a marker line or
-    carries no name. Like [`parse_raw_line`], the prefix is located anywhere
-    in the line, not just at its start (see that function's docs)."""
+def parse_marker_line(line: str) -> tuple[str, str, int | None] | None:
+    """Parses a `bench-scenario-start/end <name>` (old, name-only shape) or
+    `bench-scenario-start/end n=<frame> <name>` (2026-09-06 indexed shape)
+    line into `(edge, name, frame)` (`edge` is `"start"`/`"end"`; `frame` is
+    the 1-indexed number of the frame that carried the marker, or `None`
+    when the line carries no `n=` token — Flutter's markers, always, and
+    every Frust series captured before the indexed shape shipped). Returns
+    `None` if `line` isn't a marker line, carries no name, or carries a
+    malformed `n=` token. Like [`parse_raw_line`], the prefix is located
+    anywhere in the line, not just at its start (see that function's
+    docs)."""
     stripped = line.strip()
     start_idx = stripped.find(MARKER_START_PREFIX)
     end_idx = stripped.find(MARKER_END_PREFIX)
@@ -364,31 +415,106 @@ def parse_marker_line(line: str) -> tuple[str, str] | None:
         edge, prefix, idx = "end", MARKER_END_PREFIX, end_idx
     else:
         return None
-    name = stripped[idx + len(prefix) :].strip()
+    rest = stripped[idx + len(prefix) :].strip()
+    if not rest:
+        return None
+    frame: int | None = None
+    if rest.startswith("n="):
+        index_tok, _, name = rest.partition(" ")
+        try:
+            frame = int(index_tok[len("n=") :])
+        except ValueError:
+            return None
+        name = name.strip()
+    else:
+        name = rest
     if not name:
         return None
-    return edge, name
+    return edge, name, frame
 
 
 def slice_scenario(lines: list[str], scenario: str | None) -> list[FrameRecord]:
     """Extracts the [`FrameRecord`]s bracketed by `bench-scenario-start
-    <scenario>` / `bench-scenario-end <scenario>` marker lines. When
-    `scenario` is `None`, every parseable raw-frame line in `lines` is
-    included regardless of markers (useful for a single-scenario fixture
-    with no marker bracket, or a caller that already sliced upstream)."""
-    frames: list[FrameRecord] = []
-    active = scenario is None
-    for line in lines:
-        marker = parse_marker_line(line)
-        if marker is not None:
-            edge, name = marker
-            if scenario is not None and name == scenario:
-                active = edge == "start"
-            continue
-        if active:
+    <scenario>` / `bench-scenario-end <scenario>` marker lines (either the
+    old name-only shape or the indexed `n=<frame>` shape — see module docs'
+    "Marker attribution" section). When `scenario` is `None`, every
+    parseable raw-frame line in `lines` is included regardless of markers
+    (useful for a single-scenario fixture with no marker bracket, or a
+    caller that already sliced upstream).
+
+    Two independent attribution strategies, chosen per window (one
+    start/end occurrence of `scenario`'s markers), not globally for the
+    whole log — repeated occurrences of the same scenario name (S3's
+    continuous cycling) can each be sliced by whichever strategy that
+    occurrence's own marker pair supports:
+
+    - **Indexed** (both the window's start and end marker carry a frame
+      index): every raw frame anywhere in `lines` whose `n` falls in the
+      half-open `[start_n, end_n)` — start inclusive, end exclusive — is
+      included, regardless of that raw line's position relative to the
+      marker lines. Half-open because the closing marker is raised in the
+      build *after* the window (the S3 convention), so its frame number is
+      one past the window's last frame; an empty window is therefore
+      possible and meaningful (module docs).
+    - **Positional** (either marker carries no index — Flutter's markers,
+      always, or a pre-index Frust capture): every raw-frame line between
+      that start marker's line and its matching end marker's line, by log
+      order, exactly as this function always computed it.
+
+    An unterminated window (a `scenario` start with no matching end before
+    EOF) is always positional, extending to the end of `lines` — the same
+    trailing-inclusion behavior this function has always had.
+    """
+    if scenario is None:
+        frames: list[FrameRecord] = []
+        for line in lines:
+            if parse_marker_line(line) is not None:
+                continue
             rec = parse_raw_line(line)
             if rec is not None:
                 frames.append(rec)
+        return frames
+
+    # One pass: collect every raw frame (with its original line position, so
+    # a positional window can still be bracketed by position) and every
+    # window (start/end marker pair) matching `scenario`.
+    all_frames: list[FrameRecord] = []
+    frame_positions: list[int] = []
+    windows: list[tuple[int, int | None, int, int | None]] = []
+    open_start: tuple[int, int | None] | None = None
+
+    for pos, line in enumerate(lines):
+        marker = parse_marker_line(line)
+        if marker is not None:
+            edge, name, frame_n = marker
+            if name == scenario:
+                if edge == "start":
+                    open_start = (pos, frame_n)
+                elif open_start is not None:
+                    start_pos, start_n = open_start
+                    windows.append((start_pos, start_n, pos, frame_n))
+                    open_start = None
+            continue
+        rec = parse_raw_line(line)
+        if rec is not None:
+            frame_positions.append(pos)
+            all_frames.append(rec)
+
+    if open_start is not None:
+        # No matching end before EOF: positional, extending to the end of
+        # `lines` (there is no end marker to carry an index for this one).
+        windows.append((open_start[0], open_start[1], len(lines), None))
+
+    frames: list[FrameRecord] = []
+    for start_pos, start_n, end_pos, end_n in windows:
+        if start_n is not None and end_n is not None:
+            frames.extend(rec for rec in all_frames if start_n <= rec.n < end_n)
+        else:
+            frames.extend(
+                rec
+                for rec, line_pos in zip(all_frames, frame_positions)
+                if start_pos < line_pos < end_pos
+            )
     return frames
 
 
@@ -569,7 +695,7 @@ def slice_op_scenario(lines: list[str], scenario: str) -> list[OpRecord]:
     for line in lines:
         marker = parse_marker_line(line)
         if marker is not None:
-            edge, name = marker
+            edge, name, _frame = marker
             if name == scenario or name.startswith(scenario + "-"):
                 active = edge == "start"
             continue

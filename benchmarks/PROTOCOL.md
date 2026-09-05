@@ -340,16 +340,79 @@ python3 benchmarks/harness/stats.py --graphics --label "<app> <scenario>" \
     <out-dir>/run-{03,04,05}.pss_after.txt
 ```
 
-Scenario boundaries (`mark_scenario_start`/`mark_scenario_end`, same
-`FRUST_TRACE`+`FRUST_TRACE_RAW` gating) stamp:
+Scenario boundaries (`mark_scenario_start`/`mark_scenario_end`, gated on
+`FRUST_TRACE` alone) stamp:
 
 ```
-bench-scenario-start <name>
-bench-scenario-end <name>
+bench-scenario-start n=<u64> <name>
+bench-scenario-end n=<u64> <name>
 ```
 
 into the same log stream, letting the harness slice the per-frame series
 by scenario without any other coupling to the app.
+
+> **Marker-format change — frame-indexed, half-open, 2026-09-06.** A marker's
+> `n` is the number of the frame that **carried** it: markers are no longer
+> logged where they are raised. `mark_scenario_start`/`mark_scenario_end`
+> queue a marker; it travels with the scene the raising build hands across
+> the render channel (`crates/frust-shell-common/src/render_split.rs`); and
+> `FrameStats::record` — the single frame emitter, on the thread that
+> actually recorded the frame — logs it stamped with that frame's own `n`,
+> immediately ahead of the frame's `frust-perf raw` line. On the inline
+> (no render thread) executor the same `record` call drains the queue
+> directly. Nothing anywhere estimates a frame number across a thread
+> boundary.
+>
+> **The window is half-open: `[start_n, end_n)`.** `start n=k` is the
+> window's first frame — the build that raised it also applied the operation
+> being measured — and the S3 convention raises `end` in the *next* build,
+> so `end n=k+1` names the first frame after the window. `stats.py`'s
+> `slice_scenario` attributes every raw frame with `start_n <= n < end_n` to
+> the window when both edges carry an index, so an S3 per-op window is
+> exactly one frame: the op's own.
+>
+> **Why the frame has to stamp it** (action item
+> `act_000001a070c818837NtGqevW`): with the render-thread split the UI
+> thread that raises a marker cannot know whether the render thread has
+> recorded the previous frame yet, so neither a marker's log position nor a
+> frame number guessed on the UI side is a reliable proxy for which frames
+> it brackets. Position-based slicing was giving `s3-create1k` zero frames
+> and shifting every other S3 op by one; a UI-side "last recorded frame + 1"
+> estimate only moves the race, adding exactly one frame to every window.
+> Attributing by the recording frame's own counter removes it.
+>
+> Two consequences worth reading before interpreting a series. The channel's
+> scene slot is depth-1 latest-wins, so a build whose scene is superseded
+> before the render thread takes it never becomes a frame of its own and its
+> markers ride the frame that did draw its result — the right attribution. If
+> that swallows a whole window, both edges land on one frame, `[k, k)` is
+> empty, and the op honestly contributed no frame; a run showing many empty
+> windows means the render thread was falling behind, not that the harness
+> lost them. And a marker raised on a thread that hands no frame off attaches
+> to the next frame handed off after it — best effort, and the only
+> approximate case.
+>
+> **This is the only shape Frust emits now** — there is no config toggle
+> back to the older name-only `bench-scenario-start <name>` shape, and
+> markers no longer require `FRUST_TRACE_RAW` (that dial still gates the
+> per-frame raw line, so a marker without raw export has nothing to slice,
+> but the window is always emitted). A series already committed under
+> `benchmarks/raw` (every one, as of this change) predates the index and is
+> still name-only; `slice_scenario` falls back to its original log-position
+> bracketing for any marker with no index, so those series — and Flutter's
+> markers, which stay name-only (see below) — keep reproducing the exact
+> same numbers they always did (`summarize.py` over `benchmarks/raw/oneplus9`,
+> `pixel5` and `iphone_se` all still match `RESULTS.md`'s published tables to
+> the digit).
+>
+> **Consumers that still match the name-only literal.** `parse_marker_line`
+> handles both shapes, so everything routed through `stats.py` is covered,
+> but two places grep the marker text directly and will not match an indexed
+> line: `summarize.py`'s S3 cycle-health count
+> (`"bench-scenario-start s3-create1k" in l`) and `matrix.sh`'s per-scenario
+> presence check (`grep -q "bench-scenario-start $s"`). Both need to allow an
+> optional `n=<u64>` token before the name before the next indexed capture is
+> taken; neither affects a series already committed under `benchmarks/raw`.
 
 ### Flutter: required equivalent
 
@@ -376,7 +439,11 @@ frust-bench raw n=<u64> total_us=<u64> build_us=<u64> raster_us=<u64> skipped=0
 - `skipped` — always `0` today; reserved for parity with Frust's frame
   gate if the Flutter app ever gains an analogous skip path.
 
-and identical scenario markers:
+and the same name-only scenario markers Frust used before the 2026-09-06
+indexed shape above (Flutter's Dart emitter raises and logs a marker on the
+one thread that also logs the frame lines, so it carries no split-executor
+hazard and needs no frame index; its windows stay position-sliced and
+inclusive of the frames between the two marker lines):
 
 ```
 bench-scenario-start <name>
@@ -387,6 +454,9 @@ The harness (`06-harness`) treats `total_us`/`skipped`/the marker pair as
 the common contract across both formats; `rebuild_us`/`layout_us`/
 `paint_us` vs `build_us`/`raster_us` are reported as each framework's own
 native pass breakdown, not force-unified into a single column.
+`stats.py`'s `parse_marker_line`/`slice_scenario` recognize both the
+indexed and name-only marker shapes on either side of a comparison — see
+the indexed-format change note above.
 
 ### Per-op line format (`*-perf plugin op=...`) — the general contract
 
@@ -444,6 +514,20 @@ frust-perf plugin s8-errors write_errors=<n> read_unexpected_none=<n> read_value
 2. There is no inline `scenario=` key. The scenario id is supplied only by
    the bracketing `bench-scenario-start s8-write`/`s8-read` marker pair —
    a line read outside that bracket cannot self-identify its scenario.
+
+> **Consequence of the 2026-09-06 marker change — S8 only, action needed
+> before the next S8 capture.** A marker is no longer logged where it is
+> raised; it is logged by the frame that carried it, which for S8's
+> same-build bracket is *after* the op lines it used to enclose. Positional
+> bracketing therefore no longer attributes S8's grandfathered lines, and
+> `slice_op_scenario` will find none of them in a capture taken after that
+> change. `d1`/`d2` are unaffected — their canonical-shape lines carry
+> `scenario=` inline and self-identify regardless of bracket position — and
+> every S8 series already committed under `benchmarks/raw` is unaffected too
+> (its markers were logged inline, in the old name-only shape). The fix is
+> the retrofit this section already anticipates: give S8's two emitters the
+> inline `scenario=` key. That is an S8-emitter change, out of scope for the
+> marker rework itself.
 
 **Canonical going forward** is the `op`-token / inline-`scenario=` shape
 above — every new per-op-emitting scenario (starting with `d1`/`d2`, §9)
