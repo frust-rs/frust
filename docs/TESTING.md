@@ -124,6 +124,17 @@ commands (adapter pin required on a multi-adapter host):
 cargo clippy -p frust-render --features perf-trace --all-targets -- -D warnings
 ```
 
+`frust-shell-common`'s scenario-marker route — the per-thread marker queue, its carriage across the
+scene-handoff channel, `FrameStats::record`'s emission, the `frust-perf marker-overflow` line, and
+the tests proving split-executor interleaving — lives behind that crate's own non-default
+`perf-trace` feature; no root-workspace member enables it, so `cargo test --workspace`/`cargo
+clippy --workspace` above neither compile nor run it:
+
+```bash
+cargo test -p frust-shell-common --features perf-trace
+cargo clippy -p frust-shell-common --features perf-trace --all-targets -- -D warnings
+```
+
 Target compile gates and slow ignored scaffold/build tests remain listed in
 `docs/DEVELOPMENT.md`.
 
