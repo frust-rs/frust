@@ -651,8 +651,9 @@ Performance claims use `benchmarks/PROTOCOL.md`; a golden run is not a
 benchmark. Do not infer performance from screenshot completion time.
 `benchmarks/harness/ab_matrix.sh --tier engine` drives the render-arm gate (`engine` is a labelled
 synonym of the script's own `default` arm — there is only one renderer now) across a caller-chosen
-`--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md` and `benchmarks/RESULTS.md` for
-recorded numbers (its retired spike/classic sections are history).
+`--scenarios` subset of S1-S8 — see `docs/RENDER_DEVELOPMENT.md`; the recorded tier A/B numbers
+live in git history (`git show f64be636:benchmarks/RESULTS.md`), since `benchmarks/RESULTS.md` holds
+only the Frust-vs-Flutter matrix (driven by `benchmarks/harness/matrix.sh`).
 
 Scheduled robustness work should include:
 

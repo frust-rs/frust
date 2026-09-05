@@ -14,9 +14,10 @@ against the same device.
 
 | Column | Device | Chipset | Status |
 |---|---|---|---|
-| Mid-tier Android | OnePlus 9 (LE2115) | Snapdragon 888 / Adreno 660 | **at desk 2026-07-20** |
-| iOS | iPhone SE | Apple A-series (ProMotion N/A — 60Hz panel) | **at desk 2026-07-20** |
-| Headline Android | OnePlus 15 | Snapdragon 8-series / Adreno 840 | **pending availability** — added to the matrix (and `RESULTS.md`) whenever this device is next at desk |
+| Mid-tier Android | OnePlus 9 (LE2115) | Snapdragon 888 / Adreno 660 | at desk — in the 2026-09-05 engine pass |
+| Budget Android | Google Pixel 5 (redfin) | Snapdragon 765G / Adreno 620 | at desk — **no completed pass yet** (dropped off USB during its first 2026-09-05 block; first Frust-vs-Flutter pass still owed) |
+| iOS | iPhone SE (2nd gen) | Apple A13 (60 Hz panel, no ProMotion) | at desk — in the 2026-09-05 engine pass |
+| Headline Android | Xiaomi 12 (cupid) | Snapdragon 8 Gen 1 / Adreno 730 | **not at desk** — its 2026-07-21 vello-era pass stands until re-run |
 
 `RESULTS.md` records whatever devices actually ran a given matrix pass, not
 an aspirational list — a device column with no runs is left absent, not
@@ -109,6 +110,20 @@ documented in `RESULTS.md`'s release-vs-profile comparability-bound section as
 a deviation note for the associated run. All new results going forward use
 `--profile` and should not be directly compared against pre-2026-07-23
 baselines without reference to that bound.
+
+## 2.6 Renderer change (2026-09-02)
+
+**Frust results recorded before 2026-09-02 were rendered by `vello`; results
+from 2026-09-05 on are rendered by the frust-owned `frust-engine` strip
+pipeline on `wgpu`** (the `vello` renderer was deleted from `frust-render`;
+there is no tier switch, env var, or feature to select it). The bench app, the
+scenarios, the raw-line contract (§7, format v4) and the statistics script are
+unchanged across the switch, so a same-device, same-build-mode comparison of
+the two renderers is a straight `stats.py` diff of the two raw series. The
+cross-renderer comparison that bounds the switch is recorded once in
+`RESULTS.md`'s "Renderer transition" section; the vello-era raw series it was
+computed from were retired from `benchmarks/raw/` afterwards and live in git
+history (the section names the commit).
 
 ## 3. Environmental controls
 

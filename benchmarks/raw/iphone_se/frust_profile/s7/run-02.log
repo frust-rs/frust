@@ -1,0 +1,11 @@
+2026-09-05 06:52:51.814 Runner[15088:1095503] frust-perf vc-load
+[frust INFO] bench-scenario-start s7
+[frust INFO] bench-scenario-start s7-idle
+[frust INFO] frust-perf render-path engine-direct (frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, surface-reported format, surface-owned depth))
+[frust INFO] frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=50ms adapter_ready=72ms device_ready=72ms renderer_ready=72ms first_rebuild_done=72ms first_encode_done=72ms first_frame_presented=79ms
+[frust INFO] frust-perf raw n=1 total_us=11675 rebuild_us=40 layout_us=4446 paint_us=35 encode_us=4 acquire_us=1042 submit_us=6105 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=2 total_us=4347 rebuild_us=22 layout_us=3 paint_us=12 encode_us=10 acquire_us=1879 submit_us=2419 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=3 total_us=2081 rebuild_us=22 layout_us=2 paint_us=10 encode_us=4 acquire_us=797 submit_us=1244 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=4 total_us=4605 rebuild_us=114 layout_us=14 paint_us=42 encode_us=20 acquire_us=99 submit_us=4314 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=5 total_us=4641 rebuild_us=120 layout_us=17 paint_us=42 encode_us=15 acquire_us=77 submit_us=4367 skipped=0 gpu_q=1 gpu_total_us=845 gpu_prepass_us=100 gpu_main_us=745 gpu_composite_us=0 gpu_blit_us=0
+[frust INFO] frust-perf raw n=6 total_us=9194 rebuild_us=108 layout_us=13 paint_us=32 encode_us=20 acquire_us=5186 submit_us=3833 skipped=0 gpu_q=1 gpu_total_us=3925 gpu_prepass_us=0 gpu_main_us=3925 gpu_composite_us=0 gpu_blit_us=0

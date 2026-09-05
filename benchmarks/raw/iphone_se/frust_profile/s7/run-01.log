@@ -1,0 +1,7 @@
+2026-09-05 06:52:20.048 Runner[15084:1095185] frust-perf vc-load
+[frust INFO] bench-scenario-start s7
+[frust INFO] bench-scenario-start s7-idle
+[frust INFO] frust-perf render-path engine-direct (frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, surface-reported format, surface-owned depth))
+[frust INFO] frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=192ms adapter_ready=239ms device_ready=239ms renderer_ready=239ms first_rebuild_done=239ms first_encode_done=239ms first_frame_presented=250ms
+[frust INFO] frust-perf raw n=1 total_us=10678 rebuild_us=21 layout_us=4 paint_us=9 encode_us=1 acquire_us=1056 submit_us=9585 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=2 total_us=2658 rebuild_us=27 layout_us=4 paint_us=18 encode_us=12 acquire_us=1350 submit_us=1244 skipped=0 gpu_q=0
