@@ -84,14 +84,33 @@
 //! an empty screen under a non-zero `img`/`ph` is a fill that the renderer
 //! dropped, and a `0x202020` column under `img=0 ph>0` is only the decode ramp.
 //!
-//! The line goes through `frust_shell_common::perf::bench_emit`, so it obeys
-//! the same two-dial `FRUST_TRACE` + `FRUST_TRACE_RAW` switch as the per-frame
-//! frame series (`docs/DEVELOPMENT.md`'s Instrumentation table); the dials are
-//! read once into [`ImageStreamWidget::diag`] at build, and every counter,
-//! clock read and format below hangs off that one bool, so a build without them
-//! does exactly the work it did before. Its `frust-perf s5` prefix is
-//! deliberately not `frust-perf raw`, so `benchmarks/harness/stats.py` skips
-//! these lines while `run.sh`'s `frust-perf` capture whitelist still keeps them.
+//! Because this line is emitted *inside* the region the shells time as
+//! `paint_us` (e.g. `crates/frust-shell-android/src/app/frame.rs`'s frame
+//! callback), the `SystemTime::now()` read, the 14-field `format!`, and the
+//! synchronous logcat write it costs per frame would perturb every measured S5
+//! frame if it rode the harness's standard capture — `run.sh` always launches
+//! with both `FRUST_TRACE=1` and `FRUST_TRACE_RAW=1`, and the matrix builds
+//! with `--define FRUST_TRACE_RAW=1`, so gating this line on that existing
+//! two-dial switch (as an earlier revision did) meant it fired on *every*
+//! standard capture, not just an intentional diagnostic run. It is instead
+//! gated on its own dedicated compile-time define, `FRUST_S5_DIAG`
+//! ([`s5_diag_enabled`]) — parsed the same `option_env!`,
+//! not-the-literal-`"0"`-is-on way `frust_shell_common::perf`'s `FRUST_TRACE`/
+//! `FRUST_TRACE_RAW` are (see that crate's `trace_switch`), default off — so
+//! [`ImageStreamWidget::diag`] is `perf::enabled() && s5_diag_enabled()`
+//! (read once at build), not `perf::enabled() && perf::raw_enabled()`. A
+//! standard capture (`FRUST_TRACE=1`/`FRUST_TRACE_RAW=1`, no `FRUST_S5_DIAG`
+//! define) therefore now runs with `diag == false` and pays none of this
+//! section's per-frame cost; every counter, clock read and `bench_emit` below
+//! hangs off that one bool. Enable it with `frust build apk --profile
+//! --define FRUST_TRACE_RAW=1 --define FRUST_S5_DIAG=1` — a capture taken
+//! with it on is a diagnostic run, not a publication-grade measurement (the
+//! diagnostic's own per-frame cost is real time this scenario would not
+//! otherwise spend inside its paint span), and the 2026-09-05 S5 content
+//! diagnosis runs that motivated this section were taken with it on. Its
+//! `frust-perf s5` prefix is deliberately not `frust-perf raw`, so
+//! `benchmarks/harness/stats.py` skips these lines while `run.sh`'s
+//! `frust-perf` capture whitelist still keeps them.
 
 use std::collections::HashMap;
 
@@ -408,9 +427,9 @@ struct ImageStreamWidget {
     window: (usize, usize),
     script_ms: f64,
     last_frame: Option<FrameTime>,
-    /// Whether the two-dial perf trace is on, read once at build — the single
+    /// `perf::enabled() && s5_diag_enabled()`, read once at build — the single
     /// switch every diagnostic below hangs off (see the module doc's Content
-    /// diagnostics section).
+    /// diagnostics section and [`s5_diag_enabled`]).
     diag: bool,
     /// The `offset` [`window`](Self::window) was last computed from, in
     /// `layout`. Diagnostics only: paint compares it against the drawn
@@ -513,7 +532,7 @@ impl<State: 'static> View<State> for ImageStream {
             window: (0, 0),
             script_ms: 0.0,
             last_frame: None,
-            diag: frust_shell_common::perf::enabled() && frust_shell_common::perf::raw_enabled(),
+            diag: frust_shell_common::perf::enabled() && s5_diag_enabled(),
             window_offset: 0.0,
             layout_count: 0,
             paint_count: 0,
@@ -664,6 +683,37 @@ impl Widget for ImageStreamWidget {
 }
 
 // --- Content diagnostics (see the module doc's section of that name) ---
+
+/// The `FRUST_S5_DIAG` compile-time define — this diagnostic's own opt-in,
+/// separate from the `FRUST_TRACE`/`FRUST_TRACE_RAW` dials the harness's
+/// standard capture always sets (see the module doc's Content diagnostics
+/// section for why the two must stay decoupled). `option_env!` is exactly how
+/// `--define FRUST_S5_DIAG=1` reaches this crate: on Android it rides
+/// `-Pfrust.defines` as a base64-encoded `K=V` list, decoded and set as env
+/// vars for the `cargo-ndk` compile
+/// (`benchmarks/frust_bench/android/app/build.gradle.kts`,
+/// `crates/frust-drive/src/android_build/tasks.rs`); on desktop it is an env
+/// var present when this crate itself is built
+/// (`crates/frust-drive/src/desktop_run.rs`). Either way the value is only
+/// ever visible to `option_env!` at compile time, never `std::env::var` at
+/// runtime — the same constraint `frust_shell_common::perf`'s `FRUST_TRACE`/
+/// `FRUST_TRACE_RAW` compile-time arm reads under, and why this mirrors that
+/// exact `option_env!` read rather than adding a runtime fallback the define
+/// plumbing above never gives it. [`s5_diag_switch`] is the pure, directly
+/// testable parser this wraps.
+fn s5_diag_enabled() -> bool {
+    s5_diag_switch(option_env!("FRUST_S5_DIAG"))
+}
+
+/// The pure decision [`s5_diag_enabled`] wraps: present and not the literal
+/// string `"0"` counts as on (so `"1"`, `"true"`, or any other non-`"0"`
+/// value enables it) — the identical truthy rule
+/// `frust_shell_common::perf::trace_switch` applies to `FRUST_TRACE`/
+/// `FRUST_TRACE_RAW`. Absent (`None`, the default — no `--define
+/// FRUST_S5_DIAG=...` at all) is off.
+fn s5_diag_switch(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if v != "0")
+}
 
 /// One frame's S5 content sample: what the paint loop above actually issued,
 /// plus the windowing state it issued it from. Diagnostics only — filled and
@@ -879,6 +929,42 @@ mod tests {
             "cell=1064x256",
         ] {
             assert!(line.contains(field), "missing {field} in: {line}");
+        }
+    }
+
+    /// [`s5_diag_switch`] must accept every truthy value the crate's other
+    /// `--define` switches accept (`frust_shell_common::perf::trace_switch`'s
+    /// non-`"0"`-is-on rule): the literal `"1"` an operator actually passes,
+    /// `"true"`, and any other non-`"0"` string.
+    #[test]
+    fn s5_diag_switch_accepts_the_crates_truthy_values() {
+        assert!(s5_diag_switch(Some("1")));
+        assert!(s5_diag_switch(Some("true")));
+        assert!(s5_diag_switch(Some("anything-else-non-zero")));
+    }
+
+    /// [`s5_diag_switch`] must reject the define being entirely absent (the
+    /// default — no `--define FRUST_S5_DIAG=...` at all) and the literal
+    /// string `"0"`.
+    #[test]
+    fn s5_diag_switch_rejects_unset_and_literal_zero() {
+        assert!(!s5_diag_switch(None));
+        assert!(!s5_diag_switch(Some("0")));
+    }
+
+    /// This test build carries no `--define FRUST_S5_DIAG=...`, so
+    /// [`s5_diag_enabled`]'s compile-time `option_env!` read is unset here —
+    /// proving `diag = perf::enabled() && s5_diag_enabled()` stays `false` on
+    /// a standard harness capture (`FRUST_TRACE=1`/`FRUST_TRACE_RAW=1`, no
+    /// `FRUST_S5_DIAG`) no matter what `perf::enabled()`/`perf::raw_enabled()`
+    /// are. On a device build this shows up as the `frust-perf s5` line
+    /// simply never appearing in a standard capture's log — only an explicit
+    /// `--define FRUST_S5_DIAG=1` build ever emits it.
+    #[test]
+    fn diag_stays_off_without_the_define_even_with_trace_and_raw_on() {
+        assert!(!s5_diag_enabled());
+        for trace_and_raw_on in [false, true] {
+            assert!(!(trace_and_raw_on && s5_diag_enabled()));
         }
     }
 }
