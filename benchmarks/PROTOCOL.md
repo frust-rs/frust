@@ -351,6 +351,30 @@ bench-scenario-end n=<u64> <name>
 into the same log stream, letting the harness slice the per-frame series
 by scenario without any other coupling to the app.
 
+Every leg the marker route travels through — the raising thread's own queue,
+the frame's channel slot, and the render thread's staged list — is bounded at
+`MARKER_QUEUE_CAP = 256` entries (`crates/frust-shell-common/src/perf.rs`),
+drop-oldest: a leg that fills means markers are arriving faster than frames
+are recorded, so the response is a bounded queue rather than unbounded
+growth. The drop count travels with the batch, and the frame that finally
+carries a batch with a nonzero count gets one extra line, its own shape,
+distinct from both the `bench-scenario-*` pair above and the `frust-perf
+raw`/`frust-perf plugin` families:
+
+```
+frust-perf marker-overflow n=<u64> dropped=<u64>
+```
+
+`n` is that frame's own counter (the same one its `bench-scenario-*`/
+`frust-perf raw` lines carry) and `dropped` is how many markers were
+discarded to keep one leg inside `MARKER_QUEUE_CAP` before this batch reached
+it (`format_marker_overflow_line`). Deliberately neither a `bench-scenario-*`
+line (whose `<prefix> n=<u64> <name>` shape is `stats.py`'s parsed wire
+format — an appended field would rename the window rather than annotate it)
+nor a `frust-perf raw`/`frust-perf plugin` one, so a harness scanning the
+stream reads it as an unrelated line instead of a malformed record of a
+shape it parses.
+
 > **Marker-format change — frame-indexed, half-open, 2026-09-06.** A marker's
 > `n` is the number of the frame that **carried** it: markers are no longer
 > logged where they are raised. `mark_scenario_start`/`mark_scenario_end`
@@ -388,9 +412,16 @@ by scenario without any other coupling to the app.
 > that swallows a whole window, both edges land on one frame, `[k, k)` is
 > empty, and the op honestly contributed no frame; a run showing many empty
 > windows means the render thread was falling behind, not that the harness
-> lost them. And a marker raised on a thread that hands no frame off attaches
-> to the next frame handed off after it — best effort, and the only
-> approximate case.
+> lost them. And a marker raised on a thread that neither hands a frame off
+> (the split's UI thread, via `send_scene`) nor records one itself (the
+> inline executor) is **never emitted** — it is queued on that thread alone
+> and dies with it; there is no cross-thread guess that attaches it to some
+> other thread's frame (`crates/frust-shell-common/src/render_split.rs`'s
+> module doc and `mark_scenario_start`'s own doc comment both state the
+> rule, and why the alternative would be exactly the guess this route exists
+> to remove). A scenario measuring off-thread work must bracket it from the
+> build that shows the result, not from inside the worker — see the
+> S8/`d*` notes below for the four sub-markers this currently silences.
 >
 > **This is the only shape Frust emits now** — there is no config toggle
 > back to the older name-only `bench-scenario-start <name>` shape, and
@@ -685,6 +716,15 @@ whole matrix):
   tally, emitting one `s8-errors` marker line when any is nonzero so a run
   with a silent boundary failure is flagged rather than reported as a clean
   latency number.
+- **The `s8-write`/`s8-read` phase sub-markers run on a blocking-pool
+  thread and are not emitted, as of the 2026-09-06 marker-route change**
+  (`run_prefs_bench` calls `mark_scenario_start`/`mark_scenario_end` from
+  inside `spawn_blocking`, so §7's "never emitted" rule applies): a capture
+  taken since then carries no `bench-scenario-start s8-write`/`s8-read`
+  pair. Nothing downstream needs them — each `frust-perf plugin` op line
+  already self-identifies via its inline `scenario=s8-write|s8-read` key
+  (see the per-op format above), so no published S8 number depends on the
+  missing bracket.
 
 ## 9. DB scenarios (`d*`)
 
@@ -702,6 +742,16 @@ one binary still drives the whole matrix including both namespaces. No id
 collision is possible between the two spaces (`stats.py --scenario`
 already takes the id as an opaque string), and this doc edit does not
 change the frame-class `s1..s8` table (§8) in any way.
+
+**`d1`/`d2`'s phase sub-markers run on a blocking-pool thread and are not
+emitted, as of the 2026-09-06 marker-route change** (`run_d1_bench`/
+`run_d2_bench` call `mark_scenario_start`/`mark_scenario_end` from inside
+`spawn_blocking`, like S8's `run_prefs_bench` — §7's "never emitted" rule
+applies): a capture taken since then carries no `bench-scenario-start
+d1-insert-batch`/`d1-insert-single`/`d2-select-point`/`d2-range-scan` pair.
+As with S8, nothing downstream needs them — every d1/d2 op line already
+self-identifies via its inline `scenario=d1|d2`/`op=` keys (§9.3/§9.4), so
+no published d-class number depends on the missing bracket.
 
 ### 9.2 Row shape and seed dataset (declared convention)
 
