@@ -405,7 +405,18 @@ def parse_marker_line(line: str) -> tuple[str, str, int | None] | None:
     `None` if `line` isn't a marker line, carries no name, or carries a
     malformed `n=` token. Like [`parse_raw_line`], the prefix is located
     anywhere in the line, not just at its start (see that function's
-    docs)."""
+    docs).
+
+    The `n=` token must be one or more ASCII decimal digits (`0`-`9`) and
+    nothing else — no sign, no `_` grouping separator, no non-ASCII digit
+    script. Python's bare `int()` accepts all of those (`int("-1")`,
+    `int("+1")`, `int("1_0")`, and `int("١٢")` — Arabic-Indic digits — all
+    succeed), which would let a foreign or malformed `n=` token parse as a
+    plausible-looking frame index and silently misattribute a frame to the
+    wrong scenario window (`slice_scenario` trusts this value once parsed).
+    Any of those shapes is treated the same as a missing index: the whole
+    line is rejected as unparseable rather than risk a wrong-but-plausible
+    frame number."""
     stripped = line.strip()
     start_idx = stripped.find(MARKER_START_PREFIX)
     end_idx = stripped.find(MARKER_END_PREFIX)
@@ -421,10 +432,10 @@ def parse_marker_line(line: str) -> tuple[str, str, int | None] | None:
     frame: int | None = None
     if rest.startswith("n="):
         index_tok, _, name = rest.partition(" ")
-        try:
-            frame = int(index_tok[len("n=") :])
-        except ValueError:
+        digits = index_tok[len("n=") :]
+        if not digits or not digits.isascii() or not digits.isdigit():
             return None
+        frame = int(digits)
         name = name.strip()
     else:
         name = rest
@@ -682,14 +693,20 @@ def parse_op_line(line: str) -> OpRecord | None:
 def slice_op_scenario(lines: list[str], scenario: str) -> list[OpRecord]:
     """Extracts the [`OpRecord`]s belonging to `scenario` from one run's
     lines. A canonical-shape record (inline `scenario=` field) self-
-    identifies regardless of bracket position. A grandfathered S8-shape
-    record (no inline `scenario=` field) is instead attributed by the
-    bracketing `bench-scenario-start/end` marker — active for a marker name
-    equal to `scenario`, or beginning with `scenario + "-"` (a phase-marker
-    convention shared by S8's `s8-write`/`s8-read` and d1/d2's
-    `d1-insert-batch`/`d2-select-point`/etc. — though the canonical-shape
-    records never actually need this branch, since their own inline
-    `scenario=` field already identifies them)."""
+    identifies regardless of bracket position, matched by the same
+    parent-id rule the bracketing marker already uses: attributed to
+    `scenario` when its own `scenario` field equals `scenario` outright, or
+    begins with `scenario + "-"` (the S8 `s8-write`/`s8-read` and d1/d2
+    `d1-insert-batch`/`d2-select-point`/etc. phase-marker convention, §7) —
+    so a post-retrofit S8 op line carrying `scenario=s8-write` inline is
+    still found by a parent-id query for `s8`, exactly as a pre-retrofit,
+    bracket-only capture always was, and a query for the exact sub-id
+    (`s8-write`) still excludes the sibling phase's lines. A grandfathered
+    S8-shape record (no inline `scenario=` field) is instead attributed by
+    the bracketing `bench-scenario-start/end` marker — active for a marker
+    name equal to `scenario`, or beginning with `scenario + "-"` (though the
+    canonical-shape records never actually need this branch, since their
+    own inline `scenario=` field already identifies them)."""
     ops: list[OpRecord] = []
     active = False
     for line in lines:
@@ -703,7 +720,7 @@ def slice_op_scenario(lines: list[str], scenario: str) -> list[OpRecord]:
         if rec is None:
             continue
         if rec.scenario is not None:
-            if rec.scenario == scenario:
+            if rec.scenario == scenario or rec.scenario.startswith(scenario + "-"):
                 ops.append(rec)
         elif active:
             ops.append(rec)

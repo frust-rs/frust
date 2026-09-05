@@ -363,6 +363,28 @@ class ParseMarkerLineTests(unittest.TestCase):
     def test_indexed_marker_with_malformed_index_returns_none(self):
         self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=nope s1"))
 
+    def test_negative_index_returns_none(self):
+        # Bare `int()` happily parses a leading `-`; a frame index can never
+        # be negative, so this must be rejected rather than silently
+        # attributing frames via a negative `n`.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=-1 s1"))
+
+    def test_signed_positive_index_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=+1 s1"))
+
+    def test_underscore_grouped_index_returns_none(self):
+        # `int("1_0")` == 10 in Python (numeric-literal grouping); a foreign
+        # `n=1_0` token must not silently parse as frame 10.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=1_0 s1"))
+
+    def test_non_ascii_digit_index_returns_none(self):
+        # Arabic-Indic digits (`١٢` == "12") satisfy Python's `str.isdigit()`
+        # and `int()`, but are not ASCII decimal digits.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=١٢ s1"))
+
+    def test_empty_index_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n= s1"))
+
 
 class SliceScenarioTests(unittest.TestCase):
     def test_slices_only_bracketed_frames(self):
@@ -885,6 +907,47 @@ class SliceOpScenarioTests(unittest.TestCase):
         ops = stats.slice_op_scenario(lines, "s8-write")
         self.assertEqual([o.op for o in ops], ["write", "write"])
         self.assertIsNone(ops[0].scenario)
+
+    def test_retrofitted_s8_inline_scenario_honours_parent_id_query(self):
+        # act_000001a0738ef5026feTx6k9: post-retrofit, both S8 op families
+        # carry an inline `scenario=s8-write`/`scenario=s8-read` field (no
+        # bracket needed to attribute them). A parent-id query (`--scenario
+        # s8`) must still find every op across both phases, exactly like a
+        # pre-retrofit, bracket-attributed capture always did — not the
+        # empty table an exact-equality-only inline match would give.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-write op=write type=i64 n=1 us=580 err=0",
+            "frust-perf plugin scenario=s8-read op=read type=bool n=0 us=400 err=0",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8")
+        self.assertEqual([o.op for o in ops], ["write", "write", "read"])
+
+    def test_retrofitted_s8_inline_scenario_sub_id_query_still_exact(self):
+        # The same lines, queried by the exact sub-id: only that phase's
+        # ops come back, not the sibling phase's.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-read op=read type=bool n=0 us=400 err=0",
+        ]
+        write_ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in write_ops], ["write"])
+        read_ops = stats.slice_op_scenario(lines, "s8-read")
+        self.assertEqual([o.op for o in read_ops], ["read"])
+
+    def test_d2_canonical_query_unchanged_by_parent_id_matching(self):
+        # d2's canonical-shape lines carry their own exact scenario id
+        # inline (no parent/sub-id split the way S8's phases have) — the
+        # parent-id prefix rule must not change this scenario's existing
+        # behavior.
+        lines = [
+            "bench-scenario-start d2",
+            "frust-perf op scenario=d2 op=select_point n=0 us=50 err=0",
+            "frust-perf op scenario=d2 op=range_scan n=0 us=900 err=0 rows=37",
+            "bench-scenario-end d2",
+        ]
+        ops = stats.slice_op_scenario(lines, "d2")
+        self.assertEqual([o.op for o in ops], ["select_point", "range_scan"])
 
 
 class ComputeOpStatsTests(unittest.TestCase):
