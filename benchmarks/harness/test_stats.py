@@ -853,6 +853,39 @@ class SliceOpScenarioTests(unittest.TestCase):
         ops = stats.slice_op_scenario(lines, "s8-write")
         self.assertEqual([o.n for o in ops], [1])
 
+    def test_post_rework_s8_order_self_identifies_via_inline_scenario(self):
+        # 2026-09-06 marker shape (PROTOCOL §7): a marker is logged by the
+        # frame that carried it, which for S8's same-build bracket is AFTER
+        # the op lines it used to enclose — op lines first, both indexed
+        # marker lines after. The S8 emitter retrofit gives each op line its
+        # own inline `scenario=` field, so it self-identifies with no
+        # bracket needed, exactly like d1/d2's canonical-shape lines.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-write op=write type=i64 n=1 us=580 err=0",
+            "frust-perf plugin op=write type=total n=2 us=1192 errors=0",
+            "bench-scenario-start n=87 s8-write",
+            "bench-scenario-end n=88 s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in ops], ["write", "write"])
+        self.assertEqual([o.scenario for o in ops], ["s8-write", "s8-write"])
+
+    def test_old_s8_order_without_inline_scenario_still_parses_via_bracket(self):
+        # Pre-rework shape — every S8 series already committed under
+        # benchmarks/raw: name-only markers logged inline, ahead of the op
+        # lines they bracket, no inline `scenario=` field. Must keep
+        # reproducing the exact same numbers it always did.
+        lines = [
+            "bench-scenario-start s8-write",
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin op=write type=i64 n=1 us=580 err=0",
+            "bench-scenario-end s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in ops], ["write", "write"])
+        self.assertIsNone(ops[0].scenario)
+
 
 class ComputeOpStatsTests(unittest.TestCase):
     def test_odd_count_percentiles_match_hand_computed_values(self):

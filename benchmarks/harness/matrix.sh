@@ -214,7 +214,7 @@ block_sanity() { # $1 scenario, $2 dir -> prints "min-max" line counts over kept
     lines="$(count_lines "$pat" "$log")"
     [ -z "$min" ] || [ "$lines" -lt "$min" ] && min=$lines
     [ -z "$max" ] || [ "$lines" -gt "$max" ] && max=$lines
-    grep -q "bench-scenario-start $s" "$log" || bad=1
+    grep -Eq "bench-scenario-start( n=[0-9]+)? $s" "$log" || bad=1
     case "$s" in
       s7) grep -q -E '(frust|flutter)-perf startup' "$log" || bad=1 ;;
       s8) [ "$lines" -ge "$MIN_PLUGIN_LINES" ] || bad=1 ;;
