@@ -15,7 +15,7 @@ against the same device.
 | Column | Device | Chipset | Status |
 |---|---|---|---|
 | Mid-tier Android | OnePlus 9 (LE2115) | Snapdragon 888 / Adreno 660 | at desk — in the 2026-09-05 engine pass |
-| Budget Android | Google Pixel 5 (redfin) | Snapdragon 765G / Adreno 620 | at desk — **no completed pass yet** (dropped off USB during its first 2026-09-05 block; first Frust-vs-Flutter pass still owed) |
+| Budget Android | Google Pixel 5 (redfin) | Snapdragon 765G / Adreno 620 | at desk — in the 2026-09-05 engine pass (first Frust-vs-Flutter pass on it; run over adb-over-Wi-Fi, radios uncontrolled) |
 | iOS | iPhone SE (2nd gen) | Apple A13 (60 Hz panel, no ProMotion) | at desk — in the 2026-09-05 engine pass |
 | Headline Android | Xiaomi 12 (cupid) | Snapdragon 8 Gen 1 / Adreno 730 | **not at desk** — its 2026-07-21 vello-era pass stands until re-run |
 
