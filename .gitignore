@@ -6,6 +6,10 @@
 
 # workflow/ is a separate private repo (nested checkout) — never track it here
 /workflow/
+
+# apps/ holds sibling repositories cloned beside the framework — today apps/website, the
+# frust-rs/website Docusaurus site for frust.dev — each its own git checkout with its own
+# toolchain (Node/Docker), never a submodule and never tracked here.
 /apps/
 
 # Belt-and-braces: a consuming app redirects the embedding module's build
