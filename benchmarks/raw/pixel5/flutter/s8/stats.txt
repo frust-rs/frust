@@ -1,0 +1,5 @@
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== flutter s8 ==
+frames: 35 total, 35 active, 0 skipped
+p50=10.24ms  p95=12.27ms  p99=13.64ms  worst=13.64ms
+missed_60hz=0 (budget 16.67ms)  missed_120hz=28 (budget 8.33ms)

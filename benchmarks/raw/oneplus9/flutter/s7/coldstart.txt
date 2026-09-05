@@ -1,0 +1,32 @@
+== launch 1 2026-09-05T00:31:00Z
+Starting: Intent { act=android.intent.action.VIEW dat=flutterbench://s7/... pkg=it.f0x.flutter_bench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.flutter_bench/.MainActivity
+TotalTime: 425
+WaitTime: 428
+Complete
+== launch 2 2026-09-05T00:31:09Z
+Starting: Intent { act=android.intent.action.VIEW dat=flutterbench://s7/... pkg=it.f0x.flutter_bench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.flutter_bench/.MainActivity
+TotalTime: 414
+WaitTime: 415
+Complete
+== launch 3 2026-09-05T00:31:17Z
+Starting: Intent { act=android.intent.action.VIEW dat=flutterbench://s7/... pkg=it.f0x.flutter_bench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.flutter_bench/.MainActivity
+TotalTime: 425
+WaitTime: 428
+Complete
+== launch 4 2026-09-05T00:31:26Z
+Starting: Intent { act=android.intent.action.VIEW dat=flutterbench://s7/... pkg=it.f0x.flutter_bench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.flutter_bench/.MainActivity
+TotalTime: 405
+WaitTime: 407
+Complete

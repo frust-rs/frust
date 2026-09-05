@@ -6,6 +6,12 @@
 #                     never persists.
 #   *.pss_*.txt     — `dumpsys meminfo <our bench pkg>` snapshots (S7 memory
 #                     axis); scoped to our own app's process only.
+#   coldstart.txt   — S7 only: `am start -W` output for our own bench package
+#                     (intent, LaunchState, TotalTime/WaitTime), written by
+#                     matrix.sh's post-matrix external cold-start loop.
+#   cpuinfo.txt     — S7 only: `dumpsys cpuinfo` lines grep-filtered to our
+#                     own bench package + the TOTAL line, sampled every 30s
+#                     during the S7 blocks by matrix.sh.
 #   stats.txt       — the run.sh stdout tail from its `-- stats.py` banner
 #                     onward (the stats.py p50=/p95=/frames:/missed_* table
 #                     for that scenario's kept runs); whitelist-checked

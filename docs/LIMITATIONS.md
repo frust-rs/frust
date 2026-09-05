@@ -3401,8 +3401,9 @@ alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
 ### `render-hybrid-spike-outcome` — Phase 0 `vello_hybrid` spike: GO on the numbers, snapshot cache not provably deletable yet
 
-**Observed**: `benchmarks/RESULTS.md`'s "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal
-(engine plan Phase 0)" section measured the experimental `vello_hybrid` render tier
+**Observed**: the retired "vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal
+(engine plan Phase 0)" section of `benchmarks/RESULTS.md` (now in git history (`git show f64be636:benchmarks/RESULTS.md`) — RESULTS.md carries only
+the Frust-vs-Flutter matrix since 2026-09-05) measured the experimental `vello_hybrid` render tier
 (`RenderTier::Hybrid`, override-only, `hybrid-tier` feature) against that file's "Pixel 5 — classic
 baseline for the engine plan" section, same Adreno 620 hardware:
 
@@ -3429,7 +3430,7 @@ baseline for the engine plan" section, same Adreno 620 hardware:
    were not measured on this pass — the desktop shell now has a window-size knob
    (`FRUST_WINDOW_SIZE`/`FRUST_WINDOW_MAXIMIZED`, `app_handler.rs`) that makes a 5120×2880 arm
    reachable, but that arm has not been re-run with it; still **not measured**.
-7. **Browser WebGL2**: written NO-GO (RESULTS.md Arm 7, `benchmarks/harness/webgl2_arm.md`) — no
+7. **Browser WebGL2**: written NO-GO (the retired RESULTS.md Arm 7 — git history — and `benchmarks/harness/webgl2_arm.md`) — no
    wasm shell or target exists in this workspace; OPEN #1 decided **(b)**: the target-gated
    `wasm32` `gles`/`webgpu` section belongs to the Web Shell plan, not this one.
 
@@ -3474,9 +3475,10 @@ Historical: the spike tier this entry measured (`RenderTier::Hybrid`, `hybrid_ti
 the `vello_hybrid` pin) has since been deleted — the engine tier is its successor; the
 entry stays as the record of the GO decision and its measured numbers.
 
-**Evidence**: `benchmarks/RESULTS.md`'s "Pixel 5 — classic baseline for the engine plan" and
-"vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections (Arms
-1-7, "Fit comparison against the classic S1 model", "What could not be measured");
+**Evidence**: the retired "Pixel 5 — classic baseline for the engine plan" and
+"vello_hybrid spike — Pixel 5, iOS Simulator, macOS Metal (engine plan Phase 0)" sections of
+`benchmarks/RESULTS.md` (Arms 1-7, "Fit comparison against the classic S1 model", "What could not
+be measured") — in git history (`git show f64be636:benchmarks/RESULTS.md`);
 `benchmarks/harness/webgl2_arm.md`; `crates/frust-render/src/hybrid_tier.rs` and `tier.rs`;
 `crates/frust-render/src/context.rs`'s `HybridDirect` arm and its `hybrid_translucency_refused`
 straight-alpha refusal.
@@ -4491,8 +4493,8 @@ Worker-backed pool.
 
 ### `engine-dx12-cold-start` — the engine's pipeline warm-up pays its whole cost inside the first-ever DX12 launch; every later launch is cheap (MEASURED)
 
-**Observed** (evidence: `benchmarks/RESULTS.md`'s "Windows DX12" section,
-p7-08, Dell mini PC/Intel UHD 730/i5, `material3-demo` release build, 5 cold
+**Observed** (evidence: the retired "Windows DX12" section of `benchmarks/RESULTS.md`, in
+git history (`git show f64be636:benchmarks/RESULTS.md`); p7-08, Dell mini PC/Intel UHD 730/i5, `material3-demo` release build, 5 cold
 launches per arm via schtasks): wgpu's persisted `PipelineCache` is
 Vulkan-only, but the DX12 driver-level shader cache persists across
 processes, so run 1 after a fresh build is the true first-ever-launch cost
@@ -4514,9 +4516,9 @@ the first is markedly cheaper on the engine.
 
 ### `engine-webgl2-unhosted` — no browser/WebGL2 measurement exists, and none is planned inside the engine plan
 
-**Observed** (evidence: `benchmarks/harness/webgl2_arm.md`,
-`benchmarks/RESULTS.md`'s "Arm 7 — Browser WebGL2: NO-GO"; no `p7-07` commit
-ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — this
+**Observed** (evidence: `benchmarks/harness/webgl2_arm.md` and the retired
+"Arm 7 — Browser WebGL2: NO-GO" section of `benchmarks/RESULTS.md`, in git history (`git show f64be636:benchmarks/RESULTS.md`);
+no `p7-07` commit ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — this
 plan adds no wgpu `gles`/`webgpu` feature and hosts no wasm shell; the
 target-gated `wasm32` browser section belongs to the Web Shell plan instead
 (`engine-wasm-single-thread` above is the one engine-side fact already on
@@ -4618,8 +4620,8 @@ run (Pixel 5, iPhone) reads it back through `with_context`.
 
 ### `engine-ios-sim-seam-suites-unrun` — the engine's seam test suites have not been executed on the iOS Simulator
 
-**Observed** (evidence: `benchmarks/raw/mac/README.md`'s iOS Simulator table, gate
-`engine-p9-ios-sim-seam`): the `frust-engine` `scene_texture`/`shader_quad`/`shared_encoder`
+**Observed** (evidence: the retired `benchmarks/raw/mac/README.md`'s iOS Simulator table — in git
+history, `git show f64be636:benchmarks/raw/mac/README.md` — gate `engine-p9-ios-sim-seam`): the `frust-engine` `scene_texture`/`shader_quad`/`shared_encoder`
 suites have not yet been run on the iOS Simulator. Before `p9-f2`, their fixtures were refused at
 `request_device` (`LimitsExceeded { max_inter_stage_shader_variables: requested 16, allowed 15 }`)
 against the Simulator's Apple2 adapter, which reports only 15. The fixture fix is in —
@@ -4635,7 +4637,8 @@ way — and the app-path run already exercises the same commands end to end; onl
 own Simulator execution is outstanding.
 
 **Trigger for removal**: the three suites run to completion on the Simulator (Mac rig) and the
-result is recorded in `benchmarks/RESULTS.md` or the raw README.
+result is recorded as a gate on the phase (`benchmarks/RESULTS.md` holds only the Frust-vs-Flutter
+matrix now).
 
 ### `facade-external-pass-desktop-only` — an `ExternalPass` has only ever run against a headless target, on desktop
 
