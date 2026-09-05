@@ -67,6 +67,31 @@
 //! paint/layout-time signal-publish idiom S2 and `BubbleChartWidget`'s FPS
 //! readout use, since layout/paint carry no `EventCtx`/application state to
 //! drive a callback with.
+//!
+//! # Content diagnostics
+//!
+//! Device screencaps of this scenario have shown stretches of bare
+//! [`BACKGROUND`] with no cells at all, which the paint loop below cannot
+//! produce on its own: every materialized, unculled cell paints either its
+//! decoded [`Image`] or a solid [`PLACEHOLDER_COLOR`] fill. To tell the three
+//! candidate causes apart — too small a materialized window, a window that has
+//! gone stale against the drawn offset (so every cell culls), or fills that
+//! are issued but never reach the screen — [`paint`](ImageStreamWidget::paint)
+//! emits one [`format_s5_diag_line`] `frust-perf s5 …` line per frame carrying
+//! the window, the offset it was computed at, and the painted image/placeholder
+//! counts. Correlating a line against a screencap taken at its `t=` wall clock
+//! answers the question: an empty screen under `vis=0` is a windowing fault,
+//! an empty screen under a non-zero `img`/`ph` is a fill that the renderer
+//! dropped, and a `0x202020` column under `img=0 ph>0` is only the decode ramp.
+//!
+//! The line goes through `frust_shell_common::perf::bench_emit`, so it obeys
+//! the same two-dial `FRUST_TRACE` + `FRUST_TRACE_RAW` switch as the per-frame
+//! frame series (`docs/DEVELOPMENT.md`'s Instrumentation table); the dials are
+//! read once into [`ImageStreamWidget::diag`] at build, and every counter,
+//! clock read and format below hangs off that one bool, so a build without them
+//! does exactly the work it did before. Its `frust-perf s5` prefix is
+//! deliberately not `frust-perf raw`, so `benchmarks/harness/stats.py` skips
+//! these lines while `run.sh`'s `frust-perf` capture whitelist still keeps them.
 
 use std::collections::HashMap;
 
@@ -383,6 +408,20 @@ struct ImageStreamWidget {
     window: (usize, usize),
     script_ms: f64,
     last_frame: Option<FrameTime>,
+    /// Whether the two-dial perf trace is on, read once at build — the single
+    /// switch every diagnostic below hangs off (see the module doc's Content
+    /// diagnostics section).
+    diag: bool,
+    /// The `offset` [`window`](Self::window) was last computed from, in
+    /// `layout`. Diagnostics only: paint compares it against the drawn
+    /// `offset` to expose a window that has gone stale (every cell culls, the
+    /// column empties) rather than one that is merely small.
+    window_offset: f64,
+    /// Cumulative `layout` calls. Diagnostics only: a paint counter rising
+    /// while this one stalls is the layout-skip signature.
+    layout_count: u64,
+    /// Cumulative `paint` calls — the diagnostic line's frame number.
+    paint_count: u64,
 }
 
 /// Build `view` as a boxed [`Widget`] — see `s2_list`'s `build_leaf` doc for
@@ -410,21 +449,28 @@ fn s5_scripted_offset(t_ms: f64, max_offset: f64) -> f64 {
     }
 }
 
+/// The `[start, end)` item range to materialize for scroll `offset` in a
+/// viewport `viewport_height` tall — [`BUFFER_ITEMS`] extra items on each
+/// side, clamped to the stream. A free function so the window a given device's
+/// viewport produces is assertable without a live widget.
+fn desired_window_at(offset: f64, viewport_height: f64) -> (usize, usize) {
+    if viewport_height <= 0.0 {
+        return (0, 0);
+    }
+    let first = (offset / ITEM_EXTENT).floor() as isize - BUFFER_ITEMS;
+    let last = ((offset + viewport_height) / ITEM_EXTENT).ceil() as isize + BUFFER_ITEMS;
+    let start = first.max(0) as usize;
+    let end = (last.max(0) as usize).min(TOTAL_ITEMS);
+    (start.min(end), end)
+}
+
 impl ImageStreamWidget {
     fn max_offset(&self) -> f64 {
         (TOTAL_ITEMS as f64 * ITEM_EXTENT - self.viewport.height).max(0.0)
     }
 
     fn desired_window(&self) -> (usize, usize) {
-        if self.viewport.height <= 0.0 {
-            return (0, 0);
-        }
-        let first = (self.offset / ITEM_EXTENT).floor() as isize - BUFFER_ITEMS;
-        let last =
-            ((self.offset + self.viewport.height) / ITEM_EXTENT).ceil() as isize + BUFFER_ITEMS;
-        let start = first.max(0) as usize;
-        let end = (last.max(0) as usize).min(TOTAL_ITEMS);
-        (start.min(end), end)
+        desired_window_at(self.offset, self.viewport.height)
     }
 
     fn advance_script(&mut self, now: FrameTime) {
@@ -467,6 +513,10 @@ impl<State: 'static> View<State> for ImageStream {
             window: (0, 0),
             script_ms: 0.0,
             last_frame: None,
+            diag: frust_shell_common::perf::enabled() && frust_shell_common::perf::raw_enabled(),
+            window_offset: 0.0,
+            layout_count: 0,
+            paint_count: 0,
         }
     }
 
@@ -515,6 +565,10 @@ impl Widget for ImageStreamWidget {
 
         let (start, end) = self.desired_window();
         self.window = (start, end);
+        if self.diag {
+            self.window_offset = self.offset;
+            self.layout_count += 1;
+        }
 
         // Layout-parity contract (see the constants above): the image box is
         // full viewport width minus the padding, not the image's natural size.
@@ -558,6 +612,11 @@ impl Widget for ImageStreamWidget {
 
         let (start, end) = self.window;
         let cell_size = self.cell_size;
+        // One local bool for the whole loop (the module doc's Content
+        // diagnostics section): with the trace off, every counter and the
+        // emission below fold away.
+        let diag = self.diag;
+        let mut sample = S5Diag::default();
         for index in start..end {
             let y = index as f64 * ITEM_EXTENT - self.offset;
             if y + ITEM_EXTENT < 0.0 || y > self.viewport.height {
@@ -565,18 +624,129 @@ impl Widget for ImageStreamWidget {
             }
             let id = (index as u64) % S5_IMAGE_COUNT;
             let cell_origin = Point::new(origin.x + CELL_PAD, origin.y + y + CELL_PAD);
+            if diag {
+                sample.visible += 1;
+                sample.covered_px += visible_cell_span(y, cell_size.height, self.viewport.height);
+            }
             if let Some(widget) = self.image_widgets.get_mut(&id) {
+                if diag {
+                    sample.images += 1;
+                }
                 let mut pctx = PaintCtx::new(cell_origin, cell_size);
                 widget.paint(&mut pctx, scene);
             } else {
+                if diag {
+                    sample.placeholders += 1;
+                }
                 scene.fill_rect(cell_origin, cell_size, PLACEHOLDER_COLOR);
             }
         }
         scene.pop_clip();
 
+        if diag {
+            self.paint_count += 1;
+            sample.frame = self.paint_count;
+            sample.layouts = self.layout_count;
+            sample.epoch_ms = epoch_ms();
+            sample.offset = self.offset;
+            sample.window_offset = self.window_offset;
+            sample.window = self.window;
+            sample.ready = self.ready.len();
+            sample.widgets = self.image_widgets.len();
+            sample.viewport = self.viewport;
+            sample.cell = cell_size;
+            frust_shell_common::perf::bench_emit(&format_s5_diag_line(&sample));
+        }
+
         // Perpetual scripted motion: always ask for the next frame.
         ctx.request_frame();
     }
+}
+
+// --- Content diagnostics (see the module doc's section of that name) ---
+
+/// One frame's S5 content sample: what the paint loop above actually issued,
+/// plus the windowing state it issued it from. Diagnostics only — filled and
+/// formatted solely when the two-dial trace is on.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct S5Diag {
+    /// Paint number since this widget was built.
+    frame: u64,
+    /// Layout count at this paint — stalls while `frame` rises when the
+    /// platform frame gate skips layout.
+    layouts: u64,
+    /// Wall clock, so a host-side screencap can be matched to this frame.
+    epoch_ms: u128,
+    /// The drawn scroll offset.
+    offset: f64,
+    /// The offset [`window`](Self::window) was computed at; `offset` minus this
+    /// is how far the window has gone stale.
+    window_offset: f64,
+    /// The materialized item range, `[start, end)`.
+    window: (usize, usize),
+    /// Cells that survived the paint loop's cull — the ones that issued a paint.
+    visible: u32,
+    /// Cells painted as a decoded image.
+    images: u32,
+    /// Cells painted as a solid [`PLACEHOLDER_COLOR`] fill.
+    placeholders: u32,
+    /// Decoded image ids handed to the widget by the component.
+    ready: usize,
+    /// Image widgets built so far (an id gets one on the first layout that
+    /// sees it decoded *and* windowed).
+    widgets: usize,
+    /// Total on-screen vertical extent of the painted cells, in px — directly
+    /// comparable with a screencap's measured content coverage.
+    covered_px: f64,
+    viewport: Size,
+    cell: Size,
+}
+
+/// The on-screen vertical extent of a cell whose row starts at `y` (relative to
+/// the viewport top) in a `viewport_height`-tall viewport — the cell's box
+/// clipped to the viewport, never negative.
+fn visible_cell_span(y: f64, cell_height: f64, viewport_height: f64) -> f64 {
+    let top = (y + CELL_PAD).max(0.0);
+    let bottom = (y + CELL_PAD + cell_height).min(viewport_height);
+    (bottom - top).max(0.0)
+}
+
+/// Wall-clock milliseconds since the Unix epoch, for screencap correlation.
+/// Only ever called on the diagnostic path.
+fn epoch_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Format one `frust-perf s5 …` diagnostic line. The prefix deliberately
+/// differs from `frust-perf raw` (see the module doc's Content diagnostics
+/// section): `stats.py` keys the frame series off that exact prefix and must
+/// keep ignoring these lines, while `run.sh`'s `frust-perf` capture whitelist
+/// keeps them in the run log.
+fn format_s5_diag_line(d: &S5Diag) -> String {
+    format!(
+        "frust-perf s5 n={} lay={} t={} off={:.0} woff={:.0} win={}-{} vis={} img={} ph={} \
+rdy={} wid={} cov={:.0} vp={:.0}x{:.0} cell={:.0}x{:.0}",
+        d.frame,
+        d.layouts,
+        d.epoch_ms,
+        d.offset,
+        d.window_offset,
+        d.window.0,
+        d.window.1,
+        d.visible,
+        d.images,
+        d.placeholders,
+        d.ready,
+        d.widgets,
+        d.covered_px,
+        d.viewport.width,
+        d.viewport.height,
+        d.cell.width,
+        d.cell.height,
+    )
 }
 
 #[cfg(test)]
@@ -625,5 +795,90 @@ mod tests {
         let b = generate_s5_image_rgba(2);
         assert_eq!(a1, a2, "same index must reproduce identical bytes");
         assert_ne!(a1, b, "different indices must not collide");
+    }
+
+    /// Both rig phones' viewports must materialize a window that spans the
+    /// screen with the buffer rows on top — an empty column on device is
+    /// therefore never the window range being structurally too small. The
+    /// heights are the logical (device-independent) viewports of the two
+    /// Android devices the S5 content question was raised on: 2400 px / DPR
+    /// 2.81 and 2340 px / DPR 2.75.
+    #[test]
+    fn device_viewports_materialize_a_full_screen_window() {
+        for viewport_height in [854.0_f64, 851.0_f64] {
+            let on_screen = (viewport_height / ITEM_EXTENT).ceil() as usize;
+            for offset in [0.0, 5_000.0, 250_000.0] {
+                let (start, end) = desired_window_at(offset, viewport_height);
+                assert!(
+                    end - start >= on_screen + BUFFER_ITEMS as usize,
+                    "viewport {viewport_height} at offset {offset} materialized {start}..{end}, \
+                     fewer than the {on_screen} on-screen rows plus buffer"
+                );
+            }
+        }
+    }
+
+    /// A zero-height viewport (pre-first-layout) is the one case that
+    /// materializes nothing, and the window never runs past the stream.
+    #[test]
+    fn window_is_empty_before_layout_and_clamped_at_the_end() {
+        assert_eq!(desired_window_at(0.0, 0.0), (0, 0));
+        let (start, end) = desired_window_at(TOTAL_ITEMS as f64 * ITEM_EXTENT, 854.0);
+        assert_eq!(end, TOTAL_ITEMS);
+        assert!(start <= end);
+    }
+
+    /// A cell's counted coverage is its box clipped to the viewport: fully
+    /// inside, partly scrolled off each edge, and fully off (which the paint
+    /// loop's cull skips anyway).
+    #[test]
+    fn cell_span_is_clipped_to_the_viewport() {
+        assert_eq!(visible_cell_span(0.0, 256.0, 854.0), 256.0);
+        assert_eq!(visible_cell_span(-260.0, 256.0, 854.0), 4.0);
+        assert_eq!(visible_cell_span(840.0, 256.0, 854.0), 6.0);
+        assert_eq!(visible_cell_span(900.0, 256.0, 854.0), 0.0);
+    }
+
+    /// The diagnostic line must carry every field the diagnosis reads, and
+    /// must NOT collide with the `frust-perf raw` prefix `stats.py` slices the
+    /// frame series by (`run.sh` keeps both under one `frust-perf` whitelist).
+    #[test]
+    fn diag_line_carries_the_window_and_paint_counts() {
+        let line = format_s5_diag_line(&S5Diag {
+            frame: 42,
+            layouts: 41,
+            epoch_ms: 1_757_000_000_123,
+            offset: 12_345.6,
+            window_offset: 12_000.4,
+            window: (44, 49),
+            visible: 4,
+            images: 3,
+            placeholders: 1,
+            ready: 120,
+            widgets: 118,
+            covered_px: 812.0,
+            viewport: Size::new(1080.0, 854.0),
+            cell: Size::new(1064.0, 256.0),
+        });
+        assert!(line.starts_with("frust-perf s5 "), "line was: {line}");
+        assert!(!line.contains("frust-perf raw"), "line was: {line}");
+        for field in [
+            "n=42",
+            "lay=41",
+            "t=1757000000123",
+            "off=12346",
+            "woff=12000",
+            "win=44-49",
+            "vis=4",
+            "img=3",
+            "ph=1",
+            "rdy=120",
+            "wid=118",
+            "cov=812",
+            "vp=1080x854",
+            "cell=1064x256",
+        ] {
+            assert!(line.contains(field), "missing {field} in: {line}");
+        }
     }
 }
