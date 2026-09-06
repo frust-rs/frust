@@ -1807,6 +1807,63 @@ fn images_churning_under_pressure_never_take_a_glyph_slot() {
     engine.end_frame(residency.allocator_mut());
 }
 
+/// Image pressure beside resident glyph pages must still cost one rectangle per
+/// arrival, not a sweep of the layer.
+///
+/// The planner that decides which rectangles to give back models this
+/// residency's own occupants and the packer's per-layer free area, but it
+/// cannot see *where* a glyph page sits — the policy allocates those through
+/// the shared allocator and keeps their handles itself. So this is the case
+/// where the model is at its least informed, and the property that has to hold
+/// anyway: every image draw still resolves (the pages leave room for one
+/// arrival at a time), and no arrival displaces more than the single rectangle
+/// it needed. A planner that walked the candidate list to its end would clear
+/// and re-upload the whole image half of the layer on each of these frames.
+#[test]
+fn an_image_arriving_under_glyph_pressure_displaces_one_rectangle_at_most() {
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (128, 128),
+        max_atlases: 1,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    let font = next_font();
+
+    // Text settles first, so the pages the planner cannot see are already
+    // holding part of the one layer the images will fight over.
+    residency.begin_frame();
+    let glyph_slots = frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)])
+        .uploads
+        .len();
+    assert_eq!(glyph_slots, 4, "fixture precondition: `Hello` cached");
+
+    let mut worst_frame_evictions = 0_u64;
+    let mut worst_frame_clears = 0_usize;
+    for tag in 0..40_u8 {
+        residency.begin_frame();
+        residency
+            .resolve(&image(32, 32, tag))
+            .expect("a full atlas displaces an image rather than dropping a draw");
+        worst_frame_evictions = worst_frame_evictions.max(residency.frame_pressure_evictions());
+        worst_frame_clears = worst_frame_clears.max(residency.evictions().len());
+        residency.acknowledge_plan();
+        frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)]);
+    }
+
+    assert_eq!(residency.skipped(), 0, "no image draw was refused");
+    assert!(
+        residency.pressure_evictions() > 0,
+        "fixture precondition: the images really outgrew what the pages left"
+    );
+    assert_eq!(
+        worst_frame_evictions, 1,
+        "an arrival that needed one rectangle took one rectangle"
+    );
+    assert_eq!(
+        worst_frame_clears, 1,
+        "and scheduled exactly that rectangle's clear"
+    );
+}
+
 #[test]
 fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
     let font = FontHandle::new(FontData::new(Blob::new(Arc::new(LATIN_FONT)), 0));

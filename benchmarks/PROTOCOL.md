@@ -603,13 +603,28 @@ scenarios (§9) are the first to require it; extending `stats.py` (or an
 equivalent) to parse per-op lines — both S8's shipped shape and the
 canonical shape — is the harness task's job.
 
-### Frust: `frust-perf img …` / `frust-perf atlas …` (engine image residency, always on)
+### Frust: `frust-perf img …` / `frust-perf atlas …` / `frust-perf enc …` (engine, `perf-trace` only)
 
-Two lines the render engine itself emits through the same `log::info!` facade
-the frame lines use, so `run.sh`'s `frust-perf` whitelist keeps both in every
-`run-NN.log` with no build flag, define or env var to turn on. Neither is
-parsed by `stats.py` (the prefix is not `frust-perf raw`), and neither changes
-the per-frame raw line — the v4 format above is untouched.
+Three lines the render engine itself emits through the same `log::info!` facade
+the frame lines use, so `run.sh`'s `frust-perf` whitelist keeps all three in
+every `run-NN.log`. None is parsed by `stats.py` (the prefix is not
+`frust-perf raw`), and none changes the per-frame raw line — the v4 format above
+is untouched.
+
+**All three are compiled only under the `perf-trace` feature**, like every other
+`frust-perf` line in the workspace. That is the whole gate: there is no define
+and no env var, and the shell's `FRUST_TRACE` dial does not reach them — it
+gates the per-frame raw series, not these. The bench app's `--debug` and
+`--profile` builds enable `perf-trace`, so a measurement capture has them; a
+`--release` build does not compile them at all, which is what
+`scripts/release-lean-check.sh` asserts by grepping a shipping binary for
+`frust-perf` and expecting zero hits.
+
+Reading a capture accordingly: the `atlas` line appears once per process and
+the `enc` lines once per sixty frames, so a log with neither was built without
+instrumentation and cannot be graded. The `img` line is the conditional one —
+its absence is a property of the scene (the atlas held everything), which is
+exactly what makes its presence the signal.
 
 ```
 frust-perf img skipped=<u32> evicted=<u64> resident=<usize> budget=<w>x<h>x<layers>
@@ -632,6 +647,12 @@ presence is the signal.
 - `resident` — images holding an atlas rectangle at the end of the frame.
 - `budget` — the resolved `AtlasBudget`: per-layer extent and maximum layers.
 
+`evicted` counts rectangles a *successful* arrival displaced. An allocation the
+atlas cannot satisfy at all displaces nothing — the engine plans the eviction
+before it frees anything and abandons a plan that would not have produced the
+allocation — so `skipped>0 evicted=0` is the honest reading "this content does
+not fit", not "the atlas thrashed and gave up".
+
 ```
 frust-perf atlas tier=<mobile|desktop> budget=<w>x<h>x<layers> downlevel=<Full|WebGl2> transient_saves_memory=<true|false> adapter=<name>
 ```
@@ -641,6 +662,21 @@ tier (renderer construction). `tier` is `is_mobile_tier`'s answer and the two
 fields after `budget` are the signals it read, so a device landing on a
 surprising tier is explained by the line itself rather than re-derived from the
 adapter. `adapter` is last because it is the one value that can contain spaces.
+
+```
+frust-perf enc n=<u64> w=<frames> <phase>_us=<f.1> … total_p95_us=<f.1> draws=<u32> strips=<u32> alphas=<u32> glyph_draws=<u32> atlas_glyphs=<u32>
+```
+
+Emitted by `frust_engine::renderer` once per **60 encoded frames** — about one
+line a second at 60 Hz — reporting the median of each CPU phase of the encode
+over that window, the window's 95th-percentile total, and the median of each
+per-frame count. `n` is the engine's own frame counter and is deliberately not
+the raw line's `n` (a different emitter counting different frames); `w` is the
+window's frame count. The phase columns are the compile's own six plus its
+`glyphs` subset, the whole compile, then schedule/paints/instances/resize/
+upload/replay/pipelines/record and the total — the same order the formatter
+pins by test, which is what a capture greps by. Like the two lines above it is
+`perf-trace`-only and not `FRUST_TRACE`-gated.
 
 > **The OnePlus 9 S5 row of the 2026-09-05 pass predates both lines and the
 > engine fix they report on.** That capture was taken while a full atlas

@@ -171,8 +171,11 @@
 //! image landing on the destination rectangle the display list asked for.
 
 use core::ops::Range;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
+// Durations and the compile's own phase record are read by the `perf-trace`
+// encode window and by the tests that pin its arithmetic, and by nothing else.
+#[cfg(any(test, feature = "perf-trace"))]
 use std::time::Duration;
 
 use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
@@ -185,12 +188,14 @@ use vello_common::fearless_simd::Level;
 use vello_common::paint::{ImageId, ImageSource, Paint};
 use vello_common::strip::Strip;
 
-use crate::cache::images::ATLAS_PADDING;
+use crate::cache::images::{ATLAS_PADDING, AtlasRegion};
 use crate::cache::{
     AtlasBudget, BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, ResidentImage,
 };
+#[cfg(any(test, feature = "perf-trace"))]
+use crate::compile::CompileSpans;
 use crate::compile::paint::resolve_lut_request;
-use crate::compile::{ClearPunch, CompileSpans, CompiledFrame, PhaseClock, SceneCompiler};
+use crate::compile::{ClearPunch, CompiledFrame, PhaseClock, SceneCompiler};
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
@@ -314,7 +319,11 @@ static ATLAS_REFUSAL_WARNING: Once = Once::new();
 /// - [`record`](Self::record) — recording the frame's passes into the caller's
 ///   encoder.
 ///
-/// All zero in a build without `perf-trace`; see [`PhaseClock`].
+/// Compiled only under `perf-trace`, with everything that reads it: the whole
+/// `frust-perf enc` route is a `#[cfg]` island rather than a runtime branch the
+/// optimizer is trusted to fold, so a release-lean binary carries none of its
+/// field names, format strings or window (see [`EncodeTrace`]).
+#[cfg(feature = "perf-trace")]
 #[derive(Debug, Clone, Copy, Default)]
 struct EncodeSpans {
     /// Scene compilation, split further by its own six phases.
@@ -360,6 +369,7 @@ struct EncodeSpans {
 /// [`EncodeSpans`]' remaining phases, and `total` closes the line. Pinned as
 /// one list because the line's field order is what a capture is graded by —
 /// the same contract the `frust-perf img` line keeps.
+#[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_COLUMNS: [&str; 17] = [
     "validate",
     "prepare",
@@ -382,14 +392,18 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 
 /// The unitless per-frame counts the line reports after its phases, in row
 /// order — what the phases above were spent on.
+#[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_COUNTS: [&str; 5] = ["draws", "strips", "alphas", "glyph_draws", "atlas_glyphs"];
 
 /// Width of one window row: every phase column followed by every count.
+#[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_ROW: usize = ENCODE_TRACE_COLUMNS.len() + ENCODE_TRACE_COUNTS.len();
 
 /// What one frame drew, carried beside its phases.
 ///
 /// Counts rather than durations, and so reported without a unit suffix.
+/// `perf-trace`-only, with [`EncodeSpans`], which is all that carries it.
+#[cfg(feature = "perf-trace")]
 #[derive(Debug, Clone, Copy, Default)]
 struct EncodeCounts {
     /// Recorded draws.
@@ -405,6 +419,7 @@ struct EncodeCounts {
     atlas_glyphs: u32,
 }
 
+#[cfg(feature = "perf-trace")]
 impl EncodeCounts {
     /// What `frame` drew.
     fn of(frame: &CompiledFrame) -> Self {
@@ -430,8 +445,10 @@ impl EncodeCounts {
 /// phases (a thirty-second run reports thirty times), and it matches the
 /// cadence `frust-shell-common`'s own rate-limited frame summary already
 /// emits at.
+#[cfg(feature = "perf-trace")]
 const ENCODE_TRACE_WINDOW: usize = 60;
 
+#[cfg(feature = "perf-trace")]
 impl EncodeSpans {
     /// The whole encode.
     ///
@@ -494,11 +511,14 @@ impl EncodeSpans {
 /// The rolling window of per-frame [`EncodeSpans`] one `frust-perf enc` line
 /// is computed over.
 ///
-/// Inert in a build without `perf-trace`: [`PhaseClock`] reads no clock there,
-/// so every span reaching [`Self::record`] is zero, and `record` returns on a
-/// compile-time-constant branch before the window is ever touched. Two empty
-/// `Vec`s and a counter is all the renderer carries for it, and no frame pays
-/// a push, a sort or a format.
+/// Absent altogether from a build without `perf-trace`, rather than inert in
+/// one. The type, its window, its column names and the `frust-perf enc` literal
+/// are all inside a `#[cfg]` island — including the renderer's own field — so
+/// "no frame pays a push, a sort or a format" is what the compiler emitted and
+/// not what the optimizer was expected to prove about a constant branch. That
+/// distinction is the one the release-lean gate measures: it greps a shipping
+/// binary for `frust-perf` and expects to find nothing.
+#[cfg(feature = "perf-trace")]
 #[derive(Debug, Default)]
 struct EncodeTrace {
     /// One row per frame in the window, in [`ENCODE_TRACE_COLUMNS`] order.
@@ -512,6 +532,7 @@ struct EncodeTrace {
     frames: u64,
 }
 
+#[cfg(feature = "perf-trace")]
 impl EncodeTrace {
     /// Adds one frame's phases to the window, emitting the window's line when
     /// it fills.
@@ -520,14 +541,10 @@ impl EncodeTrace {
     /// costs falls outside every phase the line reports — the numbers describe
     /// the encode, not the encode plus its own accounting.
     fn record(&mut self, spans: &EncodeSpans) {
-        // The whole instrumentation's one gate. A build without `perf-trace`
-        // takes no clock reads at all ([`PhaseClock`]), so every row it could
-        // push would be zeros; returning here on a constant the compiler folds
-        // is what keeps such a build from paying for them anyway.
-        if !cfg!(feature = "perf-trace") {
-            return;
-        }
-        self.frames += 1;
+        // Saturating like every other counter on this path: a renderer that
+        // outlived `u64::MAX` frames would report a wrapped `n`, and a wrong
+        // number in a capture is worse than a stuck one.
+        self.frames = self.frames.saturating_add(1);
         self.window.push(spans.row());
         if self.window.len() < ENCODE_TRACE_WINDOW {
             return;
@@ -602,6 +619,7 @@ impl EncodeTrace {
 /// (an empty punch pass) or milliseconds (a ten-thousand-row table's walk), and
 /// one decimal microsecond reads the same either way without a float's
 /// locale-dependent formatting reaching a capture the harness greps.
+#[cfg(feature = "perf-trace")]
 fn format_us(nanos: u32) -> String {
     let tenths = u64::from(nanos).div_ceil(100);
     format!("{}.{}", tenths / 10, tenths % 10)
@@ -660,8 +678,9 @@ pub struct EngineRenderer {
     filters: Option<FilterResources>,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
-    /// Two empty `Vec`s and a counter in a build without `perf-trace`, which
-    /// never pushes a row into it — see [`EncodeTrace`].
+    /// Absent entirely from a build without `perf-trace`, along with the type
+    /// itself — see [`EncodeTrace`].
+    #[cfg(feature = "perf-trace")]
     encode_trace: EncodeTrace,
 }
 
@@ -722,6 +741,7 @@ impl EngineRenderer {
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
             filters: None,
+            #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         })
     }
@@ -1203,10 +1223,27 @@ impl EngineRenderer {
             device, queue, encoder, &target, depth_view, base_color, &pipelines, timestamps,
         );
 
+        // The laps above still run without `perf-trace` — `PhaseClock` reads
+        // no clock there, so each one is `Duration::ZERO` — but nothing records
+        // them, and the trace they would have fed is not compiled at all.
+        #[cfg(not(feature = "perf-trace"))]
+        let _ = (
+            compile_total,
+            schedule_span,
+            paints_span,
+            instances_span,
+            resize_span,
+            upload_span,
+            replay_span,
+            pipelines_span,
+            clock.lap(),
+        );
+
         // Last, so the window's own formatting is charged to no phase it
         // reports. A frame refused above records nothing: its phases are a
         // partial encode and would drag every percentile toward a frame that
         // was never presented.
+        #[cfg(feature = "perf-trace")]
         self.encode_trace.record(&EncodeSpans {
             compile: frame.compile_spans,
             compile_total,
@@ -3520,8 +3557,13 @@ impl FrameResources {
     /// wrote would be sampled as whatever the texture happened to contain.
     fn update_image_registry(&mut self, frame: &CompiledFrame, budget: AtlasBudget) {
         if !frame.image_evictions.is_empty() {
+            // A set rather than `Vec::contains`: both sides of this scan scale
+            // with content — the registry with how many images and glyph slots
+            // are resident, the plan with how hard the atlas is churning — and
+            // their product is the frame path's, not a report's.
+            let cleared: HashSet<AtlasRegion> = frame.image_evictions.iter().copied().collect();
             self.image_registry
-                .retain(|_, resident| !frame.image_evictions.contains(&resident.region));
+                .retain(|_, resident| !cleared.contains(&resident.region));
         }
 
         let mut refused = 0_u64;
@@ -4313,7 +4355,9 @@ mod tests {
 
     /// The `frust-perf enc` line is a contract: a capture is graded by
     /// grepping its fields, so the field order and the names are pinned here
-    /// rather than only by the formatter.
+    /// rather than only by the formatter. `perf-trace`-only, with the line —
+    /// `cargo test -p frust-engine --features perf-trace` is where it runs.
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn an_encode_trace_line_reports_every_column_in_order() {
         let mut trace = EncodeTrace {
@@ -4360,6 +4404,7 @@ mod tests {
 
     /// A window's percentile is nearest-rank over the column it names, so the
     /// value reported is one the window really contains.
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn an_encode_trace_percentile_is_nearest_rank_per_column() {
         let mut trace = EncodeTrace::default();
@@ -4377,6 +4422,7 @@ mod tests {
 
     /// Nanoseconds round up to a tenth of a microsecond, so a phase that cost
     /// anything at all never reports as free.
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn a_span_that_cost_anything_never_formats_as_zero() {
         assert_eq!(format_us(0), "0.0");

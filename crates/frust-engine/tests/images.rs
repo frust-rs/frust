@@ -37,10 +37,13 @@
 use std::sync::Arc;
 
 use frust_engine::cache::images::{
-    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES, TierLogOnce,
-    atlas_tier_line,
+    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES,
 };
-use frust_engine::compile::{CompiledFrame, image_pressure_line};
+#[cfg(feature = "perf-trace")]
+use frust_engine::cache::images::{TierLogOnce, atlas_tier_line};
+use frust_engine::compile::CompiledFrame;
+#[cfg(feature = "perf-trace")]
+use frust_engine::compile::{image_pressure_line, image_pressure_reported};
 use frust_engine::gpu::atlas::{MAX_ATLAS_INDEX, atlas_texture_descriptor, lower_encoded_image};
 use frust_engine::schedule::{PageConfig, Schedule};
 use frust_engine::{EngineError, GpuEncodedPaint, SceneCompiler};
@@ -652,6 +655,177 @@ fn an_atlas_filled_inside_one_frame_still_skips_and_schedules_no_clear() {
 }
 
 #[test]
+fn a_request_no_eviction_could_satisfy_costs_no_eviction_at_all() {
+    // The storm. One image the atlas can never hold, drawn every frame in the
+    // middle of a working set that *does* fit: `[A, Big, B, C, D]`, where the
+    // four 32-squares take the four slots and the 48-square fits in none of the
+    // gaps between them. Freeing B, C and D would not help — a 48-square needs
+    // a contiguous rectangle no combination of those holes makes while A is
+    // resident — so an eviction loop that only stops when the candidate list
+    // runs out clears and re-uploads three images per frame, forever, and skips
+    // `Big` anyway. The scene must instead settle: one skip, and nothing moves.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let a = image(32, 32);
+    let big = image(48, 48);
+    let rest: Vec<ImageData> = (0..3).map(|_| image(32, 32)).collect();
+
+    for index in 0..8_u32 {
+        let frame = compile(
+            &mut compiler,
+            &scene_of(|b| {
+                b.draw_image(&a, DEST);
+                b.draw_image(&big, DEST);
+                for data in &rest {
+                    b.draw_image(data, DEST);
+                }
+            }),
+        );
+
+        assert_eq!(
+            frame.skipped_images, 1,
+            "frame {index}: only the 48-square is refused"
+        );
+        assert_eq!(frame.image_draws, 4, "frame {index}: the rest all painted");
+
+        if index == 0 {
+            assert_eq!(
+                frame.image_uploads.len(),
+                4,
+                "the first frame makes the four that fit resident"
+            );
+        } else {
+            assert!(
+                frame.image_uploads.is_empty(),
+                "frame {index}: a settled scene re-uploads nothing — {} uploads",
+                frame.image_uploads.len()
+            );
+            assert!(
+                frame.image_evictions.is_empty(),
+                "frame {index}: and clears nothing — {} clears",
+                frame.image_evictions.len()
+            );
+        }
+        compiler.acknowledge_image_plan();
+    }
+
+    assert_eq!(
+        compiler.images().pressure_evictions(),
+        0,
+        "nothing was ever displaced for a request that could not be placed"
+    );
+    assert_eq!(
+        compiler.images().entry_count(),
+        4,
+        "and the four that fit are all still resident"
+    );
+}
+
+#[test]
+fn a_request_larger_than_everything_evictable_leaves_the_residency_alone() {
+    // The same invariant reached by area rather than by shape: a whole-layer
+    // image asked for while one of the four slots belongs to this frame. Even
+    // freeing every candidate leaves a quarter of the layer occupied, so the
+    // request is hopeless before the first rectangle is handed back — and a
+    // skip that costs nothing is exactly what it cost before eviction existed.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
+    compile(
+        &mut compiler,
+        &scene_of(|b| {
+            for data in &resident {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    compiler.acknowledge_image_plan();
+
+    let whole_layer = image(64, 64);
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            // One of the four redrawn first, so it is this frame's and cannot
+            // be evicted whatever the rest of the atlas holds.
+            b.draw_image(&resident[0], DEST);
+            b.draw_image(&whole_layer, DEST);
+        }),
+    );
+
+    assert_eq!(frame.skipped_images, 1, "the whole-layer image is refused");
+    assert!(
+        frame.image_evictions.is_empty(),
+        "and nothing was scheduled for clearing to try"
+    );
+    assert!(frame.image_uploads.is_empty());
+    assert_eq!(
+        compiler.images().pressure_evictions(),
+        0,
+        "a hopeless request evicts nothing"
+    );
+    assert_eq!(
+        compiler.images().entry_count(),
+        4,
+        "the residency is exactly as it was found"
+    );
+}
+
+#[test]
+fn one_blob_drawn_at_two_extents_in_a_frame_keeps_the_first_draws_texels() {
+    // The extent-mismatch release, held to the same rule as the pressure path.
+    // A caller that rebuilds an `ImageData` around the same buffer at a new
+    // extent gives the old rectangle back — but the plan clears before it
+    // uploads, so doing that on a frame whose first draw already resolved that
+    // rectangle would zero the texels that draw is about to sample. The second
+    // extent is skipped for this frame instead.
+    let square = image(16, 8);
+    let transposed = ImageData {
+        data: square.data.clone(),
+        format: square.format,
+        alpha_type: square.alpha_type,
+        width: 8,
+        height: 16,
+    };
+
+    let mut compiler = compiler();
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            b.draw_image(&square, DEST);
+            b.draw_image(&transposed, DEST);
+        }),
+    );
+
+    assert_eq!(frame.image_draws, 1, "the first extent painted");
+    assert_eq!(
+        frame.skipped_images, 1,
+        "the second is skipped, not swapped"
+    );
+    assert_eq!(
+        frame.image_uploads.len(),
+        1,
+        "one upload, for the extent that resolved"
+    );
+    assert!(
+        frame.image_evictions.is_empty(),
+        "and no clear over the rectangle the first draw is sampling"
+    );
+    compiler.acknowledge_image_plan();
+
+    // On a later frame the release is ordinary again: nothing has sampled the
+    // rectangle yet, so the new extent takes it and the old one is cleared.
+    let next = compile(
+        &mut compiler,
+        &scene_of(|b| b.draw_image(&transposed, DEST)),
+    );
+    assert_eq!(next.skipped_images, 0, "the new extent resolves");
+    assert_eq!(next.image_uploads.len(), 1);
+    assert_eq!(
+        next.image_evictions.len(),
+        1,
+        "and the rectangle the old extent held is reported for clearing"
+    );
+}
+
+#[test]
 fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload() {
     // The consumer contract eviction has always kept, now reached by the second
     // route: `image_evictions` names each freed rectangle once, and the plan is
@@ -732,6 +906,11 @@ fn a_displaced_image_becomes_resident_again_on_the_frame_that_draws_it() {
     );
 }
 
+/// The `frust-perf img` line exists only in a `perf-trace` build, like every
+/// other `frust-perf` line: a release-lean binary must carry none of its bytes.
+/// `cargo test -p frust-engine --features perf-trace` is where this runs; the
+/// absence half is `the_residency_line_is_absent_without_perf_trace` below.
+#[cfg(feature = "perf-trace")]
 #[test]
 fn the_per_frame_residency_line_is_written_only_when_something_happened() {
     // The line a benchmark capture is graded by: its absence means the atlas
@@ -750,18 +929,18 @@ fn the_per_frame_residency_line_is_written_only_when_something_happened() {
             }
         }),
     );
-    assert_eq!(
-        image_pressure_line(&quiet, compiler.images()),
-        None,
+    assert!(
+        !image_pressure_reported(&quiet, compiler.images()),
         "a frame the atlas held reports nothing at all"
     );
     compiler.acknowledge_image_plan();
 
     let arrival = image(32, 32);
     let evicting = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
+    assert!(image_pressure_reported(&evicting, compiler.images()));
     assert_eq!(
-        image_pressure_line(&evicting, compiler.images()).as_deref(),
-        Some("frust-perf img skipped=0 evicted=1 resident=4 budget=64x64x1"),
+        image_pressure_line(&evicting, compiler.images()),
+        "frust-perf img skipped=0 evicted=1 resident=4 budget=64x64x1",
     );
 
     // And a frame that genuinely lost draws says so in the same line.
@@ -775,9 +954,40 @@ fn the_per_frame_residency_line_is_written_only_when_something_happened() {
             }
         }),
     );
+    assert!(image_pressure_reported(&skipping, full.images()));
     assert_eq!(
-        image_pressure_line(&skipping, full.images()).as_deref(),
-        Some("frust-perf img skipped=2 evicted=0 resident=4 budget=64x64x1"),
+        image_pressure_line(&skipping, full.images()),
+        "frust-perf img skipped=2 evicted=0 resident=4 budget=64x64x1",
+    );
+}
+
+/// The other half of M1/M3: without the feature the route is not merely quiet,
+/// it is not compiled. A `use` of either symbol here would fail to resolve, so
+/// the check is that the *counters* the line reads stay available in every
+/// build — tests and the residency's own bookkeeping depend on them — while the
+/// formatter and its `frust-perf` literal do not exist to be linked.
+#[cfg(not(feature = "perf-trace"))]
+#[test]
+fn the_residency_line_is_absent_without_perf_trace() {
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
+    compile(
+        &mut compiler,
+        &scene_of(|b| {
+            for data in &resident {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    compiler.acknowledge_image_plan();
+
+    let arrival = image(32, 32);
+    let evicting = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
+    assert_eq!(evicting.skipped_images, 0);
+    assert_eq!(
+        compiler.images().frame_pressure_evictions(),
+        1,
+        "the counters a report would read are compiled in every build"
     );
 }
 
@@ -1044,6 +1254,9 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
     }
 }
 
+/// `perf-trace`-only, with the line itself — see
+/// `the_per_frame_residency_line_is_written_only_when_something_happened`.
+#[cfg(feature = "perf-trace")]
 #[test]
 fn the_resolved_atlas_tier_is_reported_once_in_a_line_a_capture_keeps() {
     // Which of the two tiers a device takes is otherwise an inference from

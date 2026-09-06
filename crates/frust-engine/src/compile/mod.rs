@@ -130,9 +130,9 @@ static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
 /// lap is two clock reads. Under `perf-trace` a lap reads
 /// [`std::time::Instant`]; without it the type is zero-sized, [`Self::lap`]
 /// answers [`Duration::ZERO`] and no clock is read at all — the "zero clock
-/// reads in a disabled build" terms `docs/CODE_STANDARDS.md`'s instrumentation
-/// conventions set for an FFI-sensitive path, met at compile time rather than
-/// by a runtime branch.
+/// reads in a disabled build" terms `docs/RENDER_DEVELOPMENT.md`'s perf-trace
+/// convention and `docs/DEVELOPMENT.md`'s Release-lean section set for an
+/// FFI-sensitive path, met at compile time rather than by a runtime branch.
 ///
 /// Laps are cumulative by construction: each one both reports the span since
 /// the previous lap and opens the next, so a phase can never be double-counted
@@ -175,8 +175,13 @@ impl PhaseClock {
 /// What one [`SceneCompiler::compile`] call spent, phase by phase.
 ///
 /// Zero across the board in a build without `perf-trace` — see [`PhaseClock`].
-/// The phases partition the call exactly, in the order they run, so their sum
-/// is the whole compile minus call overhead:
+/// The phases partition the call in the order they run, so their sum is the
+/// whole compile minus call overhead. Two edges are worth naming rather than
+/// leaving to be inferred: the frame record and its depth counter are built
+/// after the `admit` lap, so `walk` spans their construction as well as the
+/// command walk itself; and the `frust-perf img` line a `perf-trace` build
+/// emits is written *after* the last lap, so no phase is charged the cost of
+/// reporting on one.
 ///
 /// 1. [`validate`](Self::validate) — the up-front finiteness and geometry
 ///    sweep over every command. A frame is refused whole or not at all, so
@@ -189,11 +194,11 @@ impl PhaseClock {
 ///    [`crate::text::atlas_policy`] before any of them is drawn.
 /// 4. [`admit`](Self::admit) — closing the glyph atlas's own frame, which is
 ///    where admission packs what the routing pass asked for.
-/// 5. [`walk`](Self::walk) — the command walk itself: strip generation and
-///    paint encoding, and on a text-heavy scene the bulk of the call. The
-///    part of it spent inside glyph runs is reported separately by
-///    [`glyphs`](Self::glyphs), which is a subset of this rather than a phase
-///    of its own.
+/// 5. [`walk`](Self::walk) — building the frame record the walk fills, then
+///    the command walk itself: strip generation and paint encoding, and on a
+///    text-heavy scene the bulk of the call. The part of it spent inside glyph
+///    runs is reported separately by [`glyphs`](Self::glyphs), which is a
+///    subset of this rather than a phase of its own.
 /// 6. [`finish`](Self::finish) — closing open groups, generating the hole
 ///    punches, ageing the glyph atlas and taking the frame's image plan.
 ///
@@ -851,8 +856,6 @@ impl SceneCompiler {
         frame.image_uploads = uploads;
         frame.atlas_layers = self.images.layers();
 
-        note_image_pressure(&frame, &self.images);
-
         // Field by field rather than as a whole struct, so the glyph subset
         // the walk accumulated into `frame` survives. Last, so `finish` covers
         // every phase above it and the six partition the call rather than
@@ -863,6 +866,12 @@ impl SceneCompiler {
         frame.compile_spans.admit = admit;
         frame.compile_spans.walk = walk;
         frame.compile_spans.finish = clock.lap();
+
+        // After the last lap, deliberately: the line reports this frame's
+        // residency, and a phase that included the cost of reporting on itself
+        // would be measuring the instrumentation rather than the compile.
+        #[cfg(feature = "perf-trace")]
+        note_image_pressure(&frame, &self.images);
 
         Ok(frame)
     }
@@ -1897,34 +1906,56 @@ fn note_image_skip(skip: ImageSkip) {
 /// consulted (a singular paint transform, a destination with no area) as well
 /// as the atlas's own — every one of them is a draw the display list asked for
 /// and the frame did not paint, which is the question the line answers.
+///
+/// `perf-trace`-only, like every other `frust-perf` line in this workspace
+/// (`frust_render::context::log_render_path`, [`PhaseClock`], the encode
+/// window): the release-lean gate asserts a shipping binary contains no
+/// `frust-perf` bytes at all, and a `#[cfg]` is what makes that the compiler's
+/// answer rather than a hope about the optimizer.
+#[cfg(feature = "perf-trace")]
 fn note_image_pressure(frame: &CompiledFrame, images: &ImageResidency) {
-    if let Some(line) = image_pressure_line(frame, images) {
-        log::info!("{line}");
+    if !image_pressure_reported(frame, images) {
+        return;
     }
+    // The text is built *inside* the macro's argument list, so the log ceiling
+    // covers the `format!` and not merely the emission. `evicted>0` is the
+    // expected steady state of a working set larger than the atlas, and a
+    // build whose ceiling drops info lines must not pay a `String` per frame
+    // for one it will never record.
+    log::info!("{}", image_pressure_line(frame, images));
 }
 
-/// The `frust-perf img` line `frame` reports against `images`, or `None` when
-/// the frame skipped nothing and evicted nothing, and so reports nothing.
+/// Whether `frame` has any image-residency cost to report against `images`.
+///
+/// Split from the line itself so the text can be built where the log macro can
+/// elide it — see [`note_image_pressure`] — and so "a frame the atlas held
+/// reports nothing at all" stays a property a test can name.
+#[cfg(feature = "perf-trace")]
+#[must_use]
+pub fn image_pressure_reported(frame: &CompiledFrame, images: &ImageResidency) -> bool {
+    frame.skipped_images != 0 || images.frame_pressure_evictions() != 0
+}
+
+/// The `frust-perf img` line `frame` reports against `images`.
 ///
 /// Separate from the logging above because the *text* is a contract: a
 /// benchmark capture is graded by grepping these fields, so the field order and
-/// the names are pinned by a test rather than only by this module.
+/// the names are pinned by a test rather than only by this module. Ask
+/// [`image_pressure_reported`] first — on a quiet frame this still formats a
+/// line, it is simply one nothing asks for.
+#[cfg(feature = "perf-trace")]
 #[must_use]
-pub fn image_pressure_line(frame: &CompiledFrame, images: &ImageResidency) -> Option<String> {
-    let evicted = images.frame_pressure_evictions();
-    if frame.skipped_images == 0 && evicted == 0 {
-        return None;
-    }
-
+pub fn image_pressure_line(frame: &CompiledFrame, images: &ImageResidency) -> String {
     let budget = images.budget();
-    Some(format!(
-        "frust-perf img skipped={} evicted={evicted} resident={} budget={}x{}x{}",
+    format!(
+        "frust-perf img skipped={} evicted={} resident={} budget={}x{}x{}",
         frame.skipped_images,
+        images.frame_pressure_evictions(),
         images.entry_count(),
         budget.atlas_size.0,
         budget.atlas_size.1,
         budget.max_atlases,
-    ))
+    )
 }
 
 /// Report a glyph run whose font could not be read.
