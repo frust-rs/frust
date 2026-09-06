@@ -474,19 +474,23 @@ The rules below bind every pin, wherever its row lives:
   `{ workspace = true }`; gate each from its own directory (`cargo test` + `cargo clippy
   --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
-  `cargo generate-lockfile` then confirm `cargo build --workspace --locked` still
-  succeeds before committing. Exception: a manifest change that only **removes**
-  dependencies (nothing added, no range widened) is updated with a plain `cargo build`
-  instead — it prunes exactly the orphaned lockfile entries; `cargo generate-lockfile`
-  re-resolves the whole graph and is reserved for changes that add a dependency or widen
-  a range, and its full diff must be reviewed before committing.
+  `cargo generate-lockfile` then confirm `cargo build --workspace --locked` succeeds.
+  Exception: changes that only **remove** dependencies use `cargo build` instead (prunes
+  orphaned entries); `cargo generate-lockfile` is reserved for adding/widening, review the diff.
+- **wgpu's GPU backends route per target; the `30.0.1` pin stays workspace-owned.** The
+  `[workspace.dependencies]` row carries only `std`/`parking_lot`/`wgsl`; `crates/frust-gpu/Cargo.toml`'s
+  `[target.'cfg(...)'.dependencies]` tables add `metal` (apple), `vulkan` (other unix: Android, Linux) and
+  `dx12`+`vulkan` (windows). Every wgpu user (`frust-engine`, `frust-render`, `frust-testing`, `frust`'s
+  `gpu` feature) depends on `frust-gpu` unconditionally, so it is the single choke point — never add a
+  backend back to the row (it re-unions across every target). Moving features between row and tables is
+  not a bump and leaves `Cargo.lock` untouched; verify with `cargo tree -e features --target <triple>
+  -p frust-gpu`.
 - Use `cargo tree -d` to check for duplicate/divergent versions of a crate across the
   dependency graph after any manifest change.
-- Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated (they only
-  compile for `--target *-linux-android`) but legitimately appear in `Cargo.lock` on
-  every platform — expected, not drift. `libc` (unpinned `0.2`) is the same shape but
-  two-platform: android's/ios's render-thread priority self-boosts
-  (`docs/CODE_STANDARDS.md`'s sanctioned-unsafe zones).
+- Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated (`--target
+  *-linux-android`) but appear in `Cargo.lock` on all platforms (expected, not drift).
+  `libc` (unpinned `0.2`) is the same two-platform shape; android's/ios's render-thread
+  priority self-boosts (`docs/CODE_STANDARDS.md`'s sanctioned-unsafe zones).
 
 ## Platform-Support Policy
 
