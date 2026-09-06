@@ -2259,6 +2259,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-gallery"
+version = "0.1.0"
+dependencies = [
+ "frust-beui",
+ "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
+ "frust-shadcn",
+ "frust-text",
+ "frust-theme",
+ "frust-widgets",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-glyph"
 version = "0.1.0"
 dependencies = [

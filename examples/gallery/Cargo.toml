@@ -1,0 +1,37 @@
+# `frust-gallery`: the shared widget/page CASE REGISTRY both the static
+# snapshot generator (`crates/frust-testing`'s widget-snapshots bin) and the
+# future browser gallery app (`examples/web-gallery`) read — a root-workspace
+# member (covered by the root `Cargo.toml`'s `examples/*` glob, and
+# deliberately not added to that manifest's `exclude` list) rather than a
+# standalone workspace like `examples/huddle`/`playground`: it is a library
+# with no per-project Android/iOS build output that would need its own
+# `target/` dir, and it carries no out-of-tree git+rev dependency — none of
+# the three reasons the standalone examples give for excluding themselves
+# apply here. Riding the root workspace also means `cargo test
+# --workspace`/`cargo clippy --workspace --all-targets -- -D warnings` covers
+# it automatically, with no separate per-example gate to remember.
+#
+# Library-only, desktop-free shape (no `main.rs`/`android`/`ios`/`cdylib`):
+# this crate must later compile to `wasm32` for the browser gallery, so it
+# takes NO `frust-render`/`frust-gpu`/`wgpu`/`vello` edge — every `Case`
+# records a pure `View` construction (`build: fn() ->
+# frust_core::AnyView<()>`), never a rendered frame.
+[package]
+name = "frust-gallery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+frust-core = { workspace = true }
+frust-widgets = { workspace = true }
+frust-theme = { workspace = true }
+frust-text = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+frust-material = { path = "../../plugins/material" }
+frust-cupertino = { path = "../../plugins/cupertino" }
+frust-glyph = { path = "../../plugins/glyph" }
+frust-shadcn = { path = "../../plugins/shadcn" }
+frust-beui = { path = "../../plugins/beui" }
