@@ -325,14 +325,30 @@ class CommittedSeriesRegressionTests(unittest.TestCase):
 
 class ParseMarkerLineTests(unittest.TestCase):
     def test_parses_start_marker(self):
+        # The old, name-only shape — every Flutter marker, and every Frust
+        # series captured before the indexed shape shipped: no frame index.
         self.assertEqual(
-            stats.parse_marker_line("bench-scenario-start s1"), ("start", "s1")
+            stats.parse_marker_line("bench-scenario-start s1"), ("start", "s1", None)
         )
 
     def test_parses_end_marker(self):
         self.assertEqual(
             stats.parse_marker_line("bench-scenario-end cold_start"),
-            ("end", "cold_start"),
+            ("end", "cold_start", None),
+        )
+
+    def test_parses_indexed_start_marker(self):
+        # The 2026-09-06 shape: `n=<frame>` — the frame that carried the
+        # marker — ahead of the name.
+        self.assertEqual(
+            stats.parse_marker_line("bench-scenario-start n=42 s1"),
+            ("start", "s1", 42),
+        )
+
+    def test_parses_indexed_end_marker(self):
+        self.assertEqual(
+            stats.parse_marker_line("bench-scenario-end n=43 cold_start"),
+            ("end", "cold_start", 43),
         )
 
     def test_non_marker_line_returns_none(self):
@@ -340,6 +356,34 @@ class ParseMarkerLineTests(unittest.TestCase):
 
     def test_marker_with_no_name_returns_none(self):
         self.assertIsNone(stats.parse_marker_line("bench-scenario-start"))
+
+    def test_indexed_marker_with_no_name_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=1"))
+
+    def test_indexed_marker_with_malformed_index_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=nope s1"))
+
+    def test_negative_index_returns_none(self):
+        # Bare `int()` happily parses a leading `-`; a frame index can never
+        # be negative, so this must be rejected rather than silently
+        # attributing frames via a negative `n`.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=-1 s1"))
+
+    def test_signed_positive_index_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=+1 s1"))
+
+    def test_underscore_grouped_index_returns_none(self):
+        # `int("1_0")` == 10 in Python (numeric-literal grouping); a foreign
+        # `n=1_0` token must not silently parse as frame 10.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=1_0 s1"))
+
+    def test_non_ascii_digit_index_returns_none(self):
+        # Arabic-Indic digits (`١٢` == "12") satisfy Python's `str.isdigit()`
+        # and `int()`, but are not ASCII decimal digits.
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n=١٢ s1"))
+
+    def test_empty_index_returns_none(self):
+        self.assertIsNone(stats.parse_marker_line("bench-scenario-start n= s1"))
 
 
 class SliceScenarioTests(unittest.TestCase):
@@ -409,6 +453,119 @@ class SliceScenarioTests(unittest.TestCase):
         s = stats.compute_stats(frames)
         self.assertEqual(s.n_total, 3)
         self.assertEqual(s.p50_us, 200)
+
+    def test_s3_shape_indexed_window_is_exactly_the_ops_own_frame(self):
+        # The canonical S3 bracket and the whole point of the rework
+        # (act_000001a070c818837NtGqevW): `start` is raised in the build that
+        # applies the op (frame 2) and `end` in the build after it (frame 3),
+        # so the half-open [2, 3) window is exactly frame 2 — one frame, the
+        # op's own. Under the shipped emitter each marker line is written by
+        # the thread that recorded the frame, immediately ahead of that
+        # frame's raw line, which is the interleaving reproduced here.
+        lines = [
+            "bench-scenario-start n=2 s3-create1k",
+            "frust-perf raw n=1 total_us=90 rebuild_us=9 layout_us=9 paint_us=9 encode_us=31 acquire_us=21 submit_us=10 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+            "bench-scenario-end n=3 s3-create1k",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 acquire_us=70 submit_us=35 skipped=0",
+            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_us=140 acquire_us=94 submit_us=46 skipped=0",
+        ]
+        frames = stats.slice_scenario(lines, "s3-create1k")
+        self.assertEqual(
+            [f.n for f in frames],
+            [2],
+            "frame 1 precedes the window; frame 3 is the closing marker's own "
+            "frame and is excluded by the half-open rule; frame 4 follows",
+        )
+        self.assertEqual([f.total_us for f in frames], [200])
+
+    def test_indexed_markers_attribute_by_frame_identity_not_log_position(self):
+        # Index-based attribution reads the numbers, not the line order: the
+        # same window sliced out of a log whose raw lines were interleaved by
+        # another thread (per-op `frust-perf plugin` lines, app logging) must
+        # give the identical answer. Here BOTH markers appear ahead of every
+        # raw line they name, the worst case for a position-based slice.
+        lines = [
+            "bench-scenario-start n=2 s1",
+            "bench-scenario-end n=4 s1",
+            "frust-perf raw n=1 total_us=90 rebuild_us=9 layout_us=9 paint_us=9 encode_us=31 acquire_us=21 submit_us=10 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 acquire_us=70 submit_us=35 skipped=0",
+            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_us=140 acquire_us=94 submit_us=46 skipped=0",
+        ]
+        self.assertEqual(
+            [f.n for f in stats.slice_scenario(lines, "s1")],
+            [2, 3],
+            "a position-based slice would have found nothing between the two "
+            "marker lines; the indexed half-open window is frames 2 and 3",
+        )
+
+    def test_indexed_window_with_equal_edges_is_empty(self):
+        # The degenerate case the depth-1 latest-wins slot can produce: the
+        # op's own build was superseded before the render thread took it, so
+        # both edges landed on the frame that drew its result. [3, 3) is
+        # empty — the op contributed no frame of its own, and the harness
+        # must report that rather than silently borrowing a neighbour's.
+        lines = [
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+            "bench-scenario-start n=3 s3-update",
+            "bench-scenario-end n=3 s3-update",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 acquire_us=70 submit_us=35 skipped=0",
+        ]
+        self.assertEqual(stats.slice_scenario(lines, "s3-update"), [])
+
+    def test_mixed_log_indexed_and_positional_scenarios_both_slice_correctly(self):
+        # A single log carrying one indexed scenario (the new Frust shape)
+        # alongside one name-only scenario (an old marker, or Flutter's
+        # shape) — each scenario's own window is sliced by whichever
+        # strategy that occurrence's markers support, independently.
+        lines = [
+            "bench-scenario-start s2",  # positional, no index
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 acquire_us=24 submit_us=11 skipped=0",
+            "bench-scenario-end s2",
+            "bench-scenario-start n=3 s1",  # indexed
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 acquire_us=70 submit_us=35 skipped=0",
+            "bench-scenario-end n=4 s1",
+            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_us=140 acquire_us=94 submit_us=46 skipped=0",
+        ]
+        self.assertEqual([f.n for f in stats.slice_scenario(lines, "s2")], [1])
+        self.assertEqual(
+            [f.n for f in stats.slice_scenario(lines, "s1")],
+            [3],
+            "half-open: frame 4 is the closing marker's own frame, not the "
+            "window's",
+        )
+
+    def test_repeated_indexed_windows_accumulate_across_cycles(self):
+        # S3 cycles each op once per pass; every occurrence contributes its
+        # own half-open window and the frames add up into one series, the
+        # same way the name-only shape already accumulated.
+        lines = [
+            "bench-scenario-start n=1 s3-update",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 acquire_us=24 submit_us=11 skipped=0",
+            "bench-scenario-end n=2 s3-update",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+            "bench-scenario-start n=3 s3-update",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 acquire_us=70 submit_us=35 skipped=0",
+            "bench-scenario-end n=4 s3-update",
+            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_us=140 acquire_us=94 submit_us=46 skipped=0",
+        ]
+        self.assertEqual(
+            [f.n for f in stats.slice_scenario(lines, "s3-update")], [1, 3]
+        )
+
+    def test_unterminated_indexed_window_falls_back_to_positional_to_eof(self):
+        # No matching end marker before EOF: there is no end index to form a
+        # range from, so this stays positional (extends to EOF), the same
+        # trailing-inclusion behavior slice_scenario has always had.
+        lines = [
+            "bench-scenario-start n=1 s1",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 acquire_us=24 submit_us=11 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 acquire_us=47 submit_us=23 skipped=0",
+        ]
+        frames = stats.slice_scenario(lines, "s1")
+        self.assertEqual([f.n for f in frames], [1, 2])
 
 
 class DiscardFirstRunsTests(unittest.TestCase):
@@ -717,6 +874,80 @@ class SliceOpScenarioTests(unittest.TestCase):
         ]
         ops = stats.slice_op_scenario(lines, "s8-write")
         self.assertEqual([o.n for o in ops], [1])
+
+    def test_post_rework_s8_order_self_identifies_via_inline_scenario(self):
+        # 2026-09-06 marker shape (PROTOCOL §7): a marker is logged by the
+        # frame that carried it, which for S8's same-build bracket is AFTER
+        # the op lines it used to enclose — op lines first, both indexed
+        # marker lines after. The S8 emitter retrofit gives each op line its
+        # own inline `scenario=` field, so it self-identifies with no
+        # bracket needed, exactly like d1/d2's canonical-shape lines.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-write op=write type=i64 n=1 us=580 err=0",
+            "frust-perf plugin op=write type=total n=2 us=1192 errors=0",
+            "bench-scenario-start n=87 s8-write",
+            "bench-scenario-end n=88 s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in ops], ["write", "write"])
+        self.assertEqual([o.scenario for o in ops], ["s8-write", "s8-write"])
+
+    def test_old_s8_order_without_inline_scenario_still_parses_via_bracket(self):
+        # Pre-rework shape — every S8 series already committed under
+        # benchmarks/raw: name-only markers logged inline, ahead of the op
+        # lines they bracket, no inline `scenario=` field. Must keep
+        # reproducing the exact same numbers it always did.
+        lines = [
+            "bench-scenario-start s8-write",
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin op=write type=i64 n=1 us=580 err=0",
+            "bench-scenario-end s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in ops], ["write", "write"])
+        self.assertIsNone(ops[0].scenario)
+
+    def test_retrofitted_s8_inline_scenario_honours_parent_id_query(self):
+        # act_000001a0738ef5026feTx6k9: post-retrofit, both S8 op families
+        # carry an inline `scenario=s8-write`/`scenario=s8-read` field (no
+        # bracket needed to attribute them). A parent-id query (`--scenario
+        # s8`) must still find every op across both phases, exactly like a
+        # pre-retrofit, bracket-attributed capture always did — not the
+        # empty table an exact-equality-only inline match would give.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-write op=write type=i64 n=1 us=580 err=0",
+            "frust-perf plugin scenario=s8-read op=read type=bool n=0 us=400 err=0",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8")
+        self.assertEqual([o.op for o in ops], ["write", "write", "read"])
+
+    def test_retrofitted_s8_inline_scenario_sub_id_query_still_exact(self):
+        # The same lines, queried by the exact sub-id: only that phase's
+        # ops come back, not the sibling phase's.
+        lines = [
+            "frust-perf plugin scenario=s8-write op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin scenario=s8-read op=read type=bool n=0 us=400 err=0",
+        ]
+        write_ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in write_ops], ["write"])
+        read_ops = stats.slice_op_scenario(lines, "s8-read")
+        self.assertEqual([o.op for o in read_ops], ["read"])
+
+    def test_d2_canonical_query_unchanged_by_parent_id_matching(self):
+        # d2's canonical-shape lines carry their own exact scenario id
+        # inline (no parent/sub-id split the way S8's phases have) — the
+        # parent-id prefix rule must not change this scenario's existing
+        # behavior.
+        lines = [
+            "bench-scenario-start d2",
+            "frust-perf op scenario=d2 op=select_point n=0 us=50 err=0",
+            "frust-perf op scenario=d2 op=range_scan n=0 us=900 err=0 rows=37",
+            "bench-scenario-end d2",
+        ]
+        ops = stats.slice_op_scenario(lines, "d2")
+        self.assertEqual([o.op for o in ops], ["select_point", "range_scan"])
 
 
 class ComputeOpStatsTests(unittest.TestCase):

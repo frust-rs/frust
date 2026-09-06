@@ -4743,3 +4743,169 @@ to prove it against yet.
 
 **Trigger for removal**: a per-surface registry keyed by surface identity, or the first shell that
 keeps two engine-tier surfaces live at once — whichever lands first.
+
+### `shell-ios-first-frame-above-goal` — the iOS split executor's first frame still lands above the 85 ms goal
+
+**Observed**: overlapping the render thread's GPU bring-up with the UI thread's font-preinit join
+(see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s iOS render-thread split) narrowed but did
+not close the gap: the iPhone SE's first frame lands 64-176 ms (median 100) on the published 2026-09-06
+pass in `benchmarks/RESULTS.md`, against a 110 ms pre-overlap baseline and an 85 ms goal (an
+earlier 12-launch probe on the same build read 89-115 ms against a 99 ms baseline). `TextContext::new`'s font preinit is bimodal — 51-65 ms on the fast path,
+100-159 ms on the slow one, the first frame trailing the join by 13-23 ms — and once GPU bring-up runs concurrently underneath it, the slow mode is
+what sets the median first-frame cost. A render-thread-style QoS boost applied to the font-preinit
+thread was measured and did not close the gap either.
+
+**Accepted because**: the render/font overlap already recovers most of the achievable win without
+adding synchronization risk to the split; the remaining cost sits inside `TextContext::new`/Parley's
+own font matching, which this shell does not own.
+
+**Trigger for removal**: `TextContext::new`'s bimodal cost is made deterministic, or font preinit
+moves off the first-frame critical path entirely.
+
+### `shell-ios-pace-trace-artefact-only` — the "3.5% of S3 frames take two vsyncs" reading was a measurement artefact
+
+**Observed**: the `ios-pace` diagnostic (`FRUST_PACE_TRACE`, see
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) traced the earlier reading to `FramePasses::total`
+— a sum of the UI thread's and the render thread's concurrently-running spans, not a wall-clock
+interval — being read as if frames were missing a vsync. The real present-to-present cadence on the
+iPhone SE is a locked 60 Hz with no evidence of dropped vsyncs, so no frame-path change follows from
+that reading. Pre-acquiring a drawable ahead of need (the one candidate lever it might have
+motivated) was tried and rejected regardless — a drawable parked across a `Pause` is a UIKit
+watchdog hazard.
+
+**Accepted because**: the diagnostic exists precisely to keep a future pacing claim honest, and this
+reading turned out not to name a real regression.
+
+**Trigger for removal**: a present-to-present (not cost-sum) measurement on a real device showing
+actual dropped vsyncs.
+
+### `engine-atlas-tier-by-driver-flag` — atlas tier is chosen by a single driver-reported flag, not a memory-class policy
+
+**Observed**: `AtlasBudget::for_caps` (`crates/frust-engine/src/cache/images.rs`) picks the desktop
+budget (2048x2048 x8 layers) or the mobile one (1024x1024 x4 layers) solely off
+`TierCaps::transient_saves_memory`, itself read from `wgpu::AdapterInfo`. Two Android devices of
+similar class resolve differently: the Pixel 5 (Adreno 620) resolves the desktop budget, the
+OnePlus 9 (Adreno 660) resolves mobile. Functionally harmless today — both devices show zero atlas
+skips — but the memory-class decision is made by a driver capability flag never intended as a
+memory-tier signal.
+
+**Accepted because**: no skip or measurable cost has been observed on either device; guessing at an
+adapter-name or device-class heuristic ahead of an actual failure would trade one arbitrary signal
+for another.
+
+**Trigger for removal**: an adapter-class heuristic, or a shell-provided memory-class hint
+`AtlasBudget::for_caps` can read instead of the driver flag alone.
+
+### `engine-atlas-pressure-fit-model-blind-to-glyphs` — the pressure-eviction fit model cannot see glyph pages, so a committed plan can still be refused
+
+**Observed**: `ImageResidency::allocate_under_pressure`'s fit model (`plan_pressure_eviction`/
+`layer_admits`, `crates/frust-engine/src/cache/images.rs`) walks only the image entries it tracks —
+the glyph pages sharing the same allocator are invisible to it — so a plan the model approves can
+still be refused by the real packer, costing that plan's bounded evictions with no allocation
+(`skipped>0 evicted>0` in the `frust-perf img` line). The search is also bounded per atlas layer, so
+a request that recurs across several layers pays that per-refusal search bound once per layer.
+
+**Accepted because**: the model is deliberately optimistic rather than exact — it never refuses a
+request eviction could have satisfied — and the cost of a wrong plan is bounded by the same
+candidate/area ceiling that bounds every plan, not unbounded churn.
+
+**Trigger for removal**: device data showing this cost is sustained rather than occasional, at which
+point a fit test that also accounts for glyph pages, or an incrementally-maintained LRU, would be
+warranted.
+
+### `engine-atlas-pending-clear-reallocation-race` — a rectangle with a pending clear can be re-allocated to the glyph atlas before that clear is serviced
+
+**Observed**: `ImageResidency::release` (`crates/frust-engine/src/cache/images.rs`) frees an entry's
+rectangle back into the shared `ImageCache` immediately, but only *records* the rectangle in
+`evictions`, which survives until a consumer acknowledges the plan (`acknowledge_plan`). Nothing
+stops the glyph atlas policy — which allocates through that same shared allocator during compilation
+— from being handed that still-not-cleared rectangle on a later frame, ahead of the pending clear
+ever reaching a live atlas. Pre-existing (the allocator has always been shared), and now reachable
+more often since eviction runs routinely under atlas pressure rather than only on the rare
+age-based reap.
+
+**Accepted because**: no observed corruption to date — the window needs a frame between the eviction
+and the clear being serviced to land a glyph allocation on the exact freed rectangle — and closing it
+needs an allocator-level hold list this crate does not have today.
+
+**Trigger for removal**: an allocator-level hold list that withholds a freed rectangle from
+reallocation until its pending clear is acknowledged.
+
+### `shell-ios-tests-cannot-link` — `frust-shell-ios`'s lib tests cannot link on any Apple target
+
+**Observed**: the crate's two test-only macro-expansion modules (`macro_expansion`,
+`macro_expansion_state_factory` in `crates/frust-shell-ios/src/ffi_glue.rs`) each invoke `ios_app!`,
+which stamps out an `extern "C" fn frust_destroy` (among other exports); compiled into the same
+linked test binary, the two clash. iOS-gated unit tests (e.g. the `pace_trace` formatter tests) are
+therefore verified only by `cargo check --target aarch64-apple-ios-sim --tests` (or
+`--all-targets`), which compiles but never links — never by an actually-run `cargo test` on an Apple
+target.
+
+**Accepted because**: the macro-expansion smoke tests need to exercise real macro expansion on the
+iOS target, and no real `cdylib`/app binary ever links this crate's own test harness in.
+
+**Trigger for removal**: gating the macro-expansion test modules behind a dedicated cfg so at most
+one of them compiles into any one linked test binary.
+
+### `bench-sub-markers-off-frame-thread-never-emitted` — a scenario sub-marker raised from a pool thread is dropped, not queued
+
+**Observed**: `frust-shell-common`'s scenario-marker route (`crates/frust-shell-common/src/perf.rs`)
+is per-thread: a marker raised on a thread only reaches a recorded frame if that same thread later
+calls `RenderSender::send_scene` (which drains its own thread-local queue). A `spawn_blocking` pool
+thread never calls `send_scene`, so a sub-marker raised there — `frust_bench`'s `s8-write`/
+`s8-read`, `d1-*`, `d2-*` — is raised and then simply never emitted; the surrounding scenario's
+inline `scenario=` op rows still land and remain the record of what happened.
+
+**Accepted because**: the route's per-thread design is what keeps it lock-free on the frame path,
+and every scenario the gap affects still self-reports through its inline op rows.
+
+**Trigger for removal**: re-siting the affected sub-markers onto the UI thread, or a route that
+forwards an off-thread marker onto the next frame some other way.
+
+### `engine-text-glyph-lowering-dominates-encode` — text-heavy CPU encode cost is dominated by glyph lowering even on atlas hits
+
+**Observed**: on S3/S6-shaped scenes (iPhone SE and OnePlus 9), 87-92% of the compile walk's cost is
+spent lowering glyphs even when every glyph is an atlas hit: a cached glyph still pays a
+general-purpose flattener and a full image-paint record in
+`crates/frust-engine/src/text/backend.rs` rather than a cheaper cached-hit path. A candidate
+fast-rect-style shortcut (mirroring the compiler's own axis-aligned rect fast path) is unproven for
+glyphs.
+
+**Accepted because**: correctness came first — every glyph draws through one general path rather
+than a second, less-tested one — and the cost is measured but has no safe, proven lever behind it
+yet.
+
+**Trigger for removal**: a measured, proven fast path for a cached atlas-hit glyph in the text
+backend.
+
+### `cli-build-no-default-features-gap` — `frust build` forwards cargo `--features` only, never `--no-default-features`
+
+**Observed**: `frust build`'s cargo passthrough (`crates/frust-cli/src/cli.rs`,
+`crates/frust-cli/src/commands/build.rs`) carries `--features` only; there is no
+`--no-default-features` passthrough. A no-db size measurement therefore cannot go through
+`frust build apk` at all — the `frust_bench` no-db-feature APK used for that measurement is built
+directly with `cargo-ndk` plus `./gradlew` instead — and `frust build apk --release` separately
+refuses to run without real release-signing material
+(`crates/frust-drive/src/android_build/signing.rs`) by design, so that measurement APK is a
+debug-signed artifact outside the CLI's own release path.
+
+**Accepted because**: the CLI's release-signing refusal is a deliberate guard against shipping an
+unsigned release artifact; the missing `--no-default-features` passthrough is a real gap but has had
+exactly one caller — this size measurement — to date.
+
+**Trigger for removal**: a `--no-default-features` passthrough (or a dedicated measurement mode) on
+`frust build`.
+
+### `bench-flutter-s2-single-line-parity-break` — Flutter's S2 rows now render single-line; earlier S2 numbers are not comparable
+
+**Observed**: `benchmarks/flutter_bench/lib/scenarios/s2_list.dart`'s rows now set `maxLines: 1`/
+`TextOverflow.ellipsis` to match Frust's S2 row geometry. Any S2 number measured before that change
+used a different (wrap-capable) row shape on the Flutter side and cannot be compared against a
+number measured after it.
+
+**Accepted because**: matching row geometry is what makes an S2 frame-cost comparison meaningful in
+the first place; the alternative was an already-mismatched comparison.
+
+**Trigger for removal**: none needed to remove the entry outright — flagged so a reader does not mix
+pre- and post-change S2 numbers in one comparison; superseded in practice by the next published S2
+pass, which uses only post-change data.

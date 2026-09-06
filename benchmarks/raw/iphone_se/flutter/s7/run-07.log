@@ -1,5 +1,5 @@
 bench-scenario-start s7
 flutter-perf startup first_frame_ms=8
 bench-scenario-start s7-idle
-flutter-perf raw n=3 build_us=197 raster_us=11709 total_us=12218
-flutter-perf raw n=4 build_us=242 raster_us=3072 total_us=3604
+flutter-perf raw n=3 build_us=169 raster_us=12554 total_us=12995
+flutter-perf raw n=4 build_us=245 raster_us=2355 total_us=2759

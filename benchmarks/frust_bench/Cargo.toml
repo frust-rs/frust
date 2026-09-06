@@ -67,7 +67,13 @@ frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 # enough today — the crate's own default-engine resolution is what lets a
 # future `engine-turso` column reach these scenarios with no scenario-code
 # change (see `plugins/database/src/lib.rs`'s module doc, *Engines*).
-frust-database = { path = "../../plugins/database" }
+#
+# Optional, behind the default-ON `db` feature below: it statically links a
+# bundled SQLite (~1 MB of C in the release `libfrustbench.so`) that only the
+# two `d*` scenarios ever call, so the S1–S8 frame-class matrix builds it out
+# with `--no-default-features`. Default-on keeps every existing invocation
+# (`frust run`, `frust build`, `cargo test`, the harness) unchanged.
+frust-database = { path = "../../plugins/database", optional = true }
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -106,6 +112,31 @@ reactive_graph = "0.2"
 # Version-Pin Policy hand-sync rule) — see either of those manifests for the
 # full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
 [features]
+# `db` ON by default so every existing invocation — `frust run`, `frust build
+# apk/ios`, `cargo test`, the benchmark harness — keeps building all ten
+# scenarios with no new flag. Only a deliberate `--no-default-features` build
+# drops it.
+default = ["db"]
+
+# The DB op-latency class (`d1`/`d2`, PROTOCOL.md §9): the `frust-database`
+# dependency, its bundled SQLite, and the two scenario modules + their
+# `SCENARIOS` registry entries (`src/scenarios/mod.rs`).
+#
+# Turning it OFF yields the S1–S8 frame-class app used for the app-size
+# matrix. There is no CLI route to a no-`db` APK today: `frust build`'s
+# Gradle plumbing forwards `--features` only (`-Pfrust.cargoFeatures`,
+# base64) and has no `--no-default-features` knob, so build the S1–S8 arm
+# with cargo-ndk directly:
+#
+#   cd benchmarks/frust_bench
+#   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs \
+#       build --release --no-default-features --features lean
+#
+# and, for a packaged APK, follow it with
+# `./android/gradlew -p android assembleRelease -x cargoNdkBuild`, which
+# packages the jniLibs that command just wrote instead of rebuilding them.
+db = ["dep:frust-database"]
+
 # Release-lean log ceiling — see the `log` dependency above for why this is a
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit

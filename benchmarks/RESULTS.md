@@ -12,58 +12,120 @@ Every table below is reproducible from `benchmarks/raw/<device>/<app>/<sN>/`
 `python3 benchmarks/harness/summarize.py --frust <…>/frust_profile --flutter <…>/flutter`,
 which runs `harness/stats.py` — the one shared statistics script — over both
 apps' raw lines. Percentiles are nearest-rank over non-skipped frames; the first
-2 of 12 runs are warm-up and excluded; miss counts are per frame attempted.
+2 of 12 runs are warm-up and excluded; miss counts are per frame attempted. Each
+device's "vs 2026-09-05" table is `harness/compare.py` over two of those JSON
+dumps, both regenerated from the committed raw trees; Δ positive = slower.
 
-> **Results reset 2026-09-05 — engine renderer.** Frust's `vello` renderer was
-> deleted on 2026-09-02 and replaced by the frust-owned `frust-engine` strip
-> pipeline (PROTOCOL §2.6). Every Frust series below is a `--profile` build of
-> `f64be636` on that engine; the 2026-07-21 vello-era matrix (OnePlus 9, iPhone SE,
-> Xiaomi 12) was retired in one sweep — its OnePlus 9 and iPhone SE raws are
-> gone from `raw/` after the renderer-transition comparison at the bottom of this
-> file, its Xiaomi 12 section is kept (condensed) until that device is re-run.
-> **Devices in this pass:** OnePlus 9, iPhone SE and Pixel 5 (16/16 blocks each). The Pixel 5 dropped off
-> USB during its first attempt and re-ran the full matrix the same morning over adb-over-Wi-Fi (radios left
-> as found — see its deviations); the Xiaomi 12 was not at desk.
-> Toolchain for this pass: Rust 1.98.1 (pinned), Flutter 3.47.2 stable, Xcode 26.2,
-> NDK 28.2.13676358, `wgpu` 30.0.1.
+> **Post-optimization pass, 2026-09-06.** Every Frust series below for the
+> OnePlus 9, iPhone SE and Pixel 5 is a `--profile` build of `21076221` on the
+> frust-owned `frust-engine` strip pipeline with the render-thread split, and
+> replaces that device's 2026-09-05 series (PROTOCOL §2.6); each device section
+> carries a compact delta table against it. **All three devices ran the full
+> 16 blocks**, in one unattended `matrix.sh` session each: OnePlus 9 (USB,
+> 120 Hz pinned), iPhone SE (network `devicectl`), Pixel 5 (adb-over-Wi-Fi,
+> unpinned). Frust's `vello` renderer was deleted on 2026-09-02 and the
+> 2026-07-21 vello-era matrix retired with it; the Xiaomi 12 section below is
+> the condensed remnant of that pass and the one device still awaiting a re-run.
+> Toolchain for this pass: Rust 1.98.1 (pinned), Flutter 3.47.2 stable /
+> Dart 3.13.2, Xcode 26.2 (17C52), `wgpu` 30.0.1 (pinned).
+
+## Success criteria — post-optimization pass, 2026-09-06
+
+Every criterion the optimization work set itself, scored with a number from this pass. Two are missed and are recorded as missed; one was written against a quantity that no longer exists and is restated rather than scored.
+
+| Criterion | Measured this pass | Verdict |
+|---|---|---|
+| iPhone SE framework first frame ≤ 85 ms | **100 ms** median (64–176 over 12 launches) | **MISS** |
+| OnePlus 9 S1 `gpu_main` ≤ 5.0 ms | **6.37 ms** p50 over 35,989 `gpu_q=1` frames | **MISS** |
+| S3 "two vsyncs ≤ 0.5 %" | criterion is void — see below | **RESTATED** |
+| S5 continuous image column, both Android devices | OnePlus `skipped=0` over 34,878 `img` lines; Pixel emits **no `img` line at all** | **MET** |
+| S3 `create 1k` > 0 frames on every device | OnePlus **341**, iPhone SE **180**, Pixel 5 **260** | **MET** |
+
+**iPhone SE first frame — missed on the median, met on half the launches.** 100 ms median against the 85 ms bar, better than 2026-09-05's 110 ms on every statistic (min 78→64, max 250→176). The distribution is bimodal — six launches at 64–82 ms, six at 119–176 — and the split is entirely the font preinit: `first_frame_presented` = `font_preinit_joined` + 13–23 ms (median 17) in all twelve launches, the join being 51–65 ms in the fast half and 100–159 in the slow. GPU bring-up is no longer the constraint (`adapter_ready` 102→22 ms median, max 239→34), so closing this is a font-preinit question, not a renderer one.
+
+**OnePlus 9 S1 `gpu_main` — missed, and flat against the baseline.** 6.37 ms against the 5.0 ms bar, where 2026-09-05 measured 6.34: no regression and no improvement. S1 is fragment-shader bound here — 6.37 of the frame's 6.45 ms GPU total is `gpu_main`, prepass 0.07, composite/blit 0.00 — so the identified lever is in the shader and is not in this build. The Pixel 5 reads `gpu_main` 13.60 ms against an 11.11 ms panel period, i.e. GPU-bound there too.
+
+**"S3 two vsyncs ≤ 0.5 %" is void as written.** It counted S3 frames whose `total_us` exceeded two vsync periods. Under the render-thread split `total_us` sums the UI half's `rebuild`/`layout`/`paint` with the render half's `encode`/`acquire`/`submit`, folded by `FramePasses::from_split` from two threads that run **concurrently** for one frame (PROTOCOL §7) — a per-frame cost sum, not the interval between presents. A frame can cost more than a period and still present on the next vsync, so "over two budgets" counts nothing. This pass proves it arithmetically: OnePlus 9 S1 has a cost-sum p50 of 8.55 ms with 63.05 % of frames above the 8.33 ms column, while the same capture presents 36,029 frames in 300 s — 120.1 fps, a cadence a 63 % two-vsync rate cannot coexist with. A per-frame present-to-present *distribution* is not recoverable either: the sanitized logs carry no timestamps and `platform-view … period_us` is a smoothed display-period estimate, not an interval sample. **Restated as the two real quantities:** S3 cost-sum p95 and achieved present rate.
+
+| Device | S3 cost-sum p95 old→new | S3 present rate old→new |
+|---|---|---|
+| OnePlus 9 (120 Hz pinned) | 12.16 → 12.26 ms | 114.5 → 114.6 fps |
+| iPhone SE (60 Hz) | 18.78 → 18.48 ms | 60.9 → 61.4 fps |
+| Pixel 5 (unpinned 60/90 Hz) | 9.60 → 10.84 ms | 89.0 → 88.7 fps |
+
+Every device holds its present rate to within 0.5 fps of the previous pass, and the cost-sum p95 is flat on the OnePlus 9, better on the iPhone SE and worse on the Pixel 5 — the last inside that device's own between-session variance (see its delta note).
+
+---
 
 ## Device: Pixel 5 (redfin, Snapdragon 765G / Adreno 620) — mid-tier Android
 
-**Status:** run 2026-09-05 08:33–10:32 UTC, **12 runs × 30 s per scenario per app (S7: 60 s runs), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** **Frust = PROFILE build of `f64be636`** (engine renderer; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4), **Flutter = profile build** (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/pixel5/frust_profile/<sN>/` and `raw/pixel5/flutter/<sN>/` (run-NN.log + run-NN.pss_before/after.txt, stats.txt; S7 adds cpuinfo.txt/coldstart.txt). **First Frust-vs-Flutter matrix pass on this device** (it previously ran frust-only engine gates) — a new column in the matrix. One unattended `matrix.sh` session, all 16 blocks `ok` on attempt 1, no retries. The device was reached over **adb-over-Wi-Fi** (deviation 1) after a USB drop aborted the first launch (deviation 6).
+**Status:** run 2026-09-06 17:55–19:59 UTC, **12 runs × 30 s per scenario per app (S7: 60 s runs), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** **Frust = PROFILE build of `21076221`** (engine renderer with the render-thread split; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4), **Flutter = profile build** (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/pixel5/frust_profile/<sN>/` and `raw/pixel5/flutter/<sN>/` (run-NN.log + run-NN.pss_before/after.txt, stats.txt; S7 adds cpuinfo.txt/coldstart.txt). One unattended `matrix.sh` session, all 16 blocks captured on attempt 1, no thermal stall; the frust S8 block was re-run once by a stale driver check that does not affect its data (deviation 2). The device was reached over **adb-over-Wi-Fi** (deviation 1). **This pass supersedes the 2026-09-05 pass on this device.**
 
-- Chipset: Snapdragon 765G (board `lito`) / Adreno 620, GLES driver V@0490.0. Model: Pixel 5 `redfin` (serial redacted).
-- OS: Android 14, build `UP1A.231105.001` (stock, release-keys), SDK 34.
-- Display: 1080×2340 @ ~435 dpi; modes id 0 = 60 Hz (active at idle), id 1 = 90 Hz. **Refresh NOT pinned** (`peak_refresh_rate`/`min_refresh_rate` unset throughout, as on this device's earlier engine gates); the apps opt in themselves. stats.py budgets are 16.67 / 8.33 ms only — the panel's 11.11 ms (90 Hz) budget is not a column (deviation 3).
-- High-refresh opt-in engaged on both apps (§6): Frust `Surface.setFrameRate` (in-app FPS readout 89.8 in S1), Flutter `flutter_displaymode`. Achieved (active frames ÷ 300 s): Frust ~89 fps in S2/S3/S4/S6, ~79 in S5, ~67 in S1; Flutter ~82 (S1), ~88 (S4/S6), ~87 (S5); S2/S3 Flutter paint is event-driven.
-- Brightness fixed 128/255, auto-brightness off (`device_state.sh`) for every block; owner's 91/manual restored afterwards (read-back confirmed). Screen timeout 30 min, `svc power stayon true` during blocks. Battery saver off.
-- Radios: **airplane ON with the Wi-Fi override (`wifi_on=2`) and a VPN tunnel active for the whole session** (the adb link); Bluetooth off. Left as found by `--wireless` — not the §3 radios-off state (deviation 1).
-- Charger: **none — on battery the entire session** (`USB powered: false`, `AC powered: false`); real level 99 % → 78 % across the 16 blocks; `--min-level 30` guard passed every block (deviation 2).
-- Thermal: gate ceiling 38 °C / 120 s cooldown before every block; session start 27.1 °C, peak 29.2 °C (after the flutter S5 block), end 26.0 °C. **No cooldown stall in any block** (no `warning: still` in any run.log). 30 s blocks 384–388 s wall, 60 s S7 blocks 745/749 s.
-- Toolchain: Rust 1.98.1 (pinned), NDK 27.0.12077973; Flutter 3.47.2 stable / Dart 3.13.2. APKs byte-identical to the OnePlus 9 pass: frust 34,206,174 B (md5 d11f1aaa…), flutter 27,193,780 B (md5 135e9aab…); stale installs removed and both installed fresh by the driver, md5 re-verified.
-- Visual gate (driver screencap per block, all 16 reviewed): **PASS on every block, both apps.** S1 same deterministic bubble field on both; S2 mid-scroll rows on both; S3 populated table on both (Flutter with update/swap marks); S4 parse screen on both; **S5 geometry PASS — both apps' cells span edge-to-edge with identical side padding and cell height; Frust's three visible cells were all fully decoded (no empty cells), Flutter's showed two decoded + one grey placeholder**; S6 multilingual block on both; S7 idle pages; S8 quiescent screens.
+- Chipset: Snapdragon 765G (board `lito`) / Adreno 620. Model: Pixel 5 `redfin` (serial redacted).
+- Display: 1080×2340 @ ~435 dpi; modes id 0 = 60 Hz, id 1 = 90 Hz. **Refresh NOT pinned** (`peak_refresh_rate`/`min_refresh_rate` unset throughout, matching this device's earlier passes); the apps opt in themselves. **The panel was already in the 90 Hz mode at session start** (`mActiveSfDisplayMode` id 1), where the 2026-09-05 session recorded 60 Hz at idle. stats.py budgets are 16.67 / 8.33 ms only — the panel's 11.11 ms (90 Hz) budget is not a column (deviation 3).
+- High-refresh opt-in engaged on both apps (§6): Frust `Surface.setFrameRate`, Flutter `flutter_displaymode`. Achieved (active frames ÷ 300 s): Frust ~88.4–88.7 fps in S2/S3/S4/S6, ~79.4 in S5, ~65.9 in S1; Flutter ~82.0 (S1), ~84.0 (S5), ~87.5–87.8 (S4/S6); S2/S3 Flutter paint is event-driven.
+- Brightness fixed 128/255, auto-brightness off (`device_state.sh`) for every block. Screen timeout 30 min, `svc power stayon true` during blocks. Battery saver off.
+- Radios: **left exactly as found by `--wireless`** (airplane setting untouched, Wi-Fi up, a tunnel carrying the adb link) — not the §3 radios-off state (deviation 1).
+- Charger: **AC-connected at the start, disconnected mid-session** — `AC powered: true` at 100 % when the session opened, the level flat at 100 % through the frust S5 block (18:54 UTC), then 98 % → 91 % over the remaining blocks (flutter S5, S6, S7, S8) with `AC powered: false` at close; so S1–S4 and frust S5 ran on mains and the rest on battery. `dumpsys battery unplug` spoofed on-battery state before every block either way. **The 2026-09-05 session ran on battery throughout (99 % → 78 %)** — see the delta note below, this is a real environmental difference between the two passes.
+- Thermal: gate ceiling 38 °C / 120 s cooldown before every block; session start 28.6 °C, peak 37.2 °C (after the frust S6 block), end 31.0 °C. **No cooldown stall in any block** (no `warning: still` in any run.log). 30 s blocks 384–386 s wall, 60 s S7 blocks 744/743 s.
+- Toolchain: Rust 1.98.1 (pinned), `wgpu` 30.0.1 (pinned); Flutter 3.47.2 stable / Dart 3.13.2. Frust APK arm64-only, 12,008,167 B (md5 1715cb35…); Flutter APK fat profile build, 70,462,089 B (md5 43132929…) — packaged differently, so their APK sizes are not a size comparison. Both installed fresh, md5 re-verified by the driver.
+- Visual gate (driver screencap per block, all 16 reviewed): **PASS on every block, both apps**, and no keyboard or other system window intruded on any capture (bottom-band luma 20–89 across all 16, against the 237 that a Gboard window reads — the OnePlus 9's deviation 1 did not occur here). **S5 geometry PASS — Frust's column is edge-to-edge with every visible cell fully decoded, no placeholders and no gaps.**
 - Sanitization: driver staging `RAW_OK` (192 run logs, 384 PSS snapshots, 16 stats.txt, S7 cpuinfo/coldstart), whitelist self-check passed.
 
 ### S1
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 14.86 | 16.18 | 16.93 | 116.08 | 345 (1.72%) | 20,113 (100.00%) | 20,113 (~67.0 fps avg) |
-| Flutter (profile) | 12.17 | 19.54 | 22.58 | 67.63 | 1,424 (5.76%) | 24,666 (99.84%) | 24,705 (~82.3 fps avg) |
+| Frust (profile) | 15.23 | 18.03 | 19.00 | 146.39 | 2,016 (10.20%) | 19,765 (100.00%) | 19,765 (~65.9 fps avg) |
+| Flutter (profile) | 12.55 | 20.21 | 23.54 | 68.05 | 1,434 (5.83%) | 24,504 (99.59%) | 24,604 (~82.0 fps avg) |
 
-Frust pass p50 (ms): rebuild 0.10, layout 0.00, paint 0.16, encode 0.08, acquire 0.03, submit 14.46; layout_us>0 on 914/20,113 frames; GPU (gpu_q=1 on 20,073) total p50/p95 13.88/14.09 ms
+Frust pass p50 (ms): rebuild 0.11, layout 0.00, paint 0.19, encode 0.08, acquire 0.03, submit 14.52; layout_us>0 on 6,903/19,765 frames; GPU (gpu_q=1 on 19,725) total p50/p95 13.91/14.15 ms
 
-**Split.** Flutter wins the median (12.17 vs 14.86 ms) and the worst frame (67.6 vs 116.1 ms) at a higher cadence (~82 vs ~67 fps); Frust wins the tail (p95 16.18 vs 19.54, p99 16.93 vs 22.58) and misses the 60 Hz budget on 1.72 % vs 5.76 % of frames attempted. The breakdown line puts 14.46 of Frust's 14.86 ms median in submit (GPU total p50 13.88 ms).
+**Split, and this is the device's one GPU-bound scenario.** Flutter takes the median (12.55 vs 15.23 ms) and the worst frame (68.05 vs 146.39); Frust takes the tail (p95 18.03 vs 20.21, p99 19.00 vs 23.54). Frust misses the 60 Hz budget on 10.20 % of frames against Flutter's 5.83 %, at ~65.9 vs ~82.0 fps. The breakdown says why plainly: 14.52 of Frust's 15.23 ms is `submit`, and GPU pass time is 13.91 ms median — above the panel's 11.11 ms period at 90 Hz, so S1 cannot hold the refresh rate on Adreno 620 no matter what the CPU side does. `gpu_main` is 13.60 ms of that 13.91.
 
 ### S2
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 8.91 | 10.61 | 11.73 | 115.61 | 35 (0.13%) | 15,476 (57.99%) | 26,687 (~89.0 fps avg) |
-| Flutter (profile) | 22.65 | 30.32 | 56.68 | 72.20 | 4,149 (97.53%) | 4,247 (99.84%) | 4,254 (~14.2 fps avg) |
+| Frust (profile) | 10.18 | 11.32 | 14.14 | 158.28 | 135 (0.51%) | 17,621 (66.45%) | 26,517 (~88.4 fps avg) |
+| Flutter (profile) | 31.28 | 40.59 | 66.64 | 83.79 | 3,152 (99.49%) | 3,168 (100.00%) | 3,168 (~10.6 fps avg) |
 
-Frust pass p50 (ms): rebuild 0.09, layout 2.91, paint 0.31, encode 0.06, acquire 0.07, submit 5.17; layout_us>0 on 26,683/26,687 frames; GPU (gpu_q=1 on 26,647) total p50/p95 8.33/8.55 ms
+Frust pass p50 (ms): rebuild 0.09, layout 3.73, paint 0.35, encode 0.06, acquire 0.07, submit 5.95; layout_us>0 on 26,516/26,517 frames; GPU (gpu_q=1 on 26,477) total p50/p95 8.15/8.44 ms
 
-**Frust wins S2** — p50 8.91 vs 22.65 ms, p95 10.61 vs 30.32, 60 Hz misses 0.13 % vs 97.53 % of frames attempted. Flutter's lower absolute 8.33 ms miss count reflects its ~6× smaller event-driven frame total (4,254 vs 26,687), not cheaper frames. Frust layout ran on every frame (p50 2.91 ms) — a genuine per-frame relayout.
+**Frust wins S2 decisively** — p50 10.18 vs 31.28 ms, p95 11.32 vs 40.59, and 0.51 % vs 99.49 % of frames over the 60 Hz budget. Frust repaints continuously at ~88.4 fps (26,517 frames) while Flutter manages 3,168 painted frames; the per-frame figures compare, the frame counts do not. Frust re-lays out every frame at 3.73 ms median, the most expensive layout in the matrix.
+
+### S4
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 5.93 | 11.44 | 12.45 | 148.06 | 44 (0.17%) | 3,022 (11.37%) | 26,586 (~88.6 fps avg) |
+| Flutter (profile) | 5.17 | 6.74 | 8.11 | 29.48 | 6 (0.02%) | 177 (0.67%) | 26,334 (~87.8 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.24, layout 0.00, paint 0.12, encode 0.03, acquire 1.70, submit 3.79; layout_us>0 on 23,840/26,586 frames; GPU (gpu_q=1 on 26,546) total p50/p95 3.94/4.32 ms
+
+**Flutter wins S4** — p50 5.17 vs 5.93 ms, p95 6.74 vs 11.44, worst 29.48 vs 148.06 — with both apps near the panel rate and both essentially never missing the 60 Hz budget (0.02 % vs 0.17 %).
+
+### S5
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 13.04 | 13.84 | 14.62 | 164.75 | 108 (0.45%) | 23,450 (98.49%) | 23,809 (~79.4 fps avg) |
+| Flutter (profile) | 8.39 | 12.57 | 15.37 | 30.05 | 105 (0.42%) | 12,845 (50.95%) | 25,211 (~84.0 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.62, layout 0.03, paint 0.03, encode 0.02, acquire 0.06, submit 12.18; layout_us>0 on 23,808/23,809 frames; GPU (gpu_q=1 on 23,769) total p50/p95 12.15/12.44 ms
+
+**Split, on a valid image column.** Flutter wins the median (8.39 vs 13.04 ms); Frust wins the tail (p95 13.84 vs 12.57 is Flutter's, but p99 14.62 vs 15.37 and the 60 Hz miss rate 0.45 % vs 0.42 % are a wash) and the two are within noise on budget misses. The content gate is the strongest form available: **no `frust-perf img` line was emitted at all across the kept runs**, which per PROTOCOL §7 means the atlas never skipped or evicted an image — the line only appears when one of those counters is non-zero. 12.18 of Frust's 13.04 ms is `submit` against 12.15 ms of GPU pass time, so this scenario is GPU-bound here too.
+
+### S6
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 7.88 | 10.15 | 13.43 | 166.62 | 99 (0.37%) | 8,271 (31.20%) | 26,511 (~88.4 fps avg) |
+| Flutter (profile) | 10.25 | 17.96 | 19.65 | 37.32 | 2,465 (9.39%) | 24,835 (94.63%) | 26,243 (~87.5 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.11, layout 0.20, paint 0.32, encode 0.11, acquire 1.25, submit 5.78; layout_us>0 on 26,511/26,511 frames; GPU (gpu_q=1 on 26,471) total p50/p95 7.84/9.44 ms
+
+**Frust wins S6** — p50 7.88 vs 10.25 ms, p95 10.15 vs 17.96, p99 13.43 vs 19.65, and 0.37 % vs 9.39 % of frames over the 60 Hz budget, at the same ~88 fps.
 
 ### S3
 
@@ -71,66 +133,33 @@ Per-op reconcile-frame timing (`s3-*` sub-markers aggregated across all cycles i
 
 | Op | Frust p50/p95/p99/worst (ms) | n frames | Flutter p50/p95/p99/worst (ms) | n frames |
 |---|---|---|---|---|
-| create 1k | 9.45 / 11.03 / 11.03 / 11.03 | 19 | 4.82 / 6.41 / 6.41 / 6.41 | 10 |
-| create 10k | 9.45 / 10.45 / 14.81 / 15.90 | 246 | **not captured** | 0 |
-| update every 10th of 10k | 8.30 / 9.21 / 10.19 / 11.38 | 253 | **not captured** | 0 |
-| swap | 8.16 / 9.57 / 9.88 / 10.18 | 263 | **not captured** | 0 |
-| clear | 7.50 / 9.10 / 9.96 / 11.34 | 262 | **not captured** | 0 |
+| create 1k | 12.70 / 19.36 / 20.48 / 21.02 | 260 | 5.67 / 7.34 / 7.34 / 7.34 | 4 |
+| create 10k | 9.85 / 14.21 / 17.86 / 23.73 | 270 | **not captured** | 0 |
+| update every 10th of 10k | 8.57 / 10.59 / 13.72 / 17.77 | 269 | **not captured** | 0 |
+| swap | 8.47 / 10.42 / 15.90 / 16.37 | 270 | **not captured** | 0 |
+| clear | 7.67 / 9.24 / 12.05 / 14.17 | 260 | **not captured** | 0 |
 
 Overall S3 frame series (whole capture incl. settle gaps — continuous vs event-driven paint, not apples-to-apples):
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 5.97 | 9.60 | 11.78 | 114.41 | 44 (0.16%) | 2,737 (10.25%) | 26,713 (~89.0 fps avg) |
-| Flutter (profile) | 18.32 | 53.52 | 58.13 | 68.27 | 462 (51.56%) | 857 (95.65%) | 896 (~3.0 fps avg) |
+| Frust (profile) | 6.61 | 10.84 | 13.21 | 144.59 | 140 (0.53%) | 3,965 (14.90%) | 26,604 (~88.7 fps avg) |
+| Flutter (profile) | 19.34 | 54.08 | 59.12 | 67.91 | 470 (52.40%) | 851 (94.87%) | 897 (~3.0 fps avg) |
 
 Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 27–27; Flutter (profile) `s3-create1k` reopens per kept run: 18–18.
 
-**No cross-app per-op comparison** (Flutter landed 10 frames for create 1k and none for the other ops; Frust's per-op rows are shifted by one op — deviations 4–5). Frust's per-op medians all sit inside one 90 Hz frame (7.5–9.5 ms). Overall series: Frust p50 5.97 ms at ~89 fps continuous vs Flutter 18.32 ms event-driven — no overall winner declared, per convention.
-
-### S4
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 5.70 | 7.32 | 8.23 | 136.41 | 24 (0.09%) | 232 (0.87%) | 26,703 (~89.0 fps avg) |
-| Flutter (profile) | 5.32 | 18.55 | 19.89 | 33.04 | 6,047 (22.93%) | 7,876 (29.87%) | 26,371 (~87.9 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.25, layout 0.00, paint 0.12, encode 0.02, acquire 1.67, submit 3.60; layout_us>0 on 24,152/26,703 frames; GPU (gpu_q=1 on 26,663) total p50/p95 3.80/4.15 ms
-
-**Frust wins S4 on the tail, Flutter on the median.** Medians are close (5.70 vs 5.32 ms, Flutter lower) at the same ~88–89 fps, but Frust's p95/p99 are 7.32/8.23 vs 18.55/19.89 ms and it misses the 60 Hz budget on 0.09 % vs 22.93 % of frames during the parse. Flutter's worst frame is lower (33.0 vs 136.4 ms).
-
-### S5
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 13.19 | 13.99 | 14.53 | 161.77 | 34 (0.14%) | 22,983 (97.00%) | 23,695 (~79.0 fps avg) |
-| Flutter (profile) | 6.27 | 11.17 | 13.46 | 28.98 | 10 (0.04%) | 5,528 (21.24%) | 26,025 (~86.8 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.63, layout 0.03, paint 0.03, encode 0.02, acquire 0.06, submit 12.29; layout_us>0 on 23,694/23,695 frames; GPU (gpu_q=1 on 23,655) total p50/p95 12.28/12.53 ms
-
-**Flutter wins S5** — p50 6.27 vs 13.19 ms, p95 11.17 vs 13.99, p99 13.46 vs 14.53, worst 29.0 vs 161.8 ms, at ~87 vs ~79 fps; both apps miss the 60 Hz budget on <0.2 % of frames. The breakdown line puts 12.29 of Frust's 13.19 ms median in submit (GPU total p50 12.28 ms). Both apps composited the identical edge-to-edge cell geometry (visual gate above).
-
-### S6
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 6.82 | 8.71 | 10.71 | 125.92 | 24 (0.09%) | 2,176 (8.17%) | 26,637 (~88.8 fps avg) |
-| Flutter (profile) | 16.94 | 19.46 | 19.93 | 33.21 | 13,825 (52.47%) | 25,616 (97.23%) | 26,346 (~87.8 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.09, layout 0.14, paint 0.17, encode 0.09, acquire 1.49, submit 4.76; layout_us>0 on 26,637/26,637 frames; GPU (gpu_q=1 on 26,597) total p50/p95 8.17/9.43 ms
-
-**Frust wins S6** — p50 6.82 vs 16.94 ms, p95 8.71 vs 19.46, p99 10.71 vs 19.93, and 0.09 % vs 52.47 % of frames over the 60 Hz budget at the same ~88 fps. Flutter's worst frame is lower (33.2 vs 125.9 ms).
+**Frust wins S3, and all five reconcile ops are captured.** Each op lands 260–270 frames under the frame-indexed markers (create 1k 12.70 ms p50, create 10k 9.85, update 8.57, swap 8.47, clear 7.67); Flutter lands 4 frames on `create 1k` and none elsewhere, so the per-op columns are not a race. On the overall series Frust is 6.61 ms p50 / 10.84 p95 over 26,604 painted frames against Flutter's 19.34 / 54.08 over 897.
 
 ### S7
 
 | Metric | Frust (profile) | Flutter (profile) |
 |---|---|---|
-| External cold start (`am start -W` TotalTime, median of kept launches) | ~136 ms (136/137/125; first of 4 discarded) | ~617 ms (595/617/644; first of 4 discarded) |
-| Framework-reported first-frame span | ~153 ms median (`first_frame_presented`, 143–166 across 12 launches; `adapter_ready` median 35 ms) | ~153 ms median (`first_frame_ms`, 148–172 across 12 launches) |
-| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | ~8.9% avg (max 8.9%, 2 samples) | 0 samples |
-| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~90.7 MB (90.3–91.1, 10 kept snapshots) | ~112.9 MB (110.8–120.9, 10 kept snapshots) |
+| External cold start (`am start -W` TotalTime, median of kept launches) | ~159 ms (164/159/144; first of 4 discarded) | ~638 ms (611/651/638; first of 4 discarded) |
+| Framework-reported first-frame span | ~172 ms median (`first_frame_presented`, 161–186 across 12 launches; `adapter_ready` median 43 ms) | ~162 ms median (`first_frame_ms`, 158–216 across 12 launches) |
+| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | 0 samples | 0 samples |
+| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~96.5 MB (96.0–96.8, 10 kept snapshots) | ~120.9 MB (117.9–129.0, 10 kept snapshots) |
 
-**Frust wins S7** — external cold start ~136 vs ~617 ms (~4.5×) and idle memory ~90.7 vs ~112.9 MB PSS (~20 % lower). The framework-self-reported first-frame spans are equal (~153 ms median both). Idle CPU: 25 `dumpsys cpuinfo` samples per app; both apps read 0 % in every sample where the process appears, except one Frust sample (8.9 %) taken at a process launch — read both as ~0 % (deviation 7).
+**Frust starts ~4× faster and idles ~20 % lighter.** External cold start 159 vs 638 ms (`am start -W` TotalTime), idle TOTAL PSS 96.5 vs 120.9 MB. The framework first-frame spans are close on this device (172 vs 162 ms median) and, as always, are measured from each framework's own entry point. Neither app appeared in `dumpsys cpuinfo` during the idle window, i.e. idle CPU ~0 % for both.
 
 ### S8
 
@@ -138,73 +167,114 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 | Op | Frust (profile) (µs/call) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | 126 | 416 | n/a |
-| write i64 | 132 | 476 | n/a |
-| write f64 | 142 | 547 | n/a |
-| write String | 132 | 426 | n/a |
-| write Vec\<String\> | 139 | 436 | n/a |
-| read (unique key, forces channel) bool | 41 | 15224† | ~1 |
-| read (unique key, forces channel) i64 | 41 | 15224† | ~1 |
-| read (unique key, forces channel) f64 | 42 | 15224† | ~1 |
-| read (unique key, forces channel) String | 41 | 15224† | ~1 |
-| read (unique key, forces channel) Vec\<String\> | 42 | 15224† | ~2 |
+| write bool | 136 | 405 | n/a |
+| write i64 | 148 | 419 | n/a |
+| write f64 | 162 | 462 | n/a |
+| write String | 150 | 407 | n/a |
+| write Vec\<String\> | 153 | 425 | n/a |
+| read (unique key, forces channel) bool | 41 | 15300† | ~1 |
+| read (unique key, forces channel) i64 | 41 | 15300† | ~0 |
+| read (unique key, forces channel) f64 | 41 | 15300† | ~1 |
+| read (unique key, forces channel) String | 41 | 15300† | ~1 |
+| read (unique key, forces channel) Vec\<String\> | 42 | 15300† | ~2 |
 
 `s8-errors` marker lines across kept logs: frust 0, flutter 0. †Flutter's only channel-crossing read is the package's `reload()` whole-store re-read (one figure for every read row).
 
-**Frust wins S8** — writes 126–142 vs 416–547 µs/call (~3.1–3.9×); Frust's per-key read is 41–42 µs vs Flutter's 15,224 µs `reload()` whole-store re-read. Flutter's cached read (~1 µs) is a Dart-map lookup, not a boundary crossing. Zero errors on both apps.
+**Frust wins S8 decisively** — writes 136–162 vs 405–462 µs/call (~2.8–3.0×), and a per-key Frust read at 41 µs against Flutter's whole-store `reload()` at 15,300 µs. This is the slowest S8 of the three devices on both sides, which is the storage tier rather than either framework. Zero `s8-errors` on either app.
+
+### vs 2026-09-05 (Frust, same device, same scenarios)
+
+| Scenario | p50 old→new (ms) | Δp50 | p95 old→new (ms) | Δp95 | miss@16.67 old→new | fps old→new |
+|---|---|---|---|---|---|---|
+| S1 | 14.86→15.23 | +2.5% | 16.18→18.03 | +11.4% | 1.72%→10.20% | 67.0→65.9 |
+| S2 | 8.91→10.18 | +14.3% | 10.61→11.32 | +6.7% | 0.13%→0.51% | 89.0→88.4 |
+| S4 | 5.70→5.93 | +4.0% | 7.32→11.44 | +56.4% | 0.09%→0.17% | 89.0→88.6 |
+| S5 | 13.19→13.04 | -1.1% | 13.99→13.84 | -1.1% | 0.14%→0.45% | 79.0→79.4 |
+| S6 | 6.82→7.88 | +15.7% | 8.71→10.15 | +16.5% | 0.09%→0.37% | 88.8→88.4 |
+| S3 (overall) | 5.97→6.61 | +10.7% | 9.60→10.84 | +12.9% | 0.16%→0.53% | n/a→n/a |
+
+**Read this table with the control beside it, not on its own.** Frust moved +2.5…+15.7 % on p50 (S5 −1.1 %), but the **Flutter control on the same runs moved −39.5 % to +38.1 %** — S2 p50 22.65→31.28 (+38.1 %), S4 p95 18.55→6.74 (−63.7 %), S6 p50 16.94→10.25 (−39.5 %), S5 p50 6.27→8.39 (+33.9 %). An unchanged control app swinging by up to 64 % between the two sessions means this device's session-to-session variance is several times the Frust delta, so **no per-scenario conclusion should be drawn from the Frust column here**. Two environmental differences are documented and plausibly responsible: the 2026-09-05 session ran **on battery** (99 → 78 %) while this one ran **on AC for S1–S4 and frust S5 and on battery from flutter S5 onward** (100 → 91 %, charger disconnected mid-session), and the panel idled at **90 Hz** this session against 60 Hz last time — on an unpinned device both feed directly into the DVFS and refresh policy the frame loop runs under. Off the frame axis, where the metrics are not per-frame, the pass is better: external cold start 137→159 ms is worse but idle TOTAL PSS falls 104.7→96.5 MB (Frust) and 142.4→120.9 MB (Flutter). A clean re-measurement of this device with the charger state matched to the baseline is the way to settle the frame rows.
 
 ### Methodology deviations (this device)
 
-1. **Wireless adb link, radios uncontrolled.** After the phone dropped off USB (deviation 6) it was reached over adb-over-Wi-Fi (Tailscale-range address); `matrix.sh --wireless` left airplane ON with the Wi-Fi override (`wifi_on=2`) and a VPN tunnel active for the whole session (status bar: Wi-Fi + VPN key), because toggling them would cut the link. Bluetooth off. Not the §3 radios-off state; applied identically to both apps.
-2. **On battery, not charging.** No cable; `USB powered: false` throughout, real level 99 % → 78 % over the 16 blocks; `--min-level 30` guard passed every block. The `dumpsys battery unplug` spoof was still applied per block but was moot.
-3. **90 Hz budget not a stats.py column.** The panel ran its 90 Hz mode under the apps' opt-in, but stats.py reports only the 16.67 / 8.33 ms budgets; the 11.11 ms budget is not tabulated. Achieved cadence is derived from the frame counts (active frames ÷ 300 s): Frust ~67 (S1), ~89 (S2/S3/S4/S6), ~79 (S5) fps; Flutter ~82 (S1), ~88 (S4/S6), ~87 (S5) fps.
-4. **S3 per-op attribution shifted by one op on the engine build (measurement, not performance).** The engine emits a frame's `frust-perf raw` line after the op's `bench-scenario-end` marker, so `create 1k` collects almost no frames (0–1 per cycle, 19 total) and every other op's bucket receives the previous op's reconcile frame. The Frust per-op rows are therefore shifted by one op; the overall S3 series is unaffected.
-5. **S3 Flutter per-op capture:** 10 frames for create 1k and none for the other ops (the known `addTimingsCallback` delivery gap) — no cross-app per-op comparison.
-6. **First launch aborted — this is a full relaunch.** The USB-tethered launch at 22:01 UTC (2026-09-04) lost the device at ~22:02 UTC during frust/S1 run 2 and was later aborted; nothing from it is used. The wireless relaunch at 08:33 UTC re-installed both APKs and ran S1–S8 in one session.
-7. **S7 idle-CPU line:** the table's Frust "8.9 %, 2 samples" is a single launch-moment sample (fresh pid, 207 minor faults) counted by summarize.py; Flutter's "0 samples" means its process lines all read `+0%`. In all other samples both processes read 0 %.
-8. **Visual notes (not failures):** Flutter's S2 row titles wrap and overlap neighbouring rows on this panel (bench-app layout, visual only); Flutter's S5 capture shows one grey placeholder cell with decode in flight.
-9. As on prior passes: Flutter release-mode in-app cross-check not captured; S4 parse wall time not recoverable (timestamp-free capture); S8 burst-during-animation variant not run; external cold start measured post-matrix (4 launches per app, first discarded, 3 s force-stop gap).
+1. **adb-over-Wi-Fi, radios left as found.** The device was reached over `--wireless`, so airplane mode, Wi-Fi and Bluetooth were not touched (toggling them would cut the link) and the §3 radios-off state was not applied. Same deviation as this device's 2026-09-05 pass.
+2. **frust S8 graded `DEGENERATE` twice by a stale driver check; the data is complete.** Identical to the other two devices: `matrix.sh`'s `block_sanity` counts `-perf plugin op=` while Frust's S8 emitters now lead with the canonical inline `scenario=` key, so the check saw 2 lines where the run captured 2,002 per-op lines. `stats.py` parses the new shape and the S8 table above is computed from it; `pick_src` fell back to attempt 1. The driver check was corrected the same day (`block_sanity` and `run.sh`'s op counts now accept the `scenario=` shape, `7ee376b3`); a 12-run S8 block per app re-captured on the OnePlus 9 with the corrected check graded `ok` at 2,002 lines and reproduced that device's published S8 medians within 2 %, so the series above stand.
+3. **The 90 Hz budget is not a column.** stats.py reports the 16.67 and 8.33 ms budgets only, so on this unpinned 60/90 Hz panel neither column is the frame period the apps were actually running to (11.11 ms at 90 Hz). Read the achieved-fps figures for cadence.
+4. **Charger state differs from the 2026-09-05 baseline and changed mid-session** — mains for S1–S4 and frust S5, battery from flutter S5 onward (100 % → 91 %, `AC powered: false` at close), battery-only there. Recorded above because it bounds the delta table, not because it invalidates this pass's own Frust-vs-Flutter comparison, where both apps shared the identical session.
+5. **Flutter S2 rows are not comparable to any Flutter S2 row before 2026-09-05** — the Flutter bench app was changed to single-line ellipsis for row-text parity with Frust.
+6. As on prior passes: Flutter release-mode in-app cross-check not captured; S4 parse wall time not recoverable (timestamp-free capture); S8 burst-during-animation variant not run; S3 Flutter per-op capture lands 4 frames on `create 1k` and none elsewhere (the known `addTimingsCallback` delivery gap).
 
 ---
 
 ## Device: OnePlus 9 (LE2115 "lemonade", Snapdragon 888 / Adreno 660) — mid-tier Android
 
-**Status:** run 2026-09-04/05 (UTC), **12 runs × 30 s per scenario per app (S7: 60 s runs), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** **Frust = PROFILE build of `f64be636`** (engine renderer; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4), **Flutter = profile build** (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/oneplus9/frust_profile/<sN>/` and `raw/oneplus9/flutter/<sN>/` (run-NN.log + run-NN.pss_before/after.txt, stats.txt; S7 adds cpuinfo.txt/coldstart.txt). S1–S6 ran in one unattended `matrix.sh` session, S7–S8 in a second session after a driver hang (deviation 1).
+**Status:** run 2026-09-06 13:26–15:32 UTC, **12 runs × 30 s per scenario per app (S7: 60 s runs), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** **Frust = PROFILE build of `21076221`** (engine renderer with the render-thread split; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4), **Flutter = profile build** (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/oneplus9/frust_profile/<sN>/` and `raw/oneplus9/flutter/<sN>/` (run-NN.log + run-NN.pss_before/after.txt, stats.txt; S7 adds cpuinfo.txt/coldstart.txt). One unattended `matrix.sh` session, all 16 blocks captured; 15 graded `ok` on attempt 1 and the frust S8 block was re-run once by a stale driver check that does not affect its data (deviation 2). **This pass supersedes the 2026-09-05 pass on this device**, whose S5 row is invalid (deviation 1 of that pass, restated in deviation 10 below).
 
 - Chipset: Snapdragon 888 (board `lahaina`) / Adreno 660, GLES driver V@0530.53. Model: OnePlus 9 LE2115 (serial redacted).
-- OS: **LineageOS 22.2 — Android 15, `lineage_lemonade-userdebug 15 BP1A.250405.007` (nightly 20250414), not the stock OxygenOS of the earlier section**; fingerprint still reports `OnePlus9:14/UKQ1.230924.001`.
-- Display: 1080×2400 @ 450 dpi; modes id 0 = 60 Hz (active at idle), id 1 = 120 Hz. **Both `min_refresh_rate`/`peak_refresh_rate` pinned to 120 for every block** (`--pin-refresh 120`, read-back `peak=120.0 min=120.0`, restored to `Infinity`/unset afterwards); Frust's in-app FPS readout showed 121.0 in S1. Both budgets (16.67 / 8.33 ms) reported.
-- High-refresh opt-in engaged on both apps (§6): Frust `Surface.setFrameRate`, Flutter `flutter_displaymode` ^0.7.0. Achieved: Frust ~120 fps in every frame scenario; Flutter ~97 (S1), ~108 (S5), ~119 (S4/S6) fps; S2/S3 Flutter paint is event-driven.
-- Brightness fixed 128/255, auto-brightness off (`device_state.sh`); airplane on (read-back 1), Wi-Fi off, Bluetooth off, battery saver off, screen timeout 30 min, `svc power stayon true` during blocks; all restored (deviation 8).
-- Charger: USB-connected to a 4.5 A charger throughout (adb); `dumpsys battery unplug` spoofed on-battery state before every block. Phone was at a real 1 % at 04:44 local; `--min-level 30` guard waited 6 min (23 → 32 %) before S1; real level 32 → 88 % across S1–S6, 100 % for S7–S8.
-- Thermal: gate ceiling 38 °C / 120 s cooldown (`device_state.sh`) before every block. S1–S6 session: start 32.4 °C, peak 36.3 °C, end 33.9 °C; S7–S8 session: start 28.8 °C, peak 28.8 °C, end 27.9 °C. **No cooldown stall in any block** (no `warning: still` in any run.log).
-- Toolchain: Rust 1.98.1 (pinned), NDK 27.0.12077973; Flutter 3.47.2 stable / Dart 3.13.2. APKs: frust 34,206,174 B (md5 d11f1aaa…), flutter 27,193,780 B (md5 135e9aab…); both installed fresh (stale installs uninstalled first), md5 re-verified by the driver.
-- Visual gate (driver screencap per block): S1/S2/S4/S6 PASS both apps (same deterministic content on both); **S5 geometry PASS — both apps' cells span edge-to-edge with the identical 8 dp side padding**; flutter/s3 capture blank and frust/s5 capture sparse — see deviations 3–4; S7/S8: PASS both apps (S7 pages, S8 quiescent screens).
-- Sanitization: S1–S6 staged (`stage_raw.sh`) `RAW_OK`; S7–S8 staged by the driver `RAW_OK`; merged tree re-checked against the same whitelist: `RAW_OK` (192 run logs, 384 PSS snapshots).
+- OS: LineageOS — Android 15, `lineage_lemonade-userdebug 15 BP1A.250405.007` (nightly 20250405), SDK 35; fingerprint still reports `OnePlus9:14/UKQ1.230924.001`.
+- Display: 1080×2400 @ ~392 dpi; modes id 0 = 60 Hz (active at idle), id 1 = 120 Hz. **Both `min_refresh_rate`/`peak_refresh_rate` pinned to 120 for every block** (`--pin-refresh 120`, read-back `peak=120.0 min=120.0`, restored to `Infinity`/unset afterwards); Frust's in-app FPS readout showed 121.0 in S1. Both budgets (16.67 / 8.33 ms) reported — but see the note under "vs 2026-09-05" on what the 8.33 ms column now means under the render-thread split.
+- High-refresh opt-in engaged on both apps (§6): Frust `Surface.setFrameRate`, Flutter `flutter_displaymode`. Achieved (active frames ÷ 300 s): Frust ~120.1 fps in every frame scenario; Flutter ~97.8 (S1), ~108.6 (S5), ~119.2 (S4/S6); S2/S3 Flutter paint is event-driven.
+- Brightness fixed 128/255, auto-brightness off (`device_state.sh`); airplane on (read-back 1), Wi-Fi off, Bluetooth off, battery saver off, screen timeout 30 min, `svc power stayon true` during blocks; all restored and read back at 15:32 UTC (airplane 0, Wi-Fi on, BT off, `peak_refresh_rate` Infinity, `min_refresh_rate` unset).
+- Charger: USB-connected throughout (adb); `dumpsys battery unplug` spoofed on-battery state before every block. Real level 100 % for all 16 blocks, so the `--min-level 30` guard never waited.
+- Thermal: gate ceiling 38 °C / 120 s cooldown before every block. Session start 31.2 °C, peak 38.2 °C (after the flutter S5 block), end 32.6 °C. **One cooldown timeout**, in the frust S6 block (deviation 3); no other block stalled. 30 s blocks 384–385 s wall (S6 frust 506 s), 60 s S7 blocks 744 s each.
+- Toolchain: Rust 1.98.1 (pinned), `wgpu` 30.0.1 (pinned); Flutter 3.47.2 stable / Dart 3.13.2. Frust APK arm64-only, 12,008,167 B (md5 1715cb35…); Flutter APK fat profile build, 70,462,089 B (md5 43132929…) — the two are packaged differently and their APK sizes are not a size comparison (see the App size section). Stale installs removed and both installed fresh by the driver, md5 re-verified.
+- Visual gate (driver screencap per block, all 16 reviewed): **content PASS on every block, both apps.** S1 the same deterministic bubble field on both; S2 mid-scroll rows on both; S3 populated table on both; S4 parse screen on both; **S5 geometry PASS — Frust's column is edge-to-edge and every visible cell fully decoded, Flutter's shows three decoded cells and one grey placeholder**; S6 multilingual block on both; S7 idle pages; S8 quiescent screens. A soft-keyboard window overlays the lower third of all eight **frust** captures and none of the flutter ones — deviation 1, which is about composition, not content.
+- Sanitization: driver staging `RAW_OK` (192 run logs, 384 PSS snapshots, 16 stats.txt, S7 cpuinfo/coldstart), whitelist self-check passed.
 
 ### S1
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 8.20 | 9.45 | 10.11 | 47.71 | 35 (0.10%) | 15,188 (42.14%) | 36,038 (~120.1 fps avg) |
-| Flutter (profile) | 9.44 | 17.15 | 19.47 | 40.11 | 1,517 (5.19%) | 26,710 (91.46%) | 29,203 (~97.3 fps avg) |
+| Frust (profile) | 8.55 | 9.84 | 10.61 | 54.73 | 39 (0.11%) | 22,717 (63.05%) | 36,029 (~120.1 fps avg) |
+| Flutter (profile) | 9.50 | 16.96 | 19.47 | 87.02 | 1,501 (5.12%) | 26,519 (90.39%) | 29,337 (~97.8 fps avg) |
 
-Frust pass p50 (ms): rebuild 0.19, layout 0.00, paint 0.41, encode 0.06, acquire 1.28, submit 6.25; layout_us>0 on 55/36,038 frames; GPU (gpu_q=1 on 35,998) total p50/p95 6.41/6.65 ms
+Frust pass p50 (ms): rebuild 0.19, layout 0.00, paint 0.42, encode 0.06, acquire 1.61, submit 6.25; layout_us>0 on 243/36,029 frames; GPU (gpu_q=1 on 35,989) total p50/p95 6.45/6.72 ms
 
-
-**Frust wins S1** — p50 8.20 vs 9.44 ms, p95 9.45 vs 17.15, p99 10.11 vs 19.47, and 0.10 % vs 5.19 % of frames over the 60 Hz budget, at ~120 vs ~97 fps. Flutter's worst frame is lower (40.1 vs 47.7 ms).
+**Frust wins S1** — p50 8.55 vs 9.50 ms, p95 9.84 vs 16.96, p99 10.61 vs 19.47, worst 54.73 vs 87.02, and 0.11 % vs 5.12 % of frames over the 60 Hz budget, at ~120.1 vs ~97.8 fps. The pass breakdown puts 6.25 ms of Frust's 8.55 ms in submit and 6.45 ms of GPU pass time under it — S1 is GPU-bound on this device (see the criteria section: `gpu_main` p50 6.37 ms).
 
 ### S2
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 8.83 | 11.45 | 13.09 | 49.98 | 36 (0.10%) | 27,672 (76.84%) | 36,011 (~120.0 fps avg) |
-| Flutter (profile) | 15.20 | 24.20 | 27.86 | 82.34 | 2,218 (37.97%) | 5,138 (87.96%) | 5,841 (~19.5 fps avg) |
+| Frust (profile) | 9.06 | 11.31 | 12.86 | 53.71 | 44 (0.12%) | 28,884 (80.19%) | 36,021 (~120.1 fps avg) |
+| Flutter (profile) | 15.46 | 24.75 | 28.25 | 49.27 | 2,301 (39.15%) | 5,103 (86.82%) | 5,878 (~19.6 fps avg) |
 
-Frust pass p50 (ms): rebuild 0.09, layout 1.84, paint 0.28, encode 0.04, acquire 0.30, submit 5.96; layout_us>0 on 36,011/36,011 frames; GPU (gpu_q=1 on 35,971) total p50/p95 4.79/4.97 ms
+Frust pass p50 (ms): rebuild 0.10, layout 1.80, paint 0.28, encode 0.04, acquire 0.63, submit 5.95; layout_us>0 on 36,019/36,021 frames; GPU (gpu_q=1 on 35,981) total p50/p95 4.85/5.04 ms
 
+**Frust wins S2 decisively** — p50 9.06 vs 15.46 ms, p95 11.31 vs 24.75, p99 12.86 vs 28.25, and 0.12 % vs 39.15 % of frames over the 60 Hz budget. Frust holds ~120.1 fps continuously while Flutter's paint is event-driven (~19.6 fps of painted frames), so the fps columns are not comparable; the per-frame figures are. Frust re-lays out every frame here (`layout_us>0` on 36,019/36,021) at 1.80 ms median.
 
-**Frust wins S2** — p50 8.83 vs 15.20 ms, p95 11.45 vs 24.20, 60 Hz misses 0.10 % vs 37.97 % of frames attempted. Flutter's lower absolute 8.33 ms miss count reflects its ~6× smaller event-driven frame total (5,841 vs 36,011), not cheaper frames. Frust layout ran on every frame (p50 1.84 ms) — a genuine per-frame relayout.
+### S4
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 4.77 | 6.17 | 8.35 | 71.41 | 28 (0.08%) | 367 (1.02%) | 36,046 (~120.2 fps avg) |
+| Flutter (profile) | 4.22 | 4.63 | 5.77 | 20.03 | 1 (0.00%) | 4 (0.01%) | 35,759 (~119.2 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.11, layout 0.00, paint 0.06, encode 0.02, acquire 0.10, submit 4.27; layout_us>0 on 17/36,046 frames; GPU (gpu_q=1 on 36,006) total p50/p95 1.12/1.26 ms
+
+**Flutter wins S4** — p50 4.22 vs 4.77 ms, p95 4.63 vs 6.17, p99 5.77 vs 8.35, worst 20.03 vs 71.41, both at ~120 fps and both essentially never missing the 60 Hz budget (0.00 % vs 0.08 %). The concurrent animation costs Frust more per frame than Flutter under the same JSON parse.
+
+### S5
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 7.93 | 8.89 | 10.51 | 63.45 | 32 (0.09%) | 6,415 (17.81%) | 36,018 (~120.1 fps avg) |
+| Flutter (profile) | 6.43 | 14.26 | 16.34 | 69.64 | 250 (0.77%) | 10,675 (32.78%) | 32,570 (~108.6 fps avg) |
+
+Frust pass p50 (ms): rebuild 1.06, layout 0.06, paint 0.08, encode 0.01, acquire 1.32, submit 5.40; layout_us>0 on 36,018/36,018 frames; GPU (gpu_q=1 on 35,978) total p50/p95 6.45/6.61 ms
+
+**Split, and this row is the one that changed meaning.** Flutter wins the median (6.43 vs 7.93 ms); Frust wins the tail (p95 8.89 vs 14.26, p99 10.51 vs 16.34), the 60 Hz miss rate (0.09 % vs 0.77 %) and the cadence (~120.1 vs ~108.6 fps). Unlike the 2026-09-05 row, **this capture composites the whole image column**: 34,878 `frust-perf img` lines across the kept runs report `skipped=0` on every one, with 55,317 evictions and up to 63 resident images against a 1024×1024×4 atlas — PROTOCOL §7's content gate ("no line at all, or lines with `skipped=0`") is met and eviction-only degradation is the documented healthy mode. Frust's rebuild rises to 1.06 ms median, which is that re-upload traffic.
+
+### S6
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) | 8.44 | 9.16 | 11.01 | 58.26 | 51 (0.14%) | 21,577 (59.88%) | 36,034 (~120.1 fps avg) |
+| Flutter (profile) | 8.30 | 9.81 | 10.31 | 95.67 | 2 (0.01%) | 17,443 (48.79%) | 35,750 (~119.2 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.15, layout 0.31, paint 0.46, encode 0.04, acquire 1.21, submit 6.17; layout_us>0 on 36,034/36,034 frames; GPU (gpu_q=1 on 35,994) total p50/p95 1.73/1.78 ms
+
+**Near-tie on S6.** Flutter takes the median by a hair (8.30 vs 8.44 ms) and the 60 Hz miss rate (0.01 % vs 0.14 %); Frust takes p95 (9.16 vs 9.81) and the worst frame (58.26 vs 95.67). Frust's GPU pass time is 1.73 ms median — the cost here is shaping and upload on the CPU side, not the strip pipeline.
 
 ### S3
 
@@ -212,70 +282,33 @@ Per-op reconcile-frame timing (`s3-*` sub-markers aggregated across all cycles i
 
 | Op | Frust p50/p95/p99/worst (ms) | n frames | Flutter p50/p95/p99/worst (ms) | n frames |
 |---|---|---|---|---|
-| create 1k | **not captured** | 0 | 10.82 / 11.37 / 11.37 / 11.37 | 2 |
-| create 10k | 20.81 / 21.65 / 21.95 / 22.02 | 256 | **not captured** | 0 |
-| update every 10th of 10k | 15.24 / 15.90 / 16.04 / 16.14 | 263 | **not captured** | 0 |
-| swap | 14.20 / 15.56 / 16.07 / 16.40 | 235 | **not captured** | 0 |
-| clear | 14.77 / 15.90 / 16.05 / 16.35 | 272 | **not captured** | 0 |
+| create 1k | 14.98 / 19.07 / 20.60 / 54.69 | 341 | 10.48 / 10.65 / 10.65 / 10.65 | 4 |
+| create 10k | 20.62 / 21.75 / 22.04 / 22.21 | 346 | **not captured** | 0 |
+| update every 10th of 10k | 15.57 / 19.20 / 19.75 / 20.50 | 350 | **not captured** | 0 |
+| swap | 14.54 / 19.14 / 20.47 / 22.01 | 348 | **not captured** | 0 |
+| clear | 15.18 / 17.17 / 18.58 / 18.93 | 340 | **not captured** | 0 |
 
 Overall S3 frame series (whole capture incl. settle gaps — continuous vs event-driven paint, not apples-to-apples):
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 5.57 | 12.16 | 19.25 | 47.08 | 735 (2.14%) | 2,482 (7.23%) | 34,350 (~114.5 fps avg) |
-| Flutter (profile) | 19.16 | 33.65 | 36.07 | 83.64 | 593 (64.39%) | 903 (98.05%) | 921 (~3.1 fps avg) |
+| Frust (profile) | 5.66 | 12.26 | 18.98 | 63.23 | 658 (1.91%) | 2,592 (7.54%) | 34,371 (~114.6 fps avg) |
+| Flutter (profile) | 19.22 | 33.85 | 35.66 | 90.35 | 608 (65.87%) | 905 (98.05%) | 923 (~3.1 fps avg) |
 
 Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 35–35; Flutter (profile) `s3-create1k` reopens per kept run: 19–19.
 
-
-**No cross-app per-op comparison** — Flutter's per-op capture landed 2 frames total (create 1k) and none for the other ops (the known `addTimingsCallback` delivery gap), and Frust's `create 1k` sub-marker landed 0 frames this pass (its other four ops 235–272 frames each; deviation 5). Overall series (not apples-to-apples): Frust 5.57 / 12.16 / 19.25 ms over 34,350 frames (35 cycles per run) vs Flutter 19.16 / 33.65 / 36.07 ms over 921 event-driven frames (19 cycles per run); no overall winner declared, per convention.
-
-### S4
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 4.54 | 6.22 | 8.26 | 64.53 | 24 (0.07%) | 331 (0.92%) | 36,060 (~120.2 fps avg) |
-| Flutter (profile) | 4.24 | 4.94 | 5.89 | 74.91 | 1 (0.00%) | 12 (0.03%) | 35,842 (~119.5 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.10, layout 0.00, paint 0.05, encode 0.02, acquire 0.10, submit 4.09; layout_us>0 on 22/36,060 frames; GPU (gpu_q=1 on 36,020) total p50/p95 1.12/1.19 ms
-
-
-**Roughly a tie, Flutter marginally smoother** — animation-during-parse p50 4.24 vs 4.54 ms, p95 4.94 vs 6.22, p99 5.89 vs 8.26, 120 Hz misses 12 vs 331; both hold a locked ~120 fps. Frust's worst frame is lower (64.5 vs 74.9 ms). Parse wall time not captured (deviation 7).
-
-### S5
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 7.78 | 8.85 | 10.41 | 53.00 | 36 (0.10%) | 7,041 (19.53%) | 36,045 (~120.2 fps avg) |
-| Flutter (profile) | 6.54 | 14.21 | 16.35 | 26.03 | 253 (0.78%) | 10,921 (33.70%) | 32,404 (~108.0 fps avg) |
-
-Frust pass p50 (ms): rebuild 1.04, layout 0.05, paint 0.08, encode 0.01, acquire 1.12, submit 5.47; layout_us>0 on 36,044/36,045 frames; GPU (gpu_q=1 on 36,005) total p50/p95 5.07/6.67 ms
-
-
-**Split — Flutter wins the median, Frust wins the tail**: p50 6.54 vs 7.78 ms for Flutter; p95 8.85 vs 14.21 and p99 10.41 vs 16.35 for Frust, with 0.10 % vs 0.78 % of frames over 60 Hz and 19.5 % vs 33.7 % over 120 Hz, at ~120 vs ~108 fps. Frust's pass breakdown is rebuild-dominated (1.04 ms) with layout 0.05 / paint 0.08 ms per frame; read with deviation 4.
-
-### S6
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) | 8.19 | 8.90 | 10.50 | 49.64 | 44 (0.12%) | 12,609 (34.97%) | 36,052 (~120.2 fps avg) |
-| Flutter (profile) | 8.37 | 9.81 | 10.29 | 91.13 | 2 (0.01%) | 18,371 (51.39%) | 35,747 (~119.2 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.16, layout 0.32, paint 0.46, encode 0.04, acquire 0.96, submit 6.16; layout_us>0 on 36,052/36,052 frames; GPU (gpu_q=1 on 36,012) total p50/p95 1.74/1.81 ms
-
-
-**Near tie, split by metric** — Frust p50 8.19 vs 8.37 ms and p95 8.90 vs 9.81, with fewer 120 Hz misses (35.0 % vs 51.4 %); Flutter p99 10.29 vs 10.50 and fewer 60 Hz misses (2 vs 44). Worst frame: Frust 49.6 vs Flutter 91.1 ms. Both ~120 fps.
+**Frust wins S3 on every comparable axis, and the per-op rows are readable again.** All five Frust reconcile ops now land frames (340–350 each) because the bench app stamps `bench-scenario-start n=<frame>` markers that `stats.py` slices by frame index; on 2026-09-05 `create 1k` collected 0 frames and each other op's bucket held the previous op's frame. Flutter still lands only 4 frames, on `create 1k` alone (its `addTimingsCallback` delivery gap), so the per-op columns are not a like-for-like race. On the overall series Frust is at 5.66 ms p50 / 12.26 p95 over 34,371 painted frames against Flutter's 19.22 / 33.85 over 923 — continuous vs event-driven paint, so read the per-op table for the reconcile cost and the overall table only for cadence.
 
 ### S7
 
 | Metric | Frust (profile) | Flutter (profile) |
 |---|---|---|
-| External cold start (`am start -W` TotalTime, median of kept launches) | ~137 ms (141/126/137; first of 4 discarded) | ~414 ms (414/425/405; first of 4 discarded) |
-| Framework-reported first-frame span | ~105 ms median (`first_frame_presented`, 100–122 across 12 launches; `adapter_ready` median 50 ms) | ~80 ms median (`first_frame_ms`, 5–86 across 12 launches) |
-| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | ~5.9% avg (max 5.9%, 2 samples) | 0 samples |
-| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~104.7 MB (104.6–104.9, 10 kept snapshots) | ~142.4 MB (142.0–142.6, 10 kept snapshots) |
+| External cold start (`am start -W` TotalTime, median of kept launches) | ~128 ms (141/128/126; first of 4 discarded) | ~422 ms (422/430/409; first of 4 discarded) |
+| Framework-reported first-frame span | ~95 ms median (`first_frame_presented`, 89–104 across 12 launches; `adapter_ready` median 36 ms) | ~79 ms median (`first_frame_ms`, 66–86 across 12 launches) |
+| Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | 0 samples | 0 samples |
+| Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | ~116.8 MB (116.5–117.2, 10 kept snapshots) | ~157.4 MB (157.1–157.7, 10 kept snapshots) |
 
-**Frust wins S7** — external cold start ~137 vs ~414 ms (~3×) and idle memory ~104.7 vs ~142.4 MB PSS (26 % lower). The framework-reported first-frame span favours Flutter (~80 vs ~105 ms; Frust's `adapter_ready` median 50 ms is the GPU-init floor). Idle CPU is effectively 0 % on both — the Frust line's 5.9 % (2 samples) is a collision artefact, see deviation 2.
+**Frust starts ~3.3× faster and idles ~26 % lighter.** External cold start 128 vs 422 ms (`am start -W` TotalTime), idle TOTAL PSS 116.8 vs 157.4 MB. Flutter reports the shorter framework first-frame span (79 vs 95 ms median), measured from each framework's own entry point, so the two spans bound different work; the external `am start` figure is the one measured identically on both sides. Neither app appeared in `dumpsys cpuinfo` during the idle window (0 samples both), i.e. idle CPU ~0 % for both.
 
 ### S8
 
@@ -283,175 +316,200 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 | Op | Frust (profile) (µs/call) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | 101 | 288 | n/a |
-| write i64 | 94 | 285 | n/a |
-| write f64 | 94 | 305 | n/a |
-| write String | 95 | 276 | n/a |
-| write Vec\<String\> | 95 | 288 | n/a |
-| read (unique key, forces channel) bool | 19 | 4383† | ~0 |
-| read (unique key, forces channel) i64 | 19 | 4383† | ~0 |
-| read (unique key, forces channel) f64 | 19 | 4383† | ~0 |
-| read (unique key, forces channel) String | 19 | 4383† | ~0 |
-| read (unique key, forces channel) Vec\<String\> | 19 | 4383† | ~0 |
+| write bool | 99 | 291 | n/a |
+| write i64 | 93 | 289 | n/a |
+| write f64 | 93 | 309 | n/a |
+| write String | 93 | 276 | n/a |
+| write Vec\<String\> | 92 | 281 | n/a |
+| read (unique key, forces channel) bool | 19 | 4378† | ~0 |
+| read (unique key, forces channel) i64 | 19 | 4378† | ~0 |
+| read (unique key, forces channel) f64 | 19 | 4378† | ~0 |
+| read (unique key, forces channel) String | 19 | 4378† | ~0 |
+| read (unique key, forces channel) Vec\<String\> | 19 | 4378† | ~0 |
 
 `s8-errors` marker lines across kept logs: frust 0, flutter 0. †Flutter's only channel-crossing read is the package's `reload()` whole-store re-read (one figure for every read row).
 
-**Frust wins S8 decisively** — writes 94–101 vs 276–305 µs/call (~2.9–3.2×); a per-key Frust read costs 19 µs while Flutter's only channel-crossing read is the whole-store `reload()` at 4,383 µs (its ~0 µs cached read is a Dart-map lookup, not a boundary crossing). Zero `s8-errors` on either app.
+**Frust wins S8 decisively** — writes 92–99 vs 276–309 µs/call (~3.0–3.3×); a per-key Frust read costs 19 µs while Flutter's only channel-crossing read is the whole-store `reload()` at 4,378 µs (its ~0 µs cached read is a Dart-map lookup, not a boundary crossing). Zero `s8-errors` on either app.
+
+### vs 2026-09-05 (Frust, same device, same scenarios)
+
+| Scenario | p50 old→new (ms) | Δp50 | p95 old→new (ms) | Δp95 | miss@16.67 old→new | fps old→new |
+|---|---|---|---|---|---|---|
+| S1 | 8.20→8.55 | +4.2% | 9.45→9.84 | +4.2% | 0.10%→0.11% | 120.1→120.1 |
+| S2 | 8.83→9.06 | +2.6% | 11.45→11.31 | -1.2% | 0.10%→0.12% | 120.0→120.1 |
+| S4 | 4.54→4.77 | +5.0% | 6.22→6.17 | -0.7% | 0.07%→0.08% | 120.2→120.2 |
+| S5 | 7.78→7.93 | +2.0% | 8.85→8.89 | +0.5% | 0.10%→0.09% | 120.2→120.1 |
+| S6 | 8.19→8.44 | +3.0% | 8.90→9.16 | +2.9% | 0.12%→0.14% | 120.2→120.1 |
+| S3 (overall) | 5.57→5.66 | +1.7% | 12.16→12.26 | +0.8% | 2.14%→1.91% | n/a→n/a |
+
+Frust's per-frame cost sum is 2–5 % higher on every scenario while the presented cadence is unchanged at ~120.1 fps, and the Flutter control moved −1.7…+2.3 % on the same runs, so the control is stable and the Frust move is real but small. Two caveats bound how far it can be read: only the frust blocks carried an extra composited system layer (deviation 1), and Frust's `acquire_us` — the swapchain wait, which that layer would lengthen — accounts for most of the difference (S1 1.28→1.61 ms, S5 1.12→1.32, S6 0.96→1.21). **S5 is not a regression at all**: it is +2.0 % while compositing an image column the 2026-09-05 capture dropped roughly half of. Off the frame axis the pass is faster: external cold start 137→128 ms, framework first frame 105→95 ms, `adapter_ready` 50→36 ms. Idle TOTAL PSS rose 104.7→116.8 MB (Frust) and 142.4→157.4 MB (Flutter), i.e. on both sides, so it is not a Frust-side change.
+
+**The 8.33 ms column counts cost, not vsync misses** — under the render-thread split `total_us` is a two-thread cost sum, and this device's S1 is the worked example in the criteria section above (8.55 ms p50, 63.05 % "over budget", 120.1 fps presented).
 
 ### Methodology deviations (this device)
 
-1. **Driver hang → two `matrix.sh` sessions.** Session 1 (22:01–23:25 UTC) completed S1–S6 cleanly, then hung before S7's `BLOCK START`: `run_block`'s `sampler="$(android_cpu_sampler_bg …)"` never returned because the sampler's `( while …; done >>file ) &` subshell kept bash's saved copy of the command-substitution pipe open (`lsof`: driver fd 3 read end ↔ sampler fd 10 write end; reproduced in isolation — an `exec >>file 2>/dev/null` inside the subshell fixes it). The orphaned sampler polled `dumpsys cpuinfo` on the idle launcher until the session was killed at 23:48 (its `frust/s7/cpuinfo.txt` is junk). Session 2 (23:52–00:31 UTC, `--scenarios s7,s8 --skip-install`, same pin/guard, identical setup read-back) ran S7–S8 ~27 min after S6 at a real 100 % / 28.8 °C, and cleared both sampler substitutions without hanging (same bash 5.3.15 — the hang is ordering-dependent, not deterministic).
-2. **S7 frust block overlap (operator error).** For ~95 s at the start of session 2's S7 frust block a second driver instance launched by this operator ran the same block before being SIGKILLed (no restore side effects). Only run-01/run-02 (discarded warm-ups) overlapped; kept runs 03–12 began after it was gone and carry the normal marker shape (the `s7`+`s7-idle` double start marker is intrinsic — same in the prior pass). Residue: `frust_profile/s7/cpuinfo.txt` holds 6 of its 31 samples from 23:51:25–23:53:57 (same-second duplicates), and the S7 table's Frust idle-CPU line (5.9 %, 2 samples) is exactly the duplicate 23:52:26 samples taken during the double launch; in the other 29 samples the process was absent from `dumpsys cpuinfo` (0 %) — read Frust idle CPU as ~0 %, like Flutter's.
-3. **flutter/s3 block screencap blank** — capture timing (one frame ~8 s after foreground; the cycle clears the table every ~1.6 s). Cycle health confirmed (19 `create1k` / 18 `clear` per run, all 12 runs) and a post-matrix hand launch rendered the table (rows 10001–10020). Not a render failure; no re-run.
-4. **frust/s5 scene only partially materialised (health caveat).** The block screencap shows one decoded cell and pure background below (no 0x202020 placeholders); a post-matrix hand launch showed image content on 43 / 51 / 0 / 0 / 68 % of sampled pixels at 3 / 8 / 13 / 18 / 25 s — the stream populates but goes fully empty for stretches of every 20 s scroll cycle. Per-frame layout 0.05 / paint 0.08 ms (vs S2's 1.84 / 0.28) corroborates, and the 2026-09-01 engine-tier S5 baseline on this device has the identical signature, so it is systematic rather than a run artefact. Frust's S5 rows therefore composite less than Flutter's edge-to-edge cells; not re-run (the same APK reproduces it).
-5. **S3 per-op capture gaps:** Flutter landed 2 frames (create 1k) and none for the other ops (the known `addTimingsCallback` delivery gap); Frust's `create 1k` sub-marker landed 0 frames this pass (create 10k / update / swap / clear: 235–272 frames each).
-6. **Flutter S2 row text wraps and overlaps** neighbouring rows on this 384 dp-wide panel (font_scale 1.0, physical 450 dpi, no display override) — bench-app layout, visual only.
-7. As on prior passes: Flutter release-mode in-app cross-check not captured; S4 parse wall time not recoverable (timestamp-free capture); S8 burst-during-animation variant not run.
-8. **Device-state restore:** session 2's saved state was session 1's already-set-up state, so its own restore left airplane on, the 120 Hz pin and brightness 128; the operator restored the true original by hand at 00:34 UTC (airplane 0, Wi-Fi on, BT off, `peak_refresh_rate` Infinity, `min_refresh_rate` unset, brightness 1/auto; read-back confirmed).
-9. **Charger:** USB-connected to a 4.5 A charger throughout, `dumpsys battery unplug` spoofed before every block; the phone started the night at a real 1 %, the `--min-level 30` guard waited 6 min (23 → 32 %), real level rose 32 → 88 % across S1–S6 and read 100 % for S7–S8.
-10. **Raw staging:** S1–S6 staged by `stage_raw.sh` (main loop), S7–S8 by session 2's driver (`RAW_OK`); the merged 192-log / 384-PSS tree re-passed the identical whitelist checks.
+1. **Soft-keyboard window over the frust blocks only (composition asymmetry).** A Gboard window (`com.google.android.inputmethod.latin`) covers the lower third of all eight frust block screencaps and none of the eight flutter ones (bottom-band mean luma 237 vs 20–81 across the 16 captures). It did not change what either app drew: `dumpsys window` reports the bench window at the full `[0,0][1080,2400]` with `insetsChanged=false`, and the frust captures show content clipped mid-bubble and mid-cell at the keyboard edge rather than re-laid out, so both apps rendered their whole surface and every per-frame span measures the same scene. What it does add is one more layer for SurfaceFlinger to composite over the frust blocks, which is the most likely source of the `acquire_us` rise above. It therefore makes this device's Frust-vs-2026-09-05 deltas a soft comparison and its **Frust-vs-Flutter verdicts conservative for Frust**, since only Frust carried the extra layer. The condition did not reproduce after the session (`mInputShown=false`, both apps' post-run screencaps clean), so the trigger is not identified; whether the 2026-09-05 pass ran under it is unknown, because block screencaps are not committed artifacts. **A re-run of this device with a verified keyboard-free foreground is owed.**
+2. **frust S8 graded `DEGENERATE` twice by a stale driver check; the data is complete.** `matrix.sh`'s `block_sanity` counts lines matching `-perf plugin op=`, but Frust's S8 emitters now carry the canonical inline `scenario=` key first (`frust-perf plugin scenario=s8-write op=write type=bool n=3 us=102 err=0`), which PROTOCOL §7 documents as shipped since `198d3eb8`; only the two `op=…type=total` roll-up lines still match the old pattern, so the check saw 2 where the run captured 2,002 per-op lines — the same count as the 2026-09-05 series. `stats.py` parses the new shape correctly and the S8 table above is computed from it. The block was re-run once, graded the same way, and `pick_src` fell back to attempt 1; the staged tree holds the full series. The driver check was corrected the same day (`block_sanity` and `run.sh`'s op counts now accept the `scenario=` shape, `7ee376b3`); a 12-run S8 block per app re-captured on this device at 19:17–19:30 UTC with the corrected check graded `ok` at 2,002 lines and reproduced the table above within 2 % (Frust writes 91–101 vs 92–99 µs, reads 19 vs 19; Flutter writes 282–310 vs 276–309 µs, `reload()` 4,467 vs 4,378), so the series above stand and the re-capture is not published.
+3. **One thermal cooldown timeout.** The frust S6 block opened at 38.2 °C and the 120 s wait did not clear the 38 °C ceiling (`warning: still 38.2C after 120s wait — timed out, proceeding anyway`), making that block 506 s of wall against 384 s for the others. It is the block immediately after the session's peak (the flutter S5 block ended at 38.2 °C); no other block stalled and the session ended at 32.6 °C.
+4. **S7 idle CPU is 0 samples on both sides.** Neither package appeared in the `dumpsys cpuinfo` samples taken every 30 s through the S7 blocks, so the row reads ~0 % for both apps rather than carrying a number — the same reading the 2026-09-05 pass arrived at after discounting its contaminated samples.
+5. **APK packaging differs between the two apps this pass** — the Frust APK is arm64-only (12,008,167 B) and the Flutter APK a fat profile build (70,462,089 B). Both were installed fresh with md5 re-verified; neither figure is a size comparison, which is the App size section's job.
+6. **Flutter S2 rows are not comparable to any Flutter S2 row before 2026-09-05** — the Flutter bench app was changed to single-line ellipsis for row-text parity with Frust, so its S2 series measures different work than the earlier builds did.
+7. **This device's S5 rows supersede the 2026-09-05 S5 row, which is invalid** — that capture was taken while a full atlas refused image draws outright, so roughly half the image composites it timed were never performed (PROTOCOL §7's note on the `img` line). The row above is the first valid S5 measurement on this device.
+8. As on prior passes: Flutter release-mode in-app cross-check not captured; S4 parse wall time not recoverable (timestamp-free capture); S8 burst-during-animation variant not run.
 
 ---
 
 ## Device: iPhone SE (2nd gen) (iPhone12,8 / Apple A13 Bionic) — iOS, 60 Hz budget tier
 
-**Status:** run 2026-09-04 22:13Z → 2026-09-05 00:21Z, **full-form: 12 runs × 30 s per scenario per app (S7 also 30 s — the 60 s length only serves Android's idle window), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** Frust = **PROFILE** build of `f64be636` (engine renderer; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4); Flutter = profile build (`flutter build … --profile`, Flutter 3.47.2). Raw series under `raw/iphone_se/frust_profile/<sN>/` and `raw/iphone_se/flutter/<sN>/` (192 run logs, 12 per scenario per app; no PSS snapshots on iOS).
+**Status:** run 2026-09-06 15:32–17:54 UTC, **full-form: 12 runs × 30 s per scenario per app (S7 also 30 s — the 60 s length only serves Android's idle window), first 2 discarded (10 kept) — PROTOCOL §4 satisfied.** Frust = **PROFILE** build of `21076221` (engine renderer with the render-thread split; `frust build … --profile --define FRUST_TRACE_RAW=1`, raw format v4); Flutter = profile build (`flutter build … --profile`, Flutter 3.47.2), one `flutter_sN.app` installed per scenario. Raw series under `raw/iphone_se/frust_profile/<sN>/` and `raw/iphone_se/flutter/<sN>/` (192 run logs, 12 per scenario per app; no PSS snapshots on iOS). All 16 blocks captured in one unattended session; two were re-run (deviations 1–2). **This pass supersedes the 2026-09-05 pass on this device.**
 
-- Chipset: Apple A13 Bionic (arm64e); iPhone SE 2nd gen (iPhone12,8, hardware D79AP); serial/UDID redacted.
-- OS: iOS 26.6.1 (23G83), Developer Mode on, wired `devicectl` transport.
+- Chipset: Apple A13 Bionic (arm64e); iPhone SE 2nd gen (iPhone12,8); serial/UDID redacted.
+- OS: iOS 26.6.1, Developer Mode on, network-paired `devicectl` transport (the device reported `available (paired)` throughout).
 - Display: 60 Hz panel, single mode. **The 8.33 ms column is N/A on this device** (summarize.py still prints it; it is not discussed).
-- Refresh opt-in (§6): no >60 Hz mode exists, so the gate is moot; both apps ran at ~61–62 fps in every frame scenario.
-- Brightness / airplane / Wi-Fi / BT: **uncontrolled** (no iOS CLI). Charger: USB-connected throughout (devicectl requirement); battery 83 % charging at launch → 100 % by 23:53Z, then full/not-charging to the end.
+- Refresh opt-in (§6): no >60 Hz mode exists, so the gate is moot; Frust ran ~61.4 fps and Flutter ~67–68 fps in every frame scenario.
+- Brightness / airplane / Wi-Fi / BT: **uncontrolled** (no iOS CLI). Charger: USB-connected throughout (devicectl requirement).
 - Thermal: no sensor CLI; fixed 60 s inter-block cooldown (`--cooldown 60`); no gate stalls possible.
-- Toolchain: Xcode 26.2 (17C52), rustc 1.98.1 (pinned), Flutter 3.47.2 stable.
-- Visual gate: **skipped** (no iOS screenshot CLI). Driver marker/line-count sanity passed on all 16 blocks at the first attempt (frust blocks 375–384 s wall, Flutter 407–411 s incl. per-scenario install + container pull).
-- Sanitization: `RAW_OK` from both driver sessions; merged tree re-checked — 0 lines outside the whitelist in all 192 logs.
-- iOS conventions: Frust `total_us` (rows marked †) folds in the CADisplayLink acquire/vsync wait (`acquire` p50 10.9–13.3 ms), so † totals pin to the 16.67 ms cadence; **the "CPU work" row is `total − acquire` = rebuild+layout+paint+encode+submit** and is the per-frame comparison row. Flutter's `totalSpan` goes negative under load, so its frame total is `build_us+raster_us`. **For the engine, `submit` waits on the GPU, so that row is CPU+GPU on the Frust side while Flutter's `build+raster` is CPU only — the two are not like-for-like, and no per-frame winner is declared from them; Frust's real GPU time is the `gpu_total` figure in each pass-breakdown line (Metal timestamps, `gpu_q=1`).**
+- Toolchain: Xcode 26.2 (17C52), rustc 1.98.1 (pinned), `wgpu` 30.0.1 (pinned), Flutter 3.47.2 stable / Dart 3.13.2.
+- Visual gate: **skipped** (no iOS screenshot CLI). Driver marker/line-count sanity passed on 14 of 16 blocks at the first attempt (frust blocks 380–385 s wall, Flutter 450–456 s incl. per-scenario install + container pull).
+- Sanitization: driver staging `RAW_OK`; whitelist self-check passed — 0 lines outside the whitelist in all 192 logs.
+- iOS conventions (unchanged): Frust `total_us` (rows marked †) folds in the CADisplayLink acquire/vsync wait (`acquire` p50 10.9–13.2 ms), so † totals pin to the 16.67 ms cadence; **the "CPU work" row is `total − acquire` = rebuild+layout+paint+encode+submit** and is the per-frame comparison row. Flutter's `totalSpan` goes negative under load, so its frame total is `build_us+raster_us`. **For the engine, `submit` waits on the GPU, so that row is CPU+GPU on the Frust side while Flutter's `build+raster` is CPU only — the two are not like-for-like, and no per-frame winner is declared from them; Frust's real GPU time is the `gpu_total` figure in each pass-breakdown line (Metal timestamps, `gpu_q=1`).**
 
-### S1 — Animation storm
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) † | 16.61 | 18.19 | 18.56 | 26.35 | 8,480 (46.09%) | 18,278 (99.34%) | 18,400 (~61.3 fps avg) |
-| Frust CPU work (total − acquire wait) | 5.79 | 6.48 | 6.92 | 13.04 | 0 (0.00%) | 15 (0.08%) | 18,400 (~61.3 fps avg) |
-| Flutter (profile) | 4.91 | 5.56 | 5.71 | 20.82 | 7 (0.04%) | 11 (0.06%) | 18,575 (~61.9 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.03, layout 0.01, paint 0.05, encode 0.05, acquire 10.87, submit 5.62; layout_us>0 on 18,400/18,400 frames; GPU (gpu_q=1 on 18,360) total p50/p95 4.38/4.58 ms
-
-**No per-frame winner is declared on this device** (asymmetric instruments, as on every iOS pass): both apps hold the 60 Hz cadence at ~61–62 fps with zero budget misses on their work rows. Frust's frame is ~0.2 ms of CPU plus 4.4 ms of GPU (Metal timestamps, p50/p95 4.38/4.58 ms) and the `submit` pass waits on that GPU work, so the CPU-work row (5.79 ms) is CPU+GPU; Flutter's 4.91 ms is build+raster CPU time with its GPU time not exposed. Frust's † totals show 46 % misses only because they are the cadence itself.
-
-### S2 — Long-list scroll (10k rows)
+### S1
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) † | 18.81 | 20.76 | 21.44 | 24.99 | 10,845 (59.45%) | 11,570 (63.43%) | 18,241 (~60.8 fps avg) |
-| Frust CPU work (total − acquire wait) | 6.34 | 7.33 | 7.73 | 11.64 | 0 (0.00%) | 30 (0.16%) | 18,241 (~60.8 fps avg) |
-| Flutter (profile) | 4.83 | 5.52 | 5.84 | 11.07 | 0 (0.00%) | 11 (0.17%) | 6,422 (~21.4 fps avg) |
+| Frust (profile) † | 16.71 | 18.20 | 18.54 | 42.16 | 9,729 (52.84%) | 18,302 (99.41%) | 18,411 (~61.4 fps avg) |
+| Frust CPU work (total − acquire wait) | 5.79 | 6.47 | 6.90 | 10.62 | 0 (0.00%) | 24 (0.13%) | 18,411 (~61.4 fps avg) |
+| Flutter (profile) | 5.10 | 5.53 | 5.68 | 20.78 | 6 (0.03%) | 12 (0.06%) | 20,092 (~67.0 fps avg) |
 
-Frust pass p50 (ms): rebuild 0.09, layout 2.47, paint 0.14, encode 0.03, acquire 12.57, submit 2.97; layout_us>0 on 18,241/18,241 frames; GPU (gpu_q=1 on 18,201) total p50/p95 3.08/3.14 ms
+Frust pass p50 (ms): rebuild 0.03, layout 0.01, paint 0.05, encode 0.05, acquire 10.94, submit 5.61; layout_us>0 on 18,411/18,411 frames; GPU (gpu_q=1 on 18,371) total p50/p95 4.38/4.58 ms
 
-**No per-frame winner declared** (same asymmetry): Frust CPU ≈2.7 ms (relayout on every frame, layout p50 2.47 ms) + GPU 3.1 ms (p50/p95 3.08/3.14) inside a 6.34 ms CPU+GPU-wait row, vs Flutter's 4.83 ms build+raster CPU with GPU unexposed; neither misses the 60 Hz budget on work. Frust paints continuously (18,241 frames); Flutter paints event-driven (6,422 frames, ~642/run).
+**Flutter carries less CPU work per frame; both hold the panel.** On the comparison row Frust is 5.79 ms against Flutter's 5.10 (p95 6.47 vs 5.53), and neither app misses the 60 Hz budget on the work axis (0.00 % both). Frust's GPU pass time is 4.38 ms median, so most of the 5.79 ms is GPU wait inside `submit` rather than CPU — see the iOS conventions above before reading the two rows as like-for-like.
 
-### S3 — Table ops (continuous cycling)
+### S2
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) † | 19.28 | 21.00 | 21.79 | 24.93 | 14,570 (79.29%) | 15,153 (82.46%) | 18,376 (~61.3 fps avg) |
+| Frust CPU work (total − acquire wait) | 6.47 | 7.50 | 7.99 | 11.06 | 0 (0.00%) | 53 (0.29%) | 18,376 (~61.3 fps avg) |
+| Flutter (profile) | 4.93 | 5.65 | 5.97 | 10.55 | 0 (0.00%) | 11 (0.17%) | 6,423 (~21.4 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.10, layout 2.53, paint 0.15, encode 0.03, acquire 13.18, submit 3.00; layout_us>0 on 18,376/18,376 frames; GPU (gpu_q=1 on 18,336) total p50/p95 3.08/3.14 ms
+
+**Frust pays more per frame and paints far more of them.** Work row 6.47 vs 4.93 ms; Frust repaints continuously at ~61.3 fps (18,376 frames) while Flutter's scroll paint is event-driven (6,423 frames), so the per-frame figures compare and the frame counts do not. Frust re-lays out every frame at 2.53 ms median, which is the bulk of its cost here.
+
+### S4
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) † | 16.60 | 17.09 | 17.65 | 39.42 | 7,789 (42.23%) | 13,188 (71.50%) | 18,446 (~61.5 fps avg) |
+| Frust CPU work (total − acquire wait) | 3.69 | 4.39 | 4.60 | 8.83 | 0 (0.00%) | 1 (0.01%) | 18,446 (~61.5 fps avg) |
+| Flutter (profile) | 1.38 | 1.61 | 1.73 | 7.76 | 0 (0.00%) | 0 (0.00%) | 20,335 (~67.8 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.11, layout 0.02, paint 0.04, encode 0.02, acquire 12.70, submit 3.48; layout_us>0 on 18,446/18,446 frames; GPU (gpu_q=1 on 18,406) total p50/p95 0.62/0.84 ms
+
+**Flutter wins S4 on the work axis** — 1.38 vs 3.69 ms p50, 1.61 vs 4.39 p95 — with neither app missing the 60 Hz budget. Frust's GPU time is 0.62 ms, the cheapest of the matrix, so this row is CPU-side scheduling under the concurrent animation, not rasterisation.
+
+### S5
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) † | 16.90 | 17.86 | 18.25 | 39.85 | 11,043 (60.00%) | 17,940 (97.47%) | 18,406 (~61.4 fps avg) |
+| Frust CPU work (total − acquire wait) | 5.47 | 6.11 | 6.42 | 10.31 | 0 (0.00%) | 12 (0.07%) | 18,406 (~61.4 fps avg) |
+| Flutter (profile) | 2.62 | 3.60 | 3.74 | 6.60 | 0 (0.00%) | 0 (0.00%) | 20,228 (~67.4 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.50, layout 0.03, paint 0.03, encode 0.01, acquire 11.51, submit 4.89; layout_us>0 on 18,406/18,406 frames; GPU (gpu_q=1 on 18,366) total p50/p95 4.64/4.73 ms
+
+**Flutter wins the work axis; Frust's image column is complete.** Work row 5.47 vs 2.62 ms. As on the OnePlus 9, this capture composites the whole column: 16,941 `frust-perf img` lines across the kept runs, `skipped=0` on every one, 54,095 evictions and up to 60 resident images against the atlas budget — PROTOCOL §7's content gate is met with eviction-only degradation.
+
+### S6
+
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
+|---|---|---|---|---|---|---|---|
+| Frust (profile) † | 17.07 | 17.85 | 18.36 | 42.58 | 15,916 (86.01%) | 18,396 (99.41%) | 18,505 (~61.7 fps avg) |
+| Frust CPU work (total − acquire wait) | 5.57 | 6.28 | 6.64 | 13.80 | 0 (0.00%) | 12 (0.06%) | 18,505 (~61.7 fps avg) |
+| Flutter (profile) | 4.30 | 5.14 | 5.38 | 15.75 | 0 (0.00%) | 17 (0.08%) | 20,498 (~68.3 fps avg) |
+
+Frust pass p50 (ms): rebuild 0.07, layout 0.16, paint 0.25, encode 0.08, acquire 11.50, submit 5.02; layout_us>0 on 18,505/18,505 frames; GPU (gpu_q=1 on 18,465) total p50/p95 1.64/1.86 ms
+
+**Closest scenario on this device** — work row 5.57 vs 4.30 ms p50, 6.28 vs 5.14 p95, neither app missing the 60 Hz budget. Frust's GPU time is 1.64 ms; the cost is shaping and glyph upload on the CPU side.
+
+### S3
 
 Per-op reconcile-frame timing (`s3-*` sub-markers aggregated across all cycles in the kept runs):
 
 | Op | Frust p50/p95/p99/worst (ms) | n frames | Flutter p50/p95/p99/worst (ms) | n frames |
 |---|---|---|---|---|
-| create 1k | 16.75 / 16.98 / 17.07 / 17.17 | 180 | **not captured** | 0 |
-| create 10k | 16.04 / 17.03 / 18.86 / 19.17 | 189 | **not captured** | 0 |
-| update every 10th of 10k | 15.68 / 16.95 / 17.59 / 17.65 | 180 | **not captured** | 0 |
-| swap | 15.99 / 17.11 / 18.24 / 19.73 | 180 | **not captured** | 0 |
-| clear | 15.72 / 16.87 / 17.28 / 18.54 | 180 | **not captured** | 0 |
+| create 1k | 26.41 / 27.31 / 31.66 / 31.79 | 180 | **not captured** | 0 |
+| create 10k | 24.32 / 25.05 / 25.32 / 25.48 | 190 | **not captured** | 0 |
+| update every 10th of 10k | 20.83 / 21.63 / 22.04 / 22.20 | 185 | **not captured** | 0 |
+| swap | 19.89 / 21.82 / 22.14 / 22.60 | 180 | **not captured** | 0 |
+| clear | 19.17 / 19.94 / 20.31 / 20.60 | 180 | **not captured** | 0 |
 
 Overall S3 frame series (whole capture incl. settle gaps — continuous vs event-driven paint, not apples-to-apples):
 
 | App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
 |---|---|---|---|---|---|---|---|
-| Frust (profile) | 16.79 | 18.78 | 24.89 | 31.71 | 11,389 (62.32%) | 17,288 (94.59%) | 18,276 (~60.9 fps avg) |
-| Flutter (profile) | 5.01 | 12.84 | 13.72 | 16.80 | 2 (0.22%) | 268 (29.29%) | 915 (~3.0 fps avg) |
+| Frust (profile) | 16.73 | 18.48 | 24.69 | 31.79 | 10,144 (55.11%) | 16,779 (91.15%) | 18,408 (~61.4 fps avg) |
+| Flutter (profile) | 5.05 | 12.71 | 13.54 | 16.86 | 3 (0.29%) | 315 (30.23%) | 1,042 (~3.5 fps avg) |
 
-Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Flutter (profile) `s3-create1k` reopens per kept run: 5–20.
+Cycle health — Frust (profile) `s3-create1k` reopens per kept run: 19–19; Flutter (profile) `s3-create1k` reopens per kept run: 15–22.
 
-**No cross-app per-op comparison exists** (Flutter per-op capture landed 0 frames, as on every prior pass). Frust's per-op figures are `total_us`, hence cadence-bound (p50 15.7–16.8 ms), and shifted by one op (deviation 6); no winner is declared from the overall series.
+**All five Frust reconcile ops are captured, and their numbers are not comparable with 2026-09-05's.** The frame-indexed half-open windows attribute exactly the op's own frame, where the previous pass sliced by log position and attributed a neighbouring frame to each op (PROTOCOL §7's marker-format note). That is why the per-op p50s read 19.2–26.4 ms here against 15.7–16.8 ms before while **the overall series is flat** — p50 16.79→16.73 ms over a near-identical 18,276→18,408 frames, and its p95 and 60 Hz miss rate both improved. Read the change as a correction of attribution, not a regression in reconcile cost. Flutter still lands no per-op frames at all on this device.
 
-### S4 — Heavy-work responsiveness (JSON parse + concurrent animation)
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) † | 16.72 | 16.99 | 17.84 | 23.45 | 12,598 (68.69%) | 18,233 (99.42%) | 18,340 (~61.1 fps avg) |
-| Frust CPU work (total − acquire wait) | 3.42 | 4.03 | 4.28 | 15.44 | 0 (0.00%) | 6 (0.03%) | 18,340 (~61.1 fps avg) |
-| Flutter (profile) | 1.34 | 1.51 | 1.63 | 6.82 | 0 (0.00%) | 0 (0.00%) | 18,630 (~62.1 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.09, layout 0.01, paint 0.04, encode 0.01, acquire 13.30, submit 3.25; layout_us>0 on 18,340/18,340 frames; GPU (gpu_q=1 on 18,300) total p50/p95 0.67/0.86 ms
-
-**No per-frame winner declared**: both hold a locked ~61–62 fps animation through the parse with zero 60 Hz misses on work. Frust's row is 3.42 ms CPU+GPU-wait with only 0.67 ms of GPU time (p50) — the rest is the synchronous submit/present path — vs Flutter's 1.34 ms build+raster CPU (GPU unexposed). Parse wall time not captured.
-
-### S5 — Image pipeline (decode-and-display while scrolling)
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) † | 17.12 | 18.40 | 19.20 | 23.66 | 13,472 (73.69%) | 17,893 (97.88%) | 18,281 (~60.9 fps avg) |
-| Frust CPU work (total − acquire wait) | 5.31 | 6.58 | 7.36 | 10.99 | 0 (0.00%) | 34 (0.19%) | 18,281 (~60.9 fps avg) |
-| Flutter (profile) | 2.74 | 3.67 | 3.95 | 5.74 | 0 (0.00%) | 0 (0.00%) | 18,598 (~62.0 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.57, layout 0.03, paint 0.04, encode 0.01, acquire 11.85, submit 4.67; layout_us>0 on 18,281/18,281 frames; GPU (gpu_q=1 on 18,241) total p50/p95 2.58/4.66 ms
-
-**No per-frame winner declared**: both sustain ~61–62 fps with no 60 Hz misses on work. Frust 5.31 ms CPU+GPU-wait (GPU p50/p95 2.58/4.66 ms, rebuild 0.57 ms) vs Flutter 2.74 ms build+raster CPU (GPU unexposed); Flutter's worst is tighter (5.7 vs 11.0 ms). No screenshot exists on iOS to confirm Frust's S5 content here — see the OnePlus 9 S5 caveat and the renderer-transition verdict before reading this row.
-
-### S6 — Text shaping stress
-
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames |
-|---|---|---|---|---|---|---|---|
-| Frust (profile) † | 17.08 | 17.91 | 18.41 | 24.67 | 15,487 (84.78%) | 18,154 (99.38%) | 18,267 (~60.9 fps avg) |
-| Frust CPU work (total − acquire wait) | 5.54 | 6.28 | 6.73 | 15.24 | 0 (0.00%) | 12 (0.07%) | 18,267 (~60.9 fps avg) |
-| Flutter (profile) | 4.27 | 5.13 | 5.47 | 13.98 | 0 (0.00%) | 21 (0.11%) | 18,631 (~62.1 fps avg) |
-
-Frust pass p50 (ms): rebuild 0.07, layout 0.15, paint 0.26, encode 0.08, acquire 11.53, submit 4.98; layout_us>0 on 18,267/18,267 frames; GPU (gpu_q=1 on 18,227) total p50/p95 1.64/1.86 ms
-
-**No per-frame winner declared**: both at ~61–62 fps with zero 60 Hz misses on work. Frust 5.54 ms CPU+GPU-wait (GPU p50/p95 1.64/1.86 ms; text shaping in layout/paint 0.4 ms) vs Flutter 4.27 ms build+raster CPU (GPU unexposed); worst 15.2 vs 14.0 ms.
-
-### S7 — Cold start + idle (30 s runs)
+### S7
 
 | Metric | Frust (profile) | Flutter (profile) |
 |---|---|---|
 | External cold start (`am start -W` TotalTime, median of kept launches) | not captured | not captured |
-| Framework-reported first-frame span | ~110 ms median (`first_frame_presented`, 78–250 across 12 launches; `adapter_ready` median 102 ms) | ~8 ms median (`first_frame_ms`, 6–9 across 12 launches) |
+| Framework-reported first-frame span | ~100 ms median (`first_frame_presented`, 64–176 across 12 launches; `adapter_ready` median 22 ms) | ~8 ms median (`first_frame_ms`, 6–9 across 12 launches) |
 | Idle CPU during the S7 blocks (`dumpsys cpuinfo`) | n/a | n/a |
 | Idle memory (TOTAL PSS, mean over kept runs' post-run snapshots) | n/a | n/a |
 
-Only the framework-self-reported spans exist on iOS (deviation 2): **Flutter's is far shorter** (8 vs 110 ms median); Frust's span is dominated by GPU adapter/device init (`adapter_ready` median 102 of the 110 ms). No external cold start, idle CPU or memory captured.
+**Frust's GPU bring-up got much faster; its first frame did not follow.** `adapter_ready` median falls 102→22 ms (max 239→34), but the first-frame span only moves 110→100 ms because it now waits on the font preinit instead: across the 12 launches `first_frame_presented` equals `font_preinit_joined` plus 13–23 ms (median 17) in every single one, and the join itself is bimodal — six launches at 51–65 ms (first frame 64–82 ms) and six at 100–159 ms (first frame 119–176 ms). The ≤ 85 ms criterion is missed on the median and met on exactly the fast half; the criteria section states it plainly. Flutter's ~8 ms figure is its own framework-entry span and bounds different work.
 
-### S8 — Plugin-call overhead (shared preferences)
+### S8
 
 Per-op median latency over the kept runs (µs/call; each type's first call excluded as warm-up).
 
 | Op | Frust (profile) (µs/call) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | 6 | 125 | n/a |
-| write i64 | 15 | 60 | n/a |
-| write f64 | 17 | 55 | n/a |
-| write String | 6 | 52 | n/a |
-| write Vec\<String\> | 6 | 61 | n/a |
-| read (unique key, forces channel) bool | 1 | 2698† | ~0 |
-| read (unique key, forces channel) i64 | 1 | 2698† | ~0 |
-| read (unique key, forces channel) f64 | 1 | 2698† | ~0 |
-| read (unique key, forces channel) String | 1 | 2698† | ~0 |
-| read (unique key, forces channel) Vec\<String\> | 1 | 2698† | ~0 |
+| write bool | 4 | 132 | n/a |
+| write i64 | 3 | 56 | n/a |
+| write f64 | 4 | 55 | n/a |
+| write String | 4 | 52 | n/a |
+| write Vec\<String\> | 5 | 61 | n/a |
+| read (unique key, forces channel) bool | 1 | 2692† | ~0 |
+| read (unique key, forces channel) i64 | 1 | 2692† | ~0 |
+| read (unique key, forces channel) f64 | 1 | 2692† | ~0 |
+| read (unique key, forces channel) String | 1 | 2692† | ~0 |
+| read (unique key, forces channel) Vec\<String\> | 1 | 2692† | ~0 |
 
 `s8-errors` marker lines across kept logs: frust 0, flutter 0. †Flutter's only channel-crossing read is the package's `reload()` whole-store re-read (one figure for every read row).
 
-**Frust wins S8 decisively** — writes 6–17 µs vs Flutter's 52–125 µs (≈3–20× per type); Frust's per-key read is ~1 µs vs Flutter's 2,698 µs `reload()` whole-store re-read. Zero errors on both apps.
+**Frust wins S8 by a wide margin on iOS** — writes 3–5 vs 52–132 µs/call, and a per-key read at 1 µs against Flutter's whole-store `reload()` at 2,692 µs. Both sides are cheaper here than on Android because the iOS preferences store is in-process on both. Zero `s8-errors` on either app.
+
+### vs 2026-09-05 (Frust CPU-work row, same device, same scenarios)
+
+| Scenario | p50 old→new (ms) | Δp50 | p95 old→new (ms) | Δp95 | miss@16.67 old→new |
+|---|---|---|---|---|---|
+| S1 | 5.79→5.79 | +0.1% | 6.48→6.47 | -0.0% | 0.00%→0.00% |
+| S2 | 6.34→6.47 | +2.0% | 7.33→7.50 | +2.3% | 0.00%→0.00% |
+| S4 | 3.42→3.69 | +7.9% | 4.03→4.39 | +8.8% | 0.00%→0.00% |
+| S5 | 5.31→5.47 | +3.1% | 6.58→6.11 | -7.2% | 0.00%→0.00% |
+| S6 | 5.54→5.57 | +0.5% | 6.28→6.28 | -0.1% | 0.00%→0.00% |
+| S3 (overall) | 16.79→16.73 | -0.3% | 18.78→18.48 | -1.6% | 62.32%→55.11% |
+
+The per-frame work row is unchanged within noise on four of six scenarios (−0.0…+3.1 %); S4 is the one outlier at +7.9 % p50 / +8.8 % p95, and the Flutter control moved +3.4 % / +6.2 % on the same scenario in the same session, so most of that is session-level rather than Frust-side. The Flutter control moved −4.3…+3.8 % across the board. Off the frame axis the pass is clearly better: `adapter_ready` 102→22 ms median, first-frame span 110→100 ms (min 78→64, max 250→176), and the S3 overall series holds its p50 while dropping p95 18.78→18.48 ms and its 60 Hz miss rate 62.32→55.11 %. The S3 **per-op** rows are the one place a straight old-vs-new read is wrong — the marker attribution changed under them; see the S3 note above.
 
 ### Methodology deviations (this device)
 
-1. **Matrix ran in two driver sessions.** The first (`matrix-iphone_se`) was killed externally at 23:48:44Z (an orchestration-tool process-group kill, not a device fault) during frust/s7 run 9 of 12, after S1–S6 (12 blocks) had completed first-attempt `ok`. S7–S8 were re-run in a second session (`matrix-iphone_se-2`, `--scenarios s7,s8`) starting 23:52:17Z, 9 min after the S6 Flutter block ended; its first block reinstalled the frust app from the same artifact and each Flutter `.app` was installed by its block as usual. The first session's 8 partial frust/s7 runs are excluded; S7/S8 are the second session's 12 runs each.
-2. **No external cold start, idle CPU or idle PSS on iOS** (no `am start -W`/`dumpsys` equivalents); only framework spans reported.
-3. **Environmental controls uncontrolled:** brightness, airplane/Wi-Fi/BT, charger (USB-connected, charging 83→100 %), thermal (no sensor; fixed 60 s cooldown).
-4. **Visual gate skipped** (no screenshot CLI); the driver's marker/line-count sanity stood in.
-5. **60 Hz panel:** 8.33 ms column N/A; Frust † totals fold in the CADisplayLink acquire wait and pin to the cadence — per-frame comparisons use the CPU-work row (total − acquire); Flutter's total is the `build+raster` work-sum (`totalSpan` negative under load). The CPU-work row is CPU+GPU-wait for Frust and CPU-only for Flutter (no Flutter GPU timing exists), so per-frame rows are reported side by side without a winner.
-6. **S3:** Flutter per-op capture 0 frames (structural `addTimingsCallback` gap, as every prior pass). The engine emits a frame's raw line after the `s3-*` end marker, so Frust's per-op rows are shifted by one op (op N's frame lands in op N+1's window) — recorded, not re-run. Flutter kept run-10 captured only 5 `create1k` cycles / 26 frames (others 20 / 98–100); included as captured.
-7. Flutter release-mode in-app cross-check not captured; S8 burst-during-animation variant not run (as on every prior pass).
+1. **flutter S3 re-run once (Flutter-side timing delivery).** On the first attempt two of the twelve runs under-delivered frame timings — run-09 produced 0 `flutter-perf raw` lines and run-05 produced 26 against ~107 in every other run — which is the known Flutter iOS `addTimingsCallback` delivery gap, not a capture fault. The retry graded `ok` (kept line counts 76–108) and is the staged series.
+2. **frust S8 graded `DEGENERATE` twice by a stale driver check; the data is complete.** Identical to the OnePlus 9 case: `matrix.sh`'s `block_sanity` counts `-perf plugin op=` while Frust's S8 emitters now lead with the canonical inline `scenario=` key, so the check saw 2 lines where the run captured 2,002 per-op lines. `stats.py` parses the new shape and the S8 table above is computed from it; `pick_src` fell back to attempt 1. The driver check was corrected the same day (`block_sanity` and `run.sh`'s op counts now accept the `scenario=` shape, `7ee376b3`); a 12-run S8 block per app re-captured on the OnePlus 9 with the corrected check graded `ok` at 2,002 lines and reproduced that device's published S8 medians within 2 %, so the series above stand.
+3. **No visual gate and no thermal or battery telemetry on this device** — iOS exposes no screenshot, temperature or battery-level CLI to the driver, so this device's block sanity is marker/line-count only and its thermal control is the fixed 60 s inter-block cooldown.
+4. **Flutter's fps column is not a presented rate here.** Flutter reports 20,092–20,498 frames per 300 s capture (~67–68 fps) on a 60 Hz panel, so its timing callbacks are not one-per-present; Frust's ~61.4 fps is a presented count. Compare the two apps on the per-frame rows, not the fps column.
+5. **Flutter S2 rows are not comparable to any Flutter S2 row before 2026-09-05** — the Flutter bench app was changed to single-line ellipsis for row-text parity with Frust.
+6. As on prior passes: no external `am start -W` equivalent is captured on iOS (the S7 cold-start row reads "not captured" for both apps), no PSS/idle-memory axis exists, Flutter release-mode in-app cross-check not captured, and the S8 burst-during-animation variant was not run.
 
 ---
 
@@ -589,250 +647,88 @@ Per-op median latency over the kept runs (µs/call; each type's first call exclu
 
 ---
 
-## App size (release) — re-measured 2026-09-05 (engine build)
+## App size (release) — Frust re-measured 2026-09-06, Flutter 2026-09-05
 
-Host-side snapshot via `benchmarks/harness/app_size.sh` over fresh release
-builds of `f64be636` (Frust `frust build apk --release` / `frust build ios
---release`, Flutter 3.47.2 `flutter build apk --release [--split-per-abi]` /
-`flutter build ios --release`). The Frust Android release was signed with a
-throwaway local keystore purely to satisfy the CLI's release-signing gate; signing
-does not change the size class.
+Frust's rows are release builds of `21076221`; the Flutter column is the
+2026-09-05 `app_size.sh` snapshot of Flutter 3.47.2 (`flutter build apk
+--release [--split-per-abi]` / `flutter build ios --release`), unchanged this
+pass and dated accordingly. The Frust Android release is signed with a
+throwaway local keystore purely to satisfy the CLI's release-signing gate;
+signing does not change the size class. Sizes are MiB alongside the exact byte
+count, which is the authoritative figure.
 
-| Axis | Frust | Flutter |
-|---|---|---|
-| Android universal release APK (3 ABIs) | **31.46 MB** (32,991,926 B) | 49.36 MB (51,762,140 B) |
-| Android arm64-v8a split | **10.94 MB** (11,471,451 B) | 17.45 MB (18,295,458 B) |
-| arm64 `.so` payload (from the split) | 10.82 MB (one `libfrustbench.so`) | 16.55 MB (engine + app) |
-| dex total | 0.17 MB | 0.81 MB |
-| iOS release `.app` (`du -sk`) | **11.61 MB** | 16.64 MB |
+| Axis | Frust, `db` on (default) | Frust, `db` off (`--no-default-features --features lean`) | Flutter (2026-09-05) |
+|---|---|---|---|
+| Android universal release APK (3 ABIs) | **31.47 MiB** (33,002,246 B) | not built as universal | 49.36 MiB (51,762,140 B) |
+| Android arm64-v8a split APK | **10.95 MiB** (11,480,155 B) | **9.09 MiB** (9,533,659 B) | 17.45 MiB (18,295,458 B) |
+| in-APK `lib/arm64-v8a/libfrustbench.so` | 10.83 MiB (11,352,480 B) | 8.97 MiB (9,405,968 B) | 16.55 MiB (engine + app) |
+| on-disk arm64 `.so` (stripped) | 10.83 MiB (11,352,488 B) | 8.97 MiB (9,405,976 B) | n/a |
+| iOS release `.app` (`du -sk`) | **11.63 MiB** (11,908 KB) | not built | 16.64 MiB |
+| iOS `Runner` binary | 11.54 MiB (12,103,152 B) | not built | n/a |
 
-Frust stays the smaller artifact on every axis, but by a narrower margin than
-the 2026-07-21 vello-era snapshot (universal 21.25 MB → 31.46 MB, arm64 `.so`
-7.42 MB → 10.82 MB, iOS 7.96 MB → 11.61 MB). The bench app itself also grew
-between the two snapshots (the `d1`/`d2` DB scenarios pull in `frust-database`
-with a bundled SQLite), so the delta is not attributable to the renderer alone;
-a size attribution of the engine build (`naga` shader translation, `wgpu` 30,
-the strip pipeline) against the vello build is the open follow-up.
+Two findings from this measurement, both about where the bytes are:
+
+- **Routing `wgpu` per target saves ~0 bytes.** Restricting each target to the
+  backends and `naga` writers it can actually use (Android → `vulkan`/`spv-out`,
+  Apple → `metal`/`msl-out`, Windows → `dx12`+`vulkan`/`hlsl-out`+`spv-out`,
+  from `dx12`+`metal`+`vulkan` everywhere) moves the universal APK by 0 bytes
+  and the arm64 `.so` by +16 B. Fat LTO with `codegen-units = 1` had already
+  dead-stripped the unreferenced writers: per-crate attribution of the
+  unstripped arm64 `.so` is byte-identical across the change — `naga` 890,515 B
+  both ways, attributed total 7,406,938 → 7,406,834 B. The change is build
+  hygiene and correctness of intent, not a size lever.
+- **The `db` feature gate is the lever.** Turning the DB scenarios off drops the
+  arm64 `.so` from 11,352,488 to 9,405,976 B (−1,946,512 B, −17.1 %) and the
+  arm64 split APK by the same −1,946,496 B (−17.0 %). Attributed symbol bytes
+  fall 7,406,834 → 5,722,214; the rows that disappear are bundled `sqlite3`
+  (671,557 B), its unmangled C helpers (951,967 B) and `rusqlite`. What remains
+  on top is led by `naga` 890,515, `core` 660,128, `wgpu_core` 550,868,
+  `harfrust` 387,678 and `skrifa` 288,148 — so the next size question is the
+  shader-translation and GPU-plumbing tier, not SQLite.
+
+Frust stays the smaller artifact on every axis it shares with Flutter. Against
+the 2026-07-21 vello-era snapshot it is still larger (universal 21.25 → 31.47
+MB, arm64 `.so` 7.42 → 10.83 MiB, iOS 7.96 → 11.63 MiB), and the bench app itself
+grew between the two snapshots because the `d1`/`d2` scenarios pull in
+`frust-database` with a bundled SQLite — the `db`-off column above is the size
+of that difference, and the remainder is the open renderer-attribution question.
 
 ## Renderer transition (vello → frust-engine) — regression check, 2026-09-05
 
-Every row is `harness/compare.py` over two `summarize.py` JSON dumps: the retired series (git history, `git show f64be636:benchmarks/raw/…`) against this pass's committed raws; Δ positive = slower. The same-build-mode (`--profile`) vello rows are the renderer comparison proper; the 2026-07-21 release rows are cross-methodology (PROTOCOL §2.5) and read on tails only; the engine-to-engine rows show drift since the last engine gate.
+Recorded once, on the 2026-09-05 pass: `harness/compare.py` over two
+`summarize.py` JSON dumps, the retired vello series (git history,
+`git show f64be636:benchmarks/raw/…`) against that pass's raws; Δ negative =
+faster. The same-build-mode (`--profile`) vello rows were the renderer
+comparison proper, the 2026-07-21 release rows cross-methodology (PROTOCOL
+§2.5, tails only). The full per-device comparison tables were folded into this
+summary on 2026-09-06, when the post-optimization pass above replaced the
+device sections they were computed against; they remain in git history
+(`git show de265855:benchmarks/RESULTS.md`).
 
-### Verdict
+**Verdict: no per-frame renderer regression on Android or iOS in the
+like-for-like rows.** Its two open measurement caveats — S5 content on the
+OnePlus 9 and S3 per-op attribution — are settled by the 2026-09-06 pass above;
+its iOS tail items are carried into that pass's criteria section.
 
-**No per-frame renderer regression on Android or iOS in the like-for-like rows; S5 is invalid on the engine build until its empty-content behaviour is fixed; S3 per-op attribution needs a measurement fix; two iOS tail items to inspect.**
-
-- **OnePlus 9, same build mode (vello `--profile` 2026-09-01 → engine `--profile` 2026-09-05):** the
-  engine is faster on every scenario that has a vello-profile baseline — S1 p50 14.84→8.20 ms
-  (−45 %), S2 17.99→8.83 (−51 %), S5 22.07→7.78 (−65 %), S6 8.19→8.19 (flat, p95 +1 %) — and every
-  cell now holds a locked 120 fps where vello ran 47–68 fps. Engine-to-engine drift since the
-  Phase-7 gate is −3…−10 % (better) on every metric. Flutter drifted <7 % on every p50/p95 between
-  its 3.44.2 and 3.47.2 builds, so the cross-app verdicts are not an artefact of the Flutter move.
-- **OnePlus 9, cross-methodology (vello RELEASE 2026-07-21 → engine profile):** S1/S2/S5 tails
-  −22…−56 %; S3 per-op p50/p95 −10…−22 %; external cold start 185→135 ms and first frame
-  128→105 ms. The two rows that moved the wrong way are §2.5 artefacts, not renderer work:
-  S6 p50 5.67→8.19 ms is the 120 Hz pin (the frame period is 8.33 ms; vello's unpinned S6 ran
-  ~104 fps; the same-build S6 row above is flat) and S8 writes 65–67→94–95 µs are plugin calls that
-  never touch the renderer (profile instrumentation + the OS change; Frust still 3× Flutter).
-- **iPhone SE, same build mode (S1/S2/S6):** the 60 Hz cadence is identical (16.6–19.5 ms totals),
-  and the engine's per-frame cost is now fully observable — CPU 0.14–2.7 ms + GPU (Metal
-  timestamps, `gpu_q=1`) 4.4 / 3.1 / 1.6 ms for S1 / S2 / S6, unchanged from the Phase-7 gate
-  (4.35 / 3.07 / 1.64). The "CPU work" row rises +8…+22 % against vello only because the engine's
-  `submit_us` waits on the GPU inside it while vello's compute was asynchronous and never
-  measured; it is not a like-for-like regression.
-- **iPhone SE, inspect (cross-methodology, release → profile):** (1) **S3 table ops** — the
-  reconcile-frame tail lengthened: overall series p95 16.60→18.78 ms, p99 16.80→24.89 ms, and
-  646 of 18,276 kept frames now land at 20–33 ms (8 before), i.e. ~3.5 % of frames take two vsyncs
-  during create/update/clear; per-op p95s moved from 16.3–16.5 to 16.9–17.1 ms. (2) **S7 first
-  frame** 87→110 ms median (engine pipeline/shader setup on Metal). Both exceed §2.5's ~3–7 %
-  tail bound and deserve a targeted look; neither changes a Frust-vs-Flutter verdict.
-- **S5 is NOT a valid comparison on the engine build (visual gate, OnePlus 9).** Frust's S5 screen
-  shows one or two image cells and empty background where Flutter shows a continuous column of cells
-  (grey placeholders while decoding, then images); the operator's hand launch measured content
-  covering 43 / 51 / 0 / 0 / 68 % of the list at 3 / 8 / 13 / 18 / 25 s, and the 2026-09-01 engine
-  baseline carries the same signature. `frust_bench`'s S5 draws no placeholder for an undecoded
-  cell, so either the engine's image path drops cells or decode never catches up with the scroll —
-  either way the engine's cheap S5 frames (7.8 ms at 120 fps) are partly empty frames, and the
-  −65 % S5 row above must not be read as a renderer win until the cause is fixed and S5 re-run.
-- **S3 per-op attribution is broken on the engine build (measurement, not performance).** The
-  engine emits a frame's `frust-perf raw` line *after* the scenario's `bench-scenario-end` marker
-  (vello emitted it in between), so `create 1k` collects zero frames and every other op's bucket
-  receives the previous op's reconcile frame. The frust per-op rows are shifted by one op on every
-  engine-pass device; the overall S3 series is unaffected. Fix in the bench app or `stats.py`
-  (attribute by frame start), then the per-op rows become readable again.
-- **Pixel 5, same build mode (vello `--profile` 2026-09-01 → engine `--profile` 2026-09-05, unpinned
-  60/90 Hz):** the largest gains of the matrix — S1 p50 48.40→14.86 ms (−69 %), S2 42.96→8.91 (−79 %),
-  S5 95.56→13.19 (−86 %), S6 23.23→6.82 (−71 %); every vello cell missed the 60 Hz budget on 100 % of
-  frames, the engine on 0.1–1.7 %. Engine-to-engine drift since the wgpu-30 pin (2026-09-02) is within
-  ±5 % on every metric. Frust's S5 painted a continuous column on this device (see the S5 caveat: the
-  empty-column signature is OnePlus-9-specific so far), so the Pixel 5 S5 row is a valid comparison.
-
-### OnePlus 9 (Adreno 660, 120 Hz pinned)
-
-**same build mode — THE renderer comparison (S1/S2/S5/S6)** — vello classic, profile, 2026-09-01 (tier A/B) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 14.84→8.20 | -44.7% | 16.03→9.45 | -41.1% | 16.85→10.11 | 75.61→47.71 | 1.22%→0.10% | 68.0→120.1 |
-| S2 | 17.99→8.83 | -50.9% | 19.85→11.45 | -42.3% | 20.76→13.09 | 51.13→49.98 | 81.11%→0.10% | 67.0→120.0 |
-| S5 | 22.07→7.78 | -64.8% | 23.37→8.85 | -62.1% | 24.08→10.41 | 56.39→53.00 | 96.56%→0.10% | 47.5→120.2 |
-| S6 | 8.19→8.19 | +0.0% | 8.78→8.90 | +1.4% | 9.43→10.50 | 52.12→49.64 | 0.15%→0.12% | 119.9→120.2 |
-
-**Moved past ±10% (inspect):**
-- S1 p50 -44.7% (14.84→8.20 ms)
-- S1 p95 -41.1% (16.03→9.45 ms)
-- S2 p50 -50.9% (17.99→8.83 ms)
-- S2 p95 -42.3% (19.85→11.45 ms)
-- S5 p50 -64.8% (22.07→7.78 ms)
-- S5 p95 -62.1% (23.37→8.85 ms)
-
-**engine-to-engine drift since Phase 7** — engine, profile, 2026-09-01 (p7-06) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 8.43→8.20 | -2.7% | 9.84→9.45 | -4.0% | 10.50→10.11 | 50.10→47.71 | 0.11%→0.10% | 120.0→120.1 |
-| S2 | 9.29→8.83 | -5.0% | 11.24→11.45 | +1.9% | 12.60→13.09 | 48.09→49.98 | 0.12%→0.10% | 120.1→120.0 |
-| S5 | 8.59→7.78 | -9.5% | 9.38→8.85 | -5.6% | 10.53→10.41 | 52.77→53.00 | 0.07%→0.10% | 120.1→120.2 |
-| S6 | 9.08→8.19 | -9.8% | 9.52→8.90 | -6.5% | 10.60→10.50 | 51.25→49.64 | 0.21%→0.12% | 120.1→120.2 |
-
-**No metric moved past ±10%.**
-
-**cross-methodology (§2.5: medians not comparable, tails within ~3–7 %)** — vello, RELEASE, 2026-07-21 (full matrix) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 9.70→8.20 | -15.5% | 12.19→9.45 | -22.5% | 15.49→10.11 | 56.49→47.71 | 0.77%→0.10% | 64.5→120.1 |
-| S2 | 10.87→8.83 | -18.8% | 14.97→11.45 | -23.5% | 17.96→13.09 | 56.12→49.98 | 1.64%→0.10% | 60.2→120.0 |
-| S4 | 4.64→4.54 | -2.2% | 5.50→6.22 | +13.1% | 6.11→8.26 | 57.61→64.53 | 0.06%→0.07% | 119.7→120.2 |
-| S5 | 15.71→7.78 | -50.5% | 20.08→8.85 | -55.9% | 20.94→10.41 | 56.23→53.00 | 41.80%→0.10% | 47.9→120.2 |
-| S6 | 5.67→8.19 | +44.3% | 10.75→8.90 | -17.2% | 12.14→10.50 | 58.14→49.64 | 0.07%→0.12% | 103.7→120.2 |
-| S3 (overall series) | 8.99→5.57 | -38.1% | 12.20→12.16 | -0.3% | 20.43→19.25 | 54.34→47.08 | 2.76%→2.14% | 0.0→0.0 |
-
-**Moved past ±10% (inspect):**
-- S1 p50 -15.5% (9.70→8.20 ms)
-- S1 p95 -22.5% (12.19→9.45 ms)
-- S2 p50 -18.8% (10.87→8.83 ms)
-- S2 p95 -23.5% (14.97→11.45 ms)
-- S4 p95 +13.1% (5.50→6.22 ms)
-- S5 p50 -50.5% (15.71→7.78 ms)
-- S5 p95 -55.9% (20.08→8.85 ms)
-- S6 p50 +44.3% (5.67→8.19 ms)
-- S6 p95 -17.2% (10.75→8.90 ms)
-- S3 (overall series) p50 -38.1% (8.99→5.57 ms)
-- S3 s3-clear p50 -15.6%
-- S3 s3-clear p95 -21.6%
-- S3 s3-create10k p95 -18.0%
-- S3 s3-swap p50 -11.5%
-- S3 s3-swap p95 -16.5%
-- S3 s3-update p50 -10.1%
-- S3 s3-update p95 -19.7%
-- S7 first-frame span -18.0% (128→105 ms)
-- S8 write:f64 +40.3% (67→94 µs)
-- S8 write:string +46.2% (65→95 µs)
-- S8 write:string_list +41.8% (67→95 µs)
-
-**Flutter drift (3.44.2 → 3.47.2, OxygenOS → LineageOS)** — Flutter 3.44.2, 2026-07-21 → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 9.23→9.44 | +2.3% | 16.90→17.15 | +1.4% | 19.08→19.47 | 38.61→40.11 | 5.10%→5.19% | 101.5→97.3 |
-| S2 | 14.57→15.20 | +4.4% | 23.97→24.20 | +0.9% | 27.09→27.86 | 44.59→82.34 | 31.53%→37.97% | 20.7→19.5 |
-| S4 | 4.23→4.24 | +0.2% | 5.01→4.94 | -1.4% | 5.79→5.89 | 14.94→74.91 | 0.00%→0.00% | 119.5→119.5 |
-| S5 | 6.14→6.54 | +6.6% | 13.87→14.21 | +2.5% | 15.96→16.35 | 23.27→26.03 | 0.44%→0.78% | 112.2→108.0 |
-| S6 | 8.35→8.37 | +0.3% | 9.75→9.81 | +0.7% | 10.19→10.29 | 11.93→91.13 | 0.00%→0.01% | 119.2→119.2 |
-| S3 (overall series) | 19.32→19.16 | -0.8% | 34.90→33.65 | -3.6% | 35.94→36.07 | 81.30→83.64 | 65.29%→64.39% | 0.0→0.0 |
-
-**No metric moved past ±10%.**
-
-### iPhone SE (A13, 60 Hz)
-
-**same build mode — renderer comparison on the WORK row (S1/S2/S6)** — vello classic, profile, 2026-09-01 (tier A/B) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 4.76→5.79 | +21.6% | 5.32→6.48 | +21.7% | 5.67→6.92 | 9.82→13.04 | 0.00%→0.00% | 0.0→0.0 |
-| S2 | 5.73→6.34 | +10.6% | 6.72→7.33 | +9.1% | 7.11→7.73 | 10.21→11.64 | 0.00%→0.00% | 0.0→0.0 |
-| S6 | 5.14→5.54 | +7.7% | 5.66→6.28 | +11.0% | 5.95→6.73 | 13.68→15.24 | 0.00%→0.00% | 0.0→0.0 |
-
-**Moved past ±10% (inspect):**
-- S1 p50 +21.6% (4.76→5.79 ms)
-- S1 p95 +21.7% (5.32→6.48 ms)
-- S2 p50 +10.6% (5.73→6.34 ms)
-- S6 p95 +11.0% (5.66→6.28 ms)
-
-**engine-to-engine drift (work row)** — engine, profile, 2026-09-01 (p7-06) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 5.72→5.79 | +1.2% | 6.39→6.48 | +1.4% | 6.84→6.92 | 16.04→13.04 | 0.00%→0.00% | 0.0→0.0 |
-| S2 | 6.43→6.34 | -1.5% | 7.40→7.33 | -1.0% | 7.94→7.73 | 12.58→11.64 | 0.00%→0.00% | 0.0→0.0 |
-| S6 | 5.43→5.54 | +2.1% | 6.29→6.28 | -0.0% | 6.75→6.73 | 14.56→15.24 | 0.00%→0.00% | 0.0→0.0 |
-
-**No metric moved past ±10%.**
-
-**cross-methodology, work row** — vello, RELEASE, 2026-07-21 (full matrix) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 4.41→5.79 | +31.3% | 5.16→6.48 | +25.6% | 5.87→6.92 | 39.27→13.04 | 0.01%→0.00% | 0.0→0.0 |
-| S2 | 4.80→6.34 | +32.0% | 6.00→7.33 | +22.1% | 6.36→7.73 | 8.75→11.64 | 0.00%→0.00% | 0.0→0.0 |
-| S4 | 3.58→3.42 | -4.7% | 5.11→4.03 | -21.0% | 5.36→4.28 | 6.79→15.44 | 0.00%→0.00% | 0.0→0.0 |
-| S5 | 4.67→5.31 | +13.5% | 5.25→6.58 | +25.4% | 5.57→7.36 | 9.28→10.99 | 0.00%→0.00% | 0.0→0.0 |
-| S6 | 4.67→5.54 | +18.7% | 5.41→6.28 | +16.2% | 5.67→6.73 | 9.79→15.24 | 0.00%→0.00% | 0.0→0.0 |
-| S3 (overall series) | 16.22→16.79 | +3.5% | 16.60→18.78 | +13.2% | 16.80→24.89 | 38.91→31.71 | 2.70%→62.32% | 0.0→0.0 |
-
-**Moved past ±10% (inspect):**
-- S1 p50 +31.3% (4.41→5.79 ms)
-- S1 p95 +25.6% (5.16→6.48 ms)
-- S2 p50 +32.0% (4.80→6.34 ms)
-- S2 p95 +22.1% (6.00→7.33 ms)
-- S4 p95 -21.0% (5.11→4.03 ms)
-- S5 p50 +13.5% (4.67→5.31 ms)
-- S5 p95 +25.4% (5.25→6.58 ms)
-- S6 p50 +18.7% (4.67→5.54 ms)
-- S6 p95 +16.2% (5.41→6.28 ms)
-- S3 (overall series) p95 +13.2% (16.60→18.78 ms)
-- S7 first-frame span +26.4% (87→110 ms)
-- S8 write:bool +100.0% (3→6 µs)
-- S8 write:f64 +325.0% (4→17 µs)
-- S8 write:i64 +400.0% (3→15 µs)
-- S8 write:string +100.0% (3→6 µs)
-
-**Flutter drift (build+raster work-sum)** — Flutter 3.44.2, 2026-07-21 → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 4.92→4.91 | -0.3% | 5.50→5.56 | +1.1% | 5.87→5.71 | 25.26→20.82 | 0.04%→0.04% | 61.8→61.9 |
-| S2 | 4.87→4.83 | -0.9% | 5.43→5.52 | +1.5% | 5.91→5.84 | 11.13→11.07 | 0.00%→0.00% | 21.4→21.4 |
-| S4 | 1.34→1.34 | -0.2% | 1.59→1.51 | -4.9% | 1.71→1.63 | 7.63→6.82 | 0.00%→0.00% | 61.8→62.1 |
-| S5 | 2.71→2.74 | +1.0% | 3.61→3.67 | +1.9% | 3.90→3.95 | 5.52→5.74 | 0.00%→0.00% | 61.6→62.0 |
-| S6 | 4.24→4.27 | +0.6% | 4.96→5.13 | +3.4% | 5.26→5.47 | 16.80→13.98 | 0.01%→0.00% | 61.9→62.1 |
-| S3 (overall series) | 4.97→5.01 | +0.9% | 12.33→12.84 | +4.1% | 14.67→13.72 | 18.62→16.80 | 0.10%→0.22% | 0.0→0.0 |
-
-**Moved past ±10% (inspect):**
-- S7 first-frame span +14.3% (7→8 ms)
-
-### Pixel 5 (Adreno 620, unpinned 60/90 Hz)
-
-**same build mode — renderer comparison (S1/S2/S5/S6)** — vello classic, profile, 2026-09-01 (tier A/B) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 48.40→14.86 | -69.3% | 49.42→16.18 | -67.3% | 50.21→16.93 | 154.87→116.08 | 100.00%→1.72% | 20.6→67.0 |
-| S2 | 42.96→8.91 | -79.3% | 45.30→10.61 | -76.6% | 46.20→11.73 | 144.50→115.61 | 100.00%→0.13% | 24.4→89.0 |
-| S5 | 95.56→13.19 | -86.2% | 99.81→13.99 | -86.0% | 102.39→14.53 | 197.88→161.77 | 100.00%→0.14% | 10.8→79.0 |
-| S6 | 23.23→6.82 | -70.7% | 24.35→8.71 | -64.2% | 25.03→10.71 | 104.82→125.92 | 100.00%→0.09% | 43.5→88.8 |
-
-**Moved past ±10% (inspect):**
-- S1 p50 -69.3% (48.40→14.86 ms)
-- S1 p95 -67.3% (49.42→16.18 ms)
-- S2 p50 -79.3% (42.96→8.91 ms)
-- S2 p95 -76.6% (45.30→10.61 ms)
-- S5 p50 -86.2% (95.56→13.19 ms)
-- S5 p95 -86.0% (99.81→13.99 ms)
-- S6 p50 -70.7% (23.23→6.82 ms)
-- S6 p95 -64.2% (24.35→8.71 ms)
-
-**engine-to-engine drift since the wgpu-30 pin** — engine, profile, 2026-09-02 (p8-07, wgpu 30) → 2026-09-05 engine:
-
-| Scenario | p50 old→new (ms) | Δp50 | p95 old→new | Δp95 | p99 old→new | worst old→new | miss@16.67 old→new | fps old→new |
-| S1 | 14.94→14.86 | -0.5% | 16.39→16.18 | -1.3% | 17.29→16.93 | 122.20→116.08 | 2.79%→1.72% | 66.8→67.0 |
-| S2 | 8.71→8.91 | +2.4% | 10.42→10.61 | +1.8% | 12.54→11.73 | 121.22→115.61 | 0.27%→0.13% | 88.8→89.0 |
-| S5 | 13.24→13.19 | -0.4% | 14.03→13.99 | -0.2% | 14.51→14.53 | 159.97→161.77 | 0.12%→0.14% | 78.5→79.0 |
-| S6 | 7.15→6.82 | -4.7% | 8.96→8.71 | -2.8% | 11.20→10.71 | 124.45→125.92 | 0.14%→0.09% | 88.8→88.8 |
-
-**No metric moved past ±10%.**
+- **Same build mode, the renderer comparison proper** (vello `--profile`
+  2026-09-01 → engine `--profile` 2026-09-05). OnePlus 9: S1 p50 14.84→8.20 ms
+  (−45 %), S2 17.99→8.83 (−51 %), S5 22.07→7.78 (−65 %), S6 flat, every cell
+  moving from 47–68 fps to a locked 120 fps. Pixel 5 (unpinned): the largest
+  gains of that matrix — S1 48.40→14.86 (−69 %), S2 42.96→8.91 (−79 %), S5
+  95.56→13.19 (−86 %), S6 23.23→6.82 (−71 %), with every vello cell missing the
+  60 Hz budget on 100 % of frames against the engine's 0.1–1.7 %. iPhone SE: the
+  60 Hz cadence identical, per-frame cost fully observable at CPU 0.14–2.7 ms
+  plus GPU 4.4 / 3.1 / 1.6 ms for S1 / S2 / S6; its "CPU work" row rose
+  +8…+22 % only because the engine's `submit_us` waits on the GPU inside it
+  while vello's compute was asynchronous and never measured — bookkeeping.
+  Engine-to-engine drift was −3…−10 % (OnePlus 9) and within ±5 % (Pixel 5).
+- **Cross-methodology** (vello RELEASE 2026-07-21 → engine profile, OnePlus 9):
+  S1/S2/S5 tails −22…−56 %, S3 per-op −10…−22 %, cold start 185→135 ms, first
+  frame 128→105 ms. The two rows that moved the wrong way are §2.5 artefacts:
+  S6 p50 5.67→8.19 ms is the 120 Hz pin (period 8.33 ms; the same-build row is
+  flat) and S8 writes 65–67→94–95 µs are plugin calls, not renderer work.
+  Flutter's own 3.44.2→3.47.2 drift stayed <7 %, so the cross-app verdicts are
+  not a Flutter artefact.
 
 ## DB scenarios (`d1`/`d2`) — no runs recorded yet
 

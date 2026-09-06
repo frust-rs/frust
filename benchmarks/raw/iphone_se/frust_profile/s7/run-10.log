@@ -1,10 +1,12 @@
-2026-09-05 06:57:04.068 Runner[15124:1097692] frust-perf vc-load
-[frust INFO] bench-scenario-start s7
+2026-09-07 00:21:23.319 Runner[25022:1697124] frust-perf vc-load
 [frust INFO] frust-perf render-path engine-direct (frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, surface-reported format, surface-owned depth))
-[frust INFO] bench-scenario-start s7-idle
-[frust INFO] frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=50ms adapter_ready=71ms device_ready=71ms renderer_ready=71ms first_rebuild_done=71ms first_encode_done=71ms first_frame_presented=78ms
-[frust INFO] frust-perf raw n=1 total_us=7436 rebuild_us=15 layout_us=1 paint_us=8 encode_us=2 acquire_us=886 submit_us=6521 skipped=0 gpu_q=0
-[frust INFO] frust-perf raw n=2 total_us=2076 rebuild_us=21 layout_us=2 paint_us=8 encode_us=4 acquire_us=951 submit_us=1087 skipped=0 gpu_q=0
-[frust INFO] frust-perf raw n=3 total_us=4735 rebuild_us=102 layout_us=21 paint_us=71 encode_us=32 acquire_us=95 submit_us=4412 skipped=0 gpu_q=0
-[frust INFO] frust-perf raw n=4 total_us=4640 rebuild_us=105 layout_us=18 paint_us=36 encode_us=23 acquire_us=87 submit_us=4369 skipped=0 gpu_q=0
-[frust INFO] frust-perf raw n=5 total_us=6402 rebuild_us=92 layout_us=17 paint_us=38 encode_us=19 acquire_us=2053 submit_us=4182 skipped=0 gpu_q=1 gpu_total_us=1082 gpu_prepass_us=340 gpu_main_us=742 gpu_composite_us=0 gpu_blit_us=0
+[frust INFO] frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=Full transient_saves_memory=true adapter=Apple A13 GPU
+[frust INFO] frust-perf startup init_entry=0ms font_preinit_started=0ms adapter_ready=24ms device_ready=24ms renderer_ready=24ms font_preinit_joined=51ms first_rebuild_done=58ms first_encode_done=58ms first_frame_presented=64ms
+[frust INFO] bench-scenario-start n=1 s7
+[frust INFO] bench-scenario-start n=1 s7-idle
+[frust INFO] frust-perf raw n=1 total_us=9985 rebuild_us=35 layout_us=4139 paint_us=23 encode_us=14 acquire_us=1482 submit_us=4290 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=2 total_us=7555 rebuild_us=38 layout_us=8 paint_us=30 encode_us=7 acquire_us=6088 submit_us=1382 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=3 total_us=2005 rebuild_us=25 layout_us=4 paint_us=17 encode_us=4 acquire_us=789 submit_us=1163 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=4 total_us=4537 rebuild_us=108 layout_us=23 paint_us=32 encode_us=18 acquire_us=109 submit_us=4245 skipped=0 gpu_q=0
+[frust INFO] frust-perf raw n=5 total_us=4103 rebuild_us=102 layout_us=17 paint_us=35 encode_us=14 acquire_us=93 submit_us=3841 skipped=0 gpu_q=1 gpu_total_us=719 gpu_prepass_us=96 gpu_main_us=623 gpu_composite_us=0 gpu_blit_us=0
+[frust INFO] frust-perf raw n=6 total_us=5907 rebuild_us=105 layout_us=16 paint_us=39 encode_us=22 acquire_us=97 submit_us=5625 skipped=0 gpu_q=1 gpu_total_us=664 gpu_prepass_us=0 gpu_main_us=664 gpu_composite_us=0 gpu_blit_us=0

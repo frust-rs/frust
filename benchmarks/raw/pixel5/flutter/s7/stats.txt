@@ -1,5 +1,5 @@
 -- stats.py (discarding first 2 runs, per protocol convention) --
 == flutter s7 ==
 frames: 22 total, 22 active, 0 skipped
-p50=10.53ms  p95=11.27ms  p99=12.27ms  worst=12.27ms
-missed_60hz=0 (budget 16.67ms)  missed_120hz=19 (budget 8.33ms)
+p50=13.25ms  p95=18.72ms  p99=23.38ms  worst=23.38ms
+missed_60hz=4 (budget 16.67ms)  missed_120hz=22 (budget 8.33ms)

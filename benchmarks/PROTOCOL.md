@@ -125,6 +125,11 @@ cross-renderer comparison that bounds the switch is recorded once in
 computed from were retired from `benchmarks/raw/` afterwards and live in git
 history (the section names the commit).
 
+**The 2026-09-06 post-optimization pass supersedes the 2026-09-05 pass** on
+every device it covers (OnePlus 9, iPhone SE, Pixel 5): its raw series replace
+theirs under `benchmarks/raw/`, and `RESULTS.md` carries a per-device delta
+table against them.
+
 ## 3. Environmental controls
 
 Applied identically to both apps, every run, every device:
@@ -256,6 +261,19 @@ frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_
 > (`rebuild+layout+paint+encode+acquire+submit`), and every percentile in this
 > document is still computed from it alone.
 >
+> **`total_us` is a cost sum, not a frame interval.** Under the render-thread
+> split the six spans are measured on two threads that run concurrently for one
+> frame — `rebuild`/`layout`/`paint` on the UI thread, `encode`/`acquire`/
+> `submit` on the render thread, folded by `FramePasses::from_split` and
+> emitted once. Their sum is therefore the frame's total CPU cost across both
+> threads, and it can exceed the display period while the pipeline still
+> presents on every vsync. Do not read "`total_us` over one budget" as "missed
+> a vsync", and do not read "over two budgets" as "took two vsyncs": the
+> budget columns count cost, and the present-side quantity the sanitized series
+> carries is the achieved rate (active frames / capture seconds). A capture
+> showing a p50 cost sum above the frame period at the panel's full rate is the
+> ordinary pipelined case, not a contradiction.
+>
 > **The reading lags its own line.** A frame's queries are mapped without ever
 > blocking the frame path, so the `gpu_*_us` values on frame *n*'s line are a
 > recent frame's cost, not frame *n*'s — in steady state one fresh reading
@@ -340,16 +358,126 @@ python3 benchmarks/harness/stats.py --graphics --label "<app> <scenario>" \
     <out-dir>/run-{03,04,05}.pss_after.txt
 ```
 
-Scenario boundaries (`mark_scenario_start`/`mark_scenario_end`, same
-`FRUST_TRACE`+`FRUST_TRACE_RAW` gating) stamp:
+Scenario boundaries (`mark_scenario_start`/`mark_scenario_end`, gated on
+`FRUST_TRACE` alone) stamp:
 
 ```
-bench-scenario-start <name>
-bench-scenario-end <name>
+bench-scenario-start n=<u64> <name>
+bench-scenario-end n=<u64> <name>
 ```
 
 into the same log stream, letting the harness slice the per-frame series
 by scenario without any other coupling to the app.
+
+Every leg the marker route travels through — the raising thread's own queue,
+the frame's channel slot, and the render thread's staged list — is bounded at
+`MARKER_QUEUE_CAP = 256` entries (`crates/frust-shell-common/src/perf.rs`),
+drop-oldest: a leg that fills means markers are arriving faster than frames
+are recorded, so the response is a bounded queue rather than unbounded
+growth. The drop count travels with the batch, and the frame that finally
+carries a batch with a nonzero count gets one extra line, its own shape,
+distinct from both the `bench-scenario-*` pair above and the `frust-perf
+raw`/`frust-perf plugin` families:
+
+```
+frust-perf marker-overflow n=<u64> dropped=<u64>
+```
+
+`n` is that frame's own counter (the same one its `bench-scenario-*`/
+`frust-perf raw` lines carry) and `dropped` is how many markers were
+discarded to keep one leg inside `MARKER_QUEUE_CAP` before this batch reached
+it (`format_marker_overflow_line`). Deliberately neither a `bench-scenario-*`
+line (whose `<prefix> n=<u64> <name>` shape is `stats.py`'s parsed wire
+format — an appended field would rename the window rather than annotate it)
+nor a `frust-perf raw`/`frust-perf plugin` one, so a harness scanning the
+stream reads it as an unrelated line instead of a malformed record of a
+shape it parses.
+
+> **Marker-format change — frame-indexed, half-open, 2026-09-06.** A marker's
+> `n` is the number of the frame that **carried** it: markers are no longer
+> logged where they are raised. `mark_scenario_start`/`mark_scenario_end`
+> queue a marker; it travels with the scene the raising build hands across
+> the render channel (`crates/frust-shell-common/src/render_split.rs`); and
+> `FrameStats::record` — the single frame emitter, on the thread that
+> actually recorded the frame — logs it stamped with that frame's own `n`,
+> immediately ahead of the frame's `frust-perf raw` line. On the inline
+> (no render thread) executor the same `record` call drains the queue
+> directly. Nothing anywhere estimates a frame number across a thread
+> boundary.
+>
+> **The window is half-open: `[start_n, end_n)`.** `start n=k` is the
+> window's first frame — the build that raised it also applied the operation
+> being measured — and the S3 convention raises `end` in the *next* build,
+> so `end n=k+1` names the first frame after the window. `stats.py`'s
+> `slice_scenario` attributes every raw frame with `start_n <= n < end_n` to
+> the window when both edges carry an index, so an S3 per-op window is
+> exactly one frame: the op's own.
+>
+> **Why the frame has to stamp it:** with the render-thread split the UI
+> thread that raises a marker cannot know whether the render thread has
+> recorded the previous frame yet, so neither a marker's log position nor a
+> frame number guessed on the UI side is a reliable proxy for which frames
+> it brackets. Position-based slicing was giving `s3-create1k` zero frames
+> and shifting every other S3 op by one; a UI-side "last recorded frame + 1"
+> estimate only moves the race, adding exactly one frame to every window.
+> Attributing by the recording frame's own counter removes it.
+>
+> Two consequences worth reading before interpreting a series. The channel's
+> scene slot is depth-1 latest-wins, so a build whose scene is superseded
+> before the render thread takes it never becomes a frame of its own and its
+> markers ride the frame that did draw its result — the right attribution. If
+> that swallows a whole window, both edges land on one frame, `[k, k)` is
+> empty, and the op honestly contributed no frame; a run showing many empty
+> windows means the render thread was falling behind, not that the harness
+> lost them. And a marker raised on a thread that neither hands a frame off
+> (the split's UI thread, via `send_scene`) nor records one itself (the
+> inline executor) is **never emitted** — it is queued on that thread alone
+> and dies with it; there is no cross-thread guess that attaches it to some
+> other thread's frame (`crates/frust-shell-common/src/render_split.rs`'s
+> module doc and `mark_scenario_start`'s own doc comment both state the
+> rule, and why the alternative would be exactly the guess this route exists
+> to remove). A scenario measuring off-thread work must bracket it from the
+> build that shows the result, not from inside the worker — see the
+> S8/`d*` notes below for the six sub-markers this still silences
+> (`s8-write`, `s8-read`, `d1-insert-batch`, `d1-insert-single`,
+> `d2-select-point`, `d2-range-scan`), all of which stamp from inside a
+> `spawn_blocking` closure.
+>
+> **`s4-parse` restored to the UI thread, 2026-09-06.** Unlike the six
+> above, S4's `s4-parse` window has no per-op line of its own to fall back
+> on, so a silenced window was its only bound — it has been re-sited onto
+> the UI thread rather than added to the silenced list: `start` is raised
+> in the build that hands the generate-then-parse call to `spawn_blocking`,
+> `end` in the first build that observes the result
+> (`benchmarks/frust_bench/src/scenarios/s4_heavy.rs`), so the half-open
+> window spans every frame produced while that call was in flight. Frust
+> and Flutter are symmetric for `s4-parse` again
+> (`benchmarks/flutter_bench/lib/scenarios/s4_heavy.dart` brackets the same
+> `Isolate.run` round trip from its own UI/main isolate).
+>
+> **This is the only shape Frust emits now** — there is no config toggle
+> back to the older name-only `bench-scenario-start <name>` shape, and
+> markers no longer require `FRUST_TRACE_RAW` (that dial still gates the
+> per-frame raw line, so a marker without raw export has nothing to slice,
+> but the window is always emitted). A series already committed under
+> `benchmarks/raw` (every one, as of this change) predates the index and is
+> still name-only; `slice_scenario` falls back to its original log-position
+> bracketing for any marker with no index, so those series — and Flutter's
+> markers, which stay name-only (see below) — keep reproducing the exact
+> same numbers they always did (`summarize.py` over `benchmarks/raw/oneplus9`,
+> `pixel5` and `iphone_se` all still match `RESULTS.md`'s published tables to
+> the digit).
+>
+> **Consumers that grep the marker text directly, fixed in `198d3eb8`.**
+> `parse_marker_line` handles both shapes, so everything routed through
+> `stats.py` is covered. The two places that grep the marker text directly
+> instead of going through it — `summarize.py`'s S3 cycle-health count and
+> `matrix.sh`'s per-scenario presence check — now both accept an optional
+> `n=<u64>` token before the name, so an indexed line matches too:
+> `summarize.py` defines
+> `S3_CREATE1K_START_RE = re.compile(r"bench-scenario-start(?: n=\d+)? s3-create1k")`,
+> and `matrix.sh` checks `grep -Eq "bench-scenario-start( n=[0-9]+)? $s"`.
+> Neither change affects a series already committed under `benchmarks/raw`.
 
 ### Flutter: required equivalent
 
@@ -376,7 +504,11 @@ frust-bench raw n=<u64> total_us=<u64> build_us=<u64> raster_us=<u64> skipped=0
 - `skipped` — always `0` today; reserved for parity with Frust's frame
   gate if the Flutter app ever gains an analogous skip path.
 
-and identical scenario markers:
+and the same name-only scenario markers Frust used before the 2026-09-06
+indexed shape above (Flutter's Dart emitter raises and logs a marker on the
+one thread that also logs the frame lines, so it carries no split-executor
+hazard and needs no frame index; its windows stay position-sliced and
+inclusive of the frames between the two marker lines):
 
 ```
 bench-scenario-start <name>
@@ -387,6 +519,9 @@ The harness (`06-harness`) treats `total_us`/`skipped`/the marker pair as
 the common contract across both formats; `rebuild_us`/`layout_us`/
 `paint_us` vs `build_us`/`raster_us` are reported as each framework's own
 native pass breakdown, not force-unified into a single column.
+`stats.py`'s `parse_marker_line`/`slice_scenario` recognize both the
+indexed and name-only marker shapes on either side of a comparison — see
+the indexed-format change note above.
 
 ### Per-op line format (`*-perf plugin op=...`) — the general contract
 
@@ -426,31 +561,54 @@ when any op errors, one line, matching S8's shape:
 <app>-perf plugin <scenario>-errors <key>=<count> [<key>=<count> ...]
 ```
 
-**S8's shipped lines** (already shipping —
-`frust_bench/src/scenarios/s8_prefs.rs`,
-`flutter_bench/lib/scenarios/s8_prefs.dart`) predate this formalization
-and differ from the canonical shape above in two ways, both **grandfathered
-as-is by this document — S8's emitters are unchanged by this doc edit**:
+**S8's shipped lines** — `frust_bench/src/scenarios/s8_prefs.rs`,
+`flutter_bench/lib/scenarios/s8_prefs.dart` — predate this formalization
+and keep one lasting difference from the canonical shape above on both
+sides: the marker's second token is `plugin`, not the canonical `op`
+token, since S8 groups all plugin-boundary scenarios under one token,
+distinct from the frame-line family's `raw`/`startup` tokens. Since
+`198d3eb8`, Frust's two emitters also carry the canonical inline
+`scenario=` key, self-identifying the same way `d1`/`d2`'s lines do:
 
 ```
-frust-perf plugin op=<write|read> type=<tag> n=<i> us=<us> err=<0|1>
+frust-perf plugin scenario=s8-write op=write type=<tag> n=<i> us=<us> err=<0|1>
+frust-perf plugin scenario=s8-read op=read type=<tag> n=<i> us=<us> err=<0|1>
 flutter-perf plugin op=<write|read_cached|read_crossing> type=<tag> n=<i> us=<us> err=<0|1>
 frust-perf plugin s8-errors write_errors=<n> read_unexpected_none=<n> read_value_mismatch=<n>
 ```
 
-1. The marker's second token is `plugin`, not the canonical `op` token —
-   S8 groups all plugin-boundary scenarios under one token, distinct from
-   the frame-line family's `raw`/`startup` tokens.
-2. There is no inline `scenario=` key. The scenario id is supplied only by
-   the bracketing `bench-scenario-start s8-write`/`s8-read` marker pair —
-   a line read outside that bracket cannot self-identify its scenario.
+Flutter's line keeps the pre-retrofit shape shown above — no inline
+`scenario=` — and stays attributed to `s8-write`/`s8-read` only by the
+bracketing `bench-scenario-start`/`-end` marker pair; that is safe there
+because Flutter's markers are name-only and logged inline (see "Flutter:
+required equivalent" above), so there is no frame-index hazard to work
+around. A Frust S8 series already committed under `benchmarks/raw` (every
+one, as of this change) predates `198d3eb8` and still carries the
+pre-retrofit shape (`frust-perf plugin op=<write|read> type=<tag> n=<i>
+us=<us> err=<0|1>`, no inline `scenario=`); `slice_op_scenario` continues
+to attribute those lines by the same bracketing marker pair, exactly as it
+always did.
+
+> **Consequence of the 2026-09-06 marker change on S8, fixed by
+> `198d3eb8`.** A marker is no longer logged where it is raised; it is
+> logged by the frame that carried it, which for S8's same-build bracket is
+> *after* the op lines it used to enclose. Positional bracketing therefore
+> stopped attributing Frust's S8 lines for a capture taken between the
+> marker change and the retrofit. `d1`/`d2` were never exposed to this —
+> their canonical-shape lines carry `scenario=` inline and self-identify
+> regardless of bracket position — and every S8 series already committed
+> under `benchmarks/raw` is unaffected too, since its markers were logged
+> inline, in the old name-only shape. `198d3eb8` closed the gap by giving
+> Frust's two emitters the inline `scenario=` key shown above.
 
 **Canonical going forward** is the `op`-token / inline-`scenario=` shape
 above — every new per-op-emitting scenario (starting with `d1`/`d2`, §9)
-speaks it. S8's `plugin`-token lines are **not** retrofitted by this doc
-edit; reconciling them (either teaching a per-op parser both shapes, or
-updating the two S8 emitters to the canonical form) is the harness task's
-job, tracked as a methodology deviation (also recorded in `RESULTS.md`).
+speaks it. S8's `plugin` token is a permanent grandfathered exception on
+both sides. Flutter's lines keep the bracket-only attribution described
+above; reconciling them to the canonical inline-`scenario=` form (Frust's
+side already reconciled) remains the harness task's job if ever
+undertaken, tracked as a methodology deviation (also recorded in
+`RESULTS.md`).
 
 **Methodology-deviations note (also recorded in `RESULTS.md`):**
 `benchmarks/harness/stats.py` today parses only `*-perf raw` per-frame
@@ -461,6 +619,115 @@ script, predating any shared-script parsing of per-op lines. The `d*`
 scenarios (§9) are the first to require it; extending `stats.py` (or an
 equivalent) to parse per-op lines — both S8's shipped shape and the
 canonical shape — is the harness task's job.
+
+### Frust: `frust-perf img …` / `frust-perf atlas …` / `frust-perf enc …` (engine, `perf-trace` only)
+
+Three lines the render engine itself emits through the same `log::info!` facade
+the frame lines use, so `run.sh`'s `frust-perf` whitelist keeps all three in
+every `run-NN.log`. None is parsed by `stats.py` (the prefix is not
+`frust-perf raw`), and none changes the per-frame raw line — the v4 format above
+is untouched.
+
+**All three are compiled only under the `perf-trace` feature**, like every other
+`frust-perf` line in the workspace. That is the whole gate: there is no define
+and no env var, and the shell's `FRUST_TRACE` dial does not reach them — it
+gates the per-frame raw series, not these. The bench app's `--debug` and
+`--profile` builds enable `perf-trace`, so a measurement capture has them; a
+`--release` build does not compile them at all, which is what
+`scripts/release-lean-check.sh` asserts by grepping a shipping binary for
+`frust-perf` and expecting zero hits.
+
+Reading a capture accordingly: the `atlas` line appears once per process and
+the `enc` lines once per sixty frames, so a log with neither was built without
+instrumentation and cannot be graded. The `img` line is the conditional one —
+its absence is a property of the scene (the atlas held everything), which is
+exactly what makes its presence the signal.
+
+```
+frust-perf img skipped=<u32> evicted=<u64> resident=<usize> budget=<w>x<h>x<layers>
+```
+
+Emitted by `frust_engine::compile` at most **once per compiled frame**, and
+only on a frame where at least one of the first two counters is non-zero — a
+scene the atlas holds comfortably emits nothing at all, so the line's mere
+presence is the signal.
+
+- `skipped` — image draws this frame painted nothing. The atlas refusing an
+  image is the usual cause; a singular paint transform or a destination with no
+  area also lands here, because every one of them is a draw the display list
+  asked for and the frame did not paint.
+- `evicted` — resident images this frame displaced to make room for another
+  (`ImageResidency::pressure_evictions`' per-frame delta). Each one costs a
+  re-upload the next frame that draws it, so `evicted>0` with `skipped=0` is
+  the healthy degradation: the working set is larger than the atlas and the
+  screen is still complete.
+- `resident` — images holding an atlas rectangle at the end of the frame.
+- `budget` — the resolved `AtlasBudget`: per-layer extent and maximum layers.
+
+`evicted` counts rectangles a pressure plan released this frame, whether or not
+the allocation that motivated the plan then succeeded. A plan is committed only
+when the fit model predicts the allocation will succeed, but the model is
+necessary-not-sufficient (it cannot see glyph pages sharing the allocator), so a
+committed plan the packer still refuses yields `skipped>0 evicted>0` on the same
+frame — that combination is the residual-thrash signal a grader must escalate,
+not discount. `skipped>0 evicted=0` has two readings: an unsatisfiable request
+(nothing freed, zero cost) or a planner that stopped at its candidate/area
+budget (still has more candidates to evaluate) — and cannot by itself be read as
+"this content does not fit".
+
+```
+frust-perf atlas tier=<mobile|desktop> budget=<w>x<h>x<layers> downlevel=<Full|WebGl2> transient_saves_memory=<true|false> adapter=<name>
+```
+
+Emitted **once per process**, when `AtlasBudget::for_caps` first resolves a
+tier (renderer construction). `tier` is `is_mobile_tier`'s answer and the two
+fields after `budget` are the signals it read, so a device landing on a
+surprising tier is explained by the line itself rather than re-derived from the
+adapter. `adapter` is last because it is the one value that can contain spaces.
+
+```
+frust-perf enc n=<u64> w=<frames> <phase>_us=<f.1> … total_p95_us=<f.1> draws=<u32> strips=<u32> alphas=<u32> glyph_draws=<u32> atlas_glyphs=<u32>
+```
+
+Emitted by `frust_engine::renderer` once per **60 encoded frames** — about one
+line a second at 60 Hz — reporting the median of each CPU phase of the encode
+over that window, the window's 95th-percentile total, and the median of each
+per-frame count. `n` is the engine's own frame counter and is deliberately not
+the raw line's `n` (a different emitter counting different frames); `w` is the
+window's frame count. The phase columns are the compile's own six plus its
+`glyphs` subset, the whole compile, then schedule/paints/instances/resize/
+upload/replay/pipelines/record and the total — the same order the formatter
+pins by test, which is what a capture greps by. Like the two lines above it is
+`perf-trace`-only and not `FRUST_TRACE`-gated.
+
+> **The OnePlus 9 S5 row of the 2026-09-05 pass predates both lines and the
+> engine fix they report on.** That capture was taken while a full atlas
+> refused an image draw outright, so roughly half the S5 image composites it
+> timed were never performed (the phones disagreed: the OnePlus 9 refused on
+> every run, the Pixel 5 on none). Its S5 number is therefore not comparable
+> with Flutter's, nor with any S5 capture taken after the fix — a post-fix S5
+> run composites the content the pre-fix one dropped and pays re-uploads for
+> the images the atlas cannot hold at once. The Pixel 5 row of the same pass is
+> unaffected. Any re-run must be judged on `frust-perf img`: no line at all, or
+> lines with `skipped=0`, is the content gate; `evicted>0` is expected.
+
+### Frust: `frust-perf s5 …` (S5 content diagnostic, opt-in)
+
+`ImageStreamWidget::paint` (`frust_bench/src/scenarios/s5_image.rs`) can
+emit one `format_s5_diag_line` `frust-perf s5 …` line per frame, reporting
+the materialized window, the offset it was computed at, and the painted
+image/placeholder counts — see the module's own "Content diagnostics" doc
+comment for what each field answers and how to correlate a line against a
+screencap. The line is emitted only when the bench is built with
+`--define FRUST_S5_DIAG=1` **and** perf is enabled (`FRUST_TRACE`/
+`FRUST_TRACE_RAW`); default is off, so an ordinary measurement capture
+never pays for computing or emitting it. A capture taken with the define
+on is diagnostic, not publication-grade — the 2026-09-05 19:03-19:13Z S5
+diagnosis runs were — because the line is emitted from inside the same
+paint span the per-frame series times, so turning it on perturbs that
+frame's own `paint_us`. Its `frust-perf s5` prefix (not `frust-perf raw`)
+means `stats.py` skips it while `run.sh`'s capture whitelist still keeps
+it in the log.
 
 ## 8. Scenarios (S1–S8)
 
@@ -516,6 +783,13 @@ whole matrix):
   geometry (`(viewport.width − 2·pad) × 256`, `ImageFit::Cover`). S5 numbers
   captured before this date are not cross-app comparable and were retired
   with the 2026-07-21 results reset.
+- **Atlas residency is part of S5's content gate.** S5 streams more distinct
+  images past the viewport than a mobile-tier atlas holds at once, so a capture
+  is only comparable if the engine painted every cell it was asked for. Read
+  `frust-perf img` (§7) alongside the frame series: no line, or lines with
+  `skipped=0`, means the content was complete; `evicted>0` is the expected cost
+  of a working set larger than the atlas. The 2026-09-05 OnePlus 9 row predates
+  the engine change that made this true — see §7's note.
 
 ### S7-specific notes
 
@@ -572,6 +846,15 @@ whole matrix):
   tally, emitting one `s8-errors` marker line when any is nonzero so a run
   with a silent boundary failure is flagged rather than reported as a clean
   latency number.
+- **The `s8-write`/`s8-read` phase sub-markers run on a blocking-pool
+  thread and are not emitted, as of the 2026-09-06 marker-route change**
+  (`run_prefs_bench` calls `mark_scenario_start`/`mark_scenario_end` from
+  inside `spawn_blocking`, so §7's "never emitted" rule applies): a capture
+  taken since then carries no `bench-scenario-start s8-write`/`s8-read`
+  pair. Nothing downstream needs them — each `frust-perf plugin` op line
+  already self-identifies via its inline `scenario=s8-write|s8-read` key
+  (see the per-op format above), so no published S8 number depends on the
+  missing bracket.
 
 ## 9. DB scenarios (`d*`)
 
@@ -589,6 +872,16 @@ one binary still drives the whole matrix including both namespaces. No id
 collision is possible between the two spaces (`stats.py --scenario`
 already takes the id as an opaque string), and this doc edit does not
 change the frame-class `s1..s8` table (§8) in any way.
+
+**`d1`/`d2`'s phase sub-markers run on a blocking-pool thread and are not
+emitted, as of the 2026-09-06 marker-route change** (`run_d1_bench`/
+`run_d2_bench` call `mark_scenario_start`/`mark_scenario_end` from inside
+`spawn_blocking`, like S8's `run_prefs_bench` — §7's "never emitted" rule
+applies): a capture taken since then carries no `bench-scenario-start
+d1-insert-batch`/`d1-insert-single`/`d2-select-point`/`d2-range-scan` pair.
+As with S8, nothing downstream needs them — every d1/d2 op line already
+self-identifies via its inline `scenario=d1|d2`/`op=` keys (§9.3/§9.4), so
+no published d-class number depends on the missing bracket.
 
 ### 9.2 Row shape and seed dataset (declared convention)
 

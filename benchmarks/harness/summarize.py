@@ -41,6 +41,11 @@ S3_OPS = (
     ("s3-swap", "swap"),
     ("s3-clear", "clear"),
 )
+# Cycle-health count for the S3 reconcile loop (PROTOCOL §7): tolerates both
+# the name-only marker shape every committed series still carries and the
+# 2026-09-06 indexed shape (`bench-scenario-start n=<u64> s3-create1k`) a
+# future capture emits, same substring looseness as before.
+S3_CREATE1K_START_RE = re.compile(r"bench-scenario-start(?: n=\d+)? s3-create1k")
 FRUST_PASS_FIELDS = ("rebuild_us", "layout_us", "paint_us", "encode_us", "acquire_us", "submit_us", "present_us")
 S8_ROWS = (
     # (label, frust (op,type), flutter crossing (op,type), flutter cached (op,type))
@@ -324,7 +329,7 @@ def build(args: argparse.Namespace) -> tuple[str, dict]:
             entry[key] = {**st.as_dict(), "kept_runs": kept}
             cycles = []
             for p in run_logs(side / "s3")[D:]:
-                cycles.append(sum(1 for l in p.read_text(errors="replace").splitlines() if "bench-scenario-start s3-create1k" in l))
+                cycles.append(sum(1 for l in p.read_text(errors="replace").splitlines() if S3_CREATE1K_START_RE.search(l)))
             entry[key]["create1k_cycles_per_kept_run"] = cycles
             if cycles:
                 notes.append(f"{label} `s3-create1k` reopens per kept run: {min(cycles)}–{max(cycles)}")

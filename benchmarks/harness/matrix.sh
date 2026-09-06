@@ -207,14 +207,14 @@ ios_record_device() {
 count_lines() { local n; n="$(grep -c -E "$1" "$2" 2>/dev/null | head -1)"; echo "${n:-0}"; }
 block_sanity() { # $1 scenario, $2 dir -> prints "min-max" line counts over kept logs; returns 1 if degenerate
   local s="$1" d="$2" pat min= max= n i log lines bad=0
-  case "$s" in s8) pat='-perf plugin op='; ;; *) pat='-perf raw'; ;; esac
+  case "$s" in s8) pat='-perf plugin( scenario=[^ ]+)? op='; ;; *) pat='-perf raw'; ;; esac
   i=0
   for log in "$d"/run-[0-9][0-9].log; do
     i=$((i+1)); [ "$i" -le 2 ] && continue   # first two are warm-up (PROTOCOL §4)
     lines="$(count_lines "$pat" "$log")"
     [ -z "$min" ] || [ "$lines" -lt "$min" ] && min=$lines
     [ -z "$max" ] || [ "$lines" -gt "$max" ] && max=$lines
-    grep -q "bench-scenario-start $s" "$log" || bad=1
+    grep -Eq "bench-scenario-start( n=[0-9]+)? $s" "$log" || bad=1
     case "$s" in
       s7) grep -q -E '(frust|flutter)-perf startup' "$log" || bad=1 ;;
       s8) [ "$lines" -ge "$MIN_PLUGIN_LINES" ] || bad=1 ;;

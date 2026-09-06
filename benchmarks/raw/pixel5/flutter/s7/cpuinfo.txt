@@ -1,54 +1,50 @@
-== 2026-09-05T10:04:57Z
-5.2% TOTAL: 2% user + 2.2% kernel + 0% iowait + 0.5% irq + 0.3% softirq
-== 2026-09-05T10:05:27Z
-5.2% TOTAL: 1.9% user + 2.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
-== 2026-09-05T10:05:57Z
-5.2% TOTAL: 1.9% user + 2.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
-== 2026-09-05T10:06:28Z
-3.6% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:06:58Z
-3.6% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:07:28Z
-3.3% TOTAL: 1% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:07:58Z
-3.3% TOTAL: 1% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:08:28Z
- +0% 8398/it.f0x.flutter_bench: 0% user + 0% kernel
-4% TOTAL: 1.4% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:08:59Z
- +0% 8398/it.f0x.flutter_bench: 0% user + 0% kernel
-4% TOTAL: 1.4% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:09:29Z
-3.2% TOTAL: 0.9% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:09:59Z
-3.2% TOTAL: 0.9% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:10:30Z
-3.7% TOTAL: 1.2% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:11:00Z
-3.7% TOTAL: 1.2% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:11:30Z
-3.4% TOTAL: 0.9% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:12:00Z
-3.4% TOTAL: 0.9% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.3% softirq
-== 2026-09-05T10:12:30Z
-3.5% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq
-== 2026-09-05T10:13:01Z
-3.5% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq
-== 2026-09-05T10:13:31Z
- +0% 9276/it.f0x.flutter_bench: 0% user + 0% kernel
-7.9% TOTAL: 3.6% user + 3.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
-== 2026-09-05T10:14:01Z
- +0% 9276/it.f0x.flutter_bench: 0% user + 0% kernel
-7.9% TOTAL: 3.6% user + 3.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
-== 2026-09-05T10:14:31Z
-3.1% TOTAL: 0.8% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:15:02Z
-3.1% TOTAL: 0.8% user + 1.6% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:15:32Z
-3.2% TOTAL: 0.9% user + 1.5% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:16:02Z
-3.2% TOTAL: 0.9% user + 1.5% kernel + 0% iowait + 0.3% irq + 0.2% softirq
-== 2026-09-05T10:16:32Z
-4.4% TOTAL: 1.1% user + 2.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
-== 2026-09-05T10:17:02Z
-4.4% TOTAL: 1.1% user + 2.4% kernel + 0% iowait + 0.5% irq + 0.2% softirq
+== 2026-09-06T19:26:04Z
+5.5% TOTAL: 2.1% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:26:34Z
+7.7% TOTAL: 2.8% user + 3.8% kernel + 0% iowait + 0.6% irq + 0.4% softirq
+== 2026-09-06T19:27:04Z
+7.7% TOTAL: 2.8% user + 3.8% kernel + 0% iowait + 0.6% irq + 0.4% softirq
+== 2026-09-06T19:27:34Z
+3.6% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:28:05Z
+3.6% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:28:35Z
+3.4% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:29:05Z
+3.4% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:29:35Z
+3.6% TOTAL: 1.1% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:30:05Z
+3.6% TOTAL: 1.1% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:30:35Z
+4% TOTAL: 1.2% user + 1.9% kernel + 0% iowait + 0.4% irq + 0.3% softirq
+== 2026-09-06T19:31:06Z
+4% TOTAL: 1.2% user + 1.9% kernel + 0% iowait + 0.4% irq + 0.3% softirq
+== 2026-09-06T19:31:36Z
+3.6% TOTAL: 1.1% user + 1.8% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:32:06Z
+3.6% TOTAL: 1.1% user + 1.8% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:32:36Z
+3.5% TOTAL: 1% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:33:06Z
+3.5% TOTAL: 1% user + 1.8% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:33:36Z
+6.9% TOTAL: 2.7% user + 3.3% kernel + 0% iowait + 0.5% irq + 0.3% softirq
+== 2026-09-06T19:34:06Z
+6.9% TOTAL: 2.7% user + 3.3% kernel + 0% iowait + 0.5% irq + 0.3% softirq
+== 2026-09-06T19:34:37Z
+3.5% TOTAL: 1% user + 1.8% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:35:07Z
+3.5% TOTAL: 1% user + 1.8% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:35:37Z
+3.5% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:36:07Z
+3.5% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:36:37Z
+3.4% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:37:08Z
+3.4% TOTAL: 1% user + 1.7% kernel + 0% iowait + 0.3% irq + 0.2% softirq
+== 2026-09-06T19:37:38Z
+3.5% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq
+== 2026-09-06T19:38:08Z
+3.5% TOTAL: 1.1% user + 1.7% kernel + 0% iowait + 0.4% irq + 0.2% softirq

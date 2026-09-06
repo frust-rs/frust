@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Backend-free by design: the workspace row carries only wgpu's base
+# (`std`/`parking_lot`/`wgsl`), and the per-OS backends (`vulkan`/`metal`/
+# `dx12`) are added per target by `frust-gpu`'s
+# `[target.'cfg(...)'.dependencies]` tables. This crate needs no tables of its
+# own — `frust-gpu` is an unconditional dependency below, so cargo's additive
+# feature unification supplies the target's backend through it. Adding
+# backends to this row instead would re-union all three across every target;
+# see `crates/frust-gpu/Cargo.toml` for the measured rationale.
 wgpu.workspace = true
 peniko.workspace = true
 kurbo.workspace = true

@@ -236,6 +236,35 @@ anchor laid down under the old one, and a tick carrying the focus/IME edge tight
 the bare theme cap regardless of any longer per-request interval (see
 [LIMITATIONS.md](LIMITATIONS.md)).
 
+### iOS render-thread split
+
+`frust-shell-ios`'s default (split) executor overlaps startup rather than serializing it: the
+dedicated render thread is spawned, and starts GPU bring-up (adapter/device/renderer-ready) on its
+own, *before* the UI thread joins the background font-preinit thread it spawned at entry — so the
+GPU work and the font wait, the two longest serial stretches of iOS cold start, run concurrently
+instead of back to back. The two threads share one startup-span recorder (`SharedStartupSpans`)
+behind a `StartupRecorder` that is `Owned` for the inline (`FRUST_NO_RENDER_THREAD`) executor and
+`Shared` for the split one; every `Shared` method locks only for the body of its own record/take
+call, never across `render_scene`'s blocking GPU tail (drawable acquire plus submit) — a `render_loop`
+that once held the lock across that whole call was a latent UIKit-watchdog hazard. Once the startup
+line is taken and emitted on the first present, the render thread drops to a lock-free `Owned`
+handle for every later frame. Because the two threads race to record onto the same shared line, the
+spans they contribute do not print in a fixed left-to-right causal order — a reader determines actual
+ordering from each span's own recorded delta, not from its position in the line.
+
+Frame pacing itself is unchanged: the surface's desired maximum frame latency stays at its constant
+(two frames in flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of the
+frame that needs it was measured and rejected — a drawable parked across a `Pause` is a UIKit
+watchdog hazard. What exists instead is a `perf-trace`-only diagnostic behind the `FRUST_PACE_TRACE`
+dial: `ios-pace`, one `frust-perf ios-pace` line per rendered frame decomposing wake/idle/acquire/
+submit/loop time plus `p2p_us` — submit-to-submit cadence between frames whose GPU work was actually
+submitted for presentation. A frame that presented nothing reports `p2p_us=NA` and leaves the
+cadence base untouched; under armed present-sync the UI thread commits the drawable later than the
+render thread's own submit, so the render thread never observes that later commit. This diagnostic
+is also what showed an earlier "frames over 20 ms are missing a vsync" reading to be a measurement
+artefact: `FramePasses::total` sums the UI thread's and the render thread's concurrently-running
+spans, so it is a cost, not an interval, and present-to-present on the iPhone SE is a locked 60 Hz.
+
 ### Cross-cutting host signals
 
 - **Event pass under root owner:** every shell routes input through `AppTree::event` inside a

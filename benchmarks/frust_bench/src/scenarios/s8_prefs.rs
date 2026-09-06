@@ -294,7 +294,7 @@ fn run_prefs_bench() -> S8Report {
                 write_ok[ty.index() * KEYS_PER_TYPE + i] = false;
             }
             frust_shell_common::perf::bench_emit(&format!(
-                "frust-perf plugin op=write type={} n={i} us={us} err={}",
+                "frust-perf plugin scenario=s8-write op=write type={} n={i} us={us} err={}",
                 ty.tag(),
                 err as u8
             ));
@@ -337,7 +337,7 @@ fn run_prefs_bench() -> S8Report {
                 }
             }
             frust_shell_common::perf::bench_emit(&format!(
-                "frust-perf plugin op=read type={} n={i} us={us} err={}",
+                "frust-perf plugin scenario=s8-read op=read type={} n={i} us={us} err={}",
                 ty.tag(),
                 err as u8
             ));
