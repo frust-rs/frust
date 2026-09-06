@@ -103,20 +103,99 @@ const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 /// single epoch and in a single line.
 ///
 /// Contention is bounded to that one UI-side record, and it cannot collide with
-/// the render thread's per-frame hold of the guard: it happens strictly before
-/// the first scene is handed off, because layout cannot run before the joined
-/// `TextContext` exists.
+/// [`render_loop`]'s per-frame use of the same mutex: the UI-side write happens
+/// strictly before the first scene is handed off, because layout cannot run
+/// before the joined `TextContext` exists — and, from the first handed-off
+/// scene on, [`StartupRecorder`] below only ever takes this lock for the short
+/// body of one record/take call, never across a frame's surrounding work.
 type SharedStartupSpans = Arc<Mutex<Option<StartupSpans>>>;
 
 /// Record `names`, in order, on a shared startup recorder. A no-op once the
 /// startup line has been emitted (the recorder is gone by then), and
 /// poison-tolerant: a panicked holder costs instrumentation, never a frame.
+///
+/// Used for the one-shot, non-per-frame writes (`adapter_ready`/`device_ready`/
+/// `renderer_ready` in [`install_surface`], `first_rebuild_done` and
+/// `font_preinit_joined`); the per-frame render tail goes through
+/// [`StartupRecorder`] instead, whose contract is never to hold this lock
+/// across a frame's own GPU work.
 fn record_startup_spans(startup_spans: &Mutex<Option<StartupSpans>>, names: &[&'static str]) {
     let mut guard = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
     if let Some(spans) = guard.as_mut() {
         for name in names {
             spans.record(name);
         }
+    }
+}
+
+/// A startup-span recorder handle passed into [`crate::app::render_scene`],
+/// abstracting over how the caller stores its `Option<StartupSpans>`: owned
+/// directly ([`InlineExecutor`](crate::app::InlineExecutor) — no
+/// synchronization needed at all) or shared with the UI thread via a
+/// [`Mutex`] ([`SharedStartupSpans`] — [`render_loop`]'s split path).
+///
+/// The one contract every variant keeps, and the reason this type exists:
+/// a lock, if any, is held only for the body of a single record/take call —
+/// **never** across the caller's surrounding work, and in particular never
+/// across `render_scene`'s blocking GPU tail (`nextDrawable` acquire + Metal
+/// submit). Before this type, [`render_loop`] locked the mutex once and held
+/// the guard across the *whole* `render_scene` call, including that blocking
+/// tail — closing the Phase 2 review's minor #11/#19 finding (any future
+/// UI-thread caller reaching for this mutex would block behind a vsync/
+/// drawable wait, the classic `0x8badf00d` watchdog-kill shape), defense in
+/// depth today since nothing currently reaches for it from the UI thread.
+pub(crate) enum StartupRecorder<'a> {
+    /// Owned directly — the inline executor's plain `Option<StartupSpans>`.
+    Owned(&'a mut Option<StartupSpans>),
+    /// Shared with the UI thread — the split's [`SharedStartupSpans`]. Each
+    /// method below locks only for its own short body.
+    Shared(&'a Mutex<Option<StartupSpans>>),
+}
+
+impl StartupRecorder<'_> {
+    /// Record `name` once — a no-op if the recorder has already drained (the
+    /// startup line was already emitted) or already carries this span.
+    pub(crate) fn record_once(&mut self, name: &'static str) {
+        fn record_if_missing(spans: &mut Option<StartupSpans>, name: &'static str) {
+            if let Some(spans) = spans.as_mut()
+                && !spans.spans().iter().any(|(n, _)| *n == name)
+            {
+                spans.record(name);
+            }
+        }
+        match self {
+            StartupRecorder::Owned(spans) => record_if_missing(spans, name),
+            StartupRecorder::Shared(mutex) => {
+                let mut guard = mutex.lock().unwrap_or_else(|err| err.into_inner());
+                record_if_missing(&mut guard, name);
+            }
+        }
+    }
+
+    /// Take the recorder (if still live), record `name` on it, and emit the
+    /// accumulated startup line — once. The record+emit that follow the take
+    /// run on the now-fully-owned local value, off any mutex entirely — the
+    /// `Shared` variant's lock is held only for the `take()` itself.
+    ///
+    /// Returns whether this call performed the take (the frame that just
+    /// retired the recorder), so a caller juggling a `Shared` handle across
+    /// many frames (see [`render_loop`]'s `startup_retired` fast path) knows
+    /// when it can drop to a lock-free `Owned(&mut None)` handle from the
+    /// next frame on — the per-frame cost this closes out (Phase 2 review
+    /// minor #5).
+    pub(crate) fn take_and_emit(&mut self, name: &'static str) -> bool {
+        let taken = match self {
+            StartupRecorder::Owned(spans) => spans.take(),
+            StartupRecorder::Shared(mutex) => {
+                mutex.lock().unwrap_or_else(|err| err.into_inner()).take()
+            }
+        };
+        let drained = taken.is_some();
+        if let Some(mut spans) = taken {
+            spans.record(name);
+            spans.emit_log();
+        }
+        drained
     }
 }
 
@@ -480,6 +559,11 @@ pub(crate) fn render_loop(
     let mut phase = RenderPhase::NoSurface;
     let mut first_install_done = false;
     let mut first_rebuild_recorded = false;
+    // Set once `StartupRecorder::take_and_emit` reports the startup line has
+    // been emitted (the first successful present) — from then on this loop
+    // never touches `startup_spans`'s mutex again for the per-frame render
+    // tail (see the per-frame block below and `StartupRecorder`'s docs).
+    let mut startup_retired = false;
     // iOS self-recovery state (the layer is permanent — recreate from it on loss).
     let mut metal_layer: Option<*mut c_void> = None;
     let mut physical: (u32, u32) = (1, 1);
@@ -581,28 +665,37 @@ pub(crate) fn render_loop(
                 // frame, gate every `Instant::now()` behind it (inside
                 // `render_scene`).
                 let perf_on = perf::enabled();
-                {
-                    // Hold the shared recorder for the frame — `render_scene`
-                    // stamps `first_encode_done`/`first_frame_presented` and emits
-                    // the startup line from inside it. Scoped so the guard is
-                    // released before the self-heal below, which records through
-                    // the same (non-reentrant) mutex.
-                    let mut spans = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
-                    render_scene(
-                        &mut renderer,
-                        &render_cx,
-                        &frame.scene.scene,
-                        frame.scene.base_color,
-                        frame.ui_spans,
-                        &mut frame_stats,
-                        &mut spans,
-                        perf_on,
-                        &presented,
-                        // Present-sync: park this frame under its own id so the UI
-                        // thread can tell the platform-view release gate which
-                        // frame it just put on screen.
-                        Some((&present, frame.meta.frame_id)),
-                    );
+                // Build this frame's startup-span recorder handle. Before
+                // retirement, `Shared` locks `startup_spans`'s mutex only for
+                // the short body of each individual record/take call inside
+                // `render_scene` — never across the surrounding GPU tail
+                // (`nextDrawable` acquire + Metal submit). Once retired, a
+                // fresh always-`None` owned handle stands in, so this thread
+                // never touches the mutex again for the steady-state
+                // per-frame path (see `StartupRecorder`'s docs).
+                let mut retired_spans: Option<StartupSpans> = None;
+                let recorder = if startup_retired {
+                    StartupRecorder::Owned(&mut retired_spans)
+                } else {
+                    StartupRecorder::Shared(&startup_spans)
+                };
+                let (_, just_retired) = render_scene(
+                    &mut renderer,
+                    &render_cx,
+                    &frame.scene.scene,
+                    frame.scene.base_color,
+                    frame.ui_spans,
+                    &mut frame_stats,
+                    recorder,
+                    perf_on,
+                    &presented,
+                    // Present-sync: park this frame under its own id so the UI
+                    // thread can tell the platform-view release gate which
+                    // frame it just put on screen.
+                    Some((&present, frame.meta.frame_id)),
+                );
+                if just_retired {
+                    startup_retired = true;
                 }
 
                 // iOS self-heals a lost surface from the retained layer (nothing

@@ -100,8 +100,16 @@ mod pace_trace {
     struct Prev {
         /// End of the previous frame's acquire — the base of `loop_us`.
         acquire_end: Option<Instant>,
-        /// End of the previous frame's submit: on the non-deferred path the
-        /// instant its present was issued, and so the base of `p2p_us`.
+        /// End of the previous **presenting** frame's submit — the instant
+        /// its present was issued, and so the base of `p2p_us`. Unlike
+        /// [`Self::acquire_end`]/[`Self::loop_end`], a frame that presented
+        /// nothing (`Redraw`/`SurfaceLost`/`Skipped`/`Err` — see
+        /// [`record`]'s `presented` parameter) leaves this untouched: `p2p_us`
+        /// measures the presented cadence specifically, so its base may only
+        /// ever advance on a frame that actually presented (Phase 2 review
+        /// minor #6 / act_000001a075af175599YuJ0qa — the prior unconditional
+        /// advance let one long present-to-present gap get reported as two
+        /// short, misleading intervals).
         submit_end: Option<Instant>,
         /// End of the previous loop iteration's last render-thread work (its
         /// submit) — the base of `idle_us`, which is therefore the time this
@@ -124,26 +132,44 @@ mod pace_trace {
         static BUF: RefCell<String> = const { RefCell::new(String::new()) };
     }
 
-    /// Emit one frame's line. `wake` is when the render thread entered the
-    /// frame tail with a scene in hand; the remaining instants/durations are
-    /// the spans the caller already measured.
-    pub(super) fn record(
+    /// Write one frame's `frust-perf ios-pace` line into `buf` (cleared
+    /// first) and return the next [`Prev`] state, from explicit inputs — the
+    /// pure core [`record`] wraps around the thread-local buffer/`PREV`/`SEQ`
+    /// state and unit tests call directly with a scratch `String` and an
+    /// explicit `n`/`prev`, no thread-local or `log` dependency (mirrors
+    /// `frust-engine::renderer::EncodeTrace::line`'s directly-tested-formatter
+    /// shape).
+    ///
+    /// `presented` is whether *this* frame actually presented
+    /// (`FrameOutcome::Rendered` on the inline path; the UI-thread present
+    /// under armed present-sync — see [`super::pace_record`]'s caller). When
+    /// `false`, `p2p_us` reports the literal `NA` sentinel rather than a
+    /// number (a wrong-looking interval reads as measured; `NA` cannot), and
+    /// the returned [`Prev::submit_end`] carries `prev.submit_end` through
+    /// unchanged — the base advances only on a frame that actually presented.
+    ///
+    /// Every argument is one distinct field of the one frame this line
+    /// reports on (mirrors [`render_scene`]'s and `ffi_glue::install_surface`'s
+    /// own `#[allow(clippy::too_many_arguments)]` for the same frame-tail
+    /// shape) — bundling them into a struct here would only relocate the same
+    /// count onto a constructor at each of this function's three call sites
+    /// (`record` and the two `#[cfg(test)]` callers below).
+    #[allow(clippy::too_many_arguments)]
+    fn write_line(
+        buf: &mut String,
+        n: u64,
+        prev: Prev,
         wake: Instant,
         acquire_start: Instant,
         acquire: Duration,
         submit_start: Instant,
         submit: Duration,
-    ) {
+        presented: bool,
+    ) -> Prev {
         use std::fmt::Write as _;
 
         let acquire_end = acquire_start + acquire;
         let submit_end = submit_start + submit;
-        let prev = PREV.with(Cell::get);
-        let n = SEQ.with(|seq| {
-            let n = seq.get() + 1;
-            seq.set(n);
-            n
-        });
         // A missing base is the first frame of the series (or the first after a
         // surface episode); it reports 0 rather than a fabricated interval, and
         // the analysis discards frame 1 exactly as every other first-frame
@@ -151,26 +177,195 @@ mod pace_trace {
         let since = |base: Option<Instant>, at: Instant| {
             base.map_or(Duration::ZERO, |b| at.saturating_duration_since(b))
         };
-        BUF.with_borrow_mut(|buf| {
-            buf.clear();
-            let _ = write!(
+        buf.clear();
+        let _ = write!(
+            buf,
+            "{PREFIX} n={n} wake_us={} idle_us={} acq_us={} sub_us={} \
+             loop_us={} p2p_us=",
+            acquire_start.saturating_duration_since(wake).as_micros(),
+            since(prev.loop_end, wake).as_micros(),
+            acquire.as_micros(),
+            submit.as_micros(),
+            since(prev.acquire_end, acquire_end).as_micros(),
+        );
+        if presented {
+            let _ = write!(buf, "{}", since(prev.submit_end, submit_end).as_micros());
+        } else {
+            buf.push_str("NA");
+        }
+        Prev {
+            acquire_end: Some(acquire_end),
+            submit_end: if presented {
+                Some(submit_end)
+            } else {
+                prev.submit_end
+            },
+            loop_end: Some(submit_end),
+        }
+    }
+
+    /// Emit one frame's line. `wake` is when the render thread entered the
+    /// frame tail with a scene in hand; the remaining instants/durations are
+    /// the spans the caller already measured. See [`write_line`]'s doc for
+    /// `presented`.
+    pub(super) fn record(
+        wake: Instant,
+        acquire_start: Instant,
+        acquire: Duration,
+        submit_start: Instant,
+        submit: Duration,
+        presented: bool,
+    ) {
+        let prev = PREV.with(Cell::get);
+        let n = SEQ.with(|seq| {
+            let n = seq.get() + 1;
+            seq.set(n);
+            n
+        });
+        let next = BUF.with_borrow_mut(|buf| {
+            let next = write_line(
                 buf,
-                "{PREFIX} n={n} wake_us={} idle_us={} acq_us={} sub_us={} \
-                 loop_us={} p2p_us={}",
-                acquire_start.saturating_duration_since(wake).as_micros(),
-                since(prev.loop_end, wake).as_micros(),
-                acquire.as_micros(),
-                submit.as_micros(),
-                since(prev.acquire_end, acquire_end).as_micros(),
-                since(prev.submit_end, submit_end).as_micros(),
+                n,
+                prev,
+                wake,
+                acquire_start,
+                acquire,
+                submit_start,
+                submit,
+                presented,
             );
             log::info!("{buf}");
+            next
         });
-        PREV.set(Prev {
-            acquire_end: Some(acquire_end),
-            submit_end: Some(submit_end),
-            loop_end: Some(submit_end),
-        });
+        PREV.set(next);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The `frust-perf ios-pace` line is a contract: a capture is graded
+        /// by grepping its fields, so the field order and names are pinned
+        /// here rather than only by the formatter (mirrors
+        /// `frust-engine::renderer`'s
+        /// `an_encode_trace_line_reports_every_column_in_order`).
+        #[test]
+        fn ios_pace_line_reports_every_field_in_order() {
+            let t0 = Instant::now();
+            let wake = t0;
+            let acquire_start = t0 + Duration::from_micros(1_000);
+            let acquire = Duration::from_micros(2_000);
+            let submit_start = acquire_start + acquire;
+            let submit = Duration::from_micros(500);
+            let prev = Prev {
+                acquire_end: Some(t0.checked_sub(Duration::from_micros(2_000)).unwrap()),
+                submit_end: Some(t0.checked_sub(Duration::from_micros(3_500)).unwrap()),
+                loop_end: Some(t0.checked_sub(Duration::from_micros(4_000)).unwrap()),
+            };
+            let mut buf = String::new();
+            let next = write_line(
+                &mut buf,
+                7,
+                prev,
+                wake,
+                acquire_start,
+                acquire,
+                submit_start,
+                submit,
+                true,
+            );
+            assert_eq!(
+                buf,
+                "frust-perf ios-pace n=7 wake_us=1000 idle_us=4000 acq_us=2000 \
+                 sub_us=500 loop_us=5000 p2p_us=7000"
+            );
+            let acquire_end = acquire_start + acquire;
+            let submit_end = submit_start + submit;
+            assert_eq!(next.acquire_end, Some(acquire_end));
+            assert_eq!(next.submit_end, Some(submit_end));
+            assert_eq!(next.loop_end, Some(submit_end));
+        }
+
+        /// A missing base (no prior frame — the first of the series, or the
+        /// first after a surface episode) reports `0` rather than a
+        /// fabricated interval, for every `since()`-derived field.
+        #[test]
+        fn since_returns_zero_on_missing_base() {
+            let t0 = Instant::now();
+            let wake = t0;
+            let acquire_start = t0 + Duration::from_micros(100);
+            let acquire = Duration::from_micros(50);
+            let submit_start = acquire_start + acquire;
+            let submit = Duration::from_micros(10);
+            let mut buf = String::new();
+            let _ = write_line(
+                &mut buf,
+                1,
+                Prev::default(),
+                wake,
+                acquire_start,
+                acquire,
+                submit_start,
+                submit,
+                true,
+            );
+            assert_eq!(
+                buf,
+                "frust-perf ios-pace n=1 wake_us=100 idle_us=0 acq_us=50 \
+                 sub_us=10 loop_us=0 p2p_us=0"
+            );
+        }
+
+        /// The fix this type exists for: a frame that presented nothing
+        /// reports `p2p_us` as the `NA` sentinel, never a number, and does
+        /// NOT advance `submit_end` — the next presenting frame's `p2p_us`
+        /// must still measure from the last REAL present, not from this
+        /// frame's near-zero submit.
+        #[test]
+        fn a_non_presenting_frame_does_not_advance_the_base() {
+            let t0 = Instant::now();
+            let prior_submit_end = t0.checked_sub(Duration::from_millis(30)).unwrap();
+            let prev = Prev {
+                acquire_end: Some(t0.checked_sub(Duration::from_micros(500)).unwrap()),
+                submit_end: Some(prior_submit_end),
+                loop_end: Some(t0.checked_sub(Duration::from_micros(500)).unwrap()),
+            };
+            let wake = t0;
+            let acquire_start = t0 + Duration::from_micros(10);
+            let acquire = Duration::from_micros(5);
+            let submit_start = acquire_start + acquire;
+            // A non-presenting frame's submit is near-zero (e.g. a
+            // reconfigure/skip) — exactly the shape that used to corrupt the
+            // next presenting frame's `p2p_us`.
+            let submit = Duration::from_micros(1);
+            let mut buf = String::new();
+            let next = write_line(
+                &mut buf,
+                2,
+                prev,
+                wake,
+                acquire_start,
+                acquire,
+                submit_start,
+                submit,
+                false,
+            );
+            assert!(
+                buf.ends_with("p2p_us=NA"),
+                "a non-presenting frame must report p2p_us as absent, not an interval: {buf}"
+            );
+            assert_eq!(
+                next.submit_end,
+                Some(prior_submit_end),
+                "the base must not advance on a frame that presented nothing"
+            );
+            // acquire_end/loop_end are unaffected by the presented gate — they
+            // track the frame's own acquire/submit work regardless of outcome.
+            let acquire_end = acquire_start + acquire;
+            let submit_end = submit_start + submit;
+            assert_eq!(next.acquire_end, Some(acquire_end));
+            assert_eq!(next.loop_end, Some(submit_end));
+        }
     }
 }
 
@@ -256,14 +451,17 @@ impl InlineExecutor {
         ui: UiSpans,
         perf_on: bool,
     ) -> Duration {
-        render_scene(
+        // Owned directly (no lock involved): the inline path never shares
+        // `startup_spans` with another thread, unlike the split's
+        // `StartupRecorder::Shared` — see that type's docs.
+        let (encode_time, _startup_retired) = render_scene(
             &mut self.renderer,
             &self.render_cx,
             scene,
             base_color,
             ui,
             &mut self.frame_stats,
-            &mut self.startup_spans,
+            crate::ffi_glue::StartupRecorder::Owned(&mut self.startup_spans),
             perf_on,
             &self.presented,
             // Present-sync never applies inline: this tail already runs on the
@@ -272,7 +470,8 @@ impl InlineExecutor {
             // in sync with no deferral needed. Deferring it a tick here would
             // only add latency.
             None,
-        )
+        );
+        encode_time
     }
 
     /// Record a gate-skipped frame (all-zero pass durations) so the skip counter
@@ -652,6 +851,10 @@ impl FrameExecutor {
 /// Takes the `Option<Instant>`s the frame path already holds rather than
 /// reading a clock of its own: with `perf_on` false they are `None` and there
 /// is nothing to report, which is the same answer the dial would give.
+///
+/// `presented` is whether this frame actually presented
+/// (`FrameOutcome::Rendered`) — see [`pace_trace`]'s `write_line` doc for why
+/// `p2p_us`'s base may only ever advance on such a frame.
 #[cfg(feature = "perf-trace")]
 fn pace_record(
     wake: Option<Instant>,
@@ -659,6 +862,7 @@ fn pace_record(
     acquire: Duration,
     submit_start: Option<Instant>,
     submit: Duration,
+    presented: bool,
 ) {
     if !pace_trace::enabled() {
         return;
@@ -666,7 +870,14 @@ fn pace_record(
     if let (Some(wake), Some(acquire_start), Some(submit_start)) =
         (wake, acquire_start, submit_start)
     {
-        pace_trace::record(wake, acquire_start, acquire, submit_start, submit);
+        pace_trace::record(
+            wake,
+            acquire_start,
+            acquire,
+            submit_start,
+            submit,
+            presented,
+        );
     }
 }
 
@@ -681,6 +892,7 @@ fn pace_record(
     _acquire: Duration,
     _submit_start: Option<Instant>,
     _submit: Duration,
+    _presented: bool,
 ) {
 }
 
@@ -704,10 +916,18 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// behind `perf_on` (the FFI-path perf convention: zero clock reads when
 /// disabled), recording the folded [`FramePasses`] through the single emitter
 /// (`frame_stats`), and stamping the first-encode / first-frame startup milestones
-/// on `startup_spans`. Returns the encode span. Shared by the inline path (UI
-/// thread) and the split path's [`crate::ffi_glue::render_loop`] (render thread)
-/// so the per-frame render logic is not forked — the exact pre-split tail, only
-/// relocated.
+/// through `startup_spans`. Returns the encode span and whether this call just
+/// retired the startup recorder (see
+/// [`crate::ffi_glue::StartupRecorder::take_and_emit`]). Shared by the inline
+/// path (UI thread) and the split path's [`crate::ffi_glue::render_loop`]
+/// (render thread) so the per-frame render logic is not forked — the exact
+/// pre-split tail, only relocated.
+///
+/// `startup_spans` is a [`crate::ffi_glue::StartupRecorder`] rather than a bare
+/// `Option<StartupSpans>` so the split's shared-with-the-UI-thread variant can
+/// keep its lock scoped to each individual record/take call — never held
+/// across this function's own blocking GPU tail (acquire + submit) below. See
+/// that type's docs for the finding this closes (Phase 2 review minor #11/#19).
 ///
 /// # Autorelease pool
 ///
@@ -741,27 +961,23 @@ pub(crate) fn render_scene(
     base_color: peniko::Color,
     ui: UiSpans,
     frame_stats: &mut FrameStats,
-    startup_spans: &mut Option<StartupSpans>,
+    mut startup_spans: crate::ffi_glue::StartupRecorder<'_>,
     perf_on: bool,
     presented: &AtomicU64,
     present: Option<(&PresentHandoff, u64)>,
-) -> Duration {
+) -> (Duration, bool) {
     autoreleasepool(|_pool| {
         // Encode span (GPU/CPU encode, no swapchain touch).
         let encode_start = perf_on.then(Instant::now);
         let encode_outcome = renderer.encode(render_cx, scene, base_color);
         let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // First-frame decomposition: stamp the first encode-complete boundary once
-        // (only when something was actually encoded).
-        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
-            && let Some(spans) = startup_spans.as_mut()
-            && !spans
-                .spans()
-                .iter()
-                .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
-        {
-            spans.record(perf::SPAN_FIRST_ENCODE_DONE);
+        // First-frame decomposition: stamp the first encode-complete boundary
+        // once (only when something was actually encoded). `record_once`
+        // locks (for the split's `Shared` variant) only for this call's own
+        // short body — never across the acquire/submit tail below.
+        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) {
+            startup_spans.record_once(perf::SPAN_FIRST_ENCODE_DONE);
         }
 
         // Acquire span (blocking vsync/present wait — `nextDrawable`).
@@ -796,19 +1012,9 @@ pub(crate) fn render_scene(
             Err(err) => Err(err),
         };
         let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
-        // The pacing trace's own line, before the outcome match: it reports
-        // where this frame's wall clock went (see [`pace_trace`]), which is
-        // the same story whether the outcome was `Rendered` or a reconfigure.
-        // `encode_start` doubles as the frame's wake instant — it is read at
-        // the top of this tail, the moment the render thread has a scene.
-        pace_record(
-            encode_start,
-            acquire_start,
-            acquire_time,
-            submit_start,
-            submit_time,
-        );
 
+        let mut startup_retired = false;
+        let mut presented_this_frame = false;
         match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
             // next tick draws against the fresh configuration.
@@ -820,18 +1026,35 @@ pub(crate) fn render_scene(
                 log::warn!("frust-shell-ios: surface lost; recreating");
             }
             Ok(FrameOutcome::Rendered) => {
+                presented_this_frame = true;
                 // A presented frame: bump the shared counter the UI thread reads
                 // before paint. `Skipped` presents nothing, so it doesn't.
                 presented.fetch_add(1, Ordering::Relaxed);
-                // First successful present: close out the cold-start recorder once.
-                if let Some(mut spans) = startup_spans.take() {
-                    spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
-                    spans.emit_log();
-                }
+                // First successful present: close out the cold-start recorder
+                // once. `take_and_emit` locks (for `Shared`) only for the
+                // `take()` itself — the record+emit that follow run on the
+                // now-fully-owned local value, off any mutex entirely.
+                startup_retired = startup_spans.take_and_emit(perf::SPAN_FIRST_FRAME_PRESENTED);
             }
             Ok(FrameOutcome::Skipped) => {}
             Err(err) => log::error!("frust-shell-ios: render error: {err:#}"),
         }
+
+        // The pacing trace's own line, after the outcome match so it knows
+        // whether this frame presented (see [`pace_trace`]'s `write_line` doc
+        // for why `p2p_us`'s base may only advance then) — the durations it
+        // reports are the same ones measured above regardless of where in
+        // this function the call sits. `encode_start` doubles as the frame's
+        // wake instant — it is read at the top of this tail, the moment the
+        // render thread has a scene.
+        pace_record(
+            encode_start,
+            acquire_start,
+            acquire_time,
+            submit_start,
+            submit_time,
+            presented_this_frame,
+        );
 
         // One folded frame record through the single emitter, with this
         // surface's real GPU pass timing attached when it produces one
@@ -852,6 +1075,6 @@ pub(crate) fn render_scene(
             frame_stats.emit_log();
         }
 
-        encode_time
+        (encode_time, startup_retired)
     })
 }

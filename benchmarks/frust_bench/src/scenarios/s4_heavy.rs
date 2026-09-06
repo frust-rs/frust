@@ -16,10 +16,16 @@
 //! `start` is stamped in [`S4Heavy::init`], the build that hands the whole
 //! generate-then-parse call to `spawn_blocking` (the frame the off-thread
 //! work is kicked off); `end` is stamped in [`S4Heavy::build`], the first
-//! build that observes the `spawn_blocking` result applied to [`S4State`]
-//! (`S4State::end_marked` guards against re-raising it on a later frame,
-//! since `build` keeps re-running every frame while [`SpinBox`] animates).
-//! The half-open window therefore spans every frame produced while the whole
+//! build that observes the `spawn_blocking` result reach
+//! [`AsyncValue::Ready`] (`S4State::end_marked` guards against re-raising it
+//! on a later frame, since `build` keeps re-running every frame while
+//! [`SpinBox`] animates). A failed task (`AsyncValue::Error`, e.g. a
+//! `spawn_blocking` panic/abort) raises no `end` marker at all — a window
+//! bracketing an error is not a measurement a harness grading by marker pair
+//! could tell apart from a genuine ~50MB generate-and-parse (Phase 2 review
+//! minor #9 / act_000001a075af19cbXlrxBysI: the prior guard,
+//! `!is_loading() && !is_idle()`, admitted `Error` alongside `Ready`). The
+//! half-open window therefore spans every frame produced while the whole
 //! off-thread call — payload generation and parse together, since both run
 //! inside the one `spawn_blocking` closure and only their combined
 //! completion is observable from the UI thread — was in flight, not the
@@ -380,7 +386,9 @@ pub struct S4State {
     /// Whether [`S4Heavy::build`] has already raised the `s4-parse` end
     /// marker. `build` re-runs every frame while [`SpinBox`] animates, but
     /// the task resolves once — this guards against re-raising `end` on
-    /// every frame after the first that observes it.
+    /// every frame after the first that observes it. A failed task
+    /// (`AsyncValue::Error`) never sets this: no `end` marker is raised for
+    /// a parse that didn't succeed (see the module doc).
     end_marked: bool,
 }
 
@@ -414,8 +422,12 @@ impl Component for S4Heavy {
     fn build(&self, state: &mut S4State) -> AnyView<S4State> {
         let value = state.task.signal().get();
         // Close the `s4-parse` window on the first build that observes the
-        // `spawn_blocking` result leaving `Loading` — see `S4State::end_marked`.
-        if !state.end_marked && !value.is_loading() && !value.is_idle() {
+        // `spawn_blocking` result reach `Ready` — see `S4State::end_marked`.
+        // A failed task (`AsyncValue::Error`) never closes the window: `end`
+        // must bracket a successful generate-and-parse, not a run that
+        // errored out (Phase 2 review minor #9 — the prior condition,
+        // `!is_loading() && !is_idle()`, admitted `Error` here too).
+        if !state.end_marked && value.is_ready() {
             frust_shell_common::perf::mark_scenario_end("s4-parse");
             state.end_marked = true;
         }
@@ -626,6 +638,59 @@ mod tests {
         assert!(
             state.end_marked,
             "end_marked must stay set across later rebuilds"
+        );
+
+        owner.cleanup();
+    }
+
+    /// A failed task (`AsyncValue::Error`) must close no `s4-parse` window at
+    /// all — see the module doc and `S4State::end_marked` (Phase 2 review
+    /// minor #9 / act_000001a075af19cbXlrxBysI: the prior end condition,
+    /// `!is_loading() && !is_idle()`, admitted `Error` alongside `Ready`).
+    ///
+    /// `S4Heavy::init`'s own generate-then-parse call cannot fail, so this
+    /// drives a throwaway, instantly-resolving `use_task` instead (never the
+    /// expensive real ~50MB payload generator) and forces its signal straight
+    /// to `Error` — exactly the state a `spawn_blocking` panic/abort would
+    /// eventually deliver via `use_task`'s coordinator — to pin `build`'s
+    /// marker logic against it directly.
+    #[test]
+    fn s4_parse_window_does_not_close_on_a_failed_task() {
+        use frust::TaskError;
+        use reactive_graph::owner::Owner;
+        use reactive_graph::traits::{GetUntracked, Set};
+        use std::sync::Arc;
+
+        let _rt = frust_reactive::ReactiveRuntime::init(Arc::new(|| {}));
+        let owner = Owner::new();
+
+        let mut state = owner.with(|| S4State {
+            task: use_task(|| async { Ok::<usize, std::io::Error>(0) }),
+            end_marked: false,
+        });
+
+        // Force the signal straight to `Error`, bypassing the (infallible)
+        // fetcher entirely.
+        let error: TaskError = Arc::new(std::io::Error::other("s4 parse failed (test)"));
+        state.task.signal().set(AsyncValue::Error(error));
+        assert!(state.task.signal().get_untracked().is_error());
+
+        let component = S4Heavy;
+        owner.with(|| {
+            let _ = component.build(&mut state);
+        });
+        assert!(
+            !state.end_marked,
+            "a failed task must never raise the s4-parse end marker"
+        );
+
+        // Stays unmarked across a later rebuild too (SpinBox keeps animating).
+        owner.with(|| {
+            let _ = component.build(&mut state);
+        });
+        assert!(
+            !state.end_marked,
+            "end_marked must stay clear on a failed task"
         );
 
         owner.cleanup();
