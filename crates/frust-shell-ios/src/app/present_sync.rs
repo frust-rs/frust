@@ -142,3 +142,39 @@ impl IosAppHandle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PresentHandoff;
+
+    /// The default (host did not arm present-sync): the render thread presents
+    /// inline, nothing is ever parked, and the slot stays inert — the
+    /// zero-cost-when-unused half of the mechanism.
+    #[test]
+    fn unarmed_handoff_is_inert() {
+        let handoff = PresentHandoff::new(false);
+        assert!(!handoff.is_armed());
+        assert!(handoff.take().is_none());
+    }
+
+    /// Armed: the render thread must defer its present into the slot instead
+    /// of issuing it off the transaction-committing thread. `armed` is fixed
+    /// at construction (a pre-`frust_init` host choice), so this is the whole
+    /// of the render side's decision.
+    #[test]
+    fn armed_handoff_reports_deferred_present() {
+        let handoff = PresentHandoff::new(true);
+        assert!(handoff.is_armed());
+    }
+
+    /// `clear` is the backgrounding/(re)install/teardown door and must be a
+    /// no-op on an empty slot — it runs on paths that cannot know whether the
+    /// render thread parked anything (a gate-skipped tick parks nothing).
+    #[test]
+    fn clear_on_an_empty_slot_is_a_no_op() {
+        let handoff = PresentHandoff::new(true);
+        handoff.clear();
+        handoff.clear();
+        assert!(handoff.take().is_none());
+    }
+}

@@ -23,6 +23,157 @@ use objc2::rc::autoreleasepool;
 
 use super::present_sync::PresentHandoff;
 
+/// The render thread's **pacing trace**: one diagnostic line per rendered
+/// frame decomposing where that frame's wall clock went between two presents,
+/// behind a dial of its own (`FRUST_PACE_TRACE`, parsed exactly like
+/// `FRUST_TRACE`) on top of `perf-trace` + [`perf::enabled`].
+///
+/// # What it answers
+///
+/// `acquire_us` alone cannot say *why* the swapchain made the render thread
+/// wait: a wait for the display's next refresh and a wait for the layer's
+/// drawable pool to release one look identical from inside the span. The two
+/// are told apart by what surrounds the span — how long this thread sat idle
+/// before asking (`idle_us`), and whether the interval between consecutive
+/// presents (`p2p_us`) is one refresh period or two. A wait anchored to an
+/// absolute refresh deadline shrinks when the thread arrives late; a wait for a
+/// pool release does not, and instead pins `loop_us` to one period however
+/// early the ask was.
+///
+/// # What it answered (iPhone SE, A13, iOS 26, 60 Hz — 2026-09-06,
+/// act_000001a070c81738SE728A0X)
+///
+/// Refresh-deadline anchored, not pool starvation: over 7,269 S3 frames
+/// `acq_us` regressed on `idle_us` with a slope of −0.90, so the wait shrinks
+/// almost 1:1 with a later ask. And nothing is being dropped — `p2p_us` p50
+/// 16.67 ms, 0.06 % of intervals past 25 ms, none past 41 ms. The S3 reading
+/// that "3.5 % of frames take two vsyncs" (`total_us` > 20 ms) therefore
+/// counts frames whose excess IS that wait: the same series' CPU-work row
+/// (`total − acquire`, `summarize.py --frust-work-row`) has zero frames over
+/// 20 ms, and S2 — never suspected of anything — sits at 18.9 % by the same
+/// `total_us` rule at a locked 60.8 fps.
+///
+/// `p2p_us` is the only field here that measures the *presented* cadence.
+/// Every other per-frame number this shell reports — including
+/// `FramePasses::total`, which sums UI-thread and render-thread spans that run
+/// concurrently under the split — is a cost, not an interval, and a cost above
+/// one refresh period is not by itself a dropped frame.
+///
+/// # Cost
+///
+/// Zero when the dial is off: no clock read of its own (every instant is one
+/// the surrounding spans already took under `perf_on`), one cached `bool`
+/// test, and a reused thread-local buffer when it is on. The dial is a
+/// diagnostic, not a benchmark mode — a measured run leaves it off so its
+/// per-frame line cannot perturb what is being measured.
+#[cfg(feature = "perf-trace")]
+mod pace_trace {
+    use std::cell::{Cell, RefCell};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    /// Prefix every line carries, so a capture greps this series apart from
+    /// `frust-perf raw`/`frust-perf frame`. A literal here (not a `perf::SPAN_*`
+    /// const) because it names a diagnostic line shape, not a span.
+    const PREFIX: &str = "frust-perf ios-pace";
+
+    /// The dial, cached for the process like [`perf::enabled`]'s own: set the
+    /// compile-time `FRUST_PACE_TRACE` define (`frust build ios --define
+    /// FRUST_PACE_TRACE=1`) or the runtime env var to any value but `"0"`.
+    ///
+    /// [`perf::enabled`]: frust_shell_common::perf::enabled
+    pub(super) fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            fn set(value: Option<&str>) -> bool {
+                matches!(value, Some(v) if v != "0")
+            }
+            set(option_env!("FRUST_PACE_TRACE"))
+                || set(std::env::var("FRUST_PACE_TRACE").ok().as_deref())
+        })
+    }
+
+    /// What one frame's line needs from the frames before it. `Copy`, in a
+    /// `Cell`, on the render thread that produces every frame — no lock, no
+    /// allocation.
+    #[derive(Clone, Copy, Default)]
+    struct Prev {
+        /// End of the previous frame's acquire — the base of `loop_us`.
+        acquire_end: Option<Instant>,
+        /// End of the previous frame's submit: on the non-deferred path the
+        /// instant its present was issued, and so the base of `p2p_us`.
+        submit_end: Option<Instant>,
+        /// End of the previous loop iteration's last render-thread work (its
+        /// submit) — the base of `idle_us`, which is therefore the time this
+        /// thread had nothing to do but wait for the UI thread's next scene.
+        /// Tracked separately from [`Self::submit_end`] so a future iteration
+        /// that ends on something other than the submit still reports the idle
+        /// window correctly.
+        loop_end: Option<Instant>,
+    }
+
+    thread_local! {
+        static PREV: Cell<Prev> = const { Cell::new(Prev {
+            acquire_end: None,
+            submit_end: None,
+            loop_end: None,
+        }) };
+        static SEQ: Cell<u64> = const { Cell::new(0) };
+        /// Reused across frames so the hot path formats without growing an
+        /// allocation, matching `perf`'s own raw-line buffer discipline.
+        static BUF: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    /// Emit one frame's line. `wake` is when the render thread entered the
+    /// frame tail with a scene in hand; the remaining instants/durations are
+    /// the spans the caller already measured.
+    pub(super) fn record(
+        wake: Instant,
+        acquire_start: Instant,
+        acquire: Duration,
+        submit_start: Instant,
+        submit: Duration,
+    ) {
+        use std::fmt::Write as _;
+
+        let acquire_end = acquire_start + acquire;
+        let submit_end = submit_start + submit;
+        let prev = PREV.with(Cell::get);
+        let n = SEQ.with(|seq| {
+            let n = seq.get() + 1;
+            seq.set(n);
+            n
+        });
+        // A missing base is the first frame of the series (or the first after a
+        // surface episode); it reports 0 rather than a fabricated interval, and
+        // the analysis discards frame 1 exactly as every other first-frame
+        // number is discarded.
+        let since = |base: Option<Instant>, at: Instant| {
+            base.map_or(Duration::ZERO, |b| at.saturating_duration_since(b))
+        };
+        BUF.with_borrow_mut(|buf| {
+            buf.clear();
+            let _ = write!(
+                buf,
+                "{PREFIX} n={n} wake_us={} idle_us={} acq_us={} sub_us={} \
+                 loop_us={} p2p_us={}",
+                acquire_start.saturating_duration_since(wake).as_micros(),
+                since(prev.loop_end, wake).as_micros(),
+                acquire.as_micros(),
+                submit.as_micros(),
+                since(prev.acquire_end, acquire_end).as_micros(),
+                since(prev.submit_end, submit_end).as_micros(),
+            );
+            log::info!("{buf}");
+        });
+        PREV.set(Prev {
+            acquire_end: Some(acquire_end),
+            submit_end: Some(submit_end),
+            loop_end: Some(submit_end),
+        });
+    }
+}
+
 /// One finished frame's payload crossing the UI→render-thread handoff in the
 /// split: the painted [`Scene`] plus the clear color it was
 /// painted for (the live theme's surface color — it must ride *with* the frame so
@@ -493,6 +644,46 @@ impl FrameExecutor {
     }
 }
 
+/// Feed the render thread's pacing trace one frame's spans — a no-op unless
+/// both `perf-trace` and the [`pace_trace`] dial are on, and unconditionally
+/// nothing in a build without the feature (the whole module, its strings
+/// included, is compiled out).
+///
+/// Takes the `Option<Instant>`s the frame path already holds rather than
+/// reading a clock of its own: with `perf_on` false they are `None` and there
+/// is nothing to report, which is the same answer the dial would give.
+#[cfg(feature = "perf-trace")]
+fn pace_record(
+    wake: Option<Instant>,
+    acquire_start: Option<Instant>,
+    acquire: Duration,
+    submit_start: Option<Instant>,
+    submit: Duration,
+) {
+    if !pace_trace::enabled() {
+        return;
+    }
+    if let (Some(wake), Some(acquire_start), Some(submit_start)) =
+        (wake, acquire_start, submit_start)
+    {
+        pace_trace::record(wake, acquire_start, acquire, submit_start, submit);
+    }
+}
+
+/// The `perf-trace`-off arm of [`pace_record`]: an inlinable no-op, so the
+/// call site folds away with the rest of the perf route (see
+/// `frust_shell_common::perf::enabled`'s feature-off rationale).
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+fn pace_record(
+    _wake: Option<Instant>,
+    _acquire_start: Option<Instant>,
+    _acquire: Duration,
+    _submit_start: Option<Instant>,
+    _submit: Duration,
+) {
+}
+
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
 /// surface produces no such measurement (a device that never offered
@@ -605,6 +796,18 @@ pub(crate) fn render_scene(
             Err(err) => Err(err),
         };
         let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+        // The pacing trace's own line, before the outcome match: it reports
+        // where this frame's wall clock went (see [`pace_trace`]), which is
+        // the same story whether the outcome was `Rendered` or a reconfigure.
+        // `encode_start` doubles as the frame's wake instant — it is read at
+        // the top of this tail, the moment the render thread has a scene.
+        pace_record(
+            encode_start,
+            acquire_start,
+            acquire_time,
+            submit_start,
+            submit_time,
+        );
 
         match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
