@@ -1,4 +1,4 @@
-//! Reactive-programming substrate for Frust (phase 5.5).
+//! Reactive-programming substrate for Frust.
 //!
 //! This crate owns the process-wide [`ReactiveRuntime`]: a background tokio
 //! runtime, a custom [`any_spawner`] executor that routes `spawn` to that
@@ -6,9 +6,10 @@
 //! [`FrameWaker`], and the root reactive [`Owner`]. It also re-exports the
 //! `reactive_graph` types the later programming-model tasks build on, and
 //! owns the process-wide deep-link source shells write platform deep links
-//! into (see [`push_deep_link`]/[`deep_links`]) and the process-wide Android
+//! into (see [`push_deep_link`]/[`deep_links`]), the process-wide Android
 //! back-press source next to it (see [`push_back_press`]/[`back_presses`] and
-//! the `handles_back` flag). A process-wide
+//! the `handles_back` flag), and the process-wide desktop menu-activation
+//! source beside those (see [`push_menu_event`]/[`menu_events`]). A process-wide
 //! signals-dirty flag (`ReactiveRuntime::take_signals_dirty`), tripped by
 //! [`TrackedScope`]'s dirty path, lets a shell ask synchronously and cheaply
 //! once per frame "did any tracked signal change since I last asked" — the
@@ -21,6 +22,7 @@
 mod back;
 mod deep_link;
 mod executor;
+mod menu;
 mod runtime;
 mod task;
 mod tracked;
@@ -30,6 +32,7 @@ pub use back::{
     push_back_press, set_can_pop_provider, set_handles_back,
 };
 pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
+pub use menu::{MenuEvent, MenuEvents, menu_events, push_menu_event};
 pub use runtime::{FrameWaker, ReactiveRuntime, spawn_blocking};
 pub use task::{AsyncValue, TaskError, UseTask, use_task};
 pub use tracked::TrackedScope;

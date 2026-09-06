@@ -111,7 +111,11 @@ impl IconData {
     /// [`BezPath::from_svg`](kurbo::BezPath::from_svg); a parse failure is a
     /// wiring bug (a malformed generated entry) and panics. For a user path it
     /// clones the shared `BezPath` (cheap for the small paths icons are).
-    pub(crate) fn resolve(&self) -> (BezPath, f64) {
+    ///
+    /// Public because out-of-tree design systems (the design-system plugin
+    /// tier) paint icons through it — `IconData` without `resolve` has no
+    /// reachable geometry outside this crate.
+    pub fn resolve(&self) -> (BezPath, f64) {
         match &self.repr {
             IconRepr::Svg { d, design } => {
                 let path = BezPath::from_svg(d).unwrap_or_else(|e| {
@@ -129,7 +133,10 @@ impl IconData {
     /// Whether `self` and `other` name the same icon geometry, cheaply — an
     /// `Arc` pointer check for user paths, a `d`/design comparison for generated
     /// sources. Lets [`IconView::rebuild`] skip re-parsing an unchanged icon.
-    pub(crate) fn same(&self, other: &IconData) -> bool {
+    ///
+    /// Public for the same reason as [`IconData::resolve`]: out-of-tree design
+    /// systems need the cheap-identity check to skip re-parsing on rebuild.
+    pub fn same(&self, other: &IconData) -> bool {
         match (&self.repr, &other.repr) {
             (
                 IconRepr::Svg {
@@ -236,6 +243,11 @@ impl<State: 'static> View<State> for IconView {
             base_path,
             design,
             size: self.size,
+            // Natural-size default until `layout` runs — a widget painted
+            // before its first `layout` pass (or a design-system consumer
+            // that skips it, e.g. this module's own paint-only tests) sees
+            // the unconstrained `size×size` box, matching pre-fix behavior.
+            laid_out_size: Size::new(self.size, self.size),
             color: self.color,
             label: self.label.clone(),
         }
@@ -259,6 +271,11 @@ impl<State: 'static> View<State> for IconView {
         }
         if prev.size != self.size {
             element.size = self.size;
+            // Re-seed the natural-size default (see `build`'s comment); the
+            // LAYOUT flag below re-measures it against real constraints
+            // before the next paint in the normal pipeline, but a caller
+            // that paints without laying out first still sees the new size.
+            element.laid_out_size = Size::new(self.size, self.size);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.color != self.color {
@@ -283,6 +300,11 @@ pub struct IconWidget {
     /// The side length of `base_path`'s square design box.
     design: f64,
     size: f64,
+    /// The box `layout` last resolved (`bc.constrain(size×size)`) — what
+    /// `paint` actually fills. Matches `size×size` exactly under a loose
+    /// constraint (the natural, overwhelmingly common case); diverges under a
+    /// tight constraint the requested `size` doesn't satisfy.
+    laid_out_size: Size,
     color: Option<Color>,
     label: Option<String>,
 }
@@ -291,21 +313,31 @@ impl Widget for IconWidget {
     fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // A fixed size×size box, clamped into the incoming constraints (a tight
         // constraint — e.g. inside a SizedBox — wins outright).
-        bc.constrain(Size::new(self.size, self.size))
+        let laid_out = bc.constrain(Size::new(self.size, self.size));
+        self.laid_out_size = laid_out;
+        laid_out
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let color = self
             .color
             .unwrap_or_else(|| resolve_default_color(Theme::from_paint_ctx(ctx)));
-        // Scale the design box to the laid-out size. `design` is always > 0 for
-        // a real icon; guard against a degenerate design box just in case.
+        // Scale the design box to fill the LAID-OUT box (min-side scale, so a
+        // non-square laid-out box never overdraws either axis), then center
+        // the scaled glyph inside it. Under a loose constraint (the common
+        // case) `laid_out_size == size×size`, so `scale == size/design` and
+        // the centering offset is exactly zero — byte-identical to the
+        // pre-fix, size-only scale. `design` is always > 0 for a real icon;
+        // guard against a degenerate design box just in case.
         let scale = if self.design > 0.0 {
-            self.size / self.design
+            self.laid_out_size.width.min(self.laid_out_size.height) / self.design
         } else {
             1.0
         };
-        let scaled = Affine::scale(scale) * self.base_path.clone();
+        let glyph_side = self.design * scale;
+        let dx = (self.laid_out_size.width - glyph_side) / 2.0;
+        let dy = (self.laid_out_size.height - glyph_side) / 2.0;
+        let scaled = Affine::translate((dx, dy)) * Affine::scale(scale) * self.base_path.clone();
         scene.fill_path(ctx.origin(), &scaled, &Brush::Solid(color));
     }
 
@@ -421,6 +453,81 @@ mod tests {
     }
 
     #[test]
+    fn paint_natural_size_after_layout_is_unchanged() {
+        // Guards the common case: laying out under a loose constraint (the
+        // overwhelmingly common shape) resolves to size×size, and paint must
+        // still fill exactly that box with zero centering offset — the same
+        // output as `paint_scales_the_design_box_to_the_requested_size`
+        // above, but with `layout` actually run first.
+        let view = icon(square_data()).size(48.0);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let laid_out = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        assert_eq!(laid_out, Size::new(48.0, 48.0));
+        let rec = paint_rec(&mut w, Point::new(3.0, 5.0), None);
+        let (origin, bbox, _) = rec.fills[0];
+        assert_eq!(origin, Point::new(3.0, 5.0));
+        assert!((bbox.width() - 48.0).abs() < 1e-6, "path scaled to size");
+        assert!((bbox.height() - 48.0).abs() < 1e-6);
+        assert!((bbox.x0 - 0.0).abs() < 1e-6);
+        assert!((bbox.y0 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paint_fills_a_tight_larger_box_centered() {
+        // Tight-LARGER (G12, fab_menu's collapsed trigger): a 34×34 tight
+        // constraint around a 24-design icon. Pre-fix, `paint` scaled to the
+        // VIEW's configured size (24) and drew at the box origin, leaving
+        // the glyph off-center by (34-24)/2 = 5dp toward the top-left. Fixed
+        // paint must fill the laid-out 34×34 box instead.
+        let view = icon(square_data()); // default size 24.0, design 24.0
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let laid_out = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(34.0, 34.0)));
+        assert_eq!(laid_out, Size::new(34.0, 34.0));
+        let rec = paint_rec(&mut w, Point::new(3.0, 5.0), None);
+        let (origin, bbox, _) = rec.fills[0];
+        assert_eq!(origin, Point::new(3.0, 5.0));
+        assert!(
+            (bbox.width() - 34.0).abs() < 1e-6,
+            "glyph must fill the laid-out box (34), not the requested size (24); got {}",
+            bbox.width()
+        );
+        assert!((bbox.height() - 34.0).abs() < 1e-6);
+        // Centered: a square design box scaled to fill a square laid-out box
+        // needs zero translation — the scaled path starts flush at 0..34.
+        assert!((bbox.x0 - 0.0).abs() < 1e-6);
+        assert!((bbox.y0 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paint_fills_a_tight_smaller_box_without_overdraw() {
+        // Tight-SMALLER: a 16×16 tight constraint around a 24-design icon —
+        // the latent overdraw bug (same root cause as G12, never
+        // device-observed since no shipped consumer constrains an icon
+        // smaller than its requested size, but broken all the same). Pre-fix
+        // `paint` drew the full 24×24 glyph regardless, overdrawing past the
+        // laid-out box's edges.
+        let view = icon(square_data()); // default size 24.0, design 24.0
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let laid_out = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(16.0, 16.0)));
+        assert_eq!(laid_out, Size::new(16.0, 16.0));
+        let rec = paint_rec(&mut w, Point::new(3.0, 5.0), None);
+        let (origin, bbox, _) = rec.fills[0];
+        assert_eq!(origin, Point::new(3.0, 5.0));
+        assert!(
+            (bbox.width() - 16.0).abs() < 1e-6,
+            "glyph must shrink to the laid-out box (16), not overdraw at the \
+             requested size (24); got {}",
+            bbox.width()
+        );
+        assert!((bbox.height() - 16.0).abs() < 1e-6);
+        assert!((bbox.x0 - 0.0).abs() < 1e-6);
+        assert!((bbox.y0 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn user_supplied_path_renders() {
         // The composability requirement: a hand-built BezPath paints as an icon.
         let mut path = BezPath::new();
@@ -444,7 +551,7 @@ mod tests {
         let explicit = Color::from_rgb8(0xAB, 0xCD, 0xEF);
         let view = icon(square_data()).color(explicit);
         let mut w = build(&view);
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
         assert_eq!(rec.fills[0].2, explicit);
     }
@@ -453,7 +560,7 @@ mod tests {
     fn themed_default_resolves_on_surface() {
         let view = icon(square_data());
         let mut w = build(&view);
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
         assert_eq!(rec.fills[0].2, theme.scheme().on_surface);
     }
@@ -478,6 +585,26 @@ mod tests {
                 !path.elements().is_empty(),
                 "generated icon `{}` parsed to an empty path",
                 source.d
+            );
+        }
+    }
+
+    #[test]
+    fn the_icon_button_arc_additions_exist_and_are_in_all() {
+        // The two directional arrows the caret precedent doesn't cover, a
+        // third pointing forward, and a copy affordance — all four are
+        // present in the generated set and enumerable via `ALL`, not just
+        // reachable by name.
+        let additions = super::super::icons::ALL;
+        for (name, d) in [
+            ("ARROW_UPWARD", super::super::icons::ARROW_UPWARD.d),
+            ("ARROW_DOWNWARD", super::super::icons::ARROW_DOWNWARD.d),
+            ("ARROW_FORWARD", super::super::icons::ARROW_FORWARD.d),
+            ("CONTENT_COPY", super::super::icons::CONTENT_COPY.d),
+        ] {
+            assert!(
+                additions.iter().any(|source| source.d == d),
+                "icons::{name} is missing from icons::ALL"
             );
         }
     }

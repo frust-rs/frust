@@ -23,7 +23,7 @@
 //!
 //! # Wholesale facade re-export
 //!
-//! Unlike the baseline/catalog widgets' flat per-type re-export lists, the
+//! Unlike the baseline widgets' flat per-type re-export lists, the
 //! `frust` facade re-exports this module **wholesale**
 //! (`pub use frust_widgets::motion;`), mirroring the existing
 //! `pub use frust_widgets::icons;` precedent — the only other wholesale

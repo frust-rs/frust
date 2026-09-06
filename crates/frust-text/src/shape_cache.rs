@@ -15,7 +15,10 @@ use std::collections::HashMap;
 
 use peniko::Brush;
 
-use crate::style::{FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextStyle};
+use crate::style::{
+    FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextAlign, TextStyle,
+    to_parley_align,
+};
 
 /// Default cache capacity, mirroring Flutter's SkParagraph LRU paragraph cache
 /// (128 entries, keyed by text + styling).
@@ -47,6 +50,14 @@ pub struct ShapeCacheStats {
 /// Float fields are keyed by their bit pattern (`f32::to_bits`) so equality
 /// and hashing agree; the style values here (sizes, spacings, sRGB channels)
 /// are never `NaN`, so bitwise keying is exact.
+///
+/// `align` is part of the key even though alignment is applied *after*
+/// shaping (during line-breaking, not shaping) — parley bakes the aligned
+/// line positions into the cached [`parley::Layout`] itself
+/// ([`ShapeCache::get`] mutates the cached layout in place), so two texts
+/// differing only in alignment must not collide on the same cache entry: a
+/// collision would make the second text's request silently reuse and repaint
+/// the first text's aligned line positions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ShapeKey {
     text: String,
@@ -57,6 +68,7 @@ pub(crate) struct ShapeKey {
     color: [u32; 4],
     letter_spacing: u32,
     line_height: LineHeightBits,
+    align: TextAlign,
 }
 
 impl ShapeKey {
@@ -72,6 +84,7 @@ impl ShapeKey {
             color: style.color.components.map(f32::to_bits),
             letter_spacing: style.letter_spacing.to_bits(),
             line_height: LineHeightBits::from(style.line_height),
+            align: style.align,
         }
     }
 }
@@ -196,8 +209,13 @@ impl ShapeCache {
         entry.last_used = tick;
         if !same_width(entry.broken_width, max_width) {
             entry.layout.break_all_lines(max_width);
+            // `key.align` (not a hardcoded `Start`): this is the width-change
+            // re-break path context.rs's initial shape+break call doesn't
+            // reach, so it must independently re-apply the same alignment or
+            // a resized layout silently reverts to `Start` — see `ShapeKey`'s
+            // docs.
             entry.layout.align(
-                parley::layout::Alignment::Start,
+                to_parley_align(key.align),
                 parley::layout::AlignmentOptions::default(),
             );
             entry.broken_width = max_width;
@@ -272,6 +290,27 @@ mod tests {
         // Text and style still distinguish keys.
         assert_ne!(key("hello", 16.0), key("world", 16.0));
         assert_ne!(key("hello", 16.0), key("hello", 24.0));
+    }
+
+    #[test]
+    fn key_distinguishes_alignment() {
+        // Two texts identical but for alignment must not collide in the
+        // cache — see `ShapeKey`'s docs on why `align` is part of the key.
+        let start = ShapeKey::new(
+            "hello",
+            &TextStyle {
+                align: TextAlign::Start,
+                ..TextStyle::new(16.0, Color::BLACK)
+            },
+        );
+        let center = ShapeKey::new(
+            "hello",
+            &TextStyle {
+                align: TextAlign::Center,
+                ..TextStyle::new(16.0, Color::BLACK)
+            },
+        );
+        assert_ne!(start, center);
     }
 
     #[test]

@@ -18,6 +18,12 @@ use reactive_graph::owner::Owner;
 const W: f64 = 800.0;
 const H: f64 = 600.0;
 
+/// The frame-class scenario ids (s1..=s8), in order. This expectation is shared
+/// across both `db`-on and db-off configurations: the `s*` prefix must stay in
+/// sync across the two SCENARIOS static arrays, so both builds see the same indices
+/// for the baseline frame-class table.
+const FRAME_CLASS_IDS: [&str; 8] = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"];
+
 /// A GPU-free paint target recording the workload: gradient/solid path fills,
 /// strokes, glyph runs, and rounded-rect chrome (the HUD/switcher buttons).
 #[derive(Default)]
@@ -105,22 +111,83 @@ fn gated_frame<S: 'static, V: View<S>>(
 }
 
 #[test]
-fn registry_has_eight_scenarios_in_id_order() {
+#[cfg(feature = "db")]
+fn registry_has_ten_scenarios_in_id_order() {
+    // s1..=s8 (the frame-class table) stay in their original order and
+    // indices unchanged, with d1/d2 (the DB op-latency class, PROTOCOL §9)
+    // appended after — the registry widened from eight to ten entries, but
+    // nothing about the s1..=s8 slice moved.
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
-    assert_eq!(ids, ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]);
+    let mut expected = FRAME_CLASS_IDS.to_vec();
+    expected.extend(["d1", "d2"]);
+    assert_eq!(ids, expected);
 }
 
 #[test]
+#[cfg(not(feature = "db"))]
+fn registry_has_eight_scenarios_in_id_order() {
+    // On a db-off build, the registry has only the eight frame-class scenarios
+    // (s1..=s8), in the same order as the db-on SCENARIOS prefix.
+    let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
+    assert_eq!(ids, FRAME_CLASS_IDS);
+}
+
+#[test]
+#[cfg(feature = "db")]
 fn deep_link_and_id_parsing() {
     assert_eq!(scenarios::index_from_id("s1"), Some(0));
     assert_eq!(scenarios::index_from_id("s7"), Some(6));
-    assert_eq!(scenarios::index_from_id("s9"), None);
+    assert_eq!(scenarios::index_from_id("s8"), Some(7));
+    // Exact-match ids only — an unregistered id must never resolve.
+    assert_eq!(scenarios::index_from_id("nope"), None);
+
+    // The `d*` DB op-latency namespace (PROTOCOL §9.1) resolves through the
+    // exact same opaque-string lookup as `s*` — nothing here special-cases
+    // the `d`-prefix.
+    assert_eq!(scenarios::index_from_id("d1"), Some(8));
+    assert_eq!(scenarios::index_from_id("d2"), Some(9));
+    assert_eq!(scenarios::index_from_id("d3"), None);
+    assert_eq!(scenarios::index_from_url("frustbench://d1"), Some(8));
+    assert_eq!(scenarios::index_from_url("frustbench://d2"), Some(9));
 
     assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
     assert_eq!(scenarios::index_from_url("frustbench://s7/idle"), Some(6));
     assert_eq!(scenarios::index_from_url("frustbench://s3?x=1"), Some(2));
     assert_eq!(scenarios::index_from_url("frustbench://nope"), None);
     assert_eq!(scenarios::index_from_url("other://s1"), None);
+}
+
+#[test]
+#[cfg(not(feature = "db"))]
+fn deep_link_and_id_parsing() {
+    // Test frame-class scenario id resolution on a db-off build.
+    for (idx, id) in FRAME_CLASS_IDS.iter().enumerate() {
+        assert_eq!(
+            scenarios::index_from_id(id),
+            Some(idx),
+            "s* id {} should resolve to index {}",
+            id,
+            idx
+        );
+    }
+    // Exact-match ids only — an unregistered id must never resolve.
+    assert_eq!(scenarios::index_from_id("nope"), None);
+
+    // On a db-off build, d1 and d2 are not in the registry, so they must
+    // resolve to None (falling back to S1 with a log line).
+    assert_eq!(scenarios::index_from_id("d1"), None);
+    assert_eq!(scenarios::index_from_id("d2"), None);
+    assert_eq!(scenarios::index_from_id("d3"), None);
+
+    // URL parsing: frame-class ids work the same way.
+    assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
+    assert_eq!(scenarios::index_from_url("frustbench://s7/idle"), Some(6));
+    assert_eq!(scenarios::index_from_url("frustbench://s3?x=1"), Some(2));
+    assert_eq!(scenarios::index_from_url("frustbench://nope"), None);
+    assert_eq!(scenarios::index_from_url("other://s1"), None);
+    // d1/d2 do not resolve on a db-off build.
+    assert_eq!(scenarios::index_from_url("frustbench://d1"), None);
+    assert_eq!(scenarios::index_from_url("frustbench://d2"), None);
 }
 
 /// Drive one scenario's view over a `BenchState`, at a fixed index.
@@ -174,7 +241,7 @@ fn s7_is_static_and_paints_text() {
 
 #[test]
 fn every_registered_scenario_mounts_and_paints() {
-    // All 8 scenarios are implemented (tasks 02/03/04) — no stubs remain.
+    // All of S1-S8 are implemented (tasks 02/03/04) — no stubs remain.
     // Each must mount from the registry and paint something on frame 0;
     // per-scenario behavior (animation liveness, scroll, decode) is covered
     // by the dedicated tests in this file and the scenario modules.

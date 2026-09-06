@@ -5,47 +5,48 @@
 //! Every interactive demo needs state that survives the shell's per-frame
 //! rebuild (a toggle's checked flag, the demo-card index, a replay counter),
 //! but this page is a plain `page(&CatalogState)` function with no `Component`
-//! state of its own and may not touch [`CatalogState`] (the `c01` scaffold
+//! state of its own and may not touch [`CatalogState`] (the page-fn
 //! contract). So each demo's local state lives in a self-healing `thread_local!`
 //! [`RwSignal`] cached across rebuilds — the same screen-local-state idiom
 //! `examples/huddle`'s page functions use. `build` only ever *reads* those
 //! signals (subscribing); every *write* happens in an event handler.
 //!
-//! Stub scaffold (`c01`): a placeholder honoring the page-fn contract in
+//! Originally a stub scaffold placeholder honoring the page-fn contract in
 //! `pages/mod.rs`.
 
-use frust::glyph::TermLine;
-use frust::glyph::{
-    PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
-    tabs, term_block,
-};
-use frust::motion::patterns::{FadeScale, FadeThrough, GlyphSlide, SharedAxis, SlideDirection};
+use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, Update, any, button, inflexible, keyed, switch, text, use_context,
+    TransitionSpec, Update, any, button, inflexible, keyed, text, use_context,
+};
+use frust_glyph::TermLine;
+use frust_glyph::motion::{GlyphSlide, SlideDirection};
+use frust_glyph::{
+    PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
+    tabs, term_block, toggle,
 };
 
 use crate::CatalogState;
 
 /// Glyph accent amber — the reference build's `--accent-amber`.
 /// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn amber() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
 /// A muted caption ink for the per-demo timing notes.
 /// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
@@ -161,7 +162,9 @@ fn demo_press() -> FlexChild<CatalogState> {
     ])
 }
 
-/// 02 toggle spring: a baseline switch (spatial knob translate + effects track).
+/// 02 toggle spring: `frust_glyph::toggle` itself — the demo now shows the
+/// authored component (spatial knob translate + effects track) rather than a
+/// Material stand-in.
 fn demo_toggle() -> FlexChild<CatalogState> {
     let on = toggle_sig();
     let checked = on.get();
@@ -169,7 +172,7 @@ fn demo_toggle() -> FlexChild<CatalogState> {
         inflexible(label("02 Toggle spring")),
         inflexible(caption("220ms spatial knob + 150ms effects track")),
         gap(6.0),
-        inflexible(switch(checked, move |_s: &mut CatalogState, v| on.set(v))),
+        inflexible(toggle(checked, move |_s: &mut CatalogState, v| on.set(v))),
     ])
 }
 
@@ -233,13 +236,13 @@ fn demo_modal() -> FlexChild<CatalogState> {
 }
 
 /// See `overlays.rs`'s twin: bottom-pinned, full width on phones, capped at
-/// 640dp + centered on larger screens (M3/Flutter convention; Ed's
-/// device-gate round 3). The glyph_card supplies the panel surface.
+/// 640dp + centered on larger screens (M3/Flutter convention, device-gate
+/// verified). The glyph_card supplies the panel surface.
 fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
     any(Align(
         Alignment { x: 0.0, y: 1.0 },
         SizedBox(Some(SHEET_MAX_WIDTH), None)
-            .child(frust::glyph::glyph_card::<CatalogState>().desc(panel)),
+            .child(frust_glyph::glyph_card::<CatalogState>().desc(panel)),
     ))
 }
 
@@ -480,9 +483,9 @@ fn demo_boot() -> FlexChild<CatalogState> {
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     // Durations/easings come from the canonical Glyph motion scheme (the app
-    // forces `Theme::glyph_baseline()`; only its `reduce_motion` flag toggles,
+    // forces `frust_glyph::baseline()`; only its `reduce_motion` flag toggles,
     // never these token values).
-    let motion = Theme::glyph_baseline().motion;
+    let motion = frust_glyph::baseline().motion;
 
     any(FlexView::new(
         Axis::Vertical,

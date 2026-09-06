@@ -21,10 +21,8 @@ frust-text = { workspace = true }
 # introduces no cycle.
 frust-core = { workspace = true }
 
-[features]
-default = ["glyph-fonts"]
-# Embeds Space Mono + IBM Plex Mono TTF bytes (glyph::fonts::font_data())
-# via include_bytes! — no filesystem/network access at runtime.
-# `--no-default-features` compiles the crate without them (fonts module
-# absent, every other token table unaffected).
-glyph-fonts = []
+# No features: this crate carries no design-language token module of its own.
+# `Theme::neutral()` is the language-free floor every shell falls back to, and
+# a design system (in-tree or third-party) composes its own tables over
+# `ThemeBuilder`/`ThemeExtensions` from its own crate — see
+# docs/WIDGETS_ARCHITECTURE.md's External Design-System Contract.

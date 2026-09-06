@@ -3,6 +3,11 @@ name = "{{ project_name }}"
 version = "0.1.0"
 edition = "2024"
 publish = false
+# Windows-only resource embedding (taskbar/exe icon, FileVersion/
+# ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
+# isn't itself platform-conditional (Cargo has no such thing) and stays a
+# no-op off Windows.
+build = "windows/build.rs"
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
@@ -16,7 +21,23 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # that generated this project ("frust_path" is explicitly a temporary
 # mechanism). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
+#
+# `frust` itself carries no design-system catalog and its own `[features]`
+# default is `default = []` — there is nothing left to opt out of with
+# `default-features = false`, so this edge names no features at all (mirrors
+# the default `Cargo.toml.tmpl`'s comment).
 frust = { path = "{{ frust_path }}" }
+
+# Design system (gs1): Glyph is this app's design system, brought in as a
+# sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
+# feature — mirrors the default `Cargo.toml.tmpl`'s comment (see that file
+# for the full rationale). `src/lib.rs`'s `frust::app!(..., setup = {
+# frust_glyph::install(); })` is the runtime call that actually makes it the
+# active theme; delete the `frust-glyph` dependency below and that call to
+# opt out (still builds, neutral-themed), or swap it for `frust-material`/
+# `frust-cupertino` plus the matching `install()` call to use one of the
+# other two built-in design systems instead.
+frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
@@ -27,17 +48,14 @@ frust = { path = "{{ frust_path }}" }
 # dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-frust" }
 
-# `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
-# Version-Pin Policy) — this app path-deps into a **sibling checkout**
-# (`../clean-signals-rs`, next to this Frust checkout) at the exact same
-# path `clean-signals-frust`'s own `clean-signals` dependency resolves
-# (both by path, relative to different starting points but the same real
-# absolute directory), so Cargo unifies both into one crate identity — the
-# type-identity rule `examples/huddle/Cargo.toml` documents at length.
-# **Dev-machine-only while `clean-signals` is unpublished**: this project
-# will not build without that sibling checkout present (see `frust create
-# --arch clean-signals`'s help text).
-clean-signals = { path = "{{ frust_path }}/../../../clean-signals-rs/crates/clean-signals" }
+# `clean-signals` itself is not yet published to crates.io (see
+# `docs/DEVELOPMENT.md`'s Version-Pin Policy) — this app git+rev-pins to the
+# public repo at the exact same spec `clean-signals-frust`'s own
+# `clean-signals` dependency resolves, so Cargo unifies both into one crate
+# identity — the type-identity rule `examples/huddle/Cargo.toml` documents at
+# length. Unlike the old sibling-checkout path dep, this builds on any
+# machine with no local `clean-signals-rs` checkout required.
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 
 # `log` facade dependency for the release-only `lean` feature below — mirrors
 # the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
@@ -45,6 +63,14 @@ clean-signals = { path = "{{ frust_path }}/../../../clean-signals-rs/crates/clea
 # this variant must declare the feature too or a release build fails on an
 # unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
 log = "0.4"
+
+# `windows/build.rs`'s resource embedder. `winres` (the older, commonly
+# referenced crate for this) was last published 2021-09-28 — stale — so this
+# uses the actively maintained `winresource` fork instead. A
+# `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
+# never touches a macOS/Linux build.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [features]
 # Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
@@ -70,19 +96,10 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes.
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

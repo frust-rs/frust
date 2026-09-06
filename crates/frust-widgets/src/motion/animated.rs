@@ -255,7 +255,7 @@ impl<State: 'static> View<State> for AnimatedOpacityView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnimatedOpacityWidget {
         AnimatedOpacityWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             explicit_timing: self.timing,
             anim: ImplicitAnim::new(self.target),
         }
@@ -276,12 +276,12 @@ impl<State: 'static> View<State> for AnimatedOpacityView<State> {
             element.explicit_timing = self.timing;
             flags |= ChangeFlags::PAINT;
         }
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut AnimatedOpacityWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -312,12 +312,14 @@ impl Widget for AnimatedOpacityWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 // --- AnimatedScale ------------------------------------------------------------
@@ -386,7 +388,7 @@ impl<State: 'static> View<State> for AnimatedScaleView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnimatedScaleWidget {
         AnimatedScaleWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             alignment: self.alignment,
             explicit_timing: self.timing,
             anim: ImplicitAnim::new(self.target),
@@ -412,12 +414,12 @@ impl<State: 'static> View<State> for AnimatedScaleView<State> {
             element.explicit_timing = self.timing;
             flags |= ChangeFlags::PAINT;
         }
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut AnimatedScaleWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -457,12 +459,14 @@ impl Widget for AnimatedScaleWidget {
         // section: `route_event_single` hit-tests the child's laid-out
         // (unscaled) bounds via `ChildPod::contains`, never the paint-time
         // transform.
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

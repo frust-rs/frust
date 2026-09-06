@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
-    Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, app_bar, flexible,
-    hero, icon, icons, inflexible, list_item, scroll_view, text, use_context,
+    Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, flexible, hero,
+    icon, icons, inflexible, scroll_view, text, use_context,
 };
+use frust_material::{app_bar, list_item};
 
 use crate::HuddleState;
 use crate::features::profile::domain::CURRENT_USER_ID;
@@ -25,7 +26,7 @@ use super::profile;
 
 /// The You tab root. `controller` pushes the settings stack and the profile page.
 pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
-    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
 
     let repo = use_context::<Arc<dyn ProfileRepository + Send + Sync>>()

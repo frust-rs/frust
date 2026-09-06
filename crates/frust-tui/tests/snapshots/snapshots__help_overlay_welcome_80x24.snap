@@ -2,9 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(80, 24, &state)"
 ---
-                                                           toolchain ◌ checking…
-                                                                                
-               ╭ Keyboard Shortcuts ────────────────────────────╮               
+               ╭ Keyboard Shortcuts ────────────────────────────╮ain ◌ checking…
                │                                                │▓▓             
                │  r       Run on device(s)…                     │▓▓             
                │  x       Stop session                          │▓▓             
@@ -16,13 +14,15 @@ expression: "render_to_string(80, 24, &state)"
                │  a       Add plugin…                           │▓▓             
                │  ^O      Switch project…                       │▓▓             
                │  R       Refresh devices                       │▓▓             
+               │  m       MCP server…                           │▓▓             
+               │  M       Start/stop MCP server                 │▓▓             
+               │  D       DAP server…                           │▓▓             
                │  ⌥m      Toggle mouse capture                  │▓▓             
                │  f       Toggle follow-tail                    │▓▓             
                │  /       Search logs…                          │▓▓             
+               │  l       Cycle log level filter                │▓▓             
+               │  z       Toggle nearest backtrace fold         │▓▓             
+               │  d       DevTools                              │▓▓             
+               │  r       Refresh widget tree                   │▓▓             
                │  q       Quit                                  │▓▓             
-               │                                                │▓▓             
-               │  Esc close                                     │▓▓             
-               ╰────────────────────────────────────────────────╯▓▓             
-                 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             
-                                                                                
-? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]
+? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]

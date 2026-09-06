@@ -52,9 +52,9 @@ use std::time::{Duration, Instant};
 
 use frust::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
-    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, Stack, any,
-    filled_card, text,
+    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, Stack, any, text,
 };
+use frust_material::filled_card;
 
 use crate::HuddleState;
 use crate::ui::sheet::drag_up_dismiss;

@@ -109,12 +109,12 @@ fn setup() -> Owner {
 /// [`Brightness`] under the fresh ambient owner — mirroring a shell's own
 /// `provide_context(theme.clone())` push (`docs/ARCHITECTURE.md`'s Theme
 /// delivery, the app-code half). Every page reads `use_context::<Theme>()`
-/// (falling back to `Theme::glyph_baseline()` with no context), so this is
+/// (falling back to `frust_glyph::baseline()` with no context), so this is
 /// what lets the multi-brightness sweep below actually exercise each page's
 /// live-token re-resolution rather than only ever hitting the fallback.
 fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     let owner = setup();
-    let theme = Theme::builder(Theme::glyph_baseline())
+    let theme = Theme::builder(frust_glyph::baseline())
         .brightness(brightness)
         .build();
     provide_context(theme.clone());
@@ -122,8 +122,8 @@ fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     // (`root.set_theme(Box::new(theme))`): `provide_context` only serves
     // app-code `use_context` reads; every widget-internal color resolves from
     // the LayoutCtx/PaintCtx theme the shell threads via `set_theme`
-    // (docs/ARCHITECTURE.md's Theme delivery). Round-1 review: without this
-    // the brightness sweep silently exercised unthemed dark fallbacks.
+    // (docs/ARCHITECTURE.md's Theme delivery). Without this the brightness
+    // sweep silently exercised unthemed dark fallbacks.
     (owner, theme)
 }
 
@@ -256,8 +256,8 @@ fn every_page_mounts_at_every_size_and_brightness() {
     }
 }
 
-/// Round-1 review Major 2: the brightness sweep must actually verify COLOR
-/// values, not just paint counts — a page that hardcoded its dark-mode text
+/// The brightness sweep must actually verify COLOR values, not just paint
+/// counts — a page that hardcoded its dark-mode text
 /// colors would paint an identical color set under both brightnesses. Every
 /// page carries at least one theme-resolved text role (headings resolve
 /// `primary`, captions `on_surface_variant`), so the per-page painted color
@@ -347,7 +347,7 @@ fn full_shell_mounts_with_header_tabs_and_body() {
 }
 
 /// A headless no-double-top-padding regression test: the root
-/// [`glyph::app_bar`](frust::glyph::app_bar) consumes the top window inset
+/// [`glyph::app_bar`](frust_glyph::app_bar) consumes the top window inset
 /// itself (grows its own height by it), and the body `safe_area(...).top(false)`
 /// must NOT pad by that same inset a second time. Every painted glyph run's
 /// absolute Y translation should shift by exactly `top_inset` between a
@@ -446,7 +446,7 @@ const SETTLE_MS: u64 = 5000;
 #[test]
 fn every_section_requests_no_frames_with_animations_disabled() {
     for brightness in BRIGHTNESSES {
-        let theme = Theme::builder(Theme::glyph_baseline())
+        let theme = Theme::builder(frust_glyph::baseline())
             .brightness(brightness)
             .map_motion(|m: MotionScheme| MotionScheme {
                 reduce_motion: true,

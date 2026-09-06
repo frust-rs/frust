@@ -1,13 +1,13 @@
-//! The toolchain bootstrap wizard (PLAN D6a / workbook B6): a shadowed,
+//! The toolchain bootstrap wizard: a shadowed,
 //! centered two-pane modal — a left step tree (Prerequisites → Platforms ▾ →
 //! Doctor rollup, fdemon's collapsed/expanded projection) and a right detail
 //! pane listing the selected area's components + its guided fix commands, each
 //! either copy-to-clipboard or "Run in session". The base workbench/welcome
 //! layer is rendered with a *suppressed* `MouseCtx` (see `crate::ui::render`),
-//! so only this panel's regions are live while it's open — the D4 base-layer
+//! so only this panel's regions are live while it's open — the base-layer
 //! suppression, plus the binding `[Esc] Close` title affordance.
 //!
-//! Layering (D2): renders `&BootstrapWizard` and only *registers* interaction;
+//! Layering: renders `&BootstrapWizard` and only *registers* interaction;
 //! it never mutates the engine. fdemon's InstallWizard is a PATTERN source only
 //! (BSL-1.1 — no verbatim copies).
 

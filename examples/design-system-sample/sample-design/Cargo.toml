@@ -1,0 +1,19 @@
+[package]
+name = "sample-design"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# `frust` is the ONLY dependency — that is the proof this crate exists to
+# carry. Every token type, every widget-authoring trait, the geometry/paint
+# vocabulary, the recording-scene test seam, and the `set_default_theme`
+# install hook are reached through the facade; nothing here names
+# `frust-widgets`, `frust-theme`, `frust-core`, `kurbo`, or `peniko`.
+#
+# Catalogs off (inherited — see the workspace manifest's `frust` entry for why
+# the switch lives there): a design-system crate must never enable a built-in
+# catalog feature, since Cargo features are additive and one such line would
+# turn Material/Cupertino/Glyph back on for every app that depends on it.
+frust = { workspace = true }

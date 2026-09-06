@@ -1,4 +1,4 @@
-//! Feedback section — status/feedback widgets from the `frust::glyph`
+//! Feedback section — status/feedback widgets from the `frust_glyph`
 //! catalog: badges, removable tags, alerts, toast triggers, and the three
 //! loader/placeholder shapes.
 //!
@@ -17,7 +17,7 @@
 //!
 //! # Toast variant caveat
 //!
-//! [`glyph::toast_host`]'s v1 contract (`crates/frust-widgets/src/glyph/
+//! [`glyph::toast_host`]'s v1 contract (`plugins/glyph/src/
 //! toast.rs`) takes a plain `Vec<String>` queue and always plays each entry
 //! as a [`glyph::ToastVariant::Plain`] toast — there is no way to thread a
 //! variant through the shared string queue today. The five buttons below
@@ -28,8 +28,12 @@
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
-    Padding, Row, RwSignal, SizedBox, Update, any, button, component, glyph, keyed, text,
+    Padding, Row, RwSignal, SizedBox, Update, any, button, component, keyed, text,
 };
+// Re-anchored onto `frust_glyph` under the old `glyph` local name (this
+// file's own dense `glyph::` call-site prefix predates the plugin split) —
+// keeps every call site below unchanged.
+use frust_glyph as glyph;
 
 use crate::CatalogState;
 
@@ -125,6 +129,8 @@ fn badges_row<State: 'static>() -> AnyView<State> {
         any(glyph::badge("degraded", glyph::BadgeVariant::Warning).dot(true)),
         h_gap(8.0),
         any(glyph::badge("offline", glyph::BadgeVariant::Error).dot(true)),
+        h_gap(8.0),
+        any(glyph::badge("active", glyph::BadgeVariant::Info)),
         h_gap(8.0),
         any(glyph::badge("read-only", glyph::BadgeVariant::Neutral)),
         h_gap(8.0),

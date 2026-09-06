@@ -13,27 +13,27 @@
 //! technique `examples/huddle`'s `ui::solid_source` helper uses, reproduced
 //! locally here rather than shared, since this crate has no dependency on
 //! `examples/huddle`. Radius chips are a static rounded-rect fill — a local
-//! [`StaticRoundedRect`] view rather than [`frust::glyph::skeleton`], since a
+//! [`StaticRoundedRect`] view rather than [`frust_glyph::skeleton`], since a
 //! static specimen needs no skeleton-loading animation.
 //!
 //! # Unmapped Glyph text tokens
 //!
 //! The reference build's `fg-dim`/`fg-faintest` text tokens have no
-//! `ColorScheme` role — `frust_theme::glyph::color`'s module docs record this
+//! `ColorScheme` role — `frust_glyph::tokens::color`'s module docs record this
 //! as a deliberate, already-documented leftover (`on_surface_variant` already
 //! carries `fg-muted`). This page cannot resolve them from the live theme
 //! without hardcoding a literal hex (which would violate the "never hardcode
 //! hexes" rule below), so it labels them N/A rather than painting a swatch.
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+};
 use frust::{
-    AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, GlyphInk, Image, ImageFit,
-    ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any,
-    inflexible, text, use_context,
+    AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Image, ImageFit, ImageSource,
+    Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, inflexible, text,
+    use_context,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::Size;
+use frust_glyph::GlyphInk;
 
 use crate::CatalogState;
 
@@ -270,7 +270,7 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     // Live theme read: subscribes this build to `set_app_theme` writes, so a
     // header brightness/motion toggle repaints every swatch below from the
     // CURRENT scheme — never a hardcoded hex.
-    let theme = use_context::<Theme>().unwrap_or_else(Theme::glyph_baseline);
+    let theme = use_context::<Theme>().unwrap_or_else(frust_glyph::baseline);
     let scheme = theme.scheme();
     let muted = scheme.on_surface_variant;
     let status = theme
@@ -360,7 +360,7 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
         "Text",
         Some(
             "fg / fg-muted resolve from ColorScheme; fg-dim / fg-faintest have no \
-             live role (frust_theme::glyph::color, documented leftover)",
+             live role (frust_glyph::tokens::color, documented leftover)",
         ),
         wrap_rows(
             vec![

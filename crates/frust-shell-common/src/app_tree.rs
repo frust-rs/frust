@@ -66,10 +66,29 @@ pub trait AppTree {
     /// Whether some widget in the tree currently holds keyboard/IME focus
     /// (delegates to [`RenderRoot::is_focus_active`]).
     ///
-    /// A frame-gate input: a focused field's caret/selection
-    /// chrome may need repainting, so the mobile shells feed this into
-    /// [`crate::FrameInputs::focus_or_ime_active`].
+    /// A *level* read, used by a shell that needs the current state (an IME
+    /// reconcile, a caret decision). It is deliberately **not** what the mobile
+    /// frame gate consults any more — a focus session that lasts forces a frame
+    /// forever — see [`AppTree::focus_ime_generation`].
     fn is_focus_active(&self) -> bool;
+
+    /// The focus/IME session generation, bumped on every actual change of the
+    /// root's focus flag or published IME surface (delegates to
+    /// [`RenderRoot::focus_ime_generation`]).
+    ///
+    /// The frame gate's *edge* input: a shell caches the value it last saw and
+    /// feeds `last != now` into
+    /// [`crate::FrameInputs::focus_or_ime_changed`], so a focus/IME transition
+    /// forces exactly one frame while a steady focus session (a caret blinking
+    /// in an otherwise-idle field) leaves the gate free to skip or pace. The
+    /// same cheap compare-a-generation shape as
+    /// [`AppTree::semantics_generation`].
+    ///
+    /// Deliberately **not** defaulted, unlike [`AppTree::set_insets`] and the
+    /// other additive methods below: any constant default (`0` included) would
+    /// report "nothing ever changed" and silently strand a focus transition,
+    /// against the frame gate's default-to-run rule.
+    fn focus_ime_generation(&self) -> u64;
 
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased.
@@ -252,6 +271,20 @@ pub trait AppTree {
     fn take_retired_platform_views(&mut self) -> Vec<u64> {
         Vec::new()
     }
+
+    /// A read-only, pre-order snapshot of the retained tree (delegates to
+    /// [`RenderRoot::inspect`]) — the one thing the devtools
+    /// [`DevtoolsUi`](crate::devtools::DevtoolsUi) hop needs from a mobile
+    /// shell, whose handle owns its tree only as a `Box<dyn AppTree>`.
+    ///
+    /// Gated on the `devtools` feature: with devtools compiled out there is no
+    /// caller, and the seam should not exist. Defaulted to an empty `Vec`
+    /// like the getters above, so an [`AppTree`] impl outside this crate still
+    /// compiles; the concrete tree overrides it.
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        Vec::new()
+    }
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -288,6 +321,10 @@ where
 
     fn is_focus_active(&self) -> bool {
         self.root.is_focus_active()
+    }
+
+    fn focus_ime_generation(&self) -> u64 {
+        self.root.focus_ime_generation()
     }
 
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
@@ -360,6 +397,11 @@ where
 
     fn take_retired_platform_views(&mut self) -> Vec<u64> {
         self.root.take_retired_platform_views()
+    }
+
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        self.root.inspect()
     }
 }
 
@@ -460,6 +502,9 @@ mod tests {
             unimplemented!()
         }
         fn is_focus_active(&self) -> bool {
+            unimplemented!()
+        }
+        fn focus_ime_generation(&self) -> u64 {
             unimplemented!()
         }
         fn layout(&mut self, _logical: Size, _text_ctx: &mut dyn Any) {
@@ -584,7 +629,7 @@ mod tests {
             // recording `Scene` reads it back without naming a color type;
             // the color itself comes from a theme constructor (type inferred,
             // so this crate needs no `peniko` dependency).
-            let color = frust_theme::ColorScheme::m3_baseline_light().primary;
+            let color = frust_theme::ColorScheme::neutral_light().primary;
             scene.fill_rect(ctx.origin(), Size::new(self.baked, 1.0), color);
         }
     }
@@ -808,6 +853,144 @@ mod tests {
             "without an ambient owner, provide_context no-ops and use_context \
              resolves to None (the F1 bug this task closes)"
         );
+    }
+
+    // --- WindowMetrics delivery + rebuild-cost regression test ---------------
+    //
+    // All three shells publish `WindowMetrics` the same way: poll a
+    // `WindowMetricsPublisher` from the entry points where the window's shape
+    // actually moves (surface create/resize, insets), and `provide_context` the
+    // result under the reactive root owner ONLY when the poll reports a change.
+    // Their own publish methods are unreachable from the host (both mobile `app`
+    // modules are target-gated; the desktop one needs a live winit window), so
+    // this drives that exact loop over the shared `AppTree` seam — the same
+    // reason the tracked-rebuild test below lives here.
+    //
+    // Two things are proven together, because they trade off against each other:
+    //   1. `use_context::<WindowMetrics>()` resolves inside `Component::build`
+    //      (the delivery contract), and
+    //   2. a static window re-provides NOTHING across a long run of frames (the
+    //      cost contract). `provide_context` notifies nothing on its own — an
+    //      unconditional per-frame re-provide would still cost a lock write
+    //      plus an allocation every frame at the FFI boundary for no
+    //      observable benefit, which is what this guards against.
+
+    use frust_core::{Orientation, WindowMetrics};
+
+    use crate::WindowMetricsPublisher;
+
+    /// Records what the nested component's `build` resolved for
+    /// `use_context::<WindowMetrics>()` on its most recent run.
+    type MetricsSink = Rc<RefCell<Option<WindowMetrics>>>;
+
+    /// Reads the shell-provided window shape in `build`, like a real component
+    /// laying itself out around size/orientation would.
+    #[derive(Clone)]
+    struct MetricsComp {
+        sink: MetricsSink,
+    }
+    impl Component for MetricsComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> AnyView<()> {
+            *self.sink.borrow_mut() = use_context::<WindowMetrics>();
+            any(StubLeaf)
+        }
+    }
+
+    #[test]
+    fn window_metrics_reaches_component_build_and_re_provides_only_on_change() {
+        let sink: MetricsSink = Rc::new(RefCell::new(None));
+        let comp = MetricsComp { sink: sink.clone() };
+
+        // Counts actual `provide_context` calls — the app-wide invalidation a
+        // re-provide represents. This is the number the cost contract is about.
+        let provides = Rc::new(Cell::new(0u32));
+
+        // The shells' shared publish body: poll, and publish only on `Some`.
+        // (Each shell wraps this in `ReactiveRuntime::with_owner`/`Owner::with`;
+        // here the whole run is inside one `owner.with` below, matching.)
+        let mut publisher = WindowMetricsPublisher::new();
+        let provides_for_publish = provides.clone();
+        let publish = move |publisher: &mut WindowMetricsPublisher,
+                            physical: (u32, u32),
+                            scale: f64,
+                            insets: WindowInsets| {
+            if let Some(metrics) = publisher.poll(physical, scale, insets) {
+                provide_context(metrics);
+                provides_for_publish.set(provides_for_publish.get() + 1);
+            }
+        };
+
+        let owner = Owner::new();
+        owner.with(|| {
+            // Seed before the first rebuild, exactly as each shell does (the
+            // mobile shells inside `new`, desktop inside `resumed`) — a 1080x2400
+            // @3x portrait phone surface, no insets reported yet.
+            publish(&mut publisher, (1080, 2400), 3.0, WindowInsets::default());
+
+            let mut app = new_boxed_app_with(|| (), move |state: &mut ()| comp.build(state));
+            app.rebuild();
+
+            // (1) Delivery: it resolved inside `Component::build`, in LOGICAL px.
+            let seen = sink
+                .borrow()
+                .expect("WindowMetrics must reach Component::build");
+            assert_eq!(seen.size, Size::new(360.0, 800.0), "logical, not physical");
+            assert_eq!(seen.scale, 3.0);
+            assert_eq!(seen.orientation, Orientation::Portrait);
+            assert_eq!(seen.insets, WindowInsets::default());
+            assert_eq!(provides.get(), 1, "the seed publishes exactly once");
+
+            // (2) Cost: a static window over a long run of frames. Every frame
+            // re-runs the publish body with the values the shell has stored
+            // (nothing moved), then rebuilds. Not one re-provide may happen.
+            for _ in 0..120 {
+                publish(&mut publisher, (1080, 2400), 3.0, WindowInsets::default());
+                app.rebuild();
+            }
+            assert_eq!(
+                provides.get(),
+                1,
+                "a static window must never re-provide WindowMetrics — an \
+                 unconditional per-frame re-provide would pay a lock write \
+                 plus an allocation every frame at the FFI boundary for \
+                 nothing observable"
+            );
+
+            // (3) A real rotation publishes once and flips the derived
+            // orientation the next rebuild reads...
+            publish(&mut publisher, (2400, 1080), 3.0, WindowInsets::default());
+            app.rebuild();
+            assert_eq!(provides.get(), 2, "a rotation is a real change");
+            let seen = sink.borrow().expect("still delivered after the rotation");
+            assert_eq!(seen.size, Size::new(800.0, 360.0));
+            assert_eq!(seen.orientation, Orientation::Landscape);
+
+            // ...and then goes quiet again at the new shape.
+            for _ in 0..120 {
+                publish(&mut publisher, (2400, 1080), 3.0, WindowInsets::default());
+                app.rebuild();
+            }
+            assert_eq!(provides.get(), 2, "settled again after the rotation");
+
+            // (4) The insets copy moves independently (the IME coming up at an
+            // unchanged size/scale) — one more publish, then quiet.
+            let ime_up = frust_core::insets::WindowInsets::new(
+                frust_core::insets::EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
+                frust_core::insets::EdgeInsets::new(0.0, 0.0, 0.0, 340.0),
+            );
+            publish(&mut publisher, (2400, 1080), 3.0, ime_up);
+            app.rebuild();
+            publish(&mut publisher, (2400, 1080), 3.0, ime_up);
+            app.rebuild();
+            assert_eq!(provides.get(), 3, "an insets change publishes exactly once");
+            assert_eq!(
+                sink.borrow().expect("delivered").insets,
+                ime_up,
+                "the metrics carry a copy of the shell's already-logical insets"
+            );
+        });
     }
 
     // --- Mobile tracked-rebuild regression test ----

@@ -1,95 +1,222 @@
-//! The `TextInput` interactive widget: an editable text
-//! field, single-line by default and optionally wrapped multi-line.
+//! The `TextInput` interactive widget: an editable text field, single-line by
+//! default and optionally wrapped multi-line.
 //!
 //! [`text_input`] produces a [`TextInputView`] carrying the current `value`, a
 //! `placeholder`, an `on_change` callback, and an optional `on_submit`. Like the
-//! other interactive widgets it is a **controlled component** (see
-//! `docs/CODE_STANDARDS.md`): it never owns the durable value. Each edit reports
-//! the *requested* text through `on_change`, and the next `rebuild` reconciles
-//! the app-confirmed `value` back into the underlying [`TextEditor`] —
-//! set-if-different, preserving the selection while the text is unchanged. The
-//! content text's style (family/weight/style/size/letter-spacing/line-height,
-//! plus color when set explicitly) can be set with [`TextInputView::text_style`];
-//! it never touches the chrome color constants or padding/caret sizing below.
-//! Mirroring [`Text`](crate::TextView)'s [`effective_style`](TextInputWidget::effective_style)
-//! pattern: when the app did **not** call `.text_style(...)`, the glyph color
-//! resolves from the active theme's `on_surface` role at LAYOUT time (where
-//! `TextInput`, like `Text`, bakes its color into the shaped editor state),
-//! falling back to black with no theme threaded; an explicit `.text_style(...)`
-//! always wins (explicit > theme > black fallback). This baked-at-layout
-//! resolution is safe only under the `set_theme` → `ChangeFlags::LAYOUT`
-//! contract (`docs/CODE_STANDARDS.md`'s Theming conventions) — already
-//! guaranteed by `RenderRoot::set_theme`.
+//! other interactive widgets it is a **controlled component**
+//! (`docs/CODE_STANDARDS.md`'s Interaction Semantics): it never owns the durable
+//! value. Each edit reports the *requested* text through `on_change`, and the
+//! next `rebuild` reconciles the app-confirmed `value` back into the underlying
+//! [`TextEditor`] — set-if-different, preserving the selection while the text is
+//! unchanged.
+//!
+//! [`TextInputView::text_style`] sets the content text's style (family/weight/
+//! style/size/letter-spacing/line-height, plus color when set explicitly) and
+//! never touches the chrome colors or geometry (see *Chrome*). Mirroring
+//! [`Text`](crate::TextView)'s [`effective_style`](TextInputWidget::effective_style),
+//! a field that did not call `.text_style(...)` gets `on_surface` resolved at LAYOUT
+//! time — where `TextInput`, like `Text`, bakes color into the shaped editor
+//! state — falling back to black with no theme threaded: explicit > theme >
+//! black. Baked-at-layout resolution is safe only under the `set_theme` →
+//! `ChangeFlags::LAYOUT` contract (`docs/CODE_STANDARDS.md` Theming), which
+//! `RenderRoot::set_theme` guarantees.
 //!
 //! # Text context ownership
 //!
 //! Unlike the [`Text`](crate::TextView) leaf (which shapes against the shared
-//! `TextContext` threaded through `LayoutCtx` during the layout pass), a
-//! `TextInput` must apply edits *synchronously during the event pass*, where no
-//! context is threaded. It therefore owns its own [`TextContext`] and drives the
-//! editor through it — so `on_change`/the published [`ImeState`] observe the
-//! fresh editing value immediately, and layout needs no threaded context (it
-//! reads the editor's own refreshed metrics).
+//! `TextContext` threaded through `LayoutCtx`), a `TextInput` must apply edits
+//! *synchronously during the event pass*, where no context is threaded, so it owns
+//! its own [`TextContext`]: `on_change` and the published [`ImeState`] observe the
+//! fresh editing value at once, and layout needs no threaded one.
+//!
+//! **App fonts still reach it.** `TextContext::new` seeds from `frust-text`'s
+//! process-wide app-font record, where every `frust::register_app_fonts` payload
+//! lands when the shell drains it. A font registered *later* is picked up by
+//! `TextContext::sync_app_fonts` at the top of [`Widget::layout`], which rebuilds
+//! the editor so its retained parley layout re-shapes too — the shape cache
+//! alone would not cover it.
 //!
 //! # Focus, IME and blink
 //!
 //! A `Down` inside the field requests focus, places the caret, and publishes an
-//! [`ImeState`] (the focus/IME channel) so the shell can drive the platform
-//! input method. Keyboard editing (`Key`) and IME composition/state-sync (`Ime`)
-//! route down the focus path; after any edit the widget fires `on_change`, resets
-//! the caret to visible, and republishes the IME surface. The caret blinks while
-//! focused, its phase measured from the shared shell frame clock
-//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in
-//! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
-//! scroll fling uses. An edit/focus during the (clockless) event pass flags the
-//! blink for reset; the next paint records the blink epoch from `frame_time`.
+//! [`ImeState`] so the shell can drive the platform input method — the focus/IME
+//! channel `docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle owns. Keyboard
+//! editing (`Key`) and IME composition/state-sync (`Ime`) route down the focus
+//! path; after any edit the widget fires `on_change`, resets the caret to
+//! visible, and republishes the IME surface.
+//!
+//! The caret blinks while focused, its phase measured in `paint` from the shell
+//! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
+//! Its continuation frame is a paced (`CosmeticLoop`) request at the blink's own
+//! [`BLINK_MS`] half-period ([`PaintCtx::request_frame_paced_at`]) — its own
+//! slower cadence rather than the theme's cap rate, one paint per visibility
+//! toggle being all a 500ms blink needs. A concurrent cap-rate request repaints it
+//! more often through the MIN-lattice with no visible effect, safe at any cadence
+//! because the phase is `frame_time - blink_epoch`
+//! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
+//! this frame's own timestamp, not of a delta between painted frames. An
+//! edit/focus during the (clockless) event pass flags the blink for reset, the
+//! next paint recording the epoch from `frame_time`.
+//!
+//! `reduce_motion` freezes the caret **visible** (lit, not hidden) rather than
+//! mid-blink, and stops requesting blink frames while focused: unlike a purely
+//! decorative loop the caret is also the edit-point cue, so freezing it dark
+//! would hide where typing lands. The IME surface republishes every painted frame
+//! regardless, and blinking resumes once the token clears.
 //!
 //! # Multi-line mode
 //!
 //! [`TextInputView::multiline(max_visible_lines)`](TextInputView::multiline)
-//! switches the field into a wrapped multi-line mode: the layout width from the
-//! incoming constraints is fed to the editor as a soft-wrap width (see
-//! `TextEditor::set_wrap_width`), so the field grows vertically one line at a
-//! time as content wraps or newlines are inserted, capped at
-//! `max_visible_lines`. Past the cap the box height is frozen and the text is
-//! scrolled vertically by a simple **keep-caret-in-view** paint offset
-//! (recomputed statelessly each pass from the caret's line rect — full
-//! `ScrollView`-style composition, momentum, and a scrollbar are intentionally
-//! out of scope for v1); a rectangular clip keeps the overflowing lines inside
-//! the box.
+//! feeds the layout width from the incoming constraints to the editor as a
+//! soft-wrap width (`TextEditor::set_wrap_width`), so the field grows vertically
+//! one line at a time as content wraps or newlines are inserted, capped at
+//! `max_visible_lines`. Past the cap the box height freezes and the text scrolls
+//! vertically by a **keep-caret-in-view** paint offset recomputed statelessly
+//! each pass from the caret's line rect (momentum and a scrollbar are out of
+//! scope), a rectangular clip keeping the overflow inside.
 //!
-//! Enter behavior is governed by
-//! [`submit_on_enter`](TextInputView::submit_on_enter): `true` (the single-line
-//! default) fires `on_submit`, `false` (the multi-line default) inserts a
-//! literal newline. **Shift+Enter always does the opposite of the mode's
-//! default** — the `Key` event surface exposes modifiers, so Shift is honored.
-//! A single-line field ignores this knob and always submits on Enter (its Enter
-//! path is unchanged). On the mobile IME path a Return arrives as a
-//! `Commit("\n")`: single-line (and submit-on-enter) fields treat it as submit,
-//! a newline-inserting multi-line field inserts the literal newline instead.
+//! Enter is governed by [`submit_on_enter`](TextInputView::submit_on_enter):
+//! `true` (the single-line default) fires `on_submit`, `false` (the multi-line
+//! default) inserts a literal newline, and **Shift+Enter always does the opposite
+//! of the mode's default** (a single-line field ignores the knob and always
+//! submits). On the mobile IME path a Return arrives as a `Commit` of a newline,
+//! which submit-on-enter fields submit and a newline-inserting one inserts.
+//!
+//! # Disabled mode
+//!
+//! [`TextInputView::enabled(false)`](TextInputView::enabled) makes the field
+//! inert and dims it. Inertness hangs off **one** hook, the focus gate: a `Down`
+//! in a disabled field neither requests focus nor captures the pointer, and since
+//! `Key`/`Ime` reach a widget only along the recorded focus path, refusing focus
+//! makes keyboard and IME editing impossible with no per-handler guard. A field
+//! disabled *while* focused releases the focus path on the first event reaching
+//! it and stops behaving as focused (no caret, no blink frame, no active IME
+//! surface) from the very next paint.
+//!
+//! Dimming multiplies the *resolved* role color's alpha rather than swapping in a
+//! dedicated "disabled" token, at **both** resolution points (the layout-baked
+//! glyph color in [`effective_style`](TextInputWidget::effective_style) and the
+//! paint-time [`Chrome`]), so it behaves identically under every catalog and the
+//! unthemed fallbacks: `on_surface_variant` is opaque under Material/Glyph but
+//! translucent under Cupertino (`frust-theme`'s `ColorScheme` Cupertino arm,
+//! `secondaryLabel` at alpha 153), so it is *not* a portable disabled token, and
+//! it is keyed **strictly** off [`TextInputView::enabled`] at both points.
+//!
+//! # Read-only mode
+//!
+//! [`TextInputView::read_only(true)`](TextInputView::read_only) makes the field
+//! non-interactive **without** dimming it — the presentation `enabled(false)`
+//! cannot express, since disabled conflates two orthogonal questions
+//! (interactive? / dimmed?) a static-but-live-styled mock must keep apart (a
+//! splash screen's frozen preview must not pop to full alpha when it goes live).
+//!
+//! Non-interactivity reuses that same focus gate rather than a parallel path:
+//! [`TextInputWidget::interactive`] is `enabled && !read_only`, and every gate
+//! (the top of [`Widget::event`], the focused-while-painting check, the
+//! disabled-while-focused IME-dismiss branch) reads it, so a field turned
+//! read-only while focused releases focus and dismisses the platform IME exactly
+//! like one turned disabled. **Dimming stays keyed to `enabled` alone**, never
+//! `interactive`: both resolution points ([`Chrome::resolve`] and
+//! [`effective_style`](TextInputWidget::effective_style)) branch on `enabled`.
+//!
+//! **Semantics.** Read-only is a real accessibility distinction from disabled —
+//! a screen reader announces them differently — so [`Widget::semantics`] reports
+//! `set_disabled()` only when `!enabled` and `set_read_only()` when
+//! `enabled && read_only`, never both, and never by omitting the node
+//! (`docs/CODE_STANDARDS.md` Semantics: a node with something to say keeps it).
+//!
+//! Read-only is orthogonal to [`obscured`](TextInputView::obscured) — never
+//! touching masking, the mirror or the published `ImeContentType` hint, so a
+//! read-only obscured field still reports `Role::PasswordInput` with a masked
+//! a11y value, it just never focuses — and to the *Chrome* geometry setters.
+//!
+//! # Obscured (password) mode
+//!
+//! [`TextInputView::obscured(true)`](TextInputView::obscured) masks the rendered
+//! glyphs with U+2022 BULLET. The [`TextEditor`]'s model text stays **real** —
+//! every edit, selection, IME sync and `on_change` runs against the true buffer —
+//! while the masked mirror lives in a parallel [`TextEditor`] (`mask_editor`).
+//! That mirror, not the real editor, is measured, painted and hit-tested, since
+//! masking only at glyph-emission time would leave the layout (and so the caret
+//! rect, the field width and the pointer hit test) measured from the real text.
+//! The mirror is a pure function of the real editing state, recomputed after every
+//! edit, so it cannot drift; the mask is 1:1 per `char`, so offsets map with a
+//! two-string walk ([`real_to_masked`]/[`masked_to_real`]) and a multi-byte
+//! grapheme masks to exactly one bullet.
+//!
+//! **Scope boundary.** Obscuring is visual masking plus a [`Role::PasswordInput`]
+//! semantics node plus an IME content-type hint: `obscured(true)` publishes
+//! [`ImeContentType::Password`] on [`ImeState::content_type`], computed live on
+//! every publication (event pass, paint-pass republish, disabled-while-focused
+//! release), so a newly focused obscured field never has a window where it
+//! publishes `Normal`. The published [`ImeState`] still carries the **real** text
+//! (the platform IME mirror requires it), and the hint, not redaction, is what is
+//! supposed to keep the platform's suggestion strip and learned-word dictionary
+//! from seeing it — **a guarantee only as good as the shells honouring the
+//! hint**, which this widget can ask for but never prove. `obscured` is the
+//! field's sole content-type signal (see [`ImeContentType`] on why a shell must
+//! not fall back to non-secret behaviour for an unrecognized variant).
+//!
+//! # Chrome
+//!
+//! The field's chrome **colors** (background/border/focus-accent/placeholder/
+//! selection/caret) resolve from the active [`Theme`]'s `ColorScheme` (see
+//! [`Chrome::resolve`]), so an app restyles them by installing a different
+//! `Theme`. Its **geometry** ([`PAD_X`]/[`PAD_Y`] inner padding, [`BORDER_W`]
+//! border thickness, [`RADIUS`] corner radius, [`CARET_W`] caret width) is
+//! instead reachable per-instance, through [`TextInputView::padding`] and its
+//! `border_width`/`corner_radius`/`caret_width` siblings; each defaults to the
+//! constant it overrides, so a field calling none renders exactly as the defaults
+//! do. Colors stay theme-only; geometry is builder-set rather than tokenized
+//! because
+//! [`PAD_X`]/[`CARET_W`] are read from the **event pass**
+//! ([`TextInputWidget::editor_point`], [`TextInputWidget::current_ime_state`]),
+//! which threads no `Theme` — `docs/CODE_STANDARDS.md` Theming cites these very
+//! constants as that precedent — so a token would duplicate them anyway.
+//!
+//! **Focus treatment.** The focused state is an accent-colored border, no
+//! separate halo/glow. [`TextInputView::focus_ring_width`] is the one escape hatch
+//! on top — an optional border width used only while focused, defaulting to the
+//! idle width — so an app reaches the "thicker, differently-colored focus outline"
+//! look via a theme's `primary` role without a soft-glow primitive here.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, FrameTime,
-    ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
-    SemanticsCtx, View, Widget,
+    ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene,
+    PointerPhase, SemanticsCtx, View, Widget,
 };
 use frust_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
 use frust_theme::Theme;
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
-/// Corner radius of the field chrome, in logical px.
+use crate::authoring::presses;
+
+/// Default corner radius of the field chrome, in logical px. Overridable
+/// per-instance with [`TextInputView::corner_radius`] — see the module docs'
+/// "Chrome" section for why this is a builder default rather than a `Theme`
+/// token.
 const RADIUS: f64 = 6.0;
-/// Border thickness, in logical px.
+/// Default border thickness, in logical px. Overridable per-instance with
+/// [`TextInputView::border_width`] (see the module docs' "Chrome" section);
+/// the focused border additionally honors [`TextInputView::focus_ring_width`].
 const BORDER_W: f64 = 1.5;
-/// Horizontal inner padding (chrome edge to text), in logical px.
+/// Default horizontal inner padding (chrome edge to text), in logical px.
+/// Overridable per-instance with [`TextInputView::padding`] (see the module
+/// docs' "Chrome" section). Read from the event pass as well as layout/paint
+/// (`docs/CODE_STANDARDS.md`'s Theming conventions cite this constant as the
+/// precedent for why such a metric stays a plain value, not a `Theme` token).
 const PAD_X: f64 = 8.0;
-/// Vertical inner padding (chrome edge to text), in logical px.
+/// Default vertical inner padding (chrome edge to text), in logical px.
+/// Overridable per-instance with [`TextInputView::padding`] — see [`PAD_X`].
 const PAD_Y: f64 = 6.0;
-/// Caret width, in logical px.
+/// Default caret width, in logical px. Overridable per-instance with
+/// [`TextInputView::caret_width`] — see [`PAD_X`] for why it stays a plain
+/// value rather than a `Theme` token.
 const CARET_W: f32 = 1.5;
 /// Blink half-period: caret visible 500 ms, hidden 500 ms.
 const BLINK_MS: f64 = 500.0;
@@ -113,11 +240,38 @@ const CARET: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
 /// role).
 const SELECTION_ALPHA: f32 = 0.30;
 
+/// Alpha multiplier applied to every resolved **content** color (glyphs,
+/// placeholder, caret, selection) while the field is disabled.
+///
+/// Material 3's disabled state puts content at 38% of its enabled role color
+/// (`m3.material.io` — *Styles → Color → Roles*, disabled-content opacity;
+/// retrieved 2026-07-31). Applied as a *multiplier on the already-resolved
+/// role*, never as a swap to a different token: `on_surface_variant` is opaque
+/// under Material/Glyph but translucent under Cupertino (alpha 153 — see
+/// `frust-theme`'s `ColorScheme` Cupertino arm), so a token swap would dim by
+/// different amounts per design language while this multiplier does not.
+const DISABLED_CONTENT_ALPHA: f32 = 0.38;
+/// Alpha multiplier applied to the disabled field's **container** chrome (its
+/// outline/accent border). Material 3 puts a disabled container/outline at 12%
+/// (same source and retrieval date as [`DISABLED_CONTENT_ALPHA`]).
+const DISABLED_CONTAINER_ALPHA: f32 = 0.12;
+
+/// The glyph every character is replaced with in obscured (password) mode.
+///
+/// U+2022 BULLET is Android's `inputType=textPassword` default mask; the web
+/// varies by browser and Apple's HIG names no glyph, so this follows the one
+/// platform that publishes a specific character.
+const MASK_CHAR: char = '\u{2022}';
+
 /// The resolved text-field chrome colors. Themed (v1 simplification): background
 /// `surface`, border `outline`, focus accent/caret `primary`, placeholder
 /// `on_surface_variant`, selection `primary` at [`SELECTION_ALPHA`]. Unthemed:
 /// the [`BG`]/[`BORDER`]/[`ACCENT`]/[`PLACEHOLDER`]/[`SELECTION`]/[`CARET`]
 /// constants exactly, so a pre-theme app renders unchanged.
+///
+/// A disabled field dims the *resolved* values (see
+/// [`DISABLED_CONTENT_ALPHA`]), so the themed and unthemed paths dim by the
+/// same rule.
 struct Chrome {
     bg: Color,
     border: Color,
@@ -128,8 +282,8 @@ struct Chrome {
 }
 
 impl Chrome {
-    fn resolve(theme: Option<&Theme>) -> Self {
-        match theme {
+    fn resolve(theme: Option<&Theme>, enabled: bool) -> Self {
+        let mut chrome = match theme {
             Some(theme) => {
                 let s = theme.scheme();
                 Chrome {
@@ -149,8 +303,65 @@ impl Chrome {
                 selection: SELECTION,
                 caret: CARET,
             },
+        };
+        if !enabled {
+            // `bg` is deliberately left opaque: it is this field's own
+            // background painted over an arbitrary parent, so thinning it to
+            // M3's 12% container value would show the parent through the field
+            // rather than reading as "dimmed". The disabled cue is carried by
+            // the outline and the content instead.
+            chrome.border = chrome.border.multiply_alpha(DISABLED_CONTAINER_ALPHA);
+            chrome.accent = chrome.accent.multiply_alpha(DISABLED_CONTAINER_ALPHA);
+            chrome.placeholder = chrome.placeholder.multiply_alpha(DISABLED_CONTENT_ALPHA);
+            chrome.selection = chrome.selection.multiply_alpha(DISABLED_CONTENT_ALPHA);
+            chrome.caret = chrome.caret.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
+        chrome
     }
+}
+
+/// The masked mirror of `text`: one [`MASK_CHAR`] per `char`, with `'\n'`
+/// preserved so a multi-line field keeps its line structure (and therefore its
+/// height) under masking.
+fn mask_text(text: &str) -> String {
+    text.chars().map(mask_char).collect()
+}
+
+/// The single character `ch` renders as while obscured.
+fn mask_char(ch: char) -> char {
+    if ch == '\n' { '\n' } else { MASK_CHAR }
+}
+
+/// Byte offset in the masked mirror of `text` corresponding to byte offset
+/// `byte` in `text` itself.
+///
+/// An offset landing inside a multi-byte char snaps back to that char's start
+/// (mirroring `frust_text`'s `byte_to_utf16`), so caret arithmetic across a
+/// multi-byte grapheme stays exact.
+fn real_to_masked(text: &str, byte: usize) -> usize {
+    let mut masked = 0usize;
+    for (off, ch) in text.char_indices() {
+        if byte < off + ch.len_utf8() {
+            return masked;
+        }
+        masked += mask_char(ch).len_utf8();
+    }
+    masked
+}
+
+/// The inverse of [`real_to_masked`]: a byte offset in the masked mirror mapped
+/// back onto `text`. An offset inside a mask glyph snaps back to the start of
+/// the char it stands for.
+fn masked_to_real(text: &str, masked_byte: usize) -> usize {
+    let mut masked = 0usize;
+    for (off, ch) in text.char_indices() {
+        let next = masked + mask_char(ch).len_utf8();
+        if masked_byte < next {
+            return off;
+        }
+        masked = next;
+    }
+    text.len()
 }
 
 /// A view-held, typed text callback (erased on build).
@@ -173,6 +384,37 @@ pub struct TextInputView<State: 'static> {
     /// mode-default (true single-line, false multi-line); `Some(_)` = an
     /// explicit [`TextInputView::submit_on_enter`] override.
     submit_on_enter: Option<bool>,
+    /// Whether the field accepts input. `false` refuses focus (making keyboard
+    /// and IME editing unreachable) and dims the chrome — see
+    /// [`TextInputView::enabled`].
+    enabled: bool,
+    /// Whether the field refuses focus/editing without dimming — see
+    /// [`TextInputView::read_only`]. Independent of `enabled`: dimming stays
+    /// keyed to `enabled` alone (see the [module docs](self)' "Read-only mode"
+    /// section).
+    read_only: bool,
+    /// Whether the rendered glyphs are masked (password mode) — see
+    /// [`TextInputView::obscured`].
+    obscured: bool,
+    /// Horizontal inner padding — see [`TextInputView::padding`]. Defaults to
+    /// [`PAD_X`].
+    pad_x: f64,
+    /// Vertical inner padding — see [`TextInputView::padding`]. Defaults to
+    /// [`PAD_Y`].
+    pad_y: f64,
+    /// Border thickness — see [`TextInputView::border_width`]. Defaults to
+    /// [`BORDER_W`].
+    border_width: f64,
+    /// Corner radius — see [`TextInputView::corner_radius`]. Defaults to
+    /// [`RADIUS`].
+    corner_radius: f64,
+    /// Caret width — see [`TextInputView::caret_width`]. Defaults to
+    /// [`CARET_W`].
+    caret_width: f32,
+    /// Focused-only border width override — see
+    /// [`TextInputView::focus_ring_width`]. `None` = use `border_width` while
+    /// focused too (unchanged appearance).
+    focus_ring_width: Option<f64>,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
 }
@@ -196,6 +438,15 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         text_style_explicit: false,
         max_visible_lines: None,
         submit_on_enter: None,
+        enabled: true,
+        read_only: false,
+        obscured: false,
+        pad_x: PAD_X,
+        pad_y: PAD_Y,
+        border_width: BORDER_W,
+        corner_radius: RADIUS,
+        caret_width: CARET_W,
+        focus_ring_width: None,
         on_change: Rc::new(on_change),
         on_submit: None,
     }
@@ -256,12 +507,115 @@ impl<State: 'static> TextInputView<State> {
         self.submit_on_enter = Some(submit_on_enter);
         self
     }
+
+    /// Set whether the field accepts input (default `true`).
+    ///
+    /// A disabled field refuses focus, so a tap neither places the caret nor
+    /// raises the keyboard and keyboard/IME editing cannot reach it at all; it
+    /// paints no caret and dims its text, placeholder and outline (see the
+    /// [module docs](self)). A field disabled while focused drops its focus.
+    ///
+    /// This is **disabled**, not *read-only*: Material 3 and Apple's HIG both
+    /// keep a read-only field focusable and copyable, which this option
+    /// deliberately does not do.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set whether the field is read-only (default `false`): non-interactive
+    /// like a disabled field (no focus, no caret, no editing — see
+    /// [`enabled`](Self::enabled)) but painted at **full alpha**, not dimmed.
+    ///
+    /// This is the presentation `enabled(false)` cannot express: an
+    /// undimmed-but-inert field, e.g. a static mock that should look identical
+    /// before and after a live handoff. Reuses
+    /// `enabled(false)`'s one suppression hook (the focus gate) rather than a
+    /// parallel path — a field made read-only while focused releases focus and
+    /// dismisses the platform IME exactly like disabling it would. See the
+    /// [module docs](self)' "Read-only mode" section for the semantics
+    /// distinction from disabled and the interaction with `obscured`/the
+    /// chrome geometry setters.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Mask the rendered text with U+2022 BULLET (password mode, default
+    /// `false`).
+    ///
+    /// The underlying value is untouched — `on_change` and the published
+    /// `ImeState` still carry the real text, and caret/selection/editing
+    /// arithmetic is unchanged, including across multi-byte graphemes. The
+    /// field reports itself to accessibility as
+    /// [`Role::PasswordInput`]. See the [module docs](self) for what obscuring
+    /// deliberately does *not* do (no platform password keyboard, no autofill).
+    pub fn obscured(mut self, obscured: bool) -> Self {
+        self.obscured = obscured;
+        self
+    }
+
+    /// Override the chrome's inner padding (chrome edge to text), in logical
+    /// px. Defaults to [`PAD_X`]/[`PAD_Y`] (8×6) — a field that never calls
+    /// this renders identically to before this setter existed. Independent of
+    /// [`text_style`](Self::text_style)'s glyph metrics; see the module docs'
+    /// "Chrome" section for why this is a per-instance value rather than a
+    /// `Theme` token.
+    pub fn padding(mut self, x: f64, y: f64) -> Self {
+        self.pad_x = x;
+        self.pad_y = y;
+        self
+    }
+
+    /// Override the chrome's border thickness, in logical px. Defaults to
+    /// [`BORDER_W`] (1.5). Affects only the idle/unfocused border unless
+    /// [`focus_ring_width`](Self::focus_ring_width) is left unset, in which
+    /// case the focused border uses this width too (unchanged relative
+    /// behavior). See the module docs' "Chrome" section.
+    pub fn border_width(mut self, width: f64) -> Self {
+        self.border_width = width;
+        self
+    }
+
+    /// Override the chrome's corner radius, in logical px. Defaults to
+    /// [`RADIUS`] (6.0). See the module docs' "Chrome" section.
+    pub fn corner_radius(mut self, radius: f64) -> Self {
+        self.corner_radius = radius;
+        self
+    }
+
+    /// Override the caret width, in logical px. Defaults to [`CARET_W`]
+    /// (1.5). See the module docs' "Chrome" section.
+    pub fn caret_width(mut self, width: f32) -> Self {
+        self.caret_width = width;
+        self
+    }
+
+    /// Use `width` as the border thickness only while the field is focused,
+    /// instead of [`border_width`](Self::border_width). Unset by default, so
+    /// a focused field's border is the same width as its idle border,
+    /// matching the current behavior exactly. This is the narrow focus-ring
+    /// escape hatch described in the module docs' "Chrome" section — combined
+    /// with a theme's accent color, it reaches a thicker/differently-colored
+    /// focus outline without this widget growing a second rendering
+    /// primitive (a halo) it does not otherwise have.
+    pub fn focus_ring_width(mut self, width: f64) -> Self {
+        self.focus_ring_width = Some(width);
+        self
+    }
 }
 
 /// The retained widget for a [`TextInputView`].
 pub struct TextInputWidget {
-    /// The editing engine. Driven through the widget-owned `text_ctx`.
+    /// The editing engine, always holding the **real** (never masked) text.
+    /// Driven through the widget-owned `text_ctx`.
     editor: TextEditor,
+    /// The masked mirror of `editor`, present only while obscured. A pure
+    /// function of `editor`'s editing state (re-derived by
+    /// [`sync_mask`](Self::sync_mask) after every edit, so it cannot drift),
+    /// and the editor every *display* read goes through — see
+    /// [`display`](Self::display) and the [module docs](self).
+    mask_editor: Option<TextEditor>,
     /// The widget's own font/layout context — see the [module docs](self).
     text_ctx: TextContext,
     /// The declared (builder) style — family/weight/style/size/letter-spacing/
@@ -298,6 +652,26 @@ pub struct TextInputWidget {
     /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
     /// (multi-line only — a single-line field always submits).
     submit_on_enter: bool,
+    /// Whether the field accepts input (see [`TextInputView::enabled`]). Feeds
+    /// [`interactive`](Self::interactive) (the gate for the whole `event()`
+    /// pass) and, alone, both theme-resolution points' dimming — see
+    /// [`Chrome::resolve`]/[`effective_style`](Self::effective_style).
+    enabled: bool,
+    /// Whether the field is read-only (see [`TextInputView::read_only`]).
+    /// Feeds [`interactive`](Self::interactive) alongside `enabled`, but never
+    /// dimming — the whole point of the flag (see the [module docs](self)'
+    /// "Read-only mode" section).
+    read_only: bool,
+    /// Whether the rendered glyphs are masked (see [`TextInputView::obscured`]).
+    /// Kept alongside `mask_editor` (which it decides) so `rebuild` can compare
+    /// it and `semantics` can pick its role without inspecting the mirror.
+    obscured: bool,
+    /// Set by a `rebuild` that disabled or read-onlied a field holding focus:
+    /// the focus path lives on the widget's *pod*, which `rebuild` cannot reach
+    /// (`BuildCtx` carries no focus seam), so the release is deferred to the
+    /// first `event()` that arrives — meanwhile `paint` already refuses to
+    /// behave as focused (no caret, no blink frame, an inactive IME surface).
+    release_focus_pending: bool,
     /// The widget's event-pass view of its focus: set on a `Down` inside,
     /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
     /// for painting — `paint` reads `PaintCtx::has_focus()` (the pod-recorded
@@ -315,8 +689,29 @@ pub struct TextInputWidget {
     /// reset; the next paint records `blink_epoch` from `frame_time` and clears
     /// this. `true` initially so the first painted frame seeds the epoch.
     blink_reset_pending: bool,
-    on_change: crate::ErasedArgCallback<String>,
-    on_submit: Option<crate::ErasedArgCallback<String>>,
+    /// Resolved horizontal inner padding — see [`TextInputView::padding`].
+    /// Read from both the event pass (`editor_point`/`current_ime_state`) and
+    /// layout/paint (see [`PAD_X`]).
+    pad_x: f64,
+    /// Resolved vertical inner padding — see [`TextInputView::padding`] and
+    /// [`PAD_Y`].
+    pad_y: f64,
+    /// Resolved border thickness — see [`TextInputView::border_width`] and
+    /// [`BORDER_W`]. The idle border width; `paint` widens it to
+    /// `focus_ring_width` instead while focused, when set.
+    border_width: f64,
+    /// Resolved corner radius — see [`TextInputView::corner_radius`] and
+    /// [`RADIUS`].
+    corner_radius: f64,
+    /// Resolved caret width — see [`TextInputView::caret_width`] and
+    /// [`CARET_W`].
+    caret_width: f32,
+    /// Focused-only border width override — see
+    /// [`TextInputView::focus_ring_width`]. `None` = `paint` uses
+    /// `border_width` while focused too (unchanged appearance).
+    focus_ring_width: Option<f64>,
+    on_change: crate::authoring::ErasedArgCallback<String>,
+    on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
 }
 
 /// Whether `pos` (widget-local) lies within a `size`-sized field.
@@ -325,6 +720,19 @@ fn inside(pos: Point, size: Size) -> bool {
 }
 
 impl TextInputWidget {
+    /// Whether the field can take focus and be edited — `false` if disabled
+    /// *or* read-only. The single hook both flags suppress interactivity
+    /// through: [`Widget::event`]'s top gate, `paint`'s `focused` computation,
+    /// and the disabled/read-only-while-focused IME-dismiss branch all key off
+    /// this rather than `enabled` alone, so `read_only` gets the exact same
+    /// suppression `enabled(false)` already had with no parallel path. Dimming
+    /// deliberately does **not** use this — see [`Chrome::resolve`] and
+    /// [`effective_style`](Self::effective_style), which key off `enabled`
+    /// alone (the [module docs](self)' "Read-only mode" section).
+    fn interactive(&self) -> bool {
+        self.enabled && !self.read_only
+    }
+
     /// The style to shape the editor with: `style` unchanged when the color was
     /// set explicitly (or no theme is active), otherwise `style` with its color
     /// replaced by the theme's `on_surface` role. Mirrors
@@ -332,18 +740,69 @@ impl TextInputWidget {
     /// LAYOUT time (where `TextInput`, like `Text`, bakes the glyph brush into
     /// the editor's shaped state) keeps the unthemed path pixel-identical to
     /// before this retrofit.
+    ///
+    /// While disabled, whatever color that resolution produced is dimmed by
+    /// [`DISABLED_CONTENT_ALPHA`] — the layout half of the two-point dimming
+    /// (the other is [`Chrome::resolve`]), and the reason a change to `enabled`
+    /// must report `ChangeFlags::LAYOUT`.
     fn effective_style(&self, theme: Option<&Theme>) -> TextStyle {
-        if self.text_style_explicit {
-            return self.style.clone();
-        }
-        match theme {
-            Some(theme) => {
-                let mut style = self.style.clone();
-                style.color = theme.scheme().on_surface;
-                style
+        let mut style = if self.text_style_explicit {
+            self.style.clone()
+        } else {
+            match theme {
+                Some(theme) => {
+                    let mut style = self.style.clone();
+                    style.color = theme.scheme().on_surface;
+                    style
+                }
+                None => self.style.clone(),
             }
-            None => self.style.clone(),
+        };
+        if !self.enabled {
+            style.color = style.color.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
+        style
+    }
+
+    /// The editor every *display* read goes through: the masked mirror while
+    /// obscured, the real editor otherwise. Layout metrics, glyph runs,
+    /// selection rects, the caret rect and the pointer hit test all key off
+    /// this, so masking changes what is measured and not just what is drawn
+    /// (see the [module docs](self)).
+    fn display(&self) -> &TextEditor {
+        self.mask_editor.as_ref().unwrap_or(&self.editor)
+    }
+
+    /// (Re)create the masked mirror to match `obscured`, then seed it from the
+    /// current editing state. Resets `applied_wrap_width` so the next `layout`
+    /// re-installs the soft-wrap width on both editors (a freshly built
+    /// [`TextEditor`] carries none, and that install is also what refreshes the
+    /// new mirror's layout).
+    fn rebuild_mask_editor(&mut self) {
+        let style = self.applied_style.clone();
+        self.mask_editor = self.obscured.then(|| TextEditor::new(&style));
+        self.applied_wrap_width = None;
+        self.sync_mask();
+    }
+
+    /// Re-derive the masked mirror from the real editing state. A no-op when
+    /// not obscured, and (via [`EditOp::ApplyEditingState`]'s value-equality
+    /// short-circuit) when nothing changed. Because the mirror is *derived*
+    /// rather than edited in parallel, it can never drift from the real buffer.
+    fn sync_mask(&mut self) {
+        let Some(mask) = self.mask_editor.as_mut() else {
+            return;
+        };
+        let real = self.editor.editing_state_bytes();
+        let state = EditingStateBytes {
+            text: mask_text(&real.text),
+            base: real_to_masked(&real.text, real.base),
+            extent: real_to_masked(&real.text, real.extent),
+            composing: real
+                .composing
+                .map(|r| real_to_masked(&real.text, r.start)..real_to_masked(&real.text, r.end)),
+        };
+        mask.apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
     }
 
     /// Rebuild `editor` with `style`, preserving the current editing state
@@ -367,14 +826,16 @@ impl TextInputWidget {
         self.applied_style = style;
         // The freshly built editor carries no wrap width (`TextEditor::new`
         // resets it to single-line); force `layout` to re-install the desired
-        // width on the next pass.
+        // width on the next pass. (`rebuild_mask_editor` re-asserts this too —
+        // the masked mirror must be rebuilt with the same new style.)
         self.applied_wrap_width = None;
+        self.rebuild_mask_editor();
     }
 
     /// The single-line text height from the editor's refreshed metrics, floored
     /// to a sensible line height for an empty field.
     fn content_height(&self) -> f64 {
-        self.editor
+        self.display()
             .layout_size()
             .height
             .max(self.style.size as f64 * 1.25)
@@ -383,14 +844,14 @@ impl TextInputWidget {
     /// The top-left of the text content within a `height`-tall field (vertically
     /// centered, never above the top padding). Single-line placement.
     fn text_top(&self, height: f64) -> f64 {
-        ((height - self.content_height()) / 2.0).max(PAD_Y)
+        ((height - self.content_height()) / 2.0).max(self.pad_y)
     }
 
     /// Height of one text line from the editor's own metrics, falling back to a
     /// sensible line height before the first layout / when the field is empty.
     fn line_height(&self) -> f64 {
-        let h = self.editor.layout_size().height;
-        let n = self.editor.line_count();
+        let h = self.display().layout_size().height;
+        let n = self.display().line_count();
         if h > 0.0 && n > 0 {
             h / n as f64
         } else {
@@ -407,13 +868,13 @@ impl TextInputWidget {
         if self.max_visible_lines.is_none() {
             return 0.0;
         }
-        let visible = (field_height - 2.0 * PAD_Y).max(0.0);
-        let content = self.editor.layout_size().height;
+        let visible = (field_height - 2.0 * self.pad_y).max(0.0);
+        let content = self.display().layout_size().height;
         if content <= visible {
             return 0.0;
         }
         let max_off = content - visible;
-        let (y0, y1) = match self.editor.cursor_rect(CARET_W) {
+        let (y0, y1) = match self.display().cursor_rect(self.caret_width) {
             Some(c) => (c.y0, c.y1),
             None => (0.0, 0.0),
         };
@@ -432,7 +893,7 @@ impl TextInputWidget {
     /// shifted up by the keep-caret-in-view scroll offset.
     fn content_origin_y(&self, height: f64) -> f64 {
         if self.max_visible_lines.is_some() {
-            PAD_Y - self.scroll_y(height)
+            self.pad_y - self.scroll_y(height)
         } else {
             self.text_top(height)
         }
@@ -462,6 +923,7 @@ impl TextInputWidget {
             composing: None,
         });
         self.editor.apply(op, &mut self.text_ctx);
+        self.sync_mask();
     }
 
     /// Apply one editing op, then run the after-edit bookkeeping: reset the
@@ -476,6 +938,9 @@ impl TextInputWidget {
     /// Shared after-edit bookkeeping (see [`apply_edit`](Self::apply_edit)),
     /// factored out so a multi-op edit (an IME commit) reports once.
     fn finish_edit(&mut self, ctx: &mut EventCtx, before: String) {
+        // Re-derive the masked mirror first: the IME surface published below
+        // (and any metric read this pass) takes its caret rect from it.
+        self.sync_mask();
         self.reset_blink();
         let after = self.editor.text().to_string();
         if after != before {
@@ -498,8 +963,11 @@ impl TextInputWidget {
             composing_base: es.composing_base,
             composing_extent: es.composing_extent,
         };
-        let offset = origin.to_vec2() + Vec2::new(PAD_X, self.content_origin_y(size.height));
-        let caret = self.editor.cursor_rect(CARET_W).map(|c| {
+        let offset = origin.to_vec2() + Vec2::new(self.pad_x, self.content_origin_y(size.height));
+        // The caret rect is a *screen* placement hint, so it comes from the
+        // displayed (possibly masked) layout — while `editing` above stays the
+        // real text the platform IME mirror needs.
+        let caret = self.display().cursor_rect(self.caret_width).map(|c| {
             Rect::new(
                 c.x0 + offset.x,
                 c.y0 + offset.y,
@@ -511,6 +979,19 @@ impl TextInputWidget {
             active: true,
             editing,
             caret,
+            // `obscured` is the field's *only* content-type signal for now (no
+            // builder exposes an override — see the module docs' rationale).
+            // Computed live from `self.obscured` on every call, so there is no
+            // window where a masked field publishes `Normal`: the very first
+            // `ImeState` a newly focused obscured field emits already carries
+            // `Password`, which is what actually closes the suggestion-strip
+            // leak (a field that starts `Normal` and flips a frame later has
+            // already leaked to the IME).
+            content_type: if self.obscured {
+                ImeContentType::Password
+            } else {
+                ImeContentType::Normal
+            },
         }
     }
 
@@ -524,9 +1005,43 @@ impl TextInputWidget {
     /// coordinate space (used for caret placement / drag-selection).
     fn editor_point(&self, pos: Point, height: f64) -> (f32, f32) {
         (
-            (pos.x - PAD_X) as f32,
+            (pos.x - self.pad_x) as f32,
             (pos.y - self.content_origin_y(height)) as f32,
         )
+    }
+
+    /// Place (or extend the selection to) the caret nearest a widget-local
+    /// pointer position.
+    ///
+    /// Unobscured this is just [`EditOp::MoveToPoint`] on the real editor.
+    /// Obscured, the point must be resolved against the *masked* layout — the
+    /// glyphs the user actually sees, whose advances differ from the real
+    /// text's — and the resulting offsets mapped back onto the real buffer, so
+    /// a tap lands on the same character it visually points at.
+    fn move_to_point(&mut self, ctx: &mut EventCtx, x: f32, y: f32, select: bool) {
+        if self.mask_editor.is_none() {
+            self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select });
+            return;
+        }
+        let (masked_base, masked_extent) = {
+            let mask = self
+                .mask_editor
+                .as_mut()
+                .expect("obscured field has a mask editor");
+            mask.apply(EditOp::MoveToPoint { x, y, select }, &mut self.text_ctx);
+            let m = mask.editing_state_bytes();
+            (m.base, m.extent)
+        };
+        let real = self.editor.editing_state_bytes();
+        let before = real.text.clone();
+        let state = EditingStateBytes {
+            base: masked_to_real(&real.text, masked_base),
+            extent: masked_to_real(&real.text, masked_extent),
+            ..real
+        };
+        self.editor
+            .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
+        self.finish_edit(ctx, before);
     }
 
     /// Handle a keyboard key event (already focus-gated by the caller).
@@ -713,8 +1228,9 @@ impl<State: 'static> View<State> for TextInputView<State> {
             }),
             &mut text_ctx,
         );
-        TextInputWidget {
+        let mut widget = TextInputWidget {
             editor,
+            mask_editor: None,
             text_ctx,
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
@@ -723,16 +1239,29 @@ impl<State: 'static> View<State> for TextInputView<State> {
             max_visible_lines: self.max_visible_lines,
             applied_wrap_width: None,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
+            enabled: self.enabled,
+            read_only: self.read_only,
+            obscured: self.obscured,
+            release_focus_pending: false,
             focused: false,
             captured: false,
             blink_epoch: FrameTime::ZERO,
             blink_reset_pending: true,
-            on_change: crate::erase_callback_arg(&self.on_change),
+            pad_x: self.pad_x,
+            pad_y: self.pad_y,
+            border_width: self.border_width,
+            corner_radius: self.corner_radius,
+            caret_width: self.caret_width,
+            focus_ring_width: self.focus_ring_width,
+            on_change: crate::authoring::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
                 .as_ref()
-                .map(crate::erase_callback_arg::<State, String>),
-        }
+                .map(crate::authoring::erase_callback_arg::<State, String>),
+        };
+        // Seeds the masked mirror when built obscured (a no-op otherwise).
+        widget.rebuild_mask_editor();
+        widget
     }
 
     fn rebuild(
@@ -742,11 +1271,11 @@ impl<State: 'static> View<State> for TextInputView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures aren't comparable; reinstall the erased adapters unconditionally.
-        element.on_change = crate::erase_callback_arg(&self.on_change);
+        element.on_change = crate::authoring::erase_callback_arg(&self.on_change);
         element.on_submit = self
             .on_submit
             .as_ref()
-            .map(crate::erase_callback_arg::<State, String>);
+            .map(crate::authoring::erase_callback_arg::<State, String>);
 
         let mut flags = ChangeFlags::NONE;
         if prev.placeholder != self.placeholder {
@@ -762,6 +1291,43 @@ impl<State: 'static> View<State> for TextInputView<State> {
         }
         element.submit_on_enter =
             resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter);
+        // Enabled reconcile. LAYOUT (not just PAINT) because the disabled dim
+        // is baked into the glyph color at layout time — the same
+        // `set_theme` -> `ChangeFlags::LAYOUT` contract `text_style` rides.
+        // A field disabled *while focused* must not be stranded focused: clear
+        // the widget's own view of it now and flag the pod-level release for
+        // the first event that reaches us (`BuildCtx` has no focus seam).
+        if prev.enabled != self.enabled {
+            element.enabled = self.enabled;
+            if !self.enabled {
+                element.release_focus_pending = element.focused;
+                element.focused = false;
+                element.captured = false;
+            }
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // Read-only reconcile: unlike `enabled`, PAINT only — `read_only`
+        // never dims (see the module docs' "Read-only mode" section), so no
+        // glyph color is baked differently at layout time. A field made
+        // read-only *while focused* releases focus the same way a field
+        // disabled while focused does (see `interactive`).
+        if prev.read_only != self.read_only {
+            element.read_only = self.read_only;
+            if self.read_only {
+                element.release_focus_pending = element.focused;
+                element.focused = false;
+                element.captured = false;
+            }
+            flags |= ChangeFlags::PAINT;
+        }
+        // Obscured reconcile: the masked mirror is what gets *measured*, and a
+        // mask glyph's advance differs from the character it replaces, so this
+        // resizes the field as well as repainting it.
+        if prev.obscured != self.obscured {
+            element.obscured = self.obscured;
+            element.rebuild_mask_editor();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         // Text style reconcile: a changed declared style or explicit-
         // flag invalidates the style actually installed on the editor. The
         // editor itself is only rebuilt in `layout` (`effective_style`/
@@ -783,19 +1349,57 @@ impl<State: 'static> View<State> for TextInputView<State> {
             element.set_controlled_value(&self.value);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        // Chrome geometry reconcile (see the module docs' "Chrome" section).
+        // Padding feeds the resolved field height and the multi-line wrap
+        // width, so it needs a relayout; the rest (border width, corner
+        // radius, caret width, the focus-ring override) are paint-only — none
+        // of them change the `Size` `layout` returns.
+        if prev.pad_x != self.pad_x || prev.pad_y != self.pad_y {
+            element.pad_x = self.pad_x;
+            element.pad_y = self.pad_y;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.border_width != self.border_width {
+            element.border_width = self.border_width;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.corner_radius != self.corner_radius {
+            element.corner_radius = self.corner_radius;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.caret_width != self.caret_width {
+            element.caret_width = self.caret_width;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.focus_ring_width != self.focus_ring_width {
+            element.focus_ring_width = self.focus_ring_width;
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 }
 
 impl Widget for TextInputWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Late-registered app fonts (a shell's per-frame font drain, after this
+        // widget's private context was built) — a lock and a length compare
+        // when nothing is pending. On an actual registration the editor's own
+        // retained parley layout is still shaped against the old faces, so it
+        // has to be rebuilt: `apply_style` with the unchanged style does
+        // exactly that (and takes the masked mirror with it), carrying the same
+        // narrow mid-composition caveat a theme swap does — see `apply_style`.
+        let fonts_changed = self.text_ctx.sync_app_fonts();
         // Resolve the themed style and rebuild the editor if it drifted from
         // what's currently installed (a theme swap, or a rebuild-invalidated
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
-        if effective != self.applied_style {
+        if fonts_changed || effective != self.applied_style {
             self.apply_style(effective);
         }
+        // Catch-all mirror refresh: a rebuild-driven value/obscured change lands
+        // before this pass, and everything measured below reads `display()`.
+        // Cheap when already in sync (value-equality short-circuit).
+        self.sync_mask();
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -812,9 +1416,14 @@ impl Widget for TextInputWidget {
         // TextInput mirror of `Text`'s re-shape-every-frame defect.
         let desired_wrap: Option<f32> = self
             .max_visible_lines
-            .map(|_| (width - 2.0 * PAD_X).max(0.0) as f32);
+            .map(|_| (width - 2.0 * self.pad_x).max(0.0) as f32);
         if self.applied_wrap_width != Some(desired_wrap) {
             self.editor.set_wrap_width(desired_wrap, &mut self.text_ctx);
+            // The masked mirror wraps at the same width (and this is also the
+            // call that refreshes a freshly rebuilt mirror's layout).
+            if let Some(mask) = self.mask_editor.as_mut() {
+                mask.set_wrap_width(desired_wrap, &mut self.text_ctx);
+            }
             self.applied_wrap_width = Some(desired_wrap);
         }
 
@@ -823,11 +1432,11 @@ impl Widget for TextInputWidget {
                 // Clamp the reported content height to the [1, max_lines] line
                 // band (+ padding); overflow scrolls in paint.
                 let line_h = self.line_height();
-                let content = self.editor.layout_size().height.max(line_h);
+                let content = self.display().layout_size().height.max(line_h);
                 let capped = content.min(line_h * max_lines as f64);
-                capped + 2.0 * PAD_Y
+                capped + 2.0 * self.pad_y
             }
-            None => self.content_height() + 2.0 * PAD_Y,
+            None => self.content_height() + 2.0 * self.pad_y,
         };
         bc.constrain(Size::new(width, height))
     }
@@ -835,7 +1444,9 @@ impl Widget for TextInputWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
-        let chrome = Chrome::resolve(Theme::from_paint_ctx(ctx));
+        let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+        let chrome = Chrome::resolve(theme, self.enabled);
 
         // Record the blink epoch from the shared frame clock once per pending
         // reset (a focus/edit flagged it during the clockless event pass).
@@ -852,32 +1463,45 @@ impl Widget for TextInputWidget {
         // widget converges one frame after the blur: the accent border, caret,
         // caret-blink continuation frame, and IME republish below all key off
         // `focused`, so they stop together and the field stops resurrecting the
-        // IME surface the blur cleared (review F1).
-        let focused = ctx.has_focus();
+        // IME surface the blur cleared.
+        // A disabled or read-only field never *behaves* as focused, even if
+        // the pod's focus path is still recorded (a `rebuild` that flipped
+        // either flag on a focused field cannot reach it — see
+        // `release_focus_pending`).
+        let focused = ctx.has_focus() && self.interactive();
         if self.focused && !focused {
             self.focused = false;
         }
 
         // Chrome: a border-colored rounded rect with an inset background fills in
         // as the frame (there is no stroke-rect primitive on `PaintScene`).
+        // The border width itself widens to `focus_ring_width` while focused,
+        // when set — the seam's narrow focus-ring escape hatch (see the module
+        // docs' "Chrome" section); unset, it stays `border_width` either way,
+        // matching the pre-seam behavior exactly.
         let border_color = if focused {
             chrome.accent
         } else {
             chrome.border
         };
-        scene.fill_rounded_rect(origin, size, RADIUS, border_color);
+        let border_w = if focused {
+            self.focus_ring_width.unwrap_or(self.border_width)
+        } else {
+            self.border_width
+        };
+        scene.fill_rounded_rect(origin, size, self.corner_radius, border_color);
         scene.fill_rounded_rect(
-            Point::new(origin.x + BORDER_W, origin.y + BORDER_W),
+            Point::new(origin.x + border_w, origin.y + border_w),
             Size::new(
-                (size.width - 2.0 * BORDER_W).max(0.0),
-                (size.height - 2.0 * BORDER_W).max(0.0),
+                (size.width - 2.0 * border_w).max(0.0),
+                (size.height - 2.0 * border_w).max(0.0),
             ),
-            (RADIUS - BORDER_W).max(0.0),
+            (self.corner_radius - border_w).max(0.0),
             chrome.bg,
         );
 
         let text_origin = Point::new(
-            origin.x + PAD_X,
+            origin.x + self.pad_x,
             origin.y + self.content_origin_y(size.height),
         );
 
@@ -886,10 +1510,10 @@ impl Widget for TextInputWidget {
         let clip_content = self.max_visible_lines.is_some();
         if clip_content {
             scene.push_clip(
-                Point::new(origin.x + BORDER_W, origin.y + PAD_Y),
+                Point::new(origin.x + self.border_width, origin.y + self.pad_y),
                 Size::new(
-                    (size.width - 2.0 * BORDER_W).max(0.0),
-                    (size.height - 2.0 * PAD_Y).max(0.0),
+                    (size.width - 2.0 * self.border_width).max(0.0),
+                    (size.height - 2.0 * self.pad_y).max(0.0),
                 ),
             );
         }
@@ -906,33 +1530,45 @@ impl Widget for TextInputWidget {
             }
         } else {
             let off = text_origin.to_vec2();
-            // Selection highlights sit behind the glyphs.
-            for r in self.editor.selection_rects() {
+            // Selection highlights sit behind the glyphs. Both come from the
+            // displayed layout — the masked mirror while obscured.
+            for r in self.display().selection_rects() {
                 scene.fill_rect(
                     Point::new(r.x0 + off.x, r.y0 + off.y),
                     Size::new(r.width(), r.height()),
                     chrome.selection,
                 );
             }
-            for run in self.editor.to_scene_runs(text_origin) {
+            for run in self.display().to_scene_runs(text_origin) {
                 scene.draw_glyph_run(run);
             }
         }
 
-        // Caret: blink while focused. Requesting a frame keeps the desktop shell's
-        // wait-loop scheduling paints so the blink animates (the mobile shells'
-        // continuous loops already do). At rest (unfocused) we stop signalling.
+        // Caret: blink while focused. A paced (CosmeticLoop) continuation
+        // request at the blink's own [`BLINK_MS`] half-period keeps the desktop
+        // shell's wait-loop scheduling paints so the blink animates (the mobile
+        // shells' continuous loops already do), while letting the mobile frame
+        // gate throttle the cadence — the blink is an indefinite decorative
+        // toggle with no endpoint, the same classification as the
+        // design-system skeleton/progress/dots/toast/spinner loops, but naming
+        // its own slower cadence instead of the theme's cap rate (module docs'
+        // "Focus, IME and blink" section). At rest (unfocused) we stop
+        // signalling. `reduce_motion` freezes the caret **visible** and stops
+        // requesting blink frames entirely — it is a position cue, not a purely
+        // decorative loop, so it is the one exception among the paced loops
+        // that freezes lit rather than dark.
         if focused {
-            ctx.request_frame();
+            if !reduce_motion {
+                ctx.request_frame_paced_at(Duration::from_millis(BLINK_MS as u64));
+            }
             // Republish the IME surface every painted frame while focused, so a
             // controlled change applied by a rebuild (a submit clearing the
             // field) refreshes the shell-facing state the event pass would
             // otherwise leave stale — the mobile IME mirror relies on this to
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
-            if self.caret_visible_at(now)
-                && let Some(c) = self.editor.cursor_rect(CARET_W)
-            {
+            let caret_visible = reduce_motion || self.caret_visible_at(now);
+            if caret_visible && let Some(c) = self.display().cursor_rect(self.caret_width) {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
                     Point::new(c.x0 + off.x, c.y0 + off.y),
@@ -940,6 +1576,16 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
+        } else if !self.interactive() && ctx.has_focus() {
+            // Disabled or read-only while still holding the pod's focus path:
+            // publish an *inactive* IME surface so the shell dismisses the
+            // keyboard on the very next frame rather than waiting for the
+            // event-pass release (`release_focus_pending`). No caret, and no
+            // frame request — a non-interactive field is at rest.
+            let mut ime = self.current_ime_state(origin, size);
+            ime.active = false;
+            ime.caret = None;
+            ctx.publish_ime_state(ime);
         }
 
         if clip_content {
@@ -948,23 +1594,50 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // The focus gate IS the disabled/read-only gate: refusing focus here
+        // is what makes `Key`/`Ime` (focus-routed, never hit-tested)
+        // unreachable, so `handle_key`/`handle_ime` need no disabled/read-only
+        // guards of their own. A non-interactive field also consumes nothing
+        // — it is inert, not a shield.
+        if !self.interactive() {
+            if ctx.has_focus() || self.release_focus_pending {
+                ctx.release_focus();
+                self.release_focus_pending = false;
+                self.focused = false;
+                self.captured = false;
+                ctx.request_redraw();
+            }
+            return EventResult::Ignored;
+        }
         match event {
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
                     if inside(p.position, ctx.size()) {
+                        // Caret placement and selection dragging are
+                        // **primary-only**, deliberately stricter than a
+                        // browser (which places the caret on a right-click
+                        // before opening its context menu): frust has no
+                        // context-menu contract to pair that with yet, so a
+                        // secondary press moves nothing rather than silently
+                        // relocating a caret the user cannot see a menu for.
+                        // It is still consumed, and re-claims an *existing*
+                        // focus session: the root reads any `Down` bubbling no
+                        // claim as a blur, and a right-click must not blur a
+                        // field being typed into or retract its keyboard. It
+                        // never *starts* a session — right-clicking an
+                        // unfocused field raises no keyboard.
+                        if !presses(p) {
+                            if ctx.has_focus() {
+                                ctx.request_focus();
+                            }
+                            return EventResult::Handled;
+                        }
                         ctx.request_focus();
                         ctx.capture_pointer();
                         self.focused = true;
                         self.captured = true;
                         let (x, y) = self.editor_point(p.position, ctx.size().height);
-                        self.apply_edit(
-                            ctx,
-                            EditOp::MoveToPoint {
-                                x,
-                                y,
-                                select: false,
-                            },
-                        );
+                        self.move_to_point(ctx, x, y, false);
                         EventResult::Handled
                     } else {
                         // A `Down` outside our bounds that still reaches us (we are
@@ -983,7 +1656,7 @@ impl Widget for TextInputWidget {
                         return EventResult::Ignored;
                     }
                     let (x, y) = self.editor_point(p.position, ctx.size().height);
-                    self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select: true });
+                    self.move_to_point(ctx, x, y, true);
                     EventResult::Handled
                 }
                 PointerPhase::Up => {
@@ -1020,6 +1693,9 @@ impl Widget for TextInputWidget {
                 self.handle_ime(ctx, e)
             }
             InputEvent::Scroll { .. } => EventResult::Ignored,
+            // A leaf with nothing deferred: the broadcast is a harmless
+            // fall-through (it must not touch the editor, the caret, or focus).
+            InputEvent::Housekeeping => EventResult::Ignored,
         }
     }
 
@@ -1027,8 +1703,34 @@ impl Widget for TextInputWidget {
         // A single-line TextInput node exposing its current text as `value`.
         // accesskit tracks focus at the tree level, so a focused field records
         // itself as the pass's focus node rather than carrying a per-node flag.
-        let id = ctx.push_node(Role::TextInput, |node| {
-            node.set_value(self.editor.text());
+        //
+        // Obscured, the role becomes `PasswordInput` (the one piece of password
+        // semantics this option delivers) and the reported value is the *masked*
+        // mirror — an assistive-tech client reads the node value verbatim, so
+        // publishing the real secret there would defeat the masking.
+        let role = if self.obscured {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
+        let value = if self.obscured {
+            mask_text(self.editor.text())
+        } else {
+            self.editor.text().to_string()
+        };
+        // Disabled and read-only are reported as distinct accesskit node
+        // states, never conflated (a screen reader announces them
+        // differently — see the module docs' "Read-only mode" section): a
+        // disabled field says `set_disabled()`, a read-only *enabled* field
+        // says `set_read_only()`. `!enabled` wins if somehow both flags are
+        // set — a disabled field is the stronger claim.
+        let id = ctx.push_node(role, |node| {
+            node.set_value(value);
+            if !self.enabled {
+                node.set_disabled();
+            } else if self.read_only {
+                node.set_read_only();
+            }
         });
         if self.focused {
             ctx.set_focused(id);
@@ -1089,6 +1791,15 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
+        })
+    }
+
     fn ch(text: &str) -> InputEvent {
         InputEvent::Key(KeyEvent {
             key: Key::Character(text.to_string()),
@@ -1119,6 +1830,48 @@ mod tests {
         let ime = root.ime_state().expect("focus publishes an IME surface");
         assert!(ime.active);
         assert!(ime.caret.is_some(), "an IME surface carries a caret rect");
+    }
+
+    #[test]
+    fn a_secondary_press_neither_focuses_nor_moves_the_caret_nor_blurs() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        // Unfocused: a right-click takes no focus and opens no IME session,
+        // deliberately stricter than a browser (which places a caret first).
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(!root.is_focus_active());
+        assert!(!widget(&root).focused);
+        assert!(root.ime_state().is_none());
+
+        // Focused and typed into: a right-click anywhere in the field leaves the
+        // caret where it is, and leaves the live session alone — it is consumed
+        // as a tap *inside* the field, never read as an outside-tap blur.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        let caret = widget(&root).editor.editing_state_bytes().extent;
+        assert_eq!(caret, 3, "the caret sits after the typed text");
+
+        let outcome = root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 1.0, 10.0),
+        );
+
+        assert!(outcome.handled, "the field still swallows the press");
+        assert_eq!(
+            widget(&root).editor.editing_state_bytes().extent,
+            caret,
+            "a right-click places no caret"
+        );
+        assert!(!widget(&root).captured, "and starts no selection drag");
+        assert!(root.is_focus_active(), "the typing session survives it");
+        assert!(widget(&root).focused);
     }
 
     #[test]
@@ -1424,11 +2177,85 @@ mod tests {
             "an unfocused field is at rest"
         );
 
-        // Once focused, paint pumps the blink and asks for the next frame.
+        // Once focused, paint pumps the blink and asks for the next frame — a
+        // paced (CosmeticLoop) request, the same classification the
+        // design-system decorative loops (skeleton/progress/dots/toast) use,
+        // since the blink is an indefinite toggle with no endpoint the mobile
+        // frame gate may throttle.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(outcome.needs_frame, "a focused field blinks its caret");
         assert!(
-            root.paint(&mut sink, FrameTime::ZERO).needs_frame,
-            "a focused field blinks its caret"
+            outcome.needs_frame_paced_only,
+            "the caret blink is a CosmeticLoop request — the frame gate must be able to pace it"
+        );
+    }
+
+    #[test]
+    fn blink_paces_at_its_own_500ms_interval() {
+        // The caret names its own (slower) cadence via
+        // `request_frame_paced_at` rather than a bare `request_frame_paced`
+        // (the theme's cosmetic-loop cap) — asserted on the paint outcome's
+        // `paced_interval`, mirroring `frust-core`'s
+        // `paint_surfaces_the_requested_paced_interval_on_outcome`.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut sink = NullScene;
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(outcome.needs_frame_paced_only);
+        assert_eq!(
+            outcome.paced_interval,
+            Some(Duration::from_millis(BLINK_MS as u64)),
+            "the caret paces at its own 500ms half-period, not the theme cap"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_freezes_the_caret_visible_and_stops_requesting_frames() {
+        // reduce_motion is the one exception among the paced loops: the caret
+        // freezes VISIBLE (it is a position cue), not hidden, and stops
+        // requesting blink frames entirely while frozen.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut theme = Theme::neutral();
+        theme.motion.reduce_motion = true;
+        root.set_theme(Box::new(theme));
+        let caret_color = Theme::neutral().scheme().primary;
+
+        // Focus seeds `blink_epoch` at the first paint (t=0).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut NullScene, ft_ms(0.0));
+
+        // Mid-cycle from that epoch — an unfrozen caret would be hidden here
+        // (see `caret_visibility_toggles_across_the_blink_period`) — but
+        // reduce_motion must still paint it, and request no continuation frame.
+        let mut mid = CaretRecorder {
+            caret_color: Some(caret_color),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut mid, ft_ms(BLINK_MS + 10.0));
+        assert_eq!(
+            mid.caret_fills, 1,
+            "reduce_motion freezes the caret visible, even mid-blink-cycle"
+        );
+        assert!(
+            !outcome.needs_frame,
+            "a frozen caret must not request a continuation frame"
+        );
+
+        // Clearing the token resumes the ordinary paced blink.
+        let mut theme = Theme::neutral();
+        theme.motion.reduce_motion = false;
+        root.set_theme(Box::new(theme));
+        let resumed = root.paint(&mut NullScene, ft_ms(2.0 * BLINK_MS + 20.0));
+        assert!(
+            resumed.needs_frame_paced_only,
+            "blinking resumes once reduce_motion clears"
+        );
+        assert_eq!(
+            resumed.paced_interval,
+            Some(Duration::from_millis(BLINK_MS as u64))
         );
     }
 
@@ -1558,8 +2385,8 @@ mod tests {
     fn themed_chrome_resolves_roles() {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
-        let theme = Theme::m3_baseline();
+        root.set_theme(Box::new(Theme::neutral()));
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         let rec = paint_chrome(&mut root);
@@ -1569,6 +2396,229 @@ mod tests {
             "focused border is primary, background is surface"
         );
         assert_eq!(rec.rects, vec![scheme.primary], "caret is primary");
+    }
+
+    // --- Chrome geometry seam: padding / border_width / corner_radius /
+    // caret_width / focus_ring_width ---
+
+    /// Records rounded-rect (chrome) and rect (selection/caret) fill
+    /// *geometry* — origin/size/radius/color — so the seam's effect on the
+    /// actual painted chrome can be asserted, not just that the builder
+    /// accepted a value.
+    #[derive(Default)]
+    struct ChromeGeometryRecorder {
+        rrects: Vec<(Point, Size, f64, Color)>,
+        rects: Vec<(Point, Size, Color)>,
+    }
+
+    impl PaintScene for ChromeGeometryRecorder {
+        fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
+            self.rects.push((origin, size, color));
+        }
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
+            self.rrects.push((origin, size, radius, color));
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, _run: frust_scene::GlyphRun) {}
+    }
+
+    #[test]
+    fn default_chrome_geometry_matches_the_unthemed_constants() {
+        // Pins the resolved default geometry: a field that calls none of the
+        // geometry setters must render byte-for-byte at the constants.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let field_size = root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+
+        let (outer_origin, outer_size, outer_radius, _) = rec.rrects[0];
+        let (inner_origin, inner_size, inner_radius, _) = rec.rrects[1];
+        assert_eq!(outer_size, field_size, "outer chrome rect covers the field");
+        assert_eq!(outer_radius, RADIUS, "default corner radius is RADIUS");
+        assert_eq!(
+            inner_origin.x - outer_origin.x,
+            BORDER_W,
+            "default border width is BORDER_W"
+        );
+        assert_eq!(inner_origin.y - outer_origin.y, BORDER_W);
+        assert_eq!(
+            inner_size,
+            Size::new(
+                outer_size.width - 2.0 * BORDER_W,
+                outer_size.height - 2.0 * BORDER_W
+            )
+        );
+        assert_eq!(inner_radius, RADIUS - BORDER_W);
+
+        let (_, caret_size, _) = *rec.rects.last().expect("caret painted while focused");
+        assert!(
+            (caret_size.width - CARET_W as f64).abs() < 1e-6,
+            "default caret width is CARET_W"
+        );
+    }
+
+    #[test]
+    fn custom_padding_changes_the_resolved_height_and_published_caret_offset() {
+        let mut default_state = AppState::default();
+        let mut default_root = harness(&mut default_state);
+        let default_size = default_root.layout(Size::new(300.0, 200.0));
+        default_root.event(&mut default_state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let default_caret_x = default_root
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("caret rect")
+            .x0;
+
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(30.0, 40.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        let custom_size = root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let custom_caret_x = root
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("caret rect")
+            .x0;
+
+        assert_eq!(
+            custom_size.height - default_size.height,
+            2.0 * (40.0 - PAD_Y),
+            "vertical padding is reflected in the resolved field height, not just accepted"
+        );
+        assert!(
+            (custom_caret_x - default_caret_x - (30.0 - PAD_X)).abs() < 1e-6,
+            "horizontal padding shifts the published caret rect"
+        );
+    }
+
+    #[test]
+    fn custom_border_width_and_corner_radius_resize_the_painted_chrome() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .border_width(4.0)
+                .corner_radius(2.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+
+        let (outer_origin, outer_size, outer_radius, _) = rec.rrects[0];
+        let (inner_origin, inner_size, inner_radius, _) = rec.rrects[1];
+        assert_eq!(
+            outer_radius, 2.0,
+            "corner_radius reaches the painted outer rect"
+        );
+        assert_eq!(
+            inner_radius, 0.0,
+            "inner radius clamps at 0 once border_width exceeds corner_radius"
+        );
+        assert_eq!(
+            inner_origin.x - outer_origin.x,
+            4.0,
+            "border_width insets the fill"
+        );
+        assert_eq!(inner_origin.y - outer_origin.y, 4.0);
+        assert_eq!(
+            inner_size,
+            Size::new(outer_size.width - 8.0, outer_size.height - 8.0)
+        );
+    }
+
+    #[test]
+    fn custom_caret_width_changes_the_painted_caret_rect() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v).caret_width(6.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        let (_, caret_size, _) = *rec.rects.last().expect("caret painted");
+        assert!(
+            (caret_size.width - 6.0).abs() < 1e-6,
+            "caret_width is reflected in the painted caret rect, not just accepted by the builder"
+        );
+    }
+
+    #[test]
+    fn custom_focus_ring_width_only_widens_the_border_while_focused() {
+        // The focus treatment specifically: unfocused, the idle border_width
+        // is unaffected; focused, focus_ring_width takes over.
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .focus_ring_width(5.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+
+        let mut idle = ChromeGeometryRecorder::default();
+        root.paint(&mut idle, FrameTime::ZERO);
+        let (idle_outer, _, _, _) = idle.rrects[0];
+        let (idle_inner, _, _, _) = idle.rrects[1];
+        assert_eq!(
+            idle_inner.x - idle_outer.x,
+            BORDER_W,
+            "idle border stays the default width when unfocused"
+        );
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut focused = ChromeGeometryRecorder::default();
+        root.paint(&mut focused, FrameTime::ZERO);
+        let (focused_outer, _, _, _) = focused.rrects[0];
+        let (focused_inner, _, _, _) = focused.rrects[1];
+        assert_eq!(
+            focused_inner.x - focused_outer.x,
+            5.0,
+            "the focused appearance responds to focus_ring_width"
+        );
+    }
+
+    #[test]
+    fn geometry_field_changes_request_the_right_change_flags() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        // Padding changes the resolved `Size`, so it must relayout.
+        let mut padded = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(20.0, 20.0)
+        };
+        let flags = root.rebuild(&mut padded, &mut state);
+        assert!(flags.needs_layout(), "a padding change must relayout");
+
+        // Border width alone is paint-only geometry — it never resizes the
+        // field, so it must not force a relayout on top of an unrelated
+        // padding change that already did.
+        let mut bordered = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(20.0, 20.0)
+                .border_width(4.0)
+        };
+        let flags = root.rebuild(&mut bordered, &mut state);
+        assert!(flags.needs_paint());
+        assert!(
+            !flags.needs_layout(),
+            "border_width alone does not resize the field"
+        );
     }
 
     #[test]
@@ -1683,7 +2733,7 @@ mod tests {
         };
         let mut root = harness(&mut state);
 
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.brightness = frust_theme::Brightness::Dark;
         let expected = theme.scheme().on_surface;
         assert_ne!(
@@ -1717,7 +2767,7 @@ mod tests {
         };
         let mut root: RenderRoot<AppState, TextInputView<AppState>> = RenderRoot::new();
         root.rebuild(&mut logic, &mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.set_theme(Box::new(Theme::neutral()));
         root.layout(Size::new(300.0, 200.0));
 
         assert_eq!(
@@ -1771,14 +2821,14 @@ mod tests {
         };
         let mut root = harness(&mut state);
 
-        let mut theme_a = Theme::m3_baseline();
+        let mut theme_a = Theme::neutral();
         theme_a.brightness = frust_theme::Brightness::Light;
         let color_a = theme_a.scheme().on_surface;
         root.set_theme(Box::new(theme_a));
         root.layout(Size::new(300.0, 200.0));
         assert_eq!(painted_text_color(&mut root), color_a);
 
-        let mut theme_b = Theme::m3_baseline();
+        let mut theme_b = Theme::neutral();
         theme_b.brightness = frust_theme::Brightness::Dark;
         let color_b = theme_b.scheme().on_surface;
         assert_ne!(
@@ -1796,17 +2846,17 @@ mod tests {
         );
     }
 
-    // --- Nested-blur regression (review F1) ---
+    // --- Nested-blur regression ---
     //
     // A `TextInput` nested in a `Column` beside a `Button`. Focusing the field
     // then tapping the sibling is a *container-routed* blur: `route_event`
     // clears the field pod's recorded focus path, but the widget's `event()` is
-    // never called on that dispatch. Pre-fix, the widget-internal `focused` flag
-    // stayed set, so the next `paint` republished the (already-cleared) IME
-    // surface and pumped a caret-blink continuation frame — resurrecting the
+    // never called on that dispatch. If the widget-internal `focused` flag
+    // stayed set, the next `paint` would republish the (already-cleared) IME
+    // surface and pump a caret-blink continuation frame — resurrecting the
     // dismissed keyboard and keeping the desktop wait-loop spinning forever.
-    // The fix threads the pod's focus into paint (`PaintCtx::has_focus`) so the
-    // widget observes the blur and converges.
+    // Threading the pod's focus into paint (`PaintCtx::has_focus`) is what makes
+    // the widget observe the blur and converge.
 
     #[derive(Default)]
     struct NestedState {
@@ -1882,7 +2932,7 @@ mod tests {
     /// clears the focus link at the outer level only (the inner Column's pod) —
     /// the field's own pod flag deep in the blurred subtree legitimately stays
     /// stale, which is exactly the case `paint_child`'s ancestor-composed
-    /// `has_focus` seeding must cover (re-review N1).
+    /// `has_focus` seeding must cover.
     fn deep_nested_logic(state: &mut NestedState) -> crate::FlexView<NestedState> {
         use frust_core::any;
         crate::Column(vec![
@@ -1933,6 +2983,290 @@ mod tests {
         assert!(
             !outcome.needs_frame,
             "deep-nested stale focus flag must not busy-loop the desktop shell"
+        );
+    }
+
+    // --- Cross-branch unmount: a stale flag must not kill a live session ------
+    //
+    // The shipped shape is a scrollable list above a persistent composer. The
+    // user taps a row's field, then taps the composer: `route_event`'s
+    // blur-on-outside-tap breaks the focus link at the NEAREST COMMON ANCESTOR
+    // (the outer Column's pod for the list branch), so the row field's own pod
+    // flag, one level deeper, legitimately stays set. The list then recycles /
+    // filters / shrinks and the generic reconciler tears that row down.
+    //
+    // The row owns no session — the composer does. A release here is a
+    // user-visible input regression: the keyboard drops mid-typing in a field
+    // nothing touched. The effective-focus chain threaded through `BuildCtx`
+    // (`has_focus`/`with_focus_link`) is what tells the two apart, and both
+    // directions are pinned below over the same fixture.
+
+    #[derive(Default)]
+    struct BranchState {
+        row: String,
+        composer: String,
+        show_row: bool,
+        show_composer: bool,
+    }
+
+    /// Outer Column: [ inner Column (the "list", 0-or-1 row field), composer
+    /// field ]. Each field's initial text names its branch, so `ime_state`
+    /// identifies which one owns the session.
+    fn branches_logic(state: &mut BranchState) -> crate::FlexView<BranchState> {
+        use frust_core::{AnyView, any};
+        let mut rows: Vec<AnyView<BranchState>> = Vec::new();
+        if state.show_row {
+            rows.push(any(text_input(
+                state.row.clone(),
+                |s: &mut BranchState, v: String| s.row = v,
+            )));
+        }
+        let mut outer: Vec<AnyView<BranchState>> = vec![any(crate::Column(rows))];
+        if state.show_composer {
+            outer.push(any(text_input(
+                state.composer.clone(),
+                |s: &mut BranchState, v: String| s.composer = v,
+            )));
+        }
+        crate::Column(outer)
+    }
+
+    /// Build the two-branch tree with both fields present, focus the ROW field,
+    /// then focus the COMPOSER — leaving the row's own pod flag stale below the
+    /// cleared outer link. Returns the root, its text context and the state.
+    fn focus_row_then_composer() -> (
+        RenderRoot<BranchState, crate::FlexView<BranchState>>,
+        frust_text::TextContext,
+        BranchState,
+    ) {
+        let mut state = BranchState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            show_row: true,
+            show_composer: true,
+        };
+        let mut root: RenderRoot<BranchState, crate::FlexView<BranchState>> = RenderRoot::new();
+        root.rebuild(&mut branches_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Tap the row field (full Down+Up so the Up releases its capture and the
+        // next Down hit-tests afresh — see nested_blur_clears_ime_and_idles_paint).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the row field owns the session first"
+        );
+
+        // Tap the composer: focus moves branches. The blur clears the link at the
+        // outer Column only; the row field's flag inside the inner Column stays.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn tearing_down_a_stale_focused_branch_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The list shrinks: the row field — whose stale flag is still set — is
+        // torn down by the generic reconciler.
+        state.show_row = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "unmounting a stale-flagged row must not blur the composer the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's unmount"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change at all"
+        );
+    }
+
+    #[test]
+    fn tearing_down_the_live_focused_branch_still_releases_the_session() {
+        // The twin of the test above over the same fixture: when the pod that
+        // actually holds the session dies, the release must still happen — the
+        // narrowed gate must not have turned into "never mark".
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let gen_before = root.focus_ime_generation();
+
+        state.show_composer = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the focused composer's unmount releases the session"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one orphaned live focus path is exactly one edge"
+        );
+    }
+
+    // --- Wrapper type swap: the severing path `rebuild_child` owns -----------
+    //
+    // `Padding(if editing { text_input } else { text })` is the single-child
+    // wrapper shape: the view swaps the padded child's concrete type, so the
+    // focused widget is torn down inside `AnyView::rebuild` and a fresh,
+    // non-focusable one takes its pod. Nothing about that reaches the root by
+    // itself — no event, no publish — so without the orphan mark the keyboard
+    // stays up over an idle screen, `is_focus_active()` keeps reporting a
+    // session, and `Key`/`Ime` events keep routing into a widget that ignores
+    // them. Both directions are pinned below over one fixture, exactly like the
+    // cross-branch unmount pair above.
+
+    #[derive(Default)]
+    struct WrapState {
+        row: String,
+        composer: String,
+        row_editing: bool,
+    }
+
+    /// Outer Column: [ Padding-wrapped slot, composer field ]. The slot holds a
+    /// `text_input` while `row_editing` and a plain `text` label otherwise, so
+    /// flipping the flag is an `AnyView` type swap inside the wrapper — the
+    /// `rebuild_child` path, not the multi-child reconciler's.
+    fn wrapped_slot_logic(state: &mut WrapState) -> crate::FlexView<WrapState> {
+        use frust_core::{AnyView, any};
+        // The branch is taken *inside* the wrapper, so the wrapper's own view
+        // type is stable across the flip and only its child's concrete type
+        // changes — the `rebuild_child` swap. (Branching outside and handing
+        // `Padding` a pre-erased `AnyView` would double-erase the child and
+        // hide the swap from the wrapper entirely; see the note in the
+        // completion summary.)
+        let slot: AnyView<WrapState> = if state.row_editing {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                text_input(state.row.clone(), |s: &mut WrapState, v: String| s.row = v),
+            ))
+        } else {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                crate::text(state.row.clone()),
+            ))
+        };
+        crate::Column(vec![
+            slot,
+            any(text_input(
+                state.composer.clone(),
+                |s: &mut WrapState, v: String| s.composer = v,
+            )),
+        ])
+    }
+
+    /// Build the fixture and focus the **wrapped** field, leaving it (and the
+    /// wrapper pod above it) on the live focus chain.
+    fn focus_the_wrapped_field() -> (
+        RenderRoot<WrapState, crate::FlexView<WrapState>>,
+        frust_text::TextContext,
+        WrapState,
+    ) {
+        let mut state = WrapState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            row_editing: true,
+        };
+        let mut root: RenderRoot<WrapState, crate::FlexView<WrapState>> = RenderRoot::new();
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Full Down+Up so the Up releases the capture and a later Down
+        // hit-tests afresh (see the cross-branch fixture above).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the wrapped field owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn swapping_a_live_focused_wrapper_child_releases_the_session() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+        let gen_before = root.focus_ime_generation();
+
+        // The wrapper's child type-swaps out from under the focused field.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror must not outlive the type-swapped field"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one severed live focus path is exactly one edge"
+        );
+    }
+
+    #[test]
+    fn swapping_a_stale_focused_wrapper_child_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+
+        // Focus moves to the composer: the blur clears the link at the outer
+        // Column (the wrapper's own pod), leaving the wrapped field's flag one
+        // level deeper legitimately stale.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The same swap as the twin above, now on a dead branch.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "swapping a stale-flagged wrapper child must not blur the composer \
+             the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's swap"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change"
         );
     }
 
@@ -2340,6 +3674,1117 @@ mod tests {
             "placeholder with Monospace family should resolve to a different font \
              than the default SystemUi family; if this fails, ph_style likely \
              regressed to not preserving the configured family"
+        );
+    }
+
+    // --- App-font parity (the shell drain must reach the private context) ---
+    //
+    // A `TextInput` owns a private `TextContext` (module docs' Text context
+    // ownership). The defect this section pins: if that private context were a
+    // bare `TextContext::new()`, an app font registered through
+    // `frust::register_app_fonts` — drained by the shell into the *shell-owned*
+    // context, the one `LayoutCtx::text_context` threads to `Text` — would never
+    // reach the field, which would silently fall back to a platform face.
+    //
+    // `frust-widgets` cannot call `frust::register_app_fonts` (its registry
+    // lives in `frust-shell-common`, above this crate), so these tests
+    // reproduce the drain's single observable effect instead:
+    // `FontRegistryWatcher::drain_into` is a `TextContext::register_fonts` call
+    // on the shell-owned context, and nothing else.
+
+    /// The registered test font's bytes — the same public-domain subsetted
+    /// asset `frust-text`'s own registration tests use (and which
+    /// `frust-shell-common` likewise includes cross-crate rather than
+    /// duplicating a font file per crate).
+    const TUFFY: &[u8] = include_bytes!("../../frust-text/tests/fonts/Tuffy-Subset.ttf");
+
+    /// The same face with its `name` table rewritten to "Helvetica". Used for
+    /// the late-registration test so the *pre-registration* leg is meaningful
+    /// on any host: "Helvetica" resolves to whatever the platform has (or a
+    /// fallback) before registration, and to these exact bytes after, per
+    /// fontique's registered-shadows-system-family rule.
+    const TUFFY_AS_HELVETICA: &[u8] =
+        include_bytes!("../../frust-text/tests/fonts/Tuffy-As-Helvetica.ttf");
+
+    /// Tuffy's digit advance at 24px, in logical px — measured from this exact
+    /// asset through this exact parley pin (see `docs/DEVELOPMENT.md`'s
+    /// Version-Pin Policy). Hard-coded so the assertion is on the *shaped
+    /// metric*, not merely on "some font was registered": the device symptom
+    /// behind this bug was a wrong per-glyph advance (1-em fallback boxes)
+    /// while registration itself reported success.
+    const TUFFY_DIGIT_ADVANCE_24PX: f32 = 13.3125;
+
+    /// Slack on [`TUFFY_DIGIT_ADVANCE_24PX`]: parley lays out with
+    /// `quantize = true`, so a run's successive x deltas land on subpixel
+    /// boundaries and one digit pair in ten reads ~0.12px short of the nominal
+    /// advance. Far tighter than any real font swap (a fallback face differs by
+    /// whole pixels at this size).
+    const ADVANCE_TOLERANCE: f32 = 0.25;
+
+    /// The digits string every advance assertion shapes — uniform-width in
+    /// Tuffy, so one expected advance covers every glyph in the run.
+    const DIGITS: &str = "0123456789";
+
+    /// Records each painted glyph run's resolved font bytes and per-glyph
+    /// advances (successive x deltas) — shaped output, not registration state.
+    #[derive(Default)]
+    struct ShapedRunRecorder {
+        runs: Vec<(Vec<u8>, Vec<f32>)>,
+    }
+
+    impl PaintScene for ShapedRunRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let advances = run.glyphs.windows(2).map(|w| w[1].x - w[0].x).collect();
+            self.runs
+                .push((run.font.font().data.as_ref().to_vec(), advances));
+        }
+    }
+
+    /// Paint `root` and return the first glyph run's `(font bytes, advances)`.
+    fn painted_shaped_run(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+    ) -> (Vec<u8>, Vec<f32>) {
+        let mut rec = ShapedRunRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        rec.runs.first().expect("one glyph run painted").clone()
+    }
+
+    /// A 24px style in `family`.
+    fn family_style(family: frust_text::FontFamily) -> TextStyle {
+        TextStyle {
+            family,
+            ..TextStyle::new(24.0, Color::BLACK)
+        }
+    }
+
+    /// A laid-out field carrying `value` (empty = the placeholder path) in
+    /// `family`, built *now* — i.e. with whatever fonts are registered at call
+    /// time, which is the ordering under test.
+    fn field_in_family(
+        state: &mut AppState,
+        family: frust_text::FontFamily,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let style = family_style(family);
+        let mut root = RenderRoot::new();
+        root.rebuild(
+            &mut |s: &mut AppState| {
+                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                    .placeholder(DIGITS)
+                    .text_style(style.clone())
+            },
+            state,
+        );
+        root.layout(Size::new(600.0, 200.0));
+        root
+    }
+
+    /// Assert the shaped run resolved to `expected`'s exact bytes.
+    ///
+    /// Compared behind a `bool` rather than `assert_eq!` on purpose: an
+    /// `assert_eq!` between two font files prints both in full, which is tens
+    /// of megabytes of failure output per failing test.
+    fn assert_same_font(font: &[u8], expected: &[u8], what: &str) {
+        assert!(
+            font == expected,
+            "{what}: shaped against a different face than the registered app \
+             font ({} bytes shaped vs {} expected)",
+            font.len(),
+            expected.len()
+        );
+    }
+
+    /// Assert the shaped run resolved to something *other* than `other`'s bytes.
+    fn assert_other_font(font: &[u8], other: &[u8], what: &str) {
+        assert!(
+            font != other,
+            "{what}: expected a different face, got the same {} bytes",
+            font.len()
+        );
+    }
+
+    /// Assert every advance in `advances` is `expected` (within quantization
+    /// slack — see [`ADVANCE_TOLERANCE`]).
+    fn assert_uniform_advance(advances: &[f32], expected: f32, what: &str) {
+        assert!(!advances.is_empty(), "{what}: no advances measured");
+        for a in advances {
+            assert!(
+                (a - expected).abs() <= ADVANCE_TOLERANCE,
+                "{what}: shaped advance {a} != the registered font's own {expected} \
+                 (all advances: {advances:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn app_registered_font_shapes_the_field_content() {
+        // The shell's construction-time drain, reproduced exactly.
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // A field built *after* that drain — the real ordering: a design system
+        // registers its fonts from `app!`'s setup block, before the first
+        // rebuild builds any widget.
+        let mut state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Tuffy"));
+        let (font, advances) = painted_shaped_run(&mut root);
+
+        assert_same_font(&font, TUFFY, "content");
+        assert_uniform_advance(&advances, TUFFY_DIGIT_ADVANCE_24PX, "content");
+
+        // Negative control: an unregistered family name resolves to a fallback
+        // face, whose bytes cannot be the registered asset's.
+        let mut fallback_state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut fallback_root = field_in_family(
+            &mut fallback_state,
+            frust_text::FontFamily::named("Frust No Such Family"),
+        );
+        let (fallback_font, fallback_advances) = painted_shaped_run(&mut fallback_root);
+        assert_other_font(&fallback_font, TUFFY, "unregistered-family control");
+        assert_ne!(
+            fallback_advances, advances,
+            "fixture sanity: the fallback face must shape these digits to \
+             different metrics, or this test could pass without the app font"
+        );
+    }
+
+    #[test]
+    fn app_registered_font_shapes_the_placeholder() {
+        // The placeholder shapes on its own path (`text_ctx.layout` in `paint`,
+        // not the editor's retained layout), so it needs its own coverage.
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // Empty value + never focused = the placeholder is what gets painted.
+        let mut state = AppState::default();
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Tuffy"));
+        let (font, advances) = painted_shaped_run(&mut root);
+
+        assert_same_font(&font, TUFFY, "placeholder");
+        assert_uniform_advance(&advances, TUFFY_DIGIT_ADVANCE_24PX, "placeholder");
+    }
+
+    #[test]
+    fn font_registered_after_build_reshapes_the_field_at_the_next_layout() {
+        // The shells' *per-frame* late drain: a font can register after this
+        // widget's private context was built. `layout`'s `sync_app_fonts` picks
+        // it up and rebuilds the editor, whose retained parley layout would
+        // otherwise stay shaped against the old faces (clearing the private
+        // context's shape cache alone would not cover it).
+        let mut state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Helvetica"));
+        let (before_font, before_advances) = painted_shaped_run(&mut root);
+        assert_other_font(
+            &before_font,
+            TUFFY_AS_HELVETICA,
+            "pre-registration control (nothing has registered this face yet)",
+        );
+
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY_AS_HELVETICA.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // The shell forces LAYOUT on a `drain_into` that applied something;
+        // this is that relayout.
+        root.layout(Size::new(600.0, 200.0));
+        let (after_font, after_advances) = painted_shaped_run(&mut root);
+
+        // A registered family shadows any system "Helvetica" (fontique 0.11),
+        // so this holds on every host.
+        assert_same_font(&after_font, TUFFY_AS_HELVETICA, "late-registered");
+        assert_uniform_advance(&after_advances, TUFFY_DIGIT_ADVANCE_24PX, "late-registered");
+        assert_ne!(
+            after_advances, before_advances,
+            "the late registration must actually change the shaped metrics"
+        );
+    }
+
+    // --- enabled(false) ---
+
+    /// The standard fixture field, with `enabled`/`obscured`/`read_only`
+    /// dialled in.
+    fn options_logic(
+        enabled: bool,
+        obscured: bool,
+        read_only: bool,
+    ) -> impl FnMut(&mut AppState) -> TextInputView<AppState> {
+        move |state: &mut AppState| {
+            text_input(state.value.clone(), |s: &mut AppState, v: String| {
+                s.changes += 1;
+                s.value = v;
+            })
+            .placeholder("type here")
+            .enabled(enabled)
+            .obscured(obscured)
+            .read_only(read_only)
+        }
+    }
+
+    /// Build + lay out a root over `logic`.
+    fn options_root(
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+        state: &mut AppState,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut root = RenderRoot::new();
+        root.rebuild(logic, state);
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn disabled_field_refuses_focus_and_stays_inert() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled, "a disabled field consumes nothing");
+        assert!(
+            !root.is_focus_active(),
+            "a tap must not focus a disabled field"
+        );
+        assert!(!widget(&root).focused);
+        assert!(!widget(&root).captured, "no drag capture either");
+        assert!(root.ime_state().is_none(), "no IME surface is published");
+
+        // Keys and IME are unreachable (they route down the focus path, which
+        // the tap never claimed) and edit nothing even when injected directly.
+        root.event(&mut state, &ch("x"));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(state.changes, 0);
+
+        // No caret is painted, and the field is at rest.
+        let mut rec = CaretRecorder {
+            caret_color: Some(CARET.multiply_alpha(DISABLED_CONTENT_ALPHA)),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(rec.caret_fills, 0, "a disabled field paints no caret");
+        assert!(!outcome.needs_frame, "a disabled field never blinks");
+    }
+
+    #[test]
+    fn disabling_a_focused_field_releases_focus_and_deactivates_ime() {
+        let mut state = AppState::default();
+        let mut enabled_logic = options_logic(true, false, false);
+        let mut root = options_root(&mut enabled_logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().expect("focused").active);
+
+        // Flip the flag on a rebuild while the field holds focus.
+        let mut disabled_logic = options_logic(false, false, false);
+        let flags = root.rebuild(&mut disabled_logic, &mut state);
+        assert!(
+            flags.needs_layout(),
+            "the disabled dim is baked at layout, so the flip must relayout"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            !widget(&root).focused,
+            "the widget stops considering itself focused immediately"
+        );
+
+        // Leg 1 — the next paint already refuses to act focused and hands the
+        // shell an inactive IME surface (dismissing the keyboard). The root reads
+        // that inactive publish as a session release, so it drops the surface
+        // outright (both mobile bridges serialise `None` to the same inactive
+        // wire form — see `RenderRoot::ime_state`) and clears its focus mirror
+        // rather than leaving it standing over a field that stopped editing.
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(!outcome.needs_frame, "a disabled field paints at rest");
+        assert!(
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
+        );
+
+        // Leg 2 — the first event that reaches the field releases the pod-level
+        // focus path, and edits nothing on the way.
+        root.event(&mut state, &ch("x"));
+        assert!(
+            !root.is_focus_active(),
+            "the stranded focus path is released"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    /// A design-system-shaped theme whose `on_surface_variant` role is itself
+    /// **translucent** — the shape an iOS-style design system installs (its
+    /// `secondaryLabel` token really is `rgba(.., 0.60)`). Built inline here
+    /// because no design language ships in this crate any more. The dim under
+    /// test is an alpha *multiplier* on the resolved role, so it has to behave
+    /// identically over an already-translucent one — which is exactly what a
+    /// token *swap* would not do.
+    fn translucent_role_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(frust_theme::DesignLanguage::Cupertino)
+            .map_colors_light(|c| frust_theme::ColorScheme {
+                on_surface_variant: c.on_surface_variant.multiply_alpha(0.6),
+                ..c
+            })
+            .build()
+    }
+
+    #[test]
+    fn disabled_dims_content_and_outline_in_every_design_language() {
+        // The dim is an alpha multiplier on the *resolved* role, so it must
+        // behave identically unthemed, under the neutral baseline, and under a
+        // design system whose own `on_surface_variant` is already translucent
+        // (see `translucent_role_theme` — the reason a token swap would not be
+        // portable).
+        let translucent = translucent_role_theme();
+        assert!(
+            translucent.scheme().on_surface_variant.components[3] < 1.0,
+            "fixture sanity: the third arm's role must really be translucent"
+        );
+        let languages: Vec<(&str, Option<Theme>)> = vec![
+            ("unthemed", None),
+            ("neutral", Some(Theme::neutral())),
+            ("translucent-role", Some(translucent)),
+        ];
+        for (name, theme) in languages {
+            let enabled = Chrome::resolve(theme.as_ref(), true);
+            let disabled = Chrome::resolve(theme.as_ref(), false);
+            assert_eq!(
+                disabled.placeholder,
+                enabled.placeholder.multiply_alpha(DISABLED_CONTENT_ALPHA),
+                "{name}: disabled placeholder is the enabled role at 38%"
+            );
+            assert_eq!(
+                disabled.border,
+                enabled.border.multiply_alpha(DISABLED_CONTAINER_ALPHA),
+                "{name}: disabled outline is the enabled role at 12%"
+            );
+            assert!(
+                disabled.placeholder.components[3] < enabled.placeholder.components[3],
+                "{name}: the disabled placeholder must actually be more transparent"
+            );
+            assert_eq!(
+                disabled.bg, enabled.bg,
+                "{name}: the container fill stays opaque (see Chrome::resolve)"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_dims_the_layout_baked_glyph_color() {
+        // The second resolution point: the glyph color is baked into the shaped
+        // editor state at LAYOUT time, so dimming has to happen there too.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(false, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        root.set_theme(Box::new(Theme::neutral()));
+        root.layout(Size::new(300.0, 200.0));
+
+        let expected = Theme::neutral()
+            .scheme()
+            .on_surface
+            .multiply_alpha(DISABLED_CONTENT_ALPHA);
+        assert_eq!(
+            painted_text_color(&mut root),
+            expected,
+            "a disabled field's glyphs are on_surface at 38%"
+        );
+    }
+
+    #[test]
+    fn disabled_dims_the_unthemed_fallback_glyph_color() {
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(false, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        assert_eq!(
+            painted_text_color(&mut root),
+            Color::BLACK.multiply_alpha(DISABLED_CONTENT_ALPHA),
+            "with no theme threaded the black fallback dims by the same rule"
+        );
+    }
+
+    // --- read_only(true) ---
+
+    #[test]
+    fn read_only_refuses_focus_and_stays_inert() {
+        // Same inertness contract as disabled (reused suppression hook, not a
+        // parallel one): no focus, no caret, no edits reach the field.
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled, "a read-only field consumes nothing");
+        assert!(
+            !root.is_focus_active(),
+            "a tap must not focus a read-only field"
+        );
+        assert!(!widget(&root).focused);
+        assert!(!widget(&root).captured, "no drag capture either");
+        assert!(root.ime_state().is_none(), "no IME surface is published");
+
+        root.event(&mut state, &ch("x"));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(state.changes, 0);
+
+        let mut rec = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(rec.caret_fills, 0, "a read-only field paints no caret");
+        assert!(!outcome.needs_frame, "a read-only field never blinks");
+    }
+
+    #[test]
+    fn making_a_focused_field_read_only_releases_focus_and_deactivates_ime() {
+        let mut state = AppState::default();
+        let mut live_logic = options_logic(true, false, false);
+        let mut root = options_root(&mut live_logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().expect("focused").active);
+
+        // Flip the flag on a rebuild while the field holds focus.
+        let mut read_only_logic = options_logic(true, false, true);
+        let flags = root.rebuild(&mut read_only_logic, &mut state);
+        assert!(
+            !flags.needs_layout(),
+            "read-only never dims, so the flip is PAINT-only, unlike disabled"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            !widget(&root).focused,
+            "the widget stops considering itself focused immediately"
+        );
+
+        // Leg 1 — the next paint already refuses to act focused and hands the
+        // shell an inactive IME surface (dismissing the keyboard), which the root
+        // reads as a session release: surface dropped, focus mirror cleared (see
+        // the disabled twin above).
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(!outcome.needs_frame, "a read-only field paints at rest");
+        assert!(
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
+        );
+
+        // Leg 2 — the first event that reaches the field releases the pod-level
+        // focus path, and edits nothing on the way.
+        root.event(&mut state, &ch("x"));
+        assert!(
+            !root.is_focus_active(),
+            "the stranded focus path is released"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_chrome_in_every_design_language() {
+        // The first of the two dimming resolution points: `Chrome::resolve`,
+        // observed here through the actual `paint` pass (not called directly),
+        // so the assertion also proves `paint` feeds it `enabled` alone.
+        let languages: Vec<(&str, Option<Theme>)> = vec![
+            ("unthemed", None),
+            ("neutral", Some(Theme::neutral())),
+            ("translucent-role", Some(translucent_role_theme())),
+        ];
+        for (name, theme) in languages {
+            let mut state = AppState::default();
+            let mut logic = options_logic(true, false, true);
+            let mut root = options_root(&mut logic, &mut state);
+            if let Some(theme) = theme.clone() {
+                root.set_theme(Box::new(theme));
+            }
+            let live_border = Chrome::resolve(theme.as_ref(), true).border;
+            let rec = paint_chrome(&mut root);
+            assert_eq!(
+                rec.rrects[0], live_border,
+                "{name}: a read-only field's idle border matches the fully-\
+                 enabled resolved border — not `DISABLED_CONTAINER_ALPHA`-dimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_layout_baked_glyph_color() {
+        // The second of the two dimming resolution points:
+        // `effective_style`'s LAYOUT-time bake.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+        root.set_theme(Box::new(Theme::neutral()));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_eq!(
+            painted_text_color(&mut root),
+            Theme::neutral().scheme().on_surface,
+            "a read-only field's glyphs stay full-alpha on_surface, not dimmed"
+        );
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_unthemed_fallback_glyph_color() {
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+        assert_eq!(
+            painted_text_color(&mut root),
+            Color::BLACK,
+            "with no theme threaded, read-only stays the undimmed black fallback"
+        );
+    }
+
+    #[test]
+    fn switching_a_read_only_field_to_live_shows_no_alpha_change() {
+        // The motivating case: a static mock rendered read-only then switched
+        // interactive at a live handoff must show **no** alpha change at
+        // either resolution point — the pop `enabled(false)` would have
+        // produced.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut read_only_logic = options_logic(true, false, true);
+        let mut root = options_root(&mut read_only_logic, &mut state);
+        let before_glyph = painted_text_color(&mut root);
+        let before_border = paint_chrome(&mut root).rrects[0];
+
+        let mut live_logic = options_logic(true, false, false);
+        root.rebuild(&mut live_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        let after_glyph = painted_text_color(&mut root);
+        let after_border = paint_chrome(&mut root).rrects[0];
+
+        assert_eq!(
+            before_glyph, after_glyph,
+            "glyph color must not change across the read-only -> live handoff"
+        );
+        assert_eq!(
+            before_border, after_border,
+            "border color must not change across the read-only -> live handoff"
+        );
+        assert_eq!(
+            before_glyph,
+            Color::BLACK,
+            "sanity: read-only starts undimmed"
+        );
+    }
+
+    #[test]
+    fn read_only_reports_read_only_not_disabled_semantics() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, false, true);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(
+            node.is_read_only(),
+            "a read-only field says so to a11y, distinct from disabled"
+        );
+        assert!(
+            !node.is_disabled(),
+            "read-only is not the same claim as disabled"
+        );
+    }
+
+    #[test]
+    fn disabled_wins_semantics_over_read_only_when_both_are_set() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false, true);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(node.is_disabled(), "disabled is the stronger claim");
+        assert!(
+            !node.is_read_only(),
+            "disabled and read-only are never both reported"
+        );
+    }
+
+    #[test]
+    fn read_only_obscured_field_stays_password_role_and_never_focuses() {
+        // Orthogonality: `read_only` never touches masking or the IME
+        // content-type hint, it just keeps the field from ever actually
+        // focusing (so there is no active surface to publish a hint on).
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, true);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("read-only + obscured still contributes Role::PasswordInput");
+        assert_eq!(node.value(), Some("\u{2022}".repeat(7).as_str()));
+        assert!(node.is_read_only());
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled);
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+    }
+
+    // --- obscured(true) ---
+
+    #[test]
+    fn mask_offsets_map_1_to_1_per_char_across_a_multi_byte_grapheme() {
+        // "a😀b": 1 + 4 + 1 real bytes; masked "•••" is 3 × 3 bytes.
+        let text = "a\u{1F600}b";
+        assert_eq!(mask_text(text), "\u{2022}\u{2022}\u{2022}");
+        for (real, masked) in [(0, 0), (1, 3), (5, 6), (6, 9)] {
+            assert_eq!(real_to_masked(text, real), masked, "real {real} -> masked");
+            assert_eq!(
+                masked_to_real(text, masked),
+                real,
+                "masked {masked} -> real"
+            );
+        }
+        // Interior offsets snap back to the enclosing character's start, both
+        // ways (the emoji spans real bytes 1..5 and masked bytes 3..6).
+        assert_eq!(real_to_masked(text, 3), 3, "mid-emoji snaps to its start");
+        assert_eq!(masked_to_real(text, 4), 1, "mid-mask snaps to its start");
+        // A newline is preserved so a multi-line field keeps its line count.
+        assert_eq!(mask_text("a\nb"), "\u{2022}\n\u{2022}");
+    }
+
+    #[test]
+    fn obscured_paints_bullets_and_keeps_the_real_value() {
+        /// Records the glyph ids of every painted run, in order.
+        #[derive(Default)]
+        struct GlyphIdRecorder {
+            ids: Vec<u16>,
+        }
+        impl PaintScene for GlyphIdRecorder {
+            fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+            fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+            fn draw_text(&mut self, _o: Point, _t: &str) {}
+            fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+                self.ids.extend(run.glyphs.iter().map(|g| g.id as u16));
+            }
+        }
+
+        fn ids(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> Vec<u16> {
+            let mut rec = GlyphIdRecorder::default();
+            root.paint(&mut rec, FrameTime::ZERO);
+            rec.ids
+        }
+
+        // An obscured field holding "abc" must paint exactly what a plain field
+        // holding "•••" paints — and nothing of what "abc" paints.
+        let mut secret_state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true, false);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}\u{2022}\u{2022}".to_string(),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false, false);
+        let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
+
+        let mut clear_state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut clear = options_root(&mut plain_logic, &mut clear_state);
+
+        assert_eq!(
+            ids(&mut secret),
+            ids(&mut bullets),
+            "an obscured field paints bullets"
+        );
+        assert_ne!(
+            ids(&mut secret),
+            ids(&mut clear),
+            "…and not the real characters"
+        );
+        assert_eq!(
+            widget(&secret).editor.text(),
+            "abc",
+            "the model text is untouched by masking"
+        );
+    }
+
+    #[test]
+    fn obscured_measures_from_the_masked_text_not_the_real_one() {
+        // Masking at glyph-emission time only would leave the field measured
+        // from the real text: an 'i'-heavy secret would size like 'i's while
+        // painting bullets. The mirror is what gets measured, so an obscured
+        // field's width matches the equivalent bullet string's.
+        let mut secret_state = AppState {
+            value: "iiiiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true, false);
+        let secret = options_root(&mut secret_logic, &mut secret_state);
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}".repeat(10),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false, false);
+        let bullets = options_root(&mut plain_logic, &mut bullets_state);
+
+        let masked_w = widget(&secret).display().layout_size().width;
+        let bullets_w = widget(&bullets).display().layout_size().width;
+        let real_w = widget(&secret).editor.layout_size().width;
+        assert_eq!(masked_w, bullets_w, "measured from the masked mirror");
+        assert!(
+            masked_w > real_w,
+            "sanity: bullets are wider than 'i's ({masked_w} vs {real_w})"
+        );
+    }
+
+    #[test]
+    fn obscured_editing_matches_unobscured_across_a_multi_byte_grapheme() {
+        // The masking must not disturb the editing arithmetic: run the same
+        // key sequence on an obscured and a clear field and require identical
+        // editing state at every step, including over a 4-byte emoji.
+        let mut secret_state = AppState::default();
+        let mut secret_logic = options_logic(true, true, false);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+        let mut clear_state = AppState::default();
+        let mut clear_logic = options_logic(true, false, false);
+        let mut clear = options_root(&mut clear_logic, &mut clear_state);
+
+        let plain = Modifiers::default();
+        let meta = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        let events = vec![
+            pointer(PointerPhase::Down, 10.0, 10.0),
+            ch("a"),
+            ch("\u{1F600}"),
+            ch("b"),
+            named(NamedKey::ArrowLeft, plain),
+            named(NamedKey::Backspace, plain),
+            named(NamedKey::End, plain),
+            named(NamedKey::Backspace, plain),
+            InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: meta,
+                repeat: false,
+            }),
+        ];
+        for (i, event) in events.iter().enumerate() {
+            secret.event(&mut secret_state, event);
+            clear.event(&mut clear_state, event);
+            assert_eq!(
+                widget(&secret).editor.editing_state_bytes(),
+                widget(&clear).editor.editing_state_bytes(),
+                "editing state diverged at step {i}"
+            );
+        }
+        // The emoji was deleted as one grapheme in both, and the app saw the
+        // real text throughout.
+        assert_eq!(secret_state.value, "a");
+        assert_eq!(secret_state.value, clear_state.value);
+        assert_eq!(secret_state.changes, clear_state.changes);
+    }
+
+    #[test]
+    fn obscured_caret_rect_follows_the_masked_layout() {
+        // The caret must sit where the *bullets* end, not where the real text
+        // would have ended.
+        let mut secret_state = AppState {
+            value: "iiii".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true, false);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+        secret.event(&mut secret_state, &pointer(PointerPhase::Down, 290.0, 10.0));
+        let masked_caret = secret
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("a caret rect");
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}".repeat(4),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false, false);
+        let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
+        bullets.event(
+            &mut bullets_state,
+            &pointer(PointerPhase::Down, 290.0, 10.0),
+        );
+        let bullets_caret = bullets
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("a caret rect");
+
+        assert_eq!(
+            masked_caret, bullets_caret,
+            "the obscured caret tracks the masked glyphs"
+        );
+        assert_eq!(
+            secret.ime_state().expect("focused").editing.text,
+            "iiii",
+            "the IME surface still carries the real text (see the module docs)"
+        );
+    }
+
+    #[test]
+    fn obscured_tap_places_the_caret_from_the_masked_hit_test() {
+        // A tap between the first and second bullet must land on real byte 1,
+        // resolved against the masked advances (bullets are much wider than
+        // 'i's, so hit-testing the real layout would overshoot to the end).
+        let mut state = AppState {
+            value: "iiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+        // Mid-way through the first mask glyph -> caret before or after char 0.
+        let half_bullet = widget(&root).display().layout_size().width / 16.0;
+        root.event(
+            &mut state,
+            &pointer(PointerPhase::Down, PAD_X + half_bullet, 10.0),
+        );
+        let extent = widget(&root).editor.editing_state_bytes().extent;
+        assert!(
+            extent <= 1,
+            "a tap inside the first mask glyph lands at byte 0 or 1, got {extent}"
+        );
+    }
+
+    #[test]
+    fn obscured_reports_password_role_with_a_masked_value() {
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("an obscured field contributes a Role::PasswordInput node");
+        assert_eq!(
+            node.value(),
+            Some("\u{2022}".repeat(7).as_str()),
+            "the a11y value is masked too — a client reads it verbatim"
+        );
+
+        // Enabled + clear stays a plain TextInput node carrying the real value.
+        let mut plain_logic = options_logic(true, false, false);
+        let plain = options_root(&mut plain_logic, &mut state);
+        let update = plain.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a clear field stays Role::TextInput");
+        assert_eq!(node.value(), Some("hunter2"));
+        assert!(!node.is_disabled(), "an enabled field is not disabled");
+    }
+
+    #[test]
+    fn disabled_reports_disabled_semantics() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false, false);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(node.is_disabled(), "a disabled field says so to a11y");
+    }
+
+    #[test]
+    fn toggling_obscured_relayouts_and_keeps_the_value() {
+        let mut state = AppState {
+            value: "iiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut clear_logic = options_logic(true, false, false);
+        let mut root = options_root(&mut clear_logic, &mut state);
+        let clear_width = widget(&root).display().layout_size().width;
+
+        let mut secret_logic = options_logic(true, true, false);
+        let flags = root.rebuild(&mut secret_logic, &mut state);
+        assert!(
+            flags.needs_layout(),
+            "masking changes the measured text, so the flip must relayout"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            widget(&root).display().layout_size().width > clear_width,
+            "the masked mirror is measured after the flip"
+        );
+        assert_eq!(widget(&root).editor.text(), "iiiiiiii");
+
+        // …and back again.
+        root.rebuild(&mut clear_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).display().layout_size().width, clear_width);
+        assert!(widget(&root).mask_editor.is_none());
+    }
+
+    // --- content_type (widget half) ---
+    //
+    // These lock the widget's IME content-type mapping only — the leak this
+    // closes lives at the platform seam, and no widget-level test can observe
+    // whether a shell actually honours the hint. See the module docs' scope
+    // boundary and `ImeContentType`'s own docs.
+
+    #[test]
+    fn obscured_publishes_password_content_type_across_focus_edit_and_refocus() {
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+
+        // Focus.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("focused").content_type,
+            ImeContentType::Password,
+            "an obscured field's very first published IME surface must already \
+             be Password"
+        );
+
+        // Edit.
+        root.event(&mut state, &ch("x"));
+        assert_eq!(
+            root.ime_state().expect("still focused").content_type,
+            ImeContentType::Password,
+            "content type must not drop on edit"
+        );
+
+        // Blur, then re-focus.
+        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+        assert!(root.ime_state().is_none(), "blur unpublishes the surface");
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("re-focused").content_type,
+            ImeContentType::Password,
+            "content type must be correct again on re-focus, not just the first time"
+        );
+    }
+
+    #[test]
+    fn unobscured_field_publishes_the_default_no_hint_content_type() {
+        // No behaviour change for the common case: a plain field's published
+        // surface keeps the `Normal` default it always had.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("focused").content_type,
+            ImeContentType::Normal
+        );
+
+        root.event(&mut state, &ch("h"));
+        assert_eq!(
+            root.ime_state().expect("still focused").content_type,
+            ImeContentType::Normal
+        );
+    }
+
+    #[test]
+    fn obscured_content_type_is_correct_on_the_first_publication_after_focus() {
+        // The ordering guarantee the security fix rests on: a field that starts
+        // `Normal` and flips to `Password` a frame later has already leaked to
+        // the platform IME (see the module docs). Assert there is no such
+        // window by checking the *very first* `ImeState` a freshly built,
+        // never-before-focused obscured field emits — a single `Down` event,
+        // nothing before it.
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, false);
+        let mut root = options_root(&mut logic, &mut state);
+        assert!(
+            root.ime_state().is_none(),
+            "an unfocused field publishes nothing yet"
+        );
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let ime = root
+            .ime_state()
+            .expect("focusing publishes the first IME surface");
+        assert_eq!(
+            ime.content_type,
+            ImeContentType::Password,
+            "the first-ever publication for an obscured field must already \
+             carry Password"
+        );
+        assert_eq!(
+            ime.editing.text, "hunter2",
+            "sanity: this is the real first publication, not a stale one"
         );
     }
 }

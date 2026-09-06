@@ -23,10 +23,12 @@
 //! [`ButtonStyle::label_role`]. `.small()` selects a reduced padding scale;
 //! `.loading(bool)` shows a rotating spinner in place of the label and
 //! suppresses `on_press` while shown (disabled semantics — see
-//! [`Widget::semantics`](struct.ButtonWidget.html#impl-Widget-for-ButtonWidget)).
-//! The spinner freezes (and stops requesting frames) wherever it currently
-//! sits under `Theme.motion.reduce_motion`, the same skip-animation shape
-//! [`crate::material::loading_indicator`]'s morph loop uses.
+//! [`Widget::semantics`](struct.ButtonWidget.html#impl-Widget-for-ButtonWidget));
+//! `.disabled(bool)` disables interaction and dims the button's appearance
+//! (suppresses `on_press`, blocks focus acquisition, dims fill/border/label via
+//! alpha multiplication). The spinner freezes (and stops requesting frames)
+//! wherever it currently sits under `Theme.motion.reduce_motion`, the same
+//! skip-animation shape [`crate::material::loading_indicator`]'s morph loop uses.
 //!
 //! Precedence stays token-resolved (`docs/CODE_STANDARDS.md`'s Theming
 //! conventions): every fill/border/label color below is `theme > fallback`
@@ -34,6 +36,27 @@
 //! the usual three-tier precedence has nothing to win over — a future
 //! addition would slot in above the theme resolution in
 //! [`ButtonStyle::resolve`]).
+//!
+//! # Label alignment
+//!
+//! [`ButtonView::label_alignment`] reuses [`crate::Alignment`] (the same type
+//! `Align`/`AlignView` are built on — no button-local alignment type exists)
+//! to position the label within a button that has grown past its natural
+//! wrapped size, e.g. a full-bleed button stretched to fill a row. With no
+//! explicit call, the label defaults to leading-pinned on both axes — today's
+//! only behaviour — *unless* the button has been stretched **wider** than its
+//! natural content, in which case it defaults to horizontally centered; a
+//! stretched *height* never auto-centers (narrower than the reported full-bleed-
+//! width defect), so centering vertically always needs an explicit
+//! `.label_alignment()` call. A natural-width/height button is unaffected
+//! either way, since there is no free space for any alignment fraction to
+//! distribute. [`ButtonStyle::Icon`] ignores `label_alignment` outright — it is
+//! definitionally centered (square, re-centered every layout, see below) —
+//! silently half-applying an alignment there would be worse than ignoring it.
+//! **Not inherited**: `cupertino::cupertino_button` and
+//! `material::{split_button, button_group}` are fully independent
+//! implementations that never call [`button`], so none of them gain this
+//! option.
 //!
 //! # Press-feedback scale
 //!
@@ -62,10 +85,11 @@ use frust_theme::Theme;
 use kurbo::{Affine, Arc as KurboArc, Point, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::authoring::presses;
 use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::text;
 use crate::text::ThemeTextColor;
-use crate::{Timing, material::state_layer::PRESSED_OPACITY};
+use crate::{Alignment, Timing, authoring::PRESSED_OPACITY};
 
 /// Corner radius of the button's rounded-rect background, in logical px (the
 /// unthemed fallback; a theme resolves this from `shape.small`).
@@ -125,6 +149,18 @@ const BORDER_TOLERANCE: f64 = 0.1;
 /// by roughly the same amount today's `FILL`→`FILL_PRESSED` step does.
 const PRESSED_DARKEN: f32 = 0.82;
 
+/// Alpha multiplier applied to a disabled button's fill, border, and label. A
+/// disabled button dims the *resolved* theme color's alpha rather than swapping
+/// in a dedicated "disabled" token, at every resolution point (paint-time fill/
+/// border/ink), so it behaves identically under Material, Cupertino, Glyph, and
+/// the unthemed fallback constants. Material 3 puts a disabled container at 12%,
+/// but buttons are a primary interactive target (unlike passive text fields),
+/// so this uses a gentler 38% to maintain visibility while signaling
+/// unavailability (same multiplier as [`frust_text`]/`TextInput`'s
+/// `DISABLED_CONTENT_ALPHA`, Material 3 disabled content token, source:
+/// https://m3.material.io/components/buttons/specs, retrieved 2026-08-01).
+const DISABLED_ALPHA: f32 = 0.38;
+
 /// The press-feedback pivot scale while pressed.
 const PRESSED_SCALE: f64 = 0.96;
 /// The rest (unpressed) scale.
@@ -169,6 +205,13 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::new([c[0], c[1], c[2], alpha])
 }
 
+/// Return `color` with its alpha channel multiplied by `DISABLED_ALPHA` to dim
+/// a disabled button's appearance. Mirrors `TextInput`'s dimming pattern.
+fn disabled_alpha(color: Color) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], c[3] * DISABLED_ALPHA])
+}
+
 /// Build the affine that scales uniformly by `scale` about the absolute
 /// point `pivot` — mirrors `motion::animated::scale_about` (module-private
 /// there); duplicated here per this module's inlining note.
@@ -178,7 +221,7 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
         * Affine::translate((-pivot.x, -pivot.y))
 }
 
-/// A view-held, typed press callback (erased to [`crate::ErasedCallback`] on build).
+/// A view-held, typed press callback (erased to [`crate::authoring::ErasedCallback`] on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
 
 /// Visual style variant for [`Button`]. Additive: the default
@@ -405,6 +448,10 @@ pub struct ButtonView<State: 'static> {
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    disabled: bool,
+    /// `None` = the default stretch-aware behaviour — see the [module
+    /// docs](self)'s "Label alignment" section.
+    label_alignment: Option<Alignment>,
 }
 
 /// Create a button labelled `label` that runs `on_press` against the app state
@@ -419,6 +466,8 @@ pub fn button<State: 'static, F: Fn(&mut State) + 'static>(
         style: ButtonStyle::default(),
         small: false,
         loading: false,
+        disabled: false,
+        label_alignment: None,
     }
 }
 
@@ -451,6 +500,25 @@ impl<State: 'static> ButtonView<State> {
         self.loading = loading;
         self
     }
+
+    /// Disable the button while `disabled` is `true`, suppressing `on_press`,
+    /// blocking focus acquisition, and dimming the appearance (fill, border,
+    /// label) by multiplying their alpha by [`DISABLED_ALPHA`]. Precedence:
+    /// if both `.disabled(true)` and `.loading(true)`, disabled takes effect
+    /// (both suppress interaction and report disabled semantics anyway).
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Explicitly position the label within a stretched button, overriding
+    /// the stretch-aware default on both axes — see the [module
+    /// docs](self)'s "Label alignment" section. Ignored under
+    /// [`ButtonStyle::Icon`], which is always centered.
+    pub fn label_alignment(mut self, alignment: Alignment) -> Self {
+        self.label_alignment = Some(alignment);
+        self
+    }
 }
 
 /// The retained widget for a [`ButtonView`]. The label is a nested
@@ -470,10 +538,15 @@ pub struct ButtonWidget {
     /// desktop shell on every cursor motion) never latches `pressed` or fires
     /// the callback without a preceding press.
     captured: bool,
-    on_press: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    /// Whether the button is disabled (suppresses press, blocks focus, dims appearance).
+    disabled: bool,
+    /// See [`ButtonView::label_alignment`] / the [module docs](self)'s
+    /// "Label alignment" section.
+    label_alignment: Option<Alignment>,
     /// The press-feedback scale driver — see the [module docs](self).
     press: PressAnim,
     /// The loading-spinner rotation controller — always `repeat()`ing
@@ -500,6 +573,42 @@ impl ButtonWidget {
             }
             None => RADIUS,
         }
+    }
+
+    /// Resolve the label's origin for every non-Icon style — see the [module
+    /// docs](self)'s "Label alignment" section. `final_size` is the button's
+    /// own post-`BoxConstraints` box; `content_size` is the label's natural
+    /// wrapped size (label + padding, pre-constrain), used to detect
+    /// stretch. Reuses [`Alignment`]'s `-1.0..=1.0` fraction convention
+    /// directly (its `fraction` helper is private to `align.rs`, so the
+    /// two-line remap is duplicated here rather than exposed just for this).
+    fn resolve_label_origin(
+        alignment: Option<Alignment>,
+        pad_x: f64,
+        pad_y: f64,
+        final_size: Size,
+        content_size: Size,
+    ) -> Point {
+        // Free space beyond the label's natural content box on each axis —
+        // zero unless a `BoxConstraints` min has stretched the button past
+        // it. Clamped at zero defensively: `final_size` should never shrink
+        // below `content_size` (padding never underflows), but a clamp here
+        // costs nothing and avoids ever pushing the label negative.
+        let free_x = (final_size.width - content_size.width).max(0.0);
+        let free_y = (final_size.height - content_size.height).max(0.0);
+        // No explicit alignment: leading-pinned on both axes (today's only
+        // behaviour) unless the button has been stretched *wider* than its
+        // natural content, which defaults the horizontal axis to centered.
+        // Vertical stretch never auto-centers (narrower than the reported
+        // full-bleed-*width* defect) — an explicit call is the only way to
+        // center vertically.
+        let effective = alignment
+            .unwrap_or_else(|| Alignment::new(if free_x > 0.0 { 0.0 } else { -1.0 }, -1.0));
+        let frac = |component: f64| (component + 1.0) / 2.0;
+        Point::new(
+            pad_x + free_x * frac(effective.x),
+            pad_y + free_y * frac(effective.y),
+        )
     }
 
     /// Paint the loading spinner (a rotating partial ring) centered on the
@@ -535,14 +644,16 @@ impl<State: 'static> View<State> for ButtonView<State> {
             .with_curve(Curve::Linear);
         spinner.repeat();
         ButtonWidget {
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
-            on_press: crate::erase_callback(&self.on_press),
+            on_press: crate::authoring::erase_callback(&self.on_press),
             style: self.style,
             small: self.small,
             loading: self.loading,
+            disabled: self.disabled,
+            label_alignment: self.label_alignment,
             press: PressAnim::new(),
             spinner,
         }
@@ -555,13 +666,14 @@ impl<State: 'static> View<State> for ButtonView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the adapter.
-        element.on_press = crate::erase_callback(&self.on_press);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label || prev.style != self.style {
             element.label_text = self.label.clone();
             let prev_view = label_view::<State>(prev.label.clone(), prev.style);
             let next_view = label_view::<State>(self.label.clone(), self.style);
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         if prev.style != self.style {
             element.style = self.style;
@@ -569,6 +681,14 @@ impl<State: 'static> View<State> for ButtonView<State> {
         }
         if prev.small != self.small {
             element.small = self.small;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.label_alignment != self.label_alignment {
+            element.label_alignment = self.label_alignment;
+            // Alignment only moves the label's origin, never the button's
+            // own painted fill/border, but a new origin still needs a
+            // relayout pass to take effect (`ChildPod::set_origin` isn't
+            // itself a repaint trigger).
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.loading != self.loading {
@@ -584,12 +704,24 @@ impl<State: 'static> View<State> for ButtonView<State> {
                 element.press.set_pressed(false);
             }
         }
+        if prev.disabled != self.disabled {
+            element.disabled = self.disabled;
+            flags |= ChangeFlags::PAINT;
+            if self.disabled {
+                // Disabled suppresses the whole event pass from here on (see
+                // `Widget::event`), so a still-armed press would never see
+                // its terminating Up/Cancel — disarm it now.
+                element.pressed = false;
+                element.captured = false;
+                element.press.set_pressed(false);
+            }
+        }
         flags
     }
 
     fn teardown(&self, element: &mut ButtonWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = label_view::<State>(self.label.clone(), self.style);
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 
@@ -609,19 +741,34 @@ impl Widget for ButtonWidget {
         let label_size = self
             .label
             .layout_child(ctx, &BoxConstraints::loose(inner_max));
-        self.label.set_origin(Point::new(pad_x, pad_y));
         let mut size = Size::new(
             label_size.width + inset.width,
             label_size.height + inset.height,
         );
+        // The label's *natural* wrapped size (label + padding), pre-constrain
+        // — used below to detect stretch (`resolve_label_origin`) and, for
+        // Icon, to compute the pre-square origin exactly as before this
+        // option existed.
+        let content_size = size;
         if self.style == ButtonStyle::Icon {
             // Square, secondary-shaped (module docs): grow the shorter side to
             // match the longer one, then re-center the label inside it.
+            // `label_alignment` is ignored here — Icon is always centered
+            // (see the module docs' "Label alignment" section).
             let side = size.width.max(size.height);
             size = Size::new(side, side);
             self.label.set_origin(Point::new(
                 (side - label_size.width) / 2.0,
                 (side - label_size.height) / 2.0,
+            ));
+        } else {
+            let final_size = bc.constrain(size);
+            self.label.set_origin(Self::resolve_label_origin(
+                self.label_alignment,
+                pad_x,
+                pad_y,
+                final_size,
+                content_size,
             ));
         }
         bc.constrain(size)
@@ -634,17 +781,30 @@ impl Widget for ButtonWidget {
         // typecheck under NLL (the reason `ink`/`press_timing` are resolved
         // here rather than lazily, next to where each is consumed).
         let theme = Theme::from_paint_ctx(ctx);
-        let paint = self.style.resolve(theme);
+        let mut paint = self.style.resolve(theme);
         let radius = Self::resolve_radius(theme, ctx.size());
         // Press-feedback scale: `Down`/`Up`/`Cancel` only recorded the target
         // (see the module docs); resolve the direction's `Timing` now that a
         // theme is in scope.
         let press_timing = resolve_press_timing(theme, self.pressed);
-        let ink = self.style.resolve_ink(theme);
+        let mut ink = self.style.resolve_ink(theme);
         // Resolved now (last use of the shared `theme` borrow — see the
         // comment above) so the `loading` branch below can check it without
         // re-borrowing `theme` across the intervening `&mut ctx` calls.
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+
+        // Apply disabled dimming to fill, border, and ink (label/spinner color).
+        // This multiplies the resolved theme color's alpha, so it behaves
+        // identically under Material, Cupertino, Glyph, and the unthemed
+        // fallback constants.
+        if self.disabled {
+            paint.fill = disabled_alpha(paint.fill);
+            paint.fill_pressed = disabled_alpha(paint.fill_pressed);
+            if let Some(ref mut border) = paint.border {
+                *border = disabled_alpha(*border);
+            }
+            ink = disabled_alpha(ink);
+        }
 
         let fill = if self.pressed {
             paint.fill_pressed
@@ -700,9 +860,9 @@ impl Widget for ButtonWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Loading suppresses on_press and every other interaction (disabled
-        // semantics — see `Widget::semantics` and the module docs).
-        if self.loading {
+        // Loading and disabled both suppress on_press and every other interaction
+        // (disabled semantics — see `Widget::semantics` and the module docs).
+        if self.loading || self.disabled {
             return EventResult::Ignored;
         }
         let InputEvent::Pointer(p) = event else {
@@ -710,6 +870,9 @@ impl Widget for ButtonWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.press.set_pressed(true);
@@ -759,17 +922,19 @@ impl Widget for ButtonWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // A button is a single a11y node (Role::Button) labelled by its text; it
         // does not expose its inner label as a separate child node. It advertises
-        // the Click action it fires on release — unless loading, which reports
-        // disabled semantics instead.
+        // the Click action it fires on release — unless loading or disabled,
+        // which both report disabled semantics instead.
         ctx.push_node(Role::Button, |node| {
             node.set_label(self.label_text.as_str());
-            if self.loading {
+            if self.loading || self.disabled {
                 node.set_disabled();
             } else {
                 node.add_action(Action::Click);
             }
         });
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]
@@ -798,10 +963,44 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust_core::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut ButtonWidget, state: &mut Counter, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_neither_presses_nor_captures_nor_fires() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(!w.pressed, "no pressed chrome on a right-click");
+        assert!(!w.captured, "and no capture for the shell to wedge on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 10.0, 10.0),
+        );
+        assert_eq!(state.presses, 0);
+
+        // The primary gesture is untouched by the guard.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(w.pressed);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 1);
     }
 
     #[test]
@@ -937,7 +1136,7 @@ mod tests {
 
     #[test]
     fn themed_paint_resolves_primary_and_shape_small() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = widget();
         let (radius, color) = paint_bg(&mut w, Some(&theme));
         assert_eq!(color, theme.scheme().primary, "resting fill is primary");
@@ -982,14 +1181,14 @@ mod tests {
         let mut w = widget();
         assert_eq!(w.style, ButtonStyle::Primary);
         assert_eq!(paint_bg(&mut w, None), (RADIUS, FILL));
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w2 = widget();
         assert_eq!(paint_bg(&mut w2, Some(&theme)).1, theme.scheme().primary);
     }
 
     #[test]
     fn secondary_style_paints_raised_surface_and_outline_border() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Secondary);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1000,7 +1199,7 @@ mod tests {
 
     #[test]
     fn ghost_style_is_transparent_at_rest_and_washes_on_press() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Ghost);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1021,7 +1220,7 @@ mod tests {
 
     #[test]
     fn danger_style_paints_error_border_and_error_faint_pressed_wash() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Danger);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1036,18 +1235,16 @@ mod tests {
     }
 
     #[test]
-    fn per_style_fill_border_label_hold_under_glyph_dark_light_and_m3() {
+    fn per_style_fill_border_label_hold_across_baselines() {
         // The same style -> role mapping (per the module docs' "uniform
         // across languages") reads straight off `ColorScheme` fields rather
-        // than hardcoding a per-baseline table, so this asserts it against
-        // three concrete baselines
-        // rather than just M3 (already covered field-by-field by the
-        // `secondary`/`ghost`/`danger`_style_* tests above).
-        let baselines = [
-            frust_theme::Theme::m3_baseline(),
-            frust_theme::Theme::glyph_baseline(), // dark (the canonical brightness)
-            frust_theme::Theme::glyph_baseline().with_brightness(frust_theme::Brightness::Light),
-        ];
+        // than hardcoding a per-baseline table, so this asserts it against a
+        // baseline matrix rather than a single one (each style is already
+        // covered field-by-field by the `secondary`/`ghost`/`danger`_style_*
+        // tests above). A design system's own baseline is exercised by that
+        // design system's own tests; the mapping asserted here is
+        // language-neutral by construction.
+        let baselines = [frust_theme::Theme::neutral()];
         for theme in &baselines {
             let scheme = theme.scheme();
 
@@ -1113,6 +1310,111 @@ mod tests {
         );
     }
 
+    // --- Label alignment ----------------------------------------------------
+
+    /// Lay a button out under `bc` and return `(size, label_origin)`.
+    fn layout_with(w: &mut ButtonWidget, bc: &BoxConstraints) -> (Size, Point) {
+        let mut text_ctx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        let size = w.layout(&mut lctx, bc);
+        (size, w.label.origin())
+    }
+
+    #[test]
+    fn natural_width_button_label_origin_is_unchanged_by_default() {
+        // A loose constraint the label never grows into: the button wraps to
+        // its natural content size, so there's no free space for any
+        // alignment fraction to distribute — the label stays pinned at
+        // (PAD_X, PAD_Y), byte-identical to pre-option behaviour.
+        let view = button::<Counter, _>("go", |_: &mut Counter| {});
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let (size, origin) = layout_with(&mut w, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+        assert!(size.width < 200.0, "button must not have been stretched");
+        assert_eq!(origin, Point::new(PAD_X, PAD_Y));
+    }
+
+    #[test]
+    fn stretched_button_defaults_to_centered_label() {
+        // A width-only min constraint forces the button wider than its
+        // natural content — with no explicit `.label_alignment()`, the
+        // label defaults to horizontally centered.
+        let view = button::<Counter, _>("go", |_: &mut Counter| {});
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::new(200.0, 0.0), Size::new(200.0, 200.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size.width, 200.0, "min forces the full stretched width");
+        let label_width = w.label.size().width;
+        let expected_x = (size.width - label_width) / 2.0;
+        assert!(
+            (origin.x - expected_x).abs() < 1e-6,
+            "stretched button must default to a centered label: got {origin:?}, expected x={expected_x}"
+        );
+        // Height was not stretched — the default never auto-centers that axis.
+        assert_eq!(origin.y, PAD_Y);
+    }
+
+    #[test]
+    fn explicit_leading_alignment_overrides_the_stretched_default() {
+        let view =
+            button::<Counter, _>("go", |_: &mut Counter| {}).label_alignment(Alignment::TOP_LEFT);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::new(200.0, 0.0), Size::new(200.0, 200.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size.width, 200.0, "min forces the full stretched width");
+        assert_eq!(
+            origin,
+            Point::new(PAD_X, PAD_Y),
+            "an explicit leading alignment pins at the padding even when stretched"
+        );
+    }
+
+    #[test]
+    fn explicit_center_alignment_also_centers_vertically_when_stretched() {
+        // Height auto-centering never happens by default, but an explicit
+        // `Alignment::CENTER` still applies to both axes.
+        let view =
+            button::<Counter, _>("go", |_: &mut Counter| {}).label_alignment(Alignment::CENTER);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::tight(Size::new(200.0, 100.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size, Size::new(200.0, 100.0));
+        assert!(
+            origin.y > PAD_Y,
+            "an explicit CENTER alignment must also center vertically: got {origin:?}"
+        );
+    }
+
+    #[test]
+    fn icon_style_ignores_explicit_label_alignment() {
+        // Icon is definitionally centered (module docs) — an explicit
+        // `.label_alignment()` must not change its square-centered layout;
+        // the widget's own layout must be identical with or without one.
+        let plain = button::<Counter, _>("i", |_: &mut Counter| {}).style(ButtonStyle::Icon);
+        let with_alignment = button::<Counter, _>("i", |_: &mut Counter| {})
+            .style(ButtonStyle::Icon)
+            .label_alignment(Alignment::TOP_LEFT);
+        let mut counter = 0u64;
+        let mut plain_w = View::<Counter>::build(&plain, &mut BuildCtx::new(&mut counter));
+        let mut aligned_w =
+            View::<Counter>::build(&with_alignment, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
+        let (plain_size, plain_origin) = layout_with(&mut plain_w, &bc);
+        let (aligned_size, aligned_origin) = layout_with(&mut aligned_w, &bc);
+        assert_eq!(
+            plain_size.width, plain_size.height,
+            "Icon style must be square"
+        );
+        assert_eq!(
+            (plain_size, plain_origin),
+            (aligned_size, aligned_origin),
+            "an explicit label_alignment must be ignored under ButtonStyle::Icon"
+        );
+    }
+
     #[test]
     fn loading_suppresses_on_press_and_reports_disabled() {
         let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).loading(true);
@@ -1122,6 +1424,78 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(state.presses, 0, "loading must suppress on_press");
+    }
+
+    #[test]
+    fn disabled_suppresses_on_press() {
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 0, "disabled must suppress on_press");
+    }
+
+    #[test]
+    fn disabled_blocks_focus_and_press_suppression() {
+        // A disabled button returns Ignored on a Down, preventing pointer capture
+        // and press state setup — identical to loading's suppression.
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(
+            matches!(result, EventResult::Ignored),
+            "disabled must return Ignored, not Handled"
+        );
+        assert!(!w.captured, "disabled must not capture pointer");
+        assert!(!w.pressed, "disabled must not set pressed state");
+    }
+
+    #[test]
+    fn disabled_dims_appearance_by_alpha_multiplication() {
+        // A disabled button multiplies its resolved theme colors' alpha by
+        // DISABLED_ALPHA without changing the colors themselves, so the
+        // dimming works identically under Material, Cupertino, Glyph, and
+        // unthemed modes.
+        let theme = frust_theme::Theme::neutral();
+        let mut w = widget();
+        w.disabled = true;
+        let mut rec = RRectRecorder::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
+        w.paint(&mut ctx, &mut rec);
+
+        // The resting fill should be the primary color dimmed by DISABLED_ALPHA.
+        let undimmed = theme.scheme().primary;
+        let dimmed = disabled_alpha(undimmed);
+        assert_eq!(
+            rec.rrects[0].1, dimmed,
+            "disabled button must dim the fill by multiplying alpha: got {:?}, expected {:?}",
+            rec.rrects[0].1, dimmed
+        );
+    }
+
+    #[test]
+    fn disabled_and_loading_interaction() {
+        // Disabled takes precedence over loading — if both are true, the button
+        // is treated as disabled (both suppress interaction anyway, but we test
+        // the precedence semantics is respected by verifying press suppression).
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1)
+            .loading(true)
+            .disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 0, "disabled+loading must suppress on_press");
+        // Both flags stay set in the widget (neither clears the other on rebuild).
+        assert!(w.loading, "loading flag is preserved");
+        assert!(w.disabled, "disabled flag is preserved");
     }
 
     /// `reduce_motion` freezes the loading spinner wherever it currently sits
@@ -1137,7 +1511,7 @@ mod tests {
         let mut w = widget();
         w.loading = true;
 
-        let mut theme = frust_theme::Theme::m3_baseline();
+        let mut theme = frust_theme::Theme::neutral();
         theme.motion.reduce_motion = false;
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
         let mut scene = RRectRecorder::default();

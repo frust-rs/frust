@@ -1,5 +1,5 @@
-//! Reusable render widgets. Phase 1 ships the enlarged, padded button (D5:
-//! 3-row bordered target with hover + pressed states).
+//! Reusable render widgets: the enlarged, padded button (a 3-row bordered
+//! target with hover + pressed states).
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -23,8 +23,8 @@ pub enum ButtonState {
 /// Draw an enlarged, padded, rounded-border button filling `area`.
 ///
 /// The label is centered; the border brightens to `accent` on hover and the
-/// fill inverts to `primary` on press (matching the workbook B1 behavior). A
-/// leading `icon` (already resolved from [`Theme::icons`]) prefixes the label.
+/// fill inverts to `primary` on press. A leading `icon` (already resolved
+/// from [`Theme::icons`]) prefixes the label.
 pub fn big_button(
     frame: &mut Frame,
     area: Rect,

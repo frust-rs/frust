@@ -41,23 +41,34 @@ pub fn device_abi(runner: &dyn ProcessRunner, device_id: &str) -> String {
     }
 }
 
-/// `adb -s <id> shell am start -n <appId>/.MainActivity`
-/// (`MainActivity` lives in the app's own package, per the scaffolded
-/// template).
+/// `adb -s <id> shell am start -n <component>`, where `component` is a
+/// `<package>/<activity>` pair — normally
+/// [`badging::LaunchIdentity::component`](super::badging::LaunchIdentity::component)
+/// read back out of the built APK, else [`default_component`]'s
+/// `frust.toml`-derived fallback.
 ///
-/// `app_id` is interpolated into a device-shell command line
-/// (`adb shell am start -n <id>/…`), so it must already be a
-/// grammar-validated Android application id by the time it reaches here —
-/// `android_run::project::detect` is the single point that resolves
-/// `Project::app_id` and validates it (via `crate::android_id::validate`)
-/// before this function or [`resolve_pid`] ever see it. Do not add another
-/// `app_id` source that skips that validation.
-pub fn launch(runner: &dyn ProcessRunner, device_id: &str, app_id: &str) -> Result<Output> {
-    let target = format!("{app_id}/.MainActivity");
+/// `component` is interpolated into a device-shell command line, so both of
+/// its halves must already be grammar-validated by the time they reach here.
+/// There are exactly two sources, each validating at the single point it
+/// resolves a value (via `crate::android_id::validate`):
+/// `android_run::project::detect` for `Project::app_id` (fed through
+/// [`default_component`]) and `android_run::badging::parse` for a badging-read
+/// package/activity. Do not add a third that skips that validation.
+pub fn launch(runner: &dyn ProcessRunner, device_id: &str, component: &str) -> Result<Output> {
     runner.run(
         "adb",
-        &["-s", device_id, "shell", "am", "start", "-n", &target],
+        &["-s", device_id, "shell", "am", "start", "-n", component],
     )
+}
+
+/// The pre-badging launch component: `<appId>/.MainActivity`, resolving
+/// `MainActivity` relatively against the installed package. Correct whenever
+/// the installed application id and the activity's namespace coincide (every
+/// project without a flavor `applicationIdSuffix`), and the documented
+/// fallback when the APK's badging can't be read — see
+/// [`badging::resolve`](super::badging::resolve).
+pub fn default_component(app_id: &str) -> String {
+    format!("{app_id}/.MainActivity")
 }
 
 /// The real per-attempt delay used by [`resolve_pid`]'s retry loop.
@@ -70,19 +81,22 @@ pub const PID_RETRY_ATTEMPTS: u32 = 10;
 /// called between attempts (not after the last) — injected so tests don't
 /// block on a real clock.
 ///
-/// Same validated-at-source invariant as [`launch`]: `app_id` is
-/// interpolated into `adb shell pidof <id>` and must already be
-/// grammar-validated by `android_run::project::detect` before it reaches
-/// here.
+/// Same validated-at-source invariant as [`launch`]: `package` is
+/// interpolated into `adb shell pidof <package>` and must already be
+/// grammar-validated by whichever of the two sources resolved it
+/// (`android_run::project::detect` or `android_run::badging::parse`) before it
+/// reaches here. It must also be the *installed* package — the one
+/// [`launch`]'s component named — or the poll never finds the process it just
+/// started.
 pub fn resolve_pid(
     runner: &dyn ProcessRunner,
     device_id: &str,
-    app_id: &str,
+    package: &str,
     max_attempts: u32,
     sleep: &mut dyn FnMut(),
 ) -> Result<String> {
     for attempt in 0..max_attempts.max(1) {
-        let out = runner.run("adb", &["-s", device_id, "shell", "pidof", app_id])?;
+        let out = runner.run("adb", &["-s", device_id, "shell", "pidof", package])?;
         let pid = out.stdout.trim();
         if !pid.is_empty() {
             return Ok(pid.to_string());
@@ -91,7 +105,7 @@ pub fn resolve_pid(
             sleep();
         }
     }
-    bail!("`{app_id}` did not report a pid within the retry window (adb shell pidof empty)");
+    bail!("`{package}` did not report a pid within the retry window (adb shell pidof empty)");
 }
 
 /// Streams `adb -s <id> logcat --pid <pid>` to `on_line` until the child
@@ -179,12 +193,43 @@ mod tests {
     }
 
     #[test]
-    fn launch_targets_main_activity_in_app_package() {
+    fn default_component_targets_main_activity_relative_to_the_app_package() {
+        assert_eq!(
+            default_component("dev.f0x.myapp"),
+            "dev.f0x.myapp/.MainActivity"
+        );
+    }
+
+    #[test]
+    fn launch_targets_the_default_component() {
         let runner = FakeProcessRunner::new().with(
             "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
             ok(""),
         );
-        let out = launch(&runner, "emulator-5554", "dev.f0x.myapp").unwrap();
+        let out = launch(
+            &runner,
+            "emulator-5554",
+            &default_component("dev.f0x.myapp"),
+        )
+        .unwrap();
+        assert!(out.success);
+    }
+
+    /// A flavored build's component: neither half is derivable from the
+    /// other (`applicationIdSuffix` moves the package, not the activity's
+    /// namespace-rooted class), so `launch` must pass it through verbatim.
+    #[test]
+    fn launch_passes_a_badging_derived_component_through_verbatim() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 shell am start -n dev.f0x.myapp.dev/dev.f0x.myapp.MainActivity",
+            ok(""),
+        );
+        let out = launch(
+            &runner,
+            "emulator-5554",
+            "dev.f0x.myapp.dev/dev.f0x.myapp.MainActivity",
+        )
+        .unwrap();
         assert!(out.success);
     }
 

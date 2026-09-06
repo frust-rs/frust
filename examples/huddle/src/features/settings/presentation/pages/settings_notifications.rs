@@ -1,11 +1,11 @@
 //! Notification settings (`/you/settings/notifications`) — a controller-backed
-//! frequency radio group plus per-type toggle switches (Huddle showcase, task
-//! 15).
+//! frequency radio group plus per-type toggle switches (a Huddle showcase
+//! screen).
 //!
 //! Hosts a [`NotificationsController`] via
 //! [`use_controller`](clean_signals_frust::use_controller) — the same
 //! component-scoped seam the appearance screen uses. The frequency
-//! [`radio`](frust::radio) group and the [`Switch`](frust::Switch)es are
+//! [`radio`](frust::radio) group and the [`Switch`](frust_material::Switch)es are
 //! controlled components: each reports its requested value into a controller
 //! signal, and the next rebuild reflects the stored value back (no theme is
 //! applied — these are pure preference data).
@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use frust::{
     AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding, Row, Set,
-    SizedBox, Switch, any, app_bar, component, flexible, inflexible, radio, scroll_view, text,
+    SizedBox, any, component, flexible, inflexible, radio, scroll_view, text,
 };
+use frust_material::{Switch, app_bar};
 
 use crate::HuddleState;
 use crate::failure::HuddleFailure;

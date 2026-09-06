@@ -4,11 +4,11 @@
 
 use std::fs;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use toml_edit::{DocumentMut, InlineTable, Item, Value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 
-use super::registry::find_plugin;
+use super::registry::{find_plugin, known_plugins};
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
 use crate::scaffold::context::frust_path_from_project_subdir;
 
@@ -146,7 +146,154 @@ fn apply_contribution(
             cfg,
             comment,
         } => apply_app_crate_macro(project_root, invocation, *cfg, comment),
+        Contribution::CargoFeature { name, feature } => {
+            apply_cargo_feature(doc, cargo_changed, name, feature)
+        }
+        Contribution::ScaffoldFile {
+            rel_path, contents, ..
+        } => apply_scaffold_file(project_root, rel_path, contents),
+        // The desktop lane applies to the *assembled bundle* at
+        // `frust build macos|windows|linux` time, never to a project file
+        // `add_plugin` could write (see each variant's own doc comment on
+        // `Contribution` for the build-time rationale). `add_plugin` only
+        // records the contribution; there is nothing to apply or to find
+        // already present here, so the outcome is unconditional and never
+        // touches `project_root`.
+        Contribution::MacosPlistEntry { .. }
+        | Contribution::MacosEntitlement { .. }
+        | Contribution::LinuxDesktopEntry { .. } => Ok(AddOutcome::AppliedAtBuild),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Desktop-lane detection — `desktop_contributions`, the API a later
+// bundle-assembly task consumes at `frust build macos|windows|linux` time.
+// No project file is read or written on this path beyond `Cargo.toml`
+// itself; nothing here ever calls `apply_contribution`.
+// ---------------------------------------------------------------------------
+
+/// A desktop-lane contribution ([`Contribution::MacosPlistEntry`] /
+/// [`Contribution::MacosEntitlement`] / [`Contribution::LinuxDesktopEntry`])
+/// owed by a plugin the project depends on — one [`desktop_contributions`]
+/// result row.
+#[derive(Debug, Clone, Copy)]
+pub struct DesktopContribution {
+    /// The owning plugin's [`PluginSpec::id`].
+    pub plugin_id: &'static str,
+    /// The contribution itself — always one of the three desktop variants.
+    pub contribution: &'static Contribution,
+}
+
+/// Desktop-lane contributions owed by every plugin the project at
+/// `project_root` depends on — the detection API `frust build macos|linux`
+/// consumes to assemble a bundle (`add_plugin` itself never applies these;
+/// see [`Contribution::MacosPlistEntry`]'s doc comment).
+///
+/// "Installed" means the plugin's own base [`Contribution::CargoDep`] name
+/// appears as a `[dependencies]` key in the project's `Cargo.toml` — the
+/// same source of truth [`add_plugin`] itself writes to, read here rather
+/// than duplicated — **or** some other dependency entry renames itself via
+/// an inline `package = "<name>"` key ([`plugin_is_installed`]). A dependency
+/// carrying `optional = true` is never counted as installed, even when its
+/// name matches: an optional dep the app never enabled by feature must not
+/// merge the plugin's desktop-lane keys/entitlements into a bundle whose
+/// binary may not actually contain it.
+///
+/// **v1 scope:** only a plugin's **base** contributions are scanned. A
+/// desktop contribution gated behind an optional [`super::FeatureSpec`]
+/// bundle is invisible to this function even when the caller has requested that
+/// feature — `add_plugin`'s `features` argument is never persisted
+/// anywhere, so there is no durable record of *which* features a project
+/// selected for this function to read back. Widening this is future work,
+/// gated on feature selection becoming durable. Likewise, only the top-level
+/// `[dependencies]` table is consulted — a dep declared under a
+/// target-scoped table (`[target.'cfg(...)'.dependencies]`) is invisible to
+/// this function, matching the same base-only conservatism.
+///
+/// Order is deterministic: registry order ([`known_plugins`]), then each
+/// plugin's own declaration order within `base`.
+pub fn desktop_contributions(
+    project_root: &Path,
+) -> Result<Vec<DesktopContribution>, PluginAddError> {
+    let cargo_path = project_root.join(CARGO_TOML_REL);
+    let cargo_src = fs::read_to_string(&cargo_path)
+        .map_err(|_| PluginAddError::MissingProjectFile(CARGO_TOML_REL.to_string()))?;
+    let doc = cargo_src
+        .parse::<DocumentMut>()
+        .map_err(|e| PluginAddError::UnparseableCargoToml(e.to_string()))?;
+    Ok(desktop_contributions_for(&known_plugins(), &doc))
+}
+
+/// [`desktop_contributions`]'s pure inner logic, parameterized over the
+/// registry list and the parsed `Cargo.toml` doc so a test can inject
+/// synthetic [`PluginSpec`]s — the real registry carries zero desktop-lane
+/// rows today (this is the seam, not a backfill), which would otherwise
+/// make the detection logic itself untestable.
+fn desktop_contributions_for(specs: &[PluginSpec], doc: &DocumentMut) -> Vec<DesktopContribution> {
+    specs
+        .iter()
+        .filter(|spec| plugin_is_installed(spec, doc))
+        .flat_map(|spec| {
+            spec.base.iter().filter_map(move |contribution| {
+                is_desktop_contribution(contribution).then_some(DesktopContribution {
+                    plugin_id: spec.id,
+                    contribution,
+                })
+            })
+        })
+        .collect()
+}
+
+/// Whether `contribution` is one of the three desktop-lane variants.
+fn is_desktop_contribution(contribution: &Contribution) -> bool {
+    matches!(
+        contribution,
+        Contribution::MacosPlistEntry { .. }
+            | Contribution::MacosEntitlement { .. }
+            | Contribution::LinuxDesktopEntry { .. }
+    )
+}
+
+/// A plugin is "installed" iff its own base [`Contribution::CargoDep`] name
+/// either appears as a `[dependencies]` key in `doc`, or names a **renamed**
+/// dependency entry via that entry's inline `package = "<name>"` key (e.g.
+/// `cam = { package = "frust-camera", path = "..." }`) — but never a dep
+/// entry carrying `optional = true`, whose base contributions must not merge
+/// into a bundle the plugin may not actually be linked into (see
+/// [`desktop_contributions`]'s doc comment).
+fn plugin_is_installed(spec: &PluginSpec, doc: &DocumentMut) -> bool {
+    let Some(name) = spec.base.iter().find_map(|c| match c {
+        Contribution::CargoDep { name } => Some(*name),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some(deps) = doc
+        .get("dependencies")
+        .and_then(|item| item.as_table_like())
+    else {
+        return false;
+    };
+    deps.iter().any(|(key, value)| {
+        if dep_is_optional(value) {
+            return false;
+        }
+        key == name || dep_renamed_package(value) == Some(name)
+    })
+}
+
+/// Whether a `[dependencies]` entry carries `optional = true`.
+fn dep_is_optional(value: &Item) -> bool {
+    value
+        .as_table_like()
+        .and_then(|t| t.get("optional"))
+        .and_then(Item::as_bool)
+        .unwrap_or(false)
+}
+
+/// A `[dependencies]` entry's `package = "..."` value, if it renames itself.
+fn dep_renamed_package(value: &Item) -> Option<&str> {
+    value.as_table_like()?.get("package")?.as_str()
 }
 
 /// Append a macro invocation to the app crate's `src/lib.rs`
@@ -160,8 +307,8 @@ fn apply_contribution(
 ///
 /// Idempotence keys on the invocation text itself, so an author who moved the
 /// line elsewhere in the file — or wrote it by hand before running Add Plugin,
-/// which is exactly what the task-14 device gate did — is not handed a
-/// duplicate.
+/// which is exactly what a device gate run against a hand-edited project did —
+/// is not handed a duplicate.
 fn apply_app_crate_macro(
     project_root: &Path,
     invocation: &str,
@@ -272,6 +419,49 @@ fn apply_cargo_dep(
     Ok(AddOutcome::Applied)
 }
 
+/// Enable a cargo feature on an already-contributed dependency's inline table
+/// ([`Contribution::CargoFeature`]): get-or-create the dep's `features` array
+/// and push `feature` if it isn't already there.
+///
+/// The dependency must already carry an inline table (a prior
+/// [`Contribution::CargoDep`] applied by the same or an earlier `add_plugin`
+/// call, per [`apply_cargo_dep`]'s shape) — [`PluginAddError::NoSuchCargoDep`]
+/// if it doesn't, never a silently minted dep.
+fn apply_cargo_feature(
+    doc: &mut DocumentMut,
+    changed: &mut bool,
+    name: &str,
+    feature: &str,
+) -> Result<AddOutcome, PluginAddError> {
+    let no_such_dep = || PluginAddError::NoSuchCargoDep {
+        name: name.to_string(),
+        feature: feature.to_string(),
+    };
+
+    let deps = doc
+        .get_mut("dependencies")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(no_such_dep)?;
+
+    let dep = deps
+        .get_mut(name)
+        .and_then(Item::as_inline_table_mut)
+        .ok_or_else(no_such_dep)?;
+
+    let features = dep
+        .entry("features")
+        .or_insert_with(|| Value::Array(Array::new()))
+        .as_array_mut()
+        .ok_or_else(no_such_dep)?;
+
+    if features.iter().any(|v| v.as_str() == Some(feature)) {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+    features.push(feature);
+    *changed = true;
+    Ok(AddOutcome::Applied)
+}
+
 fn apply_manifest_permission(
     project_root: &Path,
     permission: &str,
@@ -304,6 +494,50 @@ fn apply_plist_entry(
     let out = insert_before_anchor(&src, "</dict>", &block, PLIST_REL)?;
     write_file(&path, PLIST_REL, &out)?;
     Ok(AddOutcome::Applied)
+}
+
+/// Create a file at `rel_path` (relative to the project root) with exact
+/// `contents` if it doesn't already exist ([`Contribution::ScaffoldFile`]).
+/// Parent directories are created as needed.
+///
+/// Idempotency guard: presence alone, never a content comparison — an
+/// existing file (even one the user has since hand-edited, e.g. their own
+/// locale strings) is left untouched and reports
+/// [`AddOutcome::AlreadyPresent`]. Never a blind overwrite
+/// (`docs/PLUGINS_CODE_STANDARDS.md`'s idempotency charter).
+fn apply_scaffold_file(
+    project_root: &Path,
+    rel_path: &str,
+    contents: &str,
+) -> Result<AddOutcome, PluginAddError> {
+    let safe_rel = safe_scaffold_rel_path(rel_path)?;
+    let path = project_root.join(safe_rel);
+    if path.exists() {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| PluginAddError::Io {
+            path: rel_path.to_string(),
+            message: e.to_string(),
+        })?;
+    }
+    write_file(&path, rel_path, contents)?;
+    Ok(AddOutcome::Applied)
+}
+
+/// Reject an absolute `rel_path` or one carrying a `..` component before it
+/// is ever joined onto `project_root`. Every [`Contribution::ScaffoldFile`]
+/// in the registry is a static, trusted string, but the check stays
+/// defensive rather than assuming that forever (see
+/// [`PluginAddError::UnsafeScaffoldPath`]).
+fn safe_scaffold_rel_path(rel_path: &str) -> Result<&Path, PluginAddError> {
+    let path = Path::new(rel_path);
+    let is_unsafe =
+        path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir));
+    if is_unsafe {
+        return Err(PluginAddError::UnsafeScaffoldPath(rel_path.to_string()));
+    }
+    Ok(path)
 }
 
 /// Wire a plugin's `com.android.library` module into the generated project:
@@ -871,8 +1105,8 @@ mod tests {
     }
 
     /// A scaffold context whose `frust_path` deliberately does NOT exist on
-    /// disk — so the derived clean-signals-rs sibling is absent (missing-sibling
-    /// error case) and no accidental real checkout is picked up.
+    /// disk — so a derived `../clean-signals-rs` sibling path is absent too,
+    /// and no accidental real checkout is picked up.
     fn test_context() -> TemplateContext {
         TemplateContext {
             project_name: "my_app".into(),
@@ -1369,31 +1603,740 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // -----------------------------------------------------------------------
+    // `Contribution::CargoFeature`
+    // -----------------------------------------------------------------------
+
+    /// Enabling a feature on a dep [`apply_cargo_dep`] just created lands a
+    /// `features = [...]` array on that same inline table.
     #[test]
-    fn missing_sibling_for_clean_signals_frust_errors() {
-        // test_context's frust_path is nonexistent, so the derived
-        // clean-signals-rs sibling is absent.
-        let root = scaffold_project("clean-signals-missing-sibling");
-        let err = add_plugin(&root, "clean-signals-frust", &[]).unwrap_err();
-        assert!(matches!(
-            err,
-            PluginAddError::SiblingCheckoutMissing { sibling, .. }
-                if sibling == "../clean-signals-rs"
-        ));
-        // The gate failed before any edit — the dep was not added.
-        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
-        assert!(!cargo.contains("clean-signals-frust = {"), "{cargo}");
+    fn cargo_feature_applies_onto_a_cargo_dep_created_line() {
+        let root = scaffold_project("cargo-feature-apply");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        apply_cargo_dep(
+            &mut doc,
+            &mut changed,
+            "frust-secure-storage",
+            "secure-storage",
+            "/nonexistent/frust/checkout",
+        )
+        .unwrap();
+        assert!(changed);
+
+        let outcome =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+
+        let rendered = doc.to_string();
+        assert!(rendered.contains("frust-secure-storage"), "{rendered}");
+        assert!(
+            rendered.contains("features = [\"biometric\"]"),
+            "{rendered}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Re-applying the same feature must not duplicate it in the array —
+    /// the second call reports `AlreadyPresent` and leaves the document
+    /// byte-identical.
+    #[test]
+    fn cargo_feature_is_idempotent_on_double_apply() {
+        let root = scaffold_project("cargo-feature-idempotent");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        apply_cargo_dep(
+            &mut doc,
+            &mut changed,
+            "frust-secure-storage",
+            "secure-storage",
+            "/nonexistent/frust/checkout",
+        )
+        .unwrap();
+
+        let first =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(first, AddOutcome::Applied);
+        let after_first = doc.to_string();
+
+        let second =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(second, AddOutcome::AlreadyPresent);
+        let after_second = doc.to_string();
+
+        assert_eq!(
+            after_first, after_second,
+            "re-applying the same feature must not change the document"
+        );
+        assert_eq!(
+            after_second.matches("biometric").count(),
+            1,
+            "the feature must appear exactly once: {after_second}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Applying onto a dependency with no existing `CargoDep` line is an
+    /// error, not a silently minted dep.
+    #[test]
+    fn cargo_feature_errors_on_missing_dep() {
+        let root = scaffold_project("cargo-feature-missing-dep");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        let err = apply_cargo_feature(&mut doc, &mut changed, "frust-not-a-real-dep", "biometric")
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PluginAddError::NoSuchCargoDep { name, feature }
+                    if name == "frust-not-a-real-dep" && feature == "biometric"
+            ),
+            "{err}"
+        );
+        assert!(!changed, "a failed apply must not mark the doc changed");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `apply_contribution`'s dispatch match handles `CargoFeature` — driven
+    /// the same way the plugin's own `add_plugin` call would, through the
+    /// real `secure-storage` registry entry rather than an ad hoc spec.
+    #[test]
+    fn cargo_feature_dispatches_through_apply_contribution() {
+        let root = scaffold_project("cargo-feature-dispatch");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+        let spec = find_plugin("secure-storage").unwrap();
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+
+        apply_contribution(
+            &Contribution::CargoDep {
+                name: "frust-secure-storage",
+            },
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+
+        let outcome = apply_contribution(
+            &Contribution::CargoFeature {
+                name: "frust-secure-storage",
+                feature: "biometric",
+            },
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert!(doc.to_string().contains("features = [\"biometric\"]"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // `Contribution::ScaffoldFile`
+    //
+    // No registry entry carries this contribution yet (seeding
+    // `locales/en/main.ftl` is a later task) — driven directly through
+    // `apply_scaffold_file`/`apply_contribution`, the same not-yet-registered
+    // shape the `SwiftPackageRef` section below uses.
+    // -----------------------------------------------------------------------
+
+    const SCAFFOLD_REL: &str = "locales/en/main.ftl";
+    const SCAFFOLD_CONTENTS: &str = "hello = Hello, world!\n";
+
+    #[test]
+    fn scaffold_file_creates_with_exact_contents_when_absent() {
+        let root = scaffold_project("scaffold-file-absent");
+        assert!(!root.join(SCAFFOLD_REL).exists());
+
+        let outcome = apply_scaffold_file(&root, SCAFFOLD_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An existing file is never overwritten, even if its contents differ
+    /// from the registry's — the idempotency guard is presence alone (the
+    /// user may have hand-edited their own locale strings).
+    #[test]
+    fn scaffold_file_existing_file_with_different_contents_is_untouched() {
+        let root = scaffold_project("scaffold-file-present");
+        let path = root.join(SCAFFOLD_REL);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "hand-edited = true\n").unwrap();
+
+        let outcome = apply_scaffold_file(&root, SCAFFOLD_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::AlreadyPresent);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "hand-edited = true\n",
+            "an existing file must never be overwritten"
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn clean_signals_frust_adds_dep_when_sibling_present() {
-        let root = scaffold_project("clean-signals-present-sibling");
-        // Point `frust` at a real in-tree crate dir so `resolve_sibling`'s
-        // `..`-walk resolves on disk: repo root becomes `<root>/vendor`, and
-        // the sibling `../clean-signals-rs` lands at `<root>/clean-signals-rs`.
-        // Every intermediate directory must actually exist for a `..`-bearing
-        // path's `.exists()` to resolve on Unix.
+    fn scaffold_file_creates_nested_parent_directories() {
+        let root = scaffold_project("scaffold-file-nested");
+        const NESTED_REL: &str = "locales/fr/deep/nested/main.ftl";
+        assert!(!root.join("locales/fr").exists());
+
+        let outcome = apply_scaffold_file(&root, NESTED_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(NESTED_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_file_rejects_absolute_path() {
+        let root = scaffold_project("scaffold-file-absolute");
+        let err = apply_scaffold_file(&root, "/etc/passwd", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == "/etc/passwd"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_file_rejects_leading_parent_dir_component() {
+        let root = scaffold_project("scaffold-file-parent-dir");
+        let err = apply_scaffold_file(&root, "../escape.txt", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == "../escape.txt"),
+            "{err}"
+        );
+        assert!(
+            !root.parent().unwrap().join("escape.txt").exists(),
+            "must never write outside the project root"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A buried `..` (not just a leading one) is caught too.
+    #[test]
+    fn scaffold_file_rejects_embedded_parent_dir_component() {
+        let root = scaffold_project("scaffold-file-embedded-parent-dir");
+        let err =
+            apply_scaffold_file(&root, "locales/../../escape.txt", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(_)),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `apply_contribution`'s dispatch match handles `ScaffoldFile` — driven
+    /// through the same per-contribution function `add_plugin`'s own loop
+    /// calls (the shape `cargo_feature_dispatches_through_apply_contribution`
+    /// above uses), asserting a second run is a no-op — the idempotency
+    /// contract `add_plugin` itself is built on.
+    #[test]
+    fn scaffold_file_dispatches_through_apply_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("scaffold-file-dispatch");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+        let spec = find_plugin("secure-storage").unwrap();
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let contribution = Contribution::ScaffoldFile {
+            rel_path: SCAFFOLD_REL,
+            contents: SCAFFOLD_CONTENTS,
+            comment: "test-only scaffold file",
+        };
+
+        let first = apply_contribution(
+            &contribution,
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(first, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let second = apply_contribution(
+            &contribution,
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(
+            second,
+            AddOutcome::AlreadyPresent,
+            "re-running must be a no-op the second time"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS,
+            "the second run must not rewrite the file"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // `Contribution::MacosPlistEntry` / `MacosEntitlement` /
+    // `LinuxDesktopEntry` — the desktop lane. No registry entry carries any
+    // of the three yet (zero backfill rows, by plan — this is the seam, not
+    // a backfill), so these are driven directly through `apply_contribution`
+    // and synthetic `PluginSpec`s, the same not-yet-registered shape the
+    // `ScaffoldFile`/`SwiftPackageRef` sections above use.
+    // -----------------------------------------------------------------------
+
+    /// Every `apply_contribution` arm for the three desktop variants reports
+    /// `AppliedAtBuild` unconditionally and touches no file — the contract
+    /// that lets `add_plugin` record them without ever writing to a project
+    /// desktop file (`macos/Info.plist`, `macos/app.entitlements`,
+    /// `linux/app.desktop`), which a pre-Phase-B project may not even have.
+    #[test]
+    fn desktop_lane_contributions_apply_at_build_and_touch_no_file() {
+        let root = scaffold_project("desktop-lane-apply-at-build");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+        let spec = find_plugin("secure-storage").unwrap();
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let before = snapshot_tree(&root);
+
+        for contribution in [
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                value: "NO",
+                comment: "test",
+            },
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                comment: "test",
+            },
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                value: "Utility;",
+                comment: "test",
+            },
+        ] {
+            let outcome = apply_contribution(
+                &contribution,
+                &spec,
+                &root,
+                FRUST_PATH,
+                &mut doc,
+                &mut changed,
+            )
+            .unwrap();
+            assert_eq!(outcome, AddOutcome::AppliedAtBuild);
+        }
+
+        assert!(
+            !changed,
+            "no desktop-lane contribution marks Cargo.toml changed"
+        );
+        assert_eq!(
+            before,
+            snapshot_tree(&root),
+            "desktop-lane contributions must never touch a project file"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // `desktop_contributions` — the detection API a later bundle-assembly
+    // task consumes. Driven through the pure inner `desktop_contributions_for`
+    // with synthetic `PluginSpec`s, since the real registry has no
+    // desktop-contributing row for the public wrapper to exercise.
+    // -----------------------------------------------------------------------
+
+    const DESKTOP_PLUGIN: PluginSpec = PluginSpec {
+        id: "desktop-test-plugin",
+        summary: "synthetic, test-only",
+        crate_dir: "desktop-test-plugin",
+        base: &[
+            Contribution::CargoDep {
+                name: "frust-desktop-test-plugin",
+            },
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                value: "NO",
+                comment: "test",
+            },
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                comment: "test",
+            },
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                value: "Utility;",
+                comment: "test",
+            },
+        ],
+        optional_features: &[],
+        requires_sibling: None,
+    };
+
+    const MOBILE_ONLY_PLUGIN: PluginSpec = PluginSpec {
+        id: "mobile-only-test-plugin",
+        summary: "synthetic, test-only",
+        crate_dir: "mobile-only-test-plugin",
+        base: &[
+            Contribution::CargoDep {
+                name: "frust-mobile-only-test-plugin",
+            },
+            Contribution::PlistEntry {
+                key: "NSCameraUsageDescription",
+                value: "test",
+                comment: "test",
+            },
+            Contribution::ManifestPermission {
+                permission: "android.permission.CAMERA",
+            },
+        ],
+        optional_features: &[],
+        requires_sibling: None,
+    };
+
+    const MIXED_PLUGIN: PluginSpec = PluginSpec {
+        id: "mixed-test-plugin",
+        summary: "synthetic, test-only",
+        crate_dir: "mixed-test-plugin",
+        base: &[
+            Contribution::CargoDep {
+                name: "frust-mixed-test-plugin",
+            },
+            Contribution::PlistEntry {
+                key: "NSCameraUsageDescription",
+                value: "test",
+                comment: "test",
+            },
+            Contribution::ManifestPermission {
+                permission: "android.permission.CAMERA",
+            },
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                value: "NO",
+                comment: "test",
+            },
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                comment: "test",
+            },
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                value: "Utility;",
+                comment: "test",
+            },
+        ],
+        optional_features: &[],
+        requires_sibling: None,
+    };
+
+    /// Parse a freshly scaffolded project's `Cargo.toml` and insert a bare
+    /// `dep_name = { path = "..." }` dependency line — standing in for what
+    /// `apply_cargo_dep` would have written, without pulling the whole
+    /// `add_plugin` pipeline in.
+    fn cargo_doc_with_dep(root: &Path, dep_name: &str) -> DocumentMut {
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let deps = doc
+            .get_mut("dependencies")
+            .and_then(Item::as_table_like_mut)
+            .unwrap();
+        let mut inline = InlineTable::new();
+        inline.insert(
+            "path",
+            Value::from("/nonexistent/frust/checkout/../../plugins/x"),
+        );
+        deps.insert(dep_name, Item::Value(Value::InlineTable(inline)));
+        doc
+    }
+
+    /// (a) An installed plugin's three desktop variants come back in
+    /// declaration order, each carrying the owning plugin's id.
+    #[test]
+    fn desktop_contributions_for_installed_plugin_collects_all_three_in_order() {
+        let root = scaffold_project("desktop-contrib-installed");
+        let doc = cargo_doc_with_dep(&root, "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
+        assert!(result.iter().all(|c| c.plugin_id == "desktop-test-plugin"));
+        assert!(matches!(
+            result[0].contribution,
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                ..
+            }
+        ));
+        assert!(matches!(
+            result[1].contribution,
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                ..
+            }
+        ));
+        assert!(matches!(
+            result[2].contribution,
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                ..
+            }
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (b) A plugin the project does not depend on contributes nothing.
+    #[test]
+    fn desktop_contributions_for_not_installed_plugin_is_empty() {
+        let root = scaffold_project("desktop-contrib-not-installed");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert!(result.is_empty(), "{result:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (c) An installed plugin with no desktop variants contributes nothing.
+    #[test]
+    fn desktop_contributions_for_installed_plugin_with_no_desktop_variants_is_empty() {
+        let root = scaffold_project("desktop-contrib-no-desktop-variants");
+        let doc = cargo_doc_with_dep(&root, "frust-mobile-only-test-plugin");
+
+        let result = desktop_contributions_for(&[MOBILE_ONLY_PLUGIN], &doc);
+        assert!(result.is_empty(), "{result:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (d) A missing or unparseable `Cargo.toml` is the same typed error
+    /// `add_plugin` itself returns for the identical condition — through the
+    /// public `desktop_contributions` wrapper, since these errors arise
+    /// before any `PluginSpec` is even consulted.
+    #[test]
+    fn desktop_contributions_missing_cargo_toml_errors() {
+        let dir = unique_temp_dir("desktop-contrib-missing-cargo");
+        fs::create_dir_all(&dir).unwrap();
+        let err = desktop_contributions(&dir).unwrap_err();
+        assert!(matches!(err, PluginAddError::MissingProjectFile(f) if f == CARGO_TOML_REL));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn desktop_contributions_unparseable_cargo_toml_errors() {
+        let dir = unique_temp_dir("desktop-contrib-bad-cargo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Cargo.toml"), "this is [not valid toml").unwrap();
+        let err = desktop_contributions(&dir).unwrap_err();
+        assert!(matches!(err, PluginAddError::UnparseableCargoToml(_)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// (e) An installed plugin whose `base` mixes mobile and desktop
+    /// contributions must leak only the desktop ones into the result.
+    #[test]
+    fn desktop_contributions_mobile_only_contributions_never_leak_into_the_result() {
+        let root = scaffold_project("desktop-contrib-mixed-leak-check");
+        let doc = cargo_doc_with_dep(&root, "frust-mixed-test-plugin");
+
+        let result = desktop_contributions_for(&[MIXED_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
+        assert!(
+            result.iter().all(|c| matches!(
+                c.contribution,
+                Contribution::MacosPlistEntry { .. }
+                    | Contribution::MacosEntitlement { .. }
+                    | Contribution::LinuxDesktopEntry { .. }
+            )),
+            "{result:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Parse a freshly scaffolded project's `Cargo.toml` and insert a
+    /// **renamed** dependency: `key_name = { package = "<dep_name>", path =
+    /// "..." }` — the shape `cam = { package = "frust-camera", ... }` takes.
+    fn cargo_doc_with_renamed_dep(root: &Path, key_name: &str, dep_name: &str) -> DocumentMut {
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let deps = doc
+            .get_mut("dependencies")
+            .and_then(Item::as_table_like_mut)
+            .unwrap();
+        let mut inline = InlineTable::new();
+        inline.insert("package", Value::from(dep_name));
+        inline.insert(
+            "path",
+            Value::from("/nonexistent/frust/checkout/../../plugins/x"),
+        );
+        deps.insert(key_name, Item::Value(Value::InlineTable(inline)));
+        doc
+    }
+
+    /// Parse a freshly scaffolded project's `Cargo.toml` and insert an
+    /// `optional = true` dependency named `dep_name`.
+    fn cargo_doc_with_optional_dep(root: &Path, dep_name: &str) -> DocumentMut {
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let deps = doc
+            .get_mut("dependencies")
+            .and_then(Item::as_table_like_mut)
+            .unwrap();
+        let mut inline = InlineTable::new();
+        inline.insert(
+            "path",
+            Value::from("/nonexistent/frust/checkout/../../plugins/x"),
+        );
+        inline.insert("optional", Value::from(true));
+        deps.insert(dep_name, Item::Value(Value::InlineTable(inline)));
+        doc
+    }
+
+    /// (f) `plugin_is_installed` (R0-m6): a dependency renamed via an inline
+    /// `package = "<name>"` key still counts as installed.
+    #[test]
+    fn desktop_contributions_for_renamed_dep_is_detected() {
+        let root = scaffold_project("desktop-contrib-renamed-dep");
+        let doc = cargo_doc_with_renamed_dep(&root, "desktop_test", "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
+        assert!(result.iter().all(|c| c.plugin_id == "desktop-test-plugin"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (g) `plugin_is_installed` (R0-m6): an `optional = true` dependency is
+    /// excluded even though its name matches — its base contributions must
+    /// not merge into a bundle whose binary may not contain it.
+    #[test]
+    fn desktop_contributions_for_optional_dep_is_excluded() {
+        let root = scaffold_project("desktop-contrib-optional-dep");
+        let doc = cargo_doc_with_optional_dep(&root, "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert!(result.is_empty(), "{result:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (h) `plugin_is_installed` (R0-m6): a plain, non-renamed, non-optional
+    /// dependency is still detected — the pre-existing behaviour is
+    /// preserved by the widened check.
+    #[test]
+    fn desktop_contributions_for_plain_dep_is_still_detected() {
+        let root = scaffold_project("desktop-contrib-plain-dep");
+        let doc = cargo_doc_with_dep(&root, "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The public wrapper reads the *real* registry, which carries zero
+    /// desktop-contributing rows today (the seam, not a backfill) — even a
+    /// freshly scaffolded project must therefore see an empty result.
+    #[test]
+    fn desktop_contributions_public_fn_is_empty_against_the_real_registry() {
+        let root = scaffold_project("desktop-contrib-public-empty");
+        let result = desktop_contributions(&root).unwrap();
+        assert!(result.is_empty(), "{result:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_signals_frust_add_succeeds_without_sibling_checkout() {
+        // test_context's frust_path is nonexistent, so a `../clean-signals-rs`
+        // sibling derived from it is absent too — clean-signals-frust's
+        // registry entry no longer requires one (clean-signals is
+        // git+rev-pinned to its public repo; see `registry.rs`'s
+        // `CLEAN_SIGNALS_FRUST`), so this must still succeed.
+        let root = scaffold_project("clean-signals-no-sibling");
+        let report = add_plugin(&root, "clean-signals-frust", &[]).unwrap();
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items[0].outcome, AddOutcome::Applied);
+        let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
+        assert!(cargo.contains("clean-signals-frust = {"), "{cargo}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_signals_frust_add_succeeds_with_stale_sibling_present() {
+        // Same as above, but with a leftover `../clean-signals-rs` directory
+        // actually present on disk (a dev machine that still has the
+        // pre-migration sibling checkout) — its presence or absence must
+        // make no difference now that the registry entry declares no
+        // `requires_sibling`.
+        let root = scaffold_project("clean-signals-stale-sibling");
         let cargo_path = root.join(CARGO_TOML_REL);
         let cargo = fs::read_to_string(&cargo_path).unwrap();
         let rewritten = cargo.replace(
@@ -1809,13 +2752,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The regression guard for the drift `F3` fixed: `add_plugin`'s tests
-    /// above only ever exercise a **freshly scaffolded** project, which by
-    /// construction always carries the `// frust:plugin-includes`/
-    /// `// frust:plugin-dependencies` anchors `Contribution::GradleModule`
-    /// hard-requires — so they are structurally incapable of catching an
-    /// existing in-repo consumer drifting away from them (exactly how
-    /// `glyph-catalog` and `layer-bench` shipped without either anchor).
+    /// The regression guard for anchor drift in already-checked-in
+    /// consumers: `add_plugin`'s tests above only ever exercise a **freshly
+    /// scaffolded** project, which by construction always carries the
+    /// `// frust:plugin-includes`/`// frust:plugin-dependencies` anchors
+    /// `Contribution::GradleModule` hard-requires — so they are structurally
+    /// incapable of catching an existing in-repo consumer drifting away from
+    /// them (exactly how early consumers — `glyph-catalog` among them —
+    /// shipped without either anchor).
     ///
     /// This drives the real `add_plugin` path — not a grep — against a
     /// tempdir copy of every in-repo Android consumer, so a future project

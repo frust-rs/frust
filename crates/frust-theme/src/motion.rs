@@ -1,46 +1,27 @@
-//! Material 3 Expressive motion: six spring presets replacing
-//! duration+easing tokens.
+//! [`MotionScheme::neutral`]: the design-language-free motion scheme — six
+//! spring presets plus a duration/easing token vocabulary, replacing a plain
+//! duration+easing-only model.
 //!
-//! Source: material-components-android `docs/theming/Motion.md` (M3
-//! Expressive, verified 2026-07-17): fastSpatial (0.9, 1400), fastEffects
-//! (1.0, 3800), defaultSpatial (0.9, 700), defaultEffects (1.0, 1600),
-//! slowSpatial (0.9, 300), slowEffects (1.0, 800) — `(damping_ratio,
-//! stiffness)`, mass 1 for every preset. "Effects" springs (opacity/color)
-//! are critically damped (`damping_ratio: 1.0`) by design — no bounce;
-//! "spatial" springs (position/size) are `0.9`, allowing a small overshoot.
+//! This crate constructs no other `MotionScheme` — a design system builds
+//! its own from its own plugin crate (`frust-material`'s `tokens` module
+//! carries the M3 Expressive six-spring mapping, source cited there;
+//! `frust-cupertino`'s carries the community-documented iOS spring
+//! baseline). Unlike [`crate::shape`]/[`crate::elevation`]/[`crate::typography`],
+//! [`MotionScheme::neutral`]'s springs are **not** a reused M3 table — every
+//! spring here is critically damped (no bounce), a deliberately unbranded
+//! feel distinct from either design system's springier presets (see that
+//! constructor's own doc comment).
 //!
 //! `MotionSpring` is plain data defined here rather than reusing
 //! `frust-core`'s animation-core spring type: `frust-theme` already
 //! depends on `frust-core` (see `docs/ARCHITECTURE.md`), so
 //! [`impl From<MotionSpring> for SpringDesc`](struct.MotionSpring.html)
 //! below lives right here rather than in a separate facade conversion.
-//!
-//! # Cupertino (iOS) mapping
-//!
-//! [`MotionScheme::cupertino`] is built from the single community-documented
-//! iOS spring baseline (retrieved 2026-07-17): mass `1.0`,
-//! stiffness `170.0`, damping (coefficient, not ratio) `15.0` — the
-//! "start with a damping of 15 and a stiffness of 170" convention cited
-//! across multiple SwiftUI community sources. [`MotionSpring`] stores a
-//! damping *ratio* ζ (mass implicitly `1.0`, matching every M3 preset), so
-//! this module converts the community coefficient via the standard
-//! relation `ζ = c / (2 * sqrt(k * m))`: `15.0 / (2 * sqrt(170.0)) ≈
-//! 0.5753` — an under-damped spring with a gentle overshoot, consistent
-//! with iOS's typically "springy" motion feel.
-//!
-//! Unlike M3, **iOS has no published/community-documented distinction
-//! between "fast"/"default"/"slow" speed tiers or "spatial"/"effects" motion
-//! categories** — the single baseline above is the only community-converged
-//! iOS spring value found. Rather than inventing an unsourced scaling factor
-//! to differentiate the six [`MotionScheme`] slots, this module applies the
-//! single documented baseline **uniformly** to all six — a documented
-//! simplification (flagged here, not a hidden gap), not a fabricated
-//! iOS-specific tuning distinction.
 
 use frust_core::anim::{Curve, SpringDesc};
 
 /// A physics spring's damping ratio and stiffness (mass is implicitly `1.0`
-/// for every M3 preset; see module docs).
+/// for every preset; see module docs).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionSpring {
     pub damping_ratio: f64,
@@ -56,13 +37,13 @@ impl MotionSpring {
     }
 }
 
-/// Converts an M3 motion token into the generic physics type
+/// Converts a [`MotionSpring`] token into the generic physics type
 /// [`AnimationController::fling`](frust_core::anim::AnimationController::fling)/
 /// [`Spring::new`](frust_core::anim::Spring::new) consume.
 ///
-/// Mass is always `1.0` — every M3 Expressive preset is defined purely in
-/// terms of damping ratio + stiffness (see the module docs), so `mass` has no
-/// token-level source to convert from.
+/// Mass is always `1.0` — every preset (this crate's and each design
+/// system's own) is defined purely in terms of damping ratio + stiffness, so
+/// `mass` has no token-level source to convert from.
 impl From<MotionSpring> for SpringDesc {
     fn from(spring: MotionSpring) -> Self {
         SpringDesc {
@@ -75,11 +56,12 @@ impl From<MotionSpring> for SpringDesc {
 
 /// Named duration tokens, in milliseconds.
 ///
-/// Glyph's motion language is bezier/duration-authored (unlike M3
-/// Expressive's springs above), so a [`MotionScheme`] carries this
+/// Glyph's motion language is bezier/duration-authored (unlike the
+/// spring-authored presets above), so a [`MotionScheme`] carries this
 /// five-slot duration vocabulary alongside the six spring presets — see
-/// [`MotionScheme::m3_expressive`]/[`MotionScheme::cupertino`] for the
-/// per-baseline mapping and sources.
+/// [`MotionScheme::neutral`] for this crate's own mapping, and
+/// `frust-material`/`frust-cupertino`'s own `tokens` modules for their
+/// per-baseline mappings and sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionDurations {
     pub instant: f64,
@@ -140,8 +122,9 @@ impl CosmeticLoopRate {
 /// The three-easing vocabulary Glyph's bezier-authored motion patterns are
 /// built from: `spatial` (position/size changes — may overshoot), `effects`
 /// (opacity/color changes — never overshoots), and `exit` (elements leaving
-/// the screen — accelerates out). See [`MotionScheme::m3_expressive`]/
-/// [`MotionScheme::cupertino`] for the per-baseline curve values and sources.
+/// the screen — accelerates out). See [`MotionScheme::neutral`] for this
+/// crate's own curve values, and `frust-material`/`frust-cupertino`'s own
+/// `tokens` modules for their per-baseline curve values and sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EasingSet {
     pub spatial: Curve,
@@ -149,8 +132,8 @@ pub struct EasingSet {
     pub exit: Curve,
 }
 
-/// The six Material 3 Expressive motion spring presets, plus the Glyph
-/// duration/easing token vocabulary mapped onto each baseline.
+/// Six motion spring presets, plus the Glyph duration/easing token
+/// vocabulary mapped onto each baseline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionScheme {
     pub fast_spatial: MotionSpring,
@@ -163,10 +146,32 @@ pub struct MotionScheme {
     pub durations: MotionDurations,
     /// The three-easing vocabulary (Glyph vocabulary; see [`EasingSet`]).
     pub easing: EasingSet,
-    /// Collapses patterned motion to a fast crossfade. Set by a shell from
-    /// the OS's reduced-motion accessibility preference; the plumbing that
-    /// reads the platform setting and threads it here lands in a later task
-    /// — every baseline below defaults this to `false`.
+    /// Collapses patterned motion to a fast crossfade. Every baseline below
+    /// defaults this to `false` — the correct value absent an OS signal — and
+    /// a mobile shell raises it from the platform's own reduced-motion
+    /// accessibility preference:
+    ///
+    /// - **Android**: `Settings.Global.ANIMATOR_DURATION_SCALE`, reduced when
+    ///   the scale is exactly `0` (the same signal `ValueAnimator::
+    ///   areAnimatorsEnabled` consults). It is **not** a `Configuration`
+    ///   field, so `onConfigurationChanged` never reports it — the embedding
+    ///   registers a `ContentObserver` on that setting's URI and re-reads it
+    ///   on every resume.
+    /// - **iOS**: `UIAccessibility.isReduceMotionEnabled`, observed through
+    ///   `UIAccessibility.reduceMotionStatusDidChangeNotification`. It is
+    ///   **not** a `UITraitCollection` trait, so `traitCollectionDidChange`
+    ///   never fires for it.
+    /// - **Desktop**: no source. winit 0.30 exposes no reduced-motion (or any
+    ///   other accessibility-preference) accessor and nothing else in the
+    ///   desktop path reads one, so the desktop shell leaves this at whatever
+    ///   the active theme authored — a deliberate, checked gap (2026-07-31),
+    ///   not an oversight to re-investigate.
+    ///
+    /// Both mobile shells apply the OS report as a **floor**: the platform's
+    /// value is OR'd over the active theme's own authored token (each shell's
+    /// `effective_reduce_motion`), never assigned over it. So a theme built
+    /// with `reduce_motion: true` keeps it while the OS setting is off, and
+    /// the OS setting still wins whenever it is on.
     pub reduce_motion: bool,
     /// The `CosmeticLoop` tick-rate cap — see [`CosmeticLoopRate`]. Every
     /// baseline below defaults this to 30Hz; override via
@@ -179,103 +184,43 @@ pub struct MotionScheme {
 }
 
 impl MotionScheme {
-    /// The Material 3 Expressive baseline motion scheme.
+    /// The neutral, design-language-free motion scheme.
     ///
-    /// Duration/easing tokens are sourced from
-    /// `material-components-android` `docs/theming/Motion.md` (verified
-    /// 2026-07-17, same source as the spring presets above), which
-    /// publishes a 16-value duration scale in four tiers — Short (50, 100,
-    /// 150, 200ms), Medium (250, 300, 350, 400ms), Long (450, 500, 550,
-    /// 600ms), Extra Long (700–1000ms) — plus the easing curves below.
-    /// Glyph's five-slot [`MotionDurations`] vocabulary maps onto that scale
-    /// as: `instant` → Short1 (50ms), `fast` → Short3 (150ms), `base` →
-    /// Medium2 (300ms, the most commonly-cited M3 "default" transition
-    /// duration), `slow` → Long2 (500ms), `deliberate` → the Extra Long
-    /// tier's floor (700ms).
+    /// Every spring is **critically damped** (`damping_ratio: 1.0`, no
+    /// overshoot) — unlike `frust-material`'s under-damped `0.9` spatial
+    /// springs (a deliberate M3 Expressive personality trait) or
+    /// `frust-cupertino`'s community-documented ζ≈0.5753 iOS spring, both of
+    /// which bounce by design (see each plugin's own `tokens` module). A
+    /// neutral-themed transition settles without overshoot — a deliberately
+    /// unbranded feel, not a missing feature. Stiffness still varies by
+    /// speed tier (fast > default > slow), the same three-tier shape every
+    /// design system's own baseline uses.
     ///
-    /// [`EasingSet`]'s three slots map onto M3's own easing-curve tokens
-    /// (Jetpack Compose's `androidx.compose.material3.tokens.MotionTokens`
-    /// control points, same source): `spatial` → Emphasized Decelerate
-    /// (`cubic-bezier(0.05, 0.7, 0.1, 1.0)`, M3's curve for entering/spatial
-    /// transitions — its steep initial deceleration reads as a slight
-    /// overshoot-adjacent settle), `effects` → Standard
-    /// (`cubic-bezier(0.2, 0.0, 0.0, 1.0)`, M3's curve for opacity/color
-    /// fades — never overshoots), `exit` → Standard Accelerate
-    /// (`cubic-bezier(0.3, 0.0, 1.0, 1.0)`, M3's curve for elements leaving
-    /// the screen).
-    pub const fn m3_expressive() -> Self {
+    /// Duration/easing tokens are a plain, **Frust-authored round-number
+    /// scale** — not sourced from any published design system's table,
+    /// unlike the M3/Cupertino baselines each plugin crate carries — using
+    /// only the generic CSS-keyword [`Curve`] variants
+    /// (`EaseOut`/`EaseInOut`/`EaseIn`), never a design-language-specific
+    /// bezier.
+    pub const fn neutral() -> Self {
         Self {
-            fast_spatial: MotionSpring::new(0.9, 1400.0),
-            fast_effects: MotionSpring::new(1.0, 3800.0),
-            default_spatial: MotionSpring::new(0.9, 700.0),
-            default_effects: MotionSpring::new(1.0, 1600.0),
-            slow_spatial: MotionSpring::new(0.9, 300.0),
-            slow_effects: MotionSpring::new(1.0, 800.0),
-            durations: MotionDurations {
-                instant: 50.0,
-                fast: 150.0,
-                base: 300.0,
-                slow: 500.0,
-                deliberate: 700.0,
-            },
-            easing: EasingSet {
-                spatial: Curve::Cubic(0.05, 0.7, 0.1, 1.0),
-                effects: Curve::Cubic(0.2, 0.0, 0.0, 1.0),
-                exit: Curve::Cubic(0.3, 0.0, 1.0, 1.0),
-            },
-            reduce_motion: false,
-            cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
-        }
-    }
-
-    /// The Cupertino (iOS) motion scheme — the single community-documented
-    /// iOS spring baseline (mass 1.0, stiffness 170.0, damping coefficient
-    /// 15.0 → damping ratio ζ ≈ 0.5753) applied uniformly to all six spring
-    /// slots. See the module docs for the ζ conversion and why iOS has no
-    /// documented fast/default/slow or spatial/effects distinction to
-    /// otherwise vary these by.
-    ///
-    /// **Community-approximate** duration/easing tokens: unlike M3, iOS
-    /// publishes no named multi-tier duration scale or curve-category
-    /// vocabulary — UIKit/SwiftUI animations are conventionally
-    /// spring-authored (the six presets above), not bezier-timed. The one
-    /// citable data point (retrieved 2026-07-17, citing Apple's
-    /// WWDC23 "Animate with springs" talk): SwiftUI's `.bouncy` spring
-    /// preset defaults to a 0.5s duration — anchoring `slow` at 500ms here.
-    /// The remaining four slots (`instant`/`fast`/`base`/`deliberate`) are a
-    /// community-approximate scale around that anchor, loosely following
-    /// commonly-cited iOS interaction timings (a ~0.2s "quick" feel, a
-    /// ~0.35s modal-presentation-adjacent "base" feel); replace them if a
-    /// citable per-tier iOS source turns up. The easing
-    /// vocabulary has the same gap as the springs: no published
-    /// spatial/effects/exit distinction, so [`Curve::EaseInOut`] (UIKit's
-    /// default `UIView.AnimationOptions` curve) is applied uniformly to all
-    /// three [`EasingSet`] slots, mirroring the springs' uniform-baseline
-    /// treatment above.
-    pub const fn cupertino() -> Self {
-        // ζ = 15.0 / (2 * sqrt(170.0)) ≈ 0.5753 (see module docs; sqrt isn't
-        // const-evaluable on stable Rust, so the ratio is precomputed here).
-        const CUPERTINO_DAMPING_RATIO: f64 = 0.5753;
-        const CUPERTINO_STIFFNESS: f64 = 170.0;
-        let spring = MotionSpring::new(CUPERTINO_DAMPING_RATIO, CUPERTINO_STIFFNESS);
-        Self {
-            fast_spatial: spring,
-            fast_effects: spring,
-            default_spatial: spring,
-            default_effects: spring,
-            slow_spatial: spring,
-            slow_effects: spring,
+            fast_spatial: MotionSpring::new(1.0, 700.0),
+            fast_effects: MotionSpring::new(1.0, 1800.0),
+            default_spatial: MotionSpring::new(1.0, 400.0),
+            default_effects: MotionSpring::new(1.0, 900.0),
+            slow_spatial: MotionSpring::new(1.0, 200.0),
+            slow_effects: MotionSpring::new(1.0, 450.0),
             durations: MotionDurations {
                 instant: 100.0,
-                fast: 200.0,
-                base: 350.0,
-                slow: 500.0,
-                deliberate: 700.0,
+                fast: 150.0,
+                base: 250.0,
+                slow: 400.0,
+                deliberate: 600.0,
             },
             easing: EasingSet {
-                spatial: Curve::EaseInOut,
+                spatial: Curve::EaseOut,
                 effects: Curve::EaseInOut,
-                exit: Curve::EaseInOut,
+                exit: Curve::EaseIn,
             },
             reduce_motion: false,
             cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
@@ -288,27 +233,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spring_presets_are_exact() {
-        let m = MotionScheme::m3_expressive();
-        assert_eq!(m.fast_spatial, MotionSpring::new(0.9, 1400.0));
-        assert_eq!(m.fast_effects, MotionSpring::new(1.0, 3800.0));
-        assert_eq!(m.default_spatial, MotionSpring::new(0.9, 700.0));
-        assert_eq!(m.default_effects, MotionSpring::new(1.0, 1600.0));
-        assert_eq!(m.slow_spatial, MotionSpring::new(0.9, 300.0));
-        assert_eq!(m.slow_effects, MotionSpring::new(1.0, 800.0));
-    }
-
-    #[test]
-    fn effects_springs_are_critically_damped() {
-        let m = MotionScheme::m3_expressive();
-        assert_eq!(m.fast_effects.damping_ratio, 1.0);
-        assert_eq!(m.default_effects.damping_ratio, 1.0);
-        assert_eq!(m.slow_effects.damping_ratio, 1.0);
-    }
-
-    #[test]
-    fn spring_desc_round_trips_all_six_presets() {
-        let m = MotionScheme::m3_expressive();
+    fn spring_desc_round_trips_neutral_presets() {
+        let m = MotionScheme::neutral();
         let presets = [
             m.fast_spatial,
             m.fast_effects,
@@ -323,88 +249,6 @@ mod tests {
             assert_eq!(desc.stiffness, preset.stiffness);
             assert_eq!(desc.damping_ratio, preset.damping_ratio);
         }
-    }
-
-    #[test]
-    fn cupertino_uses_the_single_documented_baseline_uniformly() {
-        let m = MotionScheme::cupertino();
-        let expected = MotionSpring::new(0.5753, 170.0);
-        assert_eq!(m.fast_spatial, expected);
-        assert_eq!(m.fast_effects, expected);
-        assert_eq!(m.default_spatial, expected);
-        assert_eq!(m.default_effects, expected);
-        assert_eq!(m.slow_spatial, expected);
-        assert_eq!(m.slow_effects, expected);
-    }
-
-    #[test]
-    fn cupertino_damping_ratio_is_under_damped() {
-        // ζ ≈ 0.5753 < 1.0 — a gentle overshoot, matching iOS's springy feel
-        // (see module docs).
-        let m = MotionScheme::cupertino();
-        assert!(m.default_spatial.damping_ratio < 1.0);
-        assert!(m.default_spatial.damping_ratio > 0.0);
-    }
-
-    #[test]
-    fn m3_expressive_durations_match_the_documented_mapping() {
-        let m = MotionScheme::m3_expressive();
-        assert_eq!(
-            m.durations,
-            MotionDurations {
-                instant: 50.0,
-                fast: 150.0,
-                base: 300.0,
-                slow: 500.0,
-                deliberate: 700.0,
-            }
-        );
-    }
-
-    #[test]
-    fn m3_expressive_easing_matches_the_documented_tokens() {
-        let m = MotionScheme::m3_expressive();
-        assert_eq!(m.easing.spatial, Curve::Cubic(0.05, 0.7, 0.1, 1.0));
-        assert_eq!(m.easing.effects, Curve::Cubic(0.2, 0.0, 0.0, 1.0));
-        assert_eq!(m.easing.exit, Curve::Cubic(0.3, 0.0, 1.0, 1.0));
-    }
-
-    #[test]
-    fn cupertino_durations_match_the_documented_mapping() {
-        let m = MotionScheme::cupertino();
-        assert_eq!(
-            m.durations,
-            MotionDurations {
-                instant: 100.0,
-                fast: 200.0,
-                base: 350.0,
-                slow: 500.0,
-                deliberate: 700.0,
-            }
-        );
-    }
-
-    #[test]
-    fn cupertino_easing_uses_the_single_curve_uniformly() {
-        let m = MotionScheme::cupertino();
-        assert_eq!(m.easing.spatial, Curve::EaseInOut);
-        assert_eq!(m.easing.effects, Curve::EaseInOut);
-        assert_eq!(m.easing.exit, Curve::EaseInOut);
-    }
-
-    #[test]
-    fn reduce_motion_defaults_to_false_on_both_baselines() {
-        assert!(!MotionScheme::m3_expressive().reduce_motion);
-        assert!(!MotionScheme::cupertino().reduce_motion);
-    }
-
-    #[test]
-    fn cosmetic_loop_rate_defaults_to_30hz_on_both_baselines() {
-        // Task acceptance criterion 1: default 30 on every baseline (the
-        // third, Glyph, is covered alongside its own constructor in
-        // `glyph::scales`).
-        assert_eq!(MotionScheme::m3_expressive().cosmetic_loop_rate.hz(), 30.0);
-        assert_eq!(MotionScheme::cupertino().cosmetic_loop_rate.hz(), 30.0);
     }
 
     #[test]
@@ -449,7 +293,7 @@ mod tests {
         // Task acceptance criterion 1: ThemeBuilder override test.
         use crate::theme::Theme;
 
-        let base = Theme::m3_baseline();
+        let base = Theme::neutral();
         let theme = Theme::builder(base.clone())
             .map_motion(|m| MotionScheme {
                 cosmetic_loop_rate: CosmeticLoopRate::new(15.0),
@@ -463,14 +307,56 @@ mod tests {
         assert_eq!(theme.motion.durations, base.motion.durations);
     }
 
-    // Both constructors must stay `const fn` — a regression here is a
-    // compile error, not a runtime assertion (task acceptance criterion 3).
-    const M3_CONST: MotionScheme = MotionScheme::m3_expressive();
-    const CUPERTINO_CONST: MotionScheme = MotionScheme::cupertino();
+    // ---- Neutral scheme -----------------------------------------------
 
     #[test]
-    fn constructors_stay_const_fn() {
-        assert_eq!(M3_CONST, MotionScheme::m3_expressive());
-        assert_eq!(CUPERTINO_CONST, MotionScheme::cupertino());
+    fn neutral_springs_are_all_critically_damped() {
+        // No overshoot anywhere — unlike frust-material's 0.9 spatial
+        // springs or frust-cupertino's ~0.5753 uniform spring.
+        let m = MotionScheme::neutral();
+        for s in [
+            m.fast_spatial,
+            m.fast_effects,
+            m.default_spatial,
+            m.default_effects,
+            m.slow_spatial,
+            m.slow_effects,
+        ] {
+            assert_eq!(s.damping_ratio, 1.0);
+        }
+    }
+
+    #[test]
+    fn neutral_stiffness_still_varies_by_speed_tier() {
+        let m = MotionScheme::neutral();
+        assert!(m.fast_spatial.stiffness > m.default_spatial.stiffness);
+        assert!(m.default_spatial.stiffness > m.slow_spatial.stiffness);
+        assert!(m.fast_effects.stiffness > m.default_effects.stiffness);
+        assert!(m.default_effects.stiffness > m.slow_effects.stiffness);
+    }
+
+    #[test]
+    fn neutral_easing_uses_only_generic_curves() {
+        let m = MotionScheme::neutral();
+        assert_eq!(m.easing.spatial, Curve::EaseOut);
+        assert_eq!(m.easing.effects, Curve::EaseInOut);
+        assert_eq!(m.easing.exit, Curve::EaseIn);
+    }
+
+    #[test]
+    fn neutral_cosmetic_loop_rate_defaults_to_30hz() {
+        assert_eq!(MotionScheme::neutral().cosmetic_loop_rate.hz(), 30.0);
+    }
+
+    #[test]
+    fn neutral_reduce_motion_defaults_to_false() {
+        assert!(!MotionScheme::neutral().reduce_motion);
+    }
+
+    const NEUTRAL_CONST: MotionScheme = MotionScheme::neutral();
+
+    #[test]
+    fn neutral_stays_const_fn() {
+        assert_eq!(NEUTRAL_CONST, MotionScheme::neutral());
     }
 }

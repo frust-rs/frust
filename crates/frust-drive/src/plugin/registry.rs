@@ -1,16 +1,40 @@
-//! The static plugin registry (v1) — five entries mirroring `plugins/`:
+//! The static plugin registry (v1) — fourteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
-//! `clean-signals-frust` (dependency, gated on the sibling `clean-signals-rs`
-//! checkout), `camera` (dependency, an app-side plist key, the plugin's
+//! `clean-signals-frust` (dependency; `clean-signals` itself is git+rev-pinned
+//! to its public repo, so no sibling checkout is required), `camera`
+//! (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
 //! export shim a device gate proved necessary, see this module's `CAMERA_BASE`
-//! constant's doc comment for the full rationale), and `native-widgets`
+//! constant's doc comment for the full rationale), `native-widgets`
 //! (dependency plus the plugin's own Android library
 //! module — and **nothing** on iOS, which is not an omission: that arm ships
-//! zero Swift by design).
+//! zero Swift by design), `clipboard` (dependency only — plain text
+//! clipboard access needs no manifest permission, plist key, Gradle module,
+//! or Swift package on either mobile platform), `haptics` (dependency
+//! plus the `android.permission.VIBRATE` manifest permission — the first
+//! registry entry to use [`Contribution::ManifestPermission`] rather than a
+//! Gradle module for its Android addition, since the plugin's Android
+//! backend is plain JNI with no Kotlin helper class to carry the permission
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
+//! (dependency, the plugin's own Android library module, and its own iOS
+//! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
+//! comment for why), `database` (dependency only — pure-Rust plugin, no
+//! OS-side integration), and `i18n` (dependency, a seeded starter
+//! `locales/en/main.ftl` — the first registry entry to use
+//! [`Contribution::ScaffoldFile`] — and the `frust_i18n::locales!` app-crate
+//! macro invocation; see `I18N_BASE`'s doc comment for the ordering
+//! constraint between the two), `glyph`/`material`/`cupertino`
+//! (dependency only — the three built-in design-system catalogs, which left
+//! the `frust` facade's Cargo-feature graph and now each ship as their own
+//! sibling plugin crate; adding one contributes only the Cargo dependency —
+//! calling `frust_<name>::install()` in `app!(setup = {..})` to make it the
+//! app's active theme is left to the app, the same way `frust create`'s own
+//! scaffold does it), and `shadcn` (dependency only, the same shape as the
+//! three built-ins above — the tier's first *external-origin* catalog,
+//! ported from shadcn/ui rather than authored in this repo).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -76,14 +100,13 @@ const SECURE_STORAGE: PluginSpec = PluginSpec {
 
 const CLEAN_SIGNALS_FRUST: PluginSpec = PluginSpec {
     id: "clean-signals-frust",
-    summary: "Clean-architecture facade binding the clean-signals core to frust \
-              (needs the clean-signals-rs sibling checkout).",
+    summary: "Clean-architecture facade binding the clean-signals core to frust.",
     crate_dir: "clean-signals-frust",
     base: &[Contribution::CargoDep {
         name: "clean-signals-frust",
     }],
     optional_features: &[],
-    requires_sibling: Some("../clean-signals-rs"),
+    requires_sibling: None,
 };
 
 /// `camera`'s base contributions, unwidened since first landing. No optional
@@ -190,6 +213,239 @@ const NATIVE_WIDGETS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `clipboard`'s base contribution — a single Cargo dependency, and nothing
+/// else. Plain-text clipboard read/write needs no Android manifest
+/// permission, no iOS plist key, no Gradle module (the Android backend is
+/// plain JNI against framework classes, no app-defined helper class), and no
+/// Swift package (the iOS backend is plain `objc2-ui-kit` against
+/// `UIPasteboard`) — see `plugins/clipboard/README.md`.
+const CLIPBOARD: PluginSpec = PluginSpec {
+    id: "clipboard",
+    summary: "Synchronous plain-text clipboard access (ClipboardManager / \
+              UIPasteboard / arboard).",
+    crate_dir: "clipboard",
+    base: &[Contribution::CargoDep {
+        name: "frust-clipboard",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `haptics`' base contributions — a Cargo dependency plus one
+/// [`Contribution::ManifestPermission`], the app's own `android.permission.VIBRATE`
+/// `<uses-permission>` line.
+///
+/// This is the registry's **first** use of [`Contribution::ManifestPermission`]
+/// rather than [`Contribution::GradleModule`] for an Android addition — every
+/// prior permission-carrying entry (`secure-storage`'s `USE_BIOMETRIC`,
+/// `camera`'s implicit `CAMERA` permission) rides inside the plugin's own
+/// Gradle module manifest, folded in by the manifest merger so the app's
+/// manifest is never touched. `haptics` has no such module: like `clipboard`,
+/// its Android backend is plain JNI against framework classes
+/// (`android.os.Vibrator`/`VibrationEffect`) with no app-defined Kotlin helper
+/// class to carry a permission inside — see
+/// `plugins/haptics/src/android.rs`'s module doc. `VIBRATE` is a **normal**
+/// permission (granted automatically at install, no runtime prompt), so an
+/// app-manifest edit here carries none of the runtime-permission-flow
+/// complexity a dangerous permission would.
+const HAPTICS_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-haptics",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.VIBRATE",
+    },
+];
+
+const HAPTICS: PluginSpec = PluginSpec {
+    id: "haptics",
+    summary: "Minimal haptic feedback (selection tick, impact, success/warning/error) \
+              over Vibrator/VibrationEffect and UIKit's feedback generators.",
+    crate_dir: "haptics",
+    base: HAPTICS_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `iap`'s base contributions — a Cargo dependency plus its own Android
+/// library module and its own iOS Swift package, the `camera`/`native-widgets`
+/// shape (a plugin's Kotlin/Swift never copied into the app).
+///
+/// No `ManifestPermission`: `com.android.vending.BILLING` arrives transitively
+/// from the `openiap-google` Play Billing AAR, folded into the app by the
+/// manifest merger exactly like `secure-storage`'s `USE_BIOMETRIC` and
+/// `camera`'s implicit `CAMERA` permission — proven by grepping a generated
+/// app's merged manifest. No `PlistEntry`: unlike camera's usage-description
+/// string, StoreKit needs no app-side privacy key. No `AppCrateMacro`: an app
+/// calls `frust_iap::Iap` explicitly, so there is no dead-code-elimination
+/// hazard for release LTO to strip (camera's export shim exists only because
+/// nothing in Rust calls the symbol it protects).
+const IAP_BASE: &[Contribution] = &[
+    Contribution::CargoDep { name: "frust-iap" },
+    Contribution::GradleModule {
+        gradle_name: ":frust-iap",
+        rel_path: "plugins/iap/platform/android",
+    },
+    Contribution::SwiftPackageRef {
+        package_name: "FrustIap",
+        rel_path: "plugins/iap/platform/ios",
+    },
+];
+
+const IAP: PluginSpec = PluginSpec {
+    id: "iap",
+    summary: "In-app purchases and subscriptions over Play Billing / StoreKit 2, \
+              speaking the OpenIAP wire protocol.",
+    crate_dir: "iap",
+    base: IAP_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `database`'s single optional feature — enables the Turso engine (a pure-Rust
+/// SQLite rewrite) as an alternative to SQLite. This is the first zero-OS-side
+/// optional feature: a pure Cargo-feature flip with no Gradle module, plist key,
+/// manifest permission, Swift package, or app-crate macro contribution.
+///
+/// See `plugins/database/README.md` for the binary-size cost and a comparison
+/// with SQLite. Engine selection is deferred until connection time (the API is
+/// engine-agnostic), so adding this feature does not lock an app to a single
+/// choice.
+const DATABASE_TURSO: &[Contribution] = &[Contribution::CargoFeature {
+    name: "frust-database",
+    feature: "engine-turso",
+}];
+
+/// database's single optional feature.
+const DATABASE_FEATURES: &[FeatureSpec] = &[FeatureSpec {
+    id: "engine-turso",
+    summary: "Adds the Turso (Rust SQLite rewrite) engine alongside SQLite. \
+              Significant binary-size cost (see plugin README); enables future \
+              vector-search/cloud-sync capabilities. Engine chosen at open time.",
+    contributions: DATABASE_TURSO,
+}];
+
+const DATABASE: PluginSpec = PluginSpec {
+    id: "database",
+    summary: "Embedded SQL database (SQLite via rusqlite; engine-agnostic API).",
+    crate_dir: "database",
+    base: &[Contribution::CargoDep {
+        name: "frust-database",
+    }],
+    optional_features: DATABASE_FEATURES,
+    requires_sibling: None,
+};
+
+/// `i18n`'s base contributions — a Cargo dependency, a starter locale file,
+/// and a macro invocation to load the locale bundles at compile time.
+///
+/// [`Contribution::ScaffoldFile`] must come **first**: the starter locale file
+/// is created before the [`Contribution::AppCrateMacro`] invocation references
+/// it, and the macro's expansion really does walk the `locales/` directory at
+/// compile time — a missing fallback tree is a compile error, so the seeded
+/// file is what keeps a freshly-wired scaffold building. [`Contribution::CargoDep`] adds
+/// the dependency. [`Contribution::AppCrateMacro`] invokes the compile-time
+/// `frust_i18n::locales!` macro, which validates and loads the bundle
+/// directory — the entry point into the plugin's API.
+///
+/// No Android manifest permission, plist key, Gradle module, or Swift package
+/// is needed: this is a pure-Rust plugin with no OS-side integration (see
+/// `plugins/i18n/README.md`).
+const I18N_BASE: &[Contribution] = &[
+    Contribution::ScaffoldFile {
+        rel_path: "locales/en/main.ftl",
+        contents: "# English locale — add sibling directories (de/, fr/, ...) with the same file names.\n\
+                   # Syntax: https://projectfluent.org/fluent/guide/\n\
+                   hello = Hello, { $name }!\n",
+        comment: "Starter English Fluent locale file",
+    },
+    Contribution::CargoDep { name: "frust-i18n" },
+    Contribution::AppCrateMacro {
+        invocation: "frust_i18n::locales!(\"locales\");",
+        cfg: None,
+        comment: "Load and compile Fluent locale bundles (see plugins/i18n/README.md).",
+    },
+];
+
+const I18N: PluginSpec = PluginSpec {
+    id: "i18n",
+    summary: "Fluent Project-based internationalization/localization: locale-aware message \
+              resolution and system-locale detection.",
+    crate_dir: "i18n",
+    base: I18N_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `glyph`'s single base contribution — a Cargo dependency and nothing else.
+/// Like `database`/`i18n`, this is a pure Cargo-graph addition with no
+/// OS-side integration: the registry only wires the dependency in, exactly
+/// the shape `frust create`'s own scaffold uses. Making the design system
+/// *active* still needs an explicit `frust_glyph::install()` call in the
+/// app's own `app!(setup = {..})` block — the registry cannot add that call
+/// for the caller, since it doesn't know which design system (if any) the
+/// app already has installed there.
+const GLYPH: PluginSpec = PluginSpec {
+    id: "glyph",
+    summary: "Glyph catalog; needs frust_glyph::install() in app! setup \
+              (widgets + tokens + bundled fonts).",
+    crate_dir: "glyph",
+    base: &[Contribution::CargoDep {
+        name: "frust-glyph",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `material`'s single base contribution — see [`GLYPH`]'s doc comment for
+/// the shape and the same install-call caveat.
+const MATERIAL: PluginSpec = PluginSpec {
+    id: "material",
+    summary: "Material 3 catalog; needs frust_material::install() in app! \
+              setup (widgets + tokens).",
+    crate_dir: "material",
+    base: &[Contribution::CargoDep {
+        name: "frust-material",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `cupertino`'s single base contribution — see [`GLYPH`]'s doc comment for
+/// the shape and the same install-call caveat.
+const CUPERTINO: PluginSpec = PluginSpec {
+    id: "cupertino",
+    summary: "Cupertino catalog; needs frust_cupertino::install() in app! \
+              setup (widgets + tokens).",
+    crate_dir: "cupertino",
+    base: &[Contribution::CargoDep {
+        name: "frust-cupertino",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `shadcn`'s single base contribution — see [`GLYPH`]'s doc comment for the
+/// shape and the same install-call caveat. The tier's first *external-origin*
+/// catalog (ported from shadcn/ui rather than authored here — see
+/// `plugins/shadcn/src/lib.rs`), but the same pure-Cargo-dependency shape as
+/// `glyph`/`material`/`cupertino`: no OS-side integration, and making it the
+/// app's active theme is still a manual `frust_shadcn::install()` call in
+/// `app!(setup = {..})` the registry cannot add on the caller's behalf (it
+/// has no way to know where that block should go, or whether one is already
+/// installing another design system there).
+const SHADCN: PluginSpec = PluginSpec {
+    id: "shadcn",
+    summary: "shadcn/ui catalog; needs frust_shadcn::install() in app! setup \
+              (48 components + tokens + bundled Inter/JetBrains Mono fonts).",
+    crate_dir: "shadcn",
+    base: &[Contribution::CargoDep {
+        name: "frust-shadcn",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -200,6 +456,15 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLEAN_SIGNALS_FRUST,
         CAMERA,
         NATIVE_WIDGETS,
+        CLIPBOARD,
+        HAPTICS,
+        IAP,
+        DATABASE,
+        I18N,
+        GLYPH,
+        MATERIAL,
+        CUPERTINO,
+        SHADCN,
     ]
 }
 
@@ -219,7 +484,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_five_v1_plugins() {
+    fn registry_lists_the_fourteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -229,8 +494,144 @@ mod tests {
                 "clean-signals-frust",
                 "camera",
                 "native-widgets",
+                "clipboard",
+                "haptics",
+                "iap",
+                "database",
+                "i18n",
+                "glyph",
+                "material",
+                "cupertino",
+                "shadcn",
             ]
         );
+    }
+
+    /// The `glyph`/`material`/`cupertino`/`shadcn` entries are each exactly
+    /// one `CargoDep` and nothing else — no manifest permission, plist key,
+    /// Gradle module, or Swift package, since these are pure-Rust design
+    /// systems built on `frust::authoring` alone (see `GLYPH`'s doc
+    /// comment) — `shadcn` included, despite being the tier's first
+    /// external-origin catalog: its registry shape is identical.
+    #[test]
+    fn design_system_plugins_are_each_a_cargo_dep_and_nothing_else() {
+        for (id, crate_name) in [
+            ("glyph", "frust-glyph"),
+            ("material", "frust-material"),
+            ("cupertino", "frust-cupertino"),
+            ("shadcn", "frust-shadcn"),
+        ] {
+            let spec = find_plugin(id).unwrap();
+            assert_eq!(spec.crate_dir, id);
+            assert!(spec.optional_features.is_empty());
+            assert_eq!(spec.requires_sibling, None);
+
+            assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+            assert!(
+                matches!(
+                    spec.base[0],
+                    Contribution::CargoDep { name } if name == crate_name
+                ),
+                "{:?}",
+                spec.base
+            );
+        }
+    }
+
+    /// The `haptics` entry is exactly a `CargoDep` plus one
+    /// `ManifestPermission` — no optional features, no sibling, and (unlike
+    /// every other permission-carrying entry) no `GradleModule`, since this
+    /// plugin's Android backend is plain JNI with no Kotlin helper class to
+    /// carry the permission inside (see `HAPTICS_BASE`'s own doc comment).
+    #[test]
+    fn haptics_is_a_cargo_dep_plus_one_manifest_permission_and_nothing_else() {
+        let spec = find_plugin("haptics").unwrap();
+        assert_eq!(spec.crate_dir, "haptics");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-haptics"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::ManifestPermission {
+                permission: "android.permission.VIBRATE"
+            }
+        ));
+    }
+
+    /// The `clipboard` entry is exactly one `CargoDep` — no manifest
+    /// permission, plist key, Gradle module, or Swift package (see
+    /// `CLIPBOARD`'s own doc comment for why none apply).
+    #[test]
+    fn clipboard_is_a_cargo_dep_and_nothing_else() {
+        let spec = find_plugin("clipboard").unwrap();
+        assert_eq!(spec.crate_dir, "clipboard");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-clipboard"
+            }
+        ));
+    }
+
+    /// The `database` entry is exactly one `CargoDep` — no manifest
+    /// permission, plist key, Gradle module, or Swift package, since this is
+    /// a pure-Rust plugin with no OS-side integration. It now carries one
+    /// optional feature (`engine-turso`), the first zero-OS-side feature: a
+    /// pure Cargo-feature flip.
+    #[test]
+    fn database_is_a_cargo_dep_and_nothing_else() {
+        let spec = find_plugin("database").unwrap();
+        assert_eq!(spec.crate_dir, "database");
+        assert_eq!(spec.optional_features.len(), 1);
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-database"
+            }
+        ));
+    }
+
+    /// The `database` entry's `engine-turso` feature is exactly one
+    /// `CargoFeature` — no manifest permission, plist key, Gradle module,
+    /// Swift package, or app-crate macro. It's the registry's first pure
+    /// Cargo-feature flip with zero OS-side integration (see `DATABASE_TURSO`'s
+    /// own doc comment for why).
+    #[test]
+    fn database_engine_turso_is_a_cargo_feature_and_nothing_else() {
+        let spec = find_plugin("database").unwrap();
+        let feature = spec
+            .optional_features
+            .iter()
+            .find(|f| f.id == "engine-turso")
+            .expect("engine-turso feature");
+
+        assert_eq!(
+            feature.contributions.len(),
+            1,
+            "{:?}",
+            feature.contributions
+        );
+        assert!(matches!(
+            feature.contributions[0],
+            Contribution::CargoFeature {
+                name: "frust-database",
+                feature: "engine-turso"
+            }
+        ));
     }
 
     /// The `native-widgets` entry is exactly a Cargo dependency plus the
@@ -322,6 +723,46 @@ mod tests {
         ));
     }
 
+    /// The `iap` entry's base contributions, exactly [`IAP_BASE`]'s own list
+    /// — a Cargo dependency, the plugin's own Android library module, and its
+    /// own iOS Swift package, no more and no fewer, in application order —
+    /// and no optional features / sibling requirement.
+    #[test]
+    fn iap_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("iap").unwrap();
+        assert_eq!(spec.crate_dir, "iap");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep { name: "frust-iap" }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-iap",
+                rel_path: "plugins/iap/platform/android",
+            }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::SwiftPackageRef {
+                package_name: "FrustIap",
+                rel_path: "plugins/iap/platform/ios",
+            }
+        ));
+        assert!(
+            !spec
+                .base
+                .iter()
+                .any(|c| matches!(c, Contribution::ManifestPermission { .. })),
+            "iap must add no ManifestPermission — com.android.vending.BILLING \
+             arrives transitively from the openiap-google Play Billing AAR"
+        );
+    }
+
     /// The `SwiftPackageRef` counterpart of
     /// `secure_storage_gradle_module_path_exists_in_this_checkout` below — a
     /// typo in `rel_path` would otherwise surface only as a missing
@@ -401,9 +842,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_signals_frust_declares_its_sibling_requirement() {
+    fn clean_signals_frust_declares_no_sibling_requirement() {
+        // clean-signals is git+rev-pinned to its public repo; the
+        // plugin no longer needs a `../clean-signals-rs` sibling checkout.
         let spec = find_plugin("clean-signals-frust").unwrap();
-        assert_eq!(spec.requires_sibling, Some("../clean-signals-rs"));
+        assert_eq!(spec.requires_sibling, None);
     }
 
     #[test]
@@ -618,6 +1061,333 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "native-widgets", &[]).unwrap();
         assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `haptics` counterpart of the camera/native-widgets end-to-end
+    /// cases above, and the registry's first exercise of
+    /// `Contribution::ManifestPermission` end to end (`HAPTICS_BASE`'s doc
+    /// comment): a fresh scaffold, `add_plugin(.., "haptics", ..)` applied
+    /// twice. The second apply must report `AlreadyPresent` for both
+    /// contributions and leave a byte-identical tree.
+    #[test]
+    fn haptics_add_plugin_applies_both_contributions_and_reapply_is_idempotent() {
+        let root = scaffold_project("haptics-idempotence");
+
+        let first = add_plugin(&root, "haptics", &[]).unwrap();
+        assert_eq!(first.plugin_id, "haptics");
+        assert_eq!(first.items.len(), 2, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-haptics"), "{cargo}");
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains("android.permission.VIBRATE"),
+            "{manifest}"
+        );
+
+        // No Gradle module, no Swift package, no plist key — this entry's
+        // own doc says the Android addition rides a manifest permission
+        // alone (`HAPTICS_BASE`'s comment).
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("frust-haptics"),
+            "haptics must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("FrustHaptics"),
+            "haptics must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "haptics", &[]).unwrap();
+        assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `iap` counterpart of the camera/native-widgets/haptics end-to-end
+    /// cases above — the registry's second `GradleModule` +
+    /// `SwiftPackageRef` pairing, and the first with neither a `PlistEntry`
+    /// nor an `AppCrateMacro` (`IAP_BASE`'s doc comment says why). A fresh
+    /// scaffold, `add_plugin(.., "iap", ..)` applied twice: the app's
+    /// Cargo.toml gains the dependency, `settings.gradle.kts` gains the
+    /// include trio, the app's `build.gradle.kts` gains the project
+    /// dependency, and `project.pbxproj` gains the `FrustIap` package
+    /// reference — the second apply must report every item
+    /// `AlreadyPresent` and leave a byte-identical tree.
+    #[test]
+    fn iap_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("iap-idempotence");
+
+        let pre_plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        let pre_lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+
+        let first = add_plugin(&root, "iap", &[]).unwrap();
+        assert_eq!(first.plugin_id, "iap");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency, Gradle module wiring and Swift package
+        // reference all actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-iap"), "{cargo}");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(settings.contains("include(\":frust-iap\")"), "{settings}");
+        assert!(
+            settings.contains("rootDir.resolve(\"build/frust-iap\")"),
+            "{settings}"
+        );
+        let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            app_build.contains("implementation(project(\":frust-iap\"))"),
+            "{app_build}"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(pbxproj.contains("FrustIap"), "{pbxproj}");
+        assert_pbxproj_well_formed(&pbxproj);
+
+        // No Info.plist key and no app-crate macro invocation — the
+        // absences `IAP_BASE`'s own doc comment states.
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(plist, pre_plist, "iap must add no Info.plist key");
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert_eq!(
+            lib_rs, pre_lib_rs,
+            "iap must add no app-crate macro invocation"
+        );
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "iap", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `database` plugin with the `engine-turso` feature applied: a fresh
+    /// scaffold, `add_plugin(.., "database", &["engine-turso"])` applied twice.
+    /// The first apply reports two items (`Applied`: the base CargoDep and the
+    /// optional CargoFeature), and the app's Cargo.toml gains
+    /// `frust-database = { path = ..., features = ["engine-turso"] }`. The
+    /// second apply must report every item `AlreadyPresent` and leave a
+    /// byte-identical tree — the idempotence contract.
+    ///
+    /// This is the registry's first zero-OS-side optional feature, exercising
+    /// the pure Cargo-feature flip with no platform-side machinery.
+    #[test]
+    fn database_add_plugin_with_engine_turso_feature_and_reapply_is_idempotent() {
+        let root = scaffold_project("database-engine-turso-idempotence");
+
+        let first = add_plugin(&root, "database", &["engine-turso"]).unwrap();
+        assert_eq!(first.plugin_id, "database");
+        assert_eq!(first.items.len(), 2, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency with the feature enabled actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-database"), "{cargo}");
+        assert!(
+            cargo.contains("features = [\"engine-turso\"]"),
+            "Cargo.toml must contain the engine-turso feature: {cargo}"
+        );
+
+        // No Android manifest permission, iOS plist key, Gradle module, or
+        // Swift package — the absences this pure-Rust plugin's own registry
+        // entry states (and the zero-OS-side feature reinforces).
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            !manifest.contains("database"),
+            "database must add no manifest permission"
+        );
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert!(
+            !plist.contains("database"),
+            "database must add no plist key"
+        );
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("database"),
+            "database must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("FrustDatabase"),
+            "database must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "database", &["engine-turso"]).unwrap();
+        assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `i18n` entry's base contributions, exactly [`I18N_BASE`]'s own list
+    /// — a starter Fluent locale file, a Cargo dependency, and a macro
+    /// invocation, no more and no fewer, in application order (scaffolded file
+    /// first, then the dependency, then the macro), and no optional features /
+    /// sibling requirement.
+    #[test]
+    fn i18n_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("i18n").unwrap();
+        assert_eq!(spec.crate_dir, "i18n");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::ScaffoldFile {
+                rel_path: "locales/en/main.ftl",
+                ..
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::CargoDep { name: "frust-i18n" }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::AppCrateMacro {
+                invocation: "frust_i18n::locales!(\"locales\");",
+                cfg: None,
+                ..
+            }
+        ));
+    }
+
+    /// The `i18n` plugin end to end: a fresh scaffold, `add_plugin(..,
+    /// "i18n", ..)` applied twice. The first apply reports three items
+    /// (`Applied`: ScaffoldFile, CargoDep, AppCrateMacro), and the app gains
+    /// the starter `locales/en/main.ftl` file, the Cargo dependency, and the
+    /// macro invocation. The second apply must report every item
+    /// `AlreadyPresent` and leave a byte-identical tree — the idempotence
+    /// contract.
+    ///
+    /// This is the registry's first exercise of [`Contribution::ScaffoldFile`]
+    /// end to end, and the first pure-Rust plugin after `database` to add an
+    /// `AppCrateMacro` without OS-side machinery.
+    #[test]
+    fn i18n_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("i18n-idempotence");
+
+        let first = add_plugin(&root, "i18n", &[]).unwrap();
+        assert_eq!(first.plugin_id, "i18n");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency, starter locale file, and macro invocation all
+        // actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-i18n"), "{cargo}");
+        let locale_file = fs::read_to_string(root.join("locales/en/main.ftl")).unwrap();
+        assert!(
+            locale_file.contains("hello = Hello, { $name }!"),
+            "{locale_file}"
+        );
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert!(
+            lib_rs.contains("frust_i18n::locales!(\"locales\");"),
+            "{lib_rs}"
+        );
+
+        // No Android manifest permission, iOS plist key, Gradle module, or
+        // Swift package — the absences this pure-Rust plugin's own registry
+        // entry states (`I18N_BASE`'s doc comment).
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            !manifest.contains("i18n"),
+            "i18n must add no manifest permission"
+        );
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert!(!plist.contains("i18n"), "i18n must add no plist key");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("i18n"),
+            "i18n must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("Frusti18n"),
+            "i18n must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "i18n", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
         assert!(
             second
                 .items

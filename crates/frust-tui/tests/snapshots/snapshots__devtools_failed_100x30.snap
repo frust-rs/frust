@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │                                                                          
+                         │                                                                          
+ DEVICES ↻ r             │                                                                          
+   none found            │                                                                          
+                         │                                                                          
+ SESSIONS                │                                                                          
+   huddle                │                                                                          
+   ▸ ▶ desktop           │                                                                          
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   New project · n       │                                                                          
+   Add plugin · a        │    ✗  Could not reach devtools service                                   
+   Doctor · d            │    connection refused after 3s — the service may have exited             
+   Build · b             │                                                                          
+   Clean · c             │                          ╭──────────────────╮                            
+   MCP off · M           │                          │ ⟳  Retry         │                            
+   DAP off · D           │                          ╰──────────────────╯                            
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │ devtools: failed │ r retry · Esc back to log                    [mouse ✓]
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

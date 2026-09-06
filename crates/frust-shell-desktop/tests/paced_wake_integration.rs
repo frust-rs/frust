@@ -1,17 +1,16 @@
-//! Integration suite (bug plan `catalog-animation-performance`, followup
-//! phase1-fix-2, task g1) proving the desktop shell's paced-wake mechanism
+//! Integration suite proving the desktop shell's paced-wake mechanism
 //! (`frust_shell_desktop::paced_wake`, doc-hidden but `pub` for exactly this
 //! test) both settles cleanly once a paced (`TickClass::CosmeticLoop`) loop
 //! stops requesting frames **and** always leaves the event loop's control
 //! flow consistent with the pending paced wake — never parked on a stale
 //! `WaitUntil` once a settle clears the field.
 //!
-//! The round-1 Critical this suite regression-guards: the settle path cleared
+//! The regression this suite guards against: the settle path cleared
 //! `paced_wake` but left `ControlFlow` on a stale `WaitUntil(deadline)`; once
 //! that deadline elapsed, winit treats `WaitUntil(past)` as a zero-timeout
 //! poll and busy-spins at ~100% CPU with no redraws. The fix couples the field
 //! and the control flow into one [`PacedDecision`] value; this suite models
-//! the [`ControlFlowIntent`] across turns (which the round-1 pure model never
+//! the [`ControlFlowIntent`] across turns (which the original pure model never
 //! carried) so the busy-spin is observable as a test failure.
 //!
 //! Mirrors `frust-shell-common/tests/pacing_integration.rs`'s tick-driven,
@@ -20,6 +19,18 @@
 //! (`next_paced_wake`) or an `about_to_wait` (`paced_wake_action`). No real
 //! winit event loop or window is ever constructed — both functions are pure
 //! and take `now` as a parameter.
+//!
+//! **Per-request pacing interval:** the per-request pacing interval
+//! (`PaintOutcome::paced_interval`) now flows into `next_paced_wake`
+//! alongside `needs_frame_paced_only`, so a 500ms caret blink schedules its
+//! own ~500ms wake rather than always falling back to the theme's
+//! `cosmetic_loop_rate` cap. [`ShellModel::paint_at`] threads that interval
+//! through; [`ShellModel::paint`] still forwards `None` (the original shape),
+//! so every pre-existing test below is an unmodified regression guard for
+//! "no per-request interval latched ⇒ identical to today" (acceptance
+//! criterion 2). The new tests toward the end of this file cover a 500ms-only
+//! loop (criterion 1) and an interval change mid-loop re-deriving the next
+//! deadline rather than parking on a stale one (criterion 3).
 
 use std::time::{Duration, Instant};
 
@@ -39,7 +50,7 @@ fn interval_30hz() -> Duration {
 
 /// The event loop's control-flow state, modeled across turns — the concrete
 /// mirror of winit's `ControlFlow` (only the two states this mechanism uses).
-/// The round-1 pure model carried only the `paced_wake` field, not this, so a
+/// The original pure model carried only the `paced_wake` field, not this, so a
 /// stale `WaitUntil` surviving a settle was invisible to it; carrying it here
 /// is what makes the busy-spin observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,12 +100,28 @@ impl ShellModel {
 
     /// One `RedrawRequested` paint turn.
     fn paint(&mut self, now: Instant, needs_frame: bool, needs_frame_paced_only: bool) -> bool {
+        self.paint_at(now, needs_frame, needs_frame_paced_only, None)
+    }
+
+    /// One `RedrawRequested` paint turn, additionally carrying this paint's
+    /// `PaintOutcome::paced_interval` — the per-request pacing interval (A2)
+    /// fed straight into `next_paced_wake`, mirroring `app_handler.rs`'s call
+    /// site (no persisted latch field: desktop's decision runs synchronously
+    /// right after paint, so every call always sees the freshest interval).
+    fn paint_at(
+        &mut self,
+        now: Instant,
+        needs_frame: bool,
+        needs_frame_paced_only: bool,
+        requested_interval: Option<Duration>,
+    ) -> bool {
         let decision = next_paced_wake(
             needs_frame,
             needs_frame_paced_only,
             self.anim_pacing,
             now,
             self.hz,
+            requested_interval,
         );
         self.apply(decision)
     }
@@ -106,7 +133,7 @@ impl ShellModel {
     }
 }
 
-/// (a) The round-1 Critical's exact trace (steps 1–4), written as the
+/// (a) The busy-spin regression's exact trace (steps 1–4), written as the
 /// regression test: a paced loop parks on `WaitUntil`, then a state/signal
 /// wake repaints with `needs_frame == false` *before* the deadline. The
 /// settle must clear the field AND return the loop to `Wait` — not leave it
@@ -148,7 +175,7 @@ fn settle_while_parked_returns_control_flow_to_wait() {
     assert_eq!(m.control_flow, ModeledControlFlow::Wait);
 
     // Past the old deadline: no spurious redraw, no reversion to a stale
-    // WaitUntil — the busy-spin the round-1 code exhibited is gone.
+    // WaitUntil — the busy-spin the original code exhibited is gone.
     let t2 = t0 + iv + Duration::from_millis(50);
     let requested = m.about_to_wait(t2);
     assert!(!requested, "no spurious redraw after a settle");
@@ -356,4 +383,128 @@ fn pacing_disabled_fires_now_and_stays_on_wait() {
     m.paint(now, false, false);
     m.about_to_wait(now);
     assert_eq!(m.control_flow, ModeledControlFlow::Wait);
+}
+
+// -----------------------------------------------------------------------
+// Per-request pacing interval: the desktop shell must honor
+// `PaintOutcome::paced_interval` — the caret's own ~500ms ask — rather than
+// always deriving the wake deadline from `cosmetic_loop_rate` alone.
+// -----------------------------------------------------------------------
+
+/// A ~2Hz caret blink — deliberately far slower than the 30Hz cosmetic-loop
+/// cap, the motivating per-request interval this task wires through.
+fn interval_500ms() -> Duration {
+    Duration::from_millis(500)
+}
+
+/// Acceptance criterion 1: with only a 500ms paced request active, the
+/// desktop loop must park ~500ms between paced redraws — not the theme's
+/// ~33ms (30Hz) cap.
+#[test]
+fn a_500ms_paced_request_parks_500ms_between_redraws_not_the_30hz_cap() {
+    let iv500 = interval_500ms();
+    let iv30 = interval_30hz();
+    let mut m = ShellModel::new(true, HZ_30);
+    let mut now = Instant::now();
+
+    for turn in 0..5 {
+        m.paint_at(now, true, true, Some(iv500));
+        assert_eq!(
+            m.paced_wake,
+            Some(now + iv500),
+            "turn {turn}: the scheduled deadline must be the requested 500ms, \
+             not the 30Hz cap"
+        );
+        m.about_to_wait(now);
+        assert_eq!(
+            m.control_flow,
+            ModeledControlFlow::WaitUntil(now + iv500),
+            "turn {turn}: the loop must park on the 500ms deadline"
+        );
+        assert!(
+            iv500 > iv30 * 10,
+            "sanity: 500ms is far slower than the 30Hz cap this test guards against"
+        );
+        // The loop wakes at the deadline and repaints on the next iteration.
+        now += iv500;
+    }
+}
+
+/// Acceptance criterion 2: with no per-request interval latched (`None`),
+/// behavior is byte-identical to the pre-A2 `cosmetic_loop_rate`-only
+/// fallback — the default `paint` helper (which forwards `None`) reproduces
+/// every existing assertion in this suite unchanged; this test additionally
+/// cross-checks `paint`/`paint_at(.., None)` produce the exact same decision.
+#[test]
+fn no_requested_interval_is_byte_identical_to_the_cosmetic_loop_rate_fallback() {
+    let iv = interval_30hz();
+    let t0 = Instant::now();
+
+    let mut via_paint = ShellModel::new(true, HZ_30);
+    let mut via_paint_at_none = ShellModel::new(true, HZ_30);
+
+    let requested_via_paint = via_paint.paint(t0, true, true);
+    let requested_via_paint_at = via_paint_at_none.paint_at(t0, true, true, None);
+
+    assert_eq!(requested_via_paint, requested_via_paint_at);
+    assert_eq!(via_paint.paced_wake, via_paint_at_none.paced_wake);
+    assert_eq!(via_paint.paced_wake, Some(t0 + iv));
+}
+
+/// Acceptance criterion 3 (interval-change case): a paced-only loop is first
+/// driven by a fast (30Hz-cap) request, then — mid-loop — the only paced
+/// requester becomes the slow 500ms caret. The very next `paint` turn must
+/// re-derive the deadline from the NEW interval; the following
+/// `about_to_wait` must park on that fresh deadline, never on a value implied
+/// by the old, now-stale 30Hz cadence (no busy-spin / no stretched wait on a
+/// deadline that no longer reflects reality).
+#[test]
+fn interval_change_between_paced_paints_re_derives_the_next_deadline() {
+    let iv30 = interval_30hz();
+    let iv500 = interval_500ms();
+    let mut m = ShellModel::new(true, HZ_30);
+    let t0 = Instant::now();
+
+    // Turn 1: a 30Hz shimmer paces this loop (no per-request interval).
+    m.paint_at(t0, true, true, None);
+    assert_eq!(m.paced_wake, Some(t0 + iv30));
+    m.about_to_wait(t0);
+    assert_eq!(m.control_flow, ModeledControlFlow::WaitUntil(t0 + iv30));
+
+    // The shimmer settles and the 500ms caret becomes the sole paced
+    // requester, on the very next paint (well before the stale 30Hz deadline
+    // would have elapsed).
+    let t1 = t0 + Duration::from_millis(5);
+    m.paint_at(t1, true, true, Some(iv500));
+    assert_eq!(
+        m.paced_wake,
+        Some(t1 + iv500),
+        "the new deadline must be derived from THIS paint's 500ms request, \
+         not the stale 30Hz-derived one from the previous turn"
+    );
+    assert_ne!(
+        m.paced_wake,
+        Some(t0 + iv30),
+        "the old 30Hz deadline must not survive the interval change"
+    );
+
+    // about_to_wait must park on the fresh, re-derived deadline.
+    m.about_to_wait(t1);
+    assert_eq!(
+        m.control_flow,
+        ModeledControlFlow::WaitUntil(t1 + iv500),
+        "the loop must park on the freshly re-derived 500ms deadline, never \
+         a stale WaitUntil implied by the old cadence"
+    );
+
+    // Confirm no busy-spin: at the OLD (now long-elapsed) 30Hz deadline, the
+    // loop must still be correctly parked on the NEW deadline, not fired
+    // early and not treated as an elapsed stale WaitUntil.
+    let stale_old_deadline = t0 + iv30;
+    assert!(stale_old_deadline < t1 + iv500);
+    assert_eq!(
+        m.control_flow,
+        ModeledControlFlow::WaitUntil(t1 + iv500),
+        "the modeled control flow reflects only the fresh deadline"
+    );
 }

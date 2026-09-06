@@ -1,12 +1,12 @@
-//! The build-launcher modal (PLAN D6 "build launcher"): a shadowed, centered
+//! The build-launcher modal: a shadowed, centered
 //! popup over the workbench with the artifact-kind selector + `BuildInfo`
 //! funnel (mode/flavor/defines) plus kind-conditional flags (split-per-ABI,
 //! iOS simulator/codesign, `.ipa` export method) and launch/cancel actions.
 //! The base workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this modal's regions are live while it is
-//! open — the D4 base-layer suppression, the same shape `run_config` uses.
+//! open — the base-layer suppression, the same shape `run_config` uses.
 //!
-//! Layering (D2): renders `&BuildLauncher` and only *registers* interaction;
+//! Layering: renders `&BuildLauncher` and only *registers* interaction;
 //! it never mutates the engine.
 
 use ratatui::Frame;
@@ -139,7 +139,13 @@ pub fn render(
             );
             advance(&mut y);
         }
-        ArtifactKind::Appbundle => {}
+        // A desktop bundle asks for nothing beyond mode/flavor/defines — its
+        // identity, icon and launcher metadata all come from `frust.toml` and
+        // the project's own `macos/`/`windows/`/`linux/` files.
+        ArtifactKind::Appbundle
+        | ArtifactKind::Macos
+        | ArtifactKind::Windows
+        | ArtifactKind::Linux => {}
         ArtifactKind::Ios => {
             render_toggle(
                 frame,
@@ -237,7 +243,10 @@ pub fn render(
 fn kind_row_count(kind: ArtifactKind) -> u16 {
     match kind {
         ArtifactKind::Apk | ArtifactKind::Ipa => 1,
-        ArtifactKind::Appbundle => 0,
+        ArtifactKind::Appbundle
+        | ArtifactKind::Macos
+        | ArtifactKind::Windows
+        | ArtifactKind::Linux => 0,
         ArtifactKind::Ios => 2,
     }
 }

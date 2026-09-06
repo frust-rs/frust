@@ -18,17 +18,17 @@
 //! so Material rendering stays byte-identical. The kit's mined data
 //! (`kit-colors-type-metrics.json`) has **no `Sliders` size record at all**
 //! (only shadow recipes for the knob in `glass-recipes.json`, with no
-//! width/height fields) — a strictly more inconclusive case than
-//! [`crate::cupertino::switch`]'s, which at least had an ambiguous record to
-//! reject. Per the same evidence rule applied elsewhere in this catalog,
+//! width/height fields). Per the same evidence rule this repo applies to any
+//! unsourced platform metric,
 //! [`CUPERTINO_THUMB`] is therefore **community-approximate**, not kit-cited
 //! (see its doc comment); the groove thickness ([`TRACK_H`]) is shared with
 //! the Material path unchanged, since there is no evidence either way to
 //! diverge it. The knob's reflective treatment (drop shadow + specular
-//! gradient) mirrors [`crate::cupertino::switch`]'s exactly, reading the same
-//! `theme.glass.control` tier (buttons/toggles/sliders — the kit's "control"
-//! glass tier covers interactive controls generally, see
-//! `frust-theme/src/glass.rs`'s module docs). iOS 26.2's "Liquid Glass
+//! gradient) reads the theme's own `glass.control` tier (buttons/toggles/
+//! sliders — the "control" glass tier covers interactive controls generally,
+//! see `frust-theme/src/glass.rs`'s module docs), so the recipe is whatever
+//! the active design system authored, never a value named here. iOS 26.2's
+//! "Liquid Glass
 //! slider" claims (a user-facing OS tint-adjustment control) are **not**
 //! what this branch re-skins — this is Frust's `Slider` widget, a different
 //! control; this widget ships a visual re-skin only, no behavior changes.
@@ -43,6 +43,8 @@ use frust_core::{
 use frust_theme::{DesignLanguage, GlassMaterial, GlassScale, Theme};
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
+
+use crate::authoring::presses;
 
 /// Slider control height, in logical px.
 const HEIGHT: f64 = 24.0;
@@ -110,14 +112,19 @@ fn is_cupertino(theme: Option<&Theme>) -> bool {
 }
 
 /// The `control` glass tier (buttons/toggles/sliders) the Cupertino knob's
-/// shadow/highlight reads — mirrors [`crate::cupertino::switch`]'s
-/// `resolve_control_glass` exactly (themed: `theme.glass.control`; unthemed:
-/// [`GlassScale::ios27`]'s `control` tier directly, so there is no separate
-/// hand-tuned fallback to drift out of sync — see that module's doc comment).
+/// shadow/highlight reads: `theme.glass.control`.
+///
+/// The unthemed arm is **unreachable by construction** — the sole call site
+/// sits inside the `is_cupertino(theme)` guard in `paint`, and
+/// `is_cupertino(None)` is `false`, so `theme` is always `Some` here. It
+/// therefore resolves to the language-free [`GlassScale::opaque_material`]
+/// tier rather than naming a design language's glass recipe: a fallback no
+/// paint pass can observe must not pin this baseline widget to a catalog's
+/// token table.
 fn resolve_control_glass(theme: Option<&Theme>) -> GlassMaterial {
     theme
         .map(|t| t.glass.control.clone())
-        .unwrap_or_else(|| GlassScale::ios27().control)
+        .unwrap_or_else(|| GlassScale::opaque_material().control)
 }
 
 /// Return `color` with its alpha channel replaced by `alpha` (mirrors the
@@ -164,7 +171,7 @@ pub struct SliderWidget {
     /// Gates `Move` so a hover `Move` (no prior press) never fires `on_change`;
     /// a `Down` still jumps to and reports the tapped value regardless.
     captured: bool,
-    on_change: crate::ErasedArgCallback<f64>,
+    on_change: crate::authoring::ErasedArgCallback<f64>,
 }
 
 /// Map a widget-local x (in `0..=width`) to a `0.0..=1.0` value, clamped.
@@ -183,7 +190,7 @@ impl<State: 'static> View<State> for SliderView<State> {
         SliderWidget {
             value: self.value,
             captured: false,
-            on_change: crate::erase_callback_arg(&self.on_change),
+            on_change: crate::authoring::erase_callback_arg(&self.on_change),
         }
     }
 
@@ -193,7 +200,7 @@ impl<State: 'static> View<State> for SliderView<State> {
         element: &mut SliderWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_change = crate::erase_callback_arg(&self.on_change);
+        element.on_change = crate::authoring::erase_callback_arg(&self.on_change);
         if prev.value != self.value {
             element.value = self.value;
             ChangeFlags::PAINT
@@ -237,8 +244,7 @@ impl Widget for SliderWidget {
 
         if is_cupertino(theme) {
             // Cupertino re-skin: larger reflective knob — see
-            // the module docs' Design-language branch section. Mirrors
-            // `cupertino::switch`'s shadow+highlight treatment exactly.
+            // the module docs' Design-language branch section.
             let diam = CUPERTINO_THUMB;
             let thumb_origin = Point::new(thumb_x - diam / 2.0, mid_y - diam / 2.0);
             let thumb_size = Size::new(diam, diam);
@@ -285,6 +291,9 @@ impl Widget for SliderWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 let v = value_from_x(p.position.x, ctx.size().width);
@@ -351,10 +360,36 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, 12.0),
+            button: frust_core::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut SliderWidget, state: &mut Val, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(200.0, HEIGHT));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_reports_a_value() {
+        let mut w = widget(0.0);
+        let mut state = Val::default();
+        dispatch(&mut w, &mut state, &secondary_ev(PointerPhase::Down, 50.0));
+        assert!(!w.captured, "no capture opened");
+        assert_eq!(state.changes, 0, "and no value reported");
+        // A move after it is an ordinary uncaptured pass, not a drag.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 120.0));
+        assert_eq!(state.changes, 0);
+
+        // The primary press still reports.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 50.0));
+        assert!(w.captured);
+        assert_eq!(state.value, 0.25);
     }
 
     #[test]
@@ -461,8 +496,8 @@ mod tests {
     }
 
     #[test]
-    fn themed_paint_resolves_m3_slider_roles() {
-        let theme = Theme::m3_baseline();
+    fn themed_paint_resolves_the_scheme_s_slider_roles() {
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         assert_eq!(
             paint_colors(0.5, Some(&theme)),
@@ -475,10 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn material_and_unthemed_paint_have_no_reflective_treatment() {
-        // Byte-identical to the pre-Cupertino behavior — no
-        // draw_shadow/fill_rounded_rect_brush calls leak into the Material
-        // (or unthemed) path.
+    fn non_cupertino_and_unthemed_paint_have_no_reflective_treatment() {
+        // No draw_shadow/fill_rounded_rect_brush call leaks into the default
+        // (or unthemed) path — only a `Cupertino`-tagged theme takes the
+        // reflective branch.
         let mut unthemed = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT));
@@ -487,7 +522,12 @@ mod tests {
         assert!(rec.shadows.is_empty());
         assert!(rec.brushes.is_empty());
 
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
+        assert_ne!(
+            theme.design_language,
+            DesignLanguage::Cupertino,
+            "the default path under test must not be the Cupertino one"
+        );
         let mut themed = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
@@ -497,9 +537,36 @@ mod tests {
         assert!(rec.brushes.is_empty());
     }
 
+    /// A `Cupertino`-tagged theme carrying a translucent `control` glass tier
+    /// — the shape a Cupertino design system installs, built inline here
+    /// because no design language ships in this crate. The shadow/hairline
+    /// values are arbitrary-but-distinctive: the branch under test reads them
+    /// straight off the theme, so what matters is that the assertions below
+    /// track THESE numbers rather than a hardcoded recipe.
+    fn cupertino_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(DesignLanguage::Cupertino)
+            .map_glass(|mut g| {
+                g.control = GlassMaterial {
+                    blur_radius_intent: 15.0,
+                    fills_light: Vec::new(),
+                    fills_dark: Vec::new(),
+                    hairline_alpha: 0.3,
+                    shadow: frust_theme::ShadowSpec {
+                        y_offset: 2.0,
+                        blur_std_dev: 4.0,
+                        color_alpha: 0.12,
+                    },
+                };
+                g
+            })
+            .build()
+    }
+
     #[test]
     fn cupertino_themed_paint_uses_the_larger_reflective_knob() {
-        let theme = Theme::cupertino_baseline();
+        let theme = cupertino_theme();
+        assert_eq!(theme.design_language, DesignLanguage::Cupertino);
         let mut w = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
@@ -511,7 +578,7 @@ mod tests {
         assert_eq!(rec.rrects[2], CUPERTINO_THUMB_FILL);
 
         assert_eq!(rec.shadows.len(), 1, "one drop shadow under the knob");
-        let expected = GlassScale::ios27().control.shadow;
+        let expected = theme.glass.control.shadow;
         assert_eq!(
             rec.shadows[0].2,
             CUPERTINO_THUMB / 2.0,

@@ -1,10 +1,10 @@
-//! The toolchain bootstrap wizard (PLAN D6a / workbook B6): the fresh-machine
+//! The toolchain bootstrap wizard: the fresh-machine
 //! flow that walks a machine missing `cargo-ndk` / rustup targets / a JDK to a
 //! building-Frust-apps state, modeled on fdemon 0.6.3's InstallWizard (a
 //! PATTERN source only — BSL-1.1, no verbatim copies).
 //!
 //! Everything here is plain data + pure transitions over the component-level
-//! report the drive side (T01) produces
+//! report the drive side produces
 //! ([`frust_drive::doctor::build_report`]): the wizard holds a snapshot of that
 //! [`DoctorReport`] plus the fdemon-style collapsed/expanded tree cursor, and
 //! projects it into a left step tree + a right detail pane. The two pieces of
@@ -18,7 +18,7 @@ use frust_drive::doctor::{Component, ComponentStatus, DoctorReport, FixCommand};
 
 /// The report area name whose `Missing` gates handback — a `Missing` core
 /// (Rust toolchain / cargo) blocks, every platform area's gap stays a
-/// non-blocking `Partial` (PLAN D6a; mirrors `frust_drive::doctor::report`'s
+/// non-blocking `Partial` (mirrors `frust_drive::doctor::report`'s
 /// own `CORE_AREA`, which isn't re-exported, so it's named here with this
 /// note).
 pub const CORE_AREA: &str = "Prerequisites";
@@ -101,7 +101,7 @@ impl BootstrapWizard {
         self.clamp();
     }
 
-    /// The whole-report rollup — the handback-gating status (PLAN D6a): a
+    /// The whole-report rollup — the handback-gating status: a
     /// `Missing` core blocks, platform gaps stay `Partial`.
     pub fn rollup(&self) -> ComponentStatus {
         self.report.rollup()
@@ -296,7 +296,7 @@ impl BootstrapWizard {
 }
 
 /// Cap a platform area's status at `Partial` — a `Missing` platform component
-/// is a non-blocking gap for rollup/glyph purposes (PLAN D6a); only the core
+/// is a non-blocking gap for rollup/glyph purposes; only the core
 /// area ever surfaces `Missing`.
 fn cap_platform(status: ComponentStatus) -> ComponentStatus {
     match status {

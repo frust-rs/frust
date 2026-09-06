@@ -75,6 +75,16 @@ void  frust_string_free(char *s);
 // frust_init returns a handle.
 void  frust_set_appearance(void *handle, uint8_t dark);
 
+// Reduced motion: apply the platform's reduce-motion accessibility
+// preference to the app's motion tokens. `reduce` is 0/1 (same convention as
+// `dark` above). The source is UIAccessibility.isReduceMotionEnabled — NOT a
+// UITraitCollection trait, so FrustViewController observes
+// UIAccessibility.reduceMotionStatusDidChangeNotification for live changes and
+// seeds the initial value right after frust_init returns a handle. The Rust
+// side ORs this over the active theme's own reduce_motion token (a floor, not
+// a replacement), so it also reaches a theme forced with frust::set_app_theme.
+void  frust_set_reduce_motion(void *handle, uint8_t reduce);
+
 // Deep links: deliver a platform URL — cold-start, from
 // SceneDelegate's connectionOptions.urlContexts, or running, from
 // scene(_:openURLContexts:) — into the process-wide deep-link source. `url`

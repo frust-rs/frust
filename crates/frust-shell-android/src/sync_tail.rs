@@ -17,15 +17,15 @@
 //!
 //! # Why the correction is regime-gated, not scalar
 //!
-//! Every scalar form is CLOSED by measurement: any fixed or derived-but-always-on
-//! delay that closes cupid's constant residual overcorrects the OnePlus 9's
-//! already-aligned majority and converts a lead into a *worse* lag (measured:
-//! tail 0 → lead p90 5.24; tail 2 → lag p90 6.28; tail 4 → lag p90 7.12).
-//! The correction is therefore applied **only in the regime
-//! that produces a constant-shaped residual**: a deep swapchain queue, whose
-//! app-visible proxy is the render tail's acquire wait. That single signal
-//! separates the two measured devices by two orders of magnitude and is the
-//! mechanism that makes cupid's residual constant in the first place (every
+//! Every scalar form is ruled out by measurement: any fixed or
+//! derived-but-always-on delay that closes cupid's constant residual
+//! overcorrects the OnePlus 9's already-aligned majority and converts a lead
+//! into a *worse* lag (measured: tail 0 → lead p90 5.24; tail 2 → lag p90 6.28;
+//! tail 4 → lag p90 7.12). The correction is therefore applied **only in the
+//! regime that produces a constant-shaped residual**: a deep swapchain queue,
+//! whose app-visible proxy is the render tail's acquire wait. That single
+//! signal separates the two measured devices by two orders of magnitude and is
+//! the mechanism that makes cupid's residual constant in the first place (every
 //! frame is equally late behind the same queue).
 //!
 //! # The two signals
@@ -51,55 +51,49 @@
 //!
 //! No timeline sample (below API 33, or no platform view is hosted so Kotlin
 //! never samples), an implausible sample, or a below-threshold regime all
-//! produce depth `0`, which is a bit-for-bit pass-through to the frame-id gate's
-//! own answer — already measured strictly better than shipped on both devices.
-//! The hold is a smoothing device, never a correctness barrier: every held batch
-//! also lands unconditionally after [`MAX_HOLD_FRAMES`] display frames
-//! (the settle guarantee — a final resting geometry can never strand), and
-//! [`ScrollSyncTail::clear`] releases the whole hold at once for the lifecycle
-//! edges where no further frame will be presented (backgrounding, surface loss).
+//! produce depth `0`, a bit-for-bit pass-through to the frame-id gate's own
+//! answer — itself measured strictly better than no correction at all on both
+//! devices. The hold is a smoothing device, never a correctness barrier: every
+//! held batch also lands unconditionally after [`MAX_HOLD_FRAMES`] display
+//! frames (the settle guarantee — a final resting geometry can never strand),
+//! and [`ScrollSyncTail::clear`] releases the whole hold at once for the
+//! lifecycle edges where no further frame will be presented (backgrounding,
+//! surface loss).
 //!
 //! # Gesture onset
 //!
-//! This correction's steady state is clean (band median 0 px at every velocity),
-//! but the *first* frames of a gesture were not: the
-//! correction could not exist until the acquire EWMA had risen under the new
-//! load, been confirmed for a whole confirm window, and then been ramped in one
-//! frame per tick. Three additive delays, all measured in display frames, all
-//! paid at the start of **every** gesture. Two of them are closed here:
+//! The steady state is clean (band median 0 px at every velocity); the *first*
+//! frames of a gesture are the hard part, since the correction cannot exist
+//! until the acquire EWMA has risen under the new load and been confirmed. Two
+//! choices keep that onset to a few display frames instead of a whole confirm
+//! window plus a ramp, a cost otherwise paid at the start of **every** gesture:
 //!
-//! 1. **Asymmetric confirm** ([`REGIME_ENTER_CONFIRM_FRAMES`] vs
-//!    [`REGIME_EXIT_CONFIRM_FRAMES`]). The costs of the two flips are not
-//!    symmetric, so the confirm windows are not either: entering wrongly costs a
-//!    small hold that drains harmlessly within a few frames (and is bounded by
-//!    [`MAX_HOLD_FRAMES`] regardless), while entering late costs a visible
-//!    desync at the start of every scroll. Leaving late costs nothing at rest,
-//!    so the exit window keeps the full eight-tick agreement that makes the
-//!    stand-down conservative.
-//! 2. **Pre-seeded depth** ([`ScrollSyncTail::tick`]'s seed arm). The ramp
-//!    exists so a *change* in depth under a live hold does not step the geometry
-//!    by several frames in one tick. On the tick the regime latches there is no
-//!    such hold to step (`depth == 0` — the tail was passing the gate through),
-//!    and the derived depth's input (the frame timeline's
-//!    `expectedPresentationTimeNanos` delta) is rock-stable from the very first
-//!    tick, measured ±0 across every run on cupid. So the ramp buys nothing at
-//!    onset and costs one display frame per unit of depth: the entry edge (and
-//!    any rise from a depth of zero) applies the derived depth immediately, and
-//!    the ramp is kept only for depth changes *on top of* a live hold, in both
-//!    directions.
+//! 1. **Asymmetric confirm.** Entering the regime latches over a much shorter
+//!    window than leaving it, because entering late costs a visible desync at
+//!    the start of every scroll while entering wrongly costs only a small hold
+//!    that drains harmlessly — see [`REGIME_ENTER_CONFIRM_FRAMES`] /
+//!    [`REGIME_EXIT_CONFIRM_FRAMES`] for the full cost argument.
+//! 2. **Pre-seeded depth.** The entry edge (and any rise from a depth of zero)
+//!    applies the derived depth whole rather than ramping into it: there is no
+//!    live hold to step at onset (`depth == 0` — the tail was passing the gate
+//!    through), and the timeline delta the depth derives from is rock-stable
+//!    from the very first tick (measured ±0 across every run on cupid), so
+//!    ramping would only postpone the correction one display frame per unit of
+//!    depth. The ramp is kept for depth changes *on top of* a live hold, in
+//!    both directions — see [`ScrollSyncTail::tick`]'s seed arm.
 //!
-//! The third delay — the acquire EWMA only starts rising once the GPU is
-//! actually loaded, i.e. the clock on (1) does not start at the first moved
-//! pixel — is **not** addressed here. Closing it needs a speculative arm driven
-//! by a touch-down signal pushed from Kotlin, which is only justified by a
-//! measurement showing (1)+(2) fall short.
+//! A third delay is **not** addressed: the acquire EWMA only starts rising once
+//! the GPU is actually loaded, i.e. the clock on (1) does not start at the first
+//! moved pixel. Closing it needs a speculative arm driven by a touch-down signal
+//! pushed from Kotlin, which is only justified by a measurement showing (1)+(2)
+//! fall short.
 //!
 //! Everything here is pure logic driven by two scalars per tick — no clock, no
 //! JNI, no platform types — so it compiles and unit-tests on the host even
 //! though the shell it serves is `#[cfg(target_os = "android")]`. That includes
 //! the onset behaviour: [`tests::onset_reaches_full_depth_in_three_frames`]
-//! drives the acquire EWMA's own rise curve, so the frame count this task moves
-//! is pinned by a host test rather than only by a device trace.
+//! drives the acquire EWMA's own rise curve, so the onset frame count is pinned
+//! by a host test rather than only by a device trace.
 
 use std::collections::VecDeque;
 
@@ -123,7 +117,7 @@ const REGIME_EXIT_FRACTION: f64 = 0.25;
 /// the spike's contribution on the very next tick, pinned by
 /// `a_single_acquire_spike_cannot_arm_a_submit_bound_device`). Entering late is
 /// the expensive mistake — it is paid as a visible desync at the start of every
-/// gesture — so the entry window is the short one (camera task 12b, rung 1).
+/// gesture — so the entry window is the short one.
 const REGIME_ENTER_CONFIRM_FRAMES: u32 = 2;
 
 /// Consecutive ticks that must argue for *leaving* the acquire-bound regime
@@ -176,12 +170,12 @@ const MAX_PLAUSIBLE_PERIOD_MS: f64 = 50.0;
 const MAX_PLAUSIBLE_PRESENT_DELTA_MS: f64 = 100.0;
 
 /// Bounded interval, in display frames, at which [`ScrollSyncTail::tick`]
-/// emits a diagnostic [`TailTrace`] **even with no depth-or-regime change**
-/// (g2, C3). The change-only trace answers nothing on a device where the
-/// regime never latches at all, or hovers near a threshold without crossing
-/// it — exactly the "why didn't it latch" question a new-device gate check
-/// needs, and the reason a throwaway instrumented APK was previously the only
-/// way to see it. 120 display frames is ~1 s at 120 Hz / ~2 s at 60 Hz: short
+/// emits a diagnostic [`TailTrace`] **even with no depth-or-regime change**.
+/// A change-only trace answers nothing on a device where the regime never
+/// latches at all, or hovers near a threshold without crossing it — exactly
+/// the "why didn't it latch" question a new-device gate check needs, and
+/// otherwise answerable only by a throwaway instrumented
+/// APK. 120 display frames is ~1 s at 120 Hz / ~2 s at 60 Hz: short
 /// enough that a single gesture (typically several hundred ms to a few
 /// seconds) produces at least one snapshot even with zero changes, long
 /// enough that it stays a handful of lines per session rather than
@@ -279,7 +273,7 @@ pub(crate) struct ScrollSyncTail {
     released_generation: u64,
     /// The `display_frame` the last [`TailTrace`] was emitted on (change or
     /// periodic) — [`Self::tick`]'s rate-limit clock for the bounded-interval
-    /// diagnostic (g2, C3).
+    /// diagnostic.
     last_diagnostic_frame: u64,
 }
 
@@ -308,10 +302,9 @@ impl ScrollSyncTail {
     ///
     /// Returns a [`TailTrace`] on the ticks where the depth or the regime
     /// changed, **plus** at least once every
-    /// [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless (g2, C3's
-    /// rate-limited diagnostic) — the decision of *when* to emit lives here,
-    /// host-tested, so the shell's log call site stays a single
-    /// `perf::enabled()`-gated `log::info!`.
+    /// [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless — the decision of
+    /// *when* to emit lives here, host-tested, so the shell's log call site
+    /// stays a single `perf::enabled()`-gated `log::info!`.
     pub(crate) fn tick(&mut self, signals: TailSignals) -> Option<TailTrace> {
         self.display_frame += 1;
         self.update_period(signals.frame_time_nanos);
@@ -322,8 +315,8 @@ impl ScrollSyncTail {
 
         let previous = self.depth;
         self.depth = match self.depth.cmp(&self.target_depth) {
-            // Pre-seed (camera task 12b, rung 2): a rise off a depth of zero, or
-            // off the tick the regime just latched, applies the derived depth
+            // Pre-seed: a rise off a depth of zero, or off the tick the
+            // regime just latched, applies the derived depth
             // whole. The ramp's job is to stop a depth *change* from stepping a
             // live hold by several frames at once — at onset there is no live
             // hold to step (the tail was passing the gate through), and the
@@ -341,7 +334,7 @@ impl ScrollSyncTail {
             std::cmp::Ordering::Equal => self.depth,
         };
         let changed = self.depth != previous || regime_changed;
-        // Bounded-interval fallback (g2, C3): a change-only trace is silent
+        // Bounded-interval fallback: a change-only trace is silent
         // for an entire session on a device whose regime never latches (or
         // sits just under the threshold without crossing it), which is
         // exactly the case a new-device gate check needs to see. Firing this
@@ -660,9 +653,9 @@ mod tests {
         );
         assert!(!tail.regime_active());
         assert_eq!(tail.depth(), 0);
-        // ...and on the tick it does, the derived depth applies WHOLE (camera
-        // task 12b, rung 2): there is no live hold to step, and every ramped
-        // frame here is a frame of visible desync at the start of the gesture.
+        // ...and on the tick it does, the derived depth applies WHOLE: there is
+        // no live hold to step, and every ramped frame here is a frame of
+        // visible desync at the start of the gesture.
         tail.tick(cupid_signals(REGIME_ENTER_CONFIRM_FRAMES as i64));
         assert!(tail.regime_active());
         assert_eq!(tail.depth(), 4, "the entry edge is not ramped");
@@ -692,8 +685,8 @@ mod tests {
 
     /// The quarter-weight acquire EWMA the render side publishes, replayed here
     /// so the onset tests drive the *real* rise curve rather than a step: the
-    /// regime cannot latch before this signal has climbed past `period/2`, which
-    /// is the first of the three onset delays (camera task 12b).
+    /// regime cannot latch before this signal has climbed past `period/2`,
+    /// the first of the onset delays (module docs' Gesture onset).
     struct AcquireEwma {
         value_ms: f64,
     }
@@ -741,9 +734,10 @@ mod tests {
         }
         // Two frames for the EWMA to climb past period/2 (3.50 ms, then
         // 6.13 ms against a 4.17 ms threshold), a third to confirm it, and the
-        // depth applies whole on that tick. The as-merged task-12 constants took
-        // **twelve** frames for the same signal (6 more confirm ticks + a
-        // 4-frame ramp) — ~100 ms at 120 Hz, which is the onset desync Ed saw.
+        // depth applies whole on that tick. A symmetric eight-tick entry window
+        // plus a ramped entry edge would take **twelve** frames for the same
+        // signal (6 more confirm ticks + a 4-frame ramp) — ~100 ms at 120 Hz,
+        // a visible onset desync.
         assert_eq!(
             onset_frames, 3,
             "onset must not cost a whole confirm window"
@@ -759,7 +753,7 @@ mod tests {
         // every twelfth frame (a compositor hiccup, not a queue). The EWMA jumps
         // above the enter threshold on the spike's own tick and falls back below
         // it on the next, so the two-tick entry window is never satisfied —
-        // which is what makes rung 1's short window safe.
+        // which is what makes the short entry window safe.
         for frame in 1..=240 {
             let sample_ms = if frame % 12 == 0 { 20.0 } else { 0.12 };
             tail.tick(TailSignals {
@@ -848,9 +842,9 @@ mod tests {
 
     #[test]
     fn a_device_whose_regime_never_latches_still_gets_periodic_snapshots() {
-        // The exact gap g2 exists to close: a change-only trace is silent for
-        // the whole session here, which previously meant no on-device signal
-        // existed to answer "why didn't it latch" without a throwaway build.
+        // The exact case the periodic snapshot exists for: a change-only trace
+        // is silent for the whole session here, leaving no on-device signal to
+        // answer "why didn't it latch" without a throwaway build.
         let mut tail = ScrollSyncTail::new();
         let mut trace_count = 0;
         for frame in 1..=(DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES as i64 * 2) {

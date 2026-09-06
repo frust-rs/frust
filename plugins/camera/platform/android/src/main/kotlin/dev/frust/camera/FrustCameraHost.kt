@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -51,6 +52,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * | [previewAspectRatio] | `(int session) -> float` | 0.0 until the first `TransformationInfo` |
  * | [startImageStream] | `(int session, int format) -> int` | 0 started; <0 refused |
  * | [stopImageStream] | `(int session) -> void` | unbinds the analyzer only |
+ *
+ * ### Additive entries (post-freeze)
+ *
+ * The table above is frozen verbatim; a capability added later arrives as an
+ * **additional static**, never as a changed row (the same additive rule
+ * [nativeOnImageFrame] followed). `plugins/camera/src/android.rs`'s module doc
+ * carries the mirror of this section.
+ *
+ * | Method | Signature | Notes |
+ * |---|---|---|
+ * | [setTorch] | `(int session, boolean on) -> int` | [TORCH_SET] accepted (`enableTorch`'s `ListenableFuture` is deliberately **not** waited on) / [ERROR_UNKNOWN_SESSION] / [ERROR_NO_CAMERA] nothing bound yet / [ERROR_TORCH_FAILED] |
+ * | [torchAvailable] | `(int session) -> int` | [TORCH_AVAILABLE] / [TORCH_UNAVAILABLE] / [ERROR_UNKNOWN_SESSION] / [ERROR_NO_CAMERA] |
  *
  * Kotlin → Rust ([nativeOnPermissionResult], [nativeOnCameraState],
  * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one was added
@@ -176,8 +189,25 @@ object FrustCameraHost {
      */
     private const val ERROR_PERMISSION_DENIED = -2
 
-    /** [takePicture]/[startImageStream] error: unknown or already-closed session id. */
+    /**
+     * [takePicture]/[startImageStream]/[setTorch]/[torchAvailable] error:
+     * unknown or already-closed session id.
+     */
     private const val ERROR_UNKNOWN_SESSION = -1
+
+    /**
+     * [setTorch]/[torchAvailable] error: the session is live but CameraX has
+     * not finished its first `bindToLifecycle`, so [Session.camera] is still
+     * null and there is no `CameraControl` to drive.
+     *
+     * Transient by nature — the Rust side reports a retry-worded
+     * `CameraError::Platform` rather than inventing a wait here, since the
+     * whole torch contract is non-blocking.
+     */
+    private const val ERROR_NO_CAMERA = -3
+
+    /** [setTorch] error: `CameraControl.enableTorch` itself threw. */
+    private const val ERROR_TORCH_FAILED = -5
 
     /**
      * [startImageStream] error: the requested [FORMAT_BGRA] has no CameraX
@@ -189,6 +219,21 @@ object FrustCameraHost {
 
     /** [startImageStream]: the stream request was accepted. */
     private const val IMAGE_STREAM_STARTED = 0
+
+    /**
+     * [setTorch]: the request was handed to `CameraControl.enableTorch`.
+     *
+     * Accepted, not applied — the returned `ListenableFuture` is deliberately
+     * dropped so this static never blocks its JNI caller (class doc's
+     * *Threading*).
+     */
+    private const val TORCH_SET = 0
+
+    /** [torchAvailable]: the bound camera reports `CameraInfo.hasFlashUnit()`. */
+    private const val TORCH_AVAILABLE = 1
+
+    /** [torchAvailable]: the bound camera has no flash unit (most front lenses). */
+    private const val TORCH_UNAVAILABLE = 0
 
     /**
      * [startImageStream] `format`: `ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888`
@@ -419,6 +464,11 @@ object FrustCameraHost {
                 // `unbind(useCases)`, never `unbindAll()`: another session may
                 // be bound to the same process-wide provider.
                 entry.provider?.unbind(entry.preview, entry.imageCapture)
+                // The unbound `Camera` handle can control nothing any more —
+                // drop it with the use cases (the torch goes out with the
+                // device, which is `CameraSession::close`'s documented
+                // contract on the Rust side).
+                entry.camera = null
                 entry.setState(Lifecycle.State.DESTROYED)
             } catch (e: Throwable) {
                 Log.w(TAG, "frust-camera: closeCamera($session) failed", e)
@@ -523,6 +573,63 @@ object FrustCameraHost {
         val entry = sessions[session] ?: return
         entry.streamFormat = null
         mainExecutor.execute { unbindImageAnalysis(entry) }
+    }
+
+    /**
+     * `setTorch(int session, boolean on) -> int` (class doc's *Additive
+     * entries*). Drives `CameraControl.enableTorch` on the [Camera] handle
+     * `bindToLifecycle` returned.
+     *
+     * **The returned `ListenableFuture` is deliberately dropped.** Waiting on
+     * it would mean either blocking this JNI caller (the one thing every
+     * static here must not do) or inventing a completion callback the frozen
+     * contract has no `nativeOn*` entry for; the Rust API documents the torch
+     * as non-blocking and callable from any thread, and CameraX applies the
+     * change on its own executor either way. A refusal that *is* knowable
+     * synchronously — no session, nothing bound yet, a throwing call — comes
+     * back as a return code.
+     *
+     * Runs entirely on the calling (JNI) thread, unlike every
+     * [mainExecutor]-posted static above: this one has a return code to
+     * produce, and posting would leave nothing to report. `CameraControl` is
+     * asynchronous by construction (it answers with a `ListenableFuture` and
+     * applies the change on CameraX's own camera executor — verified against
+     * camera-core 1.6.1's signature), so the call itself neither blocks here
+     * nor needs the main thread the way `bindToLifecycle` does.
+     */
+    @JvmStatic
+    fun setTorch(session: Int, on: Boolean): Int {
+        val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
+        val camera = entry.camera ?: return ERROR_NO_CAMERA
+        return try {
+            camera.cameraControl.enableTorch(on)
+            TORCH_SET
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: setTorch($session, $on) failed", e)
+            ERROR_TORCH_FAILED
+        }
+    }
+
+    /**
+     * `torchAvailable(int session) -> int` (class doc's *Additive entries*).
+     * [TORCH_AVAILABLE] / [TORCH_UNAVAILABLE], or a negative code when there
+     * is nothing to ask ([ERROR_UNKNOWN_SESSION] / [ERROR_NO_CAMERA]) — the
+     * Rust side reports every non-[TORCH_AVAILABLE] answer as `false`.
+     *
+     * `CameraInfo.hasFlashUnit()` is a fixed property of the bound lens (it
+     * answers immediately and never changes for that camera), so this is a
+     * plain synchronous read on the calling thread like [setTorch].
+     */
+    @JvmStatic
+    fun torchAvailable(session: Int): Int {
+        val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
+        val camera = entry.camera ?: return ERROR_NO_CAMERA
+        return try {
+            if (camera.cameraInfo.hasFlashUnit()) TORCH_AVAILABLE else TORCH_UNAVAILABLE
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: torchAvailable($session) failed", e)
+            TORCH_UNAVAILABLE
+        }
     }
 
     // --- Kotlin -> Rust: this plugin's own JNI exports ---------------------
@@ -680,7 +787,17 @@ object FrustCameraHost {
         // the app's slot sizing every time a preview scrolls out of view.
     }
 
-    /** Publish the resolved preview aspect ratio for [previewAspectRatio]. */
+    /**
+     * Publish the resolved preview aspect ratio for [previewAspectRatio] — the
+     * width/height of what the preview slot actually displays.
+     *
+     * An app is expected to size its slot from it (the Rust
+     * `CameraSession::preview_aspect_ratio` contract): the Android preview
+     * fits its content inside the slot rather than cropping to fill it, so a
+     * slot at this ratio is exactly filled and any other ratio letterboxes —
+     * see [CameraPreviewView]'s *Geometry* note for why a compositor-layer
+     * preview has no third option.
+     */
     internal fun setPreviewAspectRatio(sessionId: Int, ratio: Float) {
         sessions[sessionId]?.aspectRatio = ratio
     }
@@ -690,6 +807,13 @@ object FrustCameraHost {
      * `Surface.ROTATION_*` value), so CameraX's `TransformationInfo` reports
      * the rotation that makes the buffer upright *for this display*. Sessions
      * open before any view exists, so this cannot be set at build time.
+     *
+     * This is the **whole** of the preview's rotation handling: the stream's
+     * own buffer transform is derived from `targetRotation` and the system
+     * compositor is what applies it, and a `SurfaceView`-hosted preview has no
+     * content transform of its own to correct with ([CameraPreviewView]'s
+     * *Rotation* note). A `targetRotation` left stale therefore shows as a
+     * sideways preview, not as a slightly-off one.
      */
     internal fun setTargetRotation(sessionId: Int, rotation: Int) {
         val entry = sessions[sessionId] ?: return
@@ -727,6 +851,20 @@ object FrustCameraHost {
 
         /** The process-wide provider, once resolved. */
         var provider: ProcessCameraProvider? = null
+
+        /**
+         * The [Camera] `bindToLifecycle` returned — this session's handle onto
+         * `CameraControl`/`CameraInfo`, and the only way to reach the torch.
+         *
+         * Written on the main thread at **every** bind site ([configure]'s
+         * initial bind and [bindImageAnalysis]'s analyzer re-bind, which
+         * returns a handle for the same device rather than reopening it) and
+         * read from a JNI thread by [setTorch]/[torchAvailable], hence
+         * `@Volatile`. Null until the first bind completes — the
+         * [ERROR_NO_CAMERA] path, not an error state.
+         */
+        @Volatile
+        var camera: Camera? = null
 
         /**
          * The bound `ImageAnalysis` use case while a stream is running, else
@@ -777,7 +915,10 @@ object FrustCameraHost {
                     // BEFORE binding: CameraX opens the device as soon as the
                     // bound lifecycle is at least STARTED.
                     session.setState(targetState())
-                    provider.bindToLifecycle(
+                    // The returned `Camera` is this session's `CameraControl`/
+                    // `CameraInfo` handle — captured, not discarded, because
+                    // `setTorch`/`torchAvailable` have no other way in.
+                    session.camera = provider.bindToLifecycle(
                         session,
                         selectorFor(session.lensFacing),
                         session.preview,
@@ -843,7 +984,15 @@ object FrustCameraHost {
                     proxy.close()
                 }
             }
-            provider.bindToLifecycle(entry, selectorFor(entry.lensFacing), analysis)
+            // Re-assign the handle: this bind returns a `Camera` for the same
+            // already-open device (CameraX combines the new use case with the
+            // preview/capture pair), so torch control stays reachable across
+            // a `startImageStream` re-bind rather than going stale.
+            entry.camera = provider.bindToLifecycle(
+                entry,
+                selectorFor(entry.lensFacing),
+                analysis,
+            )
             entry.imageAnalysis = analysis
         } catch (e: Throwable) {
             Log.w(TAG, "frust-camera: startImageStream(${entry.id}) failed to bind", e)

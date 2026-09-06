@@ -24,7 +24,8 @@ pub use editor::{
 pub use layout::TextLayout;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
-    FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextStyle,
+    FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
+    TextOverflow, TextStyle,
 };
 
 #[cfg(test)]

@@ -71,7 +71,7 @@ android {
 
     defaultConfig {
         applicationId = "it.f0x.glyphcatalog"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue
@@ -174,11 +174,6 @@ android {
 dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
-    implementation(project(":frust-camera"))
-    // frust-native-widgets' one factory + one listener class
-    // (`dev.frust.nativewidgets`), previously hand-copied into this app's own
-    // source tree and now supplied by the plugin's own library module.
-    implementation(project(":frust-native-widgets"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

@@ -1,9 +1,84 @@
 //! Template context construction and project-name validation.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use thiserror::Error;
+
+/// Why a `--frust-path` value was rejected by [`resolve_frust_crate_path`]:
+/// neither accepted shape names the `frust` package.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FrustPathError {
+    #[error(
+        "--frust-path `{given}` doesn't point at a Frust checkout: expected either the `frust` \
+         facade crate itself (a directory whose Cargo.toml has `[package] name = \"frust\"`) or \
+         its repo root (a directory containing `crates/frust` with that Cargo.toml) — found \
+         neither"
+    )]
+    NotFacadeCrate { given: String },
+}
+
+/// Canonicalises a `--frust-path` argument to the `frust` facade crate
+/// directory, accepting either shape:
+///
+/// 1. `path` itself is the facade crate (`<path>/Cargo.toml` names package
+///    `frust`) -> returned unchanged.
+/// 2. `path` is the repo root containing it (`<path>/crates/frust/Cargo.toml`
+///    names package `frust`) -> returns the nested `<path>/crates/frust`.
+/// 3. Neither -> [`FrustPathError::NotFacadeCrate`], naming both accepted
+///    shapes.
+///
+/// Deliberately file-probed rather than string-matched on a trailing
+/// `crates/frust` path segment, so a vendored or renamed checkout still
+/// resolves. This closes a fourth broken path surface a repo-root value
+/// otherwise produces silently: `frust = { path = "<repo-root>" }` points at
+/// the root `Cargo.toml`, a virtual workspace manifest with no `[package]`
+/// table — a hard Cargo error, not a merely-wrong-but-working path — so a
+/// repo-root value cannot be made to work by adjusting the other
+/// `frust_path`-derived joins ([`frust_path_from_project_subdir`],
+/// [`TemplateContext::frust_embedding_android_dir`],
+/// [`TemplateContext::frust_embedding_ios_dir`]); it must be normalised
+/// before it ever reaches them.
+pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
+    if manifest_names_package(path, "frust") {
+        return Ok(path.to_path_buf());
+    }
+    let nested = path.join("crates").join("frust");
+    if manifest_names_package(&nested, "frust") {
+        return Ok(nested);
+    }
+    Err(FrustPathError::NotFacadeCrate {
+        given: path.display().to_string(),
+    })
+}
+
+/// A minimal `Cargo.toml` parse: only `[package] name`, serde-ignoring
+/// everything else (mirrors `ios_build::team`'s partial-`frust.toml` parse
+/// precedent).
+#[derive(Debug, Deserialize)]
+struct CargoManifestName {
+    package: Option<CargoPackageName>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackageName {
+    name: Option<String>,
+}
+
+/// Whether `<dir>/Cargo.toml` exists, parses, and names package `expected`.
+/// Any failure along the way (missing file, a virtual-workspace manifest
+/// with no `[package]` table, malformed toml) is treated as "no match", not
+/// propagated — the caller falls through to the next accepted shape.
+fn manifest_names_package(dir: &Path, expected: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    let Ok(manifest) = toml::from_str::<CargoManifestName>(&contents) else {
+        return false;
+    };
+    manifest.package.and_then(|p| p.name).as_deref() == Some(expected)
+}
 
 /// Re-base a **project-root-relative** `frust_path` for a consumer that
 /// resolves it from a project *subdirectory* one level down (`android/`,
@@ -36,6 +111,14 @@ pub fn frust_path_from_project_subdir(frust_path: &str) -> String {
         format!("../{frust_path}")
     }
 }
+
+/// Default `[macos] minimum-system-version` a freshly scaffolded project's
+/// `macos/Info.plist.tmpl` renders (`LSMinimumSystemVersion`). `frust.toml`'s
+/// `[macos]` stub ships commented out (see [`TemplateContext::render_vars`]'s
+/// doc), so there is no manifest value to read back at scaffold time; this is
+/// the same default the commented stub documents, kept as one constant so the
+/// two never drift.
+pub const DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION: &str = "11.0";
 
 /// Values substituted into `.tmpl` file contents, and (a subset of) values
 /// usable as literal path-segment placeholders.
@@ -76,6 +159,11 @@ impl TemplateContext {
             ("frust_path", self.frust_path.clone()),
             ("android_identifier", self.android_identifier()),
             ("iosIdentifier", self.ios_identifier()),
+            ("desktop_identifier", self.desktop_identifier()),
+            (
+                "macos_minimum_system_version",
+                DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION.to_string(),
+            ),
             (
                 "deeplink_scheme",
                 self.deeplink_scheme.clone().unwrap_or_default(),
@@ -128,6 +216,20 @@ impl TemplateContext {
     /// the iOS template has no identifier-named directories.
     pub fn ios_identifier(&self) -> String {
         crate::ios_id::derive(&self.org, &self.project_name)
+    }
+
+    /// Derives the desktop bundle identifier (macOS `CFBundleIdentifier`,
+    /// the Windows product identifier `windows/build.rs`'s resource block
+    /// documents, and the Linux desktop-entry `Icon`/id) shared by all three
+    /// desktop templates — see the `[desktop] identifier` key in
+    /// `frust.toml.tmpl`. Deliberately reuses [`crate::android_id::derive`]
+    /// rather than [`crate::ios_id::derive`]'s camelCase transform: unlike an
+    /// iOS bundle id, a desktop one is not App-Store-grammar-gated, so there
+    /// is no reason to mangle the project name away from its `snake_case`
+    /// form — this is the "matches the Android precedent" derivation the
+    /// desktop-templates task called for.
+    pub fn desktop_identifier(&self) -> String {
+        crate::android_id::derive(&self.org, &self.project_name)
     }
 
     /// Validates the derived iOS bundle identifier (a scaffold-time
@@ -189,6 +291,46 @@ impl TemplateContext {
             "{}/../../platform/ios/FrustEmbedding",
             frust_path_from_project_subdir(&self.frust_path)
         )
+    }
+}
+
+/// Values substituted into a **design-system** template's `.tmpl` file
+/// contents (`templates/design-system/`) — deliberately a strict subset of
+/// [`TemplateContext`]'s vars, not that struct reused with dummy values. A
+/// design-system crate is a plain library with no platform project, so it
+/// carries no `org`, no android/ios identifiers, and no deeplink config;
+/// [`crate::scaffold::generate_design_system`] is the counterpart of
+/// [`crate::scaffold::generate`] that renders against this context instead.
+#[derive(Debug, Clone)]
+pub struct DesignSystemContext {
+    /// The crate name (also its `DesignLanguage::Custom` identity tag) —
+    /// validated with [`validate_project_name`], the same grammar a
+    /// `frust create` app scaffold's `project_name` uses.
+    pub name: String,
+    pub frust_version: String,
+    pub frust_path: String,
+}
+
+impl DesignSystemContext {
+    /// The minijinja rendering context (`{{ name }}`, `{{ title_case_name }}`,
+    /// etc.) used for every design-system `.tmpl` file's content.
+    pub fn render_vars(&self) -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            ("name", self.name.clone()),
+            ("title_case_name", title_case(&self.name)),
+            ("frust_version", self.frust_version.clone()),
+            ("frust_path", self.frust_path.clone()),
+        ])
+    }
+
+    /// Placeholder values usable as literal path segments — see
+    /// [`TemplateContext::path_vars`]'s doc for the convention. The
+    /// design-system template ships no dotted-identifier directory (no
+    /// android/ios tree), so this is empty today; kept as a real method
+    /// rather than omitted so [`crate::scaffold::generate_design_system`]'s
+    /// call shape matches [`crate::scaffold::generate`]'s.
+    pub fn path_vars(&self) -> BTreeMap<&'static str, String> {
+        BTreeMap::new()
     }
 }
 
@@ -393,6 +535,27 @@ mod tests {
     fn render_vars_include_ios_identifier() {
         let vars = test_context().render_vars();
         assert_eq!(vars.get("iosIdentifier").unwrap(), "dev.f0x.myApp");
+    }
+
+    #[test]
+    fn desktop_identifier_matches_android_derivation_not_ios_camel_case() {
+        // The whole point of reusing `android_id::derive`: unlike the iOS
+        // bundle id, the underscore in `my_app` survives verbatim.
+        let mut ctx = test_context();
+        ctx.project_name = "my_app".into();
+        assert_eq!(ctx.desktop_identifier(), "dev.f0x.my_app");
+        assert_eq!(ctx.desktop_identifier(), ctx.android_identifier());
+        assert_ne!(ctx.desktop_identifier(), ctx.ios_identifier());
+    }
+
+    #[test]
+    fn render_vars_include_desktop_identifier_and_macos_minimum_system_version() {
+        let vars = test_context().render_vars();
+        assert_eq!(vars.get("desktop_identifier").unwrap(), "dev.f0x.my_app");
+        assert_eq!(
+            vars.get("macos_minimum_system_version").unwrap(),
+            DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION,
+        );
     }
 
     #[test]
@@ -610,5 +773,128 @@ mod tests {
             frust_path_from_project_subdir("vendor/frust"),
             "../vendor/frust"
         );
+    }
+
+    fn test_design_system_context() -> DesignSystemContext {
+        DesignSystemContext {
+            name: "acme_design".into(),
+            frust_version: "0.1.0".into(),
+            frust_path: "/path/to/frust".into(),
+        }
+    }
+
+    #[test]
+    fn design_system_render_vars_include_name_and_derived_title_case() {
+        let vars = test_design_system_context().render_vars();
+        assert_eq!(vars.get("name").unwrap(), "acme_design");
+        assert_eq!(vars.get("title_case_name").unwrap(), "Acme Design");
+        assert_eq!(vars.get("frust_path").unwrap(), "/path/to/frust");
+        assert_eq!(vars.get("frust_version").unwrap(), "0.1.0");
+    }
+
+    #[test]
+    fn design_system_path_vars_are_empty() {
+        assert!(test_design_system_context().path_vars().is_empty());
+    }
+
+    mod resolve_frust_crate_path_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "frust-drive-frust-path-test-{tag}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        }
+
+        fn write_manifest(dir: &std::path::Path, package_name: &str) {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+
+        /// Shape 1: `path` is the facade crate itself -> used as-is.
+        #[test]
+        fn accepts_facade_crate_directly() {
+            let root = unique_temp_dir("facade-direct");
+            write_manifest(&root, "frust");
+
+            assert_eq!(resolve_frust_crate_path(&root).unwrap(), root);
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Shape 2: `path` is the repo root containing `crates/frust` ->
+        /// canonicalises to the nested facade crate directory. This is the
+        /// previously-uncovered case: a repo-root value must resolve to a
+        /// real, buildable path rather than silently baking `frust = {
+        /// path = "<repo-root>" }` (a virtual-workspace manifest with no
+        /// `[package]` table).
+        #[test]
+        fn canonicalises_repo_root_to_nested_facade_crate() {
+            let root = unique_temp_dir("repo-root");
+            // A virtual-workspace manifest at the root — no `[package]`
+            // table, so it must NOT satisfy shape 1.
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+            write_manifest(&root.join("crates").join("frust"), "frust");
+
+            assert_eq!(
+                resolve_frust_crate_path(&root).unwrap(),
+                root.join("crates").join("frust")
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Shape 3: neither the path itself nor `<path>/crates/frust` names
+        /// package `frust` -> hard error naming both accepted shapes.
+        #[test]
+        fn rejects_unrelated_directory_naming_both_accepted_shapes() {
+            let dir = unique_temp_dir("unrelated");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let err = resolve_frust_crate_path(&dir).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(&dir.display().to_string()), "{message}");
+            assert!(message.contains("facade crate"), "{message}");
+            assert!(message.contains("crates/frust"), "{message}");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A directory with no `Cargo.toml` at all (not just a wrong
+        /// package name) hits the same rejection path.
+        #[test]
+        fn rejects_directory_with_no_cargo_toml() {
+            let dir = unique_temp_dir("no-manifest");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            assert!(resolve_frust_crate_path(&dir).is_err());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A vendored/renamed checkout — the facade crate directory itself
+        /// doesn't literally end in `crates/frust` — still resolves via
+        /// shape 1, since resolution is file-probed, not string-matched.
+        #[test]
+        fn accepts_vendored_checkout_with_nonstandard_directory_name() {
+            let root = unique_temp_dir("vendored");
+            let vendored = root.join("third_party").join("frust-vendor");
+            write_manifest(&vendored, "frust");
+
+            assert_eq!(resolve_frust_crate_path(&vendored).unwrap(), vendored);
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

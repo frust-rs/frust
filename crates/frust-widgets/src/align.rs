@@ -94,7 +94,7 @@ impl<State: 'static> View<State> for AlignView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AlignWidget {
         AlignWidget {
             alignment: self.alignment,
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
         }
     }
 
@@ -109,12 +109,12 @@ impl<State: 'static> View<State> for AlignView<State> {
             element.alignment = self.alignment;
             flags |= ChangeFlags::LAYOUT;
         }
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut AlignWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -148,13 +148,15 @@ impl Widget for AlignWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // Transparent positioning wrapper: forward to the single child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

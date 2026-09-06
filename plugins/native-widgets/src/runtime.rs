@@ -2,135 +2,115 @@
 //! implements, dispatched through ONE generic platform factory — **no
 //! per-control Kotlin/Swift, ever**.
 //!
-//! Everything in this module is platform-agnostic: it dispatches, diffs and
-//! book-keeps, and hands the two platform-shaped types
-//! ([`NativeCtx`]/[`NativeView`]) straight through to the trait impls. That is
-//! what makes the whole create/update/dispose/event contract host-testable
-//! (see this module's `tests`) with no JNI/ObjC dependency at all.
+//! Everything here is platform-agnostic — it dispatches, diffs and book-keeps,
+//! handing the two platform-shaped types ([`NativeCtx`]/[`NativeView`]) straight
+//! through to the trait impls — which is what makes the whole
+//! create/update/dispose/event contract host-testable (this module's `tests`)
+//! with no JNI/ObjC dependency at all.
 //!
 //! # Two kinds of implementation, one dispatch table
 //!
-//! [`NativeWidget`] has two families of impl, and everything below serves both
-//! identically:
-//!
-//! - the **six built-in controls** (`crate::controls`), whose props arrive
-//!   decoded from the slot's `params_json`; and
-//! - every **public [`NativeComponent`](crate::component::NativeComponent)** a
-//!   plugin author writes (an app crate cannot implement one — see that
-//!   trait's own doc for the FFI wall), reaching this trait through the one
-//!   `crate::component::Bridge<C>` impl, whose props arrive as already-typed
-//!   Rust values staged beside the wire.
-//!
-//! The registry, the props diff gate, the event routing and the disposal
-//! contract below are therefore the *same* guarantees for both — which is the
-//! whole point of bridging rather than growing a second runtime. (The event
-//! half of that is unobservable through the public trait today: this layer
-//! would route a component's event identically, but no production path
-//! attaches a listener to a component-built view for it to route —
-//! `crate::component::NativeComponent::on_event`. *Unobservable*, not
-//! unreachable: [`NativeRuntime::on_event`] keys on the slot id alone and asks
-//! nothing about which listener produced the event, so a fabricated id naming
-//! a live component's slot is delivered like any other — see that method's
-//! doc.)
+//! [`NativeWidget`] has two families of impl and everything below serves both
+//! identically: the **six built-in controls** (`crate::controls`), whose props
+//! arrive decoded from the slot's `params_json`, and every **public
+//! [`NativeComponent`](crate::component::NativeComponent)** a plugin author
+//! writes (an app crate cannot implement one — see that trait's doc for the FFI
+//! wall), reaching this trait through the one `crate::component::Bridge<C>` impl
+//! with already-typed props staged beside the wire. Registry, props diff gate, event routing and disposal
+//! are therefore the *same* guarantees for both — the point of bridging rather
+//! than growing a second runtime. The event half is unobservable through the
+//! public trait today (nothing attaches a listener to a component-built view)
+//! but not unreachable: [`NativeRuntime::on_event`] keys on the slot id alone,
+//! so a fabricated id naming a live component's slot is delivered like any
+//! other.
 //!
 //! # The generic-factory contract
 //!
 //! The framework's `platform_view` slot resolves a `viewType` to exactly one
-//! factory class — for this plugin,
-//! `dev.frust.nativewidgets.FrustNativeControlFactory` on Android (the class
-//! in `plugins/native-widgets/platform/android`, this plugin's own Gradle
-//! library module, whose three methods call this crate's three JNI exports,
-//! `crate::android`) and the bare
-//! Objective-C runtime name `FrustNativeControlFactory` on iOS (a Rust
-//! `define_class!` class, `crate::apple::factory`; same three methods, no
-//! Swift and no exports at all). Which *control* a slot means is carried in
-//! the slot's `params_json`, under two reserved keys the api layer
-//! injects and this module reads back:
+//! factory class per platform — `FrustNativeControlFactory`, Kotlin on Android
+//! over this crate's three JNI exports (`crate::android`) and a Rust
+//! `define_class!` ObjC class on iOS (`crate::apple::factory`); see
+//! `docs/NATIVE_WIDGETS_ARCHITECTURE.md` for that one-factory shape and its
+//! frozen names. Which *control* a slot means rides in its `params_json`, under
+//! two reserved keys the api layer injects and this module reads back:
 //!
 //! - [`CONTROL_KEY`] (`"__frustControl"`) — the registered kind
-//!   ([`NativeRuntime::register`]) whose [`NativeWidget`] impl serves this
-//!   slot. This is what replaces "one factory class per control".
-//! - [`SLOT_KEY`] (`"__frustSlot"`) — the differ's own `slot_id`. The
-//!   platform factory's `createView` is **not** handed the slot id (the
-//!   embedding's `FrustPlatformViewFactory` contract predates this plugin),
-//!   so injecting it into the params is the additive fix; widening
-//!   `createView`'s signature was the rejected, breaking alternative.
+//!   ([`NativeRuntime::register`]) whose [`NativeWidget`] impl serves this slot.
+//!   This is what replaces "one factory class per control".
+//! - [`SLOT_KEY`] (`"__frustSlot"`) — the differ's own `slot_id`, injected
+//!   because the platform factory's `createView` is **not** handed one (the
+//!   embedding's `FrustPlatformViewFactory` contract predates this plugin);
+//!   widening `createView`'s signature was the rejected, breaking alternative.
 //!
 //! [`with_identity`] is the encoder half of that contract, and
 //! [`Params::identity`] the decoder half — the pair round-trips (see `tests`).
 //!
 //! # Two-phase identity: a widget mounts, `create` arrives later
 //!
-//! A `platform_view` widget mounting during a frust rebuild does **not**
-//! create a native view. The differ (`frust_shell_common::platform_view`)
-//! turns that mount into a `Create` command, and the host drains its command
-//! backlog on the **next post-frame poll**, on the platform main thread —
-//! that poll is what finally calls the factory, and therefore
-//! [`NativeRuntime::create`]. Three consequences the whole runtime is shaped
-//! around:
+//! A `platform_view` widget mounting during a frust rebuild does **not** create
+//! a native view: the differ (`frust_shell_common::platform_view`) turns that
+//! mount into a `Create` command, and the host drains its backlog on the **next
+//! post-frame poll**, on the platform main thread — that poll is what finally
+//! calls the factory, and therefore [`NativeRuntime::create`]. Three
+//! consequences the whole runtime is shaped around:
 //!
 //! 1. **Per-instance state lives here, not in the widget.** A control's
 //!    [`NativeWidget::State`] is created at attach time and retained in this
 //!    runtime's slot-keyed registry, because at mount time there is nothing
 //!    native to hold.
-//! 2. **Props coalesce until attach.** Params changes made between the mount
-//!    and the attach never reach a native view — the differ's `Create`
-//!    carries the params as of the ingest that emitted it, and any later
-//!    change rides an `UpdateParams` *after* it in the same ordered backlog.
-//!    Params are therefore always the **whole** state of a slot, never a
-//!    delta: replaying a prefix of the backlog (what a surface-recreate
-//!    replay or a backlog compaction does) lands in the same place.
+//! 2. **Props coalesce until attach.** Params changes between the mount and the
+//!    attach never reach a native view — the differ's `Create` carries the
+//!    params as of the ingest that emitted it, and any later change rides an
+//!    `UpdateParams` *after* it in the same ordered backlog. Params are
+//!    therefore always the **whole** state of a slot, never a delta: replaying a
+//!    backlog prefix (a surface-recreate replay, a compaction) lands in the same
+//!    place.
 //! 3. **An event callback is registered before its instance exists**, so an
-//!    [`Instance`] is *born* with it. The api layer (`crate::api::builders`)
+//!    [`Instance`] is *born* with it: the api layer (`crate::api::builders`)
 //!    calls [`NativeRuntime::set_callback`] from the same rebuild that mounts
-//!    the slot — always before the create above. A registration naming a slot
-//!    with no live instance is therefore parked in `pending_callbacks` and
-//!    taken by [`NativeRuntime::create`], never dropped: nothing schedules a
-//!    retry frame on an idle screen (a native tap doesn't produce a frust
-//!    frame, and forcing one would forfeit the zero-frames-at-rest property
-//!    Mode B is built on), so a dropped registration would leave a visible,
-//!    tappable, permanently dead control. The same reasoning covers the
-//!    replay direction: a surface-recreate replay re-creates an instance with
-//!    no new registration at all, so a create with nothing pending inherits
-//!    the callback of the instance it replaces.
+//!    the slot, always before the create above, so a registration naming a slot
+//!    with no live instance is parked in `pending_callbacks` and taken by
+//!    [`NativeRuntime::create`] rather than dropped. Dropping it would leave a
+//!    visible, tappable, permanently dead control, because nothing schedules a
+//!    retry frame on an idle screen (a native tap produces no frust frame, and
+//!    forcing one would forfeit Mode B's zero-frames-at-rest property). The
+//!    replay direction follows: a surface-recreate replay re-creates an instance
+//!    with no new registration, so a create with nothing pending inherits the
+//!    callback of the instance it replaces.
 //!
 //! # The props diff gate is Rust-side
 //!
 //! [`NativeRuntime::update_params`] decodes the new params into the control's
-//! typed `Props` and compares them with the last applied ones via
-//! `PartialEq` **before** any platform call. An unchanged rebuild therefore
-//! costs one JSON decode plus one comparison — nanoseconds — and **zero** FFI
-//! crossings; every prior-art framework diffs before crossing for the same
-//! reason. Field-level diffing
-//! *within* a changed props struct is the impl's job in
-//! [`NativeWidget::update`], since only it knows which setter is
-//! cheap (~0.8 µs, invalidate-only) and which triggers a re-layout (~29 µs,
-//! the `setText` class).
+//! typed `Props` and compares them with the last applied ones via `PartialEq`
+//! **before** any platform call, so an unchanged rebuild costs one JSON decode
+//! plus one comparison — nanoseconds — and **zero** FFI crossings. Field-level
+//! diffing *within* a changed props struct is the impl's job in
+//! [`NativeWidget::update`]: only it knows which setter is cheap (~0.8 µs,
+//! invalidate-only) and which triggers a re-layout (~29 µs, `setText`).
 //!
 //! # Late and duplicate disposal are normal
 //!
-//! The differ disposes a slot on a *missing streak of ingests*, and ingests
-//! only happen on gate-`Run` frames, so an unmounted control's `Dispose` can
-//! arrive many frames late — or after a replacement `Create` already re-used
-//! the same slot id. Both
-//! platforms' dispose entry point is handed the **view object**, not a slot
-//! id, so disposal resolves by identity ([`NativeRuntime::take_matching`], over
-//! [`Registry::remove_matching`]); a dispose naming a view that is already
-//! gone finds nothing and is a silent no-op, and never touches whatever
-//! instance currently occupies that slot.
+//! The differ disposes a slot on a *missing streak of ingests*, and ingests only
+//! happen on gate-`Run` frames, so an unmounted control's `Dispose` can arrive
+//! many frames late — or after a replacement `Create` already re-used the slot
+//! id. Both platforms' dispose entry point is handed the **view object**, not a
+//! slot id, so disposal resolves by identity ([`NativeRuntime::take_matching`],
+//! over [`Registry::remove_matching`]): a dispose naming a view that is already
+//! gone finds nothing, is a silent no-op, and never touches whatever instance
+//! now occupies that slot.
 //!
 //! # Main-thread confinement
 //!
-//! Every entry point here runs on the platform main thread — the host polls
-//! its command backlog there, and the platform's own listeners fire there.
-//! The runtime is therefore a `thread_local!` ([`with_runtime`]) rather than a
-//! `Mutex`-guarded global: a control's `State` may hold main-thread-only
-//! platform handles (iOS's `Retained<UIView>` is `!Send`), which a global
-//! would have to forbid. [`with_runtime`] is also **re-entrancy tolerant**:
-//! a platform setter that synchronously fires its own listener (Android's
-//! `setChecked` is the classic case) would otherwise re-enter the runtime
-//! mid-update, so a re-entrant call reports `None` and is dropped with a
-//! warning instead of panicking on the borrow.
+//! Every entry point here runs on the platform main thread — the host polls its
+//! command backlog there, and the platform's own listeners fire there — so the
+//! runtime is a `thread_local!` ([`with_runtime`]) rather than a `Mutex`-guarded
+//! global: a control's `State` may hold main-thread-only platform handles (iOS's
+//! `Retained<UIView>` is `!Send`), which a global would have to forbid.
+//! [`with_runtime`] is also **re-entrancy tolerant** — a platform setter that
+//! synchronously fires its own listener (Android's `setChecked` is the classic
+//! case) would otherwise re-enter the runtime mid-update, so a re-entrant call
+//! reports `None` and is dropped with a warning instead of panicking on the
+//! borrow.
 
 use std::any::Any;
 use std::borrow::Cow;

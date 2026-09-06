@@ -12,7 +12,7 @@
 //! either way.
 //!
 //! Ignored by default: the inner `cargo build` compiles the generated
-//! project's full dependency graph (winit/vello/wgpu/parley via the
+//! project's full dependency graph (winit/wgpu/frust-engine/parley via the
 //! `frust` facade) from a cold target dir, which takes several minutes.
 //! Run explicitly:
 //! `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
@@ -38,7 +38,7 @@ fn unique_dest() -> PathBuf {
 }
 
 #[test]
-#[ignore = "compiles the generated project's full dependency graph (winit/vello/wgpu); run explicitly with `--ignored`"]
+#[ignore = "compiles the generated project's full dependency graph (winit/wgpu/frust-engine); run explicitly with `--ignored`"]
 fn scaffolded_project_builds_against_the_real_facade() {
     let dest = unique_dest();
     let _ = std::fs::remove_dir_all(&dest);
@@ -77,33 +77,39 @@ fn scaffolded_project_builds_against_the_real_facade() {
         dest.display()
     );
 
+    // The generated tree must already be `rustfmt`-clean — the manifest
+    // guarantees no downstream project has to reformat its own untouched
+    // scaffold before its first commit passes CI (docs/DEVELOPMENT.md's
+    // Formatting section pins `cargo fmt --check` into the standard verify
+    // gate; scaffolded projects inherit that expectation from turn one).
+    let fmt_status = Command::new("cargo")
+        .args(["fmt", "--check"])
+        .current_dir(&dest)
+        .status()
+        .expect("failed to spawn `cargo fmt --check` in the generated project");
+    assert!(
+        fmt_status.success(),
+        "generated project at {} is not `cargo fmt --check`-clean",
+        dest.display()
+    );
+
     let _ = std::fs::remove_dir_all(&dest);
 }
 
 /// `frust create --arch clean-signals` renders a project whose source
-/// actually compiles, on a dev machine with this checkout plus the sibling
-/// `clean-signals-rs` checkout present.
+/// actually compiles and is `cargo fmt --check`-clean.
 ///
-/// Ignored for the same reason as the default-template e2e test above (full
-/// dependency graph compile from a cold target dir), **and** additionally
-/// needs the sibling `../clean-signals-rs` checkout the generated
-/// `Cargo.toml` path-deps into (see `docs/DEVELOPMENT.md`'s Prerequisites) —
-/// skipped automatically (not just via `--ignored`) when that sibling isn't
-/// present, so this never fails on a host without it. Run explicitly:
+/// Ignored for the same reason as the default-template e2e test above: a full
+/// dependency-graph compile from a cold target dir. It no longer needs — and no
+/// longer skips itself over — a sibling `../clean-signals-rs` checkout: the
+/// generated `Cargo.toml` git+rev-pins `clean-signals` to its public repo (see
+/// `docs/DEVELOPMENT.md`'s Version-Pin Policy), so this runs on any host with
+/// network access. The old self-skip silently dropped the fmt assertions below
+/// on every machine without the sibling. Run explicitly:
 /// `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
 #[test]
-#[ignore = "compiles the generated project's full dependency graph (winit/vello/wgpu/clean-signals); run explicitly with `--ignored`, and needs a `../clean-signals-rs` sibling checkout"]
+#[ignore = "compiles the generated project's full dependency graph (winit/wgpu/frust-engine/clean-signals); run explicitly with `--ignored`"]
 fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() {
-    let sibling_clean_signals = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../clean-signals-rs/crates/clean-signals");
-    if !sibling_clean_signals.exists() {
-        eprintln!(
-            "skipping: no `../clean-signals-rs` sibling checkout at {}",
-            sibling_clean_signals.display()
-        );
-        return;
-    }
-
     let dest = unique_dest();
     let _ = std::fs::remove_dir_all(&dest);
 
@@ -143,6 +149,18 @@ fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() 
     assert!(
         build_status.success(),
         "generated clean-signals project at {} failed to `cargo build`",
+        dest.display()
+    );
+
+    // Same `rustfmt`-clean guarantee as the default-arch test above.
+    let fmt_status = Command::new("cargo")
+        .args(["fmt", "--check"])
+        .current_dir(&dest)
+        .status()
+        .expect("failed to spawn `cargo fmt --check` in the generated clean-signals project");
+    assert!(
+        fmt_status.success(),
+        "generated clean-signals project at {} is not `cargo fmt --check`-clean",
         dest.display()
     );
 

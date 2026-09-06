@@ -1,0 +1,52 @@
+== 2026-09-06T19:13:35Z
+24% TOTAL: 15% user + 7.2% kernel + 0% iowait + 1.4% irq + 0.6% softirq
+== 2026-09-06T19:14:06Z
+7.9% TOTAL: 3.1% user + 3.7% kernel + 0% iowait + 0.5% irq + 0.4% softirq
+== 2026-09-06T19:14:36Z
+7.9% TOTAL: 3.1% user + 3.7% kernel + 0% iowait + 0.5% irq + 0.4% softirq
+== 2026-09-06T19:15:06Z
+5.6% TOTAL: 2.2% user + 2.5% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:15:36Z
+5.6% TOTAL: 2.2% user + 2.5% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:16:06Z
+5.5% TOTAL: 2.2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:16:36Z
+5.5% TOTAL: 2.2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:17:06Z
+5.4% TOTAL: 2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:17:36Z
+5.4% TOTAL: 2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:18:06Z
+5.8% TOTAL: 2.2% user + 2.6% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:18:37Z
+ +0% 29048/it.f0x.frustbench: 0% user + 0% kernel
+5.8% TOTAL: 2.3% user + 2.5% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:19:07Z
+5.5% TOTAL: 2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:19:37Z
+5.5% TOTAL: 2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:20:07Z
+5.6% TOTAL: 2.1% user + 2.5% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:20:37Z
+5.6% TOTAL: 2.1% user + 2.5% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:21:07Z
+5.3% TOTAL: 2% user + 2.3% kernel + 0% iowait + 0.5% irq + 0.3% softirq
+== 2026-09-06T19:21:37Z
+5.3% TOTAL: 2% user + 2.3% kernel + 0% iowait + 0.5% irq + 0.3% softirq
+== 2026-09-06T19:22:07Z
+5.5% TOTAL: 2.2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:22:38Z
+5.5% TOTAL: 2.2% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:23:08Z
+5.5% TOTAL: 2.1% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:23:38Z
+ +0% 29610/it.f0x.frustbench: 0% user + 0% kernel
+6.4% TOTAL: 2.5% user + 2.8% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:24:08Z
+5.2% TOTAL: 1.9% user + 2.3% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:24:38Z
+5.2% TOTAL: 1.9% user + 2.3% kernel + 0% iowait + 0.6% irq + 0.3% softirq
+== 2026-09-06T19:25:08Z
+5.4% TOTAL: 2.1% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.2% softirq
+== 2026-09-06T19:25:39Z
+5.4% TOTAL: 2.1% user + 2.4% kernel + 0% iowait + 0.6% irq + 0.2% softirq

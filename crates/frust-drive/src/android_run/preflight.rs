@@ -28,7 +28,7 @@ pub struct PreflightOutcome {
 pub fn run(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
     check_rust_target(ctx)?;
     check_cargo_ndk(ctx)?;
-    let java_home = check_java(ctx)?;
+    let (java_home, _source) = check_java(ctx)?;
     check_adb(ctx)?;
     Ok(PreflightOutcome { java_home })
 }
@@ -40,7 +40,7 @@ pub fn run(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
 pub fn run_without_device_checks(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
     check_rust_target(ctx)?;
     check_cargo_ndk(ctx)?;
-    let java_home = check_java(ctx)?;
+    let (java_home, _source) = check_java(ctx)?;
     Ok(PreflightOutcome { java_home })
 }
 
@@ -65,24 +65,149 @@ fn check_cargo_ndk(ctx: &PreflightCtx) -> Result<(), String> {
     }
 }
 
-/// Resolves a `JAVA_HOME` with Java 17+: prefers the env var, falls back
-/// (macOS only) to Android Studio's bundled JBR.
+/// Linux distros' conventional JVM install root — probed (see
+/// [`well_known_jvm_homes`]) once the env var, Studio JBR, and PATH `java`
+/// have all come up empty. `/usr/lib/jvm/default` is the symlink several
+/// distros (Debian's `default-jdk`, some Arch/Manjaro setups) maintain to
+/// their chosen default; `java-*-openjdk` is the versioned-package naming
+/// Arch/Manjaro/Fedora derivatives use (e.g. `java-17-openjdk`).
+const WELL_KNOWN_JVM_ROOT: &str = "/usr/lib/jvm";
+
+/// Which resolution step in [`check_java`]'s chain produced the resolved
+/// `JAVA_HOME` — surfaced by `doctor::report`'s JDK component so its output
+/// explains itself instead of just printing a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaSource {
+    /// The `JAVA_HOME` environment variable.
+    EnvVar,
+    /// Android Studio's bundled JBR (macOS only).
+    StudioJbr,
+    /// `java` resolved off `PATH` (`-XshowSettings:properties`'s
+    /// `java.home`).
+    Path,
+    /// A Linux well-known install location under [`WELL_KNOWN_JVM_ROOT`].
+    WellKnown,
+}
+
+impl JavaSource {
+    /// Human label for `doctor`'s component detail.
+    pub fn label(self) -> &'static str {
+        match self {
+            JavaSource::EnvVar => "JAVA_HOME",
+            JavaSource::StudioJbr => "Android Studio's bundled JBR",
+            JavaSource::Path => "`java` on PATH",
+            JavaSource::WellKnown => "a well-known /usr/lib/jvm install",
+        }
+    }
+}
+
+/// Resolves a `JAVA_HOME` with Java 17+, trying each step in order and
+/// returning the first hit along with which step resolved it:
+/// 1. The `JAVA_HOME` env var (unchanged — still wins over everything else).
+/// 2. Android Studio's bundled JBR (macOS only).
+/// 3. `java` on `PATH`, resolved via `-XshowSettings:properties`'s
+///    `java.home` (see [`probe_path_java`]) — the machine this bug was
+///    filed against has no `JAVA_HOME` at all but a working `java` on PATH
+///    (Manjaro's `/usr/bin/java` symlink chain into
+///    `/usr/lib/jvm/java-17-openjdk`).
+/// 4. A Linux well-known location (see [`well_known_jvm_homes`]).
 ///
 /// `pub(crate)`: also the JDK probe `doctor::report`'s component-level
 /// report reuses, rather than re-implementing Java-version detection.
-pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<String, String> {
+pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<(String, JavaSource), String> {
     if let Some(home) = ctx.env.get("JAVA_HOME")
         && java_at_least_17(ctx.runner, &home)
     {
-        return Ok(home);
+        return Ok((home, JavaSource::EnvVar));
     }
     if ctx.is_macos && java_at_least_17(ctx.runner, STUDIO_JBR_HOME) {
-        return Ok(STUDIO_JBR_HOME.to_string());
+        return Ok((STUDIO_JBR_HOME.to_string(), JavaSource::StudioJbr));
     }
+    if let Some(home) = probe_path_java(ctx.runner)
+        && java_at_least_17(ctx.runner, &home)
+    {
+        return Ok((home, JavaSource::Path));
+    }
+    for home in well_known_jvm_homes() {
+        if java_at_least_17(ctx.runner, &home) {
+            return Ok((home, JavaSource::WellKnown));
+        }
+    }
+    let studio_clause = if ctx.is_macos {
+        ", Android Studio's bundled JBR"
+    } else {
+        ""
+    };
     Err(format!(
-        "no Java 17+ found. Set JAVA_HOME to a JDK 17+ install, or install Android Studio \
-         (bundles a JBR at `{STUDIO_JBR_HOME}`)."
+        "no Java 17+ found (tried JAVA_HOME{studio_clause}, `java` on PATH, and well-known \
+         {WELL_KNOWN_JVM_ROOT} paths). Set JAVA_HOME to a JDK 17+ install, or install Android \
+         Studio (bundles a JBR at `{STUDIO_JBR_HOME}`)."
     ))
+}
+
+/// Resolves the `java.home` a PATH-visible `java` reports via
+/// `-XshowSettings:properties -version` — the canonical cross-platform way
+/// to learn where `java` actually lives, since it resolves the full symlink
+/// chain a bare `readlink` on `/usr/bin/java` wouldn't (e.g. Manjaro's
+/// `/usr/bin/java` → `/etc/alternatives/java` → `/usr/lib/jvm/java-17-openjdk/bin/java`).
+/// Returns `None` if `java` isn't on PATH, the invocation fails, or no
+/// `java.home` property line is found.
+fn probe_path_java(runner: &dyn ProcessRunner) -> Option<String> {
+    let out = runner
+        .run("java", &["-XshowSettings:properties", "-version"])
+        .ok()?;
+    if !out.success {
+        return None;
+    }
+    // The properties dump (like the version banner) prints to stderr by
+    // convention; fall back to stdout in case a fake/JDK variant writes it
+    // there instead — same convention `java_at_least_17` follows below.
+    parse_java_home_property(&out.stderr).or_else(|| parse_java_home_property(&out.stdout))
+}
+
+/// Parses the `java.home = <path>` line out of
+/// `-XshowSettings:properties`'s output.
+fn parse_java_home_property(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("java.home")?;
+        let value = rest.trim_start().strip_prefix('=')?;
+        Some(value.trim().to_string())
+    })
+}
+
+/// Candidate Linux `JAVA_HOME`s under [`WELL_KNOWN_JVM_ROOT`], in try order:
+/// the `default` symlink first, then every `java-*-openjdk` entry newest
+/// (highest major version) first. **Best-effort, not fakeable**: this reads
+/// the real filesystem directly rather than routing through an injected
+/// seam, so it is exercised only against the real machine (never asserted
+/// on in a unit test) — [`check_java`]'s unit tests cover the chain
+/// ordering and the PATH-probe parse instead, keyed entirely through
+/// [`ProcessRunner`]/[`EnvLookup`] fakes. A missing/unreadable
+/// [`WELL_KNOWN_JVM_ROOT`] (any non-Linux host, or a Linux host with no
+/// system JDK) yields just the `default` candidate, which then fails
+/// [`java_at_least_17`] the same as any other absent path.
+fn well_known_jvm_homes() -> Vec<String> {
+    let mut homes = vec![format!("{WELL_KNOWN_JVM_ROOT}/default")];
+    let Ok(entries) = std::fs::read_dir(WELL_KNOWN_JVM_ROOT) else {
+        return homes;
+    };
+    let mut versioned: Vec<(u32, String)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let major = name.strip_prefix("java-")?.split('-').next()?;
+            if !name.ends_with("openjdk") {
+                return None;
+            }
+            Some((
+                major.parse().ok()?,
+                entry.path().to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    versioned.sort_by_key(|(major, _)| std::cmp::Reverse(*major));
+    homes.extend(versioned.into_iter().map(|(_, path)| path));
+    homes
 }
 
 fn java_at_least_17(runner: &dyn ProcessRunner, home: &str) -> bool {
@@ -144,6 +269,20 @@ mod tests {
             stdout: String::new(),
             stderr: format!(
                 "openjdk version \"{version}\" 2024-01-16\nOpenJDK Runtime Environment\n"
+            ),
+        }
+    }
+
+    /// A `-XshowSettings:properties -version` fixture: the version banner
+    /// plus a `java.home = <path>` property line, mirroring real `java`
+    /// output (both print to stderr by convention).
+    fn java_properties(java_home: &str, version: &str) -> Output {
+        Output {
+            success: true,
+            stdout: String::new(),
+            stderr: format!(
+                "openjdk version \"{version}\" 2024-01-16\nOpenJDK Runtime Environment\n\
+                 java.class.version = 61.0\njava.home = {java_home}\njava.vendor = Fake Vendor\n"
             ),
         }
     }
@@ -320,6 +459,124 @@ mod tests {
         };
         let err = run(&ctx).unwrap_err();
         assert!(err.contains("Java 17+"), "{err}");
+    }
+
+    #[test]
+    fn resolves_via_path_java_when_java_home_unset() {
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with(
+                "java -XshowSettings:properties -version",
+                java_properties("/usr/lib/jvm/java-17-openjdk", "17.0.9"),
+            )
+            .with(
+                "/usr/lib/jvm/java-17-openjdk/bin/java -version",
+                java_ok_stderr("17.0.9"),
+            )
+            .with("adb version", ok("Android Debug Bridge version 1.0.41\n"));
+        // No JAVA_HOME, not macOS (so Studio JBR is never even attempted):
+        // resolution must fall through to the PATH `java` probe.
+        let env = FakeEnv::new();
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let outcome = run(&ctx).unwrap();
+        assert_eq!(outcome.java_home, "/usr/lib/jvm/java-17-openjdk");
+    }
+
+    #[test]
+    fn check_java_reports_path_as_the_resolution_source() {
+        let runner = FakeProcessRunner::new()
+            .with(
+                "java -XshowSettings:properties -version",
+                java_properties("/usr/lib/jvm/java-17-openjdk", "17.0.9"),
+            )
+            .with(
+                "/usr/lib/jvm/java-17-openjdk/bin/java -version",
+                java_ok_stderr("17.0.9"),
+            );
+        let env = FakeEnv::new();
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let (home, source) = check_java(&ctx).unwrap();
+        assert_eq!(home, "/usr/lib/jvm/java-17-openjdk");
+        assert_eq!(source, JavaSource::Path);
+    }
+
+    #[test]
+    fn java_home_wins_over_path_java_when_both_present() {
+        // No fixture registered for the PATH-derived home's own `-version`
+        // probe below — an unexpected call would itself error via
+        // FakeProcessRunner's "missing" path, proving JAVA_HOME wins before
+        // PATH is ever probed.
+        let runner = full_runner("/opt/jdk17", "17.0.9").with(
+            "java -XshowSettings:properties -version",
+            java_properties("/usr/lib/jvm/java-17-openjdk", "17.0.9"),
+        );
+        let env = FakeEnv::new().set("JAVA_HOME", "/opt/jdk17");
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
+        let outcome = run(&ctx).unwrap();
+        assert_eq!(outcome.java_home, "/opt/jdk17");
+    }
+
+    #[test]
+    fn falls_through_when_path_java_is_below_17() {
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with(
+                "java -XshowSettings:properties -version",
+                java_properties("/opt/jdk11", "11.0.20"),
+            )
+            .with("/opt/jdk11/bin/java -version", java_ok_stderr("11.0.20"));
+        let env = FakeEnv::new(); // no JAVA_HOME
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let err = run(&ctx).unwrap_err();
+        assert!(err.contains("Java 17+"), "{err}");
+    }
+
+    #[test]
+    fn not_found_error_lists_every_source_tried() {
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .missing("/opt/jdk8/bin/java -version")
+            .missing(format!("{STUDIO_JBR_HOME}/bin/java -version"))
+            .missing("java -XshowSettings:properties -version");
+        let env = FakeEnv::new().set("JAVA_HOME", "/opt/jdk8");
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
+        let err = run(&ctx).unwrap_err();
+        assert!(err.contains("JAVA_HOME"), "{err}");
+        assert!(err.contains("Android Studio's bundled JBR"), "{err}");
+        assert!(err.contains("java` on PATH"), "{err}");
+        assert!(err.contains("/usr/lib/jvm"), "{err}");
     }
 
     #[test]

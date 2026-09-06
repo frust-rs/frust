@@ -1,0 +1,32 @@
+# `frust-material`: the Material design-system catalog plugin (production
+# deps: frust facade + kurbo/peniko, pins mirrored exactly from
+# frust-widgets' own Cargo.toml, since this crate builds custom widgets over
+# frust::authoring the same way that crate's built-in catalogs did;
+# frust-widgets/frust-core via dev-dependency are the sanctioned test-fixture
+# route and ship nothing).
+[package]
+name = "frust-material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# NOTICE: see NOTICE for third-party attributions (vendored components,
+# material_new_shapes, Material Icons lineage, fonts pointer)
+# Not the workspace default (`MIT OR Apache-2.0`): this crate bundles
+# Apache-2.0-only ported code (material-color-utilities, androidx
+# graphics-shapes lineage, Material Icons path data) and OFL-1.1 font bytes,
+# so no MIT-only arm is offerable for the combined artifact. See NOTICE.
+license = "Apache-2.0 AND OFL-1.1"
+
+[dependencies]
+frust = { path = "../../crates/frust", default-features = false }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+
+[dev-dependencies]
+frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
+# `test-support` compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx`
+# constructor) into the test build, so a clock-dependent widget — the overlay
+# seam's enter/exit ramps — can be painted at a chosen time without a
+# `RenderRoot`; the same dev-dependency shape `frust-shadcn` carries. Test-only:
+# the feature ships in nothing.
+frust-core = { path = "../../crates/frust-core", features = ["test-support"] }

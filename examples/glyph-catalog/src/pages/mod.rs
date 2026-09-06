@@ -1,8 +1,7 @@
-//! The twelve catalog sections, one module per section, mirroring the
+//! The nine catalog sections, one module per section, mirroring the
 //! reference builds' section list (foundations, buttons+forms, feedback,
-//! navigation, content, overlays, motion) plus `interactions`, `appbar`,
-//! `platform_views`, `camera`, and `native_widgets` — five sections with
-//! no reference-build section-list precedent of their own.
+//! navigation, content, overlays, motion) plus `interactions` and `appbar` —
+//! two sections with no reference-build section-list precedent of their own.
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -36,26 +35,21 @@
 
 pub mod appbar;
 pub mod buttons_forms;
-pub mod camera;
 pub mod content;
 pub mod feedback;
 pub mod foundations;
 pub mod interactions;
 pub mod motion;
-pub mod native_widgets;
 pub mod navigation;
 pub mod overlays;
-pub mod platform_views;
 
 use frust::AnyView;
 
 use crate::CatalogState;
 
-/// The twelve section tab labels, in order. Indexed by `CatalogState::section`
-/// and dispatched by [`current`]. "Native Widgets" is the newest addition,
-/// appended at the end so every existing
-/// section's index stays stable.
-pub const SECTION_LABELS: [&str; 12] = [
+/// The nine section tab labels, in order. Indexed by `CatalogState::section`
+/// and dispatched by [`current`].
+pub const SECTION_LABELS: [&str; 9] = [
     "Foundations",
     "Buttons + Forms",
     "Feedback",
@@ -65,12 +59,9 @@ pub const SECTION_LABELS: [&str; 12] = [
     "Motion",
     "Interactions",
     "AppBar",
-    "Platform Views",
-    "Camera",
-    "Native Widgets",
 ];
 
-/// Dispatch to the section page for `section` (0..12), falling back to
+/// Dispatch to the section page for `section` (0..9), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
@@ -84,9 +75,6 @@ pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
         6 => motion::page(state),
         7 => interactions::page(state),
         8 => appbar::page(state),
-        9 => platform_views::page(state),
-        10 => camera::page(state),
-        11 => native_widgets::page(state),
         _ => foundations::page(state),
     }
 }

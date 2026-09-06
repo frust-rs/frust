@@ -1,11 +1,11 @@
-//! The clean-confirm dialog (PLAN D6 "clean"): a small shadowed, centered
+//! The clean-confirm dialog: a small shadowed, centered
 //! confirm popup over the workbench before running `cargo clean` +
 //! removing the generated Android/iOS build directories. The base workbench
 //! layer is rendered with a *suppressed* `MouseCtx` (see `crate::ui::render`),
-//! so only this dialog's regions are live while it is open — the D4
+//! so only this dialog's regions are live while it is open — the
 //! base-layer suppression.
 //!
-//! Layering (D2): renders the target project path and only *registers*
+//! Layering: renders the target project path and only *registers*
 //! interaction; it never mutates the engine.
 
 use std::path::Path;

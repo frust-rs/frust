@@ -1,8 +1,9 @@
 //! The render layer: given `&AppState`, paints a frame and registers this
 //! frame's mouse regions through a [`MouseCtx`]. It never mutates the engine —
 //! interaction is expressed only as registered regions the loop turns into
-//! `Message`s (D2 layering).
+//! `Message`s.
 
+pub mod anim;
 pub mod layout;
 pub mod mouse;
 pub mod theme;
@@ -35,10 +36,10 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
         return;
     }
 
-    // A right-click context menu (T04 / D4) floats on the top z-layer over the
+    // A right-click context menu floats on the top z-layer over the
     // still-visible base layer, which is drawn with a *suppressed* `MouseCtx`
     // so only the menu's own rows are hit-testable while it's open — the same
-    // D4 base-layer suppression the workbench modals use.
+    // base-layer suppression the workbench modals use.
     if let Some(menu) = &state.context_menu {
         let mut suppressed = MouseCtx::suppressed();
         render_base(frame, area, state, theme, &mut suppressed);
@@ -77,7 +78,7 @@ fn render_base(
     }
 }
 
-/// Render the auto-dismiss toast stack (D5) bottom-anchored just above the
+/// Render the auto-dismiss toast stack bottom-anchored just above the
 /// 1-row status bar, oldest-to-newest top-to-bottom, each colored by kind. A
 /// no-op when the stack is empty (the common case).
 fn render_toasts(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -120,7 +121,7 @@ fn render_toasts(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
 }
 
 /// Render the currently-active modal (`state.active_modal()`) over its base
-/// layer. Every arm shares the same D4 base-layer suppression: the chrome
+/// layer. Every arm shares the same base-layer suppression: the chrome
 /// beneath draws with no live mouse regions (a `MouseCtx::suppressed()`), so
 /// only the topmost modal's regions are live — `translate_key`
 /// (`crate::runner`) enforces the matching keyboard exclusivity.
@@ -196,6 +197,53 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::doctor::render(frame, area, &state.doctor, theme, mouse);
         }
+        // The MCP panel reaches over either top-level screen (its `m` key and
+        // palette row are not workbench-gated — the embedded server serves
+        // the workbench itself, not one project).
+        ActiveModal::McpPanel => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::mcp::render(
+                frame,
+                area,
+                &state.mcp_status(),
+                // One snapshot per frame: the registry is live, so every row
+                // in this panel must come from the same read.
+                &state.mcp_clients(),
+                state.mcp_error.as_deref(),
+                theme,
+                mouse,
+            );
+        }
+        // The DAP settings dialog reaches over either top-level screen for the
+        // same reason the MCP panel does: the embedded server hosts the
+        // *workbench*, and its preferences are readable with no project open.
+        ActiveModal::DapSettings(settings) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::dap_settings::render(
+                frame,
+                area,
+                settings,
+                &state.dap_status(),
+                // One registry snapshot per frame, like the MCP panel's client
+                // list: the count is read live off a running server.
+                state.dap_clients().len(),
+                state.dap_error.as_deref(),
+                theme,
+                mouse,
+            );
+        }
         ActiveModal::BuildLauncher(launcher) => {
             let mut suppressed = MouseCtx::suppressed();
             views::workbench::render(frame, area, state, theme, &mut suppressed);
@@ -262,7 +310,7 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     );
 }
 
-/// The status-bar mouse-capture indicator (T04 / D4): a check while capture is
+/// The status-bar mouse-capture indicator: a check while capture is
 /// on, an "off" hint (with the `⌥m` toggle key) while it's off so users know
 /// the terminal's own text selection is available. Shared by the welcome and
 /// workbench status bars.

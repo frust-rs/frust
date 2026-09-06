@@ -1,4 +1,4 @@
-//! The fuzzy command palette (PLAN D5 / workbook Part B): a single
+//! The fuzzy command palette: a single
 //! `Ctrl+P` / `:` launcher covering every workbench command, each carrying its
 //! enabled/disabled-with-reason gate (the workbook disabled pattern).
 //!
@@ -47,7 +47,9 @@ impl Palette {
 /// One palette command: a display title, a short keyhint, the **existing**
 /// [`Message`] it emits, and its enabled/disabled-with-reason gate. A disabled
 /// command still shows (muted, with its reason) but can't be executed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, following [`Message`]'s own relaxation.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaletteCommand {
     /// The row label.
     pub title: &'static str,
@@ -67,11 +69,10 @@ pub struct PaletteCommand {
 /// devices. The order here is the tie-break order [`ranked`] falls back to for
 /// equal fuzzy scores.
 ///
-/// Deliberately omitted (no existing `Message` to wire to — see the task
-/// completion summary): "open project by path" (needs a path-input flow not in
-/// the tree) and a "help" overlay (not yet landed). Each returns with no
-/// palette entry rather than a dead command. The mouse-capture toggle (T04) is
-/// now wired below.
+/// Deliberately omitted (no existing `Message` to wire to): "open project by
+/// path" (needs a path-input flow not in the tree) and a "help" overlay (not
+/// yet landed). Each returns with no palette entry rather than a dead command.
+/// The mouse-capture toggle is now wired below.
 pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
@@ -80,6 +81,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
     let has_projects = !state.projects.is_empty();
+    // The Inspector's own refresh only means anything with its tab open on a
+    // live connection (§B12) — everywhere else `r` is a different command.
+    let inspector_live = state.active_session().is_some_and(|s| {
+        s.devtools.open
+            && s.devtools.active_tab == super::devtools::DevtoolsTab::Inspector
+            && s.devtools.phase() == super::devtools::DevtoolsPhase::Connected
+    });
 
     let gated = |title, hint, message, enabled, reason: &'static str| PaletteCommand {
         title,
@@ -154,6 +162,18 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no projects detected",
         ),
         always("Refresh devices", "R", Message::RefreshDevices),
+        // Workbook §B13. Both are always enabled: the embedded server serves
+        // *this* workbench whether or not a project is open (a `run_app` with
+        // none open reports that itself), and the panel is readable in every
+        // state, including "not running".
+        always("MCP server…", "m", Message::OpenMcpPanel),
+        always("Start/stop MCP server", "M", Message::ToggleMcpServer),
+        // The DAP pair. The dialog is the whole surface (server switch,
+        // preferences, IDE config), so `D` opens it rather than toggling; the
+        // toggle stays reachable from here (and from inside the dialog, `s`)
+        // without claiming a second top-level key.
+        always("DAP server…", "D", Message::OpenDapSettings),
+        always("Start/stop DAP server", "", Message::ToggleDapServer),
         always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
         gated(
             "Toggle follow-tail",
@@ -168,6 +188,43 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             Message::SearchOpen,
             has_session,
             "no active session",
+        ),
+        gated(
+            "Cycle log level filter",
+            "l",
+            Message::CycleLevelFilter(1),
+            has_session,
+            "no active session",
+        ),
+        gated(
+            "Toggle nearest backtrace fold",
+            "z",
+            Message::ToggleNearestFold,
+            has_session,
+            "no active session",
+        ),
+        // `d` is the session view's own DevTools toggle and the workbench's
+        // doctor panel in the *other* context (no session open) — the
+        // full-screen key-namespace swap workbook §B12 defines. Both keep
+        // their key here because both are only ever reachable in their own
+        // context; the palette and help overlay render this one registry, so
+        // the pair shows exactly as the keyboard behaves.
+        gated(
+            "DevTools",
+            "d",
+            Message::DevtoolsToggle,
+            has_session,
+            "no active session",
+        ),
+        // §B12's Inspector `r`. The palette is the one place this command is
+        // reachable from outside the tab itself, so its gate names the exact
+        // context it needs rather than the looser "no active session".
+        gated(
+            "Refresh widget tree",
+            "r",
+            Message::DevtoolsInspectorRefresh,
+            inspector_live,
+            "open DevTools' Inspector tab first",
         ),
         always("Quit", "q", Message::Quit),
     ]

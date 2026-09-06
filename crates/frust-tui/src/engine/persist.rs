@@ -17,9 +17,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use frust_dap::ide_config::{ParentIde, parse_ide_name};
 use frust_drive::doctor::{EnvLookup, RealEnv};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
+use super::dap_settings::{DapSetting, persisted_ide_name};
 use super::state::{SIDEBAR_DEFAULT_WIDTH, clamp_sidebar_width};
 
 /// Cap on the persisted recent-projects list (newest first) — trimmed on
@@ -155,22 +157,21 @@ pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Ve
     out
 }
 
-// ── Settings persistence: sidebar width, mouse-capture
-// preference, follow-tail default ───────────────────────────────────────────
+// ── Settings persistence: sidebar width, mouse-capture preference ──────────
 
 /// Persisted workbench preferences (`[settings]` table in `tui.toml`),
 /// alongside the `[recent].projects` array above — a fresh launch's
 /// "last-active project" is already covered by that list (`AppState::new`
 /// opens `projects.first()` when the cwd has no project of its own), so it
-/// carries no separate key here.
+/// carries no separate key here. Follow-tail is per-session, in-memory-only
+/// state (every session starts following) and is deliberately not persisted
+/// here — see `engine::update`'s `RegisterSession`/`ToggleFollow` handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// The sidebar's drag-resized width (columns), from the sidebar splitter.
     pub sidebar_width: u16,
     /// Whether crossterm mouse capture is on.
     pub mouse_capture: bool,
-    /// The follow-tail state a freshly-registered session tab starts in.
-    pub follow_tail_default: bool,
 }
 
 impl Default for Settings {
@@ -178,7 +179,6 @@ impl Default for Settings {
         Self {
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             mouse_capture: true,
-            follow_tail_default: true,
         }
     }
 }
@@ -218,14 +218,9 @@ fn settings_from_doc(doc: &DocumentMut) -> Settings {
         .and_then(|t| t.get("mouse_capture"))
         .and_then(Item::as_bool)
         .unwrap_or(default.mouse_capture);
-    let follow_tail_default = table
-        .and_then(|t| t.get("follow_tail_default"))
-        .and_then(Item::as_bool)
-        .unwrap_or(default.follow_tail_default);
     Settings {
         sidebar_width,
         mouse_capture,
-        follow_tail_default,
     }
 }
 
@@ -250,17 +245,6 @@ fn save_mouse_capture_with(env: &dyn EnvLookup, on: bool) {
     save_setting(env, "mouse_capture", Value::from(on));
 }
 
-/// Persist the follow-tail default — updated whenever the user toggles
-/// follow-tail on the active session (`Message::ToggleFollow`), so a future
-/// session tab starts in whichever mode was last chosen.
-pub fn save_follow_tail_default(on: bool) {
-    save_follow_tail_default_with(&RealEnv, on);
-}
-
-fn save_follow_tail_default_with(env: &dyn EnvLookup, on: bool) {
-    save_setting(env, "follow_tail_default", Value::from(on));
-}
-
 /// Format-preserving save of exactly one `[settings].<key>` — mirrors
 /// [`save_recent_project`]'s "parse, touch one key, write back whole"
 /// pattern, so a hand-edited file's comments/unrelated keys always survive
@@ -268,6 +252,14 @@ fn save_follow_tail_default_with(env: &dyn EnvLookup, on: bool) {
 /// silently dropped, settings being a convenience rather than load-bearing
 /// state).
 fn save_setting(env: &dyn EnvLookup, key: &str, value: Value) {
+    save_in_table(env, "settings", key, Some(value));
+}
+
+/// [`save_setting`] over any top-level table, with `None` *removing* the key
+/// (how an override is cleared back to its default). The whole document is
+/// parsed and written back, so every comment, table, and unrelated key in it
+/// survives untouched — the one write path both `[settings]` and `[dap]` use.
+fn save_in_table(env: &dyn EnvLookup, table: &str, key: &str, value: Option<Value>) {
     let Some(path) = config_path(env) else {
         return;
     };
@@ -277,11 +269,26 @@ fn save_setting(env: &dyn EnvLookup, key: &str, value: Value) {
         .unwrap_or_default();
 
     let root = doc.as_table_mut();
-    if !root.contains_table("settings") {
-        root.insert("settings", Item::Table(Table::new()));
+    if !root.contains_table(table) {
+        root.insert(table, Item::Table(Table::new()));
     }
-    if let Some(settings) = root.get_mut("settings").and_then(Item::as_table_mut) {
-        settings.insert(key, Item::Value(value));
+    if let Some(target) = root.get_mut(table).and_then(Item::as_table_mut) {
+        match value {
+            Some(value) => {
+                // `insert` replaces the whole entry, decor included — so a
+                // comment the user wrote above *this* key would be dropped by
+                // a plain overwrite. Carry the existing key's leading decor
+                // (that comment, and the blank lines around it) across.
+                let decor = target.key(key).map(|k| k.leaf_decor().clone());
+                target.insert(key, Item::Value(value));
+                if let (Some(decor), Some(mut key)) = (decor, target.key_mut(key)) {
+                    *key.leaf_decor_mut() = decor;
+                }
+            }
+            None => {
+                target.remove(key);
+            }
+        }
     }
 
     if let Some(parent) = path.parent()
@@ -290,6 +297,140 @@ fn save_setting(env: &dyn EnvLookup, key: &str, value: Value) {
         return;
     }
     let _ = fs::write(path, doc.to_string());
+}
+
+// ── DAP preferences: the `[dap]` table ─────────────────────────────────────
+
+/// The persisted `[dap]` preferences backing the DAP settings dialog
+/// ([`super::DapSettings`]) — the embedded debug-adapter server's launch and
+/// IDE-configuration behaviour, alongside `[settings]` and `[recent]` in the
+/// same `tui.toml`.
+///
+/// Loaded once at [`AppState::new`](super::AppState::new); every dialog edit
+/// writes exactly its own key back through [`save_dap_setting`], so a
+/// hand-edited file keeps its comments and its other keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapPrefs {
+    /// Start the server on every launch, IDE or not (`false`: opt-in).
+    pub enabled: bool,
+    /// Start it automatically when an IDE terminal is detected.
+    pub auto_start_in_ide: bool,
+    /// Write/refresh the IDE's DAP client config when the server binds.
+    pub auto_configure_ide: bool,
+    /// The port the server binds.
+    pub port: u16,
+    /// An explicit IDE override, parsed through
+    /// `frust_dap::ide_config::parse_ide_name`. An unrecognised name in the
+    /// file is ignored (falls back to detection) rather than failing the load.
+    pub ide_override: Option<ParentIde>,
+    /// Whether the one-time "an auto-start would open a DAP listener" notice
+    /// has already been shown (`false` on a fresh install). Burned exactly
+    /// once, by the first auto-start that would actually have fired — see
+    /// [`super::DapSettings::intro_port`].
+    pub intro_seen: bool,
+}
+
+impl Default for DapPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_start_in_ide: true,
+            auto_configure_ide: true,
+            port: frust_dap::DEFAULT_DAP_PORT,
+            ide_override: None,
+            intro_seen: false,
+        }
+    }
+}
+
+/// Load the persisted `[dap]` preferences against the real process
+/// environment — the same tolerance as [`load_settings`]: a missing file, a
+/// corrupt document, or a missing/malformed individual key falls back to that
+/// key's default rather than failing the load.
+pub fn load_dap_prefs() -> DapPrefs {
+    load_dap_prefs_with(&RealEnv)
+}
+
+fn load_dap_prefs_with(env: &dyn EnvLookup) -> DapPrefs {
+    let Some(path) = config_path(env) else {
+        return DapPrefs::default();
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return DapPrefs::default();
+    };
+    let Ok(doc) = text.parse::<DocumentMut>() else {
+        return DapPrefs::default();
+    };
+    dap_prefs_from_doc(&doc)
+}
+
+fn dap_prefs_from_doc(doc: &DocumentMut) -> DapPrefs {
+    let default = DapPrefs::default();
+    let table = doc.as_table().get("dap").and_then(Item::as_table);
+    let flag = |key: &str, fallback: bool| {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(Item::as_bool)
+            .unwrap_or(fallback)
+    };
+    DapPrefs {
+        enabled: flag("enabled", default.enabled),
+        auto_start_in_ide: flag("auto_start_in_ide", default.auto_start_in_ide),
+        auto_configure_ide: flag("auto_configure_ide", default.auto_configure_ide),
+        port: table
+            .and_then(|t| t.get("port"))
+            .and_then(Item::as_integer)
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(default.port),
+        ide_override: table
+            .and_then(|t| t.get("ide_override"))
+            .and_then(Item::as_str)
+            .and_then(|name| parse_ide_name(name).ok()),
+        intro_seen: flag("intro_seen", default.intro_seen),
+    }
+}
+
+/// Persist one just-changed `[dap]` preference — the runner's enactment of
+/// [`super::Effect::SaveDapSetting`], mirroring how `sidebar_width`/
+/// `mouse_capture` travel out of the pure engine.
+pub fn save_dap_setting(setting: DapSetting) {
+    save_dap_setting_with(&RealEnv, setting);
+}
+
+fn save_dap_setting_with(env: &dyn EnvLookup, setting: DapSetting) {
+    match setting {
+        DapSetting::AutoStartInIde(on) => {
+            save_in_table(env, "dap", "auto_start_in_ide", Some(Value::from(on)));
+        }
+        DapSetting::AutoConfigureIde(on) => {
+            save_in_table(env, "dap", "auto_configure_ide", Some(Value::from(on)));
+        }
+        DapSetting::Port(port) => {
+            save_in_table(env, "dap", "port", Some(Value::from(i64::from(port))));
+        }
+        // An override with no persistable name (never offered by the selector
+        // — see `dap_settings::IDE_OVERRIDES`) clears the key rather than
+        // writing a name the loader could not read back.
+        DapSetting::IdeOverride(ide) => {
+            let name = ide.and_then(persisted_ide_name);
+            save_in_table(env, "dap", "ide_override", name.map(Value::from));
+        }
+        DapSetting::IntroSeen(seen) => {
+            save_in_table(env, "dap", "intro_seen", Some(Value::from(seen)));
+        }
+    }
+}
+
+/// Persist `[dap].enabled` — "start the server on every launch". The dialog
+/// exposes no control for it (see [`super::DapSettings::enabled`]); this is
+/// the write half of the key a user sets by hand, kept beside the others so
+/// the table has one owner.
+pub fn save_dap_enabled(on: bool) {
+    save_dap_enabled_with(&RealEnv, on);
+}
+
+fn save_dap_enabled_with(env: &dyn EnvLookup, on: bool) {
+    save_in_table(env, "dap", "enabled", Some(Value::from(on)));
 }
 
 #[cfg(test)]
@@ -465,14 +606,12 @@ mod tests {
         let env = FakeEnv::home(&home);
         save_sidebar_width_with(&env, 40);
         save_mouse_capture_with(&env, false);
-        save_follow_tail_default_with(&env, false);
         let loaded = load_settings_with(&env);
         assert_eq!(
             loaded,
             Settings {
                 sidebar_width: 40,
                 mouse_capture: false,
-                follow_tail_default: false,
             }
         );
         let _ = fs::remove_dir_all(&home);
@@ -503,10 +642,6 @@ mod tests {
         assert!(!loaded.mouse_capture);
         assert_eq!(loaded.sidebar_width, Settings::default().sidebar_width);
         assert_eq!(
-            loaded.follow_tail_default,
-            Settings::default().follow_tail_default
-        );
-        assert_eq!(
             load_recent_projects_with(&env),
             vec![PathBuf::from("/tmp/huddle")],
             "the [recent] table must survive a [settings] save"
@@ -522,6 +657,189 @@ mod tests {
         fs::write(config.join("tui.toml"), "not [valid toml").unwrap();
         let env = FakeEnv::home(&home);
         assert_eq!(load_settings_with(&env), Settings::default());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── DAP preferences (`[dap]`) ───────────────────────────────────────
+
+    #[test]
+    fn a_missing_dap_table_yields_defaults() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        assert_eq!(load_dap_prefs_with(&env), DapPrefs::default());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn every_dap_preference_round_trips() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        save_dap_enabled_with(&env, true);
+        save_dap_setting_with(&env, DapSetting::AutoStartInIde(false));
+        save_dap_setting_with(&env, DapSetting::AutoConfigureIde(false));
+        save_dap_setting_with(&env, DapSetting::Port(5005));
+        save_dap_setting_with(&env, DapSetting::IdeOverride(Some(ParentIde::Zed)));
+        save_dap_setting_with(&env, DapSetting::IntroSeen(true));
+        assert_eq!(
+            load_dap_prefs_with(&env),
+            DapPrefs {
+                enabled: true,
+                auto_start_in_ide: false,
+                auto_configure_ide: false,
+                port: 5005,
+                ide_override: Some(ParentIde::Zed),
+                intro_seen: true,
+            }
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Clearing the override removes the key outright rather than writing an
+    /// empty string the loader would then have to special-case.
+    #[test]
+    fn clearing_the_ide_override_removes_the_key() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        save_dap_setting_with(&env, DapSetting::IdeOverride(Some(ParentIde::Neovim)));
+        assert_eq!(
+            load_dap_prefs_with(&env).ide_override,
+            Some(ParentIde::Neovim)
+        );
+        save_dap_setting_with(&env, DapSetting::IdeOverride(None));
+        assert_eq!(load_dap_prefs_with(&env).ide_override, None);
+        let saved = fs::read_to_string(home.join(".config/frust/tui.toml")).unwrap();
+        assert!(
+            !saved.contains("ide_override"),
+            "the key must be removed, not blanked:\n{saved}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// An IDE whose name `parse_ide_name` cannot read back is never written —
+    /// a persisted value that silently forgets itself would be worse than no
+    /// value at all.
+    #[test]
+    fn an_unnameable_ide_override_is_not_persisted() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        save_dap_setting_with(&env, DapSetting::IdeOverride(Some(ParentIde::Cursor)));
+        assert_eq!(load_dap_prefs_with(&env).ide_override, None);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The format-preservation contract for the second table: a `[dap]` save
+    /// touches one key and leaves every comment, `[settings]` key, and
+    /// `[recent]` entry in the file untouched.
+    #[test]
+    fn a_dap_save_preserves_comments_and_the_other_tables() {
+        let home = unique_temp_home();
+        let config_dir = home.join(".config").join("frust");
+        fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("tui.toml");
+        fs::write(
+            &path,
+            "# my hand-written note\n[recent]\nprojects = [\"/tmp/old\"]\n\n\
+             [settings]\nsidebar_width = 30\n\n[dap]\n# which port the editor attaches to\nport = 4849\n",
+        )
+        .unwrap();
+
+        let env = FakeEnv::home(&home);
+        save_dap_setting_with(&env, DapSetting::Port(5005));
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# my hand-written note"), "{saved}");
+        assert!(
+            saved.contains("# which port the editor attaches to"),
+            "{saved}"
+        );
+        assert!(saved.contains("sidebar_width = 30"), "{saved}");
+        assert_eq!(load_dap_prefs_with(&env).port, 5005);
+        assert_eq!(load_settings_with(&env).sidebar_width, 30);
+        assert_eq!(
+            load_recent_projects_with(&env),
+            vec![PathBuf::from("/tmp/old")],
+            "the [recent] table must survive a [dap] save"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_malformed_dap_value_falls_back_to_that_keys_default() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("tui.toml"),
+            "[dap]\nport = 99999\nenabled = \"yes\"\nide_override = \"sublime\"\n\
+             auto_configure_ide = false\n",
+        )
+        .unwrap();
+        let env = FakeEnv::home(&home);
+        assert_eq!(
+            load_dap_prefs_with(&env),
+            DapPrefs {
+                // Out of `u16` range, not a bool, and not a known IDE: each
+                // key falls back on its own without blocking the others.
+                port: DapPrefs::default().port,
+                enabled: DapPrefs::default().enabled,
+                ide_override: None,
+                auto_configure_ide: false,
+                auto_start_in_ide: true,
+                intro_seen: DapPrefs::default().intro_seen,
+            }
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `tui.toml` predating the first-run notice has no `intro_seen` key at
+    /// all: it must load as "not yet seen", so an existing install gets the
+    /// notice on its next in-IDE auto-start rather than skipping it.
+    #[test]
+    fn a_dap_table_without_intro_seen_loads_as_not_yet_seen() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("tui.toml"), "[dap]\nport = 5005\n").unwrap();
+        let env = FakeEnv::home(&home);
+        let prefs = load_dap_prefs_with(&env);
+        assert_eq!(prefs.port, 5005);
+        assert!(!prefs.intro_seen);
+
+        save_dap_setting_with(&env, DapSetting::IntroSeen(true));
+        assert!(load_dap_prefs_with(&env).intro_seen);
+        assert_eq!(
+            load_dap_prefs_with(&env).port,
+            5005,
+            "burning the notice must not disturb the other keys"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `tui.toml` written by an older build still carries the now-removed
+    /// `follow_tail_default` key (follow-tail is per-session, in-memory-only
+    /// state now — see `Settings`'s doc comment). Loading it must not error
+    /// and must ignore the stale key, recovering only the settings still
+    /// modeled.
+    #[test]
+    fn a_legacy_settings_file_with_the_removed_follow_tail_key_loads_without_error() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("tui.toml"),
+            "[settings]\nsidebar_width = 30\nmouse_capture = false\nfollow_tail_default = false\n",
+        )
+        .unwrap();
+        let env = FakeEnv::home(&home);
+        let loaded = load_settings_with(&env);
+        assert_eq!(
+            loaded,
+            Settings {
+                sidebar_width: 30,
+                mouse_capture: false,
+            },
+            "the stale key is ignored, not an error"
+        );
         let _ = fs::remove_dir_all(&home);
     }
 }

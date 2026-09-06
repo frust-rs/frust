@@ -16,20 +16,220 @@
 use std::any::Any;
 use std::cell::Cell;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton, PointerEvent,
-    PointerPhase,
+    CursorIcon, CursorPass, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
+    PointerButton, PointerEvent, PointerPhase,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
-use crate::tree::{WidgetPod, WidgetTree};
+use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
 use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
+
+/// The window's shape and platform-occlusion state, delivered to app code as a
+/// plain [`provide_context`](reactive_graph::owner::provide_context)-carried
+/// value — logical size, device-pixel scale, a
+/// [derived](Orientation::from_size) orientation, and the current
+/// [`WindowInsets`].
+///
+/// # Plain value, not a signal
+///
+/// `WindowMetrics` is delivered exactly like `Theme` and [`WindowInsets`]
+/// already are: a shell calls `provide_context` with a freshly-built value on
+/// change, and app code recovers it with `use_context::<WindowMetrics>()`
+/// inside `Component::build`. It is **not** an `RwSignal` — only `deep_link`
+/// and `back` are true signals in `frust-reactive`; every other host-signal
+/// carrier (theme, insets, and now this) is a re-provided plain value.
+///
+/// # Alongside `WindowInsets`, not superseding it
+///
+/// `WindowInsets` already reaches `Component::build` on Android and iOS today
+/// (each shell's `push_insets` calls `provide_context(insets)` independently
+/// of anything here — desktop has no such arm for either value yet).
+/// `WindowMetrics` is additive: a shell that starts providing it keeps
+/// providing the standalone `WindowInsets` context too, so an existing
+/// `use_context::<WindowInsets>()` call site never breaks. `insets` on this
+/// type is a **copy** of that same value for convenience (a widget laying
+/// itself out around window shape wants size/scale/orientation/insets
+/// together), not a replacement for the independent context.
+///
+/// # Orientation is derived, not platform-sourced
+///
+/// No platform callback in either mobile shell carries an orientation enum —
+/// Android's `nativeOnSurfaceChanged` and iOS's `frust_resize` each hand the
+/// shell only a `(width, height, scale)` triple. [`Orientation`] is therefore
+/// always computed from `size` via [`Orientation::from_size`]
+/// (portrait when `height >= width`, so an exact square reads as portrait);
+/// it never tracks a device orientation-lock setting or a platform rotation
+/// event directly.
+///
+/// # Context is not reactive
+///
+/// `provide_context` is a plain insert into the owner's context map — it
+/// notifies nothing — and `use_context` inside `Component::build` (or the
+/// root `app_logic`) creates no subscription, so re-providing a changed
+/// `WindowMetrics` does not itself mark anything dirty or wake a frame. A new
+/// value becomes visible only on the next rebuild, which the resize or inset
+/// change that produced it already drives; do not write a shell that assumes
+/// a `provide_context` write triggers one. A shell wiring this up (see
+/// `docs/SHELLS_ARCHITECTURE.md`) must still re-provide `WindowMetrics` only
+/// on an actual change (mirroring `RenderRoot::set_insets`'s
+/// `PartialEq`-guarded no-op) — the reason is cost at the FFI boundary (a
+/// lock write plus an allocation every frame), not a rebuild storm.
+/// Separately, there is no per-component rebuild skipping in this framework
+/// (a component always re-runs `build` on any rebuild it does take part in),
+/// which is affordable only because builds are cheap by construction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowMetrics {
+    /// The window's logical (density-independent) size.
+    pub size: Size,
+    /// The device-pixel scale factor (logical → physical px multiplier).
+    pub scale: f64,
+    /// The orientation derived from `size` — see the type's doc for why this
+    /// is computed, never platform-sourced.
+    pub orientation: Orientation,
+    /// A copy of the window's current insets — see the type's doc for why
+    /// this does not replace the standalone `WindowInsets` context.
+    pub insets: WindowInsets,
+}
+
+impl WindowMetrics {
+    /// Construct a [`WindowMetrics`] from its transported fields, deriving
+    /// [`orientation`](Self::orientation) from `size` rather than accepting it
+    /// as an input — see the type's doc for why orientation is never
+    /// platform-sourced.
+    pub fn new(size: Size, scale: f64, insets: WindowInsets) -> Self {
+        Self {
+            size,
+            scale,
+            orientation: Orientation::from_size(size),
+            insets,
+        }
+    }
+}
+
+/// A window's derived portrait/landscape orientation.
+///
+/// Always computed from a [`WindowMetrics::size`] via [`Orientation::from_size`]
+/// — see [`WindowMetrics`]'s doc for why no platform callback carries this as
+/// an enum directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    /// `size.height >= size.width`, including the exact-square case.
+    Portrait,
+    /// `size.height < size.width`.
+    Landscape,
+}
+
+impl Orientation {
+    /// Derives orientation from a logical window size: portrait when
+    /// `height >= width` (an exact square reads as portrait), landscape
+    /// otherwise.
+    pub fn from_size(size: Size) -> Self {
+        if size.height >= size.width {
+            Orientation::Portrait
+        } else {
+            Orientation::Landscape
+        }
+    }
+}
+
+/// How many [`InputEvent::Housekeeping`] flush passes one
+/// [`RenderRoot::rebuild`] will run before deferring the rest to the next frame.
+///
+/// A flushed pop-result callback may itself push or pop, queueing another
+/// callback — so the flush/re-diff cycle has to be allowed to iterate, but it
+/// must never be allowed to spin: a pair of callbacks that push each other would
+/// otherwise hang the frame. Three passes covers every shape observed in
+/// practice (a result that navigates once, and that page's own result), while
+/// keeping the worst case at four `app_logic` runs per frame — `app_logic` is
+/// cheap by construction (see [`RenderRoot::rebuild`]).
+///
+/// Past the cap the mark stays raised and one more frame is requested, so the
+/// remaining work lands next frame instead of being lost.
+const MAX_PENDING_RESULT_FLUSH_PASSES: usize = 3;
+
+/// Change-guarded write of the shell-facing IME surface: replaces `slot` and
+/// bumps `generation` **only** when the value actually moves ([`ImeState`] is
+/// `PartialEq`).
+///
+/// A free function over the two fields rather than a `&mut self` method because
+/// [`RenderRoot::paint`] writes it while holding disjoint borrows of the tree
+/// and the theme, where no whole-`self` call is possible;
+/// [`RenderRoot::store_ime_state`] is the method form the event pass uses, so
+/// both paths share this one implementation.
+///
+/// The change guard is load-bearing, not an optimisation: the paint pass
+/// re-publishes the focused widget's IME surface every frame, so an
+/// unconditional bump would make the shell's `focus_or_ime_changed` edge fire on
+/// every vsync for the whole life of a focus session — the level-input behavior
+/// the generation exists to replace.
+fn store_ime_state_in(slot: &mut Option<ImeState>, generation: &mut u64, next: Option<ImeState>) {
+    if *slot != next {
+        *slot = next;
+        *generation = generation.wrapping_add(1);
+    }
+}
+
+/// Release the whole focus/IME session: drop `focus_active` **and** the
+/// shell-facing surface together, bumping `generation` **exactly once** if
+/// either actually moved.
+///
+/// The paired form of [`RenderRoot::set_focus_active`]`(false)` +
+/// [`RenderRoot::store_ime_state`]`(None)`, and the single primitive every
+/// release site goes through — the blur-on-outside-tap `Down`, an explicit
+/// [`EventCtx::release_focus`](crate::event::EventCtx::release_focus), a widget
+/// publishing an *inactive* surface (see [`RenderRoot::paint`]), and the
+/// generic-unmount orphan drain in [`RenderRoot::rebuild`]. Keeping them on one
+/// primitive is what makes "a session ends" mean the same thing everywhere,
+/// rather than four hand-assembled pairs that can drift apart.
+///
+/// **One release is one edge.** The two field writers bump on each field's own
+/// change, so calling them in sequence would move
+/// [`focus_ime_generation`](RenderRoot::focus_ime_generation) *twice* for the
+/// ordinary release (focus `true`→`false` and surface `Some`→`None`). A shell
+/// only ever compares the value, so two bumps and one bump raise the same single
+/// `focus_or_ime_changed` edge — but a counter that moves once per observable
+/// transition is the contract the field doc states, and is what the release
+/// tests pin. The change guard itself is unchanged: an already-released root
+/// writes the same values back and moves nothing.
+///
+/// A free function over the three fields (not a `&mut self` method) for the same
+/// reason [`store_ime_state_in`] is: [`RenderRoot::paint`] releases while holding
+/// disjoint borrows of the tree and the theme, where no whole-`self` call is
+/// possible. [`RenderRoot::release_focus_session`] is the method form.
+fn release_focus_session_in(
+    focus_active: &mut bool,
+    ime_slot: &mut Option<ImeState>,
+    generation: &mut u64,
+) {
+    let moved = *focus_active || ime_slot.is_some();
+    *focus_active = false;
+    *ime_slot = None;
+    if moved {
+        *generation = generation.wrapping_add(1);
+    }
+}
+
+/// The allocator behind [`RenderRoot::root_identity`], handing every root a
+/// value no other root shares.
+///
+/// Starts at `1` so `0` stays available as "no root" (a pod that has never held a
+/// claim, and the at-rest published hover link — see
+/// `crate::event::set_live_hover_link`).
+///
+/// A module-level static rather than an associated const/`static` inside the
+/// generic `impl`: the latter is monomorphized per `<State, V>` pair, which would
+/// hand two roots of different concrete types the same identity — exactly the
+/// collision this counter exists to remove. `Relaxed` is enough because the value
+/// is only ever compared for equality, never used to order anything.
+static NEXT_ROOT_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
@@ -50,14 +250,84 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     pointer_captured: bool,
     /// Whether some widget in the tree currently holds focus. Root-level mirror of
     /// the per-container `focused` path bookkeeping (the focus analog of
-    /// `pointer_captured`): set when a dispatch requested focus, cleared on a
-    /// release or a blur-on-outside-tap `Down`.
+    /// `pointer_captured`): set when a dispatch requested focus, cleared by a
+    /// session release — a blur-on-outside-tap `Down`, an explicit focus release,
+    /// a widget publishing an inactive IME surface, or the generic-unmount orphan
+    /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
     focus_active: bool,
+    /// Whether the last completed hover pass left some widget in the tree holding
+    /// the hover link. Root-level mirror of the per-pod hover stamp (the hover
+    /// analog of `focus_active`), seeded into every event/paint pass so nothing
+    /// below can read as hovered while the root says nothing is.
+    hover_active: bool,
+    /// The live hover epoch: the identity of the most recent completed hover pass.
+    ///
+    /// Advanced by exactly one per hover pass — an **uncaptured**
+    /// [`PointerPhase::Move`] (which may record a claim), or the `Down`/`Up`/
+    /// `Cancel` that ends a hover outright (which may not) — and by nothing else,
+    /// so a scroll, key, IME, or housekeeping pass leaves a live hover standing.
+    /// A [`crate::widget::ChildPod`]'s recorded stamp counts as hovered only while
+    /// it equals this, which is what strands the previous claimant's path with no
+    /// container having to clear it (see the [`crate::event`] module docs).
+    ///
+    /// Starts at `1`, not `0`: a freshly built pod's stamp is `0`, and starting the
+    /// epoch past it means a never-claimed pod cannot match the live epoch by
+    /// accident before the first hover pass ever runs.
+    hover_epoch: u64,
+    /// This root's process-unique identity, assigned once at construction from
+    /// [`NEXT_ROOT_IDENTITY`] and never reused.
+    ///
+    /// It exists for exactly one comparison: the hover-orphan channel
+    /// (`crate::event`'s `mark_hover_orphaned`/`take_hover_orphaned`) is a
+    /// thread-local a *destructor* writes, so a second root driving passes on the
+    /// same thread can otherwise see a mark that is none of its business.
+    /// `hover_epoch` cannot tell them apart — every root's counter starts at `1`
+    /// and advances per hover pass, so two roots hold colliding integers as a rule
+    /// rather than as a fluke. Publishing and draining `(identity, epoch)` is what
+    /// keeps one root's unmounting claimant from ending another's live hover.
+    root_identity: u64,
+    /// The cursor the last cursor pass resolved — hover's sibling channel, and
+    /// the value a desktop shell reads through [`RenderRoot::cursor`].
+    ///
+    /// Deliberately **not** derived from `hover_active`: that mirror is
+    /// identity-free (it knows *that* something is hovered, not which widget or
+    /// what shape it wants), so a request travels its own pass-scoped slot
+    /// ([`EventCtx::set_cursor`]) and is resolved here.
+    ///
+    /// Re-resolved on every pointer [`PointerPhase::Move`], captured or not:
+    /// whatever the pass requested, or [`CursorIcon::Default`] when it requested
+    /// nothing. Every other pass leaves it standing — see [`RenderRoot::event`]
+    /// for why a `Down`/`Up` must not reset it. There is no generation counter
+    /// beside it: the shell compares the value it last applied (see
+    /// [`RenderRoot::cursor`]).
+    cursor: CursorIcon,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
-    /// by a new publish or cleared on blur.
+    /// by a new publish or dropped by a release (a blur, a focus release, an
+    /// inactive publish, or a generic-unmount orphan drain — see
+    /// [`release_focus_session_in`]).
+    ///
+    /// Only ever `None` or an **active** surface: an inactive publish is a
+    /// release, never a stored value (see [`RenderRoot::ime_state`]).
     ime_state: Option<ImeState>,
+    /// A monotonically-increasing generation bumped on every **actual** change
+    /// of `focus_active` or `ime_state` — the focus/IME session's edge signal,
+    /// read by a shell through [`RenderRoot::focus_ime_generation`].
+    ///
+    /// The mobile frame gate turns this into an *edge* input
+    /// (`FrameInputs::focus_or_ime_changed`): a shell caches the last value it
+    /// saw and runs a frame when it moves. A *level* input ("something holds
+    /// focus") forced a frame every vsync for as long as a field stayed focused,
+    /// which made caret pacing unreachable — measured at 62–120 fps on a static
+    /// screen whose only live input was focus (Xiaomi 12).
+    ///
+    /// Same-value writes deliberately do **not** bump it (see
+    /// [`RenderRoot::set_focus_active`]/[`RenderRoot::store_ime_state`]): the
+    /// paint pass republishes the focused widget's IME surface on *every* frame,
+    /// so bumping on write rather than on change would re-create exactly the
+    /// per-vsync forcing this edge exists to remove.
+    focus_ime_gen: u64,
     /// The [`PlatformViewFrame`]s the tree published during the most recent
     /// [`RenderRoot::paint`], surfaced to the shell via
     /// [`RenderRoot::platform_view_frames`]. Unlike `ime_state` above, this is
@@ -133,6 +403,20 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// dirty gate — see [`RenderRoot::semantics_if_changed`]). v1 recompute is
     /// acceptable; this is the seam a shell gates on.
     semantics_gen: u64,
+    /// Set by [`RenderRoot::rebuild`] when the deferred-callback flush owes the
+    /// shell a frame, and folded into the next [`RenderRoot::paint`]'s
+    /// [`PaintOutcome::needs_frame`] (then cleared). Two raisers, both in the
+    /// flush loop: hitting [`MAX_PENDING_RESULT_FLUSH_PASSES`] with work still
+    /// owed, and a dispatched [`InputEvent::Housekeeping`] whose
+    /// [`EventOutcome::needs_redraw`] came back set.
+    ///
+    /// The frame-request half of the deferral: `pending |= PAINT` already tells
+    /// the mobile frame gate to run its next tick, but the desktop loop is
+    /// dirty-driven (`ControlFlow::Wait`) and schedules off `needs_frame`, so the
+    /// deferral has to surface there too — otherwise the remaining flush would
+    /// wait for whatever input happens to arrive next, which is the exact
+    /// failure this whole mechanism exists to remove.
+    deferred_frame: bool,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -147,7 +431,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             window_size: Size::ZERO,
             pointer_captured: false,
             focus_active: false,
+            hover_active: false,
+            // Past a fresh pod's `0` stamp — see the field doc.
+            hover_epoch: 1,
+            root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
+            cursor: CursorIcon::Default,
             ime_state: None,
+            focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
             input_shields: Vec::new(),
             pending: ChangeFlags::NONE,
@@ -159,6 +449,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
             semantics_gen: 0,
+            deferred_frame: false,
             _state: core::marker::PhantomData,
         }
     }
@@ -292,6 +583,52 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.focus_active
     }
 
+    /// Whether some widget in the tree currently holds the hover link — i.e.
+    /// whether the last hover pass (an uncaptured [`PointerPhase::Move`]) left the
+    /// pointer over a widget that claimed it.
+    ///
+    /// The hover analog of [`RenderRoot::is_focus_active`], and a level accessor
+    /// like it: hover is not a session (nothing has to be released), so there is no
+    /// generation counterpart. `false` for any app whose widgets never call
+    /// [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover). A touch app
+    /// can still see it go `true` transiently: nothing distinguishes a touch
+    /// contact from a mouse here, so an uncaptured touch drag over a
+    /// non-capturing claimant is an ordinary hover pass — ended by the `Up` at
+    /// lift (see `docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
+    ///
+    /// A [`RenderRoot::rebuild`] that removes the claimant ends the link too, so
+    /// this never reports a hover held by a widget that no longer exists — the
+    /// hover counterpart of the unmount focus release (see that method).
+    pub fn is_hover_active(&self) -> bool {
+        self.hover_active
+    }
+
+    /// The cursor the tree last asked the host to show — what a desktop shell
+    /// pushes to its window (`frust-shell-desktop` maps it onto winit's own
+    /// cursor icons).
+    ///
+    /// A **level** accessor like [`RenderRoot::is_hover_active`], not an edge one:
+    /// the value re-resolves on every pointer [`PointerPhase::Move`] and stands
+    /// unchanged through every other pass, so a shell caches what it last applied
+    /// and calls the platform only when this differs. There is deliberately no
+    /// generation counter — a cursor is a *value*, not a session, and an unmoved
+    /// cursor is indistinguishable from one re-resolved to the same shape.
+    ///
+    /// [`CursorIcon::Default`] before the first `Move`, and after any `Move` in
+    /// which no widget called
+    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor) — so any app
+    /// whose widgets never request a cursor reads `Default` forever, and the mobile
+    /// shells never read this at all regardless of what resolves here.
+    ///
+    /// **Residual:** a widget that is torn down (or moves out from under a
+    /// stationary pointer) while its request stands leaves the last shape in
+    /// place until the next `Move` re-resolves it — the same self-correction
+    /// window hover has, and for the same reason: nothing re-resolves without
+    /// pointer motion.
+    pub fn cursor(&self) -> CursorIcon {
+        self.cursor
+    }
+
     /// The IME surface the focused widget published, for the shell to drive the
     /// platform input method (winit `set_ime_cursor_area`, Android
     /// `updateSelection`, iOS `inputDelegate`). `None` when nothing is focused or
@@ -300,8 +637,107 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Written by the focused widget through [`EventCtx::publish_ime_state`] during
     /// the event pass and refreshed on every event; it survives a rebuild (so the
     /// shell can query it between frames) and is cleared when focus is lost.
+    ///
+    /// # `None` is the only "no session" form — an inactive surface is never stored
+    ///
+    /// A widget publishing `ImeState { active: false, .. }` is ending the session,
+    /// not describing it, so both publish paths turn that into a full release
+    /// (see [`RenderRoot::paint`]) and this returns `None` rather than
+    /// `Some(inactive)`. A shell therefore never has to distinguish the two, and
+    /// `is_some()` means "a live IME session" with no second check.
+    ///
+    /// **The platform still sees the keyboard-hide.** All three shells already
+    /// map `None` onto the inactive form on the way out, so the observable wire
+    /// behavior is unchanged: `frust-shell-android`'s `ime_state_to_json` returns
+    /// `ImeJsonState::default()` (`active:false`, empty text, `-1` indices, null
+    /// caret, `"normal"`) and `frust-shell-ios`' returns the byte-identical
+    /// `ime_state_json(false, "", -1, -1, -1, -1, None, "normal")` — exactly what
+    /// the navigator's own cleared surface serialised to before. Kotlin's
+    /// `pollImeAfterDispatch` and Swift's `syncImeFocus` both branch on `active`
+    /// alone (an inactive surface's text/caret/content-type are ignored), and the
+    /// desktop shell's `sync_ime` reads `is_some_and(|s| s.active)`. Dropping the
+    /// inactive surface's payload also stops a disabled *secret* field's text
+    /// riding to the platform after its session ended.
     pub fn ime_state(&self) -> Option<ImeState> {
         self.ime_state.clone()
+    }
+
+    /// The focus/IME session generation — bumped on every **actual** change of
+    /// [`is_focus_active`](RenderRoot::is_focus_active) or
+    /// [`ime_state`](RenderRoot::ime_state), and on nothing else.
+    ///
+    /// The *edge* counterpart of those two level accessors, for a shell that
+    /// needs "did the focus/IME session move since I last looked?" rather than
+    /// "is something focused?". A shell caches the value it last saw and
+    /// compares (mirroring [`semantics_generation`](RenderRoot::semantics_generation)'s
+    /// cheap dirty gate) — that comparison is the mobile frame gate's
+    /// `FrameInputs::focus_or_ime_changed` input.
+    ///
+    /// A same-value write never moves it: re-publishing an identical IME
+    /// surface (which the paint pass does on every frame a field stays focused)
+    /// or re-blurring an already-blurred root is not an edge. Wrapping is
+    /// deliberate and harmless — a comparison, never an ordering.
+    pub fn focus_ime_generation(&self) -> u64 {
+        self.focus_ime_gen
+    }
+
+    /// Set the root's focus flag, bumping [`RenderRoot::focus_ime_generation`]
+    /// only when the value actually moves.
+    ///
+    /// One of the two writers of `focus_active` outside construction (the other
+    /// is [`release_focus_session_in`], which clears it together with the IME
+    /// surface as one edge): every focus/blur arm of [`RenderRoot::event`] goes
+    /// through one of them, so the edge generation cannot drift from the state it
+    /// describes. In practice this one only ever *sets* focus — a clear is always
+    /// a session release.
+    fn set_focus_active(&mut self, active: bool) {
+        if self.focus_active != active {
+            self.focus_active = active;
+            self.focus_ime_gen = self.focus_ime_gen.wrapping_add(1);
+        }
+    }
+
+    /// Store (or clear) the shell-facing IME surface, bumping
+    /// [`RenderRoot::focus_ime_generation`] only when the stored value actually
+    /// moves — the `&mut self` form of [`store_ime_state_in`], for the event
+    /// pass (the paint pass holds disjoint field borrows and calls that
+    /// function directly).
+    fn store_ime_state(&mut self, ime: Option<ImeState>) {
+        store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, ime);
+    }
+
+    /// End the focus/IME session: clear `focus_active` and drop the shell-facing
+    /// surface together, moving [`RenderRoot::focus_ime_generation`] exactly once
+    /// if either was set. The `&mut self` form of [`release_focus_session_in`]
+    /// (whose doc carries the full contract), for the event and rebuild passes;
+    /// the paint pass holds disjoint field borrows and calls that function
+    /// directly.
+    ///
+    /// Idempotent: releasing an already-released root writes the same values
+    /// back and fires no edge.
+    fn release_focus_session(&mut self) {
+        release_focus_session_in(
+            &mut self.focus_active,
+            &mut self.ime_state,
+            &mut self.focus_ime_gen,
+        );
+    }
+
+    /// End the standing hover link outright, outside any hover pass: advance the
+    /// epoch (which strands every stamp in the tree at once, so no container has
+    /// to be told) and clear the mirror.
+    ///
+    /// Hover's analog of [`RenderRoot::release_focus_session`], and idempotent in
+    /// the same way — ending a hover nothing holds writes the same mirror back and
+    /// costs one epoch. There is no generation counter to move: hover is not a
+    /// session a shell mirrors (see [`RenderRoot::is_hover_active`]).
+    ///
+    /// The one caller is [`RenderRoot::rebuild`]'s severed-claimant drain; a hover
+    /// pass ends its own link inline, where it also decides the *new* one.
+    fn end_hover_link(&mut self) {
+        self.hover_epoch = self.hover_epoch.wrapping_add(1);
+        self.hover_active = false;
+        crate::event::set_live_hover_link(self.root_identity, 0);
     }
 
     /// The [`PlatformViewFrame`]s published during the most recent
@@ -382,19 +818,177 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         &self.tree
     }
 
+    /// A read-only, pre-order snapshot of the retained tree for tooling: per
+    /// node an id, its parent and children, the concrete widget's type name, an
+    /// optional debug label, and its absolute border box in logical px.
+    ///
+    /// Computed on demand in O(nodes) and takes `&self` — no per-frame
+    /// bookkeeping, no mutation, and nothing here participates in
+    /// build/layout/paint. Bounds reflect the **last layout pass**, so call it
+    /// after one (before the first, every rect is zero-sized).
+    ///
+    /// Scope: the walk covers the [`WidgetTree`] arena *and* the
+    /// [`ChildPod`](crate::widget::ChildPod)s containers own, reached through
+    /// [`Widget::visit_children`](crate::widget::Widget::visit_children) — so it
+    /// is the real retained hierarchy, not just the arena (which holds little
+    /// more than the root pod). A container that leaves that seam defaulted
+    /// reads as a leaf.
+    pub fn inspect(&self) -> Vec<InspectNode> {
+        self.tree.inspect()
+    }
+
     /// Run `app_logic`, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
     /// `app_logic` is expected to be cheap and re-entrant: it is
     /// re-run in full every rebuild.
+    ///
+    /// # Deferred-callback flush
+    ///
+    /// The view diff itself is state-free (`rebuild_view` below takes no
+    /// `State`), so a widget applying a structural op there — the navigator
+    /// draining its queued `push`/`pop` is the shipped case — cannot run an app
+    /// callback that needs `&mut State`. It instead queues the callback and calls
+    /// [`mark_pending_result_flush`](crate::event::mark_pending_result_flush);
+    /// this method drains that flag and dispatches an
+    /// [`InputEvent::Housekeeping`] broadcast through the ordinary
+    /// [`event`](RenderRoot::event) plumbing, where `state` *is* in scope. This
+    /// is the only unconditional per-frame pass that holds `&mut State`, which is
+    /// why the dispatch lives here and not in a shell (flushing on the next
+    /// real input meant waiting seconds for a touch, or forever when the next
+    /// touch went to chrome outside the navigator).
+    ///
+    /// A flushed callback mutates `State`, so the view built before it ran is
+    /// stale — the `app_logic` + `rebuild_view` cycle therefore re-runs after
+    /// each flush, and the same frame shows the result. Results can queue further
+    /// nav ops, so the loop is **bounded**; past the cap the flag is left standing
+    /// and one more frame is requested rather than spinning (see
+    /// `MAX_PENDING_RESULT_FLUSH_PASSES`, this module's private cap constant).
+    ///
+    /// The broadcast's [`EventOutcome`] is propagated, not discarded: a
+    /// `needs_redraw` coming back from the dispatch folds into this rebuild's
+    /// [`ChangeFlags::PAINT`] and the deferred frame request, so a callback
+    /// whose only effect is [`EventCtx::request_redraw`]
+    /// — invisible to the re-diff, since no view-visible state changed — still
+    /// wakes both the mobile frame gate and the desktop `Wait` loop.
     pub fn rebuild(
         &mut self,
         app_logic: &mut impl FnMut(&mut State) -> V,
         state: &mut State,
     ) -> ChangeFlags {
         let view = app_logic(state);
+        let mut flags = self.rebuild_view(view);
 
-        let flags = self.rebuild_view(view);
+        // Deferred-callback convergence loop (see the method doc). Each pass:
+        // drain the flag, run the queued callbacks against real state, then
+        // re-diff so this frame reflects them.
+        let mut passes = 0usize;
+        while crate::event::take_pending_result_flush() {
+            if passes >= MAX_PENDING_RESULT_FLUSH_PASSES {
+                // Cap reached. Put the flag back — the work is still owed — and
+                // ask for one more frame instead of spinning inside this one.
+                // `pending |= PAINT` is what the mobile frame gate reads
+                // (`has_pending_change_flags`); `deferred_frame` is what surfaces
+                // on the next `paint` as `needs_frame`, which is how the desktop
+                // `ControlFlow::Wait` loop learns to wake.
+                crate::event::mark_pending_result_flush();
+                flags |= ChangeFlags::PAINT;
+                self.deferred_frame = true;
+                break;
+            }
+            // The dispatch's own outcome is load-bearing, not noise: a flushed
+            // callback whose *only* effect is `EventCtx::request_redraw` (no
+            // signal write, no state the next `app_logic` run reads) leaves the
+            // re-diff below reporting `ChangeFlags::NONE`, so nothing else in
+            // this method would ever mark the frame dirty and the requested
+            // redraw would be dropped on the floor. Fold it into exactly the
+            // wake the cap branch above raises: `PAINT` reaches `self.pending`,
+            // which is what the mobile frame gate reads
+            // (`has_pending_change_flags`), and `deferred_frame` surfaces on the
+            // next `paint` as `needs_frame`, which is how the desktop
+            // `ControlFlow::Wait` loop learns to schedule a frame. Both
+            // Housekeeping producers need it (a navigator pop-result callback
+            // and `frust-widgets`' gesture long-press latch), and without it a
+            // redraw-only effect waits for whatever input happens to arrive
+            // next — exactly the failure this mechanism exists to remove.
+            //
+            // Non-empty flags also bump the semantics generation below, which
+            // is correct: the callback just mutated real `State` through a live
+            // `EventCtx`, so the accessibility tree may genuinely have changed,
+            // and every other paint-class path here bumps it the same way (a
+            // spurious bump costs one recompute of an unchanged tree, a missed
+            // one strands a stale tree).
+            let outcome = self.event(state, &InputEvent::Housekeeping);
+            if outcome.needs_redraw {
+                flags |= ChangeFlags::PAINT;
+                self.deferred_frame = true;
+            }
+            let view = app_logic(state);
+            flags |= self.rebuild_view(view);
+            passes += 1;
+        }
+
+        // Generic-unmount focus release. A reconciler that tears down (or
+        // type-swaps, or clears the `focused` flag of) a child pod holding the
+        // recorded focus path *on the live focus chain* has severed that path,
+        // but runs over a `BuildCtx` with no `RenderRoot` in scope — so it raises
+        // `mark_focus_orphaned` and this drain performs the release the
+        // reconciler could not. "On the live chain" is what `rebuild_view`'s seed
+        // buys: a mark means a live session lost its owner, never that some stale
+        // flag deep in an already-blurred branch went away (see
+        // `mark_focus_orphaned`). Without it the root's mirror stays standing over
+        // a widget that no longer exists: `is_focus_active()` keeps reporting
+        // true and `ime_state()` keeps handing the shell a surface for a dead
+        // field, self-correcting only on the next event pass — which never
+        // arrives on a screen the user has stopped touching (the pop-into-idle
+        // case this whole seam exists for).
+        //
+        // Drained *after* the flush loop so one release covers every pass: a
+        // flushed callback that navigates re-diffs, and either diff may orphan
+        // the focus. `Housekeeping` claims no focus of its own (its root arm is
+        // inert), so nothing the loop dispatched can be undone here.
+        //
+        // The release marks no `ChangeFlags` of its own: the structural change
+        // that severed the path already flagged `LAYOUT | PAINT`, and the
+        // generation bump is what wakes the mobile frame gate's
+        // `focus_or_ime_changed` edge for the one repaint the release needs.
+        if crate::event::take_focus_orphaned() {
+            self.release_focus_session();
+        }
+
+        // Generic-unmount hover release, the same shape one channel over: a diff
+        // that dropped the `ChildPod` holding the live hover link has severed a
+        // path the epoch mechanism cannot strand, because stranding needs a hover
+        // pass and the dead claimant will never see another one. Without this the
+        // mirror stands over a widget that no longer exists — `is_hover_active()`
+        // reporting a link nothing holds — and every surviving ancestor of the
+        // claimant keeps painting hover chrome off its own still-matching stamp
+        // until some later `Move` re-derives, which never comes on a pointer the
+        // user has stopped moving.
+        //
+        // The mark is raised by the pod's destructor rather than by the
+        // reconcilers (the stamp has no setter for a container to cooperate
+        // through — see `mark_hover_orphaned`), which is what makes this cover
+        // every removal route, including hand-rolled containers outside this
+        // workspace. That reach is also why the mark is qualified by
+        // `root_identity`: a destructor fires whenever a pod happens to die, so
+        // an unqualified mark could be a second root's on this thread. Drained
+        // after the flush loop for the focus release's reason: any pass of the
+        // loop may re-diff, and one end covers them all.
+        //
+        // Unlike that release this one flags `PAINT` of its own. The reconciler
+        // that dropped the claimant usually reported `LAYOUT | PAINT` already,
+        // but "usually" is not a contract this drain can rest on: the destructor
+        // route deliberately covers containers outside this workspace (that is
+        // its whole reason for existing), and one of those can drop a pod while
+        // reporting whatever flags it likes. Ending a hover always changes what
+        // paints, so the correction states its own need for the frame it rides
+        // on — idempotent where the reconciler already said so.
+        if crate::event::take_hover_orphaned(self.root_identity) && self.hover_active {
+            self.end_hover_link();
+            flags |= ChangeFlags::PAINT;
+        }
+
         self.pending |= flags;
         // A rebuild that changed layout/paint could have changed the semantics
         // tree (added/removed/relabelled nodes); bump the dirty gate a shell polls
@@ -407,11 +1001,26 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// The rebuild body, split out so [`RenderRoot::rebuild`] can accumulate the
     /// result into [`RenderRoot::pending`] in one place.
+    ///
+    /// # Seeding the diff's focus chain
+    ///
+    /// The root is where the effective focus chain ([`BuildCtx::has_focus`])
+    /// starts: the root widget sits in no `ChildPod`, so its "link above" is the
+    /// root's own session mirror. A reconciler deep in the diff ANDs its pod's
+    /// `focused` flag onto this seed and marks an orphan only if the whole chain
+    /// holds — which is why the seed is "is there a session to lose" rather than
+    /// `focus_active` alone: an active surface parked without the flag is still a
+    /// live session `release_focus_session` would move. With neither set there is
+    /// nothing to release, so the seed is `false` and the diff marks nothing.
     fn rebuild_view(&mut self, view: V) -> ChangeFlags {
+        // Read before the `&mut self.next_id` borrow below (disjoint fields, but
+        // spelled out for the reader).
+        let session_live = self.focus_active || self.ime_state.is_some();
         match (self.root_id, self.prev_view.take()) {
             // Reconcile against the previous view of the same type.
             (Some(root_id), Some(prev)) => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                ctx.set_has_focus(session_live);
                 let flags = {
                     let pod = self
                         .tree
@@ -432,9 +1041,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // First build: materialise the widget and insert it as the root.
             _ => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                // A first build tears nothing down, so the seed is moot — set it
+                // anyway so the rule is "the root always seeds the chain", with no
+                // arm exempt.
+                ctx.set_has_focus(session_live);
                 let id = ctx.alloc_id();
                 let element = view.build(&mut ctx);
-                let pod = WidgetPod::new(id, Box::new(element));
+                // `new_typed` boxes the element exactly like `new` would, and
+                // additionally records `V::Element`'s type name for
+                // introspection — the concrete type is only nameable here.
+                let pod = WidgetPod::new_typed(id, element);
                 let root_id = self.tree.insert_root(pod);
                 self.root_id = Some(root_id);
                 self.prev_view = Some(view);
@@ -548,21 +1164,62 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
             ctx.set_has_focus(self.focus_active);
+            // Thread the hover mirror + live epoch the same way: the root widget's
+            // own hover comes from the mirror (a leaf root can claim hover itself),
+            // and deeper links are resolved per-pod by `ChildPod::paint_child`
+            // against this epoch.
+            ctx.set_hovered(self.hover_active);
+            ctx.set_hover_epoch(self.hover_epoch);
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
             // A focused editable republishes its IME surface during paint (which
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
             // shell-facing `ime_state` that the event pass alone would leave
-            // stale. Defense-in-depth against F1: only accept a bubbled publish
-            // while focus is actually active. A widget whose pod focus was just
+            // stale. Defense-in-depth: only accept a bubbled publish while
+            // focus is actually active. A widget whose pod focus was just
             // cleared by a container-routed blur (but whose internal flag lags
             // one frame) can then never resurrect the `ime_state` the blur
             // cleared — even before it observes the blur via `PaintCtx::has_focus`.
+            //
+            // Routed through `store_ime_state_in` (the field form — this pass
+            // holds disjoint borrows of the tree and the theme, so no
+            // whole-`self` call is possible here) so an *unchanged* republish —
+            // the overwhelmingly common case, a focused field re-publishing the
+            // same surface frame after frame — moves no generation and
+            // therefore fires no `focus_or_ime_changed` edge at the shell.
+            //
+            // An **inactive** publish is not a surface refresh at all: it is the
+            // publishing widget saying "this session is over" — the navigator's
+            // post-pop `cleared_ime_state`, `PatternSwitcher`'s equivalent, and
+            // a `TextInput` turned disabled/read-only under a live focus are the
+            // three shipped producers, and every one of them is an unmount or a
+            // de-focus. Storing it as `Some(inactive)` and leaving `focus_active`
+            // standing is what leaked the session after a pop: the shells' gate
+            // saw `ime_state().is_some()`, `is_focus_active()` kept lying, and the
+            // next real focus interaction started from a corrupt baseline. So it
+            // takes the *full* release instead — the same one a blur-on-outside-tap
+            // `Down` performs — through the shared primitive, which fires exactly
+            // one edge.
+            //
+            // The `self.focus_active` guard stays, and covers both arms: an
+            // inactive publish arriving when focus is already false is a no-op
+            // (nothing to release — `release_focus_session_in` would move
+            // nothing anyway, but the guard means we never even take it), and an
+            // active publish from a widget whose pod focus was just cleared
+            // still cannot resurrect the surface that blur dropped.
             if self.focus_active
                 && let Some(ime) = ctx.take_ime_state()
             {
-                self.ime_state = Some(ime);
+                if ime.active {
+                    store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, Some(ime));
+                } else {
+                    release_focus_session_in(
+                        &mut self.focus_active,
+                        &mut self.ime_state,
+                        &mut self.focus_ime_gen,
+                    );
+                }
             }
             // Replace (never merge) the whole platform-view collection with
             // whatever this pass published — unlike `ime_state` above there is
@@ -585,8 +1242,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             if needs_layout {
                 self.pending |= ChangeFlags::LAYOUT;
             }
+            // A rebuild that ran out of flush passes owes one more frame; surface
+            // it here (and clear it) so a dirty-driven shell schedules the frame
+            // that finishes the flush — see the `deferred_frame` field doc.
+            let deferred_frame = std::mem::take(&mut self.deferred_frame);
             PaintOutcome {
-                needs_frame: ctx.needs_frame(),
+                needs_frame: ctx.needs_frame() || deferred_frame,
                 needs_layout,
                 // Aggregate tick class: paced-only iff a frame was requested and
                 // every request was CosmeticLoop-class. The mobile frame gate
@@ -594,6 +1255,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // (including the LAYOUT-implying `request_layout` above) leaves
                 // this false so the frame runs every vsync.
                 needs_frame_paced_only: ctx.needs_frame_paced_only(),
+                // ...and, when it IS paceable, how fast it asked to be re-run:
+                // the MIN over every paced request this pass (`Duration::ZERO`
+                // / `None` meaning the theme's own cosmetic rate). The gate
+                // resolves it against the live theme's cap — see
+                // `PaintCtx::request_frame_paced_at`.
+                paced_interval: ctx.paced_interval(),
             }
         } else {
             PaintOutcome::default()
@@ -694,6 +1361,30 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
     /// and `Cancel` release it (never a window-leave).
     ///
+    /// Root hover bookkeeping is the third recorded path, and the one this pass
+    /// *derives* rather than merely mirrors: an **uncaptured** `Move` opens a hover
+    /// pass (widgets on the hit-tested path may claim it — see
+    /// [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover)), a
+    /// `Down`/`Up`/`Cancel` ends whatever hover stood, and every other event leaves
+    /// it alone. There is nothing to release and no generation to bump: the epoch
+    /// advance strands the previous claimant's path by itself, and the outcome's
+    /// `needs_redraw` carries the one repaint **no widget can ask for** — a hover
+    /// that ended with nothing taking it. A hover that *begins* or *moves from one
+    /// claimant to another* is repainted by the new claimant's own change-gated
+    /// `request_redraw`, which is why keeping an internal hover flag is part of the
+    /// consumer contract rather than an optimization (see `claim_hover`).
+    /// **No shell change is required for hover** — the desktop shell already
+    /// dispatches a `Move` on every cursor move.
+    ///
+    /// The cursor is hover's sibling channel and the fourth thing this pass
+    /// resolves: any pointer `Move` (captured included) re-resolves
+    /// [`RenderRoot::cursor`] from the pass's last
+    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor), defaulting to
+    /// [`CursorIcon::Default`] when nothing asked. It deliberately does **not**
+    /// fold into the outcome's `needs_redraw`: applying a cursor is a platform
+    /// call a desktop shell makes straight after this pass returns, with no frame
+    /// involved, and folding it in would repaint the tree on every hover move.
+    ///
     /// # Reentrancy
     ///
     /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
@@ -702,6 +1393,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// driven by the outcome. Rebuilding re-entrantly here would invalidate the
     /// widget references the dispatch still holds and turn the event→state→view
     /// feedback into recursion.
+    ///
+    /// [`RenderRoot::rebuild`] calls this itself with
+    /// [`InputEvent::Housekeeping`] to flush deferred state-bearing callbacks.
+    /// That is *sequential*, not re-entrant — the dispatch fully returns before
+    /// the next diff starts — so the rule above is intact.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -710,18 +1406,74 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return EventOutcome::default();
         };
 
-        let (handled, needs_redraw, captured, focus_req, focus_rel, ime) = {
+        // Hover is derived per **uncaptured** pointer `Move`: that pass, and only
+        // that pass, may record a claim, so a captured drag can never paint hover
+        // under the pointer. Every other pointer phase — `Down`, `Up`, `Cancel` —
+        // is an epoch-advancing pass that *ends* whatever hover stood without
+        // opening a new one: a press is not a hover, a touch `Down` must not
+        // inherit one, and a lift is the only signal a touch contact leaving the
+        // screen ever produces (no further `Move` follows it, so a tint claimed
+        // during an uncaptured touch drag would otherwise stand indefinitely).
+        // Ending on `Up` costs a mouse the hover tint between a click's release
+        // and its next motion — the same standing-until-next-move class as the
+        // press-then-hold-still gap, and traded deliberately for a touch link that
+        // cannot outlive the finger (`docs/LIMITATIONS.md`'s
+        // `hover-window-leave-standing`). A scroll, key, IME, or the housekeeping
+        // broadcast leaves a live hover exactly as it was.
+        let hover_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move)
+            && !self.pointer_captured;
+        let hover_ends = matches!(
+            event,
+            InputEvent::Pointer(p)
+                if matches!(
+                    p.phase,
+                    PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
+                )
+        );
+        let hover_epoch = self.hover_epoch;
+        let hover_was_active = self.hover_active;
+        let root_identity = self.root_identity;
+
+        // The cursor pass is hover's pass widened by one case: **any** pointer
+        // `Move`, captured included, because a captured `Move` routes only to the
+        // capturing widget and that is exactly how a drag keeps its own cursor
+        // while the pointer is outside its bounds. Every other pass leaves the
+        // resolved cursor standing — notably `Down`/`Up`, whose handlers have no
+        // reason to restate a cursor and whose reset would blink the shape back to
+        // `Default` for the length of a click.
+        //
+        // The slot is cleared here rather than trusted to be empty: a `set_cursor`
+        // from a dispatch no root drove (a reconciler's synthesized `Cancel`)
+        // must not leak into this pass's resolution. The clear and the drain below
+        // are one bracket (`CursorPass`) rather than two bare calls, so a dispatch
+        // that re-entered this method could not silently eat the enclosing pass's
+        // request — see that guard.
+        let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
+        let cursor_slot = CursorPass::enter();
+
+        let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
             let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
             // Seed the root widget's focus flag so a leaf-root editable that holds
             // focus can observe `has_focus()`; deeper focus is threaded per-pod.
             ctx.set_has_focus(self.focus_active);
+            // Same for the hover link, plus the live epoch every pod compares its
+            // stamp against and the eligibility gate that decides whether a claim
+            // is recordable at all this pass.
+            ctx.set_hovered(hover_was_active);
+            ctx.set_hover_epoch(hover_epoch);
+            ctx.set_hover_eligible(hover_pass);
+            // Stamped onto whichever pod records a claim, so that pod's
+            // destructor can tell this root's link from another root's
+            // identically-numbered epoch (see `root_identity`).
+            ctx.set_hover_root(root_identity);
             let result = pod.widget_mut().event(&mut ctx, event);
             let handled = matches!(result, EventResult::Handled);
             (
                 handled,
                 ctx.needs_redraw() || handled,
                 ctx.is_pointer_captured(),
+                ctx.is_hover_claimed(),
                 ctx.is_focus_requested(),
                 ctx.is_focus_released(),
                 ctx.take_ime_state(),
@@ -729,9 +1481,29 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
 
         // A published IME surface refreshes the stored one (persists past this
-        // event, survives rebuild) until a blur clears it below.
-        if ime.is_some() {
-            self.ime_state = ime;
+        // event, survives rebuild) until a blur clears it below. `store_ime_state`
+        // bumps the focus/IME edge generation only if the surface actually moved
+        // (a keystroke that changes nothing observable is not an edge).
+        //
+        // An **inactive** publish carries the same release intent here as it does
+        // in `paint` (see that method's take path): a widget that publishes
+        // `active: false` is ending the session, not describing it, so it takes
+        // the full release. Reachable from this pass too — every paint-time
+        // producer of an inactive surface is a container/widget whose `event` arm
+        // can run first — and the two passes must not disagree about what an
+        // inactive surface means. No `focus_active` guard is needed (unlike
+        // `paint`, which must refuse to *resurrect* a cleared surface): releasing
+        // an already-released root moves nothing and fires no edge.
+        //
+        // Ordering: this runs before the focus match below, so a dispatch that
+        // both published an inactive surface and requested focus still ends up
+        // focused — the later, more specific claim wins.
+        match ime {
+            Some(ime) if !ime.active => {
+                self.release_focus_session();
+            }
+            Some(ime) => self.store_ime_state(Some(ime)),
+            None => {}
         }
 
         // Root-level capture path: a captured `Down` opens a gesture; `Up`/`Cancel`
@@ -742,6 +1514,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // blur-on-outside-tap and closes it (the per-container `focused` flags are
         // cleared by the routing helpers). Key/Ime/Scroll only adjust focus if the
         // dispatch explicitly requested or released it.
+        //
+        // Every arm mutates through `set_focus_active`/`store_ime_state` or the
+        // paired `release_focus_session`, the change-guarded writers that own the
+        // focus/IME edge generation: a `Down` on already-blurred chrome (the
+        // commonest event of all) writes the same values back and must therefore
+        // NOT fire an edge.
         match event {
             InputEvent::Pointer(pointer) => match pointer.phase {
                 PointerPhase::Down => {
@@ -749,11 +1527,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                         self.pointer_captured = true;
                     }
                     if focus_req {
-                        self.focus_active = true;
+                        self.set_focus_active(true);
                     } else {
-                        // Blur: no widget on the tapped path took focus.
-                        self.focus_active = false;
-                        self.ime_state = None;
+                        // Blur: no widget on the tapped path took focus. The
+                        // canonical release — flag and surface drop together, as
+                        // one edge (see `release_focus_session_in`).
+                        self.release_focus_session();
                     }
                 }
                 PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
@@ -761,14 +1540,75 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             },
             InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_) => {
                 if focus_req {
-                    self.focus_active = true;
+                    self.set_focus_active(true);
                 }
                 if focus_rel {
-                    self.focus_active = false;
-                    self.ime_state = None;
+                    self.release_focus_session();
                 }
             }
+            // A broadcast is not user input: it opens no gesture, claims no
+            // focus, and blurs nothing. Deliberately inert here — a housekeeping
+            // pass that moved the root's capture/focus bookkeeping would change
+            // what the *next* real event does, which is exactly what this
+            // mechanism must not do (see `InputEvent::Housekeeping`).
+            //
+            // The one thing a broadcast *can* still move is the IME surface, via
+            // the publish handling above (which is pass-agnostic by design, and
+            // was before this arm existed): a widget that publishes while
+            // flushing has said something about its session either way, and an
+            // inactive publish releases it. No shipped widget does — `TextInput`
+            // ignores a broadcast outright, and both cleared-surface publishers
+            // are paint-time — so this is a contract note, not live behavior.
+            InputEvent::Housekeeping => {}
         }
+
+        // Close the hover pass: advance the epoch (which strands every stamp this
+        // pass did not renew, wherever in the tree it sits) and refresh the mirror.
+        // A claim only counts on a `hover_pass` — an ineligible pass records none
+        // anyway, but stating it here keeps the mirror true by construction rather
+        // than by the eligibility gate alone.
+        if hover_pass || hover_ends {
+            self.hover_epoch = self.hover_epoch.wrapping_add(1);
+            self.hover_active = hover_pass && hover_claimed;
+            // Republish the link a dropping pod checks its stamp against, so a
+            // rebuild that removes the claimant can report the severance the
+            // epoch alone cannot strand (see `ChildPod`'s `Drop`). Epoch `0` while
+            // nothing holds a link, which is what makes a stale stamp's drop —
+            // the common case — cost one comparison and mark nothing. The
+            // identity rides with it because epoch integers are per-root and
+            // collide by construction (see `root_identity`).
+            crate::event::set_live_hover_link(
+                self.root_identity,
+                if self.hover_active {
+                    self.hover_epoch
+                } else {
+                    0
+                },
+            );
+        }
+
+        // Close the cursor pass: the last request of the pass wins, and its
+        // absence resolves to `Default` — which is what makes the request
+        // stateless (a widget that stops asking needs no clearing) and what a
+        // pointer moving off every requesting widget resolves to. Drained
+        // unconditionally so a request made on a non-cursor pass cannot survive
+        // into the next one; only a cursor pass commits it.
+        let requested = cursor_slot.take();
+        if cursor_pass {
+            self.cursor = requested.unwrap_or_default();
+        }
+        // A hover that ended with *nothing* taking it needs one repaint no widget
+        // can ask for: the pointer moved onto empty chrome (or a press/lift/cancel
+        // cleared the link), so the old claimant's `event()` was never called and
+        // the new state has no claimant to speak for it. Every other edge is the
+        // consumer's own: a hover that *began* or *moved from one claimant to
+        // another* is repainted by the new claimant's change-gated
+        // `request_redraw`, and because a repaint is global, that one frame is also
+        // what lets the widget losing the link drop its overlay from
+        // `PaintCtx::is_hovered`. This mirror is identity-free, so an A→B handoff
+        // is `true`→`true` here and manufactures nothing — which is exactly why the
+        // consumer's internal flag is normative (see `EventCtx::claim_hover`).
+        let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);
 
         EventOutcome {
             handled,
@@ -932,6 +1772,7 @@ mod tests {
         fn draw_text(&mut self, origin: Point, text: &str) {
             self.texts.push((origin, text.to_string()));
         }
+        fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {}
     }
 
     fn app_logic(state: &mut AppState) -> MockTextView {
@@ -992,6 +1833,37 @@ mod tests {
         let pod = root.tree().pod(id).unwrap();
         assert_eq!(pod.origin(), Point::ZERO);
         assert_eq!(pod.size(), Size::new(16.0, 16.0));
+    }
+
+    #[test]
+    fn inspect_reports_the_laid_out_root() {
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let mut state = AppState {
+            label: "hi".to_string(),
+        };
+        // Before the first build there is nothing to inspect.
+        assert!(root.inspect().is_empty());
+
+        root.rebuild(&mut app_logic, &mut state);
+        root.layout(Size::new(800.0, 600.0));
+
+        let nodes = root.inspect();
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.id, root.root_id().unwrap());
+        assert_eq!(node.parent, None);
+        assert_eq!(node.depth, 0);
+        assert!(node.children.is_empty());
+        // The concrete element type is captured, not the erased box.
+        assert!(node.type_name.ends_with("TextWidget"), "{}", node.type_name);
+        assert_eq!(node.debug_label, None);
+        // Bounds match what the layout pass recorded on the pod.
+        let pod = root.tree().pod(node.id).unwrap();
+        assert_eq!(
+            node.bounds,
+            Rect::from_origin_size(pod.origin(), pod.size())
+        );
+        assert_eq!(node.bounds, Rect::new(0.0, 0.0, 16.0, 16.0));
     }
 
     #[test]
@@ -1439,6 +2311,11 @@ mod tests {
             outcome.needs_frame_paced_only,
             "a purely-cosmetic frame surfaces as paced-only"
         );
+        assert_eq!(
+            outcome.paced_interval,
+            Some(std::time::Duration::ZERO),
+            "a bare `request_frame_paced` names no interval (the theme's own rate)"
+        );
 
         // A Transition-class (`request_frame`) root is never paced-only, keeping
         // today's every-vsync behavior for existing callers.
@@ -1451,6 +2328,57 @@ mod tests {
         assert!(
             !outcome2.needs_frame_paced_only,
             "request_frame stays unpaced (Transition)"
+        );
+        assert_eq!(
+            outcome2.paced_interval, None,
+            "an unpaced frame names no paced interval"
+        );
+    }
+
+    /// A root widget whose decorative loop names its own slow cadence — the
+    /// `request_frame_paced_at` counterpart of [`PacedFrameWidget`].
+    struct SlowPacedFrameWidget;
+    impl crate::widget::Widget for SlowPacedFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced_at(std::time::Duration::from_millis(500));
+        }
+    }
+    struct SlowPacedFrameView;
+    impl View<AppState> for SlowPacedFrameView {
+        type Element = SlowPacedFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> SlowPacedFrameWidget {
+            SlowPacedFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut SlowPacedFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_surfaces_the_requested_paced_interval_on_outcome() {
+        // The end-to-end core half of the per-request pacing seam: a widget's
+        // `request_frame_paced_at` reaches the shell on `PaintOutcome`, which is
+        // what the mobile gate latches into `FramePacing`.
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+        let mut root: RenderRoot<AppState, SlowPacedFrameView> = RenderRoot::new();
+        root.rebuild(&mut |_s: &mut AppState| SlowPacedFrameView, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame_paced_only);
+        assert_eq!(
+            outcome.paced_interval,
+            Some(std::time::Duration::from_millis(500))
         );
     }
 
@@ -1762,7 +2690,7 @@ mod tests {
 
     #[test]
     fn set_theme_marks_layout_and_paint_pending() {
-        // F1: `set_theme` alone (no rebuild) must dirty layout/paint so a shell
+        // `set_theme` alone (no rebuild) must dirty layout/paint so a shell
         // gating on `take_change_flags` doesn't skip re-resolving theme-baked
         // widget state (e.g. Text's themed glyph color) on a bare theme swap.
         let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
@@ -1998,6 +2926,9 @@ mod tests {
     //     an IME surface on a `Down` in its left half, and blurs (no focus) on a
     //     `Down` in its right half. ---
 
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::event::{EditingState, ImeState};
 
     struct ImeWidget;
@@ -2020,6 +2951,7 @@ mod tests {
                             composing_extent: -1,
                         },
                         caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                        content_type: Default::default(),
                     });
                     return EventResult::Handled;
                 }
@@ -2081,6 +3013,460 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
         assert!(!root.is_focus_active());
         assert!(root.ime_state().is_none());
+    }
+
+    // --- Session release: the focus session must die with its owner -----------
+    //
+    // Two routes end a session without any user input reaching the root:
+    //
+    //  (a) a widget publishes an INACTIVE IME surface (the navigator's post-pop
+    //      `cleared_ime_state`, `PatternSwitcher`'s equivalent, a `TextInput`
+    //      turned disabled under a live focus), and
+    //  (b) a reconciler tears the focused pod out of the tree (any generic
+    //      unmount — `frust-widgets`' `cancel_active_children`/`teardown_child`),
+    //      which raises `mark_focus_orphaned` because it has no `RenderRoot` to
+    //      reach from a `BuildCtx` pass.
+    //
+    // Both must perform the SAME full release a blur does. Leaving either half
+    // standing — `focus_active` true, or `ime_state` parked at `Some(inactive)` —
+    // is what stranded a popped screen: `is_focus_active()` kept lying, the
+    // shell's IME poll kept seeing a surface, and the next real focus
+    // interaction started from a corrupt baseline.
+
+    /// The navigator's cleared surface, spelled out here so the fixture below
+    /// publishes exactly the shape `nav::navigator::cleared_ime_state` does
+    /// (`frust-core` cannot name it — `frust-widgets` sits above this crate).
+    fn cleared_surface() -> ImeState {
+        ImeState {
+            active: false,
+            editing: EditingState {
+                text: String::new(),
+                selection_base: -1,
+                selection_extent: -1,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: Default::default(),
+        }
+    }
+
+    /// A focused editable that publishes its active surface from paint (like a
+    /// real field), and — once `clear` is raised — publishes the *inactive*
+    /// surface from paint instead: the container-after-a-pop shape.
+    struct PopImeWidget {
+        clear: Rc<Cell<bool>>,
+    }
+    impl crate::widget::Widget for PopImeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if self.clear.get() {
+                ctx.publish_ime_state(cleared_surface());
+            } else if ctx.has_focus() {
+                ctx.publish_ime_state(PaintImeWidget::surface("abc"));
+            }
+        }
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(PaintImeWidget::surface("abc"));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    struct PopImeView {
+        clear: Rc<Cell<bool>>,
+    }
+    impl View<ClickState> for PopImeView {
+        type Element = PopImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PopImeWidget {
+            PopImeWidget {
+                clear: self.clear.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PopImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn inactive_paint_publish_releases_the_whole_session() {
+        // (a) The pop shape. Before this, the paint take stored `Some(inactive)`
+        // and never touched `focus_active`, so the session outlived the page.
+        let clear = Rc::new(Cell::new(false));
+        let mut logic = {
+            let clear = clear.clone();
+            move |_state: &mut ClickState| PopImeView {
+                clear: clear.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PopImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let mut scene = RecordingScene::default();
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().is_some_and(|s| s.active));
+        let focused = root.focus_ime_generation();
+
+        // The "pop": the next paint publishes the cleared surface.
+        clear.set(true);
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !root.is_focus_active(),
+            "an inactive publish ends the session, not just the surface"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the surface is dropped, never parked at Some(inactive)"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused.wrapping_add(1),
+            "one release is exactly one edge"
+        );
+
+        // The widget keeps publishing the cleared surface every frame (a real
+        // one-shot flag would not, but an idle screen must survive the worst
+        // case): the paint take's `focus_active` guard makes each a no-op, so
+        // the released session neither resurrects nor spins the edge.
+        let released = root.focus_ime_generation();
+        for _ in 0..30 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            released,
+            "an inactive publish against an already-released root is inert"
+        );
+    }
+
+    /// A view whose rebuild raises the generic-unmount orphan mark on demand —
+    /// standing in for `frust-widgets`' reconcilers, which clear a focused
+    /// `ChildPod` mid-diff and raise exactly this flag (this crate has no
+    /// multi-child container of its own to diff).
+    struct UnmountView {
+        orphan: Rc<Cell<bool>>,
+    }
+    impl View<ClickState> for UnmountView {
+        type Element = ImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ImeWidget {
+            ImeWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            if self.orphan.get() {
+                crate::event::mark_focus_orphaned();
+                return ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn generic_unmount_orphan_releases_the_whole_session() {
+        // (b) The child-list-diff shape: no publish, no event — the focused
+        // widget simply stops existing. Nothing self-corrects this on an idle
+        // screen, which is why the reconciler's mark is drained here.
+        let _ = crate::event::take_focus_orphaned();
+        let orphan = Rc::new(Cell::new(false));
+        let mut logic = {
+            let orphan = orphan.clone();
+            move |_state: &mut ClickState| UnmountView {
+                orphan: orphan.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, UnmountView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().is_some());
+        let focused = root.focus_ime_generation();
+
+        // The unmount rebuild.
+        orphan.set(true);
+        root.rebuild(&mut logic, &mut state);
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror does not outlive the widget it mirrors"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused.wrapping_add(1),
+            "one orphaned focus path is exactly one edge"
+        );
+
+        // The mark was drained, so an ordinary rebuild afterwards is inert...
+        let released = root.focus_ime_generation();
+        orphan.set(false);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(root.focus_ime_generation(), released);
+
+        // ...and re-marking against an already-released root fires no edge
+        // either (a stale `focused` flag torn down later must not spin it).
+        orphan.set(true);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(root.focus_ime_generation(), released);
+        assert!(!root.is_focus_active());
+    }
+
+    // --- The focus/IME EDGE generation ---------------------------------------
+    //
+    // `focus_ime_generation` is the shell-facing edge behind the mobile frame
+    // gate's `FrameInputs::focus_or_ime_changed`: a shell caches the value and
+    // runs a frame when it moves. Two properties make that safe, and both are
+    // pinned below: EVERY real transition moves it (or a focus change strands
+    // unpainted), and NO same-value write moves it (or a focused screen forces
+    // a frame every vsync — the level-input behavior this replaced, measured at
+    // 62–120 fps on a static focused screen).
+
+    /// A widget that focuses on `Down`, releases focus on any `Key`, and — the
+    /// point of the fixture — re-publishes an IME surface from its **paint**
+    /// pass on every frame, reading the text from a shared cell so a test can
+    /// make a republish genuinely change (or genuinely not).
+    struct PaintImeWidget {
+        published: Rc<RefCell<String>>,
+    }
+    impl PaintImeWidget {
+        fn surface(text: &str) -> ImeState {
+            ImeState {
+                active: true,
+                editing: EditingState {
+                    text: text.to_string(),
+                    selection_base: 0,
+                    selection_extent: 0,
+                    composing_base: -1,
+                    composing_extent: -1,
+                },
+                caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                content_type: Default::default(),
+            }
+        }
+    }
+    impl crate::widget::Widget for PaintImeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.publish_ime_state(Self::surface(&self.published.borrow()));
+        }
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::Key(_) => {
+                    ctx.release_focus();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    struct PaintImeView {
+        published: Rc<RefCell<String>>,
+    }
+    impl View<ClickState> for PaintImeView {
+        type Element = PaintImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PaintImeWidget {
+            PaintImeWidget {
+                published: self.published.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PaintImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn key_event() -> InputEvent {
+        InputEvent::Key(crate::event::KeyEvent {
+            key: crate::event::Key::Named(crate::event::NamedKey::Enter),
+            modifiers: crate::event::Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn focus_ime_generation_moves_on_every_pointer_transition_only() {
+        let mut root: RenderRoot<ClickState, ImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut ime_logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Idle: a rebuild/layout touches neither focus nor the IME surface.
+        let idle = root.focus_ime_generation();
+        root.rebuild(&mut ime_logic, &mut state);
+        assert_eq!(
+            root.focus_ime_generation(),
+            idle,
+            "a rebuild is not an edge"
+        );
+
+        // Focus gained + IME surface published (one transition for a shell,
+        // however many field writes it took).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let focused = root.focus_ime_generation();
+        assert_ne!(
+            focused, idle,
+            "focus + IME publish must move the generation"
+        );
+
+        // The SAME tap again, on the already-focused widget publishing the
+        // identical surface: no state moved, so no edge. This is the case that
+        // decides whether a live text field forces a frame per vsync.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused,
+            "a same-value focus/IME write must not spin the edge"
+        );
+
+        // Blur: focus cleared and the surface dropped — a real transition.
+        root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+        let blurred = root.focus_ime_generation();
+        assert_ne!(blurred, focused, "a blur must move the generation");
+
+        // Blur while already blurred (a tap on inert chrome — the commonest
+        // event there is) writes `false`/`None` back over `false`/`None`.
+        root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 20.0));
+        assert_eq!(
+            root.focus_ime_generation(),
+            blurred,
+            "blurring an already-blurred root must not move the generation"
+        );
+    }
+
+    #[test]
+    fn focus_ime_generation_ignores_an_unchanged_paint_republish() {
+        // The paint pass re-publishes the focused widget's IME surface on EVERY
+        // frame (that is how a rebuild-applied controlled change refreshes the
+        // shell-facing state). If that unconditional write moved the
+        // generation, the frame gate's edge would fire every single frame for
+        // the whole life of a focus session — exactly the per-vsync forcing the
+        // edge exists to remove.
+        let published = Rc::new(RefCell::new("abc".to_string()));
+        let mut logic = {
+            let published = published.clone();
+            move |_state: &mut ClickState| PaintImeView {
+                published: published.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Focus the field, then let it paint: the first paint publishes.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let steady = root.focus_ime_generation();
+        assert_eq!(
+            root.ime_state(),
+            Some(PaintImeWidget::surface("abc")),
+            "the paint pass published the focused widget's surface"
+        );
+
+        // 120 further frames of the same focused, unchanged field: the caret
+        // blinks, nothing else moves. Not one edge.
+        for _ in 0..120 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady,
+            "an unchanged paint republish must never move the generation"
+        );
+
+        // A real change (the app applied a controlled edit) publishes a
+        // different surface: exactly one edge, then quiet again.
+        *published.borrow_mut() = "abcd".to_string();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let edited = root.focus_ime_generation();
+        assert_ne!(edited, steady, "a changed republish IS an edge");
+        for _ in 0..10 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert_eq!(
+            root.focus_ime_generation(),
+            edited,
+            "the session goes quiet again at the new value"
+        );
+    }
+
+    #[test]
+    fn focus_ime_generation_moves_on_a_focus_release_only_once() {
+        // The Key/Ime/Scroll arm of the root focus path: a dispatch that
+        // RELEASES focus clears both the flag and the published surface.
+        let published = Rc::new(RefCell::new("abc".to_string()));
+        let mut logic = {
+            let published = published.clone();
+            move |_state: &mut ClickState| PaintImeView {
+                published: published.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let focused = root.focus_ime_generation();
+        assert!(root.is_focus_active());
+
+        // A key that releases focus: one edge.
+        root.event(&mut state, &key_event());
+        let released = root.focus_ime_generation();
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+        assert_ne!(
+            released, focused,
+            "a focus release must move the generation"
+        );
+
+        // A second release against an already-released root: no edge. (The
+        // paint pass republishes nothing now — the paint-take arm only accepts
+        // a publish while focus is active.)
+        root.event(&mut state, &key_event());
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(
+            root.focus_ime_generation(),
+            released,
+            "releasing an already-released focus must not move the generation"
+        );
     }
 
     // --- Semantics: stable ids + accessibility action routing ---
@@ -2580,5 +3966,1578 @@ mod tests {
         root.set_theme(Box::new(0u32));
         assert!(root.semantics_generation() > generation);
         assert!(root.semantics_if_changed(generation).is_some());
+    }
+
+    #[test]
+    fn orientation_from_size_is_portrait_when_taller_than_wide() {
+        assert_eq!(
+            Orientation::from_size(Size::new(400.0, 800.0)),
+            Orientation::Portrait
+        );
+    }
+
+    #[test]
+    fn orientation_from_size_is_landscape_when_wider_than_tall() {
+        assert_eq!(
+            Orientation::from_size(Size::new(800.0, 400.0)),
+            Orientation::Landscape
+        );
+    }
+
+    #[test]
+    fn orientation_from_size_square_reads_as_portrait() {
+        // Height >= width is the derivation rule (see `Orientation::from_size`'s
+        // doc); an exact square satisfies `>=` and must not panic/ambiguously
+        // resolve, so this is pinned explicitly rather than left implicit.
+        assert_eq!(
+            Orientation::from_size(Size::new(500.0, 500.0)),
+            Orientation::Portrait
+        );
+    }
+
+    #[test]
+    fn window_metrics_new_derives_orientation_from_size() {
+        let insets = WindowInsets::default();
+        let portrait = WindowMetrics::new(Size::new(390.0, 844.0), 3.0, insets);
+        assert_eq!(portrait.orientation, Orientation::Portrait);
+        assert_eq!(portrait.size, Size::new(390.0, 844.0));
+        assert_eq!(portrait.scale, 3.0);
+        assert_eq!(portrait.insets, insets);
+
+        let landscape = WindowMetrics::new(Size::new(844.0, 390.0), 3.0, insets);
+        assert_eq!(landscape.orientation, Orientation::Landscape);
+
+        let square = WindowMetrics::new(Size::new(500.0, 500.0), 2.0, insets);
+        assert_eq!(square.orientation, Orientation::Portrait);
+    }
+
+    // --- Deferred state-bearing callbacks: the `InputEvent::Housekeeping` flush
+    //     `RenderRoot::rebuild` dispatches. ---
+
+    /// App state for the flush tests.
+    #[derive(Default)]
+    struct FlushState {
+        /// How many deferred callbacks have run.
+        flushes: u32,
+        /// How many more times a running callback re-queues itself — the knob the
+        /// chained/capped tests turn.
+        chain_left: u32,
+        /// The `flushes` value each `app_logic` run observed, in order. This is
+        /// what proves the rebuild re-runs `app_logic` *after* a flush rather than
+        /// shipping the now-stale pre-flush view.
+        observed: Vec<u32>,
+    }
+
+    /// The navigator's deferred-callback shape reduced to one leaf: a shared
+    /// `Rc<Cell<u32>>` op queue (the `NavigatorController` analog) is drained
+    /// during the state-free [`View::rebuild`], which can therefore only *queue*
+    /// the callback and raise the flush mark; [`crate::widget::Widget::event`]
+    /// runs it when the broadcast arrives, where `&mut State` finally exists.
+    struct FlushView {
+        ops: std::rc::Rc<Cell<u32>>,
+    }
+
+    struct FlushWidget {
+        ops: std::rc::Rc<Cell<u32>>,
+        queued: u32,
+    }
+
+    impl FlushWidget {
+        fn drain_ops(&mut self) {
+            let ops = self.ops.replace(0);
+            if ops > 0 {
+                self.queued += ops;
+                crate::event::mark_pending_result_flush();
+            }
+        }
+    }
+
+    impl View<FlushState> for FlushView {
+        type Element = FlushWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FlushWidget {
+            let mut widget = FlushWidget {
+                ops: self.ops.clone(),
+                queued: 0,
+            };
+            widget.drain_ops();
+            widget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut FlushWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.ops = self.ops.clone();
+            element.drain_ops();
+            ChangeFlags::NONE
+        }
+    }
+
+    impl crate::widget::Widget for FlushWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if !event.is_broadcast() || self.queued == 0 {
+                return EventResult::Ignored;
+            }
+            let queued = std::mem::take(&mut self.queued);
+            let state = ctx.state_mut::<FlushState>();
+            for _ in 0..queued {
+                state.flushes += 1;
+                if state.chain_left > 0 {
+                    state.chain_left -= 1;
+                    self.ops.set(self.ops.get() + 1);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    fn flush_logic(ops: std::rc::Rc<Cell<u32>>) -> impl FnMut(&mut FlushState) -> FlushView {
+        move |state: &mut FlushState| {
+            state.observed.push(state.flushes);
+            FlushView { ops: ops.clone() }
+        }
+    }
+
+    #[test]
+    fn a_queued_callback_flushes_and_re_diffs_inside_one_rebuild() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<FlushState, FlushView> = RenderRoot::new();
+        let mut app = flush_logic(ops.clone());
+        let mut state = FlushState::default();
+
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(state.flushes, 0);
+        assert_eq!(
+            state.observed,
+            vec![0],
+            "nothing queued ⇒ exactly one app_logic run, no broadcast"
+        );
+
+        // Queue one op — the `NavigatorController::pop_with_result` analog.
+        state.observed.clear();
+        ops.set(1);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes, 1,
+            "the queued callback ran inside this rebuild — no event was dispatched \
+             by anyone but the rebuild itself"
+        );
+        assert_eq!(
+            state.observed,
+            vec![0, 1],
+            "app_logic re-ran after the flush and saw the post-callback state, so \
+             the view this frame ships is not the stale pre-flush one"
+        );
+        assert!(
+            !crate::event::take_pending_result_flush(),
+            "the mark was consumed; nothing is owed to a later frame"
+        );
+    }
+
+    #[test]
+    fn a_runaway_callback_chain_is_capped_and_deferred_to_the_next_frame() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<FlushState, FlushView> = RenderRoot::new();
+        let mut app = flush_logic(ops.clone());
+        // Far more chaining than the cap allows: unbounded, this rebuild would
+        // never return. Reaching the assertions below at all is the no-spin proof.
+        let mut state = FlushState {
+            chain_left: 100,
+            ..Default::default()
+        };
+        root.rebuild(&mut app, &mut state);
+
+        ops.set(1);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes, MAX_PENDING_RESULT_FLUSH_PASSES as u32,
+            "exactly the cap's worth of flush passes, then stop"
+        );
+
+        // The remainder is owed, not lost: the mark still stands and the next
+        // paint asks for the follow-up frame that will finish it.
+        root.layout(Size::new(50.0, 50.0));
+        let mut scene = RecordingScene::default();
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            outcome.needs_frame,
+            "hitting the cap requests one more frame, so a dirty-driven shell \
+             wakes instead of waiting for input"
+        );
+        assert!(
+            !outcome.needs_frame_paced_only,
+            "a deferred flush is not a cosmetic loop — the mobile frame gate must \
+             not throttle it"
+        );
+
+        // That next frame picks up exactly where the capped one left off.
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes,
+            2 * MAX_PENDING_RESULT_FLUSH_PASSES as u32,
+            "the deferred remainder resumed on the following frame"
+        );
+
+        // Leave this thread's flag clean for anything else in the binary.
+        let _ = crate::event::take_pending_result_flush();
+    }
+
+    /// The redraw-only flush shape: a widget that queues a callback exactly like
+    /// [`FlushView`] above, but whose broadcast handler touches **no** state at
+    /// all — it only calls [`EventCtx::request_redraw`]. `frust-widgets`' gesture
+    /// long-press latch is the shipped instance (its `on_long_press` consumer may
+    /// mutate nothing the view diff can see), and the widget's own
+    /// `ctx.request_redraw()` after firing is then the whole wake signal.
+    struct RedrawOnlyView {
+        ops: std::rc::Rc<Cell<u32>>,
+    }
+
+    struct RedrawOnlyWidget {
+        ops: std::rc::Rc<Cell<u32>>,
+        queued: bool,
+    }
+
+    impl RedrawOnlyWidget {
+        fn drain_ops(&mut self) {
+            if self.ops.replace(0) > 0 {
+                self.queued = true;
+                crate::event::mark_pending_result_flush();
+            }
+        }
+    }
+
+    impl View<()> for RedrawOnlyView {
+        type Element = RedrawOnlyWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> RedrawOnlyWidget {
+            let mut widget = RedrawOnlyWidget {
+                ops: self.ops.clone(),
+                queued: false,
+            };
+            widget.drain_ops();
+            widget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut RedrawOnlyWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.ops = self.ops.clone();
+            element.drain_ops();
+            // The whole point: the re-diff after the flush reports nothing, so
+            // the dispatch's own outcome is the only wake signal there is.
+            ChangeFlags::NONE
+        }
+    }
+
+    impl crate::widget::Widget for RedrawOnlyWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() && std::mem::take(&mut self.queued) {
+                // No `state_mut`, no signal, no view-visible change — a repaint
+                // request and nothing else.
+                ctx.request_redraw();
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn a_redraw_only_flushed_callback_wakes_both_loop_styles() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<(), RedrawOnlyView> = RenderRoot::new();
+        let mut app = |_state: &mut ()| RedrawOnlyView { ops: ops.clone() };
+        let mut state = ();
+
+        // Settle the first build so the assertions below observe only the flush.
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(50.0, 50.0));
+        let mut scene = RecordingScene::default();
+        let settled = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(!settled.needs_frame, "nothing queued ⇒ the tree is at rest");
+        let _ = root.take_change_flags();
+
+        // Queue the redraw-only callback (the gesture long-press latch analog: a
+        // prior pass marks, this rebuild flushes).
+        ops.set(1);
+        let flags = root.rebuild(&mut app, &mut state);
+        assert!(
+            flags.needs_paint(),
+            "the broadcast's `needs_redraw` folds into the rebuild's flags even \
+             though the re-diff saw no view change"
+        );
+        assert!(
+            root.has_pending_change_flags(),
+            "PAINT reached `pending`, which is the input the mobile frame gate \
+             reads to decide the next tick runs at all"
+        );
+
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            outcome.needs_frame,
+            "the same wake surfaces as `needs_frame`, which is how the desktop \
+             `ControlFlow::Wait` loop schedules a frame with no input pending"
+        );
+        assert!(
+            !outcome.needs_frame_paced_only,
+            "a flushed callback's repaint is not a cosmetic loop — the mobile \
+             frame gate must not throttle it"
+        );
+        assert!(
+            !crate::event::take_pending_result_flush(),
+            "the mark was consumed; nothing is owed to a later frame"
+        );
+
+        // And it settles: the next frame asks for nothing, so neither loop spins.
+        let _ = root.take_change_flags();
+        root.rebuild(&mut app, &mut state);
+        let settled = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !settled.needs_frame,
+            "one wake, not a perpetual one — the flush is over"
+        );
+        assert!(!root.has_pending_change_flags());
+    }
+
+    // --- Hover: the claim pipeline -------------------------------------------
+    //
+    // Hover has no Enter/Leave phase to lean on (adding one to `PointerPhase`
+    // would break every out-of-tree exhaustive match). It is instead an opt-in
+    // claim a widget makes from its uncaptured `Move` arm, recorded as an epoch
+    // stamp down the pod chain — so the fixture below is deliberately shaped like
+    // a real container: two hit-tested children, a capture fast-path, and paint
+    // recording what `PaintCtx::is_hovered` reported.
+
+    /// Which of the fixture's two leaves an assertion is about.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Leaf {
+        Top,
+        Bottom,
+    }
+
+    /// What one hover leaf observed, shared out of the widget tree.
+    #[derive(Default)]
+    struct HoverProbe {
+        /// `PaintCtx::is_hovered()` as of the last paint.
+        painted_hovered: Cell<bool>,
+        /// `EventCtx::is_hovered()` as of the last event dispatch that reached it.
+        event_hovered: Cell<bool>,
+    }
+
+    /// A leaf that claims hover on any `Move` landing inside its own bounds — the
+    /// canonical opt-in shape — and optionally captures the pointer on `Down` (the
+    /// drag fixture: a captured pointer must never create hover).
+    ///
+    /// With `latches` set it follows the whole consumer contract: the same hit test
+    /// updates an internal flag, `request_redraw` is gated on that flag changing,
+    /// and `paint` self-corrects the flag from the authoritative
+    /// `PaintCtx::is_hovered`. Clearing `latches` is a deliberate negative control —
+    /// a claimant that keeps no flag — used to pin which frames the pipeline itself
+    /// does and does not manufacture.
+    struct HoverLeaf {
+        captures: bool,
+        latches: bool,
+        hovered: bool,
+        probe: Rc<HoverProbe>,
+    }
+
+    impl crate::widget::Widget for HoverLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.probe.painted_hovered.set(ctx.is_hovered());
+            if self.latches {
+                // The self-correction half of the contract: authoritative here,
+                // whatever the event arm last recorded.
+                self.hovered = ctx.is_hovered();
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.probe.event_hovered.set(ctx.is_hovered());
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Move => {
+                    let size = ctx.size();
+                    let inside = p.position.x >= 0.0
+                        && p.position.y >= 0.0
+                        && p.position.x < size.width
+                        && p.position.y < size.height;
+                    if inside {
+                        ctx.claim_hover();
+                    }
+                    if self.latches && self.hovered != inside {
+                        self.hovered = inside;
+                        ctx.request_redraw();
+                    }
+                    // Deliberately `Ignored`: a hovering widget does not consume a
+                    // move it merely watched (the shipped `ListItem` shape).
+                    EventResult::Ignored
+                }
+                PointerPhase::Down => {
+                    if self.captures {
+                        ctx.capture_pointer();
+                    }
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Whether the container claims hover for itself, and when relative to routing
+    /// the move into its child — the ordering the claim contract binds a container
+    /// to.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GroupClaim {
+        /// Never claims — the transparent container, hovered only via the path.
+        Never,
+        /// Claims *after* routing: the contract-following container, whose claim is
+        /// a fallback the child's claim beats.
+        AfterRouting,
+        /// Claims *before* routing: the documented anti-pattern, kept as a
+        /// negative control.
+        BeforeRouting,
+    }
+
+    /// A container wrapping one hover leaf, recording what its **own**
+    /// `PaintCtx::is_hovered`/`EventCtx::is_hovered` reported — the
+    /// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
+    /// show. With `claims` set it also wants hover chrome of its own, claiming
+    /// either side of the route to exercise the ordering rule.
+    ///
+    /// The child is an `Option` so a rebuild can *remove* it — the unmount case,
+    /// where the claimant stops existing between hover passes.
+    struct HoverGroup {
+        probe: Rc<HoverProbe>,
+        claims: GroupClaim,
+        child: Option<crate::widget::ChildPod>,
+    }
+
+    impl HoverGroup {
+        /// Whether this event is an uncaptured-move-shaped pass landing inside the
+        /// container's own bounds — the same local hit test a leaf claims on.
+        fn claims_on(&self, ctx: &EventCtx, event: &InputEvent) -> bool {
+            let InputEvent::Pointer(p) = event else {
+                return false;
+            };
+            let size = ctx.size();
+            matches!(p.phase, PointerPhase::Move)
+                && p.position.x >= 0.0
+                && p.position.y >= 0.0
+                && p.position.x < size.width
+                && p.position.y < size.height
+        }
+    }
+
+    impl crate::widget::Widget for HoverGroup {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            match &mut self.child {
+                Some(child) => {
+                    let size = child.layout_child(ctx, bc);
+                    child.set_origin(Point::ZERO);
+                    size
+                }
+                // The same box with nothing in it, so removing the claimant
+                // changes what is under the pointer without moving the container.
+                None => bc.constrain(Size::new(100.0, 30.0)),
+            }
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.probe.painted_hovered.set(ctx.is_hovered());
+            if let Some(child) = &mut self.child {
+                child.paint_child(ctx, scene);
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.probe.event_hovered.set(ctx.is_hovered());
+            let claims = self.claims != GroupClaim::Never && self.claims_on(ctx, event);
+            if claims && self.claims == GroupClaim::BeforeRouting {
+                ctx.claim_hover();
+            }
+            let result = match &mut self.child {
+                Some(child) => child.event_child(ctx, event),
+                None => EventResult::Ignored,
+            };
+            if claims && self.claims == GroupClaim::AfterRouting {
+                ctx.claim_hover();
+            }
+            result
+        }
+    }
+
+    /// Two stacked hover leaves with a hit-tested route and a capture fast-path —
+    /// the minimum container that can show a claim moving between siblings.
+    struct HoverPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for HoverPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.top.paint_child(ctx, scene);
+            self.bottom.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.is_active() {
+                    let r = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return r;
+                }
+            }
+            let pos = event.position();
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// How one `HoverHarness` is shaped.
+    #[derive(Clone, Copy)]
+    struct HoverFixture {
+        /// Leaves capture the pointer on `Down` (the drag case).
+        captures: bool,
+        /// Leaves follow the consumer contract (latched flag + change-gated redraw
+        /// + paint-time self-correction).
+        latches: bool,
+        /// Wrap the top leaf in a [`HoverGroup`], so the claim path has an
+        /// ancestor pod between the claimant and the root.
+        nested: bool,
+        /// Whether (and when) that container claims hover for itself.
+        group_claims: GroupClaim,
+        /// Rebuild the container without its child: the unmount case, where the
+        /// pod holding the hover link is dropped by the view diff.
+        drop_claimant: bool,
+        /// Report [`ChangeFlags::NONE`] from that removal — the hand-rolled
+        /// container outside this workspace, which drops a pod while reporting
+        /// whatever it likes. The in-tree reconcilers report `LAYOUT | PAINT`,
+        /// which is what the release used to lean on instead of flagging its own.
+        silent_reconciler: bool,
+    }
+
+    struct HoverPairView {
+        top: Rc<HoverProbe>,
+        bottom: Rc<HoverProbe>,
+        group: Rc<HoverProbe>,
+        fixture: HoverFixture,
+    }
+
+    impl HoverPairView {
+        fn leaf(&self, probe: &Rc<HoverProbe>) -> Box<dyn crate::widget::Widget> {
+            Box::new(HoverLeaf {
+                captures: self.fixture.captures,
+                latches: self.fixture.latches,
+                hovered: false,
+                probe: probe.clone(),
+            })
+        }
+    }
+
+    impl View<()> for HoverPairView {
+        type Element = HoverPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> HoverPair {
+            let top: Box<dyn crate::widget::Widget> = if self.fixture.nested {
+                Box::new(HoverGroup {
+                    probe: self.group.clone(),
+                    claims: self.fixture.group_claims,
+                    child: Some(crate::widget::ChildPod::new(self.leaf(&self.top))),
+                })
+            } else {
+                self.leaf(&self.top)
+            };
+            HoverPair {
+                top: crate::widget::ChildPod::new(top),
+                bottom: crate::widget::ChildPod::new(self.leaf(&self.bottom)),
+            }
+        }
+        fn rebuild(&self, p: &Self, e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            // The only structural op this fixture performs: drop the nested
+            // container's child pod, the way a real reconciler drops a truncated
+            // or conditionally-removed child.
+            let removes_child = self.fixture.drop_claimant && !p.fixture.drop_claimant;
+            if !removes_child {
+                return ChangeFlags::NONE;
+            }
+            let group = e
+                .top
+                .widget_mut()
+                .downcast_mut::<HoverGroup>()
+                .expect("the drop-claimant fixture is the nested one");
+            group.child = None;
+            if self.fixture.silent_reconciler {
+                ChangeFlags::NONE
+            } else {
+                ChangeFlags::LAYOUT | ChangeFlags::PAINT
+            }
+        }
+    }
+
+    /// A `RenderRoot` over the hover fixture, plus its probes.
+    struct HoverHarness {
+        root: RenderRoot<(), HoverPairView>,
+        top: Rc<HoverProbe>,
+        bottom: Rc<HoverProbe>,
+        group: Rc<HoverProbe>,
+        state: (),
+        /// The shape the next rebuild re-states, so
+        /// [`HoverHarness::rebuild_without_claimant`] can flip one flag without
+        /// restating the rest.
+        fixture: HoverFixture,
+    }
+
+    impl HoverHarness {
+        /// The contract-following fixture: two flat leaves that latch their own
+        /// hover flag, optionally capturing on `Down`.
+        fn new(captures: bool) -> Self {
+            Self::build(HoverFixture {
+                captures,
+                latches: true,
+                nested: false,
+                group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
+            })
+        }
+
+        /// The negative control: leaves that claim hover but keep no flag of their
+        /// own, so only frames the pipeline manufactures show up.
+        fn without_consumer_flag() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: false,
+                nested: false,
+                group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
+            })
+        }
+
+        /// The top leaf wrapped in a container pod, for the path-semantics case.
+        fn nested() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+                group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
+            })
+        }
+
+        /// The same nesting, with the container claiming hover for itself the way
+        /// the contract requires: after routing the move into its child.
+        fn nested_group_claiming(claims: GroupClaim) -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+                group_claims: claims,
+                drop_claimant: false,
+                silent_reconciler: false,
+            })
+        }
+
+        /// The same nesting, with a container that drops its child while
+        /// reporting no flags — the hand-rolled container outside this workspace
+        /// the destructor route exists to cover.
+        fn nested_group_with_silent_reconciler() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+                group_claims: GroupClaim::AfterRouting,
+                drop_claimant: false,
+                silent_reconciler: true,
+            })
+        }
+
+        fn build(fixture: HoverFixture) -> Self {
+            let top = Rc::new(HoverProbe::default());
+            let bottom = Rc::new(HoverProbe::default());
+            let group = Rc::new(HoverProbe::default());
+            let mut root: RenderRoot<(), HoverPairView> = RenderRoot::new();
+            let mut state = ();
+            let (t, b, g) = (top.clone(), bottom.clone(), group.clone());
+            root.rebuild(
+                &mut move |_: &mut ()| HoverPairView {
+                    top: t.clone(),
+                    bottom: b.clone(),
+                    group: g.clone(),
+                    fixture,
+                },
+                &mut state,
+            );
+            root.layout(Size::new(100.0, 60.0));
+            HoverHarness {
+                root,
+                top,
+                bottom,
+                group,
+                state,
+                fixture,
+            }
+        }
+
+        /// Rebuild with the nested container's child removed — the claimant
+        /// unmounting between hover passes — and re-lay out, returning what the
+        /// diff reported.
+        fn rebuild_without_claimant(&mut self) -> ChangeFlags {
+            self.fixture.drop_claimant = true;
+            self.rebuild_current()
+        }
+
+        /// Rebuild restating the shape already on screen: nothing of this root's
+        /// own is severed, so any hover end it performs came from elsewhere.
+        fn rebuild_unchanged(&mut self) -> ChangeFlags {
+            self.rebuild_current()
+        }
+
+        /// Re-run the diff against the fixture as it currently stands, then
+        /// re-lay out, returning what the diff reported.
+        fn rebuild_current(&mut self) -> ChangeFlags {
+            let fixture = self.fixture;
+            let (t, b, g) = (self.top.clone(), self.bottom.clone(), self.group.clone());
+            let flags = self.root.rebuild(
+                &mut move |_: &mut ()| HoverPairView {
+                    top: t.clone(),
+                    bottom: b.clone(),
+                    group: g.clone(),
+                    fixture,
+                },
+                &mut self.state,
+            );
+            self.root.layout(Size::new(100.0, 60.0));
+            flags
+        }
+
+        /// Dispatch a pointer event at `(x, y)` in window space.
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) -> EventOutcome {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &event)
+        }
+
+        /// Move the pointer over the given leaf's middle.
+        fn move_over(&mut self, leaf: Leaf) -> EventOutcome {
+            match leaf {
+                Leaf::Top => self.dispatch(PointerPhase::Move, 50.0, 15.0),
+                Leaf::Bottom => self.dispatch(PointerPhase::Move, 50.0, 45.0),
+            }
+        }
+
+        /// Paint the tree, refreshing both probes' recorded hover state.
+        fn paint(&mut self) {
+            let mut scene = RecordingScene::default();
+            self.root.paint(&mut scene, FrameTime::ZERO);
+        }
+
+        /// `(top, bottom)` hover as the last paint reported it.
+        fn painted(&mut self) -> (bool, bool) {
+            self.paint();
+            (
+                self.top.painted_hovered.get(),
+                self.bottom.painted_hovered.get(),
+            )
+        }
+    }
+
+    #[test]
+    fn an_uncaptured_move_claims_hover_and_paint_reports_it() {
+        let mut h = HoverHarness::new(false);
+        assert!(!h.root.is_hover_active(), "nothing is hovered at rest");
+        assert_eq!(h.painted(), (false, false));
+
+        let outcome = h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active(), "the claim reached the root");
+        assert!(
+            !outcome.handled,
+            "a hovering widget need not consume the move"
+        );
+        assert_eq!(
+            h.painted(),
+            (true, false),
+            "the claimant reads as hovered, its sibling does not"
+        );
+
+        // A second move within the same leaf keeps the link (the claim is
+        // re-recorded every pass) without re-reporting a change.
+        h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert_eq!(h.painted(), (true, false));
+    }
+
+    #[test]
+    fn a_second_widgets_claim_clears_the_first_and_asks_for_a_repaint() {
+        let mut h = HoverHarness::new(false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.painted(), (true, false));
+
+        // The pointer moves onto the sibling. The container never has to clear
+        // anything: the epoch advance strands the top pod's stamp.
+        h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+        assert_eq!(
+            h.painted(),
+            (false, true),
+            "the previous claimant lost its link when the new one recorded"
+        );
+
+        // Both widgets need a repaint, and a repaint is global — one request
+        // covers them. The *losing* side is what the root itself must guarantee:
+        // moving onto a leaf that claims nothing still repaints.
+        let outcome = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(
+            !h.root.is_hover_active(),
+            "a move claiming nothing ends the hover"
+        );
+        assert!(
+            outcome.needs_redraw,
+            "the widget that lost hover cannot ask for the repaint itself"
+        );
+        assert_eq!(h.painted(), (false, false));
+
+        // ...and the same move repeated is not a change any more.
+        let settled = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(
+            !settled.needs_redraw,
+            "an already-hoverless move requests nothing"
+        );
+    }
+
+    #[test]
+    fn a_captured_move_cannot_claim_hover() {
+        let mut h = HoverHarness::new(true);
+        // Press the top leaf: it captures, and the `Down` itself ends any hover.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert!(h.root.is_pointer_captured());
+        assert!(!h.root.is_hover_active());
+
+        // Drag: every one of these moves routes to the captured leaf, whose `Move`
+        // arm hit-tests inside and calls `claim_hover()` — and must record nothing.
+        h.dispatch(PointerPhase::Move, 50.0, 16.0);
+        assert!(
+            !h.root.is_hover_active(),
+            "a captured pointer never creates hover"
+        );
+        assert_eq!(h.painted(), (false, false));
+
+        // Dragging outside the leaf keeps routing to it (capture), still no hover.
+        h.dispatch(PointerPhase::Move, 50.0, 45.0);
+        assert!(!h.root.is_hover_active());
+        assert_eq!(h.painted(), (false, false));
+
+        // Release, then a fresh uncaptured move: hover is claimable again.
+        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active());
+        assert_eq!(h.painted(), (true, false));
+    }
+
+    #[test]
+    fn a_down_up_or_cancel_ends_the_hover() {
+        // Every pointer phase other than an uncaptured `Move` ends the link. `Up`
+        // is in here for touch: a lifted finger sends no further move, so a tint
+        // claimed during an uncaptured touch drag would otherwise stand for good.
+        for ending in [PointerPhase::Down, PointerPhase::Up, PointerPhase::Cancel] {
+            let mut h = HoverHarness::new(false);
+            h.move_over(Leaf::Top);
+            assert!(h.root.is_hover_active());
+
+            let outcome = h.dispatch(ending, 50.0, 15.0);
+            assert!(
+                !h.root.is_hover_active(),
+                "{ending:?} ends the hover link outright"
+            );
+            assert!(
+                outcome.needs_redraw,
+                "{ending:?} that dropped a hover asks for the repaint"
+            );
+            assert_eq!(h.painted(), (false, false));
+        }
+    }
+
+    #[test]
+    fn a_non_pointer_pass_leaves_a_live_hover_standing() {
+        let mut h = HoverHarness::new(false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.painted(), (true, false));
+
+        // Neither a scroll, a key, nor the housekeeping broadcast is a hover pass:
+        // the pointer has not moved, so the link must survive them untouched.
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: Point::new(50.0, 15.0),
+                delta: crate::event::ScrollDelta::Lines(0.0, 1.0),
+            },
+        );
+        assert!(h.root.is_hover_active());
+        h.root.event(&mut h.state, &InputEvent::Housekeeping);
+        assert!(h.root.is_hover_active());
+        assert_eq!(h.painted(), (true, false));
+    }
+
+    #[test]
+    fn a_container_on_the_claim_path_reads_hovered_and_a_sibling_does_not() {
+        // The recorded thing is a path, so hover is `:hover`-shaped: the claimant
+        // and every ancestor enclosing it read hovered, nothing off the path does.
+        let mut h = HoverHarness::nested();
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(h.top.painted_hovered.get(), "the claimant itself");
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container enclosing the claimant is on the path too"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "a sibling leaf is off the path"
+        );
+
+        // Move onto the sibling: the container goes unhovered with its child, and
+        // both reads agree about it on the next pass.
+        h.move_over(Leaf::Bottom);
+        h.paint();
+        assert!(!h.group.painted_hovered.get());
+        assert!(!h.top.painted_hovered.get());
+        assert!(h.bottom.painted_hovered.get());
+        h.move_over(Leaf::Top);
+        assert!(
+            !h.group.event_hovered.get(),
+            "the event read reports the previous pass, like the leaf's"
+        );
+        h.move_over(Leaf::Top);
+        assert!(
+            h.group.event_hovered.get(),
+            "the container observes the link its child holds"
+        );
+    }
+
+    #[test]
+    fn an_ancestor_claiming_after_routing_loses_to_its_child_and_still_reads_hovered() {
+        // A container that wants hover chrome of its own claims after routing the
+        // move into its child. Only one claim per pass is recorded and the first one
+        // recorded wins, so the child's claim is the one that lands; the container's
+        // own late call is a silent no-op, and it reads hovered through the stamped
+        // path anyway — which is what makes this ordering correct in every case.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        let gain = h.move_over(Leaf::Top);
+        h.paint();
+        assert!(
+            h.top.painted_hovered.get(),
+            "the child under the pointer holds the link"
+        );
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container is on that path, so it reads hovered too"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "a sibling leaf is off the path"
+        );
+        assert!(gain.needs_redraw, "hover gain repaints");
+
+        // The child's latched flag now agrees with the authoritative paint read, so
+        // wandering on within the same widget settles instead of repainting.
+        let settled = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
+        h.paint();
+        assert!(h.top.painted_hovered.get());
+        assert!(h.group.painted_hovered.get());
+    }
+
+    #[test]
+    fn an_ancestor_claiming_before_routing_starves_its_subtree() {
+        // The negative control for the ordering rule above, pinning the trap it
+        // exists to prevent: a container that claims *before* forwarding is recorded
+        // first, which closes the pass to every descendant. The child under the
+        // pointer can never read hovered, so its hover chrome never appears — and
+        // because its latched flag is corrected back to `false` at paint time, it
+        // flips and asks for a frame again on every single move.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::BeforeRouting);
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(
+            !h.top.painted_hovered.get(),
+            "the ancestor's earlier claim made its child ineligible"
+        );
+        assert!(
+            h.group.painted_hovered.get(),
+            "the outermost claimant is the one holding the link here"
+        );
+        assert!(!h.bottom.painted_hovered.get());
+
+        // Repaint-per-move: the flag never converges, because the event arm and the
+        // authoritative paint read permanently disagree.
+        let again = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(
+            again.needs_redraw,
+            "the starved child re-flips its flag on every move"
+        );
+        h.paint();
+        assert!(!h.top.painted_hovered.get(), "and still paints no chrome");
+    }
+
+    #[test]
+    fn hover_gain_is_repainted_by_the_consumers_own_flag() {
+        let mut h = HoverHarness::new(false);
+        // Entering a widget: the root manufactures nothing here (its mirror went
+        // `false` → `true`, and it cannot know which widget cares), so the frame
+        // comes from the claimant's own change-gated request.
+        let gain = h.move_over(Leaf::Top);
+        assert!(gain.needs_redraw, "hover gain repaints");
+        assert_eq!(h.painted(), (true, false));
+
+        // Wandering within the same widget claims again but changes nothing, so it
+        // must not repaint per event.
+        let settled = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
+
+        // A handoff repaints both sides at once: the arriving leaf's flag changed
+        // (it asks), and because a repaint is global that same frame is what lets
+        // the departing leaf drop its chrome from the authoritative paint read.
+        let handoff = h.move_over(Leaf::Bottom);
+        assert!(handoff.needs_redraw, "a claimant handoff repaints");
+        assert_eq!(
+            h.painted(),
+            (false, true),
+            "one frame settles both the loss and the gain"
+        );
+    }
+
+    #[test]
+    fn a_claimant_without_its_own_flag_gets_only_the_loss_frame() {
+        // The negative control for the contract above: leaves that claim hover but
+        // keep no flag of their own. Gain and handoff are invisible to the root
+        // (its hover mirror is identity-free — `false` → `true` and `true` →
+        // `true`), so nothing repaints for them, which is exactly why the
+        // consumer's latched flag is normative rather than an optimization.
+        let mut h = HoverHarness::without_consumer_flag();
+        let gain = h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active());
+        assert!(!gain.needs_redraw, "no widget asked, and the root cannot");
+
+        let handoff = h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+        assert!(!handoff.needs_redraw, "a handoff is `true` → `true` here");
+
+        // Loss is the one edge the root does cover, since no widget can see it.
+        let loss = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(!h.root.is_hover_active());
+        assert!(loss.needs_redraw, "the root manufactures the loss frame");
+    }
+
+    #[test]
+    fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
+        // The one severance the epoch cannot strand: the claimant is dropped by a
+        // view diff, so it will never see the `Move` that would have re-derived
+        // the link. Its pod reports the drop and `rebuild` ends the hover.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(h.root.is_hover_active());
+        assert!(h.top.painted_hovered.get(), "the claimant holds the link");
+        assert!(
+            h.group.painted_hovered.get(),
+            "its container is on the path"
+        );
+
+        let flags = h.rebuild_without_claimant();
+        assert!(
+            !h.root.is_hover_active(),
+            "the mirror cannot outlive the widget it described"
+        );
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "the correction states its own need for a frame, whatever the \
+             reconciler that dropped the claimant reported"
+        );
+
+        // The survivor is the ancestor that was on the claim path: its own stamp
+        // still names the epoch the claim recorded, so nothing but the epoch
+        // advance keeps it from painting hover chrome for a child that is gone.
+        h.paint();
+        assert!(
+            !h.group.painted_hovered.get(),
+            "the surviving ancestor lost the link with its child"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "and the sibling never had it"
+        );
+
+        // And the pipeline is not wedged: the next move over the same spot claims
+        // cleanly, now for the container itself. (No frame is manufactured for
+        // that gain — this container keeps no latched flag of its own, which is
+        // the documented consumer-side half of the contract, not a pipeline job.)
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active(), "the next move re-claims");
+        h.paint();
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container is the claimant now"
+        );
+    }
+
+    #[test]
+    fn a_silent_reconcilers_removal_still_carries_its_own_repaint() {
+        // The reason the release flags `PAINT` itself rather than trusting the
+        // diff to have reported one. The destructor route deliberately reaches
+        // containers this workspace never sees, and such a container can drop the
+        // claimant while reporting nothing — leaving the hover correctly ended but
+        // the frame that shows it unrequested, on a pointer the user has stopped
+        // moving.
+        let mut h = HoverHarness::nested_group_with_silent_reconciler();
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active());
+
+        let flags = h.rebuild_without_claimant();
+        assert!(!h.root.is_hover_active(), "the link ends either way");
+        assert_eq!(
+            flags,
+            ChangeFlags::PAINT,
+            "and the frame it needs comes from the release, not from the diff"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_that_keeps_the_claimant_leaves_the_hover_standing() {
+        // The negative control for the release above, and the reason the mark is
+        // gated on the *live* epoch rather than on "some pod with a stamp died":
+        // an ordinary rebuild — including one that drops pods carrying stale
+        // stamps — must not touch a link the pointer still rests on.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        // Hover the top leaf, then hand the link to the sibling. The top pod chain
+        // keeps its (now stale) stamp, which is what the next rebuild drops.
+        h.move_over(Leaf::Top);
+        h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+
+        h.rebuild_without_claimant();
+        assert!(
+            h.root.is_hover_active(),
+            "dropping a stale stamp is not a severance"
+        );
+        h.paint();
+        assert!(
+            h.bottom.painted_hovered.get(),
+            "the widget actually under the pointer keeps its chrome"
+        );
+    }
+
+    #[test]
+    fn another_roots_dying_claimant_cannot_end_this_roots_hover() {
+        // Two roots on one thread. Each has run exactly one hover pass, so their
+        // epoch counters hold the identical integer — the collision the root
+        // identity exists to break. Without it, the first root's pods dying (its
+        // window closing, a page tearing down) raise a mark the second root's
+        // next rebuild drains, ending a hover the pointer is still resting on.
+        let mut first = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        let mut second = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        first.move_over(Leaf::Top);
+        second.move_over(Leaf::Top);
+        assert_eq!(
+            first.root.hover_epoch, second.root.hover_epoch,
+            "the two roots' epochs collide, which is the whole premise"
+        );
+        assert!(first.root.is_hover_active());
+        assert!(second.root.is_hover_active());
+
+        // Drop the first root outright: every pod it owns runs the destructor
+        // that reports a severed hover link, including the claimant's.
+        drop(first);
+
+        second.rebuild_unchanged();
+        assert!(
+            second.root.is_hover_active(),
+            "a mark another root raised is none of this root's business"
+        );
+        second.paint();
+        assert!(
+            second.top.painted_hovered.get(),
+            "the widget under the pointer keeps its chrome"
+        );
+    }
+
+    #[test]
+    fn event_ctx_hover_reports_the_previous_pass_not_this_ones_claim() {
+        let mut h = HoverHarness::new(false);
+        // First move over the top leaf: it was not hovered when its handler ran.
+        h.move_over(Leaf::Top);
+        assert!(
+            !h.top.event_hovered.get(),
+            "a fresh claim does not retroactively flip `is_hovered`"
+        );
+        // Second move over the same leaf: now it observes the link it holds.
+        h.move_over(Leaf::Top);
+        assert!(
+            h.top.event_hovered.get(),
+            "the link recorded last pass is visible to this pass's handler"
+        );
+    }
+
+    // --- Cursor: the per-pass request channel ---------------------------------
+    //
+    // The cursor is hover's sibling and is deliberately not derived from it (the
+    // root's hover mirror is identity-free), so it gets its own fixture: two
+    // leaves that ask for different shapes, a container that can speak before or
+    // after routing (the last-writer case), and a capture fast-path (the drag
+    // case, where the shape must survive the pointer leaving the widget).
+
+    /// How the cursor fixture's container speaks relative to its children.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ContainerCursor {
+        /// Says nothing at all — the ordinary container.
+        Silent,
+        /// Asks *before* routing, so whatever the child asks for comes later.
+        BeforeRouting(CursorIcon),
+        /// Asks *after* routing, deliberately overriding its child.
+        AfterRouting(CursorIcon),
+    }
+
+    /// A leaf that asks for one cursor while the pointer is over it and another
+    /// while it holds the capture — the two shapes a real draggable control wants.
+    struct CursorLeaf {
+        hover_icon: Option<CursorIcon>,
+        drag_icon: Option<CursorIcon>,
+        captures: bool,
+        captured: bool,
+    }
+
+    impl crate::widget::Widget for CursorLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        // A cursor is resolved entirely in the event pass — this fixture never
+        // paints, unlike the hover one (whose authoritative read is at paint time).
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Move => {
+                    if self.captured {
+                        // The captured pass belongs to this widget wherever the
+                        // pointer has gone — re-asking here is what keeps the drag
+                        // shape alive outside its own bounds.
+                        if let Some(icon) = self.drag_icon {
+                            ctx.set_cursor(icon);
+                        }
+                        return EventResult::Handled;
+                    }
+                    let size = ctx.size();
+                    let inside = p.position.x >= 0.0
+                        && p.position.y >= 0.0
+                        && p.position.x < size.width
+                        && p.position.y < size.height;
+                    if inside && let Some(icon) = self.hover_icon {
+                        ctx.set_cursor(icon);
+                    }
+                    EventResult::Ignored
+                }
+                PointerPhase::Down => {
+                    if self.captures {
+                        ctx.capture_pointer();
+                        self.captured = true;
+                    }
+                    EventResult::Handled
+                }
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    self.captured = false;
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Two stacked cursor leaves routed exactly like [`HoverPair`], plus the
+    /// container's own optional request.
+    struct CursorPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+        own: ContainerCursor,
+    }
+
+    impl crate::widget::Widget for CursorPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let ContainerCursor::BeforeRouting(icon) = self.own {
+                ctx.set_cursor(icon);
+            }
+            let result = self.route(ctx, event);
+            if let ContainerCursor::AfterRouting(icon) = self.own {
+                ctx.set_cursor(icon);
+            }
+            result
+        }
+    }
+
+    impl CursorPair {
+        /// The capture-first, then hit-test routing every real container does.
+        fn route(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.is_active() {
+                    let r = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return r;
+                }
+            }
+            let pos = event.position();
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CursorPairView {
+        own: ContainerCursor,
+        captures: bool,
+    }
+
+    impl View<()> for CursorPairView {
+        type Element = CursorPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CursorPair {
+            CursorPair {
+                top: crate::widget::ChildPod::new(Box::new(CursorLeaf {
+                    hover_icon: Some(CursorIcon::Pointer),
+                    drag_icon: Some(CursorIcon::Grabbing),
+                    captures: self.captures,
+                    captured: false,
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(CursorLeaf {
+                    hover_icon: Some(CursorIcon::Text),
+                    drag_icon: None,
+                    captures: false,
+                    captured: false,
+                })),
+                own: self.own,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut CursorPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// A `RenderRoot` over the cursor fixture.
+    struct CursorHarness {
+        root: RenderRoot<(), CursorPairView>,
+        state: (),
+    }
+
+    impl CursorHarness {
+        fn new(own: ContainerCursor, captures: bool) -> Self {
+            let mut root: RenderRoot<(), CursorPairView> = RenderRoot::new();
+            let mut state = ();
+            root.rebuild(
+                &mut move |_: &mut ()| CursorPairView { own, captures },
+                &mut state,
+            );
+            root.layout(Size::new(100.0, 60.0));
+            CursorHarness { root, state }
+        }
+
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) -> EventOutcome {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &event)
+        }
+
+        fn move_over(&mut self, leaf: Leaf) {
+            match leaf {
+                Leaf::Top => self.dispatch(PointerPhase::Move, 50.0, 15.0),
+                Leaf::Bottom => self.dispatch(PointerPhase::Move, 50.0, 45.0),
+            };
+        }
+
+        fn cursor(&self) -> CursorIcon {
+            self.root.cursor()
+        }
+    }
+
+    #[test]
+    fn a_move_resolves_the_requested_cursor_and_absence_resolves_default() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Default,
+            "nothing has asked for anything yet"
+        );
+
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Pointer,
+            "the request reached the root"
+        );
+
+        // Moving onto the sibling re-resolves to *its* shape with nothing cleared:
+        // the pass simply has a different last writer.
+        h.move_over(Leaf::Bottom);
+        assert_eq!(h.cursor(), CursorIcon::Text);
+
+        // Moving off both: the next pass has no writer at all, and absence is the
+        // default rather than a stale value — the whole point of a stateless
+        // request.
+        h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Default,
+            "a widget that stops asking falls back with nothing to clear"
+        );
+    }
+
+    #[test]
+    fn a_cursor_change_does_not_ask_for_a_repaint() {
+        // Applying a cursor is a platform call the shell makes after the pass, with
+        // no frame involved; folding it into `needs_redraw` would repaint the whole
+        // tree on every hover move.
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        let outcome = h.dispatch(PointerPhase::Move, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+        assert!(
+            !outcome.needs_redraw,
+            "a cursor request alone never schedules a frame"
+        );
+    }
+
+    #[test]
+    fn the_last_writer_on_the_routed_path_wins() {
+        // A container that asks before routing loses to its child: the child's
+        // handler runs later in the same pass, which is what makes a specific
+        // control override the generic surface behind it.
+        let mut h =
+            CursorHarness::new(ContainerCursor::BeforeRouting(CursorIcon::ColResize), false);
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Pointer,
+            "the innermost widget the route reached spoke last"
+        );
+
+        // ...and the container's own request still resolves where no child asks
+        // (moving off both leaves leaves the container as the only writer).
+        h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert_eq!(h.cursor(), CursorIcon::ColResize);
+
+        // The deliberate override is the mirror case: asking *after* routing beats
+        // the child.
+        let mut h =
+            CursorHarness::new(ContainerCursor::AfterRouting(CursorIcon::NotAllowed), false);
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::NotAllowed,
+            "a container overriding its children asks after routing"
+        );
+    }
+
+    #[test]
+    fn only_a_pointer_move_re_resolves_the_cursor() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // A press/release says nothing about the cursor, and must not blink it back
+        // to `Default` for the duration of a click.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer, "a Down leaves it standing");
+        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer, "an Up leaves it standing");
+
+        // Neither does a scroll, a key, or the housekeeping broadcast.
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: Point::new(50.0, 15.0),
+                delta: crate::event::ScrollDelta::Lines(0.0, 1.0),
+            },
+        );
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+        h.root.event(&mut h.state, &InputEvent::Housekeeping);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+    }
+
+    #[test]
+    fn a_captured_drag_keeps_the_capturing_widgets_cursor() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, true);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // Press the top leaf: it captures. The `Down` itself resolves nothing.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert!(h.root.is_pointer_captured());
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // Drag inside, then well outside its own bounds and over the sibling: every
+        // one of these moves routes to the captured leaf alone, so its drag shape is
+        // the only request in the pass — the sibling's `Text` never gets a say.
+        h.dispatch(PointerPhase::Move, 50.0, 16.0);
+        assert_eq!(h.cursor(), CursorIcon::Grabbing);
+        h.dispatch(PointerPhase::Move, 50.0, 45.0);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Grabbing,
+            "a captured drag keeps its own cursor outside its bounds"
+        );
+        h.dispatch(PointerPhase::Move, 50.0, 500.0);
+        assert_eq!(h.cursor(), CursorIcon::Grabbing);
+
+        // Release, then a fresh uncaptured move: the ordinary hit-tested resolution
+        // is back, and the drag shape is gone with nothing cleared.
+        h.dispatch(PointerPhase::Up, 50.0, 45.0);
+        h.move_over(Leaf::Bottom);
+        assert_eq!(h.cursor(), CursorIcon::Text);
     }
 }

@@ -14,16 +14,17 @@
 //!
 //! # The platform half never depends on `frust-theme`
 //!
-//! The Glyph font bytes originate in `frust-theme`'s `glyph-fonts` feature,
-//! reachable only from [`crate::api::theme`] (behind this crate's
-//! `frust-api` feature — the one place this crate's `Cargo.toml` allows a
-//! `frust-theme` dependency at all, and only under `frust-api`). This module
-//! never names that crate: `crate::api::theme` publishes the plain
-//! `&'static [u8]` slices once via [`set_glyph_bytes`] — the api→runtime
-//! seam, exactly like `crate::api::theme::ResolvedTheme`'s packed
-//! colour/size primitives already cross it. `cargo check -p
-//! frust-native-widgets --no-default-features` never sees this module reach
-//! for `frust-theme`, feature on or off — see this crate's `Cargo.toml`.
+//! The face bytes originate in a design system's own
+//! `frust_theme::NativeTypefaces` attachment, read only by
+//! [`crate::api::theme`] (behind this crate's `frust-api` feature — the one
+//! place this crate's `Cargo.toml` allows a `frust-theme` dependency at all,
+//! and only under `frust-api`). This module never names that crate:
+//! `crate::api::theme` publishes the plain `&'static [u8]` slices once via
+//! [`set_glyph_bytes`] — the api→runtime seam, exactly like
+//! `crate::api::theme::ResolvedTheme`'s packed colour/size primitives already
+//! cross it. `cargo check -p frust-native-widgets --no-default-features`
+//! never sees this module reach for `frust-theme`, feature on or off — see
+//! this crate's `Cargo.toml`.
 //!
 //! # One-time, content-hash-keyed registration
 //!
@@ -85,6 +86,12 @@ static BYTES: OnceLock<GlyphBytes> = OnceLock::new();
 /// a `Theme`, in which case [`typeface_for`] simply never finds published
 /// bytes and every control quietly stays on [`Typeface::System`] — no
 /// warning, since nothing was ever asked to register (see [`resolve`]).
+///
+/// First-call-wins is why a *live* face swap does not re-register here: the
+/// caller's own guard already skips an unchanged pair and re-publishes a
+/// changed one, but this arm latches the first (see `crate::api::theme`'s
+/// module doc — widening it is a platform-half change owing its own device
+/// gate).
 pub(crate) fn set_glyph_bytes(mono: &'static [u8], plex: &'static [u8]) {
     let _ = BYTES.set(GlyphBytes { mono, plex });
 }

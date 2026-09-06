@@ -36,7 +36,7 @@ impl<State: 'static> View<State> for StackView<State> {
             children: self
                 .children
                 .iter()
-                .map(|view| crate::build_child(view, ctx))
+                .map(|view| crate::authoring::build_child(view, ctx))
                 .collect(),
         }
     }
@@ -50,7 +50,7 @@ impl<State: 'static> View<State> for StackView<State> {
         // Stack children are plain `AnyView`s with no key storage, so every child
         // reports `None` and reconciliation stays positional. Keyed stacks are a
         // future extension (they would need a keyed child descriptor like Flex's).
-        crate::rebuild_children(
+        crate::authoring::rebuild_children(
             &prev.children,
             &self.children,
             &mut element.children,
@@ -62,7 +62,7 @@ impl<State: 'static> View<State> for StackView<State> {
 
     fn teardown(&self, element: &mut StackWidget, ctx: &mut BuildCtx<'_>) {
         for (view, pod) in self.children.iter().zip(element.children.iter_mut()) {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -86,7 +86,7 @@ impl Widget for StackWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event(&mut self.children, ctx, event)
+        crate::authoring::route_event(&mut self.children, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -95,6 +95,8 @@ impl Widget for StackWidget {
             pod.semantics_child(ctx);
         }
     }
+
+    crate::authoring::visit_children!(children);
 }
 
 #[cfg(test)]

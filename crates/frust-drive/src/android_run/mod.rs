@@ -1,9 +1,11 @@
 //! Android drive pipeline for `frust run`: preflight → gradle build → adb
-//! install → launch → pid-scoped logcat streaming.
+//! install → launch (against the built APK's own badging-read identity, see
+//! [`badging`]) → pid-scoped logcat streaming.
 //! Device selection (this module's top level) is decoupled from clap/stdin
 //! so it's unit-testable without a terminal.
 
 pub mod adb;
+pub mod badging;
 pub mod gradle;
 pub mod preflight;
 pub mod project;
@@ -101,18 +103,22 @@ pub fn stdout_is_tty() -> bool {
 }
 
 /// Drives the full, mode/flavor-aware Android pipeline: preflight →
-/// local.properties version write → (release only) signing gate →
+/// local.properties version write → (release only) signing gate + generated
+/// `.frust-signing.properties` →
 /// variant-aware `./gradlew assemble<Flavor><Mode>` → variant-aware APK
-/// install → launch → pid-scoped logcat streaming.
+/// install → badging-derived launch → pid-scoped logcat streaming.
 /// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
-/// the mode/flavor/defines/version funnel.
+/// the mode/flavor/defines/version funnel and `extra_features` for the
+/// front-end's `--features` passthrough (appended to the mode's own cargo
+/// features; an empty slice reproduces the pre-passthrough invocation).
 pub fn run(
     runner: &dyn ProcessRunner,
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
 ) -> Result<u8> {
-    run_with_env(runner, root, device, info, &RealEnv)
+    run_with_env(runner, root, device, info, extra_features, &RealEnv)
 }
 
 /// The testable core of [`run`], taking an injected [`EnvLookup`] so
@@ -123,6 +129,7 @@ fn run_with_env(
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     env: &dyn EnvLookup,
 ) -> Result<u8> {
     // The CLI path never cancels — the shared build/install/launch core is
@@ -131,7 +138,16 @@ fn run_with_env(
     // a killable logcat handle instead, honoring a cancel flag).
     let never = AtomicBool::new(false);
     let mut on_line = |line: &str| println!("{line}");
-    let prepared = match prepare_session(runner, root, device, info, env, &mut on_line, &never)? {
+    let prepared = match prepare_session(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        env,
+        &mut on_line,
+        &never,
+    )? {
         Some(prepared) => prepared,
         // Unreachable in the CLI path (`never` never sets), but keeps the
         // function total against the cancellable core.
@@ -143,10 +159,13 @@ fn run_with_env(
     // Default SIGINT disposition would exit 130; a streamed run wants
     // Ctrl-C to stop the (already-SIGINT'd, same-process-group) `adb
     // logcat` child and exit 0.
-    ctrlc::set_handler(|| {
-        std::process::exit(0);
-    })
-    .context("failed to install Ctrl-C handler")?;
+    //
+    // This asks `crate::interrupt` — the process's single SIGINT/SIGTERM/SIGHUP
+    // owner — for that exit status rather than installing a second `ctrlc`
+    // handler, which would either fail to install or replace the one that
+    // deletes `.frust-signing.properties`: a `--release` run has already armed
+    // that scrub in `prepare_session` above.
+    crate::interrupt::exit_code_on_signal(0).context("failed to install Ctrl-C handler")?;
 
     let mut on_log_line = |line: &str| println!("{line}");
     adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
@@ -156,9 +175,12 @@ fn run_with_env(
 
 /// What the build → install → launch core resolves before the logcat
 /// streaming phase begins: the launched app's pid, for the `logcat --pid`
-/// stream both front-ends attach.
+/// stream both front-ends attach, plus the *installed* package it belongs to
+/// (badging-resolved, so a flavor's `applicationIdSuffix` is already folded
+/// in) for a caller that has to name the running app afterwards.
 struct PreparedSession {
     pid: String,
+    package: String,
 }
 
 /// The shared build → install → launch → resolve-pid core of the Android run
@@ -171,11 +193,13 @@ struct PreparedSession {
 /// interrupted — a cancel requested mid-Gradle takes effect the moment that
 /// phase returns, matching the supervisor's documented kill boundary
 /// (`docs/ARCHITECTURE.md` / `supervise` module doc).
+#[allow(clippy::too_many_arguments)] // the passthrough is one more caller-supplied input, not a new dependency
 fn prepare_session(
     runner: &dyn ProcessRunner,
     root: &Path,
     device: &Device,
     info: &BuildInfo,
+    extra_features: &[String],
     env: &dyn EnvLookup,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
@@ -205,7 +229,25 @@ fn prepare_session(
     crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
-    crate::android_build::signing::check_release_signing(&android_dir, info.mode)?;
+    // One source of truth for signing (see `android_build::signing`): the gate
+    // resolves `[signing]` and the material it verified is handed to Gradle as
+    // `android/.frust-signing.properties`. The guard's `Drop` deletes that
+    // file when this function returns — every early `?`/`bail!` included — and
+    // it is dropped explicitly right after `gradle::assemble` on the happy
+    // path, so the plaintext passwords never outlive the Gradle invocation.
+    // The `crate::interrupt` registration it carries covers what `Drop` cannot:
+    // a Ctrl-C or SIGTERM during that invocation, and an abort.
+    let generated =
+        crate::android_build::signing::check_release_signing(&project.root, info.mode, on_line)?
+            .map(|resolved| {
+                crate::android_build::signing::write_resolved(&android_dir, &resolved, on_line)
+            })
+            .transpose()?;
+    // `Some` iff this is a release run the gate actually vouched for — a
+    // non-release mode and `[signing] external = true` both resolve to `None`.
+    // Recorded before the guard is dropped below, since that is exactly the
+    // condition under which Gradle's own verdict has to be checked.
+    let signing_promised = generated.is_some();
 
     if cancel.load(Ordering::SeqCst) {
         return Ok(None);
@@ -220,13 +262,15 @@ fn prepare_session(
     // warning once through this session's `on_line` sink, so `cargo ndk`
     // never sees `--features lean` it can't resolve.
     let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
+        crate::cargo_manifest::resolve_release_features(&project.root, info.mode, extra_features);
     if let Some(warning) = warning {
         on_line(&warning);
     }
 
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
-    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines, &features);
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let props =
+        crate::android_build::tasks::gradle_properties(&target, &info.defines, &feature_refs);
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
@@ -238,12 +282,26 @@ fn prepare_session(
         &props,
         on_line,
     )?;
+    // Gradle has returned; the generated signing file has no further reader.
+    drop(generated);
     if !build_out.success {
         let tail = tail_lines(&build_out.stderr, 50);
         if tail.is_empty() {
             bail!("`./gradlew {task}` failed");
         }
         bail!("`./gradlew {task}` failed:\n{tail}");
+    }
+    // The gate promised a release-signed APK; Gradle just said it produced a
+    // debug-signed one. Refuse before it reaches a device — the same backstop
+    // `android_build::build_with_env` applies, keyed off what Gradle *did*
+    // (see `android_build::signing`'s module doc).
+    if signing_promised
+        && crate::android_build::signing::reported_debug_signing(&format!(
+            "{}\n{}",
+            build_out.stdout, build_out.stderr
+        ))
+    {
+        return Err(crate::android_build::signing::debug_signed_error());
     }
     on_line(&format!(
         "Build finished in {:.1}s.",
@@ -272,8 +330,27 @@ fn prepare_session(
         return Ok(None);
     }
 
-    on_line(&format!("Launching {}…", project.app_id));
-    let launch_out = adb::launch(runner, &device.id, &project.app_id)?;
+    // The *installed* identity, read back out of the APK just built and
+    // installed rather than derived from `frust.toml`: a Gradle flavor's
+    // `applicationIdSuffix` moves the package, and AGP roots the launchable
+    // activity's class at the module namespace instead, so both halves of the
+    // `am start -n` component (and the `pidof` package) differ from the
+    // frust.toml-derived id. Unreadable badging is a warning, not an error —
+    // the fallback below is exactly right for a project with no flavor.
+    let (identity, badging_warning) = badging::resolve(runner, env, &apk_path);
+    if let Some(badging_warning) = badging_warning {
+        on_line(&badging_warning);
+    }
+    let (component, package) = match identity {
+        Some(identity) => (identity.component(), identity.package),
+        None => (
+            adb::default_component(&project.app_id),
+            project.app_id.clone(),
+        ),
+    };
+
+    on_line(&format!("Launching {package}…"));
+    let launch_out = adb::launch(runner, &device.id, &component)?;
     if !launch_out.success {
         bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
     }
@@ -282,12 +359,23 @@ fn prepare_session(
     let pid = adb::resolve_pid(
         runner,
         &device.id,
-        &project.app_id,
+        &package,
         adb::PID_RETRY_ATTEMPTS,
         &mut sleep,
     )?;
 
-    Ok(Some(PreparedSession { pid }))
+    Ok(Some(PreparedSession { pid, package }))
+}
+
+/// What a [`spawn_session`] call hands back once the logcat stream is up: the
+/// killable/drainable [`StreamHandle`] plus the *installed* package that was
+/// actually launched, so a caller (e.g. a teardown path wanting
+/// `adb shell am force-stop <package>`) doesn't have to re-derive it out of
+/// the `Launching <package>…` log line. The iOS-side counterpart is
+/// [`crate::ios_run::IosLaunch`].
+pub struct AndroidLaunch {
+    pub stream: StreamHandle,
+    pub package: String,
 }
 
 /// The streaming, cancellable variant of [`run`] for a front-end that
@@ -301,7 +389,12 @@ fn prepare_session(
 ///
 /// Returns `Ok(None)` when `cancel` was observed before the streaming phase
 /// began (a stop during build/install/launch — the caller reports the session
-/// as killed), or `Ok(Some(handle))` with the live logcat stream otherwise.
+/// as killed), or `Ok(Some(launch))` with the live logcat stream (and the
+/// launched package, see [`AndroidLaunch`]) otherwise.
+///
+/// Killing the returned handle stops the `logcat` view of the app but does not
+/// itself terminate the app on the device — a caller that wants that asks the
+/// OS with `am force-stop <package>`.
 pub fn spawn_session(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -309,7 +402,7 @@ pub fn spawn_session(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<AndroidLaunch>> {
     spawn_session_with_env(runner, root, device, info, on_line, cancel, &RealEnv)
 }
 
@@ -323,8 +416,12 @@ fn spawn_session_with_env(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
     env: &dyn EnvLookup,
-) -> Result<Option<StreamHandle>> {
-    let Some(prepared) = prepare_session(runner, root, device, info, env, on_line, cancel)? else {
+) -> Result<Option<AndroidLaunch>> {
+    // The supervisor seam exposes no `--features` flag surface of its own, so
+    // the passthrough is empty here — a TUI/MCP-driven session builds exactly
+    // what the mode selects, as it did before the passthrough existed.
+    let Some(prepared) = prepare_session(runner, root, device, info, &[], env, on_line, cancel)?
+    else {
         return Ok(None);
     };
     if cancel.load(Ordering::SeqCst) {
@@ -334,7 +431,7 @@ fn spawn_session_with_env(
     // The `Streaming logs (pid …)` marker the supervisor's `infer_state`
     // reads to advance a session to `Running`, mirroring `run`'s own line.
     on_line(&format!("Streaming logs (pid {pid})"));
-    let handle = runner
+    let stream = runner
         .spawn_streaming(
             "adb",
             &["-s", &device.id, "logcat", "--pid", &pid],
@@ -342,13 +439,21 @@ fn spawn_session_with_env(
             &[],
         )
         .with_context(|| format!("spawning `adb logcat --pid {pid}`"))?;
-    Ok(Some(handle))
+    Ok(Some(AndroidLaunch {
+        stream,
+        package: prepared.package,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::devices::Kind;
+
+    /// No `--features` passthrough — byte-identical to the pre-passthrough
+    /// invocation, which is what every case but an explicit passthrough test
+    /// asserts against.
+    const NO_EXTRA: &[String] = &[];
 
     fn android(id: &str, name: &str) -> Device {
         Device {
@@ -500,6 +605,20 @@ mod tests {
             dir
         }
 
+        /// Complete release signing material for a default-configured
+        /// project: the four values `signing::check_release_signing`
+        /// resolves, plus a placeholder file at the `storeFile` path they
+        /// name (the gate checks a keystore exists there, not that it is a
+        /// valid JKS).
+        fn write_release_signing(android_dir: &Path) {
+            fs::write(android_dir.join("upload.jks"), b"not-a-real-jks").unwrap();
+            fs::write(
+                android_dir.join("key.properties"),
+                "storePassword=pw\nkeyPassword=pw\nkeyAlias=upload\nstoreFile=upload.jks\n",
+            )
+            .unwrap();
+        }
+
         fn fake_env() -> FakeEnv {
             FakeEnv::new().set("JAVA_HOME", JAVA_HOME)
         }
@@ -592,7 +711,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Debug, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let local_props = fs::read_to_string(android_dir.join("local.properties")).unwrap();
@@ -606,7 +726,7 @@ mod tests {
         fn release_assembles_release_and_installs_release_apk() {
             let dir = unique_project_dir("release-default");
             let android_dir = dir.join("android");
-            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            write_release_signing(&android_dir);
             let out_dir = android_dir.join("app/build/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
@@ -624,7 +744,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Release, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -640,7 +761,7 @@ mod tests {
         fn release_legacy_app_drops_lean_and_warns() {
             let dir = unique_project_dir("f2-legacy");
             let android_dir = dir.join("android");
-            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            write_release_signing(&android_dir);
             fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
             let out_dir = android_dir.join("app/build/outputs/apk/release");
             fs::create_dir_all(&out_dir).unwrap();
@@ -666,6 +787,7 @@ mod tests {
                 &dir,
                 &device(),
                 &build_info,
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -690,7 +812,7 @@ mod tests {
         fn release_declaring_app_keeps_lean_without_warning() {
             let dir = unique_project_dir("f2-declaring");
             let android_dir = dir.join("android");
-            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            write_release_signing(&android_dir);
             fs::write(
                 dir.join("Cargo.toml"),
                 "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
@@ -721,6 +843,7 @@ mod tests {
                 &dir,
                 &device(),
                 &build_info,
+                NO_EXTRA,
                 &fake_env(),
                 &mut |l| lines.push(l.to_string()),
                 &never,
@@ -731,6 +854,91 @@ mod tests {
             assert!(
                 !lines.iter().any(|l| l.contains("lean")),
                 "a declaring app must not warn: {lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// **The backstop on the `frust run --release` side.** The gate
+        /// resolved material and wrote `.frust-signing.properties`, Gradle
+        /// exited 0 — and said it debug-signed anyway. `prepare_session` must
+        /// refuse before the APK reaches a device. No `adb install` fixture is
+        /// registered, so a regression that carried on would fail with an
+        /// unregistered-invocation error instead of this message.
+        #[test]
+        fn release_bails_when_gradle_reports_it_debug_signed() {
+            let dir = unique_project_dir("gradle-debug-signed");
+            let android_dir = dir.join("android");
+            write_release_signing(&android_dir);
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+
+            let runner = preflight_ok_runner().with(
+                "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                ok("> Task :app:assembleRelease\nFrust: release build is debug-signed. \
+[FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …\nBUILD SUCCESSFUL"),
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("Gradle debug-signed"), "{message}");
+            assert!(message.contains("external = true"), "{message}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The `external = true` waiver is a declared bypass and must not start
+        /// hard failing on the same marker: the run proceeds to `adb install`
+        /// (where the shared stop fixture ends it) and the waiver warning still
+        /// fires.
+        #[test]
+        fn external_signing_still_proceeds_when_gradle_reports_debug_signing() {
+            let dir = unique_project_dir("external-debug-signed");
+            let android_dir = dir.join("android");
+            fs::write(
+                dir.join("frust.toml"),
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
+            )
+            .unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("Frust: release build is debug-signed. [FRUST-SIGNING-FALLBACK]\n\
+                        BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let err = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &build_info,
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .err()
+            .expect("expected the adb install stop fixture, not a signing refusal");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert!(
+                lines.iter().any(|l| l.contains("external = true")),
+                "the waiver must still announce itself: {lines:?}"
             );
 
             let _ = fs::remove_dir_all(&dir);
@@ -757,7 +965,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Profile, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -767,7 +976,7 @@ mod tests {
         fn flavor_and_release_assembles_flavored_task_and_installs_flavored_apk() {
             let dir = unique_project_dir("flavor-release");
             let android_dir = dir.join("android");
-            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            write_release_signing(&android_dir);
             let out_dir = android_dir.join("app/build/outputs/apk/paid/release");
             fs::create_dir_all(&out_dir).unwrap();
             fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
@@ -785,7 +994,8 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Release, Some("paid"));
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -799,7 +1009,8 @@ mod tests {
             let runner = preflight_ok_runner();
 
             let build_info = info(BuildMode::Release, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("keytool"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
@@ -828,8 +1039,145 @@ mod tests {
             );
 
             let build_info = info(BuildMode::Debug, None);
-            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Plants a fake SDK (one build-tools version holding an `aapt2`)
+        /// under `dir`, returning the `aapt2` path the badging step will
+        /// invoke and the `ANDROID_HOME` value pointing at its SDK root.
+        fn plant_aapt2(dir: &std::path::Path) -> (String, String) {
+            let build_tools = dir.join("sdk/build-tools/35.0.1");
+            fs::create_dir_all(&build_tools).unwrap();
+            let aapt2 = build_tools.join("aapt2");
+            fs::write(&aapt2, "#!/bin/sh\n").unwrap();
+            (
+                aapt2.to_string_lossy().into_owned(),
+                dir.join("sdk").to_string_lossy().into_owned(),
+            )
+        }
+
+        /// The flavor bug this badging step exists for: a `dev` flavor
+        /// declaring `applicationIdSuffix ".dev"` installs
+        /// `dev.f0x.myapp.dev`, while AGP roots the launchable activity at
+        /// the module namespace (`dev.f0x.myapp.MainActivity`). Only the
+        /// badging-derived component and package are registered on the fake
+        /// runner, so a regression back to the `frust.toml`-derived
+        /// `dev.f0x.myapp/.MainActivity` + `pidof dev.f0x.myapp` would find
+        /// no fixture and error instead of silently passing.
+        #[test]
+        fn badging_identity_drives_both_the_launch_component_and_the_pid_poll() {
+            let dir = unique_project_dir("badging-flavor");
+            let out_dir = dir.join("android/app/build/outputs/apk/dev/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-dev-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-dev-debug.apk")
+                .to_string_lossy()
+                .into_owned();
+            let (aapt2, android_home) = plant_aapt2(&dir);
+
+            let runner = preflight_ok_runner()
+                .with(
+                    "./gradlew assembleDevDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    format!("{aapt2} dump badging {apk_path}"),
+                    ok("package: name='dev.f0x.myapp.dev' versionCode='1' versionName='1.0'\n\
+                        launchable-activity: name='dev.f0x.myapp.MainActivity'  label='' icon=''\n"),
+                )
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp.dev/dev.f0x.myapp.MainActivity",
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp.dev",
+                    ok("4242\n"),
+                );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let prepared = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, Some("dev")),
+                NO_EXTRA,
+                &fake_env().set("ANDROID_HOME", &android_home),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .unwrap()
+            .expect("a prepared session, not a cancellation");
+
+            assert_eq!(prepared.pid, "4242");
+            assert!(
+                lines.iter().any(|l| l == "Launching dev.f0x.myapp.dev…"),
+                "the launch line must name the installed package: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.starts_with("warning:")),
+                "a readable APK must not warn: {lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Unreadable badging (here: no SDK env, so the PATH `aapt2` lookup
+        /// fails to spawn) warns once and falls back to the pre-badging
+        /// `<app_id>/.MainActivity` + `pidof <app_id>` behavior — never a hard
+        /// error. Only the fallback invocations are registered, so a
+        /// regression that errored out (or launched something else) fails.
+        #[test]
+        fn unreadable_badging_warns_once_and_falls_back_to_the_frust_toml_identity() {
+            let dir = unique_project_dir("badging-fallback");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = preflight_ok_runner()
+                .with(
+                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                    ok(""),
+                )
+                .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok("4242\n"));
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let prepared = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .unwrap()
+            .expect("a prepared session, not a cancellation");
+
+            assert_eq!(prepared.pid, "4242");
+            assert_eq!(
+                lines.iter().filter(|l| l.starts_with("warning:")).count(),
+                1,
+                "exactly one fallback warning: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l == "Launching dev.f0x.myapp…"),
+                "{lines:?}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
@@ -865,7 +1213,7 @@ mod tests {
 
             let cancel = AtomicBool::new(false);
             let mut lines = Vec::new();
-            let mut handle = spawn_session_with_env(
+            let launch = spawn_session_with_env(
                 &runner,
                 &dir,
                 &device(),
@@ -882,7 +1230,11 @@ mod tests {
                 lines.iter().any(|l| l == "Streaming logs (pid 4242)"),
                 "{lines:?}"
             );
+            // The *installed* package rides back with the stream, so a caller
+            // wanting `am force-stop` never has to re-parse the launch line.
+            assert_eq!(launch.package, "dev.f0x.myapp");
 
+            let mut handle = launch.stream;
             let mut logcat = Vec::new();
             while let Ok(line) = handle.lines.recv() {
                 logcat.push(line);

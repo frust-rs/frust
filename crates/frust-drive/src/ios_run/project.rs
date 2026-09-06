@@ -1,34 +1,12 @@
 //! Project detection for `frust run`'s iOS simulator path (mirrors
-//! `android_run::project`): locates `frust.toml` in the current
-//! directory and resolves the iOS bundle identifier; `ios/Runner.xcodeproj`
-//! is checked separately via [`require_ios_dir`], since the desktop-fallback
-//! path doesn't need it.
+//! `android_run::project`): reads `frust.toml` through the shared
+//! `crate::manifest` reader and resolves the iOS bundle identifier;
+//! `ios/Runner.xcodeproj` is checked separately via [`require_ios_dir`],
+//! since the desktop-fallback path doesn't need it.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-
-/// The `[app]`/`[ios]` subset of `frust.toml` that `frust run` reads.
-#[derive(Debug, Clone, Deserialize)]
-struct FrustToml {
-    app: AppSection,
-    #[serde(default)]
-    ios: Option<IosSection>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AppSection {
-    name: String,
-    org: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct IosSection {
-    #[serde(default)]
-    identifier: Option<String>,
-}
+use anyhow::{Context, Result};
 
 /// A detected Frust project, resolved from a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,16 +21,8 @@ pub struct Project {
 /// Locates and parses `frust.toml` in `cwd`. Does not require `ios/` to
 /// exist — see [`require_ios_dir`] for that check, run only on the iOS path.
 pub fn detect(cwd: &Path) -> Result<Project> {
-    let toml_path = cwd.join("frust.toml");
-    if !toml_path.exists() {
-        bail!(
-            "no `frust.toml` found in `{}` — is this a Frust project? Run `frust create` to scaffold one.",
-            cwd.display()
-        );
-    }
-    let raw = fs::read_to_string(&toml_path)
-        .with_context(|| format!("reading `{}`", toml_path.display()))?;
-    let parsed = parse(&raw).with_context(|| format!("parsing `{}`", toml_path.display()))?;
+    let toml_path = crate::manifest::path(cwd);
+    let parsed = crate::manifest::load(cwd)?;
 
     let bundle_id = match parsed.ios.and_then(|i| i.identifier) {
         Some(explicit) => {
@@ -82,16 +52,12 @@ pub fn detect(cwd: &Path) -> Result<Project> {
     })
 }
 
-fn parse(raw: &str) -> Result<FrustToml> {
-    toml::from_str(raw).context("invalid frust.toml")
-}
-
 /// `ios/` (a generated Xcode project, identified by its `.xcodeproj`) must
 /// exist for the iOS simulator run path.
 pub fn require_ios_dir(root: &Path) -> Result<PathBuf> {
     let ios_dir = root.join("ios");
     if !ios_dir.join("Runner.xcodeproj").exists() {
-        bail!(
+        anyhow::bail!(
             "no `ios/Runner.xcodeproj` found in `{}` — this Frust project predates iOS \
              support, or `ios/` wasn't generated. Re-run `frust create` to add it.",
             root.display()
@@ -103,6 +69,7 @@ pub fn require_ios_dir(root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn unique_temp_dir(tag: &str) -> PathBuf {

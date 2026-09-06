@@ -20,8 +20,8 @@ expression: "render_to_string(100, 30, &workbench_state())"
    Doctor · d            │                                                                          
    Build · b             │                                                                          
    Clean · c             │                                                                          
-                         │                                                                          
-                         │                                                                          
+   MCP off · M           │                                                                          
+   DAP off · D           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

@@ -1,9 +1,7 @@
-//! Overlays section (`c07`, reference §07): "Only one floating layer at a
+//! Overlays section (reference §07): "Only one floating layer at a
 //! time" — a confirmation dialog, the signature amber-ring command palette
-//! (with a live substring filter), and a bottom-sheet-shaped page pushed
-//! straight through the navigator's transparent-page + [`PageTransition::SlideUp`]
-//! primitive (no `frust::bottom_sheet`; the reference build's own pane-picker
-//! demo, not the M3 catalog widget).
+//! (with a live substring filter), and the Glyph modal bottom sheet
+//! (`frust_glyph::sheet`) holding the reference build's own pane-picker demo.
 //!
 //! # Demo state lives outside `CatalogState` (deliberate)
 //!
@@ -16,18 +14,19 @@
 //! survive across those re-invocations, so — mirroring the Huddle showcase's
 //! `workspace_drawer::entrance_progress` precedent — they live behind a
 //! self-healing `thread_local!` cache ([`demo_state`]) instead of a new field
-//! on the shared [`CatalogState`] (out of this task's scope: `src/pages/overlays.rs`
-//! only, see the task file's Hard rules).
+//! on the shared [`CatalogState`] (scoped to this page: `src/pages/overlays.rs`
+//! only).
 
 use std::cell::Cell;
 
-use frust::glyph::{
-    PaletteItem, command_palette, glyph_card, glyph_dialog, show_command_palette, show_glyph_dialog,
-};
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox,
-    Theme, TransitionSpec, any, button, inflexible, text, use_context,
+    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    NavigatorController, Padding, PopResult, RwSignal, Set, SizedBox, Theme, any, button,
+    inflexible, text, use_context,
+};
+use frust_glyph::{
+    PaletteItem, command_palette, glyph_dialog, glyph_sheet, show_command_palette,
+    show_glyph_dialog, show_glyph_sheet,
 };
 
 use crate::CatalogState;
@@ -35,22 +34,22 @@ use crate::CatalogState;
 /// Muted subhead ink (Glyph dark `fg-muted`), matching the reference build's
 /// `.subhead` treatment for each overlay's label.
 /// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn subhead_ink() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
 /// Result-caption ink (Glyph dark accent `#ffb627`) — the same amber used for
 /// the app title in `crate::header_row`.
 /// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn caption_ink() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -115,7 +114,7 @@ fn all_palette_items() -> Vec<PaletteItem> {
 }
 
 /// The live substring filter driving `on_query` — the app's job (v1: the
-/// palette itself has no fuzzy engine, see `frust::glyph::command_palette`'s
+/// palette itself has no fuzzy engine, see `frust_glyph::command_palette`'s
 /// module docs). Case-insensitive; an empty query returns every item.
 fn filter_items(query: &str) -> Vec<PaletteItem> {
     if query.is_empty() {
@@ -141,7 +140,7 @@ fn caption_view(caption: &str) -> AnyView<CatalogState> {
 /// Wire the "Open dialog" button: `show_glyph_dialog` with the reference
 /// build's own confirmation copy (§07's "Revoke observer-token?"), a ghost
 /// Cancel + a danger Revoke action. Both actions pop immediately (bypassing
-/// the dialog's own exit animation — the same immediacy `crate::glyph::dialog`'s
+/// the dialog's own exit animation — the same immediacy `frust_glyph::dialog`'s
 /// tests document for an action tap); the scrim/Escape path still plays the
 /// widget's staged exit. The result lands in [`OverlaysDemo::caption`].
 fn open_dialog_button(
@@ -232,7 +231,7 @@ fn open_palette_button(
 
 /// The pane-picker rows from the motion reference build's own bottom-sheet
 /// demo (glyph-motion.html §06) — reused here as content, not the transition
-/// itself (`c08` owns the motion-pattern showcase).
+/// itself (the motion page owns the motion-pattern showcase).
 const SHEET_ROWS: [(&str, &str); 4] = [
     ("▣", "Split pane right"),
     ("▤", "Split pane down"),
@@ -252,59 +251,44 @@ fn sheet_row(glyph: &str, label: &str) -> FlexChild<CatalogState> {
     ))
 }
 
-/// The sheet page's body: the four pane-picker rows plus a Close button that
-/// pops the navigator (the task's "close button pops" requirement).
+/// The sheet's content: a heading, the four pane-picker rows, and a Close
+/// button that pops the navigator — in addition to the sheet's own scrim
+/// tap/handle drag/Escape/back dismiss vectors.
 fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
-    let mut children: Vec<FlexChild<CatalogState>> = SHEET_ROWS
-        .iter()
-        .map(|(g, label)| sheet_row(g, label))
-        .collect();
+    let mut children: Vec<FlexChild<CatalogState>> = vec![
+        inflexible(text("Pane picker".to_string()).size(13.5)),
+        inflexible(SizedBox(None, Some(12.0))),
+    ];
+    children.extend(SHEET_ROWS.iter().map(|(g, label)| sheet_row(g, label)));
     children.push(inflexible(SizedBox(None, Some(8.0))));
     children.push(inflexible(
         button("Close", move |_: &mut CatalogState| nav.pop())
             .style(ButtonStyle::Ghost)
             .small(),
     ));
-    any(FlexView::new(Axis::Vertical, children))
-}
-
-/// M3/Flutter bottom-sheet width convention: edge-to-edge on narrow screens,
-/// capped and horizontally centered on wide ones. Material 3 gives modal
-/// bottom sheets a 640dp max width (m3.material.io "Bottom sheets" specs;
-/// Flutter's `BottomSheet` constrains likewise) — `SizedBox` clamps the
-/// request into the incoming constraints, so `min(640, screen width)` falls
-/// out of the clamp with no measuring.
-const SHEET_MAX_WIDTH: f64 = 640.0;
-
-/// Pin a sheet panel to the BOTTOM of the transparent page — full width on
-/// phones, capped at [`SHEET_MAX_WIDTH`] and centered on larger screens
-/// (Ed's device-gate round 3; a bare view floats top-left at intrinsic size).
-fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
-    any(Align(
-        Alignment { x: 0.0, y: 1.0 },
-        SizedBox(Some(SHEET_MAX_WIDTH), None).child(panel),
+    any(Padding(
+        EdgeInsets::all(16.0),
+        FlexView::new(Axis::Vertical, children),
     ))
 }
 
-/// Wire the "Bottom sheet" button: `push_transparent_for_result` with
-/// [`PageTransition::SlideUp`] and a `glyph_card`-shaped page (the task's
-/// "card-ish sheet page") holding [`sheet_body`] — the reference build's
-/// pane-picker sheet demo, driven through the raw navigator primitive rather
-/// than the M3 `frust::bottom_sheet` catalog widget (this app has no
-/// Glyph-styled sheet chrome of its own to reach for).
+/// Wire the "Bottom sheet" button: [`show_glyph_sheet`] holding
+/// [`sheet_body`] — the reference build's pane-picker sheet demo, now on the
+/// Glyph modal bottom sheet catalog widget (`frust_glyph::sheet`) rather
+/// than a bespoke `glyph_card` pushed through the raw
+/// [`PageTransition::SlideUp`](frust::PageTransition::SlideUp) navigator
+/// primitive — that raw approach had no scrim/dimming of its own at all;
+/// this widget supplies one that fades independently of the panel's own
+/// slide (see the widget's module docs).
 fn open_sheet_button(
     demo: OverlaysDemo,
     nav: NavigatorController<CatalogState>,
 ) -> FlexChild<CatalogState> {
     inflexible(button("Bottom sheet", move |_: &mut CatalogState| {
-        let card_nav = nav.clone();
-        nav.push_transparent_for_result(
-            move || {
-                sheet_scaffold(any(glyph_card::<CatalogState>()
-                    .title(text("Pane picker".to_string()).size(13.5))
-                    .desc(sheet_body(card_nav.clone()))))
-            },
-            TransitionSpec::duration(PageTransition::SlideUp),
+        let body_nav = nav.clone();
+        show_glyph_sheet(
+            &nav,
+            move || glyph_sheet(sheet_body(body_nav.clone())),
             move |_: &mut CatalogState, _result: PopResult| {
                 demo.caption.set("Sheet: closed".to_string());
             },

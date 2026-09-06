@@ -1,6 +1,6 @@
 //! AppBar section: six demo blocks — anatomy, scroll collapse, back-nav
 //! title crossfade, the overflow menu, selection mode, and the connection
-//! banner. The catalog's own root [`AppBar`](frust::glyph::app_bar)
+//! banner. The catalog's own root [`AppBar`](frust_glyph::app_bar)
 //! is the real integration; this section is the reference showcase, kept
 //! visually consistent with it.
 //!
@@ -23,19 +23,18 @@
 //! these six moments rendered inline, so a variation's state now simply
 //! survives a push→pop→push round-trip instead of a rebuild.
 //!
-//! # The overflow-menu anchor: a genuine escape hatch
+//! # The overflow-menu anchor: a genuine framework gap
 //!
-//! [`frust::glyph::show_glyph_menu`]'s anchor is a caller-reported
-//! window-coordinate `kurbo::Rect` (`frust_widgets::glyph::menu`'s module
-//! docs describe how an `AppBar`'s trailing icon records its own painted
-//! bounds during `paint`) — there is no ancestor-bounds query a
-//! widget can make mid-layout, and no facade widget reports a child's
-//! painted bounds back to app code. [`AnchorReporter`] is this crate's minimal
-//! answer: a hand-rolled `View`/`Widget` pair built directly against
-//! `frust-core`/`kurbo` (this crate's `Cargo.toml` now carries both as real
-//! dependencies — see its own comment for the full rationale), mirroring
-//! `examples/huddle::ui::fill_box::FilledBox`'s documented low-level
-//! escape-hatch pattern exactly: it paints its child unchanged and, on every
+//! [`frust_glyph::show_glyph_menu`]'s anchor is a caller-reported
+//! window-coordinate `Rect` (`frust::kurbo::Rect`, flat-re-exported by
+//! `frust::authoring`; `frust_glyph::menu`'s module docs describe how an `AppBar`'s
+//! trailing icon records its own painted bounds during `paint`) — there is
+//! no ancestor-bounds query a widget can make mid-layout, and no facade
+//! widget reports a child's painted bounds back to app code. [`AnchorReporter`]
+//! is this crate's minimal answer: a hand-rolled `View`/`Widget` pair reached
+//! entirely through `frust::authoring`, mirroring
+//! `examples/huddle::ui::fill_box::FilledBox`'s documented low-level widget
+//! pattern exactly: it paints its child unchanged and, on every
 //! paint pass, stashes `ctx.origin()`/`ctx.size()` into a shared
 //! `Rc<Cell<Rect>>` the kebab's `on_press` handler reads back when opening
 //! the menu.
@@ -60,19 +59,12 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-// Low-level escape hatch (see the module docs' "genuine escape hatch"
-// section) — `frust-core`/`kurbo` back only `AnchorReporter` below; every
-// other widget in this file comes from the `frust` facade.
-use frust_core::{
+// AnchorReporter (see the module docs' "genuine framework gap" section) is a
+// hand-rolled `View`/`Widget` pair — reached, like every other widget in this
+// file, entirely through the `frust` facade.
+use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, Widget,
-};
-use kurbo::{Point, Rect, Size};
-
-use frust::glyph::{
-    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
-    glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
-    show_glyph_menu,
+    PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget,
 };
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
@@ -81,6 +73,11 @@ use frust::{
     GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult, RwSignal,
     ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, flexible, inflexible, safe_area,
     scroll_view, spawn_local, text, use_context,
+};
+use frust_glyph::{
+    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
+    glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
+    show_glyph_menu,
 };
 
 use crate::CatalogState;
@@ -93,7 +90,7 @@ use crate::CatalogState;
 /// baseline pre-context — see `navigation.rs`'s `accent()` twin.
 fn amber() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -101,13 +98,13 @@ fn amber() -> Color {
 /// A muted caption ink — see [`amber`]'s twin.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
 
 /// `color` with its alpha channel replaced — duplicated from
-/// `frust-widgets::glyph::badge`'s crate-private helper of the same shape
+/// `frust-glyph::badge`'s crate-private helper of the same shape
 /// (unreachable from here), see `interactions.rs`'s identical duplicate.
 fn with_alpha(color: Color, alpha: f32) -> Color {
     let c = color.components;
@@ -170,7 +167,7 @@ fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> 
 
 /// Wrap a variation page's real `bar` over a scrollable `body` — the pushed
 /// full-screen frame every variation shares. `bar` consumes the top window
-/// inset itself (`glyph::app_bar`'s own module docs), so `body`'s safe area
+/// inset itself (`frust_glyph::app_bar`'s own module docs), so `body`'s safe area
 /// disables its own top edge (`.top(false)`) to avoid double-padding it,
 /// exactly mirroring `crate::lib`'s root shell composition.
 fn variation_frame(
@@ -209,12 +206,12 @@ macro_rules! local_sig {
 }
 
 // ---------------------------------------------------------------------------
-// AnchorReporter — the overflow-menu anchor escape hatch (see module docs)
+// AnchorReporter — the overflow-menu anchor (see module docs)
 // ---------------------------------------------------------------------------
 
 /// Paints `child` unchanged but records its own window-coordinate rect into
 /// `target` on every paint pass — see the [module docs](self)'s "genuine
-/// escape hatch" section. Mirrors `examples/huddle::ui::fill_box::FilledBox`'s
+/// framework gap" section. Mirrors `examples/huddle::ui::fill_box::FilledBox`'s
 /// single-child `ChildPod` shape exactly.
 struct AnchorReporter<State: 'static> {
     child: AnyView<State>,
@@ -445,7 +442,7 @@ local_sig!(collapse_elevated_sig, bool, false);
 /// Scroll offset (logical px) past which [`AppBarView::large`] is fully
 /// collapsed — matches `AppBarView::collapse_progress`'s own `min(1,
 /// offset/60)` mapping
-/// (`frust_widgets::glyph::appbar::AppBarView::collapse_progress`'s docs).
+/// (`frust_glyph::appbar::AppBarView::collapse_progress`'s docs).
 const COLLAPSE_SPAN_PX: f64 = 60.0;
 /// Scroll offset (logical px) past which the bar also raises its scrolled
 /// elevation — mirrors [`crate::ELEVATION_THRESHOLD_PX`] (the root AppBar's
@@ -462,7 +459,7 @@ fn collapse_meta_row() -> AnyView<CatalogState> {
         Axis::Horizontal,
         vec![
             inflexible(any(
-                frust::glyph::badge("connected", BadgeVariant::Success).dot(true)
+                frust_glyph::badge("connected", BadgeVariant::Success).dot(true)
             )),
             gap(8.0),
             inflexible(text("100.71.31.57:50051 · 42ms").size(11.0).color(muted())),
@@ -685,7 +682,7 @@ fn overflow_menu_entries() -> Vec<MenuEntry> {
 }
 
 /// 04 overflow menu: the real pushed page. A kebab trailing icon opens
-/// [`frust::glyph::show_glyph_menu`], anchored at the kebab's own painted
+/// [`frust_glyph::show_glyph_menu`], anchored at the kebab's own painted
 /// rect via [`AnchorReporter`] (see the [module docs](self)) — the inline
 /// demo's exact wiring, plus a leading [`back_button`] and scrollable filler
 /// content underneath.

@@ -1,5 +1,5 @@
 //! Shadertoy — a Frust shader showcase: WGSL fragment-shader ports painted
-//! full-screen through the [`shader_view::ShaderView`] escape-hatch widget,
+//! full-screen through the hand-rolled [`shader_view::ShaderView`] widget,
 //! behind a menu picker and an FPS HUD in the same style as
 //! `benchmarks/frust_bench`'s S1 scenario.
 //!
@@ -13,12 +13,12 @@
 pub mod shader_view;
 pub mod shaders;
 
+use frust::authoring::scene::ShaderProgram;
 use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
-    SizedBox, Stack, SystemUiMode, Theme, any, button, flexible, inflexible, safe_area,
-    set_app_theme, set_system_ui_mode, text,
+    SizedBox, Stack, SystemUiMode, any, button, flexible, inflexible, safe_area, set_app_theme,
+    set_system_ui_mode, text,
 };
-use frust_scene::ShaderProgram;
 
 use shader_view::shader_view;
 
@@ -121,7 +121,7 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
     );
 
     let hint =
-        text("Fragment shader rendered offscreen and composited via vello's texture override.")
+        text("Fragment shader rendered offscreen by the engine's ShaderQuad pass and drawn as a SceneTexture.")
             .size(12.0)
             .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3));
 
@@ -157,7 +157,7 @@ impl Component for ShadertoyApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = frust_material::baseline();
         theme.brightness = Brightness::Dark;
         set_app_theme(theme);
         AppState {

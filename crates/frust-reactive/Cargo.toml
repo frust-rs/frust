@@ -11,6 +11,9 @@ license.workspace = true
 # Version-Pin Policy): the frame path is a custom subscriber, not `RenderEffect`.
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+# `net` is the smallest feature that satisfies tokio's `enable_io()` gate
+# (cfg_io_driver requires `net`, or `process`/`signal` on unix) — the IO
+# driver `frust::spawn`'s background tasks need to host real sockets.
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
 # Not yet a workspace dependency; pinned directly here for future use.
 futures = "0.3"

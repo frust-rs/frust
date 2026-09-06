@@ -1,5 +1,5 @@
 //! `scaffold`/`placeholder_body` — the shared titled-screen shell: the
-//! screen's own [`app_bar`](frust::app_bar) at the top plus a centered body.
+//! screen's own [`app_bar`](frust_material::app_bar) at the top plus a centered body.
 //! Promoted here from the former `screens` hub (now dissolved), since it is
 //! consumed across three feature slices
 //! (`messages::presentation::pages::thread`,
@@ -8,13 +8,14 @@
 //! mirrors [`crate::ui::fill_box`]'s promotion precedent.
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, app_bar, flexible,
+    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, flexible,
     inflexible, text,
 };
+use frust_material::app_bar;
 
 use crate::HuddleState;
 
-/// A titled screen scaffold: the screen's own [`app_bar`](frust::app_bar) at
+/// A titled screen scaffold: the screen's own [`app_bar`](frust_material::app_bar) at
 /// the top and a centered `body` filling the rest.
 pub fn scaffold(title: &str, body: AnyView<HuddleState>) -> AnyView<HuddleState> {
     any(FlexView::new(

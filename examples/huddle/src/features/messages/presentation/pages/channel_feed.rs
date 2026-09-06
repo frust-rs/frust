@@ -28,30 +28,58 @@
 //! map keyed by channel id (this screen's counterpart to `screens::thread`'s
 //! `composer_for`, keyed there by root message id instead).
 //!
-//! # Two deliberate adaptations to the facade-only widget set
+//! # Feed container: a keyed, variable-extent `ListView`
+//!
+//! The feed renders through
+//! [`ListView::builder_keyed`](frust::ListView::builder_keyed) over one flat
+//! row list — the "loading older…" and "being typed…" singleton rows (when
+//! shown) bracketing a [`FeedRow::Message`] per loaded message, rebuilt fresh
+//! from
+//! [`MessagesController::feed`](crate::features::messages::MessagesController::feed)
+//! every frame exactly like the earlier `keyed` `Column`'s children were —
+//! keyed by [`FeedRow::key`] (message id for a real message, the same
+//! collision-proof string keys the earlier list used for the two
+//! singletons). [`FEED_ROW_ESTIMATE`] feeds
+//! [`estimated_item_extent`](frust::ListView::estimated_item_extent),
+//! switching the list into variable-extent mode: every row still measures and
+//! lays out at its own real height (an "other" row's avatar, a link/file
+//! card, reaction chips, the typing row's spinner) — the estimate is only
+//! ever the *assumed* height of a row the list hasn't laid out yet.
+//! [`on_near_start`](frust::ListView::on_near_start) at [`NEAR_START_PX`]
+//! drives the "load older" pagination trigger, and the list's own **prepend
+//! anchoring** (see `frust_widgets::list_view`'s module docs) is what keeps
+//! the viewport visually stationary the instant
+//! [`load_older`](crate::features::messages::MessagesController::load_older)
+//! prepends a page — this screen carries no scroll-position bookkeeping of
+//! its own.
+//!
+//! An earlier version of this screen could not reach for `ListView` at all:
+//! at the time it required a single uniform `item_extent` and reconciled rows
+//! by raw index, neither compatible with variable-height chat bubbles or the
+//! keyed identity a mid-list-safe feed needs, so the feed was a
+//! [`scroll_view`](frust::scroll_view) over a [`keyed`](frust::keyed)
+//! [`Column`](frust::Column) instead, with the near-start trigger emulated
+//! off [`ScrollView::on_scroll`](frust::ScrollView). `ListView::builder_keyed`
+//! plus `estimated_item_extent` (`frust-widgets`' own later addition) close
+//! exactly that gap, so the feed now uses the container the original design
+//! named.
+//!
+//! # One remaining adaptation to the facade-only widget set
 //!
 //! This example crate depends on the `frust` facade **alone** (see
-//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions), so a couple of
-//! the design's visual items are expressed with the widgets the facade ships
-//! rather than a bespoke `Widget`:
+//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions), so one visual
+//! item is still expressed with the widgets the facade ships rather than a
+//! bespoke `Widget`:
 //!
-//! - **Feed container.** The original design named `ListView` + `on_near_start`, but
-//!   `ListView` requires a single uniform `item_extent` ("variable-extent lazy
-//!   layout is deferred" — its own module docs) and reconciles by raw index,
-//!   which cannot render variable-height chat bubbles nor preserve the keyed
-//!   identity the entrance item asks for. The feed is instead a
-//!   [`scroll_view`](frust::scroll_view) over a [`keyed`](frust::keyed)
-//!   [`Column`](frust::Column) — variable heights + stable per-message keys
-//!   — with the same near-start "load older" trigger driven off
-//!   [`ScrollView::on_scroll`](frust::ScrollView) instead of
-//!   `on_near_start`.
 //! - **Per-message entrance + typing indicator.** A per-item slide/fade
-//!   `AnimationController` needs a custom painting `Widget`, which a facade-only
-//!   crate cannot author (the same limitation the `ui::toast` module already
-//!   notes). The keyed list gives newly-appended messages stable identity, and
-//!   the "being typed" affordance uses the facade's self-animating
-//!   [`loading_indicator`](frust::loading_indicator) /
-//!   [`cupertino_activity_indicator`](frust::cupertino_activity_indicator)
+//!   `AnimationController` would need a custom painting `Widget`, authored via
+//!   `frust::authoring` — the seam `ui::toast`'s own entrance wrapper uses —
+//!   but this screen stays on the facade's built-in widgets alone rather than
+//!   hand-rolling one here. The keyed list gives newly-appended messages
+//!   stable identity, and the "being typed" affordance uses the facade's
+//!   self-animating
+//!   [`loading_indicator`](frust_material::loading_indicator) /
+//!   [`cupertino_activity_indicator`](frust_cupertino::cupertino_activity_indicator)
 //!   as a live animation. Message rows are FLAT (no `Card` wrapper) — the
 //!   `filled_card`/`elevated_card` bubble
 //!   backgrounds were removed because the card's hardcoded 16px inset inflated
@@ -60,16 +88,17 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
-    FlexView, GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding,
-    RwSignal, ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
-    cupertino_activity_indicator, filter_chip, flexible, hero, icon, icons, inflexible, keyed,
-    loading_indicator, safe_area, scroll_view, text, text_input, use_context,
+    Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
+    EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
+    Padding, RwSignal, Set, SizedBox, Stack, Theme, Update, any, flexible, hero, icon, icons,
+    inflexible, kurbo::Size, safe_area, text, text_input, use_context,
 };
-use kurbo::Size;
+use frust_cupertino::cupertino_activity_indicator;
+use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
@@ -80,6 +109,21 @@ use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
 /// Distance (logical px) from the top of the feed at which the near-start
 /// "load older" trigger fires — the infinite-scroll edge for `#firehose`.
 const NEAR_START_PX: f64 = 96.0;
+
+/// [`ListView::estimated_item_extent`](frust::ListView::estimated_item_extent)'s
+/// assumed height for a row the list hasn't laid out yet — a single-line
+/// "other" message row (sender line + one body line, the more chrome-heavy of
+/// the two row shapes, since it also carries the avatar column), picked from
+/// `Theme`'s M3 type scale rather than guessed: [`message_row`]'s own 4px
+/// top+bottom row padding (8) + [`message_bubble`]'s own 6px top+bottom
+/// bubble padding (12) + a meta line sized off `TypeScale::label_large`'s
+/// 20px line-height (nearest scale role to the row's literal 13px
+/// sender/timestamp text) + a body line sized off `TypeScale::body_large`'s
+/// 24px line-height (nearest scale role to the row's literal 15px body
+/// text) = 8 + 12 + 20 + 24 = 64. Only ever the *assumed* height — a
+/// materialized row always measures and lays out its own real height (see
+/// the module docs' *Feed container* section).
+const FEED_ROW_ESTIMATE: f64 = 64.0;
 
 /// Swipe-to-reply strip accent — a Slack-familiar blue.
 const REPLY_COLOR: Color = Color::from_rgb8(0x1E, 0x88, 0xE5);
@@ -349,8 +393,37 @@ fn feed_app_bar(
     .bottom(false))
 }
 
-/// The scrolling feed area: skeletons while loading, else the keyed message
-/// column with the near-start pagination trigger and a trailing typing row.
+/// One row of the virtualized feed list — the two ephemeral singleton rows
+/// bracketing a real message, exactly the shape the earlier `keyed` `Column`
+/// built by hand each frame. See the [module docs](self)' *Feed container*
+/// section.
+enum FeedRow {
+    /// The "loading older…" row, shown at the top while an older page loads.
+    LoadingOlder,
+    /// A real message.
+    Message(FeedMessage),
+    /// The "being typed…" row, shown at the bottom while a reply is pending.
+    Typing,
+}
+
+impl FeedRow {
+    /// This row's stable [`ChildKey`] — a message's id for
+    /// [`FeedRow::Message`], the same collision-proof string keys the earlier
+    /// list used for its two singletons otherwise (distinct from any message
+    /// id: [`ChildKey::new`] hashes the value *and* its type, and a message
+    /// id is a `u32`, never a `&str`).
+    fn key(&self) -> ChildKey {
+        match self {
+            FeedRow::LoadingOlder => ChildKey::new("loading_older"),
+            FeedRow::Message(msg) => ChildKey::new(msg.id),
+            FeedRow::Typing => ChildKey::new("typing"),
+        }
+    }
+}
+
+/// The scrolling feed area: skeletons while loading, else the keyed,
+/// variable-extent `ListView` with the near-start pagination trigger. See the
+/// [module docs](self)' *Feed container* section.
 fn feed_body(
     controller: &Arc<MessagesController>,
     design: DesignLanguage,
@@ -370,43 +443,62 @@ fn feed_body(
         return empty_feed_state();
     }
 
-    let mut children: Vec<frust::FlexChild<HuddleState>> = Vec::new();
-
+    let mut rows: Vec<FeedRow> = Vec::with_capacity(messages.len() + 2);
     if loading_older {
-        children.push(keyed("loading_older", loading_older_row(design)));
+        rows.push(FeedRow::LoadingOlder);
     }
-
-    for msg in &messages {
-        children.push(keyed(msg.id, message_row(controller, msg, sheet_sig)));
-    }
-
+    rows.extend(messages.into_iter().map(FeedRow::Message));
     if typing {
-        children.push(keyed("typing", typing_row(design)));
+        rows.push(FeedRow::Typing);
     }
+    let row_count = rows.len();
+    let rows = Rc::new(rows);
 
-    let column = FlexView::new(Axis::Vertical, children)
-        .cross_axis(CrossAxisAlignment::Stretch)
-        .main_axis(MainAxisAlignment::Start);
+    let key_rows = Rc::clone(&rows);
+    let key_of = move |i: usize| key_rows[i].key();
+
+    let build_rows = Rc::clone(&rows);
+    let build_controller = Arc::clone(controller);
+    let builder =
+        move |i: usize| feed_row_view(&build_controller, &build_rows[i], sheet_sig, design);
 
     let pager = Arc::clone(controller);
-    any(
-        // Flat-row outer HORIZONTAL padding is 8px, down from the
-        // old 12 — the message rows themselves add no card inset any more; the
-        // vertical scroll inset stays 12.
-        scroll_view(Padding(EdgeInsets::symmetric(8.0, 12.0), column)).on_scroll(
-            move |_st: &mut HuddleState, info: ScrollInfo| {
-                if info.offset <= NEAR_START_PX
-                    && pager.has_more.get_untracked()
-                    && !pager.loading_older.get_untracked()
-                {
+    let list = ListView::builder_keyed(row_count, FEED_ROW_ESTIMATE, key_of, builder)
+        .estimated_item_extent(FEED_ROW_ESTIMATE)
+        .on_near_start(
+            move |_st: &mut HuddleState| {
+                if pager.has_more.get_untracked() && !pager.loading_older.get_untracked() {
                     let pager = Arc::clone(&pager);
                     frust::spawn(async move {
                         pager.load_older().await;
                     });
                 }
             },
-        ),
-    )
+            NEAR_START_PX,
+        );
+
+    // Flat-row outer HORIZONTAL padding is 8px (the message rows themselves
+    // add no card inset any more); the old scroll-view's 12px vertical
+    // breathing room around the whole scrollable column is folded onto the
+    // list's own viewport here instead of the (now virtualized) content, so
+    // it no longer scrolls away with the first/last row — a cosmetic-only
+    // difference from the pre-`ListView` feed.
+    any(Padding(EdgeInsets::symmetric(8.0, 12.0), list))
+}
+
+/// One feed row's view: the two singleton rows unchanged from the earlier
+/// keyed `Column`, or a real message row.
+fn feed_row_view(
+    controller: &Arc<MessagesController>,
+    row: &FeedRow,
+    sheet_sig: RwSignal<FeedSheet>,
+    design: DesignLanguage,
+) -> AnyView<HuddleState> {
+    match row {
+        FeedRow::LoadingOlder => loading_older_row(design),
+        FeedRow::Message(msg) => message_row(controller, msg, sheet_sig),
+        FeedRow::Typing => typing_row(design),
+    }
 }
 
 /// One message row: the bubble, aligned right (own) or left (others, with an
@@ -683,6 +775,10 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
         // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(loading_indicator())
+        }
     };
     any(Padding(
         EdgeInsets::symmetric(4.0, 8.0),
@@ -705,6 +801,10 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
         // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(loading_indicator())
+        }
     };
     any(Padding(
         EdgeInsets::all(8.0),

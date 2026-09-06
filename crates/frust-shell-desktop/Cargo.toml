@@ -42,11 +42,31 @@ anyhow = { workspace = true }
 # is already pulled in via `frust-shell-common`).
 log = { workspace = true }
 
+# DEV-ONLY: the shipped crate reaches the reactive substrate exclusively through
+# `frust-reactive` (see docs/ARCHITECTURE.md's Layer Dependencies) — this entry
+# is a dev-dependency ONLY and never enters a consumer's dependency graph. It
+# exists for the event-dispatch owner-wrap regression test, which needs
+# `reactive_graph`'s `Get`/`Set` signal traits (`frust-reactive` re-exports
+# `RwSignal` but not the traits) to prove the wrap installs an `Owner` and NOT a
+# `TrackedScope`. Same shape and rationale as `frust-shell-common`'s dev-only
+# reactive entries.
+[dev-dependencies]
+reactive_graph = { workspace = true }
+
 [features]
 # Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
 # and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
 # unification; the CLI is the sole enabler).
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Forwards into frust-theme's own `glyph-fonts` (opt-out chain) — see
-# `frust-shell-common`'s Cargo.toml for the shape rationale.
-glyph-fonts = ["frust-theme/glyph-fonts"]
+# Opt-in in-app devtools service: re-exports frust-shell-common/devtools and
+# compiles this shell's service start + UI-thread hop in. Empty by default,
+# exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
+# profile builds only).
+devtools = ["frust-shell-common/devtools"]
+# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
+# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
+# `frust-shell-common/gpu` carries the process-wide slot `render.rs` installs
+# the live device into once a surface (and so a device) exists. Empty
+# otherwise (no new dependency, just two features on already-unconditional
+# deps), the same additive-unification shape as `perf-trace`/`devtools`.
+gpu = ["frust-shell-common/gpu", "frust-render/gpu"]

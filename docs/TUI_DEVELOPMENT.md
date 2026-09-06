@@ -1,0 +1,42 @@
+# Frust - TUI Development
+
+Version pins owned by the TUI unit (`frust-tui`). Shared prerequisites, the workbench's run
+command, the standard verify gate, and the version-pin *policy* live in
+[DEVELOPMENT.md](DEVELOPMENT.md); the unit's design lives in
+[TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md).
+
+## Version Pins
+
+The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are
+LAW; re-run the row's tripwire after touching it, and never run a blind `cargo update`):
+
+| Pin | Why | Tripwire |
+|---|---|---|
+| `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
+| `toml_edit 0.25` minor (shared with the CLI unit's `frust-drive`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
+| `tokio-util 0.7` (shared with the CLI unit's `frust-mcp`/`frust-dap`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | The `CancellationToken` both embedded servers shut down on — `frust_mcp::serve_embedded`'s and `frust_dap::serve_embedded`'s | `cargo test -p frust-tui` && `cargo test -p frust-mcp` && `cargo test -p frust-dap` |
+
+`frust-tui`'s own `tokio` feature set gained `net` (a feature add, not a version bump) so both
+embedded servers' loopback `TcpListener`s bind on this crate's own runtime rather than depending on
+another workspace member's feature unification.
+
+The DAP settings dialog's preferences persist in the same `~/.config/frust/tui.toml` the
+recent-projects store uses, under a `[dap]` table (`enabled`, `auto_start_in_ide`,
+`auto_configure_ide`, `port`, `ide_override`) loaded through the same format-preserving `toml_edit`
+path — see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)'s Embedded DAP Surface for what each key
+does.
+
+## Testing the embedded MCP server
+
+`crates/frust-tui/tests/mcp_embedded.rs` drives the embedded server end to end against a real
+workbench event loop — a real Streamable-HTTP client against a real `frust_mcp::serve_embedded`,
+observed through the same `AppState` the workbench renders, over a scripted `FakeProcessRunner`
+(no process is ever really spawned). It runs under the standard `cargo test -p frust-tui` gate,
+with no `#[ignore]`. Every wait is on a produced signal (a ready port, an HTTP response, an engine
+message, or a bounded yield-until-condition poll) rather than a sleep.
+
+## See Also
+
+- [DEVELOPMENT.md](DEVELOPMENT.md) — prerequisites, build/run/test gates, version-pin policy
+- [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) — the unit's design
+- [TUI_CODE_STANDARDS.md](TUI_CODE_STANDARDS.md) — the unit's conventions

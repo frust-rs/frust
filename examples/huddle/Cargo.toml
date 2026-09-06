@@ -22,44 +22,50 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
 # that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead.
+# create` will emit a version dependency here instead. `frust` is the
+# ONLY framework line this app ships for widget authoring — every
+# hand-rolled `View`/`Widget` pair (`ui/swipeable.rs`'s horizontal
+# swipe-to-action row, `ui/sheet.rs`'s modal sheet, `ui/fill_box.rs`'s
+# arbitrary-color rounded-rect `fill_box` leaf and `filled_box`
+# single-child container, the Home screen's animated loading
+# `Shimmer`, and `ui/toast.rs`'s paint-driven `toast_entrance`
+# slide/fade wrapper) reaches the full trait vocabulary plus geometry
+# through `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the
+# long-tail valve, where a type isn't lifted by name); no production
+# code names `frust-core`/`kurbo`/`peniko` directly any more.
 frust = { path = "../../crates/frust" }
 
-# clean-signals (the async/use-case/controller/retry substrate) stays a path
-# dependency to the sibling `clean-signals-rs` checkout; its Frust glue now
-# lives in-repo as `plugins/clean-signals-frust` (repointed from the sibling
-# checkout's pre-migration glue crate). Both this crate and the
-# in-repo glue plugin resolve `clean-signals` by the SAME canonical sibling
-# path — a hard requirement, not a convenience. If `clean-signals` came in by
-# `git`+`rev` while the glue plugin resolved `clean-signals` by path, Cargo
-# would build TWO distinct crate identities for `clean-signals`, and the
-# controller's `AsyncState`/`ControllerCore`/`Failure` types would NOT unify
-# with the glue crate's `use_controller`/`async_view`/`use_failure_listener`
-# bounds (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
-# Requires the sibling checkout at `../../../clean-signals-rs` (i.e. next to
-# `../frust`) on its `develop` branch. Swap both to a git+rev spec together,
-# never one at a time, once clean-signals gains a remote.
-clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
-clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
+# Design-system plugins: the flat Material/Cupertino/Glyph widget/theme
+# symbols this app's presentation layer names (`frust_material::AppBar`,
+# `frust_cupertino::CupertinoButton`, `frust_glyph::install`/`baseline`, ...)
+# live in these sibling plugin crates now, not behind an in-tree `frust`
+# cargo feature (the catalog feature graph was dissolved — see
+# docs/DEVELOPMENT.md's Version-Pin Policy). The app's settings/appearance
+# flow switches between all three design languages live, so it depends on
+# every one of them, unlike a single-design-language app.
+frust-material = { path = "../../plugins/material" }
+frust-cupertino = { path = "../../plugins/cupertino" }
+frust-glyph = { path = "../../plugins/glyph" }
 
-# `frust-core` + `kurbo` + `peniko`: the Home screen
-# reintroduces the facade's documented "low-level escape hatch" (see
-# `docs/ARCHITECTURE.md`) for the small hand-rolled `View`/`Widget` pairs no
-# facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row,
-# `ui/sheet.rs`'s modal sheet, `ui/fill_box.rs`'s arbitrary-color rounded-rect
-# `fill_box` leaf (avatar/badge/status-dot/composer-tile fill) and `filled_box`
-# single-child container (compact attachment tiles — the card-inset-free box the
-# feed restyle uses, promoted out of
-# `features/channels/presentation/pages/home.rs`), that same home page's
-# animated loading `Shimmer`, and `ui/toast.rs`'s paint-driven
-# `toast_entrance` slide/fade wrapper. This is the same production
-# escape-hatch dependency the pre-skeleton theme/motion screens carried (`git
-# show d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate
-# still depends on the `frust` facade alone, per `docs/CODE_STANDARDS.md`'s
-# State & Reactivity Conventions.
-frust-core = { path = "../../crates/frust-core" }
-kurbo = "0.13.1"
-peniko = "0.6.1"
+# clean-signals (the async/use-case/controller/retry substrate) is
+# git+rev-pinned to the public repo rather than the sibling `clean-signals-rs`
+# checkout, so a scaffolded `--arch clean-signals` project builds on any
+# machine with no local checkout required. Both this crate and the in-repo
+# glue plugin (`plugins/clean-signals-frust`) MUST resolve `clean-signals` by
+# the identical `git`+`rev` spec — a hard requirement, not a convenience: two
+# different resolution routes (e.g. one git, one path) would build TWO
+# distinct crate identities for `clean-signals`, and the controller's
+# `AsyncState`/`ControllerCore`/`Failure` types would NOT unify with the glue
+# crate's `use_controller`/`async_view`/`use_failure_listener` bounds
+# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy). Package
+# `clean-signals` is a workspace member on `master`, so the git dep resolves
+# it by name with no subdirectory needed. Never enable the `effects` feature
+# (`clean-signals`'s own gate onto `reactive_graph/effects`) — the frame path
+# is a custom subscriber, not `RenderEffect` (same rule as the workspace's own
+# `reactive_graph` pin). Bump the `rev` and this comment's rationale together,
+# never silently.
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
+clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -75,20 +81,31 @@ peniko = "0.6.1"
 # `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
-# Dev-only: the headless screen tests drive Frust's `RenderRoot` directly
-# (the desktop shell's own rebuild/layout/paint seam) and pump the reactive
-# runtime's UI-thread local task queue frame by frame — no GPU, no window. The
-# harness (`tests/support/mod.rs`) is lifted from `clean-signals-frust`'s own
-# integration-test support module; these deps mirror that crate's dev-deps so the
-# geometry/color/signal/runtime types unify. `tokio` is kept available for
-# `#[tokio::test]`-style controller/use-case unit tests (its time driver backs
+# Test-harness-only, NOT an escape hatch: the headless screen tests
+# (`tests/*.rs`) drive Frust's `RenderRoot` directly (`tests/support/mod.rs:24`
+# — the desktop shell's own rebuild/layout/paint seam, no GPU, no window) and
+# pump the reactive runtime's UI-thread local task queue frame by frame.
+# `RenderRoot` is deliberately not in `frust::authoring` (it is shell-owned,
+# not something an app constructs), so the harness still names these crates
+# the long way; migrating headless test harnesses onto the facade is a
+# separate design question. Production code names none of `frust-core`/
+# `frust-scene`/`frust-text`/`kurbo`/`peniko` — the same shape
+# `examples/shadertoy`/`examples/glyph-catalog` and `benchmarks/frust_bench`
+# already carry. The harness (`tests/support/mod.rs`)
+# is lifted from `clean-signals-frust`'s own integration-test support module;
+# these deps mirror that crate's dev-deps so the geometry/color/signal/runtime
+# types unify. `tokio` is kept available for `#[tokio::test]`-style
+# controller/use-case unit tests (its time driver backs
 # `clean_signals::time::sleep`); the crate's own production code never spawns a
 # tokio runtime itself — the toast auto-dismiss timer runs on the reactive
 # runtime's background executor via `frust::spawn`.
 [dev-dependencies]
+frust-core = { path = "../../crates/frust-core" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
 frust-text = { path = "../../crates/frust-text" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
 reactive_graph = "0.2"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
@@ -112,7 +129,7 @@ lean = ["log/release_max_level_warn"]
 # default — no override needed) shrank the prior baseline (lto="thin", no
 # cgu override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
 # unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
-# shader/render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3`
+# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3`
 # — the config that would actually ship, since sacrificing encode-path CPU
 # perf isn't acceptable — and under that carve-out "s" measured 7.36MB
 # (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
@@ -139,22 +156,13 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline translation runs at `opt-level = 0` by
+# wgpu/naga's shader-pipeline translation runs at `opt-level = 0` by
 # default, which is slow enough on a physical iOS device that the OS SIGKILLs
 # a debug `frust run` before the synchronous, main-thread launch-time
 # shader compile finishes — huddle is the iOS device vehicle,
 # so it needs this fix too. Identical values to the root `Cargo.toml`/
 # `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
 # --test profile_sync` is the automated tripwire.
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -165,6 +173,15 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.vello_common]
+opt-level = 2
+
+[profile.dev.package.glifo]
+opt-level = 2
+
+[profile.dev.package.fearless_simd]
 opt-level = 2
 
 # Debug dep opt widening: non-workspace-member dependencies

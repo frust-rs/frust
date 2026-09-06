@@ -1,12 +1,12 @@
-//! Real-device gate (TUI2-04) for the streaming device pipeline
+//! Real-device gate for the streaming device pipeline
 //! [`android_run::spawn_session`] — the exact code path the `frust-tui`
 //! supervisor's `start_device` drives, exercised end-to-end against a real
 //! attached Android device.
 //!
 //! Ignored by default: needs the OnePlus 9 (serial `53f887ac`) attached and a
 //! full Android toolchain (Android SDK/NDK, a JDK, `cargo-ndk`, the
-//! `aarch64-linux-android` target) plus the `../../examples/huddle` project
-//! and its `clean-signals-rs` sibling checkout. Run with:
+//! `aarch64-linux-android` target) plus the `../../examples/huddle` project.
+//! Run with:
 //!
 //! ```bash
 //! JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
@@ -57,7 +57,7 @@ fn oneplus9_spawn_session_streams_and_kills() {
     // Drive the exact streaming seam the supervisor uses: build → install →
     // launch (phase lines via the callback), returning the killable logcat
     // stream.
-    let mut handle = android_run::spawn_session(
+    let launch = android_run::spawn_session(
         &RealProcessRunner,
         &root,
         &device,
@@ -70,6 +70,7 @@ fn oneplus9_spawn_session_streams_and_kills() {
     )
     .expect("spawn_session pipeline error")
     .expect("pipeline cancelled unexpectedly");
+    let mut handle = launch.stream;
 
     // Collect a handful of logcat lines (or time out) to prove the stream is
     // live, then kill and confirm the stream tears down promptly.

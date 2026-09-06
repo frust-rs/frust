@@ -1,0 +1,14 @@
+{
+  "backend": "engine-vulkan-nvidia-t400",
+  "adapter": "NVIDIA T400 4GB",
+  "driver": "NVIDIA (610.43.03)",
+  "os": "linux",
+  "frust_commit": "f780f6d85a6f745f92085a2cd22ba9ee69196e0c",
+  "case": "adv-snapshot-scale-alpha",
+  "tolerance": {
+    "channel": 4,
+    "alpha": 4,
+    "diff_pixels": 0
+  },
+  "timestamp": "2026-08-30T15:45:55Z"
+}

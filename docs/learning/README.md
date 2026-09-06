@@ -17,12 +17,12 @@ the mechanism working in this repo.
 2. Actually run the experiments. The whole premise is that
    `FRUST_TRACE=1 cargo run` teaches you more than a chapter of prose.
 3. Line numbers were verified against the repo at the time of writing
-   (2026-07-22, HEAD `0f07565`) and **will drift**. Symbols won't — search
-   for the named function/type if a line number misses.
+   (2026-07-22, HEAD `0f07565`; re-verified 2026-08-06, HEAD `e2c95ff`) and
+   **will drift**. Symbols won't — search for the named function/type if a
+   line number misses.
 4. Everything desktop-runnable works on this machine today. Device labs
-   (chapter 7) need a physical Android/iOS device — remember the iOS
-   Simulator can't render under the vello 0.9 pin
-   (`docs/DEVELOPMENT.md` → Known Issues).
+   (chapter 7) need a physical Android/iOS device; the iOS Simulator renders
+   correctly too, under `frust-engine` (`docs/DEVELOPMENT.md` → Known Issues).
 
 ## Prerequisite (one-time)
 
@@ -46,11 +46,11 @@ RenderRoot::paint    (widgets → PaintScene commands)    ── ch. 2
    ▼
 frust_scene::Scene   (renderer-agnostic display list)   ── ch. 1
    ▼
-frust_render::encode_scene  (Command → vello::Scene)    ── ch. 4
+frust_engine::SceneCompiler::compile  (Command → GPU strips)  ── ch. 4
    ▼
-vello Renderer::render_to_texture  (compute shaders)    ── ch. 5
+EngineRenderer::encode  (ordinary render passes, no compute)  ── ch. 4
    ▼
-SurfaceRenderer::present  (blit → swapchain → screen)   ── ch. 4
+SurfaceRenderer::submit  (direct → acquired swapchain → screen) ── ch. 4
 ```
 
 Text takes a side road (shape → cache → GlyphRun → draw_glyphs): chapter 6.
@@ -64,11 +64,12 @@ chapter 7. Measuring all of it is chapter 8.
 | [1](01-scene-display-list.md) | The display list | Build a `Scene` by hand in a unit test; read every `Command` variant |
 | [2](02-widget-paint.md) | Paint your own pixels | Modify the S1 bubble-chart's canvas widget; write a custom widget; assert paint output GPU-free |
 | [3](03-frame-loop.md) | Anatomy of a frame | Trace one desktop frame from `RedrawRequested` to `present()`, matching `FRUST_TRACE` output line-by-line to code |
-| [4](04-encode-present.md) | Scene → GPU | Read the `Command`→vello translation; flip the CPU render tier; watch surface lifecycle states |
-| [5](05-vello-internals.md) | Inside vello 0.9 | Read the actual WGSL compute stages from your local cargo registry; map them to the sort-middle architecture |
+| [4](04-encode-present.md) | Scene → GPU | Read the `Command`→GPU-strip compile; watch the adapter capability gate refuse an adapter; read surface lifecycle states |
+| [5](05-vello-internals.md) | Inside vello 0.9 (historical) | Read the actual WGSL compute stages of the renderer this repo used to run, from your local cargo registry; map them to the sort-middle architecture |
 | [6](06-text-pipeline.md) | Text: string → glyphs | Run the shaping tests; measure the shape cache doing its job |
 | [7](07-mobile-frame-gate.md) | Mobile loops & the frame gate | Flip the gate/resampler kill switches on a device and watch the cost |
 | [8](08-measure-everything.md) | Measurement lab | Drive raw per-frame traces, startup spans, and the S1–S8 benchmark harness |
+| [9](09-native-widgets-pipeline.md) | Native widgets | See how OS sibling views composite with the GPU surface (and how RN/Flutter do it) |
 
 ## Mapping to the external roadmap (when you want the theory)
 
@@ -91,8 +92,8 @@ Ordered by when they pay off in this curriculum.
 
 | Video | Who / where | Link |
 |---|---|---|
-| *Vello: high performance 2D graphics* — the single best overview of the renderer under `frust-render` | Raph Levien, RustLab 2023 (RustLab Conference channel) | [youtube.com/watch?v=mmW_RbTyj8c](https://www.youtube.com/watch?v=mmW_RbTyj8c) |
-| *Faster, easier 2D vector rendering* — newer Levien talk; covers where vello is heading (the sparse-strips work you met in lab 5's caveat) | Raph Levien, RustNL (RustNL channel) | [youtube.com/watch?v=_sv8K190Zps](https://www.youtube.com/watch?v=_sv8K190Zps) |
+| *Vello: high performance 2D graphics* — the single best overview of the all-compute renderer lab 5 walks through (frust's own renderer, `frust-engine`, has since moved to a different, sparse-strips architecture — see lab 4) | Raph Levien, RustLab 2023 (RustLab Conference channel) | [youtube.com/watch?v=mmW_RbTyj8c](https://www.youtube.com/watch?v=mmW_RbTyj8c) |
+| *Faster, easier 2D vector rendering* — newer Levien talk on the sparse-strips direction; the architecture family `frust-engine` actually ships (see lab 5's closing note) | Raph Levien, RustNL (RustNL channel) | [youtube.com/watch?v=_sv8K190Zps](https://www.youtube.com/watch?v=_sv8K190Zps) |
 | *Compute Shader 101* — Levien teaching exactly the compute-shader mental model vello is built on; companion repo `github.com/googlefonts/compute-shader-101` | Raph Levien (personal channel) | [youtube.com/watch?v=DZRn_jNZjbw](https://www.youtube.com/watch?v=DZRn_jNZjbw) |
 | *Building WebGPU with Rust* — from wgpu's then-lead; what sits under vello | Dzmitry Malyshau, FOSDEM 2020 (video on the talk page) | [archive.fosdem.org/2020/…/rust_webgpu](https://archive.fosdem.org/2020/schedule/event/rust_webgpu/) |
 

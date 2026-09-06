@@ -21,6 +21,21 @@
 //! definition and one pure host-testable helper ([`ffi_support`]) compile, so
 //! the crate is inert in a host `cargo test --workspace`.
 //!
+//! # GPU-device hand-back (`gpu` feature)
+//!
+//! This shell's `gpu` Cargo feature forwards into `frust-shell-common/gpu`
+//! and `frust-render/gpu` (the process-wide device slot and its
+//! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
+//! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
+//! `frust-shell-desktop`'s render executor installs its live device into.
+//! **This shell does not install one yet** — its render-thread device
+//! creation lives in `jni_glue`'s pre-init/`create_handle` path and the
+//! `app::executor` render loop, wiring an install call there is a
+//! render-thread-split-aware change of its own, not a one-line addition —
+//! so `frust::gpu::with_context` currently answers `None` on Android even
+//! with `--features gpu` on. An accepted, explicitly tracked gap rather than
+//! a half-built accessor.
+//!
 //! # Unsafe
 //!
 //! This crate is a sanctioned `unsafe` zone: the framework crates
@@ -86,7 +101,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (a Makepad `app_main!` precedent).
 ///
-/// Stamps out the twenty `Java_dev_frust_FrustSurfaceView_native*` symbols
+/// Stamps out the twenty-two `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -96,7 +111,15 @@ pub mod __jni {
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
 /// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
 /// flips the app's theme brightness from the platform's dark-mode
-/// preference. `nativeOnDeepLink` delivers a cold-start/running
+/// preference, and `nativeSetReduceMotion` does the same for the platform's
+/// reduced-motion accessibility preference (a different sensor over the same
+/// transport — `Settings.Global.ANIMATOR_DURATION_SCALE`, not
+/// `Configuration`). `nativeAppIsDark` is the read half of the appearance
+/// seam: it returns whether the app's currently active theme is dark, so
+/// Kotlin's status-bar icon contrast can follow the APP's resolved theme
+/// (which an app-forced `frust::set_app_theme` override may have pinned away
+/// from the platform's own preference) instead of re-reading
+/// `Configuration.uiMode` directly. `nativeOnDeepLink` delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
 /// `nativeInitAccessibility` attaches the accesskit Android
 /// adapter to the host view. Two more exports:
@@ -325,6 +348,36 @@ macro_rules! android_app {
             dark: $crate::__jni::jboolean,
         ) {
             $crate::jni_glue::native_set_appearance(handle, dark)
+        }
+
+        /// JNI `nativeAppIsDark`: the read half of the appearance seam —
+        /// return whether the APP's currently active theme is dark right now,
+        /// for Kotlin to drive `updateSystemBarsAppearance` from instead of
+        /// re-reading `Configuration.uiMode` directly (the
+        /// device and the app can legitimately disagree once an app-forced
+        /// `frust::set_app_theme` override or a design system's seeded
+        /// default is in play). Additive: older generated Kotlin that never
+        /// calls this is unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeAppIsDark<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jboolean {
+            $crate::jni_glue::native_app_is_dark(handle)
+        }
+
+        /// JNI `nativeSetReduceMotion`: apply the platform's reduced-motion
+        /// accessibility preference (`Settings.Global.ANIMATOR_DURATION_SCALE
+        /// == 0`) to the active theme's motion tokens.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetReduceMotion<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            reduce: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_set_reduce_motion(handle, reduce)
         }
 
         /// JNI `nativeOnDeepLink`: deliver a platform deep link (cold-start or

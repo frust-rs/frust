@@ -1,17 +1,16 @@
 //! Platform-agnostic native-sibling compositor logic: turns the raw,
-//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`) into
-//! an idempotent, generation-stamped command list — [`ViewCommand`] — both
-//! mobile shells' FFI peek getters serve to their platform side.
+//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`) into an
+//! idempotent, generation-stamped command list — [`ViewCommand`] — both mobile
+//! shells' FFI peek getters serve to their platform side
+//! (`docs/SHELLS_ARCHITECTURE.md`'s platform-view embedding flow).
 //!
-//! # Why this lives in `frust-shell-common`
-//!
-//! This is pure diffing logic with no FFI, no JSON, and no platform types — the
-//! same "platform-agnostic brain, shell-owned wire format" split this crate
-//! already draws elsewhere (`frame_gate`'s skip decision, `resample`'s pointer
-//! interpolation). JSON encoding of a [`ViewCommand`] batch stays hand-rolled in
-//! each shell's own FFI glue (`docs/CODE_STANDARDS.md`'s "hand-roll JSON at the
-//! mobile FFI boundary" rule) — this module never touches `serde` or any string
-//! wire format, only the typed command vocabulary.
+//! Pure diffing logic with no FFI, no JSON, and no platform types — the same
+//! "platform-agnostic brain, shell-owned wire format" split this crate draws
+//! elsewhere (`frame_gate`'s skip decision, `resample`'s pointer
+//! interpolation). JSON encoding of a [`ViewCommand`] batch stays hand-rolled
+//! in each shell's own FFI glue (`docs/CODE_STANDARDS.md`'s "hand-roll JSON at
+//! the mobile FFI boundary" rule); this module owns only the typed command
+//! vocabulary, never `serde` or any wire format.
 //!
 //! # The `frust-core` → differ contract
 //!
@@ -19,30 +18,27 @@
 //! `Vec<PlatformViewFrame>` every paint pass and stays deliberately dumb: a
 //! slot absent from one pass's frames might be culled-but-still-alive,
 //! momentarily not repainting, or genuinely torn down — core has no teardown
-//! hook to tell those apart. [`PlatformViewState`] is where
-//! that ambiguity gets resolved, by watching how long a slot stays missing
-//! (see `missing_streak` below).
+//! hook to tell those apart. [`PlatformViewState`] resolves that ambiguity by
+//! watching how long a slot stays missing (`missing_streak`).
 //!
 //! # Command semantics
 //!
 //! - **New `slot_id`** ⇒ [`ViewCommand::Create`] then [`ViewCommand::Update`]
 //!   in the same ingest batch, in that order — the native side never sees an
 //!   `Update` for a view it hasn't been told to create yet.
-//! - **Rect/clip/visible change past [`EPSILON_PX`]** ⇒ `Update`; a change
-//!   smaller than that (or no change at all) emits nothing — a no-op poll is
-//!   free, so a shell can call [`PlatformViewState::commands`] every frame
-//!   with no cost when nothing moved.
+//! - **Rect/clip/visible change past [`EPSILON_PX`]** ⇒ `Update`; a smaller
+//!   change (or none at all) emits nothing, so a shell can call
+//!   [`PlatformViewState::commands`] every frame for free when nothing moved.
 //! - **`params_json` change** (detected via `params_generation`, bumped by the
-//!   widget whenever it edits `params_json`) ⇒
-//!   [`ViewCommand::UpdateParams`], independent of the rect/clip/visible
-//!   comparison above.
+//!   widget whenever it edits `params_json`) ⇒ [`ViewCommand::UpdateParams`],
+//!   independent of the rect/clip/visible comparison above.
 //! - **`view_type` change** on a live slot ⇒ [`ViewCommand::Dispose`] followed
 //!   by a fresh `Create` + `Update`, **in the same ingest**. A different
 //!   `view_type` is a different native factory, so the old view cannot be
 //!   re-parameterized into the new one; emitting only a `Create` would be
-//!   ignored by a host that already has a view for that slot id, and waiting
-//!   out the [`DISPOSE_AFTER_MISSING_FRAMES`] streak would never happen at all
-//!   (the slot is still present every pass). See the D-4 note in
+//!   ignored by a host that already has a view for that slot id, and the
+//!   [`DISPOSE_AFTER_MISSING_FRAMES`] streak would never fire at all (the slot
+//!   is still present every pass). See the view-type-swap arm in
 //!   [`PlatformViewState::ingest`].
 //! - **Missing for [`HIDE_AFTER_MISSING_FRAMES`] consecutive ingests** (while
 //!   the slot was last visible) ⇒ `Update { visible: false }` — a Hide. Only
@@ -51,10 +47,10 @@
 //! - **Missing for [`DISPOSE_AFTER_MISSING_FRAMES`] consecutive ingests** ⇒
 //!   [`ViewCommand::Dispose`], and the slot is forgotten — a later
 //!   reappearance of the same `slot_id` is indistinguishable from a brand-new
-//!   one and gets a fresh `Create` (idempotent either way — see module docs'
-//!   Widget teardown tradeoff below). [`PlatformViewState::retire`] is the
+//!   one and gets a fresh `Create`. [`PlatformViewState::retire`] is the
 //!   second, explicit path to the same outcome — the one a real widget
-//!   teardown takes, immediately — and both are kept deliberately.
+//!   teardown takes, immediately — and both are kept deliberately (Widget
+//!   teardown detection, below).
 //! - **Revive after Hide** (slot reappears in `ingest`'s frames before the
 //!   dispose threshold): since the slot is still tracked, this is just an
 //!   ordinary `Update` — `visible` flips back to `true` like any other
@@ -77,30 +73,25 @@
 //! A **non-interactive** slot always ships an empty list: shields only mean
 //! anything to a host that is forwarding touches to the native view in the
 //! first place, so carrying them would be noise the host must ignore. The
-//! resulting [`ViewCommand::Update`] shape is unchanged either way — the wire
-//! format the two embeddings already parse never moved.
+//! resulting [`ViewCommand::Update`] shape is the same either way.
 //!
 //! Comparison is epsilon-based, like `rect`/`clip` (and order-sensitive: the
 //! collection order is paint order, which is deterministic for an unchanged
 //! tree), so a shield drifting sub-pixel with its chrome emits nothing.
 //!
-//! # Widget teardown detection tradeoff
+//! # Widget teardown detection
 //!
-//! `frust-core`'s per-pass frame channel is deliberately dumb, so
-//! [`PlatformViewState`] cannot tell from `ingest` alone whether a missing
-//! slot's widget was dropped from the tree or merely culled/transiently not
-//! repainting. [`DISPOSE_AFTER_MISSING_FRAMES`] is a heuristic streak
-//! threshold covering that gap.
-//!
-//! It is now the **backstop**, not the primary path: a torn-down
-//! `platform_view` widget reports its slot id to `frust-core`'s pending-retire
-//! list (`RenderRoot::take_retired_platform_views`), which each shell drains
-//! after its rebuild and feeds to [`PlatformViewState::retire`] — an immediate
-//! `Dispose`, no streak. Both paths converge on the same command and the same
-//! "next Create is fresh" semantics, and the streak still covers the cases the
-//! teardown hook cannot see (a widget dropped without `View::teardown`
-//! running). A merely culled slot reports no retire, so it correctly keeps
-//! living behind the streak.
+//! Two paths converge on the same `Dispose`. A torn-down `platform_view`
+//! widget reports its slot id to `frust-core`'s pending-retire list
+//! (`RenderRoot::take_retired_platform_views`), which each shell drains after
+//! its rebuild and feeds to [`PlatformViewState::retire`] — an immediate
+//! `Dispose`, no streak. [`DISPOSE_AFTER_MISSING_FRAMES`] is the **backstop**
+//! for what that hook cannot see (a widget dropped without `View::teardown`
+//! running): a heuristic streak, since `ingest` alone cannot tell a dropped
+//! widget from a culled or transiently-not-repainting one. Both paths give the
+//! same command and the same "next `Create` is fresh" semantics, and a merely
+//! culled slot reports no retire, so it correctly keeps living behind the
+//! streak.
 //!
 //! # Generation / acknowledgement / compaction
 //!
@@ -124,12 +115,11 @@
 //!
 //! The backlog only shrinks on [`acknowledge`](PlatformViewState::acknowledge),
 //! so a native side that stops acking (a wedged host, a lost view hierarchy)
-//! would otherwise grow it for the process lifetime — and a camera preview is
-//! the first genuinely long-lived slot, so "the app exits before it matters" is
-//! no longer an answer. Past [`MAX_PENDING_COMMANDS`] entries the backlog is
-//! **compacted into its own net effect**: one `Dispose` per slot the dropped
-//! entries tore down, then a full `Create` + `Update` replay of every live slot
-//! — exactly the surface-recreate replay
+//! would otherwise grow it for the process lifetime — reachable, since a camera
+//! preview is a genuinely long-lived slot. Past [`MAX_PENDING_COMMANDS`]
+//! entries the backlog is **compacted into its own net effect**: one `Dispose`
+//! per slot the dropped entries tore down, then a full `Create` + `Update`
+//! replay of every live slot — exactly the surface-recreate replay
 //! ([`reset_for_surface_recreate`](PlatformViewState::reset_for_surface_recreate)),
 //! which is already the established "the native side must rebuild from this
 //! alone" batch. Every dropped intermediate is a state transition the replay
@@ -147,15 +137,18 @@
 //! releasing only the prefix whose frame is already presented:
 //! [`FramePairing`] keeps the `(generation, frame_id)` bookkeeping and
 //! [`commands_up_to`](PlatformViewState::commands_up_to) serves the prefix.
+//! Holding geometry for a presentation that never comes is the gate's one
+//! failure mode, so it releases anyway once the frame it waits on has fallen far
+//! enough behind — counted in submissions while frames flow and in idle display
+//! ticks ([`FramePairing::note_idle_tick`]) once they stop.
 //!
 //! # Skip-safety
 //!
-//! A gate-skipped frame (`docs/ARCHITECTURE.md`'s Frame gate) calls nothing —
-//! a shell simply never calls [`PlatformViewState::ingest`] on a `Skip`
-//! decision, so no rect can appear to "move" during a skip (paint doesn't run,
-//! so `PaintCtx::visible_rect`/scroll state can't have changed either) —
-//! nothing in this module special-cases a skip; the contract is entirely
-//! "don't call ingest".
+//! Nothing here special-cases a gate-skipped frame
+//! (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module); the contract is
+//! entirely "don't call [`ingest`](PlatformViewState::ingest) on a `Skip`".
+//! Paint doesn't run on a skip, so no rect can appear to "move" either
+//! (`PaintCtx::visible_rect`/scroll state can't have changed).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -176,7 +169,7 @@ pub const HIDE_AFTER_MISSING_FRAMES: u32 = 2;
 
 /// Consecutive `ingest` calls a slot may be absent from `frames` before it is
 /// Disposed outright. A heuristic streak, not a real teardown signal — see
-/// the module docs' Widget teardown detection tradeoff.
+/// the module docs' Widget teardown detection.
 pub const DISPOSE_AFTER_MISSING_FRAMES: u32 = 30;
 
 /// Upper bound on the not-yet-acknowledged command backlog before it is
@@ -195,6 +188,11 @@ pub const MAX_PENDING_COMMANDS: usize = 256;
 /// never rendered at all, and a dropped frame's id never presents. Without this
 /// arm one dropped scene strands every later batch forever — a submission
 /// counter is not a presented counter.
+///
+/// The same bound counts idle display ticks
+/// ([`FramePairing::note_idle_tick`]), which is what keeps the hatch reachable
+/// once the frame loop stops producing frames and the submission cursor freezes
+/// with it.
 ///
 /// Measured pipeline depth on physical test devices was 2–4 frames, so
 /// 12 sits well above the working range while bounding worst-case staleness to
@@ -248,7 +246,7 @@ pub enum ViewCommand {
     },
     /// Tear down a slot's native view entirely. A `slot_id` reused after this
     /// (the same numeric id reappearing in a later `ingest`) is treated as
-    /// brand-new — see the module docs' Widget teardown detection tradeoff.
+    /// brand-new — see the module docs' Widget teardown detection.
     Dispose {
         /// Which slot to tear down.
         slot_id: u64,
@@ -277,8 +275,8 @@ struct SlotEntry {
 ///
 /// `live` is a [`BTreeMap`] (keyed by `slot_id`), not a `HashMap` — iteration
 /// order must be deterministic (ascending `slot_id`) for the "same ingest
-/// sequence ⇒ identical command stream" golden-test guarantee (acceptance
-/// criterion 3); a frame's own `Create`+`Update` ordering is separately
+/// sequence ⇒ identical command stream" golden-test guarantee; a frame's own
+/// `Create`+`Update` ordering is separately
 /// guaranteed by iterating `frames` itself in the caller's given order.
 #[derive(Debug, Default)]
 pub struct PlatformViewState {
@@ -330,7 +328,7 @@ impl PlatformViewState {
             // Z-shields): its own manual rects plus the auto-collected ones
             // overlapping it, or nothing at all when it isn't interactive.
             let shields = resolve_shields(frame, input_shields);
-            // D-4: the slot's `view_type` changed under a live id. A different
+            // The slot's `view_type` changed under a live id. A different
             // `view_type` resolves to a different native factory, so the old
             // view must be torn down and a new one built — in THIS batch. Drop
             // the tracked entry first, so the `None` arm below emits the fresh
@@ -470,7 +468,7 @@ impl PlatformViewState {
 
     /// Explicit retire: dispose `slot_id` right now regardless of its missing
     /// streak, for a shell with a real teardown signal (see the module docs'
-    /// Widget teardown detection tradeoff). A no-op (returns `false`) if
+    /// Widget teardown detection). A no-op (returns `false`) if
     /// `slot_id` isn't currently live (already disposed, or never created).
     pub fn retire(&mut self, slot_id: u64) -> bool {
         if self.live.remove(&slot_id).is_some() {
@@ -594,7 +592,7 @@ impl PlatformViewState {
     /// The `Dispose`s must survive: a slot created *before* the un-acked window
     /// and disposed inside it is a native view the host already built and would
     /// otherwise never be told to tear down — a leak. A slot that was disposed
-    /// **and** is live again (a `slot_id` reuse, or the D-4 `view_type` swap)
+    /// **and** is live again (a `slot_id` reuse, or a `view_type` swap)
     /// keeps its `Dispose` too, and the replay's `Create` rebuilds it from the
     /// current `view_type`/params — the only ordering that survives a factory
     /// change.
@@ -663,6 +661,13 @@ impl PlatformViewState {
 /// meaningful (backgrounding, surface recreation), after which the whole
 /// backlog releases immediately — a hide or a full replay must reach the native
 /// side even though no further frame will ever present to unlock it.
+///
+/// Going *idle* is the third such moment, and the only one with no lifecycle
+/// callback to hang a `clear` on: the loop simply stops producing frames while
+/// the display keeps ticking. A shell reports those ticks
+/// ([`note_idle_tick`](Self::note_idle_tick)) so the staleness hatch stays
+/// reachable there — without them a batch whose frame never presented is held
+/// for the process lifetime (see that method for the full failure mode).
 #[derive(Debug, Default)]
 pub struct FramePairing {
     /// `(generation, frame_id)` per produced batch, oldest first. Both
@@ -670,6 +675,14 @@ pub struct FramePairing {
     /// what lets [`releasable_generation`](Self::releasable_generation) stop at
     /// the first held entry.
     due: VecDeque<(u64, u64)>,
+    /// Display ticks that produced no frust frame since the last
+    /// [`record`](Self::record) — the idle half of the staleness cursor (see
+    /// [`note_idle_tick`](Self::note_idle_tick)). Reset by every produced batch
+    /// and by [`clear`](Self::clear), so it only ever measures the *current*
+    /// idle stretch: an entry recorded before an earlier stretch is aged by
+    /// fewer ticks than really elapsed, which errs toward holding, never toward
+    /// releasing early.
+    idle_ticks: u64,
 }
 
 /// Upper bound on tracked-but-unreleased batches. Reached only if the native
@@ -692,22 +705,67 @@ impl FramePairing {
             self.due.pop_front();
         }
         self.due.push_back((generation, frame_id));
+        // A produced frame ends the idle stretch: this batch's own frame is
+        // genuinely in flight, so from here the submission cursor is the honest
+        // clock to age every entry by again.
+        self.idle_ticks = 0;
+    }
+
+    /// Report one display tick on which the frame loop produced **no** frust
+    /// frame — the tick a shell's frame gate skipped. Ages every held batch
+    /// exactly as a submission does (see
+    /// [`releasable_generation`](Self::releasable_generation)).
+    ///
+    /// **Why the release gate needs an idle clock at all.** A batch is released
+    /// on one of two events: its own frame is confirmed *presented*, or the
+    /// submission cursor climbs [`MAX_FRAMES_IN_FLIGHT`] past it. A present is
+    /// recorded only for a `Rendered` render outcome, so any other one — an
+    /// encode or acquire skipped against a surface that is not ready, a
+    /// swapchain reconfigure, a lost surface, an encode/acquire error — leaves
+    /// the batch's frame permanently unconfirmed. That is survivable while
+    /// frames keep flowing, because the submission cursor walks past it within
+    /// twelve frames. Once the app settles, though, the submission cursor stops
+    /// too, and *neither* arm can ever fire again: the settled geometry is held
+    /// for the process lifetime and the native sibling stays parked at whatever
+    /// mid-animation rect it last applied — device-observed as a camera preview
+    /// stuck black behind correct-but-never-delivered geometry, healed only by a
+    /// surface recreate (which `clear`s the pairing). The display clock is the
+    /// one cursor still moving at idle, and an idle tick carries exactly the
+    /// evidence the submission cursor does: that frame is not coming.
+    ///
+    /// **Why an idle *bound* and not an immediate release.** Releasing the whole
+    /// backlog on the last painted frame is not expressible: a touch-driven drag
+    /// paints with `needs_frame == false` every frame, so "this paint asked for
+    /// no continuation frame" cannot tell a settle frame from a mid-drag one,
+    /// and keying the release on it would turn the gate off for exactly the
+    /// scrolling case it was built to smooth. Aging by idle ticks costs nothing
+    /// on any path where frames still flow — a present that does arrive still
+    /// releases the batch first, unchanged — and bounds the broken path to
+    /// [`MAX_FRAMES_IN_FLIGHT`] display ticks (~100 ms at 120 Hz).
+    pub fn note_idle_tick(&mut self) {
+        self.idle_ticks = self.idle_ticks.saturating_add(1);
     }
 
     /// The highest generation releasable right now, given the id of the last
     /// **presented** frame and of the last **submitted** one.
     ///
     /// A batch is releasable once its own frame is on screen, or once that
-    /// frame has fallen [`MAX_FRAMES_IN_FLIGHT`] behind the submission cursor
-    /// (it was dropped by the latest-wins channel and will never present). The
-    /// first batch that is neither caps the boundary at its own generation
-    /// minus one, so everything published before it — including a lifecycle
-    /// batch that was never paired with a frame at all — still goes out; an
-    /// empty queue releases everything.
+    /// frame has fallen [`MAX_FRAMES_IN_FLIGHT`] behind the staleness cursor
+    /// (it was dropped by the latest-wins channel, or never presented at all,
+    /// and will never reach the screen). The first batch that is neither caps
+    /// the boundary at its own generation minus one, so everything published
+    /// before it — including a lifecycle batch that was never paired with a
+    /// frame at all — still goes out; an empty queue releases everything.
+    ///
+    /// The staleness cursor is the submission cursor plus the current idle
+    /// stretch ([`note_idle_tick`](Self::note_idle_tick)): the two are the same
+    /// "frames have moved on past this one" evidence, and with no idle ticks
+    /// reported this is bit-for-bit the submission-only rule.
     pub fn releasable_generation(&self, presented_frame_id: u64, submitted_frame_id: u64) -> u64 {
+        let stale_cursor = submitted_frame_id.saturating_add(self.idle_ticks);
         for &(generation, due_frame) in &self.due {
             let on_screen = due_frame <= presented_frame_id;
-            let stranded = submitted_frame_id.saturating_sub(due_frame) >= MAX_FRAMES_IN_FLIGHT;
+            let stranded = stale_cursor.saturating_sub(due_frame) >= MAX_FRAMES_IN_FLIGHT;
             if !on_screen && !stranded {
                 return generation.saturating_sub(1);
             }
@@ -729,9 +787,12 @@ impl FramePairing {
     }
 
     /// Forget every pairing (backgrounding, surface recreation) — see the
-    /// type's Lifecycle note.
+    /// type's Lifecycle note. Also drops the idle stretch, so the ticks counted
+    /// against frames belonging to a surface (or a foreground session) that is
+    /// gone cannot age the first batch recorded after it.
     pub fn clear(&mut self) {
         self.due.clear();
+        self.idle_ticks = 0;
     }
 
     /// Whether any batch is still waiting to be paired off.
@@ -1241,7 +1302,7 @@ mod tests {
         assert!(!state.retire(999));
     }
 
-    // ---- D-4: view_type swap ------------------------------------------------
+    // ---- view_type swap -----------------------------------------------------
 
     #[test]
     fn view_type_swap_disposes_and_recreates_in_the_same_ingest() {
@@ -1314,7 +1375,7 @@ mod tests {
         );
     }
 
-    // ---- D-8: backlog cap ---------------------------------------------------
+    // ---- backlog cap --------------------------------------------------------
 
     /// Drive `ingest` until the backlog cap trips (detected as the first poll
     /// where the backlog got *shorter*), never acknowledging. Returns the
@@ -1548,6 +1609,128 @@ mod tests {
     }
 
     #[test]
+    fn idle_ticks_release_a_batch_whose_frame_never_presents() {
+        let mut pairing = FramePairing::new();
+        // The settle frame: batch 1 rides frame 10, which is submitted and then
+        // never presented (any non-`Rendered` render outcome records nothing).
+        pairing.record(1, 10);
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            0,
+            "held while that frame could still land"
+        );
+
+        // The app is now idle — no further submissions, so the display clock is
+        // the only cursor left moving.
+        for _ in 0..(MAX_FRAMES_IN_FLIGHT - 1) {
+            pairing.note_idle_tick();
+            assert_eq!(
+                pairing.releasable_generation(9, 10),
+                0,
+                "still inside the staleness bound"
+            );
+        }
+        pairing.note_idle_tick();
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            u64::MAX,
+            "the idle stretch strands a frame that will never present"
+        );
+    }
+
+    #[test]
+    fn an_idle_released_batch_is_served_exactly_once() {
+        let mut state = PlatformViewState::new();
+        let mut pairing = FramePairing::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        let generation = state.commands().0;
+        pairing.record(generation, 10);
+
+        // Frame 10 never presented and nothing else was submitted: the poll
+        // serves nothing at all.
+        let releasable = pairing.releasable_generation(9, 10);
+        assert!(state.commands_up_to(releasable).1.is_empty());
+
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        let releasable = pairing.releasable_generation(9, 10);
+        let (reported, cmds) = state.commands_up_to(releasable);
+        assert_eq!(cmds.len(), 2, "the held Create+Update finally go out");
+        assert_eq!(reported, generation);
+
+        // The native side applies and acks: both halves compact, so no further
+        // poll — however many more idle ticks land — re-serves the batch.
+        state.acknowledge(reported);
+        pairing.acknowledge(reported);
+        pairing.note_idle_tick();
+        let releasable = pairing.releasable_generation(9, 10);
+        assert!(
+            state.commands_up_to(releasable).1.is_empty(),
+            "applied once, never re-applied"
+        );
+        assert!(pairing.is_empty());
+    }
+
+    #[test]
+    fn a_presented_frame_releases_before_the_idle_bound_is_reached() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        // The render tail runs a tick or two behind the UI thread, so a settle
+        // frame's present routinely lands after the loop has already idled.
+        pairing.note_idle_tick();
+        pairing.note_idle_tick();
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            0,
+            "held: the frame is still well inside the bound"
+        );
+        assert_eq!(
+            pairing.releasable_generation(10, 10),
+            u64::MAX,
+            "the present releases it exactly as before"
+        );
+    }
+
+    #[test]
+    fn a_produced_batch_resets_the_idle_stretch() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        for _ in 0..(MAX_FRAMES_IN_FLIGHT - 1) {
+            pairing.note_idle_tick();
+        }
+        // The loop wakes and paints again before the bound trips: frames are
+        // flowing, so both batches are aged by the submission cursor alone.
+        pairing.record(2, 11);
+        assert_eq!(
+            pairing.releasable_generation(9, 11),
+            0,
+            "a spent idle stretch cannot strand a live pipeline"
+        );
+
+        // Idling again ages them from scratch.
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        assert_eq!(pairing.releasable_generation(9, 11), u64::MAX);
+    }
+
+    #[test]
+    fn clear_drops_the_idle_stretch_with_the_pairings() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        // Backgrounding / surface recreation: the ticks counted against a
+        // session whose frames are gone must not age the next session's first
+        // batch, which is gated normally.
+        pairing.clear();
+        pairing.record(2, 1);
+        assert_eq!(pairing.releasable_generation(0, 1), 1);
+    }
+
+    #[test]
     fn gate_tracking_is_bounded_by_an_unacking_native_side() {
         let mut pairing = FramePairing::new();
         for i in 1..=(MAX_TRACKED_BATCHES as u64 * 2) {
@@ -1666,7 +1849,7 @@ mod tests {
         assert_eq!(last_update_shields(&state), vec![over]);
     }
 
-    // ---- Prompt teardown retire -----------------------
+    // ---- Widget teardown retire -------------------------
 
     #[test]
     fn a_retired_slot_disposes_immediately_and_the_next_ingest_is_quiet() {
@@ -1690,7 +1873,7 @@ mod tests {
 
     #[test]
     fn a_merely_culled_slot_is_never_disposed_by_the_retire_path() {
-        // The keep-alive contract (camera A6): a scrolled-offscreen slot runs no
+        // The keep-alive contract: a scrolled-offscreen slot runs no
         // teardown, so no retire arrives; it is Hidden by the streak and stays
         // live well past the point a retire would have disposed it.
         let mut state = PlatformViewState::new();

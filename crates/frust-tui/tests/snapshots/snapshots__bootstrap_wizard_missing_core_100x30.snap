@@ -20,8 +20,8 @@ expression: "render_to_string(100, 30, &bootstrap_state(missing_core_report(), 0
    Doctor · d│                                                                        │▓▓           
    Build · b │                                                                        │▓▓           
    Clean · c │                                                                        │▓▓           
-             │                                                                        │▓▓           
-             │                                                                        │▓▓           
+   MCP off · │                                                                        │▓▓           
+   DAP off · │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           

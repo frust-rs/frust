@@ -1,4 +1,4 @@
-//! Right-click context menus (T04 / PLAN D4): a small positioned popup whose
+//! Right-click context menus: a small positioned popup whose
 //! entries are built from the [`ContextTarget`] the click landed on.
 //!
 //! Like the command palette ([`super::palette`]), the menu is a *launcher*, not
@@ -35,7 +35,9 @@ use super::state::AppState;
 /// One context-menu row: a fixed label, a short keyhint, the **existing**
 /// [`Message`] it re-dispatches, and its enabled gate (a disabled row shows
 /// muted and can't be activated — the same pattern as [`super::PaletteCommand`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, following [`Message`]'s own relaxation.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MenuEntry {
     /// The row label.
     pub label: &'static str,
@@ -69,7 +71,7 @@ impl MenuEntry {
 
 /// The open context menu: its anchor position, the target it was built for, its
 /// entries, and the highlighted row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContextMenu {
     /// The column the menu's top-left corner prefers (clamped into the frame at
     /// render time).
@@ -220,6 +222,7 @@ mod tests {
                 id: SessionId(0),
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
+                devtools: crate::engine::DevtoolsLaunch::unavailable(),
             },
         );
         st.sessions[0].state = SessionState::Running;

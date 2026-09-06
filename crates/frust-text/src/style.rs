@@ -158,6 +158,61 @@ pub enum FontStyle {
     Oblique(Option<f32>),
 }
 
+/// Paragraph alignment: how each line is positioned within the layout's
+/// width.
+///
+/// Mirrors parley's `Alignment` semantics (see `parley::layout::Alignment`)
+/// without leaking the parley type. Only meaningful when the layout is
+/// wrapped to a `max_width` ([`crate::TextContext::layout`]'s third
+/// argument) — an unbounded layout's line width already equals its content
+/// width, so every alignment renders identically to [`TextAlign::Start`].
+///
+/// **Applies to [`crate::TextContext::layout`] only.** A live-edited
+/// [`crate::TextEditor`] (the engine behind `TextInput`) does not read this
+/// field — see that type's docs for why editable text is out of scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum TextAlign {
+    /// Leading edge of the line's text direction (left for LTR, right for
+    /// RTL). Default — matches v1's hardcoded behavior exactly.
+    #[default]
+    Start,
+    /// Trailing edge of the line's text direction (right for LTR, left for
+    /// RTL).
+    End,
+    /// Always the left edge, regardless of text direction.
+    Left,
+    /// Each line centered within the layout's width.
+    Center,
+    /// Always the right edge, regardless of text direction.
+    Right,
+    /// Each line except the last is spaced out to fill the layout's width.
+    Justify,
+}
+
+/// How text that overflows a bounded [`TextContext::layout_bounded`]
+/// (`max_lines`) is handled.
+///
+/// Mirrors Flutter's `TextOverflow.clip`/`TextOverflow.ellipsis` shape (a
+/// deliberately small subset — no `fade`/`visible`). Only meaningful
+/// alongside `max_lines`: with no line cap, neither variant changes
+/// anything (there is nothing to overflow past).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum TextOverflow {
+    /// Drop whole lines past `max_lines` outright; the last visible line's
+    /// own text is left exactly as the line-breaker assigned it, even if it
+    /// is itself wider than the box (an unbreakable run with no wrap
+    /// opportunity) — Frust does not character-trim in this mode. Default,
+    /// and a no-op when `max_lines` is unset (today's behavior).
+    #[default]
+    Clip,
+    /// Same line-dropping as [`Self::Clip`], plus: the last visible line is
+    /// character-truncated (UTF-8/char-boundary safe) and has `'…'`
+    /// appended so it fits the layout's `max_width`. With an unbounded
+    /// `max_width`, there is no width to truncate against, so the last
+    /// visible line's full text is kept with `'…'` simply appended.
+    Ellipsis,
+}
+
 /// Line height: how much vertical space each line of text occupies.
 ///
 /// Mirrors parley's `LineHeight` semantics (see `parley::LineHeight`)
@@ -204,6 +259,8 @@ pub struct TextStyle {
     pub letter_spacing: f32,
     /// Line height.
     pub line_height: LineHeight,
+    /// Paragraph alignment. Defaults to [`TextAlign::Start`].
+    pub align: TextAlign,
 }
 
 impl TextStyle {
@@ -230,6 +287,7 @@ impl Default for TextStyle {
             color: Color::BLACK,
             letter_spacing: 0.0,
             line_height: LineHeight::default(),
+            align: TextAlign::default(),
         }
     }
 }
@@ -301,6 +359,23 @@ pub(crate) fn to_parley_line_height(line_height: LineHeight) -> parley::LineHeig
     }
 }
 
+/// Converts a Frust [`TextAlign`] into parley's `layout::Alignment`.
+/// `pub(crate)` — see [`to_parley_family`]. Shared by [`crate::context`]
+/// (the initial shape+break) and [`crate::shape_cache`] (the width-change
+/// re-break path) — both must apply the same alignment, or a resized layout
+/// silently reverts to [`TextAlign::Start`] (see the shape cache's module
+/// docs).
+pub(crate) fn to_parley_align(align: TextAlign) -> parley::layout::Alignment {
+    match align {
+        TextAlign::Start => parley::layout::Alignment::Start,
+        TextAlign::End => parley::layout::Alignment::End,
+        TextAlign::Left => parley::layout::Alignment::Left,
+        TextAlign::Center => parley::layout::Alignment::Center,
+        TextAlign::Right => parley::layout::Alignment::Right,
+        TextAlign::Justify => parley::layout::Alignment::Justify,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +390,7 @@ mod tests {
         assert_eq!(style.color, Color::BLACK);
         assert_eq!(style.letter_spacing, 0.0);
         assert_eq!(style.line_height, LineHeight::MetricsRelative(1.0));
+        assert_eq!(style.align, TextAlign::Start);
     }
 
     #[test]
@@ -325,6 +401,35 @@ mod tests {
         assert_eq!(style.family, FontFamily::SystemUi);
         assert_eq!(style.weight, FontWeight::REGULAR);
         assert_eq!(style.style, FontStyle::Normal);
+        assert_eq!(style.align, TextAlign::Start);
+    }
+
+    #[test]
+    fn to_parley_align_maps_every_variant() {
+        assert_eq!(
+            to_parley_align(TextAlign::Start),
+            parley::layout::Alignment::Start
+        );
+        assert_eq!(
+            to_parley_align(TextAlign::End),
+            parley::layout::Alignment::End
+        );
+        assert_eq!(
+            to_parley_align(TextAlign::Left),
+            parley::layout::Alignment::Left
+        );
+        assert_eq!(
+            to_parley_align(TextAlign::Center),
+            parley::layout::Alignment::Center
+        );
+        assert_eq!(
+            to_parley_align(TextAlign::Right),
+            parley::layout::Alignment::Right
+        );
+        assert_eq!(
+            to_parley_align(TextAlign::Justify),
+            parley::layout::Alignment::Justify
+        );
     }
 
     #[test]

@@ -7,6 +7,10 @@
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]/
 //! [`logical_insets`], the last converting platform per-edge insets into a
 //! logical [`WindowInsets`](frust_core::insets::WindowInsets)),
+//! the shared window-shape publish path ([`window_metrics`] assembling a
+//! logical [`WindowMetrics`](frust_core::WindowMetrics) and
+//! [`WindowMetricsPublisher`] deciding — on all three shells — whether it
+//! actually changed and so may be re-provided to app code),
 //! the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
 //! [`ThemeOverrideWatcher`] — see [`theme_override`]'s module docs for the
 //! layering rationale), the [`perf`] module's frame-timing/startup-span
@@ -32,7 +36,11 @@
 //! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`]) each mobile
 //! shell publishes the live surface's actual verdict
 //! into, so app code can observe a `RefusedTranslucent` platform refusal
-//! instead of an invisible native sibling.
+//! instead of an invisible native sibling. Behind the non-default `gpu`
+//! cargo feature, [`gpu`] carries the process-wide GPU-device slot
+//! ([`gpu::install_gpu_handle`]/[`gpu::gpu_handle`]) a shell's render
+//! executor installs its device into once, type-erased so this crate still
+//! names no GPU type — see the module's own docs.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -44,19 +52,38 @@
 //! plumbing.
 
 mod app_tree;
+/// The in-app devtools service's shell side — the [`DevtoolsUi`](devtools::DevtoolsUi)
+/// hop seam, the process-wide [`start`](devtools::start)/[`pump`](devtools::pump)
+/// pair, and the `DevtoolsBackend` implementation behind them. Compiled only
+/// under the `devtools` cargo feature; absent entirely otherwise (see the
+/// module's own docs).
+#[cfg(feature = "devtools")]
+pub mod devtools;
 mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;
+/// The process-wide GPU-device slot — [`gpu::install_gpu_handle`]/
+/// [`gpu::gpu_handle`] — a shell's render executor installs its device into
+/// once, and the facade's `frust::gpu::with_context` (see
+/// `crates/frust/src/lib.rs`) reads it back. Compiled only under the `gpu`
+/// cargo feature; absent entirely otherwise, and type-erased even then so
+/// this crate names no GPU type (see the module's own docs).
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod perf;
 pub mod platform_view;
 pub mod render_split;
 pub mod resample;
 mod surface_mode;
 mod system_ui;
+mod theme_default;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
-pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, sanitize_scale};
+pub use ffi_support::{
+    WindowMetricsPublisher, guard, logical_insets, logical_size, run_guarded_thread,
+    sanitize_scale, window_metrics,
+};
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
 };
@@ -76,6 +103,7 @@ pub use system_ui::{
     SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
     set_system_ui_mode,
 };
+pub use theme_default::{default_theme, set_default_theme};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,
     theme_override_active,

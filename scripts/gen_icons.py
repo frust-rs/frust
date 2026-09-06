@@ -22,6 +22,7 @@ Usage:
     python3 scripts/gen_icons.py --src <svg-dir> \\
         [--out crates/frust-widgets/src/icons/mod.rs] \\
         [--design 24.0]
+    cargo fmt -p frust-widgets
 
 `--src` expects one `<stem>.svg` file per `STARTER_SET` entry below, where
 `<stem>` is the entry's second tuple element (e.g. `home.svg` for `HOME`).
@@ -34,7 +35,17 @@ renamed to `<stem>.svg` in the `--src` directory (a handful of entries need a
 non-default upstream `<name>` — see the STARTER_SET comment below, e.g. the
 filled/outline star pair).
 
-By default the icon set is the 41-glyph starter list Huddle needs; pass
+**The trailing `cargo fmt -p frust-widgets` is required**, not optional
+polish: this script always emits one blank line between the `D` constant and
+the first entry plus one blank line before each `pub const` block via plain
+string joins, with no blank-run collapsing of its own — rustfmt's default
+`blank_lines_upper_bound = 1` is what collapses that down to the single
+blank line the checked-in module actually carries. Skipping this step leaves
+an extra blank line after `const D` that a byte-identical-regeneration check
+(this module's own conformance expectation) would flag as a diff.
+
+By default the icon set is the 41-glyph starter list Huddle needs, expanded
+by a task-15 8-glyph batch (see the STARTER_SET comment below); pass
 `--all-in-dir` to instead emit every `*.svg` found under `--src`.
 
 The `NAME` a file maps to is its stem upper-snake-cased (e.g.
@@ -70,16 +81,30 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# The starter set Huddle needs. Each entry is a (CONST_NAME, svg_stem) pair;
-# svg_stem is the filename (without .svg) to look for under --src. Material
-# Symbols filenames are lower_snake_case, so the stem doubles as the lookup key
-# for most entries — the upstream icon name matches the stem directly. Two
-# exceptions, where the const needs a specific upstream *variant* rather than
-# a same-named icon: STAR/STAR_FILLED both come from the single upstream
-# `star` icon's two static exports — the default (fill=0, outline) `star.svg`
-# and the `fill1` (filled) variant, conventionally saved here as
-# `star_fill1.svg` (see this module's docstring for the upstream URL shape;
-# append `_fill1` before `_24px.svg` for the filled export).
+# The starter set Huddle needs, plus a small task-15 expansion for consumers
+# that need chrome/detach/pane/scan/network marks with no font-glyph fallback
+# available (see this module's `MODULE_HEADER` and task-15's own notes for
+# why a vector path is load-bearing here, not cosmetic — U+2699 GEAR and
+# U+25A3 are absent/inconsistent across the bundled mono fonts on-device).
+# Each entry is a (CONST_NAME, svg_stem) pair; svg_stem is the filename
+# (without .svg) to look for under --src. Material Symbols filenames are
+# lower_snake_case, so the stem doubles as the lookup key for most entries —
+# the upstream icon name matches the stem directly. A few exceptions, where
+# the const needs a specific upstream *variant* or a differently-named
+# upstream icon rather than a same-named one:
+#   - STAR/STAR_FILLED both come from the single upstream `star` icon's two
+#     static exports — the default (fill=0, outline) `star.svg` and the
+#     `fill1` (filled) variant, conventionally saved here as
+#     `star_fill1.svg` (see this module's docstring for the upstream URL
+#     shape; append `_fill1` before `_24px.svg` for the filled export).
+#   - FULLSCREEN_EXPAND draws from the upstream `fullscreen` icon (saved as
+#     `fullscreen.svg`) — `fullscreen_expand` is not an upstream icon name.
+#   - POWER draws from the upstream `power_settings_new` icon (the ⏻ power-
+#     button glyph) rather than upstream `power` (which renders a power
+#     *cord/plug*, a different mark — see PLUG below).
+#   - GLOBE draws from the upstream `public` icon (Material Symbols' globe
+#     glyph is filed under that name upstream, not `globe`).
+#   - PLUG draws from the upstream `cable` icon (a plug/connector mark).
 STARTER_SET: list[tuple[str, str]] = [
     ("HOME", "home"),
     ("SEARCH", "search"),
@@ -122,6 +147,20 @@ STARTER_SET: list[tuple[str, str]] = [
     ("CALL", "call"),
     ("SCHEDULE", "schedule"),
     ("DONE_ALL", "done_all"),
+    # -- task-15 expansion (FINDINGS #42) -----------------------------------
+    ("FULLSCREEN_EXPAND", "fullscreen"),
+    ("FULLSCREEN_EXIT", "fullscreen_exit"),
+    ("POWER", "power_settings_new"),
+    ("PANE_MARK", "splitscreen"),
+    ("CHEVRON_LEFT", "chevron_left"),
+    ("SCAN_MARK", "qr_code_scanner"),
+    ("GLOBE", "public"),
+    ("PLUG", "cable"),
+    # -- directional arrows and a copy mark, for the baseline icon_button ---
+    ("ARROW_UPWARD", "arrow_upward"),
+    ("ARROW_DOWNWARD", "arrow_downward"),
+    ("ARROW_FORWARD", "arrow_forward"),
+    ("CONTENT_COPY", "content_copy"),
 ]
 
 MODULE_HEADER = '''\
@@ -148,11 +187,15 @@ MODULE_HEADER = '''\
 //! ```text
 //! python3 scripts/gen_icons.py --src <material-symbols-svg-dir> \\
 //!     --out crates/frust-widgets/src/icons/mod.rs
+//! cargo fmt -p frust-widgets
 //! ```
 //!
 //! The script reads each `<name>.svg`, extracts and renormalizes its
-//! `<path d="...">` data, validates it parses, and re-emits this file. See
-//! `scripts/gen_icons.py`.
+//! `<path d="...">` data, validates it parses, and re-emits this file; the
+//! trailing `cargo fmt` is required to collapse this generator's raw
+//! double blank line before the first entry down to the single blank line
+//! this file actually carries (see `scripts/gen_icons.py`'s own docstring).
+//! See `scripts/gen_icons.py`.
 
 use crate::IconSource;
 

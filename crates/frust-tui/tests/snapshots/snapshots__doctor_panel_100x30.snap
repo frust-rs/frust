@@ -20,8 +20,8 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d    │      Xcode not found. Run: xcode-select --install              │▓▓               
    Build · b     │                                                                │▓▓               
    Clean · c     │   Re-run     Close                                             │▓▓               
-                 │  r re-run · Esc close                                          │▓▓               
-                 ╰────────────────────────────────────────────────────────────────╯▓▓               
+   MCP off · M   │  r re-run · Esc close                                          │▓▓               
+   DAP off · D   ╰────────────────────────────────────────────────────────────────╯▓▓               
                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓               
                          │                                                                          
                          │                                                                          

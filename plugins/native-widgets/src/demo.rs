@@ -1,35 +1,26 @@
 //! [`DemoCard`] — ONE composite [`NativeComponent`], shipped inside this
-//! plugin behind the **non-default `demo-components` feature**.
-//!
-//! The native-subtree surface —
-//! [`ComponentCtx::with_local_frame`] + [`ComponentCtx::add_child`] +
-//! [`ComponentCtx::retain_child`] — and the generic
-//! [`native_component`](crate::api::native_component) mounting builder
-//! already existed, but nothing outside a host test ever called them: on iOS
-//! in particular `addSubview` had **no caller anywhere**. This module is that
-//! caller. It is a
-//! parent view with a title label and two buttons under it, published as
-//! exactly **one** `platform_view` slot no matter how many children it grows.
+//! plugin behind the **non-default `demo-components` feature**: a parent view
+//! with a title label and two buttons under it, published as exactly **one**
+//! `platform_view` slot no matter how many children it grows. It proves the
+//! [`NativeComponent`] trait works end to end — define → register → mount →
+//! create → update → dispose, with a real native hierarchy under one slot —
+//! with real device coverage on both platforms.
 //!
 //! # Why the demo lives in the plugin and not in an example app
 //!
-//! **An app crate cannot implement [`NativeComponent`] today.** `create` has to
-//! construct real native views, which means naming `jni::objects::JObject` on
-//! Android and `objc2-ui-kit`'s classes on iOS *in the implementing crate*;
-//! this plugin re-exports neither FFI crate, and `docs/CODE_STANDARDS.md`'s
-//! State & Reactivity Conventions sanction only a `frust-core`/`kurbo`/`peniko`
-//! escape hatch for an `examples/*` app. So the demo ships here, where both FFI
-//! crates are already dependencies and all three target gates already run in
-//! CI, and the consuming app merely turns the feature on, calls
-//! [`register_demo_components`] and mounts the result.
-//!
-//! **Be clear about what that does and does not prove.** It proves the trait
-//! works end to end — define → register → mount → create → update → dispose,
-//! with a real native hierarchy under one slot — and it gives that path device
-//! coverage. It does **not** prove a third-party app author can write one:
-//! they still cannot, without raw FFI dependencies of their own. Closing that
-//! gap (re-exporting a curated view-construction surface, or the FFI crates
-//! themselves) is a separate, unscheduled decision.
+//! **An app crate cannot implement [`NativeComponent`] today.** `create` has
+//! to name `jni::objects::JObject` (Android) and `objc2-ui-kit`'s classes
+//! (iOS) *in the implementing crate*, and this plugin re-exports neither FFI
+//! crate (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
+//! `examples/*` app on `frust` plus plugin crates only — a raw FFI dependency
+//! is not among them). So the demo ships here, where both FFI crates are
+//! already dependencies and all three target gates already run in CI; a
+//! consuming app merely turns the feature on, calls
+//! [`register_demo_components`], and mounts the result. This proves the
+//! trait works, not that a third-party app author can write one — they still
+//! need raw FFI dependencies of their own; closing that gap (re-exporting a
+//! curated view-construction surface, or the FFI crates themselves) is a
+//! separate, unscheduled decision.
 //!
 //! # The subtree, and who lays it out
 //!
@@ -46,9 +37,7 @@
 //! each child an explicit frame inside [`DEMO_CARD_WIDTH`] x
 //! [`DEMO_CARD_HEIGHT`], because this crate deliberately pulls in neither
 //! `UIStackView` nor any constraint API (`crate::apple::ctx`'s *Frame-setting
-//! layout only*). Mount the slot at exactly that size — the
-//! [`DEMO_CARD_WIDTH`]/[`DEMO_CARD_HEIGHT`] pair exists so a caller does not
-//! have to guess.
+//! layout only*). Mount the slot at exactly that size.
 //!
 //! # One slot, four handles, and a counted teardown
 //!
@@ -75,29 +64,27 @@
 //!
 //! The two buttons are **display-only**: they show the platform's own press
 //! feedback and report nothing back. That is not a choice this card made —
-//! **no production path attaches a listener** to a [`NativeComponent`] in this
-//! build, its root as much as its children, so **no [`NativeComponent`] can
-//! receive events in this build**, and there is no supported way to arrange one.
-//! [`NativeComponent::on_event`] owns the full reasoning and names the gap
-//! this defers; the short version is that attaching this crate's
-//! shared `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's
-//! id, and a component is never handed one (`create` receives `&self`, a
+//! **no production path attaches a listener** to a [`NativeComponent`] in
+//! this build, its root as much as its children, so **no [`NativeComponent`]
+//! can receive events in this build**, and there is no supported way to
+//! arrange one. [`NativeComponent::on_event`] owns the full reasoning; the
+//! short version is that attaching this crate's shared
+//! `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's id, and
+//! a component is never handed one (`create` receives `&self`, a
 //! [`ComponentCtx`] and its props).
 //!
 //! **The platform escape hatch is not a way around that.**
-//! `ComponentCtx::env` and `ComponentCtx::mtm` hand out the raw platform, but
+//! `ComponentCtx::env`/`ComponentCtx::mtm` hand out the raw platform, but
 //! neither yields an event route: on Android the only listener class is that
 //! same `FrustNativeListener`, so a component could only feed its constructor
 //! a *fabricated* slot id — which would deliver the event to a **different
 //! slot**, a correctness bug rather than a workaround. On iOS the target type
-//! (`FrustNativeControlTarget`) is crate-private, but that alone does not
-//! block attaching *something*: a plugin author who already depends on
-//! `objc2-ui-kit` — the audience these very docs name — could `define_class!`
-//! their own target and call `addTarget:action:`. What they cannot do is
-//! route it back through [`NativeComponent::on_event`], because a component
-//! is never handed its own slot id (`create` receives `&self`, a
-//! [`ComponentCtx`] and its props, nothing that identifies the slot). Write a
-//! component as display-only until the attach half ships.
+//! (`FrustNativeControlTarget`) is crate-private, but a plugin author who
+//! already depends on `objc2-ui-kit` could `define_class!` their own target
+//! and call `addTarget:action:`; what they still cannot do is route it back
+//! through [`NativeComponent::on_event`], because a component is never
+//! handed its own slot id. Write a component as display-only until the
+//! attach half ships.
 //!
 //! # The feature gate
 //!

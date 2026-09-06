@@ -5,6 +5,12 @@ android/key.properties
 *.jks
 *.keystore
 
+# Written by `frust build`/`frust run --release` with the signing values the
+# CLI gate resolved (plaintext passwords, owner-only) and deleted again the
+# moment Gradle returns. One should only ever exist mid-build — if you see it
+# in `git status`, a build was killed hard; delete it.
+android/.frust-signing.properties
+
 # CLI-generated build output (kept in sync with `frust clean`'s REMOVED_DIRS).
 # `android/build/` is the `:frust-embedding` module's redirected output — see
 # android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block.
@@ -12,6 +18,12 @@ android/app/build/
 android/build/
 android/.gradle/
 build/
+
+# Desktop bundle output (`frust build macos|windows|linux`) and the .ico the
+# drive regenerates from `[desktop] icon` before every Windows build — build
+# output, never commit (kept in sync with `frust clean`'s REMOVED_DIRS).
+dist/
+windows/icon.ico
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties

@@ -49,6 +49,43 @@ final class FrustView: UIView {
     var keyboardType: UIKeyboardType = .default
     var returnKeyType: UIReturnKeyType = .done
 
+    // UITextInputTraits: the security/suggestion knobs the published
+    // `ImeState.content_type` hint drives (see
+    // `FrustViewController.applyImeContentType`, called from `syncImeFocus`
+    // right before `becomeFirstResponder`, so the keyboard is configured
+    // correctly from the first character rather than being reconfigured
+    // mid-session). `isSecureTextEntry` is the load-bearing one — it is what
+    // suppresses the QuickType suggestion bar and keyboard learning
+    // (FINDINGS #31); a field that publishes no hint keeps UIKit's own
+    // defaults (visible entry, spell-check on).
+    var isSecureTextEntry: Bool = false
+    var spellCheckingType: UITextSpellCheckingType = .default
+    var textContentType: UITextContentType?
+
+    // UITextInputTraits: smart-punctuation + autocapitalization knobs (task
+    // F1), driven by `applyImeContentType` the same way as the properties
+    // above. `UITextInputTraits` members are `@objc optional`, so unlike a
+    // stock `UITextField`/`UITextView` this custom `UITextInput` gets no
+    // automatic suppression from `isSecureTextEntry` alone — each trait needs
+    // its own stored property here or `applyImeContentType`'s assignment to
+    // it does not compile.
+    //
+    // The initial values below are pre-first-classification placeholders
+    // only, not a contract: nothing reads them before `syncImeFocus`'s first
+    // call classifies the field (before `becomeFirstResponder()`), and
+    // `applyImeContentType` (task F2) assigns all eight of the traits it
+    // manages — this pair plus `isSecureTextEntry`/`textContentType`/
+    // `autocorrectionType`/`spellCheckingType` above — explicitly in every
+    // one of its switch arms, so whatever is stored here is overwritten
+    // unconditionally the moment a content type is known. (`autocorrectionType`
+    // above is itself stored as `.yes`, not `UITextAutocorrectionType.default`
+    // — proof these starting values were never meant to read as "Apple's
+    // documented defaults, left standing".)
+    var smartQuotesType: UITextSmartQuotesType = .default
+    var smartDashesType: UITextSmartDashesType = .default
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .default
+    var autocapitalizationType: UITextAutocapitalizationType = .sentences
+
     /// A custom editor view must opt in to becoming first responder for the
     /// keyboard to appear.
     override var canBecomeFirstResponder: Bool { true }

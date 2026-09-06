@@ -62,12 +62,5 @@
 	     higher. -->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-	<!-- frust-camera: required by Apple whenever an app links
-	     AVFoundation capture APIs — a missing key crashes the app on first
-	     access rather than merely denying permission. This must stay
-	     app-side per Apple requirement, so
-	     this is a real edit even though frust-camera itself is a plugin. -->
-	<key>NSCameraUsageDescription</key>
-	<string>This app uses the camera to show a live preview and capture photos in the Camera catalog page.</string>
 </dict>
 </plist>

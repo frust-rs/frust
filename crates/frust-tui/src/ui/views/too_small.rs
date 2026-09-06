@@ -1,4 +1,4 @@
-//! The too-small-terminal warning screen (D5 responsive breakpoints): shown
+//! The too-small-terminal warning screen (responsive breakpoints): shown
 //! when the terminal is below the minimum workable size.
 
 use ratatui::Frame;

@@ -1,0 +1,22 @@
+[package]
+name = "{{ name }}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# `frust` is the ONLY dependency a design-system crate should ever need —
+# every token type, the widget-authoring traits, the geometry/paint
+# vocabulary, and the `set_default_theme` install hook are reached through
+# the facade; see `frust::authoring` for the widget-authoring seam this
+# crate's one example widget (`src/lib.rs`) is built on.
+#
+# NOTE: temporary path dependency pointing at the Frust repo checkout that
+# generated this project ("frust_path" is explicitly a temporary mechanism —
+# the same one `frust create`'s app template uses). Once Frust crates are
+# published, `frust create` will emit a version dependency here instead.
+#
+# Frust's own built-in design systems are sibling plugin crates, not `frust`
+# Cargo features — this dependency enables nothing extra. See README.md.
+frust = { path = "{{ frust_path }}" }
+

@@ -1,17 +1,17 @@
 //! Glyph Catalog — a standalone example app showcasing the entire Glyph
-//! design system: every token scale, all 21 `frust::glyph` widgets, the
+//! design system: every token scale, all 21 `frust_glyph` widgets, the
 //! `Button` styles and baseline form controls under the Glyph theme, and all
 //! of `frust::motion`'s transition patterns, faithful to the three vendored
 //! reference builds (dark, light, motion).
 //!
 //! This module is only the **shell**: the app state, the root [`navigator`]
-//! (whose home page is a [`glyph::app_bar`](frust::glyph::app_bar) — the
+//! (whose home page is a [`glyph::app_bar`](frust_glyph::app_bar) — the
 //! brand mark, "glyph catalog" title, and the brightness/reduce-motion/
 //! animations toggles folded into its trailing actions (superseding the old
 //! header-row `Row`) — over a [`safe_area`]'d body: the
-//! 10-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
-//! hosting one of ten section pages in a [`scroll_view`], under a bare
-//! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
+//! 9-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
+//! hosting one of nine section pages in a [`scroll_view`], under a bare
+//! [`toast_host`](frust_glyph::toast_host) overlay (default bottom-center
 //! anchoring, no app-side positioning)), and the
 //! [`frust::app!`] entry binding all three platforms. The AppBar consumes the
 //! top window inset itself, so the body's [`safe_area`] disables its own top
@@ -24,35 +24,25 @@
 //! **zero** catalog code — `frust::navigator` (imported below) auto-wires
 //! Android/gesture back handling for the shared [`NavigatorController`].
 //!
-//! # Mode B background
-//!
-//! The generated Android/iOS glue now turns `FRUST_TRANSLUCENT_SURFACE`/
-//! `translucentSurface` ON (this catalog is the framework's Mode B testbed —
-//! see `pages::platform_views`'s module docs) — a process-wide, compile-time
-//! choice, not one scoped to that one section. Under Mode B the frust
-//! surface's own base clear turns alpha-0 (`frust-shell-*`'s per-frame
-//! `base_color` swap), so **every** pixel no widget explicitly paints becomes
-//! a window straight through to whatever sits behind the surface — not just
-//! `platform_views`'s own deliberate slot. [`home_page`]'s root [`Stack`]
-//! therefore paints an explicit, surface-colored [`AppBackground`] as its
-//! bottom-most layer, restoring every other section's opaque look; the
-//! `platform_views` section's own slot is the one deliberate hole punched
-//! through it.
+//! [`home_page`]'s root [`Stack`] paints an explicit, surface-colored
+//! [`AppBackground`] as its bottom-most layer beneath the app content and
+//! toast overlay, since [`Stack`] itself paints no implicit background.
 //!
 //! Run it with `cargo run` (desktop preview) or `frust run` (Android/iOS).
 
 pub mod pages;
 
-use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
-use kurbo::Size;
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
+};
 
-use frust::motion::patterns::{GlyphSlide, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, Brightness, Color, Component, FlexView, Get, GetUntracked, MotionScheme,
     NavigatorController, RwSignal, ScrollInfo, Set, Stack, Theme, TransitionSpec, View, any,
     button, flexible, icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme,
 };
+use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
 use pages::SECTION_LABELS;
 
@@ -61,11 +51,9 @@ use pages::SECTION_LABELS;
 // "Mode B background" section)
 // ---------------------------------------------------------------------------
 
-/// A full-bleed background fill — the low-level `frust-core`/`kurbo` escape
-/// hatch (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions;
-/// `examples/huddle::ui::fill_box::FillBox` is the identical pattern, and
-/// this crate already carries both crates as sanctioned dependencies for
-/// `pages::appbar`'s `AnchorReporter`). Needed because no facade widget
+/// A full-bleed background fill — a hand-rolled `View`/`Widget` pair reached
+/// entirely through `frust::authoring` (`examples/huddle::ui::fill_box::FillBox`
+/// is the identical pattern, built the same way). Needed because no facade widget
 /// paints an unconditional "fill available space" rect: `Image`/`SizedBox`
 /// only tighten a child when the INCOMING constraint is already tight, and
 /// [`Stack`] hands every child a LOOSE (min-zero) constraint, so a naive
@@ -136,7 +124,7 @@ pub struct CatalogState {
     /// content slides left).
     pub slide: RwSignal<SlideDirection>,
     /// The FIFO toast queue rendered by the root
-    /// [`toast_host`](frust::glyph::toast_host); a page pushes a message by
+    /// [`toast_host`](frust_glyph::toast_host); a page pushes a message by
     /// appending to it.
     pub toasts: RwSignal<Vec<String>>,
     /// The shared navigator controller, so overlay pages (dialogs, the command
@@ -146,7 +134,7 @@ pub struct CatalogState {
     /// Whether the active section body has scrolled past
     /// [`ELEVATION_THRESHOLD_PX`], fed by the body `scroll_view`'s
     /// `on_scroll` and consumed by the root
-    /// [`app_bar`](frust::glyph::app_bar)'s `.elevated(...)` — the
+    /// [`app_bar`](frust_glyph::app_bar)'s `.elevated(...)` — the
     /// same `y > 4` scrolled-shadow cue the AppBar's own reference HTML uses.
     pub elevated: RwSignal<bool>,
     /// The header animations on/off toggle (default on). OFF means "every demo
@@ -187,14 +175,14 @@ impl Default for CatalogState {
 }
 
 /// Force the app-wide theme from the current header-toggle flags: a
-/// [`ThemeBuilder`](frust::ThemeBuilder) over [`Theme::glyph_baseline`] with
+/// [`ThemeBuilder`](frust::ThemeBuilder) over [`frust_glyph::baseline`] with
 /// the chosen brightness and the reduced-motion flag mapped into its
 /// [`MotionScheme`]. Called from all three header toggles so the flags
 /// always compose (never clobber each other) — `reduce_motion` here is
 /// already the *effective* flag (see [`effective_reduce_motion`]), not the
 /// raw header reduce-motion toggle.
 fn apply_theme(brightness: Brightness, reduce_motion: bool) {
-    let theme = Theme::builder(Theme::glyph_baseline())
+    let theme = Theme::builder(frust_glyph::baseline())
         .brightness(brightness)
         .map_motion(move |m: MotionScheme| MotionScheme { reduce_motion, ..m })
         .build();
@@ -213,10 +201,10 @@ fn effective_reduce_motion(reduce_motion: bool, animations_enabled: bool) -> boo
 
 /// Scroll offset (logical px) past which the root AppBar grows its scrolled
 /// shadow/border — mirrors the `glyph::appbar` reference HTML's `y > 4` check
-/// (see [`glyph::app_bar`](frust::glyph::app_bar)'s module docs).
+/// (see [`glyph::app_bar`](frust_glyph::app_bar)'s module docs).
 const ELEVATION_THRESHOLD_PX: f64 = 4.0;
 
-/// The root [`glyph::app_bar`](frust::glyph::app_bar): a brand-mark leading
+/// The root [`glyph::app_bar`](frust_glyph::app_bar): a brand-mark leading
 /// glyph, the "glyph catalog" title, and the brightness/reduce-motion/
 /// animations toggles folded into its trailing actions — replacing the old
 /// header row's own `Row` so the shell stacks exactly one bar. The
@@ -224,7 +212,7 @@ const ELEVATION_THRESHOLD_PX: f64 = 4.0;
 /// decision — see [`CatalogState::animations_enabled`]'s doc comment for
 /// what OFF means).
 /// The AppBar consumes the top window inset itself (its [module
-/// docs](frust::glyph::app_bar)), so the body below never pads its own top
+/// docs](frust_glyph::app_bar)), so the body below never pads its own top
 /// edge.
 fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
     let brightness = state.brightness.get();
@@ -239,10 +227,10 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
     let motion_label = if reduce_motion { "⏸" } else { "▶" };
     let animations_label = if animations_enabled { "⏵" } else { "⏹" };
 
-    // Live accent-text role — resolves per-brightness (round-0 review of the
-    // header row: a fixed dark amber failed AA on the light surface).
+    // Live accent-text role — resolves per-brightness (a fixed dark amber
+    // failed AA on the light surface).
     let accent = frust::use_context::<frust::Theme>()
-        .unwrap_or_else(frust::Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary;
 
@@ -281,14 +269,14 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
         );
     }));
 
-    any(frust::glyph::app_bar::<CatalogState>("glyph catalog")
+    any(frust_glyph::app_bar::<CatalogState>("glyph catalog")
         .leading(brand)
         .actions(vec![brightness_btn, motion_btn, animations_btn])
         .elevated(elevated))
 }
 
 /// The navigator's home page: the root AppBar over a safe-area'd body (the
-/// 10-section tab strip plus the pattern-switched section body in a scroll
+/// 9-section tab strip plus the pattern-switched section body in a scroll
 /// view), all under a bare toast overlay, over an [`AppBackground`] base
 /// layer (see the module docs' "Mode B background" section). Re-run on every
 /// rebuild (the navigator re-invokes its page builder), so the signal reads
@@ -299,7 +287,7 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     let pending = state.toasts.get();
 
     let labels: Vec<String> = SECTION_LABELS.iter().map(|s| s.to_string()).collect();
-    let tab_strip = inflexible(frust::glyph::tabs(
+    let tab_strip = inflexible(frust_glyph::tabs(
         labels,
         section,
         |state: &mut CatalogState, index| {
@@ -351,26 +339,27 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     // bottom-center with inset-aware margins — no app-side `Align`/`Padding`
     // wrapper needed (framework-side anchoring).
     //
-    // `AppBackground` is the BOTTOM-most layer (see
-    // the module docs' "Mode B background" section above): under the now-ON
-    // `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface` mobile glue, an
-    // unpainted pixel anywhere in `column` would otherwise be a window
-    // straight through the surface, not just `platform_views`'s own
-    // deliberate slot.
+    // `AppBackground` is the BOTTOM-most layer (see the module docs above):
+    // `Stack` itself paints no implicit background, so this is what gives
+    // `column` an opaque, surface-colored backdrop.
     let background_color = frust::use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface;
     any(Stack(vec![
         any(AppBackground(background_color)),
         any(column),
-        any(frust::glyph::toast_host(pending)),
+        any(frust_glyph::toast_host(pending)),
     ]))
 }
 
-/// The root [`Component`]. The shell default theme is already
-/// Glyph (every shell seeds `Theme::glyph_baseline()`), so `init` forces
-/// nothing — it only wires the reactive [`CatalogState`].
+/// The root [`Component`]. This example's `frust::app!` call below installs
+/// Glyph as the seeded default theme via its `setup = { .. }` block
+/// (`frust_glyph::install()`, run before any shell construction) — a
+/// shell's own built-in fallback is [`Theme::neutral()`] now, so `init`
+/// relies on that explicit install rather than a shell-seeded Glyph default;
+/// `init` itself forces nothing — it only wires the reactive
+/// [`CatalogState`].
 #[derive(Default)]
 pub struct CatalogApp;
 
@@ -399,5 +388,14 @@ impl Component for CatalogApp {
 // `CatalogApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that
-// `main.rs` calls.
-frust::app!(CatalogApp);
+// `main.rs` calls. The `setup` block installs Glyph as the seeded default
+// theme (`frust_glyph::install()`) before any shell reads the
+// default-theme slot — a shell's own fallback is `Theme::neutral()` now, and
+// this catalog exists specifically to showcase Glyph, so it must not launch
+// neutral.
+frust::app!(
+    CatalogApp,
+    setup = {
+        frust_glyph::install();
+    }
+);

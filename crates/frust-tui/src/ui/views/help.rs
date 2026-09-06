@@ -1,10 +1,10 @@
-//! The keyboard/help overlay (`?`, T05 / D5): a workbook-styled popup listing
-//! every command's keyhint. Sourced from exactly the same
+//! The keyboard/help overlay (`?`): a shadowed, centered popup listing every
+//! command's keyhint. Sourced from exactly the same
 //! [`crate::engine::palette::commands`] table the command palette renders —
 //! a single source of truth for the whole workbench's key vocabulary, never a
 //! second hand-maintained key list to drift out of sync with the palette's.
 //!
-//! Layering (D2): renders `&AppState` and only *registers* interaction (a
+//! Layering: renders `&AppState` and only *registers* interaction (a
 //! click closes it, mirroring the doctor panel's Close button); it never
 //! mutates the engine.
 

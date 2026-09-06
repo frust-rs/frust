@@ -3,8 +3,8 @@
 //! so the feed restyle can share them).
 //!
 //! Two small hand-rolled [`View`]/[`Widget`] pairs built directly against
-//! `frust-core` — the facade's documented "low-level escape hatch" pattern
-//! (`docs/ARCHITECTURE.md`), the same precedent `ui::swipeable`/`ui::toast`
+//! `frust::authoring` — the facade's own widget-authoring seam
+//! (`docs/CORE_ARCHITECTURE.md`), the same precedent `ui::swipeable`/`ui::toast`
 //! already use:
 //!
 //! - [`FillBox`] is a fixed-size filled rounded rect (a circle is
@@ -20,12 +20,10 @@
 //!   (`filled_box(Padding(10‥12, …), color, 8)`) without the card inset that
 //!   ballooned the whole feed.
 
-use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+use frust::authoring::{
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, any,
 };
-use kurbo::{Point, Size};
-use peniko::Color;
 
 // ---------------------------------------------------------------------------
 // FillBox — fixed-size filled rounded rect (leaf)

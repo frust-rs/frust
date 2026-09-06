@@ -213,8 +213,8 @@ mod tests {
     /// The unconditional pre-init gate ([`ensure_initialized`](super::ensure_initialized)):
     /// with the flag unset it returns `NotInitialized` on a path that touches
     /// **no** panic machinery — a plain acquire load, not `catch_unwind` /
-    /// `ndk-context` (fix F1: the guarantee no longer rides on `catch_unwind`,
-    /// so it holds under `panic = "abort"`). Off-Android [`initialize`] does not
+    /// `ndk-context` (deliberately: a guarantee that rode on `catch_unwind`
+    /// would not hold under `panic = "abort"`). Off-Android [`initialize`] does not
     /// exist, so the flag is permanently `false` and this exercises exactly the
     /// pre-init branch every accessor takes first.
     #[test]
@@ -227,7 +227,7 @@ mod tests {
 
     /// The host stub's pre-init contract: no handles off-Android, so
     /// [`with_jni_env`](super::with_jni_env) reports `NotInitialized` (via the
-    /// flag gate) without running its closure (Phase 1 acceptance: pre-init is a
+    /// flag gate) without running its closure (pre-init is a
     /// typed error, never a panic).
     #[test]
     fn with_jni_env_reports_not_initialized_pre_init() {

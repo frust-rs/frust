@@ -1,26 +1,31 @@
 # glyph-catalog
 
-A standalone Frust example app showcasing the **entire Glyph design system** —
-every token scale, all 21 `frust::glyph` widgets, the `Button` styles and
-baseline form controls under the Glyph theme, and all of `frust::motion`'s
-transition patterns — faithful to the three vendored reference builds (dark,
-light, motion).
+A standalone Frust example app showcasing the **entire Glyph design system**,
+and *only* the Glyph design system — every token scale, all 21 `frust_glyph`
+widgets, the `Button` styles and baseline form controls under the Glyph
+theme, and all of `frust::motion`'s transition patterns — faithful to the
+three vendored reference builds (dark, light, motion).
 
 It doubles as a living demo of `PatternSwitcher`, the navigator's Glyph page
 transitions, the brightness swap, and reduced-motion collapse.
 
+Plugin, native-widgets, platform-view-compositing, and responsive-layout
+demos are **not** part of this catalog's charter — those live in
+[`examples/playground`](../playground) instead.
+
 ## What it shows
 
 A header (app title + a brightness toggle + a reduce-motion toggle) sits above
-a 7-tab section strip, each tab hosting one catalog section in a
+a 9-tab section strip, each tab hosting one catalog section in a
 `pattern_switcher` (`GlyphSlide`) so switching tabs plays a themed slide
 transition:
 
 1. **Foundations** — live color/type/radius token specimens (every swatch
    re-resolves from the current theme, never a hardcoded hex).
 2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, plus
-   the baseline form controls (`text_input`, `checkbox`, `radio`, `switch`,
-   `slider`) rendered under the Glyph theme.
+   the baseline form controls (`text_input`, `checkbox`, `radio`, `slider`)
+   rendered under the Glyph theme, alongside the Glyph catalog's own
+   `frust_glyph::toggle`.
 3. **Feedback** — badges, dismissible tags, alerts, toast triggers, and the
    progress/skeleton/dots loaders.
 4. **Navigation** — a standalone tabs demo, segmented control, breadcrumb, two
@@ -35,6 +40,15 @@ transition:
    toast, staggered log reveal, a composable screen-transition picker, and a
    boot sequence), plus a live `theme.motion` duration/easing token table and
    a reduced-motion status note.
+8. **Interactions** — eight moments tied to a simulated muxr event stream: a
+   connection heartbeat, a session-attach card morph, a new-session boot
+   sequence, a token-revoke character scramble, a long-press charge ring, a
+   pull-to-refresh rain burst, a live-output waveform, and a copy-to-clipboard
+   burst.
+9. **AppBar** — an inline anatomy diagram plus six pushed full-screen
+   variations of the catalog's own root `frust_glyph::app_bar`: scroll collapse,
+   back-nav title crossfade, an overflow menu, selection mode, and a
+   connection banner.
 
 A toast host overlays every section (Feedback's and Motion's toast triggers
 both queue into the same shared FIFO).
@@ -68,11 +82,11 @@ person at a desk, not something a sandboxed, display-less CI
 run could produce:
 
 1. `cargo run` from this directory (desktop preview).
-2. Click each of the 7 tabs; toggle brightness (◐/◑) and reduce-motion
+2. Click each of the 9 tabs; toggle brightness (◐/◑) and reduce-motion
    (▶/⏸) at each tab, confirming every specimen/demo repaints live (no stale
    hardcoded color, no residual animation once reduced-motion is on).
 3. A screenshot tool of the reviewer's choice (`cmd+shift+4` on macOS, or an
-   OS screenshot utility) captures each of the 7 states for a visual diff
+   OS screenshot utility) captures each of the 9 states for a visual diff
    against the vendored reference builds.
 
 The automated gate this repo *does* ship — `tests/smoke.rs`'s
@@ -83,8 +97,10 @@ proof, not a substitute for the visual gate above.
 
 ## Theming
 
-Every shell seeds `Theme::glyph_baseline()` by default (dark-first). The
-header toggles rebuild the theme via a `ThemeBuilder` over the Glyph baseline
+This app's `setup` block seeds `frust_glyph::baseline()` as the app-wide
+default theme (dark-first) — a shell's own built-in fallback is
+`Theme::neutral()` now, so an explicit install is required. The header
+toggles rebuild the theme via a `ThemeBuilder` over the Glyph baseline
 (`.brightness(...)` + `.map_motion(...)` for the reduced-motion flag) and force
 it app-wide with `set_app_theme`. Toggling reduced-motion collapses every
 transition pattern used across the catalog (the section `pattern_switcher`,
@@ -106,7 +122,7 @@ with reason (see each page's own module docs for the full rationale).
 | Accent (amber) | ✓ |
 | Semantic (cyan/success/warning/error + faint, 8) | ✓ |
 | Text: fg, fg-muted | ✓ |
-| Text: fg-dim, fg-faintest | N/A — no `ColorScheme` role (`frust_theme::glyph::color`'s own documented leftover); painting one would require a hardcoded hex, which the token-not-hardcode convention forbids |
+| Text: fg-dim, fg-faintest | N/A — no `ColorScheme` role (`frust_glyph::tokens::color`'s own documented leftover); painting one would require a hardcoded hex, which the token-not-hardcode convention forbids |
 | Borders (border, border-bright) | ✓ |
 | `StatusPalette` extension row | ✓ |
 | `GlyphInk` extension row (brightness-invariant) | ✓ |
@@ -131,7 +147,7 @@ with reason (see each page's own module docs for the full rationale).
 | Textarea (`.multiline`) | ✓ |
 | Checkbox | ✓ |
 | Radio pair | ✓ |
-| Toggle switch (spring) | ✓ |
+| Toggle switch (spring) | ✓ — `frust_glyph::toggle`, the Glyph catalog's own authored toggle-spring switch (`plugins/glyph/src/toggle.rs`), not a `frust`/`frust-widgets` baseline item |
 | Select dropdown | N/A — no `frust` widget exists for it |
 | Slider with live readout | ✓ |
 
@@ -144,7 +160,7 @@ with reason (see each page's own module docs for the full rationale).
 | Tags (dismissible) | ✓ |
 | Alerts (Info/Success/Warning/Error) | ✓ |
 | Toast triggers + 2.4s auto-dismiss caption | ✓ |
-| Toast per-variant coloring | N/A — framework gap: `glyph::toast_host`'s queue is `Vec<String>` with no variant field, so every toast paints as `ToastVariant::Plain` regardless of trigger; a future `frust-widgets` change, flagged in-page |
+| Toast per-variant coloring | N/A — framework gap: `frust_glyph::toast_host`'s queue is `Vec<String>` with no variant field, so every toast paints as `ToastVariant::Plain` regardless of trigger; a future `frust-glyph` change, flagged in-page |
 | Progress bar | ✓ (fixed 65%, the documented fallback option) |
 | Skeleton, dots loader | ✓ |
 
@@ -202,22 +218,22 @@ with reason (see each page's own module docs for the full rationale).
 
 An earlier research pass (written before this catalog's pages were filled in)
 flagged 11 components as having no direct `frust`
-widget. In practice `frust-widgets`' `glyph` catalog already ships a
+widget. In practice the `frust-glyph` catalog plugin already ships a
 purpose-built widget for all but one:
 
 | Component | Actual status |
 |---|---|
-| Tag (dismissible) | ✓ `glyph::tag` — covered, §04 |
-| Stat card | ✓ `glyph::stat_card` — covered, §06 |
-| Terminal/code block | ✓ `glyph::term_block` — covered, §06 |
-| Breadcrumb | ✓ `glyph::breadcrumb` — covered, §05 |
-| Avatar | ✓ `glyph::avatar` — covered, §05 |
-| Tooltip | ✓ `glyph::tooltip` — covered, §06 |
-| Empty state | ✓ `glyph::empty_state` — covered, §06 |
-| Command palette | ✓ `glyph::command_palette` — covered, §07/Motion |
-| Bottom navigation | ✓ (mapped to `glyph::glyph_nav_bar`, no dedicated bottom-nav widget — see §05 above) |
+| Tag (dismissible) | ✓ `frust_glyph::tag` — covered, §04 |
+| Stat card | ✓ `frust_glyph::stat_card` — covered, §06 |
+| Terminal/code block | ✓ `frust_glyph::term_block` — covered, §06 |
+| Breadcrumb | ✓ `frust_glyph::breadcrumb` — covered, §05 |
+| Avatar | ✓ `frust_glyph::avatar` — covered, §05 |
+| Tooltip | ✓ `frust_glyph::tooltip` — covered, §06 |
+| Empty state | ✓ `frust_glyph::empty_state` — covered, §06 |
+| Command palette | ✓ `frust_glyph::command_palette` — covered, §07/Motion |
+| Bottom navigation | ✓ (mapped to `frust_glyph::glyph_nav_bar`, no dedicated bottom-nav widget — see §05 above) |
 | Boot sequence animation | ✓, approximated (see Motion #11 above) |
-| Staggered log reveal | ✓ `glyph::term_block(...).staggered(true)` — covered, Motion #09 |
+| Staggered log reveal | ✓ `frust_glyph::term_block(...).staggered(true)` — covered, Motion #09 |
 
 ### Coverage audit result
 

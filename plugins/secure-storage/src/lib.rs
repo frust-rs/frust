@@ -331,8 +331,9 @@ impl SecureStorage {
     ///
     /// # Errors
     /// [`SecureStorageError::Storage`] if the store's location can't be
-    /// resolved (file backend, no usable data directory). On Android (Phase
-    /// 3), [`SecureStorageError::PlatformNotInitialized`] for an old scaffold.
+    /// resolved (file backend, no usable data directory).
+    /// [`SecureStorageError::PlatformNotInitialized`] on Android for a
+    /// scaffold that predates `nativeInitPlatform`.
     pub fn open(name: &str) -> Result<Self, SecureStorageError> {
         Self::open_with(name, StoreOptions::default())
     }

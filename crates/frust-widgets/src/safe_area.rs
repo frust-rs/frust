@@ -105,7 +105,7 @@ impl<State: 'static> View<State> for SafeAreaView<State> {
             right: self.right,
             bottom: self.bottom,
             minimum: self.minimum,
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
         }
     }
 
@@ -129,12 +129,12 @@ impl<State: 'static> View<State> for SafeAreaView<State> {
             element.minimum = self.minimum;
             flags |= ChangeFlags::LAYOUT;
         }
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut SafeAreaWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -173,13 +173,15 @@ impl Widget for SafeAreaWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // Transparent inset wrapper, mirroring Padding: forward to the child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

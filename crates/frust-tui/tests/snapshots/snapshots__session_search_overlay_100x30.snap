@@ -6,14 +6,14 @@ expression: "render_to_string(100, 30, &state)"
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │huddle:  1 ▶ desktop                                                      
-  ▸ huddle               │   Compiling huddle v0.1.0                                                
-                         │    Finished dev profile                                                  
- DEVICES ↻ r             │     Running `target/debug/huddle`                                        
-   none found            │app: booting up                                                           
-                         │warning: unused variable `x`                                              
- SESSIONS                │app: frame 1 rendered                                                     
-   huddle                │error: texture upload failed                                              
-   ▸ ▶ desktop           │app: recovering                                                           
+  ▸ huddle               │   12:00:00 [app]       Compiling huddle v0.1.0                           
+                         │   12:00:01 [app]        Finished dev profile                             
+ DEVICES ↻ r             │   12:00:02 [app]         Running `target/debug/huddle`                   
+   none found            │   12:00:03 [app]    app: booting up                                      
+                         │ W 12:00:04 [app]    warning: unused variable `x`                         
+ SESSIONS                │   12:00:05 [app]    app: frame 1 rendered                                
+   huddle                │ E 12:00:06 [app]    error: texture upload failed                         
+   ▸ ▶ desktop           │   12:00:07 [app]    app: recovering                                      
                          │                                                                          
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
@@ -21,14 +21,14 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d            │                                                                          
    Build · b             │                                                                          
    Clean · c             │                                                                          
+   MCP off · M           │                                                                          
+   DAP off · D           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
+                         │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
                          │ /  err█                                                                  
 ● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

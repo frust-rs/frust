@@ -1,22 +1,20 @@
 //! [`StatusPalette`]: success/warning/info color roles as a
 //! [`crate::extensions::ThemeExtensions`] consumer.
 //!
-//! Material 3's baseline 46-role [`crate::color::ColorScheme`] has no
-//! `success`/`warning`/`info` roles at all — only `error`. Google's own
-//! Material Theme Builder covers this gap via its "custom color" extension
-//! feature (apply the same HCT tonal-palette derivation `error`/
-//! `error_container` uses to an arbitrary seed hue), rather than a second
-//! fixed role table — so there is no single official M3 token source to cite
-//! here. **Community-approximate**: the values below apply that same
-//! tone-relationship `ColorScheme::m3_baseline_light`/`_dark`'s `error` roles
-//! use (light: base/on/container/on-container ≈ tone 40/100/90/10; dark: ≈
-//! tone 80/20/30/90) to green (success), amber (warning), and blue (info)
-//! seed hues, chosen for conventional semantic association and AA contrast
-//! against `surface`/`on_surface`, not measured against a specific Google
-//! export.
+//! [`crate::color::ColorScheme`]'s 46 roles carry no
+//! `success`/`warning`/`info` at all — only `error`. This extension is that
+//! gap's typed filler: [`crate::theme::Theme::neutral`] attaches
+//! [`StatusPalette::neutral`], and a design system attaches its own table the
+//! same way.
 //!
-//! Glyph's own values (`StatusPalette::glyph()`) land in a later task (15) —
-//! this module ships the extension type plus the M3 default only.
+//! **Community-approximate** (`neutral`'s values): they apply the same
+//! tone-relationship Material 3's `error` roles use (light:
+//! base/on/container/on-container ≈ tone 40/100/90/10; dark: ≈ tone
+//! 80/20/30/90) to green (success), amber (warning), and blue (info) seed
+//! hues, chosen for conventional semantic association and AA contrast against
+//! `surface`/`on_surface`, not measured against a specific published export —
+//! Material 3 has no fixed status-role table to cite (its Theme Builder
+//! covers the gap with per-seed HCT "custom colors" instead).
 
 use crate::color::Brightness;
 use peniko::Color;
@@ -46,11 +44,12 @@ pub struct StatusColors {
 /// [`crate::extensions::ThemeExtensions`] — recovered with
 /// `theme.extension::<StatusPalette>()`.
 ///
-/// Every built-in baseline (`Theme::m3_baseline`, `Theme::cupertino_baseline`)
-/// attaches [`StatusPalette::m3`] by default, so `extension::<StatusPalette>()`
-/// is always `Some` on a Frust-constructed `Theme` — an app or third-party
-/// design system can still `theme.extensions.insert(StatusPalette { .. })`
-/// to override it wholesale.
+/// [`crate::theme::Theme::neutral`] attaches [`StatusPalette::neutral`], so
+/// `extension::<StatusPalette>()` is always `Some` on the framework's own
+/// baseline; an app or design system attaches its own table with
+/// `theme.extensions.insert(StatusPalette { .. })` (or
+/// [`ThemeBuilder::extension`](crate::builder::ThemeBuilder::extension)) to
+/// override it wholesale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StatusPalette {
     pub light: StatusColors,
@@ -67,11 +66,16 @@ impl StatusPalette {
         }
     }
 
-    /// The Material 3 baseline default (see module docs for derivation
-    /// rationale) — attached to both `Theme::m3_baseline()` and
-    /// `Theme::cupertino_baseline()` (Cupertino has no published equivalent
-    /// either, so it shares this default rather than going unset).
-    pub const fn m3() -> Self {
+    /// The language-free palette [`crate::theme::Theme::neutral`] composes.
+    ///
+    /// Success/warning/info are a *functional* signal, not a design-language
+    /// "look" — the same reasoning `ColorScheme::neutral_light`/`_dark` use to
+    /// keep `error` real red instead of grayscaling it too — so the neutral
+    /// baseline carries a real three-status table rather than going unset.
+    /// The values are the module docs' community-approximate tone
+    /// relationships, stated here in full rather than delegated, so this
+    /// constructor stands on its own with every design language out of tree.
+    pub const fn neutral() -> Self {
         Self {
             light: StatusColors {
                 // Green seed, ~tone 40/100/90/10 (mirrors `error`'s light
@@ -89,16 +93,15 @@ impl StatusPalette {
                 warning_container: Color::from_rgb8(0xFF, 0xDD, 0xB0),
                 on_warning_container: Color::from_rgb8(0x2B, 0x17, 0x00),
 
-                // Blue seed, echoing M3's own `primary`-adjacent "info" blue
-                // used elsewhere in Google's Material guidance.
+                // Blue seed, the conventional "info" blue.
                 info: Color::from_rgb8(0x00, 0x61, 0xA4),
                 on_info: Color::from_rgb8(0xFF, 0xFF, 0xFF),
                 info_container: Color::from_rgb8(0xD1, 0xE4, 0xFF),
                 on_info_container: Color::from_rgb8(0x00, 0x1D, 0x36),
             },
             dark: StatusColors {
-                // Dark tone relationship (~80/20/30/90), mirroring
-                // `error`'s dark tones (`F2B8B5`/`601410`/`8C1D18`/`F9DEDC`).
+                // Dark tone relationship (~80/20/30/90), mirroring `error`'s
+                // dark tones (`F2B8B5`/`601410`/`8C1D18`/`F9DEDC`).
                 success: Color::from_rgb8(0xA6, 0xF1, 0xA1),
                 on_success: Color::from_rgb8(0x00, 0x39, 0x0F),
                 success_container: Color::from_rgb8(0x20, 0x57, 0x23),
@@ -123,23 +126,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m3_colors_selects_by_brightness() {
-        let palette = StatusPalette::m3();
+    fn neutral_colors_selects_by_brightness() {
+        let palette = StatusPalette::neutral();
         assert_eq!(palette.colors(Brightness::Light), &palette.light);
         assert_eq!(palette.colors(Brightness::Dark), &palette.dark);
     }
 
     #[test]
-    fn m3_light_and_dark_are_distinct() {
-        let palette = StatusPalette::m3();
+    fn neutral_light_and_dark_are_distinct() {
+        let palette = StatusPalette::neutral();
         assert_ne!(palette.light.success, palette.dark.success);
         assert_ne!(palette.light.warning, palette.dark.warning);
         assert_ne!(palette.light.info, palette.dark.info);
     }
 
     #[test]
-    fn m3_spot_check() {
-        let palette = StatusPalette::m3();
+    fn neutral_spot_check() {
+        let palette = StatusPalette::neutral();
         assert_eq!(palette.light.success, Color::from_rgb8(0x2E, 0x7D, 0x32));
         assert_eq!(palette.light.on_success, Color::from_rgb8(0xFF, 0xFF, 0xFF));
         assert_eq!(palette.dark.warning, Color::from_rgb8(0xFF, 0xC4, 0x6B));
@@ -147,12 +150,12 @@ mod tests {
     }
 
     #[test]
-    fn m3_is_const_constructible() {
-        // Regression anchor: `StatusPalette::m3()` must stay a `const fn` so
-        // it can be used in const contexts if a future caller wants that;
-        // this binds it to a `const` and just uses it, which fails to
-        // compile if constness regresses.
-        const PALETTE: StatusPalette = StatusPalette::m3();
+    fn neutral_is_const_constructible() {
+        // Regression anchor: `StatusPalette::neutral()` must stay a `const fn`
+        // so a design system can name it in a const context; this binds it to
+        // a `const` and just uses it, which fails to compile if constness
+        // regresses.
+        const PALETTE: StatusPalette = StatusPalette::neutral();
         assert_eq!(PALETTE.light.success, Color::from_rgb8(0x2E, 0x7D, 0x32));
     }
 }

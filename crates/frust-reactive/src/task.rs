@@ -1,4 +1,4 @@
-//! The blessed heavy-work idiom (phase 9.A): [`AsyncValue<T>`] + [`use_task`].
+//! The blessed heavy-work idiom: [`AsyncValue<T>`] + [`use_task`].
 //!
 //! This is Frust's direct counterpart to Flutter's
 //! `compute()`/`FutureBuilder` — a one-call way to run heavy work off the UI
@@ -18,7 +18,7 @@
 //!
 //! `use_task` splits the work into two halves, wired explicitly (never
 //! assuming any implicit cancellation — the leptos precedent shows
-//! "implicit cancellation" claims are usually wrong; see the phase-9
+//! "implicit cancellation" claims are usually wrong; see the
 //! research ledger §9):
 //!
 //! 1. **A background half** — the fetcher future is handed to the process-wide
@@ -59,7 +59,7 @@ use crate::runtime::ReactiveRuntime;
 /// clone of the state is cheap and the error is shareable across the tree.
 pub type TaskError = Arc<dyn std::error::Error + Send + Sync>;
 
-/// The exhaustive state of an asynchronously-loaded value (phase 9.A).
+/// The exhaustive state of an asynchronously-loaded value.
 ///
 /// Deliberately named for parity with Riverpod's `AsyncValue<T>` (Flutter) —
 /// the genuine prior art for a load/data/error sum type with exhaustive
@@ -216,7 +216,7 @@ struct Coordinator<T: Send + Sync + 'static> {
     bg_abort: Arc<Mutex<Option<AbortHandle>>>,
 }
 
-/// Runs a fetch, wiring a heavy-work idiom around it (phase 9.A).
+/// Runs a fetch, wiring a heavy-work idiom around it.
 ///
 /// Called from `Component::init`/`build` under the component's [`Owner`]. It
 /// immediately starts a first fetch and returns a [`UseTask<T>`] to read the

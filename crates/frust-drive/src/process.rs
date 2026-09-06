@@ -50,6 +50,37 @@ pub trait ProcessRunner {
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output>;
 
+    /// Like [`run_streaming`](ProcessRunner::run_streaming), but also
+    /// **removes** every variable named in `remove_env` from the child's
+    /// environment, so a variable this process inherited is unreadable to the
+    /// tool being invoked. Removal is applied after `env`, so a name appearing
+    /// in both ends up unset.
+    ///
+    /// This exists for invocations where an *ambiently* exported variable
+    /// silently changes what a tool does — `cargo packager`, which notarizes
+    /// (and uploads to Apple) any `.app` it signs the moment it can read Apple
+    /// credentials out of the environment. Scrubbing is the only way to say
+    /// "sign, don't phone home" to a tool with no flag for it.
+    ///
+    /// **The default implementation ignores `remove_env`** and forwards to
+    /// [`run_streaming`](ProcessRunner::run_streaming): it exists purely so the
+    /// crate's small in-test runner doubles stay source-compatible, and is only
+    /// sound for an implementation that spawns no real process. Any
+    /// implementation that *does* spawn one must override this — both runners
+    /// in this module do.
+    fn run_streaming_scrubbed(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        remove_env: &[&str],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        let _ = remove_env;
+        self.run_streaming(cmd, args, cwd, env, on_line)
+    }
+
     /// Like [`run_streaming`](ProcessRunner::run_streaming), but
     /// **non-blocking**: spawns the process and returns immediately with a
     /// [`StreamHandle`] a caller drains/cancels at its own pace instead of
@@ -387,6 +418,18 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
+/// The signals `frust-drive::interrupt` owns, as a child's `WTERMSIG` would
+/// report them: SIGHUP(1), SIGINT(2), SIGTERM(15). Stable kernel-ABI numbers
+/// across every Unix target Frust builds for, like [`group_kill_unix`]'s
+/// `SIGKILL`.
+///
+/// A streamed child dying of one of these is the observable half of a
+/// process-group signal (a terminal Ctrl-C, a CI runner's `kill`) that this
+/// process was almost certainly also a target of — see
+/// [`RealProcessRunner::run_streaming`]'s reap.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [i32; 3] = [1, 2, 15];
+
 /// `SIGKILL`s the entire Unix process group whose id equals `child_pid`.
 ///
 /// [`ProcessRunner::spawn_streaming`] places each streamed child in its own
@@ -423,25 +466,18 @@ fn group_kill_unix(child_pid: u32) {
 /// Shells out for real via [`std::process::Command`].
 pub struct RealProcessRunner;
 
-impl ProcessRunner for RealProcessRunner {
-    fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
-        let out = Command::new(cmd)
-            .args(args)
-            .output()
-            .with_context(|| format!("failed to spawn `{cmd}`"))?;
-        Ok(Output {
-            success: out.status.success(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
-    }
-
-    fn run_streaming(
+impl RealProcessRunner {
+    /// The one streaming implementation both
+    /// [`ProcessRunner::run_streaming`] and
+    /// [`ProcessRunner::run_streaming_scrubbed`] use — the plain variant is
+    /// exactly this with an empty `remove_env`, so the two can never drift.
+    fn stream(
         &self,
         cmd: &str,
         args: &[&str],
         cwd: Option<&Path>,
         env: &[(&str, &str)],
+        remove_env: &[&str],
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output> {
         use std::io::{BufRead, BufReader, Read};
@@ -456,6 +492,12 @@ impl ProcessRunner for RealProcessRunner {
         }
         for (key, value) in env {
             command.env(key, value);
+        }
+        // After the additions, so a name in both lists ends up unset —
+        // `Command`'s env overrides are a map applied over the inherited
+        // environment, and the later `env_remove` entry wins.
+        for key in remove_env {
+            command.env_remove(key);
         }
 
         let mut child = command
@@ -499,11 +541,72 @@ impl ProcessRunner for RealProcessRunner {
             .wait()
             .with_context(|| format!("waiting on `{cmd}`"))?;
 
+        // A child killed by a termination signal is usually not a tool that
+        // failed — it is this process's own Ctrl-C/SIGTERM arriving group-wide
+        // and killing both of us. Returning a plain `success: false` here
+        // hands the caller an ordinary build failure to `bail!` on, which
+        // races `interrupt`'s handler thread for the process's exit status
+        // (exit 1 versus its scrub-then-130) and used to win about as often as
+        // it lost. Deferring here — at the one seam every synchronous pipeline
+        // funnels its external tools through, rather than in each pipeline's
+        // own failure branch — makes the signal win, for every caller.
+        //
+        // Costs nothing on the ordinary paths: an exit status carries a
+        // `signal()` only for a signal-killed child, so a tool that merely
+        // exited non-zero (the normal build-failure case) never calls in.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status
+                .signal()
+                .is_some_and(|signal| TERMINATION_SIGNALS.contains(&signal))
+            {
+                crate::interrupt::defer_to_pending_signal(crate::interrupt::SIGNAL_DEFER_TIMEOUT);
+            }
+        }
+
         Ok(Output {
             success: status.success(),
             stdout: stdout_lines.join("\n"),
             stderr,
         })
+    }
+}
+
+impl ProcessRunner for RealProcessRunner {
+    fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+        let out = Command::new(cmd)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to spawn `{cmd}`"))?;
+        Ok(Output {
+            success: out.status.success(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn run_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        self.stream(cmd, args, cwd, env, &[], on_line)
+    }
+
+    fn run_streaming_scrubbed(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        remove_env: &[&str],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        self.stream(cmd, args, cwd, env, remove_env, on_line)
     }
 
     fn spawn_streaming(
@@ -708,6 +811,10 @@ pub struct FakeProcessRunner {
     /// boundary (e.g. `frust-tui`'s ad-hoc clean/build sessions), which
     /// requires `Sync`.
     recorded_cwd: Mutex<Option<PathBuf>>,
+    /// The `remove_env` list the most recent streaming call carried — see
+    /// [`recorded_env_removals`](Self::recorded_env_removals). `Mutex`-backed
+    /// for the same `Sync` reason as [`recorded_cwd`](Self::recorded_cwd).
+    recorded_env_removals: Mutex<Option<Vec<String>>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -830,6 +937,31 @@ impl FakeProcessRunner {
     fn record_cwd(&self, cwd: Option<&Path>) {
         *self.recorded_cwd.lock().unwrap_or_else(|p| p.into_inner()) = cwd.map(Path::to_path_buf);
     }
+
+    /// The environment-variable names the most recent
+    /// [`run_streaming`](ProcessRunner::run_streaming)/
+    /// [`run_streaming_scrubbed`](ProcessRunner::run_streaming_scrubbed) call
+    /// asked to have removed from the child: an empty `Vec` for a call that
+    /// scrubbed nothing, `None` if no streaming call has been made at all.
+    /// Lets a test assert that a credential-sensitive invocation really was
+    /// scrubbed (and that an opted-in one really wasn't), which the child's
+    /// environment itself can't show once the process is faked.
+    pub fn recorded_env_removals(&self) -> Option<Vec<String>> {
+        self.recorded_env_removals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Records `remove_env` for
+    /// [`recorded_env_removals`](Self::recorded_env_removals).
+    fn record_env_removals(&self, remove_env: &[&str]) {
+        *self
+            .recorded_env_removals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) =
+            Some(remove_env.iter().map(|key| key.to_string()).collect());
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -883,10 +1015,27 @@ impl ProcessRunner for FakeProcessRunner {
         cmd: &str,
         args: &[&str],
         cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        self.run_streaming_scrubbed(cmd, args, cwd, env, &[], on_line)
+    }
+
+    /// As [`run_streaming`](Self::run_streaming) — there is no real child
+    /// whose environment could differ — except that `remove_env` is recorded
+    /// for [`recorded_env_removals`](FakeProcessRunner::recorded_env_removals),
+    /// which is how a test asserts the scrub a faked invocation asked for.
+    fn run_streaming_scrubbed(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
         _env: &[(&str, &str)],
+        remove_env: &[&str],
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output> {
         self.record_cwd(cwd);
+        self.record_env_removals(remove_env);
         let out = self.run(cmd, args)?;
         for line in out.stdout.lines() {
             on_line(line);
@@ -1076,6 +1225,160 @@ mod tests {
             .unwrap();
         assert_eq!(seen, vec!["line one", "line two"]);
         assert!(out.success);
+    }
+
+    /// The scrub is real at the child boundary: a variable this test process
+    /// itself inherited is unreadable to a child spawned with it in
+    /// `remove_env`, while the same child spawned without the scrub reads it
+    /// fine (the negative control). Deliberately probes an *inherited*
+    /// variable rather than one this test exported — `std::env::set_var` is
+    /// `unsafe` and process-global, and inheritance is exactly the case the
+    /// credential scrub exists for.
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_scrubbed_removes_an_inherited_var_from_the_child() {
+        // Whichever of these the runtime environment actually carries; PATH is
+        // the always-present last resort.
+        let probe = ["HOME", "USER", "PATH"]
+            .into_iter()
+            .find(|key| std::env::var_os(key).is_some())
+            .expect("a test process always inherits at least PATH");
+        let script = format!("echo \"probe=[${{{probe}:-<unset>}}]\"");
+        let runner = RealProcessRunner;
+
+        let mut inherited = Vec::new();
+        runner
+            .run_streaming("/bin/sh", &["-c", &script], None, &[], &mut |line| {
+                inherited.push(line.to_string())
+            })
+            .unwrap();
+        assert!(
+            inherited.iter().any(|l| l != "probe=[<unset>]"),
+            "negative control: an unscrubbed child should still read {probe}, got {inherited:?}"
+        );
+
+        let mut scrubbed = Vec::new();
+        runner
+            .run_streaming_scrubbed(
+                "/bin/sh",
+                &["-c", &script],
+                None,
+                &[],
+                &[probe],
+                &mut |line| scrubbed.push(line.to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            scrubbed,
+            vec!["probe=[<unset>]".to_string()],
+            "{probe} should be unset in the scrubbed child"
+        );
+    }
+
+    /// Removal is applied after the `env` additions, so a name given in both
+    /// ends up unset rather than set — the ordering the scrub depends on when
+    /// a caller adds env pairs to the same invocation it scrubs.
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_scrubbed_removal_wins_over_an_added_env_pair() {
+        let runner = RealProcessRunner;
+        let mut lines = Vec::new();
+        runner
+            .run_streaming_scrubbed(
+                "/bin/sh",
+                &["-c", "echo \"v=[${FRUST_SCRUB_PROBE:-<unset>}]\""],
+                None,
+                &[("FRUST_SCRUB_PROBE", "secret")],
+                &["FRUST_SCRUB_PROBE"],
+                &mut |line| lines.push(line.to_string()),
+            )
+            .unwrap();
+        assert_eq!(lines, vec!["v=[<unset>]".to_string()]);
+    }
+
+    /// The fake's recording side: a scrubbed invocation reports exactly the
+    /// names it was asked to remove, a plain one reports an empty list, and a
+    /// runner that has streamed nothing reports `None`.
+    #[test]
+    fn fake_records_the_env_removals_of_the_most_recent_streaming_call() {
+        let runner = FakeProcessRunner::new().with(
+            "cargo packager",
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert_eq!(runner.recorded_env_removals(), None);
+
+        runner
+            .run_streaming_scrubbed(
+                "cargo",
+                &["packager"],
+                None,
+                &[],
+                &["APPLE_ID", "APPLE_PASSWORD"],
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            runner.recorded_env_removals(),
+            Some(vec!["APPLE_ID".to_string(), "APPLE_PASSWORD".to_string()])
+        );
+
+        runner
+            .run_streaming("cargo", &["packager"], None, &[], &mut |_| {})
+            .unwrap();
+        assert_eq!(runner.recorded_env_removals(), Some(Vec::new()));
+    }
+
+    /// A runner that overrides neither streaming method (every in-test double
+    /// outside this module) still compiles and runs: the trait's default
+    /// forwards to `run_streaming`, ignoring the removal list.
+    #[test]
+    fn the_trait_default_forwards_a_scrubbed_call_to_run_streaming() {
+        struct ForwardingRunner;
+
+        impl ProcessRunner for ForwardingRunner {
+            fn run(&self, _cmd: &str, _args: &[&str]) -> Result<Output> {
+                unreachable!("this double only streams")
+            }
+
+            fn run_streaming(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                _cwd: Option<&Path>,
+                _env: &[(&str, &str)],
+                on_line: &mut dyn FnMut(&str),
+            ) -> Result<Output> {
+                on_line("forwarded");
+                Ok(Output {
+                    success: true,
+                    stdout: "forwarded".to_string(),
+                    stderr: String::new(),
+                })
+            }
+
+            fn spawn_streaming(
+                &self,
+                _cmd: &str,
+                _args: &[&str],
+                _cwd: Option<&Path>,
+                _env: &[(&str, &str)],
+            ) -> Result<StreamHandle> {
+                unreachable!("this double only streams synchronously")
+            }
+        }
+
+        let mut lines = Vec::new();
+        let out = ForwardingRunner
+            .run_streaming_scrubbed("tool", &[], None, &[], &["APPLE_ID"], &mut |line| {
+                lines.push(line.to_string())
+            })
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(lines, vec!["forwarded".to_string()]);
     }
 
     #[test]
@@ -1432,6 +1735,29 @@ mod tests {
             out.stderr.contains("to-stderr"),
             "stderr should be captured into Output.stderr (piped, not inherited), got {:?}",
             out.stderr
+        );
+    }
+
+    /// A real child killed by a termination signal still returns an ordinary
+    /// unsuccessful `Output`. Nothing signals the test process itself, so
+    /// `interrupt`'s latch stays clear and the reap-time defer must time out
+    /// and hand control back — a child someone `kill`s by pid must never hang
+    /// the caller waiting for an exit that isn't coming.
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_real_signal_killed_child_returns_instead_of_hanging() {
+        use std::time::Instant;
+
+        let runner = RealProcessRunner;
+        let started = Instant::now();
+        let out = runner
+            .run_streaming("/bin/sh", &["-c", "kill -TERM $$"], None, &[], &mut |_| {})
+            .unwrap();
+        assert!(!out.success, "a signal-killed child is not a success");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the defer is bounded; this returned only after {:?}",
+            started.elapsed()
         );
     }
 

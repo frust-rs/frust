@@ -20,6 +20,20 @@
 //! macro definition and the pure host-testable helpers ([`ffi_support`]) compile,
 //! so the crate is inert in a host `cargo test --workspace` and on Android.
 //!
+//! # GPU-device hand-back (`gpu` feature)
+//!
+//! This shell's `gpu` Cargo feature forwards into `frust-shell-common/gpu`
+//! and `frust-render/gpu` (the process-wide device slot and its
+//! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
+//! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
+//! `frust-shell-desktop`'s render executor installs its live device into.
+//! **This shell does not install one yet** — its render-thread device
+//! creation lives in `ffi_glue`'s render-loop bring-up and `app::executor`,
+//! wiring an install call there is a render-thread-split-aware change of
+//! its own, not a one-line addition — so `frust::gpu::with_context`
+//! currently answers `None` on iOS even with `--features gpu` on. An
+//! accepted, explicitly tracked gap rather than a half-built accessor.
+//!
 //! # Unsafe
 //!
 //! This crate is a sanctioned `unsafe` zone: the framework crates
@@ -65,10 +79,13 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (Makepad `app_main!` precedent).
 ///
-/// Stamps out the nineteen `frust_*` symbols the generated Swift app declares
+/// Stamps out the twenty `frust_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
 /// `frust_set_appearance` (the dark-mode export),
+/// `frust_set_reduce_motion` (the reduced-motion accessibility export — the
+/// same transport over a different sensor: `UIAccessibility`, not
+/// `UITraitCollection`),
 /// `frust_on_deep_link` (cold-start/running deep-link delivery),
 /// `frust_init_accessibility` (the accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
@@ -263,6 +280,16 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
             $crate::ffi_glue::set_appearance(handle, dark)
+        }
+
+        /// `frust_set_reduce_motion`: apply the platform's reduced-motion
+        /// accessibility preference (`UIAccessibility.isReduceMotionEnabled`)
+        /// to the active theme's motion tokens. `reduce` is `0`/`1`,
+        /// mirroring `frust_set_appearance`'s `dark: u8`.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_set_reduce_motion(handle: *mut ::core::ffi::c_void, reduce: u8) {
+            $crate::ffi_glue::set_reduce_motion(handle, reduce)
         }
 
         /// `frust_set_insets`: deliver the platform window insets

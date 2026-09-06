@@ -19,7 +19,7 @@
 //! [`GreetingRepository`] implementation exactly once and passes it
 //! straight into `presentation::pages::init_controller` as a prop — the
 //! team-demo convention (a single page needs no `provide_context`
-//! indirection; see `docs/DEVELOPMENT.md`'s `--arch clean-signals` note and
+//! indirection; see `docs/CLI_DEVELOPMENT.md`'s `--arch clean-signals` note and
 //! `examples/huddle`'s `lib.rs` for the context-injection variant a
 //! multi-route app needs instead).
 //!
@@ -70,4 +70,18 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
 // (unconditional; self-gated to `target_os = "ios"`), and (on desktop) the
 // hidden `__frust_main` that `main.rs` calls. Never edit this line or
 // `main.rs` — add screens/state to the feature slices above instead.
-frust::app!({{ title_case_name | replace(" ", "") }}App);
+// The `setup` block runs once, on the UI thread, before the root
+// component's `Component::init`; `frust_glyph::install()` is what makes
+// Glyph this app's design system — every shell otherwise falls back to a
+// design-language-free `Theme::neutral()`. Delete this call (and
+// `Cargo.toml`'s `frust-glyph` dependency) for a neutral-themed app, or
+// swap it for `frust_material::install()` / `frust_cupertino::install()`
+// (and the matching `Cargo.toml` dependency) to use one of the other two
+// built-in design systems instead.
+frust::app!(
+    {{ title_case_name | replace(" ", "") }}App,
+    setup = {
+        frust_glyph::install();
+    }
+);
+

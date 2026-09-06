@@ -1,0 +1,5 @@
+error: `locales!`: no `fixtures/no-fallback/en` directory, so there is no default fallback locale — name one explicitly: locales!("fixtures/no-fallback", fallback: "de")
+ --> tests/macro/missing_fallback.rs:4:22
+  |
+4 | frust_i18n::locales!("fixtures/no-fallback");
+  |                      ^^^^^^^^^^^^^^^^^^^^^^

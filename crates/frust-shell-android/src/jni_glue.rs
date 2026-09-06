@@ -53,7 +53,7 @@ use jni::refs::Global;
 use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
-use frust_core::event::{EditingState, ImeState};
+use frust_core::event::{EditingState, ImeContentType, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -849,6 +849,20 @@ pub fn native_init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> jlong {
     init_logger_once();
+    // Devtools, compiled in only under this crate's `devtools` feature. Started
+    // here — after `init_logger_once` above, never before it — because the
+    // service's discovery line (`frust-devtools listening on <port>`) is a
+    // `log::info!` call, and tooling recovers the port by grepping it out of
+    // logcat: started ahead of `android_logger`, that one line would be lost
+    // and the port unrecoverable on a device. No wake callback: the
+    // Choreographer loop drains the hop queue every tick (see
+    // `AndroidAppHandle::frame`). The app name is the process name, which on
+    // Android is the package name.
+    #[cfg(feature = "devtools")]
+    frust_shell_common::devtools::start(
+        frust_shell_common::devtools::app_name_from_process(),
+        None,
+    );
     guard("nativeInit", 0, || {
         let cache_dir = env
             .with_env(|env| cache_dir.try_to_string(env))
@@ -1486,6 +1500,55 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
     });
 }
 
+/// `nativeAppIsDark`: the read half of the appearance seam — return whether
+/// the APP's currently active theme is dark right now, for Kotlin to drive
+/// `updateSystemBarsAppearance` from instead of re-reading
+/// `Configuration.uiMode` (see [`AndroidAppHandle::is_dark_theme`]'s doc for
+/// the full rationale). `FrustSurfaceView` calls this right
+/// after every `nativeSetAppearance` (`surfaceCreated`/
+/// `onConfigurationChanged`) AND once per frame (`pollAppBrightness`), so a
+/// runtime `frust::set_app_theme`/`clear_app_theme` call — which has no
+/// device `Configuration` event of its own — still reaches the status bar
+/// within one frame.
+///
+/// A missing/torn-down handle returns `false` (light) — a defensive default
+/// only, never actually observed on the production path: Kotlin already
+/// guards every call site on `handle != 0L` before reaching here (mirrors
+/// [`native_system_ui_state`]'s own note that its default is a narrow
+/// teardown-race fallback, not a meaningful "unknown" state — the app side
+/// itself never has an "unknown" brightness once a handle exists, since
+/// [`AndroidAppHandle::new`] always seeds `theme.brightness` before returning
+/// one).
+pub fn native_app_is_dark(handle: jlong) -> jboolean {
+    guard("nativeAppIsDark", false, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        match unsafe { handle_mut(handle) } {
+            Some(app) => app.is_dark_theme(),
+            None => false,
+        }
+    })
+}
+
+/// `nativeSetReduceMotion`: apply the platform's reduced-motion accessibility
+/// preference to the active theme's `MotionScheme`, re-publishing it through
+/// both delivery paths — the reduced-motion twin of [`native_set_appearance`].
+///
+/// `reduce` is Kotlin's `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` read.
+/// That setting is not part of `Configuration`, so Kotlin sources it from a
+/// `ContentObserver` plus a re-read on resume rather than
+/// `onConfigurationChanged` (see `FrustSurfaceView.reduceMotionEnabled`).
+/// Same `jboolean`-is-a-real-`bool` note as [`native_set_appearance`]; the
+/// continuous Choreographer loop repaints the next tick with no extra wake
+/// needed. A missing handle is a no-op.
+pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
+    guard("nativeSetReduceMotion", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_reduce_motion(reduce);
+        }
+    });
+}
+
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's
 /// packed `(generation, mode)` state for Kotlin's `doFrame` to poll,
 /// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.
@@ -1851,12 +1914,48 @@ pub fn native_init_accessibility(env: EnvUnowned, handle: jlong, view: JObject) 
     });
 }
 
+/// Map [`ImeContentType`] onto the stable wire string [`ImeJsonState::content_type`]
+/// carries into `build_ime_state_json`'s `"contentType"` field.
+///
+/// `ImeContentType` is `#[non_exhaustive]`, and this crate is not the crate
+/// that defines it, so (unlike `ImeContentType::is_secret`/
+/// `suppresses_suggestions`, defined alongside the enum) a wildcard arm is
+/// mandatory here — `rustc` will not let this bridge compile against a future
+/// variant it hasn't seen. Rather than let that wildcard silently default to
+/// `"normal"` (exactly the downgrade the type's own docs warn about), it fails
+/// closed using the same [`ImeContentType::is_secret`]/
+/// [`ImeContentType::suppresses_suggestions`] predicates the enum's docs
+/// mandate matching on for this reason: an unrecognized variant becomes the
+/// *strictest* wire string its own predicates justify, never the loosest.
+/// Mirrors `frust_shell_ios::ffi_glue::content_type_wire` byte-for-byte (same
+/// four wire strings, same fail-closed rule).
+fn content_type_wire(content_type: ImeContentType) -> &'static str {
+    match content_type {
+        ImeContentType::Normal => "normal",
+        ImeContentType::Password => "password",
+        ImeContentType::NoSuggestions => "noSuggestions",
+        ImeContentType::Terminal => "terminal",
+        other => {
+            if other.is_secret() {
+                "password"
+            } else if other.suppresses_suggestions() {
+                "noSuggestions"
+            } else {
+                "normal"
+            }
+        }
+    }
+}
+
 /// Map the focused widget's published [`ImeState`] (or its absence) onto the
 /// plain, host-testable [`ImeJsonState`] the JSON builder consumes.
 ///
 /// `None` (nothing focused / no surface published) becomes the inactive default.
 /// The caret [`kurbo::Rect`] flattens to `(x, y, width, height)` logical pixels,
 /// dropped when any component is non-finite (it would not serialise as JSON).
+/// [`ImeState::content_type`] maps through [`content_type_wire`] onto the
+/// explicitly-encoded wire string — never a `Debug` rendering, which is exactly
+/// what [`ImeState`]'s own hand-written `Debug` impl redacts for a secret field.
 fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
     let Some(state) = state else {
         return ImeJsonState::default();
@@ -1878,6 +1977,7 @@ fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
         comp_base: state.editing.composing_base,
         comp_ext: state.editing.composing_extent,
         caret,
+        content_type: content_type_wire(state.content_type),
     }
 }
 
@@ -1927,4 +2027,100 @@ mod macro_expansion_factory {
     }
 
     crate::android_app!(NonDefaultState, make_state, test_logic);
+}
+
+/// `content_type_wire`/`ime_state_to_json` coverage. Compiled (and would run)
+/// only under `#[cfg(target_os = "android")]` — this crate's JNI/`frust-core`
+/// dependency is Android-target-gated (see the crate's `Cargo.toml`), so
+/// unlike [`crate::ffi_support`]'s tests this module never executes on the
+/// Linux host `cargo test --workspace` runs on; it is verified only by
+/// `cargo check --all-targets --target aarch64-linux-android -p
+/// frust-shell-android` (compiles, does not run) until an Android test runner
+/// exists. Mirrors `frust_shell_ios::ffi_glue`'s `ime_content_type_wire`
+/// module.
+#[cfg(test)]
+mod ime_content_type_wire {
+    use frust_core::event::{EditingState, ImeContentType, ImeState};
+
+    use super::{content_type_wire, ime_state_to_json};
+    use crate::ffi_support::build_ime_state_json;
+
+    #[test]
+    fn every_variant_maps_to_its_stable_wire_string() {
+        assert_eq!(content_type_wire(ImeContentType::Normal), "normal");
+        assert_eq!(content_type_wire(ImeContentType::Password), "password");
+        assert_eq!(
+            content_type_wire(ImeContentType::NoSuggestions),
+            "noSuggestions"
+        );
+        assert_eq!(content_type_wire(ImeContentType::Terminal), "terminal");
+    }
+
+    #[test]
+    fn absent_state_encodes_as_normal() {
+        // No focused field: the inactive sentinel must not default to a
+        // secret classification (that would be over-restrictive, not a leak,
+        // but it's still the wrong default — "normal" is what "no field" is).
+        let json = build_ime_state_json(&ime_state_to_json(None));
+        assert!(json.contains(r#""contentType":"normal""#));
+    }
+
+    #[test]
+    fn published_password_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hunter2".to_string(),
+                selection_base: 7,
+                selection_extent: 7,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Password,
+        };
+        let json = build_ime_state_json(&ime_state_to_json(Some(state)));
+        assert!(json.contains(r#""contentType":"password""#));
+        // The leak this finding closes is the suggestion strip, not the
+        // published text — the core deliberately still carries the real text
+        // for the platform mirror (see `ImeState` docs); confirm this bridge
+        // doesn't (re)introduce redaction that would desync it.
+        assert!(json.contains(r#""text":"hunter2""#));
+    }
+
+    #[test]
+    fn published_no_suggestions_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "AB12-CD34".to_string(),
+                selection_base: 9,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::NoSuggestions,
+        };
+        let json = build_ime_state_json(&ime_state_to_json(Some(state)));
+        assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn published_terminal_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "ls -la".to_string(),
+                selection_base: 6,
+                selection_extent: 6,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Terminal,
+        };
+        let json = build_ime_state_json(&ime_state_to_json(Some(state)));
+        assert!(json.contains(r#""contentType":"terminal""#));
+    }
 }

@@ -6,26 +6,47 @@
 //! deliberate mock latency so the loading **skeletons** are visible. Each row
 //! is a [`swipeable_row`](crate::ui::swipeable::swipeable_row): swipe right to
 //! archive, left to mute, each raising an undo toast. A status-dot avatar (two
-//! rendered with [`Image`], the rest an initials circle painted via the
-//! `frust-core` escape hatch), an unread badge, and a lock icon for private
+//! rendered with [`Image`], the rest an initials circle painted via
+//! `frust::authoring`), an unread badge, and a lock icon for private
 //! channels complete each row. Pull-to-refresh re-runs the loader.
 //!
-//! # Why the escape hatch
+//! # Why the hand-rolled widgets
 //!
 //! No facade widget paints an arbitrary-color filled circle or an animated
 //! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` so
 //! the feed can share it) and [`Shimmer`] below
 //! are small hand-rolled `View`/`Widget` pairs built directly against
-//! `frust-core` — the same
-//! precedent the pre-skeleton theme screen used for its `ColorBoxView`
-//! (`docs/ARCHITECTURE.md`'s "low-level escape hatch"). Everything else goes
-//! through the `frust` facade.
+//! `frust::authoring` — the same
+//! precedent the pre-skeleton theme screen used for its `ColorBoxView`.
+//! Everything else goes through the `frust` facade.
 //!
-//! # ListView vs. ScrollView
+//! # Roster container: a keyed, variable-extent `ListView`
 //!
-//! The roster uses [`scroll_view`] wrapping a [`Column`], not the Material
-//! `ListView`: `ScrollView` is the only facade widget exposing
-//! `on_refresh_release` (pull-to-refresh), which this screen needs.
+//! The roster renders through [`ListView::builder_keyed`](frust::ListView::builder_keyed)
+//! over a flat row list — the two singleton section header rows
+//! ("Channels" and "Direct messages") bracketing [`RosterRow::Channel`] and
+//! [`RosterRow::Dm`] rows, rebuilt fresh from
+//! [`ChannelsController::data`](crate::features::channels::ChannelsController::data)
+//! every frame exactly like the earlier `keyed` `Column`'s children were —
+//! keyed by [`RosterRow::key`] (channel or DM id for real items, distinct
+//! collision-proof string keys for the two singletons). A channel/DM row's
+//! avatar-driven height and a section header's shorter text-only height are
+//! *not* the same, so the list runs in **variable-extent** mode
+//! ([`ListView::estimated_item_extent`](frust::ListView::estimated_item_extent),
+//! seeded with [`ROSTER_ROW_EXTENT`] — the feed's precedent, `channel_feed`)
+//! rather than the closed-form uniform path: each row measures its own
+//! natural height (a header stays short; a channel/DM row's avatar +
+//! `row_layout` padding still comes out to exactly `ROSTER_ROW_EXTENT`) —
+//! forcing a header to the taller row extent (an earlier, reverted attempt at
+//! this) shifted every following row down far enough that a channel appended
+//! at the roster's live edge could land outside a caller's viewport.
+//! [`on_refresh_release`](frust::ListView::on_refresh_release) drives the
+//! pull-to-refresh operation at the same refresh op the earlier `scroll_view`
+//! version used — [`roster_list`] overlays its own centered spinner while a
+//! reload is in flight, since the callback is a pure gesture hook with no
+//! in-progress visual of its own. Keying by id means a mute/archive/reorder
+//! mutation keeps swipe/press state attached to the right channel — the
+//! keyed identity that the old positional Column couldn't maintain.
 //!
 //! # Home actions
 //!
@@ -48,20 +69,22 @@
 //! confirm/cancel modal onto the app's outer navigator, and confirming
 //! toasts "Invites sent (mock)" — see [`show_invite_modal`].
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
+};
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment,
+    Align, Alignment, AnimationController, AnyView, Axis, ChildKey, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
-    NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme, View,
-    action, any, app_bar, button, circular_progress, component, dialog, flexible, hero, icon,
-    icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
+    ListView, NavigatorController, Padding, PopResult, Row, SizedBox, Stack, Theme, View, any,
+    button, component, flexible, hero, icon, icons, inflexible, safe_area, scroll_view, text,
     text_input, use_context,
 };
-use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
-use kurbo::Size;
-use peniko::Color;
+use frust_cupertino::{action, show_cupertino_alert};
+use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
 
 use clean_signals_frust::use_controller;
 
@@ -110,6 +133,15 @@ fn status_color(status: UserStatus) -> Color {
     }
 }
 
+/// The roster [`ListView`](frust::ListView)'s variable-extent estimate, and a
+/// channel/DM row's actual measured height: avatar column (40) + row padding
+/// (20, split across top and bottom via [`row_layout`]'s
+/// `EdgeInsets::symmetric`), for a total of 60px. A section header measures
+/// shorter than this (its own natural text height) — see the [module
+/// docs](self)' *Roster container* section for why the list is
+/// variable-extent rather than closed-form uniform.
+const ROSTER_ROW_EXTENT: f64 = 60.0;
+
 // ---------------------------------------------------------------------------
 // Material list metrics (Material sizing reference measurements)
 // ---------------------------------------------------------------------------
@@ -132,6 +164,40 @@ const BADGE_H: f64 = 18.0;
 const BADGE_RADIUS: f64 = BADGE_H / 2.0;
 /// Unread-badge count text — M3 `labelSmall` (11).
 const BADGE_TEXT_SIZE: f32 = 11.0;
+
+// ---------------------------------------------------------------------------
+// Roster row structure
+// ---------------------------------------------------------------------------
+
+/// One row of the virtualized roster list — the two ephemeral singleton rows
+/// bracketing a real channel or DM, exactly the shape the earlier `keyed`
+/// `Column` built by hand each frame. See the [module docs](self)' *Roster
+/// container* section.
+enum RosterRow {
+    /// The "Channels" header row, shown at the top of the roster.
+    ChannelsHeader,
+    /// A real channel item.
+    Channel(ChannelItem),
+    /// The "Direct messages" header row.
+    DmsHeader,
+    /// A real DM item.
+    Dm(DmItem),
+}
+
+impl RosterRow {
+    /// This row's stable [`ChildKey`] — a channel/DM's id for real items,
+    /// or a collision-proof string key for the two singleton headers (distinct
+    /// from any channel/DM id: [`ChildKey::new`] hashes the value *and* its
+    /// type, and an id is a `String`, never matching the `&str` header keys).
+    fn key(&self) -> ChildKey {
+        match self {
+            RosterRow::ChannelsHeader => ChildKey::new("channels_header"),
+            RosterRow::Channel(c) => ChildKey::new(&c.id),
+            RosterRow::DmsHeader => ChildKey::new("dms_header"),
+            RosterRow::Dm(d) => ChildKey::new(&d.id),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Escape-hatch leaf widgets
@@ -423,128 +489,113 @@ fn skeleton_row() -> AnyView<HomeState> {
 // Loaded roster
 // ---------------------------------------------------------------------------
 
-/// The loaded roster: sectioned Channels + Direct messages inside a
-/// pull-to-refresh scroll view.
+/// The loaded roster: the keyed, variable-extent `ListView` with section
+/// headers and channel/DM rows, wrapped in a pull-to-refresh `Padding` layer,
+/// with a centered indeterminate spinner overlaid while `refreshing` (a
+/// reload triggered by pull-to-refresh) is in flight. See the [module
+/// docs](self)' *Roster container* section.
 fn roster_list(
     state: &HomeState,
     data: &channels::ChannelsData,
     refreshing: bool,
 ) -> AnyView<HomeState> {
-    let mut children: Vec<AnyView<HomeState>> = Vec::new();
+    // Build the roster row list: "Channels" header, then channels, then
+    // "Direct messages" header, then DMs. This mirrors the earlier keyed
+    // Column structure built by hand each frame.
+    let mut rows: Vec<RosterRow> = Vec::new();
+    rows.push(RosterRow::ChannelsHeader);
+    rows.extend(data.channels.iter().cloned().map(RosterRow::Channel));
+    rows.push(RosterRow::DmsHeader);
+    rows.extend(data.dms.iter().cloned().map(RosterRow::Dm));
 
-    if refreshing {
-        children.push(any(Align(
-            Alignment::CENTER,
+    let row_count = rows.len();
+    let rows = Rc::new(rows);
+
+    // The key function: each row's stable identity, used to reconcile rows
+    // across mutations like mute/archive/reorder.
+    let key_rows = Rc::clone(&rows);
+    let key_of = move |i: usize| key_rows[i].key();
+
+    // Extract the pieces we need from state so they can be captured in 'static
+    // closures: NavigatorController and ToastController are cloned/shared into
+    // the builder, along with the Arc<ChannelsController> (cheap clone).
+    let build_rows = Rc::clone(&rows);
+    let build_nav = state.nav.clone();
+    let build_controller = Arc::clone(&state.controller);
+    let build_toasts = state.toasts.clone();
+    let build_logo = state.logo.clone();
+
+    // The builder function: construct the view for each row. Each row needs
+    // the pieces for navigation, async ops, and UI state that were extracted
+    // above.
+    let builder = move |i: usize| match &build_rows[i] {
+        RosterRow::ChannelsHeader => section_header("Channels"),
+        RosterRow::Channel(c) => {
+            channel_row_keyed(&build_nav, &build_controller, &build_toasts, &build_logo, c)
+        }
+        RosterRow::DmsHeader => section_header("Direct messages"),
+        RosterRow::Dm(d) => {
+            dm_row_keyed(&build_nav, &build_controller, &build_toasts, &build_logo, d)
+        }
+    };
+
+    // The refresh callback: same operation the earlier scroll_view used.
+    let pager = Arc::clone(&state.controller);
+    let list = ListView::builder_keyed(row_count, ROSTER_ROW_EXTENT, key_of, builder)
+        .estimated_item_extent(ROSTER_ROW_EXTENT)
+        .on_refresh_release(move |_s: &mut HomeState| {
+            let handle = pager.clone();
+            frust::spawn_local(async move {
+                handle.load().await;
+            });
+        });
+
+    // The outer padding is the same 8px horizontal that the old scroll_view
+    // used (and the vertical breathing room is unchanged too, just now applied
+    // to the list's viewport rather than the column's content).
+    let list = any(Padding(EdgeInsets::all(8.0), list));
+
+    if !refreshing {
+        return list;
+    }
+
+    // While a pull-to-refresh reload is in flight, overlay a centered
+    // indeterminate spinner on top of the (still-visible, stale) roster —
+    // `ListView::on_refresh_release`'s own rubber-band overscroll is a pure
+    // gesture/position effect with no in-progress visual of its own, so the
+    // app supplies one, exactly as the pre-`ListView` `scroll_view` version
+    // did. A `Stack` layer rather than a synthetic row, so it never
+    // participates in row keying/windowing.
+    any(Stack(vec![
+        list,
+        any(Align(
+            Alignment::new(0.0, -0.85), // near the top, matching the old top-of-content spinner
             Padding(
                 EdgeInsets::all(8.0),
                 circular_progress(ProgressValue::Indeterminate),
             ),
-        )));
-    }
-
-    children.push(section_header("Channels"));
-    for c in &data.channels {
-        children.push(channel_row(state, c));
-    }
-    children.push(section_header("Direct messages"));
-    for d in &data.dms {
-        children.push(dm_row(state, d));
-    }
-
-    any(
-        scroll_view(Padding(EdgeInsets::all(8.0), Column(children))).on_refresh_release(
-            move |s: &mut HomeState| {
-                let handle = s.controller.clone();
-                frust::spawn_local(async move {
-                    handle.load().await;
-                });
-            },
-        ),
-    )
+        )),
+    ]))
 }
 
-/// A section header row.
+/// A section header row: left-aligned text at SECTION_LABEL_SIZE, its own
+/// natural height (shorter than a channel/DM row's avatar-driven
+/// [`ROSTER_ROW_EXTENT`]) — safe under the roster's variable-extent `ListView`
+/// (see [`roster_list`]), which measures each row rather than forcing every
+/// row to one uniform height.
 fn section_header(title: &str) -> AnyView<HomeState> {
     any(Padding(
-        // Start margin 16 (8 outer scroll pad + 8 here) — Material side margin.
+        // Start margin 16 (8 outer list pad + 8 here) — Material side margin.
         EdgeInsets::symmetric(8.0, 12.0),
         text(title.to_string()).size(SECTION_LABEL_SIZE),
     ))
-}
-
-/// A channel roster row (leading `#`/lock circle + name + preview + badge),
-/// wrapped in a swipeable row.
-fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
-    let leading = any(channel_circle());
-
-    // Title row: the name, plus a lock icon for a private channel.
-    let title: AnyView<HomeState> = if c.private {
-        any(Row(vec![
-            any(text(c.name.clone()).size(LIST_TITLE_SIZE)),
-            any(SizedBox(Some(6.0), None)),
-            any(icon(icons::LOCK).size(16.0)),
-        ]))
-    } else {
-        any(text(c.name.clone()).size(LIST_TITLE_SIZE))
-    };
-
-    let nav = state.nav.clone();
-    let route_id = c.id.clone();
-    let content = tappable_content(
-        title,
-        c.preview.clone(),
-        c.unread,
-        move |_s: &mut HomeState| {
-            let feed_nav = nav.clone();
-            let feed_id = route_id.clone();
-            nav.push(move || {
-                crate::features::messages::presentation::pages::channel_feed::channel_feed(
-                    feed_nav.clone(),
-                    feed_id.clone(),
-                )
-            });
-        },
-    );
-
-    let row = row_layout(leading, content);
-    let menu_row = row_with_long_press_menu(row, c.id.clone(), format!("#{}", c.name), c.muted);
-    swipe_wrap(menu_row, c.id.clone(), format!("#{}", c.name), state)
-}
-
-/// A DM roster row (user avatar + name + preview + badge), wrapped in a
-/// swipeable row.
-fn dm_row(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
-    let leading = dm_avatar(state, d);
-
-    let title = any(text(d.name.clone()).size(LIST_TITLE_SIZE));
-    let nav = state.nav.clone();
-    let route_id = d.id.clone();
-    let content = tappable_content(
-        title,
-        d.preview.clone(),
-        d.unread,
-        move |_s: &mut HomeState| {
-            let feed_nav = nav.clone();
-            let feed_id = route_id.clone();
-            nav.push(move || {
-                crate::features::messages::presentation::pages::channel_feed::channel_feed(
-                    feed_nav.clone(),
-                    feed_id.clone(),
-                )
-            });
-        },
-    );
-
-    let row = row_layout(leading, content);
-    let menu_row = row_with_long_press_menu(row, d.id.clone(), d.name.clone(), d.muted);
-    swipe_wrap(menu_row, d.id.clone(), d.name.clone(), state)
 }
 
 /// Wrap a row (leading + tappable content, pre-swipe) so a long-press opens
 /// its [`HomeSheet::RowActions`] menu. [`GestureDetector`] is a transparent
 /// wrapper (every event still forwards to the child — see its module docs),
 /// so this composes cleanly with the row's own tap navigation and the
-/// [`swipe_wrap`] that wraps it next.
+/// swipe wrapper that wraps it next.
 fn row_with_long_press_menu(
     row: AnyView<HomeState>,
     id: String,
@@ -581,53 +632,6 @@ fn channel_circle() -> AnyView<HomeState> {
             text("#").size(MONOGRAM_SIZE).color(Color::WHITE),
         ))),
     ]))
-}
-
-/// A DM avatar: an image (for a chosen couple of users) or an initials circle,
-/// with a presence status dot, wrapped in a hero + a profile-navigating tap.
-fn dm_avatar(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
-    // A couple of users get a real `Image` avatar; the rest an initials circle.
-    let use_image = matches!(d.user_id, 2 | 5) && state.logo.is_some();
-    let base: AnyView<HomeState> = if use_image {
-        let src = state.logo.clone().expect("guarded by use_image");
-        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover)))
-    } else {
-        // SizedBox+Align monogram idiom — see `channel_circle`.
-        any(Stack(vec![
-            any(fill_box(
-                Size::new(AVATAR_SIZE, AVATAR_SIZE),
-                avatar_color(d.user_id),
-                AVATAR_RADIUS,
-            )),
-            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
-                Alignment::CENTER,
-                text(d.initials.clone())
-                    .size(MONOGRAM_SIZE)
-                    .color(Color::WHITE),
-            ))),
-        ]))
-    };
-
-    let dot = any(Align(
-        Alignment::new(1.0, 1.0),
-        fill_box(Size::new(12.0, 12.0), status_color(d.status), 6.0),
-    ));
-    let avatar = any(Stack(vec![base, dot]));
-
-    let nav = state.nav.clone();
-    let user_id = d.user_id;
-    any(
-        GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(
-            move |_s: &mut HomeState| {
-                let id = user_id.to_string();
-                nav.push(move || {
-                    crate::features::profile::presentation::pages::profile::profile_screen(
-                        id.clone(),
-                    )
-                });
-            },
-        ),
-    )
 }
 
 /// The tappable middle-of-row content: name/title, preview, and trailing unread
@@ -696,44 +700,188 @@ fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> AnyVi
     ))
 }
 
+/// A channel roster row, built from extracted state pieces. This is the
+/// ListView version of [`channel_row`], used inside the keyed builder closure
+/// where the full HomeState cannot be passed as a reference.
+fn channel_row_keyed(
+    nav: &NavigatorController<HuddleState>,
+    controller: &Arc<ChannelsController>,
+    toasts: &crate::ui::toast::ToastController,
+    _logo: &Option<ImageSource>,
+    c: &ChannelItem,
+) -> AnyView<HomeState> {
+    // Mimic the structure of the original channel_row, but accept the
+    // extracted pieces instead of HomeState.
+    let leading = any(channel_circle());
+
+    // Title row: the name, plus a lock icon for a private channel.
+    let title: AnyView<HomeState> = if c.private {
+        any(Row(vec![
+            any(text(c.name.clone()).size(LIST_TITLE_SIZE)),
+            any(SizedBox(Some(6.0), None)),
+            any(icon(icons::LOCK).size(16.0)),
+        ]))
+    } else {
+        any(text(c.name.clone()).size(LIST_TITLE_SIZE))
+    };
+
+    let nav_clone = nav.clone();
+    let route_id = c.id.clone();
+    let content = tappable_content(
+        title,
+        c.preview.clone(),
+        c.unread,
+        move |_s: &mut HomeState| {
+            let feed_nav = nav_clone.clone();
+            let feed_id = route_id.clone();
+            nav_clone.push(move || {
+                crate::features::messages::presentation::pages::channel_feed::channel_feed(
+                    feed_nav.clone(),
+                    feed_id.clone(),
+                )
+            });
+        },
+    );
+
+    let row = row_layout(leading, content);
+    let menu_row = row_with_long_press_menu(row, c.id.clone(), format!("#{}", c.name), c.muted);
+    swipe_wrap_keyed(
+        menu_row,
+        c.id.clone(),
+        format!("#{}", c.name),
+        controller,
+        toasts,
+    )
+}
+
+/// A DM roster row, built from extracted state pieces. This is the ListView
+/// version of [`dm_row`], used inside the keyed builder closure where the full
+/// HomeState cannot be passed as a reference.
+fn dm_row_keyed(
+    nav: &NavigatorController<HuddleState>,
+    controller: &Arc<ChannelsController>,
+    toasts: &crate::ui::toast::ToastController,
+    logo: &Option<ImageSource>,
+    d: &DmItem,
+) -> AnyView<HomeState> {
+    // Mimic the structure of the original dm_row, but accept the extracted
+    // pieces instead of HomeState.
+    let leading = dm_avatar_keyed(logo, d);
+
+    let title = any(text(d.name.clone()).size(LIST_TITLE_SIZE));
+    let nav_clone = nav.clone();
+    let route_id = d.id.clone();
+    let content = tappable_content(
+        title,
+        d.preview.clone(),
+        d.unread,
+        move |_s: &mut HomeState| {
+            let feed_nav = nav_clone.clone();
+            let feed_id = route_id.clone();
+            nav_clone.push(move || {
+                crate::features::messages::presentation::pages::channel_feed::channel_feed(
+                    feed_nav.clone(),
+                    feed_id.clone(),
+                )
+            });
+        },
+    );
+
+    let row = row_layout(leading, content);
+    let menu_row = row_with_long_press_menu(row, d.id.clone(), d.name.clone(), d.muted);
+    swipe_wrap_keyed(menu_row, d.id.clone(), d.name.clone(), controller, toasts)
+}
+
+/// A DM avatar built from extracted state pieces (primarily `logo`). This is
+/// the ListView version of [`dm_avatar`], used when the full HomeState cannot
+/// be passed as a reference.
+fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> AnyView<HomeState> {
+    // A couple of users get a real `Image` avatar; the rest an initials circle.
+    let use_image = matches!(d.user_id, 2 | 5) && _logo.is_some();
+    let base: AnyView<HomeState> = if use_image {
+        let src = _logo.clone().expect("guarded by use_image");
+        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover)))
+    } else {
+        // SizedBox+Align monogram idiom — see `channel_circle`.
+        any(Stack(vec![
+            any(fill_box(
+                Size::new(AVATAR_SIZE, AVATAR_SIZE),
+                avatar_color(d.user_id),
+                AVATAR_RADIUS,
+            )),
+            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+                Alignment::CENTER,
+                text(d.initials.clone())
+                    .size(MONOGRAM_SIZE)
+                    .color(Color::WHITE),
+            ))),
+        ]))
+    };
+
+    let dot = any(Align(
+        Alignment::new(1.0, 1.0),
+        fill_box(Size::new(12.0, 12.0), status_color(d.status), 6.0),
+    ));
+    let avatar = any(Stack(vec![base, dot]));
+
+    let user_id = d.user_id;
+    any(
+        GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(
+            move |_s: &mut HomeState| {
+                let id = user_id.to_string();
+                let nav = _s.nav.clone(); // Capture nav from the state in the closure
+                nav.push(move || {
+                    crate::features::profile::presentation::pages::profile::profile_screen(
+                        id.clone(),
+                    )
+                });
+            },
+        ),
+    )
+}
+
 /// Wrap a row in a [`swipeable_row`](crate::ui::swipeable::swipeable_row):
-/// swipe right → archive, left → mute, each raising an undo toast.
-fn swipe_wrap(
+/// swipe right → archive, left → mute, each raising an undo toast. This
+/// version takes extracted pieces (controller, toasts) instead of HomeState.
+fn swipe_wrap_keyed(
     row: AnyView<HomeState>,
     id: String,
     label: String,
-    state: &HomeState,
+    controller: &Arc<ChannelsController>,
+    toasts: &crate::ui::toast::ToastController,
 ) -> AnyView<HomeState> {
-    let data = state.controller.data;
+    let data = controller.data;
 
     let archive_id = id.clone();
     let archive_label = label.clone();
-    let archive_cb = move |s: &mut HomeState| {
-        let handle = s.controller.clone();
+    let archive_controller = Arc::clone(controller);
+    let archive_toasts = toasts.clone();
+    let archive_cb = move |_s: &mut HomeState| {
+        let handle = archive_controller.clone();
         let op_id = archive_id.clone();
         frust::spawn_local(async move {
             handle.set_archived(op_id, true).await;
         });
         let undo_id = archive_id.clone();
-        s.toasts
-            .show_with_action(format!("Archived {archive_label}"), "Undo", move || {
-                channels::set_archived_flag(data, &undo_id, false)
-            });
+        archive_toasts.show_with_action(format!("Archived {archive_label}"), "Undo", move || {
+            channels::set_archived_flag(data, &undo_id, false)
+        });
     };
 
     let mute_id = id;
     let mute_label = label;
-    let mute_cb = move |s: &mut HomeState| {
-        let handle = s.controller.clone();
+    let mute_controller = Arc::clone(controller);
+    let mute_toasts = toasts.clone();
+    let mute_cb = move |_s: &mut HomeState| {
+        let handle = mute_controller.clone();
         let op_id = mute_id.clone();
         frust::spawn_local(async move {
             handle.set_muted(op_id, true).await;
         });
         let undo_id = mute_id.clone();
-        s.toasts
-            .show_with_action(format!("Muted {mute_label}"), "Undo", move || {
-                channels::set_muted_flag(data, &undo_id, false)
-            });
+        mute_toasts.show_with_action(format!("Muted {mute_label}"), "Undo", move || {
+            channels::set_muted_flag(data, &undo_id, false)
+        });
     };
 
     any(crate::ui::swipeable::swipeable_row(row)
@@ -944,6 +1092,27 @@ fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLangu
                 vec![action("Send")],
                 |s: &mut HuddleState, result: PopResult| {
                     if result.take::<usize>() == Some(0) {
+                        s.toasts.show("Invites sent (mock)");
+                    }
+                },
+            );
+        }
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            let confirm_nav = nav.clone();
+            show_dialog(
+                nav,
+                move || {
+                    let confirm = confirm_nav.clone();
+                    dialog()
+                        .title("Invite people")
+                        .body("Send invites to this workspace? (mock)")
+                        .action(any(button("Send", move |_s: &mut HuddleState| {
+                            confirm.pop_with_result(PopResult::of(true));
+                        })))
+                },
+                |s: &mut HuddleState, result: PopResult| {
+                    if result.take::<bool>() == Some(true) {
                         s.toasts.show("Invites sent (mock)");
                     }
                 },

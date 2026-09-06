@@ -4,16 +4,23 @@ Two paired apps implementing eight identical scenarios (S1–S8), one
 harness that drives both and computes identical statistics from their raw
 frame series, published methodology, and a results table.
 
+**Purpose, scoped narrowly.** `benchmarks/` exists ONLY for flutter-vs-frust
+comparative benchmarking per `PROTOCOL.md` — the S1–S8 frame-class scenarios
+plus the D1/D2 DB op-latency scenarios (§9), each implemented identically by
+both apps and measured by the shared harness. Exploratory scenarios, capability
+probes, or single-sided (frust-only) demos that don't fit that paired-comparison
+contract belong in `examples/playground`, not here.
+
 ## What's here
 
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | The published methodology: device matrix, environmental controls, run counts, statistics, fairness gates, the exact raw-line formats both apps emit, and the S1–S8 scenario table. Read this first. |
-| `RESULTS.md` | Per-device × per-scenario results tables (empty template until runs are recorded), plus a methodology-deviations section per device. |
+| `RESULTS.md` | Per-device × per-scenario results tables for the current renderer pass, a methodology-deviations section per device, the release app-size table, and the one-off renderer-transition (vello → frust-engine) comparison. Strictly Frust-vs-Flutter — engine-plan gate evidence lives in git history, not here. |
 | `frust_bench/` | The Frust bench app — a standalone Cargo package (own workspace, path-deps into `crates/*`), one binary implementing all eight scenarios behind a scenario driver, selected via launch arg/deep link. |
 | `flutter_bench/` | The Flutter bench app — idiomatic Flutter implementing the same eight scenarios, source published for scrutiny (see `PROTOCOL.md` §6's fairness gates). |
-| `harness/` | Shell/Python scripts: install both apps, set device state (brightness/airplane mode/thermal cooldown), run a scenario N times, pull logs, slice by scenario markers, compute percentile statistics from ONE shared script, and emit the `RESULTS.md` table + raw CSVs. |
-| `raw/` | Committed raw per-run series (CSV) backing every number in `RESULTS.md` — created once `07-run-matrix` runs the suite; not present until then. |
+| `harness/` | Shell/Python scripts: `matrix.sh` runs the whole S1–S8 matrix on one device unattended (device state, installs, interleaved `run.sh` blocks, sanity/retry, S7 extras, sanitized raw staging); `run.sh` drives one scenario N times on one app; `device_state.sh` is the Android fairness gate; `stats.py` is the ONE shared statistics script; `summarize.py` turns a raw tree into the `RESULTS.md` tables (+ JSON); `app_size.sh` measures release artifacts; `ab_matrix.sh` is the frust-only render-arm gate driver. |
+| `raw/` | Committed, sanitized raw per-run series backing every number in `RESULTS.md`: `raw/<device>/{frust_profile,flutter}/<sN>/run-NN.log` (+ Android `run-NN.pss_*.txt` meminfo snapshots, `stats.txt`, S7 `coldstart.txt`/`cpuinfo.txt`). |
 
 ## Why this exists
 
@@ -29,15 +36,24 @@ to.
 ## How to run
 
 ```bash
-# Run one scenario on a connected device, both apps, full matrix
-./benchmarks/harness/run.sh s1 --device <serial>
+# Build the two profile artifacts (from each app's own directory)
+(cd benchmarks/frust_bench && frust build apk --profile --define FRUST_TRACE_RAW=1)
+(cd benchmarks/flutter_bench && flutter build apk --profile)
 
-# Run the full S1-S8 matrix
-./benchmarks/harness/run.sh all --device <serial>
+# Full S1-S8 matrix on one Android device, unattended (see matrix.sh's header)
+./benchmarks/harness/matrix.sh --platform android --device <serial> --device-name <slug> \
+    --out <dir> --frust-apk <apk> --flutter-apk <apk>
+
+# One scenario, one app (what matrix.sh calls per block)
+./benchmarks/harness/run.sh s1 --app frust --device <serial>
+
+# Tables for RESULTS.md from a staged raw tree
+python3 benchmarks/harness/summarize.py --frust <dir>/raw/<slug>/frust_profile --flutter <dir>/raw/<slug>/flutter
 ```
 
-See `harness/README.md` (once `06-harness` lands) for install prerequisites
-and device-state setup. Each standalone app can also be run/built directly
+iOS uses `--platform ios` with a signed `frust build ios --profile` app and one
+`flutter build ios --profile --dart-define=SCENARIO=<sN>` app per scenario (see
+`run.sh`'s header). Each standalone app can also be run/built directly
 from its own directory for iteration:
 
 ```bash
@@ -47,7 +63,6 @@ from its own directory for iteration:
 
 ## Status
 
-Both apps and the harness are actively being built out.
-`RESULTS.md` reflects real device runs only — it starts empty and fills in
-as the matrix is actually executed, never with placeholder or projected
-numbers.
+`RESULTS.md` reflects real device runs only — never placeholder or projected
+numbers. The current pass (2026-09-05) measures the frust-owned `frust-engine`
+renderer; the vello-era pass it replaced is in git history (PROTOCOL §2.6).

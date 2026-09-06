@@ -1,0 +1,165 @@
+[package]
+name = "frust-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# I18nError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# Detection/engine/formatting backends log rather than print — platform
+# plugins never own stdout/stderr the way `frust-drive` does.
+log = { workspace = true }
+# The `locales!` compile-time bundle-loading proc macro (`plugins/i18n/
+# macros`) — a path dependency, mirroring every other in-tree crate's
+# `<crate>-macros` sibling: `proc-macro = true` crates cannot also export
+# ordinary items, so the split is mechanical, not a layering choice. This
+# crate re-exports it at its own root (`frust_i18n::locales`, see
+# `src/lib.rs`) so a caller never depends on the macros crate directly.
+frust-i18n-macros = { path = "macros" }
+# Fluent Project's message-bundle engine (`src/engine`) — parses/resolves
+# `.ftl` message files per requested locale. Direct dependency per plan D6:
+# `fluent-templates` is deliberately NOT used — this crate owns bundle
+# construction/caching itself rather than delegating to that crate's
+# `Loader` abstraction.
+fluent-bundle = { workspace = true }
+# Locale negotiation (`fluent_langneg::negotiate_languages`) resolving a
+# requested locale list against this crate's compiled-in available locales
+# (`src/engine`).
+fluent-langneg = { workspace = true }
+# The BCP-47 Unicode Language Identifier `Locale` wraps
+# (`src/locale.rs`) — shared with `frust-i18n-macros`'s own locale-directory
+# validation.
+unic-langid = { workspace = true }
+
+# The app-facing `frust-api` feature: reactive locale-binding glue
+# (`src/reactive.rs`) for a `frust` app — the facade-tier half of this
+# crate's charter (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions: a
+# plugin needing both a platform-plugin core and facade glue ships as one
+# crate with a default-on `frust-api` feature gating the optional `frust`
+# dependency, `frust-native-widgets`'s shape, rather than splitting into two
+# crates). `cargo check -p frust-i18n --no-default-features` must still
+# resolve to the platform-plugin charter line (no `frust` facade crate
+# anywhere in the tree) — `cargo tree -p frust-i18n --no-default-features -e
+# normal` is the tripwire.
+#
+# A literal `path` dependency, not `{ workspace = true }`: Cargo forbids a
+# workspace-inherited dependency from overriding `default-features` unless
+# the workspace-level entry already sets it explicitly, and the root `frust`
+# entry doesn't. `frust` itself now has no default features at all (the three
+# design-system catalogs left the tree as their own plugin crates), so there
+# is nothing left to trim — the plain path edge stays for the override
+# freedom, not for a catalog opt-out.
+frust = { path = "../../crates/frust", optional = true }
+
+# The `formatting` feature's ICU4X number/date/plural formatting stack
+# (`src/fmt`) — see root `Cargo.toml`'s comment for the pin rationale (the
+# 2.2.x line already resolved in this lockfile; `icu_experimental`
+# exact-pinned). Independently toggleable from `frust-api`: a headless
+# CLI/backend build can format numbers/dates/plurals with no facade
+# dependency at all, and vice versa.
+icu_decimal = { workspace = true, optional = true }
+icu_datetime = { workspace = true, optional = true }
+icu_plurals = { workspace = true, optional = true }
+icu_experimental = { workspace = true, optional = true }
+# The two ICU4X support crates `src/fmt` cannot reach through the four
+# components above, both already in the lockfile at the versions the
+# components themselves resolve (see the root `Cargo.toml`'s own comments):
+# `icu_locale_core` owns the `LanguageIdentifier` every `*Preferences` bag is
+# built from (`src/fmt/bridge.rs`'s target type), and `tinystr` owns the
+# `TinyAsciiStr<3>` inside `icu_experimental`'s `CurrencyCode` newtype
+# (`src/fmt/currency.rs`). Both ride the same `formatting` gate as the
+# components — nothing outside `src/fmt` names either.
+icu_locale_core = { workspace = true, optional = true }
+tinystr = { workspace = true, optional = true }
+# Named for its `sync` feature alone (see the root `Cargo.toml`): without it
+# an ICU4X `DataPayload` holds an `Rc` and no built formatter is `Send +
+# Sync`, so `src/fmt/bridge.rs`'s process-wide cache would not compile. No
+# code in this crate names an `icu_provider` type.
+icu_provider = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Compile-fail/compile-pass harness for the `locales!` macro's diagnostics
+# (`tests/macro_diagnostics.rs`) — the only way to assert that a malformed
+# `.ftl`, a non-BCP-47 locale directory, or a typo'd generated key actually
+# *fails compilation* with the message it promises. Dev-only: never shipped,
+# never counted against this crate's `--no-default-features` charter line.
+trybuild = { workspace = true }
+# Dev-only: `src/reactive.rs`'s headless tests (its own `#[cfg(test)] mod
+# tests`, plus `tests/reactive.rs`) need an ambient reactive `Owner` and, for
+# the signal-write → wake test, a live `ReactiveRuntime`/`TrackedScope`/
+# `FrameWaker` — none of which `frust`'s flat facade re-exports (deliberately:
+# those are framework-internal wiring, not app API). A direct `frust-reactive`
+# dev-dependency is the sanctioned route, matching `clean-signals-frust`'s own
+# precedent for the identical reason (`docs/PLUGINS_CODE_STANDARDS.md`'s
+# Plugin Conventions charter: production code stays on `frust::{...}` only —
+# see `src/reactive.rs`'s module doc).
+frust-reactive = { workspace = true }
+
+# Both `frust-api` and `formatting` default on. `formatting`'s measured cost is
+# ~+1.09 MB — baked CLDR data, not code (`README.md` §10's Per-feature deltas table) —
+# re-confirmed default-on by the project owner on 2026-08-15 after that corrected
+# measurement (an earlier, dead-stripped-baseline figure had understated it). An app
+# that wants the smaller binary opts out explicitly:
+# `default-features = false, features = ["frust-api"]` keeps message-only i18n with no
+# ICU4X in the dependency graph at all.
+[features]
+default = ["frust-api", "formatting"]
+frust-api = ["dep:frust"]
+formatting = [
+    "dep:icu_decimal",
+    "dep:icu_datetime",
+    "dep:icu_plurals",
+    "dep:icu_experimental",
+    "dep:icu_locale_core",
+    "dep:tinystr",
+    "dep:icu_provider",
+]
+
+# Android: unlike `frust-clipboard`/`frust-haptics`/`frust-camera` (which
+# declare `frust-plugin` unconditionally since it's inert off Android and
+# target-gating it "buys nothing" — those crates' own comments), this crate
+# target-gates it deliberately: `src/locale.rs`/`src/engine`/`src/fmt` have
+# zero Android dependency at all — only `src/detect`'s Android backend needs
+# the platform handle (a JNI read of
+# `Resources.getSystem().getConfiguration().getLocales()`) — so keeping it
+# alongside `jni` in this one block, rather than promoting it to an
+# unconditional dependency, keeps every non-Android host's dependency graph
+# free of it.
+[target.'cfg(target_os = "android")'.dependencies]
+frust-plugin = { path = "../../crates/frust-plugin" }
+jni = { workspace = true }
+
+# `target_vendor = "apple"` (iOS + macOS) — wider than `frust-clipboard`/
+# `frust-haptics`'s UIKit-only `target_os = "ios"` arms, because
+# `objc2-foundation`'s `NSLocale` (unlike `objc2-ui-kit`) is plain
+# Foundation, not UIKit, so it links on macOS too. `src/detect`'s real
+# Apple backend (a later task) is still expected to route only
+# `target_os = "ios"` through it, matching the desktop arm's `sys-locale`
+# read below for macOS instead (see that block's comment) — this wider gate
+# just means `objc2`/`objc2-foundation` land in the macOS dependency graph
+# without necessarily being called there, the same "target-gated but not
+# necessarily exercised on every target it lands on" shape the Version-Pin
+# Policy already documents for `jni`/`ndk-context`/`libc`. The feature list
+# below is a starting set for `NSLocale.preferredLanguages`; a later task
+# may need to widen it once the real implementation lands.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSLocale",
+    "NSObject",
+    "NSString",
+    "NSArray",
+] }
+
+# Desktop system-locale read (`src/detect`'s eventual desktop backend) —
+# `not(android, ios)` rather than clipboard's `any(macos, linux, windows)`:
+# same three targets, complementary phrasing. This is the arm macOS is
+# actually expected to route its `system_locales()` implementation through
+# (not the wider Apple arm above, which exists for iOS) — "macOS uses
+# `sys-locale`, not the apple arm" per this crate's own design note.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+sys-locale = { workspace = true }
+

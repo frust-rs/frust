@@ -56,9 +56,10 @@ impl BuildMode {
     /// desktop/`cargo run`, Android (`-Pfrust.cargoFeatures`), and iOS
     /// (`FRUST_FEATURES`) seams all thread through.
     ///
-    /// - **debug / profile** → `["frust/perf-trace"]`: instrumentation
-    ///   (`frust-perf` frame/startup emission + the render-path probes) is
-    ///   compiled IN. Profile keeps it via THIS feature, never via a log
+    /// - **debug / profile** → `["frust/perf-trace", "frust/devtools"]`:
+    ///   instrumentation (`frust-perf` frame/startup emission + the
+    ///   render-path probes) and the in-app devtools service are both compiled
+    ///   IN. Profile keeps them via THESE features, never via a log
     ///   level — `release_max_level_*` keys off `debug_assertions`, which the
     ///   `[profile.profile]` inherits-release profile has OFF, so a log-level
     ///   ceiling would wrongly silence profile perf lines.
@@ -66,14 +67,19 @@ impl BuildMode {
     ///   which forwards to `log/release_max_level_warn` — stray info/debug log
     ///   lines are constant-folded out while warn/error crash diagnostics
     ///   survive. `perf-trace` is absent, so a release artifact carries
-    ///   neither the emission code nor its `frust-perf` string literals.
+    ///   neither the emission code nor its `frust-perf` string literals, and
+    ///   `devtools` is absent, so it carries no loopback listener, no
+    ///   discovery line and no way to drive the UI from off-process. That
+    ///   absence is the release-purity guarantee: it comes from the FEATURE
+    ///   never being selected here, not from a runtime `debug_assertions`
+    ///   check inside the app.
     ///
     /// Never empty (every mode selects at least one feature), so the platform
     /// encoders can treat an empty result as "not applicable" without ever
     /// producing one here.
     pub fn cargo_features(&self) -> &'static [&'static str] {
         match self {
-            BuildMode::Debug | BuildMode::Profile => &["frust/perf-trace"],
+            BuildMode::Debug | BuildMode::Profile => &["frust/perf-trace", "frust/devtools"],
             BuildMode::Release => &["lean"],
         }
     }
@@ -331,10 +337,16 @@ mod tests {
 
     #[test]
     fn cargo_features_matches_each_mode() {
-        // debug/profile compile instrumentation IN; release swaps to the
-        // `lean` log ceiling and carries no `perf-trace`.
-        assert_eq!(BuildMode::Debug.cargo_features(), &["frust/perf-trace"]);
-        assert_eq!(BuildMode::Profile.cargo_features(), &["frust/perf-trace"]);
+        // debug/profile compile instrumentation AND the devtools service IN;
+        // release swaps to the `lean` log ceiling and carries neither.
+        assert_eq!(
+            BuildMode::Debug.cargo_features(),
+            &["frust/perf-trace", "frust/devtools"]
+        );
+        assert_eq!(
+            BuildMode::Profile.cargo_features(),
+            &["frust/perf-trace", "frust/devtools"]
+        );
         assert_eq!(BuildMode::Release.cargo_features(), &["lean"]);
     }
 
@@ -345,6 +357,29 @@ mod tests {
                 .cargo_features()
                 .contains(&"frust/perf-trace")
         );
+    }
+
+    /// The release-purity half of the two-layer devtools gate: a release build
+    /// must never select the feature, so the listener/protocol/discovery-line
+    /// code is not merely inert but absent from the artifact.
+    #[test]
+    fn release_cargo_features_never_contain_devtools() {
+        assert!(
+            !BuildMode::Release
+                .cargo_features()
+                .contains(&"frust/devtools")
+        );
+    }
+
+    #[test]
+    fn debug_and_profile_cargo_features_select_devtools() {
+        for mode in [BuildMode::Debug, BuildMode::Profile] {
+            assert!(
+                mode.cargo_features().contains(&"frust/devtools"),
+                "mode {mode:?}: {:?}",
+                mode.cargo_features()
+            );
+        }
     }
 
     #[test]

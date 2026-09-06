@@ -1,0 +1,52 @@
+== 2026-09-06T14:58:59Z
+14% TOTAL: 7.4% user + 6.2% kernel + 0% iowait + 0.7% irq + 0.1% softirq
+== 2026-09-06T14:59:29Z
+14% TOTAL: 7.4% user + 6.2% kernel + 0% iowait + 0.7% irq + 0.1% softirq
+== 2026-09-06T14:59:59Z
+14% TOTAL: 7.4% user + 6.2% kernel + 0% iowait + 0.7% irq + 0.1% softirq
+== 2026-09-06T15:00:29Z
+2.1% TOTAL: 1% user + 0.9% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:00:59Z
+2.1% TOTAL: 1% user + 0.9% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:01:29Z
+1.6% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:02:00Z
+1.6% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:02:30Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:03:00Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:03:30Z
+1.7% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:04:00Z
+ +0% 1843/it.f0x.flutter_bench: 0% user + 0% kernel
+1.6% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:04:30Z
+1.8% TOTAL: 0.6% user + 0.9% kernel + 0.1% irq + 0% softirq
+== 2026-09-06T15:05:00Z
+1.8% TOTAL: 0.6% user + 0.9% kernel + 0.1% irq + 0% softirq
+== 2026-09-06T15:05:30Z
+1.5% TOTAL: 0.6% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:06:00Z
+1.5% TOTAL: 0.6% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:06:30Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:07:00Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:07:31Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:08:01Z
+1.6% TOTAL: 0.7% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:08:31Z
+1.6% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:09:01Z
+ +0% 3157/it.f0x.flutter_bench: 0% user + 0% kernel
+1.8% TOTAL: 0.8% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:09:31Z
+1.4% TOTAL: 0.5% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:10:01Z
+1.4% TOTAL: 0.5% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:10:31Z
+1.5% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T15:11:01Z
+1.5% TOTAL: 0.7% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq

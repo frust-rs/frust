@@ -13,8 +13,8 @@
 //! "AES/GCM/NoPadding"` ciphertext, persisted `iv_len || iv || ciphertext`,
 //! Base64, via `SharedPreferences.putString` in a file named `frust.ss.<store>`
 //! (the same per-store namespace, so `clear` never touches another store's or
-//! another library's data). Works on minSdk 24 (Keystore AES-GCM is available
-//! from API 23). The Base64 + IV framing are pure Rust ([`framing`], host-
+//! another library's data). Works on minSdk 26 (Keystore AES-GCM is available
+//! from API 23, well below the floor). The Base64 + IV framing are pure Rust ([`framing`], host-
 //! tested); everything below is the JNI wiring, exercised on-device only.
 //!
 //! # Platform handles, threading, and never-panic contract

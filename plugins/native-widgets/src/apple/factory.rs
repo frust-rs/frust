@@ -11,33 +11,27 @@
 //! | `updateParams(_:paramsJson:)` (optional) | `updateParams:paramsJson:` | [`FrustNativeControlFactory::update_params`] | Props change, Rust-diffed before any setter runs |
 //! | `disposeView(_:)` (optional) | `disposeView:` | [`FrustNativeControlFactory::dispose_view`] | Release everything the control retained |
 //!
-//! ## Two name pins, both load-bearing
-//!
-//! 1. **The class's runtime name is pinned to
-//!    [`FACTORY_CLASS_NAME`]** via `define_class!`'s `#[name = "…"]`. `#[name]`
-//!    is *optional* in objc2 0.6 — omitting it auto-generates a name that
-//!    embeds the crate version, and objc2's own docs advise library authors to
-//!    omit it precisely so two SemVer-incompatible copies can coexist. **This
-//!    crate must set it anyway**: the host resolves a factory by
-//!    `NSClassFromString(viewType)` (`FrustViewHost.resolveFactory`) against
-//!    the string `crate::api::builders`' iOS `VIEW_TYPE` publishes, so a
-//!    version-bearing auto name would break the lookup on every version bump.
-//!    A stable, hand-pinned name *is* the discovery mechanism here — do not
-//!    "correct" this toward objc2's general advice.
-//! 2. **The protocol is pinned to `"FrustPlatformViewFactory"`** via
-//!    [`extern_protocol!`]'s own `#[name = "…"]` (objc2 otherwise derives the
-//!    runtime name from the *Rust* trait name). Its Swift half is pinned the
-//!    same way — `@objc(FrustPlatformViewFactory)` on the `public protocol`
-//!    — because Swift would otherwise register it under its mangled name
-//!    (`_TtP14FrustEmbedding24FrustPlatformViewFactory_`) and no non-Swift
-//!    implementor could ever attach a conformance the host's
-//!    `class_conformsToProtocol` check can see. That was an earlier
-//!    on-device failure (a black hole where the control should be); the Swift
-//!    fix shipped alongside it.
-//!
 //! [`FrustNativeControlFactory::createView_paramsJson`]: FrustNativeControlFactory
 //! [`FrustNativeControlFactory::update_params`]: FrustNativeControlFactory
 //! [`FrustNativeControlFactory::dispose_view`]: FrustNativeControlFactory
+//!
+//! ## Two name pins, both load-bearing
+//!
+//! 1. **Class name pinned to [`FACTORY_CLASS_NAME`]** via `define_class!`'s
+//!    `#[name = "…"]` — optional in objc2 0.6 (omitting it auto-generates a
+//!    version-bearing name, which objc2's own docs recommend for
+//!    SemVer-incompatible coexistence), but this crate must set it: the host
+//!    resolves a factory via `NSClassFromString(viewType)`
+//!    (`FrustViewHost.resolveFactory`) against the exact string
+//!    `crate::api::builders`' iOS `VIEW_TYPE` publishes, so an auto-generated
+//!    name would break the lookup on every version bump. Do not "correct"
+//!    this toward objc2's general advice.
+//! 2. **Protocol name pinned to `"FrustPlatformViewFactory"`** via
+//!    [`extern_protocol!`]'s own `#[name = "…"]` (objc2 otherwise derives it
+//!    from the Rust trait name), matched on the Swift side by
+//!    `@objc(FrustPlatformViewFactory)` on the `public protocol` — Swift's
+//!    default mangled name would leave nothing for `class_conformsToProtocol`
+//!    to see, silently breaking every control on iOS.
 //!
 //! ## The failure contract: a dead slot, never a nil return
 //!
@@ -48,19 +42,18 @@
 //! is exactly what this module provides, so returning nil here would be an
 //! unchecked implicitly-unwrapped-nil crash at first use.
 //!
-//! Therefore **every** failure path of [`createViewWithParamsJson:`][cv]
-//! returns a plain, empty [`UIView`] ([`dead_slot_view`]) instead: an
-//! invisible, zero-content slot the host can position and hide like any other.
-//! That covers an unknown control kind, a control's own `create` failing, a
-//! re-entrant runtime borrow, malformed params — and a **caught panic**. It is
-//! the iOS analogue of the Android arm's "dead slot, not a crashed frame loop"
-//! (`crate::android`'s contract table), reached through a different mechanism
-//! because iOS has no exception channel to throw into: Android *throws* into
-//! `applyCreate`'s `catch (Throwable)`, Apple *returns something harmless*.
-//! `FrustPlatformViewFactory.swift`'s doc comment states the same contract; if
-//! you change one, change the other.
-//!
-//! [cv]: FrustNativeControlFactory
+//! Therefore **every** failure path of
+//! [`createViewWithParamsJson:`][`FrustNativeControlFactory::createView_paramsJson`]
+//! — an unknown control kind, a control's own `create` failing, a re-entrant
+//! runtime borrow, malformed params, or a **caught panic** — returns a
+//! plain, empty [`UIView`] ([`dead_slot_view`]) instead: an invisible,
+//! zero-content slot the host can position and hide like any other. It is
+//! the iOS analogue of the Android arm's "dead slot, not a crashed frame
+//! loop" (`crate::android`'s contract table), reached through a different
+//! mechanism because iOS has no exception channel to throw into: Android
+//! *throws* into `applyCreate`'s `catch (Throwable)`, Apple *returns
+//! something harmless*. `FrustPlatformViewFactory.swift`'s doc comment
+//! states the same contract; if you change one, change the other.
 //!
 //! ## Which call carries the slot id
 //!
@@ -75,14 +68,13 @@
 //! finds nothing, and leaves the live control alone (`crate::runtime`'s *late
 //! and duplicate disposal*).
 //!
-//! **Why a scan and not a `ptr -> slot` side table.** A pointer-keyed map
-//! would be O(1) instead of O(live slots), but it would be a *second* source
-//! of truth that has to be invalidated on every replace, every identity-based
-//! take, and every `dispose_slot` — and getting that wrong reintroduces the
-//! exact "a late dispose deletes the live, already-replaced control" bug the
-//! registry's design memo is built around. `Registry::remove_matching`'s
-//! identity semantics are already the contract, already host-tested
-//! (`crate::registry`'s tests, `crate::runtime`'s
+//! A pointer-keyed `ptr -> slot` side table would be O(1) instead of O(live
+//! slots), but it would be a *second* source of truth needing invalidation
+//! on every replace, identity-based take, and `dispose_slot` — getting that
+//! wrong reintroduces "a late dispose deletes the live, already-replaced
+//! control". `Registry::remove_matching`'s identity semantics are already
+//! the contract, already host-tested (`crate::registry`'s tests,
+//! `crate::runtime`'s
 //! `a_late_dispose_for_a_replaced_view_never_touches_the_live_one`), and the
 //! scan is over the handful of native slots on screen. One source of truth
 //! wins.
@@ -118,10 +110,10 @@
 //! ObjC class registered into the runtime *from live Rust code*
 //! ([`ensure_registered`], reached from the api layer) and then found by name
 //! through the ObjC runtime's own class table — nothing crosses the linker as
-//! an orphan C export, so there is nothing for LTO to drop. An earlier
-//! device test proved exactly this in a signed release build (`lto = "fat"`
-//! + `strip = "symbols"`). Adding a `#[used]` static here would
-//! keep alive a symbol that does not exist; do not "fix" this.
+//! an orphan C export, so there is nothing for LTO to drop (verified in a
+//! signed release build, `lto = "fat"` + `strip = "symbols"`). Adding a
+//! `#[used]` static here would keep alive a symbol that does not exist; do
+//! not "fix" this.
 //!
 //! # No unwind across FFI
 //!
@@ -130,24 +122,23 @@
 //! `docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the Apple mirror of
 //! what `jni::EnvUnowned::with_env` does for the Android exports.
 //!
-//! **One precise exception, stated rather than glossed**:
-//! `createViewWithParamsJson:` acquires its `MainThreadMarker` *before*
-//! entering the guard, because it must return a `UIView` on every path and so
-//! its `Err` arm needs a marker as well — acquiring one there instead would
-//! re-run the same failing call with nothing left to catch it. Under
-//! `debug_assertions`, `MainThreadMarker::from` asserts, so a genuinely
-//! off-main-thread call panics outside the guard. That is bounded and
-//! deliberate: it can only happen when the host has already violated the
-//! `MainThreadOnly` contract (in which case no sound recovery exists — you
-//! cannot touch UIKit off the main thread), and the release profile is
-//! `panic = "abort"`, so no unwind crosses this boundary in a shipped build.
-//! `updateParams:paramsJson:` and `disposeView:` return `()` and therefore
-//! acquire their markers INSIDE the guard, with no such exception.
+//! **One precise exception**: `createViewWithParamsJson:` acquires its
+//! `MainThreadMarker` *before* entering the guard, because it must return a
+//! `UIView` on every path and so its `Err` arm needs a marker as well —
+//! acquiring one there instead would re-run the same failing call with
+//! nothing left to catch it. Under `debug_assertions`, `MainThreadMarker::from`
+//! asserts, so a genuinely off-main-thread call panics outside the guard.
+//! That is bounded and deliberate: it can only happen when the host has
+//! already violated the `MainThreadOnly` contract (in which case no sound
+//! recovery exists — you cannot touch UIKit off the main thread), and the
+//! release profile is `panic = "abort"`, so no unwind crosses this boundary
+//! in a shipped build. `updateParams:paramsJson:` and `disposeView:` return
+//! `()` and therefore acquire their markers INSIDE the guard, with no such
+//! exception.
 //!
-//! A caught
-//! panic is logged and resolves to that method's benign default: an empty
-//! placeholder view for `createView` (the failure contract above), and nothing
-//! at all for the two `void` methods.
+//! A caught panic is logged and resolves to that method's benign default: an
+//! empty placeholder view for `createView` (the failure contract above), and
+//! nothing at all for the two `void` methods.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Once;

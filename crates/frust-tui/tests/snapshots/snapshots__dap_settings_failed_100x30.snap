@@ -1,0 +1,26 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_dap_settings(100, 30, &settings, &DapStatus::Stopped, 0,\nSome(\"binding 127.0.0.1:4849 failed: Address already in use (os error 98)\"),)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                  ╭ DAP server ──────────────────────────────────────────────────╮                  
+                  │                                                              │▓▓                
+                  │  ▸ Server    failed   Start                                  │▓▓                
+                  │    Port      4849                                            │▓▓                
+                  │    [x] auto-start in an IDE terminal                         │▓▓                
+                  │    [x] auto-configure the IDE on start                       │▓▓                
+                  │    IDE       ‹ detected: none ›                              │▓▓                
+                  │   Generate IDE config now     Close                          │▓▓                
+                  │                                                              │▓▓                
+                  │  ✗ binding 127.0.0.1:4849 failed: Address already in use (…  │▓▓                
+                  │  config generation failed: `/tmp/huddle/.vscode/launch.jso…  │▓▓                
+                  │  Tab move · Space toggle · s start/stop · g gen · Esc close  │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

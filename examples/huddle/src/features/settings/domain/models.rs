@@ -142,6 +142,10 @@ impl DesignChoice {
             DesignLanguage::Glyph => DesignChoice::Glyph,
             DesignLanguage::Material3 => DesignChoice::Material3,
             DesignLanguage::Cupertino => DesignChoice::Cupertino,
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                DesignChoice::Material3
+            }
         }
     }
 }
@@ -234,13 +238,17 @@ pub fn compose(
     }
 
     let base = match design {
-        DesignChoice::Glyph => Theme::glyph_baseline(),
-        DesignChoice::Material3 => Theme::m3_baseline(),
-        DesignChoice::Cupertino => Theme::cupertino_baseline(),
+        DesignChoice::Glyph => frust_glyph::baseline(),
+        DesignChoice::Material3 => frust_material::baseline(),
+        DesignChoice::Cupertino => frust_cupertino::baseline(),
         DesignChoice::System => match current.design_language {
-            DesignLanguage::Glyph => Theme::glyph_baseline(),
-            DesignLanguage::Material3 => Theme::m3_baseline(),
-            DesignLanguage::Cupertino => Theme::cupertino_baseline(),
+            DesignLanguage::Glyph => frust_glyph::baseline(),
+            DesignLanguage::Material3 => frust_material::baseline(),
+            DesignLanguage::Cupertino => frust_cupertino::baseline(),
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                frust_material::baseline()
+            }
         },
     };
 
@@ -301,7 +309,7 @@ mod tests {
 
     #[test]
     fn all_default_axes_clear_the_override() {
-        let current = Theme::m3_baseline();
+        let current = frust_material::baseline();
         assert_eq!(
             compose2(DesignChoice::System, BrightnessChoice::System, &current),
             ThemeDecision::Clear,
@@ -310,7 +318,7 @@ mod tests {
 
     #[test]
     fn forcing_a_design_applies_that_baseline() {
-        let current = Theme::m3_baseline();
+        let current = frust_material::baseline();
         let theme = applied(compose2(
             DesignChoice::Cupertino,
             BrightnessChoice::System,
@@ -325,7 +333,7 @@ mod tests {
     fn forcing_dark_keeps_the_platform_design_via_current() {
         // Design axis `System`, brightness forced Dark: the design must resolve
         // from `current`'s live language rather than discarding it.
-        let current = Theme::cupertino_baseline();
+        let current = frust_cupertino::baseline();
         let theme = applied(compose2(
             DesignChoice::System,
             BrightnessChoice::Dark,
@@ -337,7 +345,7 @@ mod tests {
 
     #[test]
     fn forcing_material_dark_is_fully_explicit() {
-        let current = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let current = frust_cupertino::baseline().with_brightness(Brightness::Light);
         let theme = applied(compose2(
             DesignChoice::Material3,
             BrightnessChoice::Dark,
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn forcing_glyph_applies_the_glyph_baseline() {
-        let current = Theme::m3_baseline();
+        let current = frust_material::baseline();
         let theme = applied(compose2(
             DesignChoice::Glyph,
             BrightnessChoice::System,
@@ -365,7 +373,7 @@ mod tests {
     fn system_design_resolves_glyph_from_the_ambient_theme() {
         // Design axis `System` against a live Glyph theme must re-resolve the
         // Glyph baseline, not silently fall back to Material3.
-        let current = Theme::glyph_baseline();
+        let current = frust_glyph::baseline();
         let theme = applied(compose2(
             DesignChoice::System,
             BrightnessChoice::Dark,
@@ -403,7 +411,7 @@ mod tests {
     #[test]
     fn an_accent_forces_apply_even_with_system_axes() {
         // A non-default accent at otherwise-default axes must NOT clear.
-        let current = Theme::m3_baseline();
+        let current = frust_material::baseline();
         let theme = applied(compose(
             DesignChoice::System,
             BrightnessChoice::System,
@@ -421,8 +429,8 @@ mod tests {
 
     #[test]
     fn a_type_factor_forces_apply_and_scales_a_role() {
-        let current = Theme::m3_baseline();
-        let baseline_body = Theme::m3_baseline().type_scale.body_large.size;
+        let current = frust_material::baseline();
+        let baseline_body = frust_material::baseline().type_scale.body_large.size;
         let theme = applied(compose(
             DesignChoice::System,
             BrightnessChoice::System,
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn brightness_accent_and_scale_compose_independently() {
         // Change all three at once; each axis lands independently in the result.
-        let current = Theme::m3_baseline();
+        let current = frust_material::baseline();
         let theme = applied(compose(
             DesignChoice::System,
             BrightnessChoice::Dark,
@@ -456,15 +464,15 @@ mod tests {
             AccentChoice::MossGreen.primary(Brightness::Dark),
         );
         // Type axis.
-        let baseline = Theme::m3_baseline().type_scale.title_large.size;
+        let baseline = frust_material::baseline().type_scale.title_large.size;
         assert!((theme.type_scale.title_large.size - baseline * 1.15).abs() < 1e-3);
     }
 
     #[test]
     fn changing_one_axis_leaves_the_others_at_default() {
         // Accent-only change: brightness stays light, type scale unchanged.
-        let current = Theme::m3_baseline();
-        let baseline_body = Theme::m3_baseline().type_scale.body_large.size;
+        let current = frust_material::baseline();
+        let baseline_body = frust_material::baseline().type_scale.body_large.size;
         let theme = applied(compose(
             DesignChoice::System,
             BrightnessChoice::System,

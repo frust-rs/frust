@@ -10,7 +10,7 @@
 //! `on_primary`, `primary_container`, `on_primary_container`, `secondary`,
 //! `tertiary`) picked to read like a coherent tonal family, one table per
 //! brightness. The values are chosen in the *spirit* of the M3 baseline scheme
-//! ([`ColorScheme::m3_baseline_light`]/`_dark`): a saturated mid-tone `primary`
+//! ([`frust_material::color_scheme_light`]/[`frust_material::color_scheme_dark`]): a saturated mid-tone `primary`
 //! on white in light mode, a light `primary` on a dark `on_primary` in dark
 //! mode, and a pale/deep `primary_container` pair — the same relationships the
 //! baseline uses, just re-hued. They are *consistent*, not tonally exact, and
@@ -178,8 +178,8 @@ pub fn apply(theme: &mut Theme, accent: AccentChoice) {
 /// [`AccentChoice::Default`] swatch paints from.
 fn baseline_scheme(brightness: Brightness) -> ColorScheme {
     match brightness {
-        Brightness::Light => ColorScheme::m3_baseline_light(),
-        Brightness::Dark => ColorScheme::m3_baseline_dark(),
+        Brightness::Light => frust_material::color_scheme_light(),
+        Brightness::Dark => frust_material::color_scheme_dark(),
     }
 }
 
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn default_is_a_no_op() {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = frust_material::baseline();
         let before = theme.clone();
         apply(&mut theme, AccentChoice::Default);
         assert_eq!(theme, before, "the default accent changes nothing");
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn applying_an_accent_retints_both_schemes() {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = frust_material::baseline();
         apply(&mut theme, AccentChoice::OceanBlue);
         assert_eq!(
             theme.light.primary,
@@ -215,7 +215,7 @@ mod tests {
         // A non-primary neutral role is untouched.
         assert_eq!(
             theme.light.surface,
-            ColorScheme::m3_baseline_light().surface
+            frust_material::color_scheme_light().surface
         );
     }
 

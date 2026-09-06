@@ -12,7 +12,7 @@
 //! of a turn's coupled effects together: the value `ShellHandler::paced_wake`
 //! must take, whether the caller still owes an immediate `request_redraw()`,
 //! and the [`ControlFlowIntent`] to apply to the event loop. They are one
-//! value on purpose — the round-1 Critical was exactly a *split* between the
+//! value on purpose — the bug this prevents was exactly a *split* between the
 //! field and the control flow: a settle cleared `paced_wake` but left the
 //! loop parked on a stale `ControlFlow::WaitUntil`, so once that deadline
 //! elapsed winit treated `WaitUntil(past)` as a zero-timeout poll and
@@ -72,7 +72,7 @@ pub enum ControlFlowIntent {
 /// `request_redraw()`, and the [`ControlFlowIntent`] to apply. Returned as
 /// one value from *both* decision points so a call site can never update the
 /// field without also deciding the control flow — see the module docs for
-/// why that coupling is load-bearing (the round-1 busy-spin Critical).
+/// why that coupling is load-bearing (the busy-spin bug it prevents).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacedDecision {
     /// What `ShellHandler::paced_wake` must become after this turn.
@@ -89,19 +89,38 @@ pub struct PacedDecision {
 /// in `app_handler.rs`) — injected so this stays a pure, directly testable
 /// function; never call `Instant::now()` inside this module. `cosmetic_loop_hz`
 /// is the theme's `CosmeticLoopRate::hz()` (guaranteed finite and `>= 10.0`
-/// by that type's NaN-safe clamp); the paced interval `1.0 / hz` is computed
+/// by that type's NaN-safe clamp) — the paced-loop **cap**. `requested_interval`
+/// is this same paint's `PaintOutcome::paced_interval` (the MIN-aggregated
+/// per-request interval, e.g. a ~500ms caret blink against a 30Hz shimmer
+/// cap): `None` and `Some(Duration::ZERO)` both mean "at the theme's own
+/// rate". The interval this paint actually schedules at is the **longer** of
+/// the cap and the requested interval — `1.0 / cosmetic_loop_hz`
+/// `.max(requested)` — the identical `max(cap, requested)` semantics as
+/// [`frust_shell_common::frame_gate::FramePacing::effective_interval`], so a
+/// per-request interval can only ever widen the cadence, never tighten it
+/// below the theme's own ceiling. Both the cap and the fold are computed
 /// **only** on the branch that actually schedules, so a settling or
-/// immediate-redraw frame never runs that division.
+/// immediate-redraw frame never runs that arithmetic.
+///
+/// **Overflow ceiling.** `requested_interval` always traces back to a
+/// widget's `frust_core::PaintCtx::request_frame_paced_at`, which clamps to
+/// `frust_core::PaintCtx::MAX_PACED_INTERVAL` (10s) before it is ever folded
+/// into `PaintOutcome::paced_interval` — so the `now + interval` addition
+/// below stays far below any panic-on-overflow `Instant` bound even at the
+/// widest legal input. This function performs no clamp of its own; it relies
+/// entirely on that upstream bound, the single entry point every paced
+/// interval flows through.
 pub fn next_paced_wake(
     needs_frame: bool,
     needs_frame_paced_only: bool,
     anim_pacing: bool,
     now: Instant,
     cosmetic_loop_hz: f32,
+    requested_interval: Option<Duration>,
 ) -> PacedDecision {
     if !needs_frame {
         // Settle: clear any stale deadline a prior paced frame left AND
-        // return the loop to `Wait`. The round-1 bug cleared the field here
+        // return the loop to `Wait`. The busy-spin bug cleared the field here
         // but left the control flow on a stale `WaitUntil`.
         return PacedDecision {
             paced_wake: None,
@@ -112,8 +131,15 @@ pub fn next_paced_wake(
     if anim_pacing && needs_frame_paced_only {
         // Paced-only decorative loop: schedule the follow-up redraw one
         // interval out and leave the control flow untouched — the next
-        // `about_to_wait` turn is what parks the loop on `WaitUntil`.
-        let interval = Duration::from_secs_f32(1.0 / cosmetic_loop_hz);
+        // `about_to_wait` turn is what parks the loop on `WaitUntil`. The
+        // theme's cap is a ceiling (a request tighter than it is clamped up),
+        // while a slower per-request interval widens the cadence — see this
+        // function's docs for the `max(cap, requested)` contract.
+        let cap = Duration::from_secs_f32(1.0 / cosmetic_loop_hz);
+        let interval = match requested_interval {
+            Some(requested) => cap.max(requested),
+            None => cap,
+        };
         PacedDecision {
             paced_wake: Some(now + interval),
             request_redraw: false,
@@ -190,14 +216,16 @@ mod tests {
         let now = base();
         for paced_only in [true, false] {
             for anim_pacing in [true, false] {
-                assert_eq!(
-                    next_paced_wake(false, paced_only, anim_pacing, now, 30.0),
-                    PacedDecision {
-                        paced_wake: None,
-                        request_redraw: false,
-                        control_flow: ControlFlowIntent::Wait,
-                    }
-                );
+                for requested in [None, Some(Duration::from_millis(500))] {
+                    assert_eq!(
+                        next_paced_wake(false, paced_only, anim_pacing, now, 30.0, requested),
+                        PacedDecision {
+                            paced_wake: None,
+                            request_redraw: false,
+                            control_flow: ControlFlowIntent::Wait,
+                        }
+                    );
+                }
             }
         }
     }
@@ -206,7 +234,7 @@ mod tests {
     fn paced_only_with_pacing_enabled_schedules_and_leaves_control_flow_unchanged() {
         let now = base();
         assert_eq!(
-            next_paced_wake(true, true, true, now, 30.0),
+            next_paced_wake(true, true, true, now, 30.0, None),
             PacedDecision {
                 paced_wake: Some(now + interval_30hz()),
                 request_redraw: false,
@@ -222,7 +250,7 @@ mod tests {
         // owed, control flow back to Wait).
         let now = base();
         assert_eq!(
-            next_paced_wake(true, true, false, now, 30.0),
+            next_paced_wake(true, true, false, now, 30.0, None),
             PacedDecision {
                 paced_wake: None,
                 request_redraw: true,
@@ -237,12 +265,118 @@ mod tests {
         // (spring, finite animation) is never paced.
         let now = base();
         assert_eq!(
-            next_paced_wake(true, false, true, now, 30.0),
+            next_paced_wake(true, false, true, now, 30.0, None),
             PacedDecision {
                 paced_wake: None,
                 request_redraw: true,
                 control_flow: ControlFlowIntent::Wait,
             }
+        );
+    }
+
+    // --- next_paced_wake: per-request interval (A2) ---
+
+    #[test]
+    fn no_requested_interval_falls_back_to_the_cosmetic_loop_cap() {
+        // Acceptance criterion 2: with nothing latched (None), behavior must
+        // be byte-identical to the cosmetic_loop_rate-only fallback.
+        let now = base();
+        assert_eq!(
+            next_paced_wake(true, true, true, now, 30.0, None),
+            next_paced_wake(true, true, true, now, 30.0, Some(Duration::ZERO)),
+            "None and Some(ZERO) both mean \"at the theme's own rate\""
+        );
+        assert_eq!(
+            next_paced_wake(true, true, true, now, 30.0, None),
+            PacedDecision {
+                paced_wake: Some(now + interval_30hz()),
+                request_redraw: false,
+                control_flow: ControlFlowIntent::Unchanged,
+            }
+        );
+    }
+
+    #[test]
+    fn a_500ms_caret_request_paces_slower_than_the_30hz_cap() {
+        // Acceptance criterion 1: a 500ms paced request, alone, must schedule
+        // ~500ms out rather than the theme's 30Hz (~33ms) cap.
+        let now = base();
+        let requested = Duration::from_millis(500);
+        assert_eq!(
+            next_paced_wake(true, true, true, now, 30.0, Some(requested)),
+            PacedDecision {
+                paced_wake: Some(now + requested),
+                request_redraw: false,
+                control_flow: ControlFlowIntent::Unchanged,
+            }
+        );
+    }
+
+    #[test]
+    fn a_tighter_requested_interval_is_clamped_up_to_the_theme_cap() {
+        // The theme's cosmetic_loop_rate is a CEILING, not a floor: a request
+        // faster than the cap (e.g. a stray 5ms ask) is clamped up to the cap
+        // — matching `FramePacing::effective_interval`'s `max(cap, requested)`.
+        let now = base();
+        let too_fast = Duration::from_millis(5);
+        assert_eq!(
+            next_paced_wake(true, true, true, now, 30.0, Some(too_fast)),
+            PacedDecision {
+                paced_wake: Some(now + interval_30hz()),
+                request_redraw: false,
+                control_flow: ControlFlowIntent::Unchanged,
+            }
+        );
+    }
+
+    #[test]
+    fn requested_interval_is_ignored_while_pacing_is_disabled() {
+        // The FRUST_NO_ANIM_PACING kill switch still fires immediately
+        // regardless of any latched per-request interval.
+        let now = base();
+        assert_eq!(
+            next_paced_wake(
+                true,
+                true,
+                false,
+                now,
+                30.0,
+                Some(Duration::from_millis(500))
+            ),
+            PacedDecision {
+                paced_wake: None,
+                request_redraw: true,
+                control_flow: ControlFlowIntent::Wait,
+            }
+        );
+    }
+
+    #[test]
+    fn interval_change_between_paints_re_derives_the_next_deadline() {
+        // Acceptance criterion 3: an interval CHANGE between paced paints
+        // (e.g. a shimmer stops and a 500ms caret becomes the sole paced
+        // request) must re-derive the next deadline from THIS paint's own
+        // interval, never park on a deadline computed under the old one.
+        let t0 = base();
+        // First paint: a 30Hz shimmer in flight (no per-request interval —
+        // folds to the theme cap), schedules ~33ms out.
+        let d0 = next_paced_wake(true, true, true, t0, 30.0, None);
+        assert_eq!(d0.paced_wake, Some(t0 + interval_30hz()));
+
+        // The shimmer settles; only the 500ms caret paces now. The very next
+        // paint (any time — here, immediately) must schedule off the NEW
+        // 500ms interval, not the stale 30Hz one from the previous decision.
+        let t1 = t0 + Duration::from_millis(1);
+        let d1 = next_paced_wake(true, true, true, t1, 30.0, Some(Duration::from_millis(500)));
+        assert_eq!(
+            d1.paced_wake,
+            Some(t1 + Duration::from_millis(500)),
+            "the deadline must be re-derived from this paint's own requested \
+             interval, not carried over from the prior 30Hz decision"
+        );
+        assert_ne!(
+            d1.paced_wake, d0.paced_wake,
+            "the new deadline must differ from the stale 30Hz-derived one"
         );
     }
 

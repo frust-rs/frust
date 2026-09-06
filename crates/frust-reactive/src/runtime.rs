@@ -65,6 +65,9 @@ impl ReactiveRuntime {
         let runtime = Builder::new_multi_thread()
             .worker_threads(2)
             .enable_time()
+            // IO driver: `frust::spawn`'s background tasks (tonic/hyper socket
+            // work) need a live reactor, not just the timer driver above.
+            .enable_io()
             .thread_name("frust-reactive")
             .build()
             .expect("frust-reactive: failed to build the background tokio runtime");
@@ -344,6 +347,44 @@ mod tests {
             "a signal write from a pumped local task must be observed by \
              take_signals_dirty called after the pump — the pump-first \
              ordering contract"
+        );
+    }
+
+    /// The runtime's IO driver must actually be live on the `frust::spawn`
+    /// path (`Executor::spawn` -> `ForgeExecutor::spawn` -> `Handle::spawn`,
+    /// the same route real async IO takes), not just the timer driver the
+    /// other tests in this module exercise: a spawned task must be able to
+    /// bind a socket and complete an accept/connect round-trip.
+    #[test]
+    fn spawn_reaches_io_driver() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        ReactiveRuntime::init(noop_waker());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        Executor::spawn(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind must succeed with the IO driver enabled");
+            let addr = listener.local_addr().expect("listener has a local addr");
+
+            let accept = tokio::spawn(async move { listener.accept().await });
+            tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect must succeed with the IO driver enabled");
+            accept
+                .await
+                .expect("accept task must not panic")
+                .expect("accept must succeed");
+
+            tx.send(()).expect("test receiver must still be alive");
+        });
+
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect(
+            "a spawned task must complete an accept/connect round-trip \
+             through the IO driver within 5s",
         );
     }
 }

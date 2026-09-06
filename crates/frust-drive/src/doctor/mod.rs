@@ -4,6 +4,7 @@
 
 mod android_sdk;
 mod cargo_ndk;
+mod cargo_packager;
 mod mobile_targets;
 pub mod report;
 mod rust_toolchain;
@@ -11,6 +12,7 @@ mod xcode;
 
 pub use android_sdk::AndroidSdkValidator;
 pub use cargo_ndk::CargoNdkValidator;
+pub use cargo_packager::CargoPackagerValidator;
 pub use mobile_targets::MobileTargetsValidator;
 pub use report::{Area, Component, ComponentStatus, DoctorReport, FixCommand, build_report};
 pub use rust_toolchain::RustToolchainValidator;
@@ -66,6 +68,7 @@ pub fn default_validators() -> Vec<Box<dyn Validator>> {
         Box::new(CargoNdkValidator),
         Box::new(AndroidSdkValidator),
         Box::new(XcodeValidator),
+        Box::new(CargoPackagerValidator),
     ]
 }
 

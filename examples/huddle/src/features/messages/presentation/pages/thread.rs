@@ -56,10 +56,10 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
-    hero, icon, icons, inflexible, keyed, scroll_view, text, text_input, use_context,
+    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, hero, icon,
+    icons, inflexible, keyed, kurbo::Size, scroll_view, text, text_input, use_context,
 };
-use kurbo::Size;
+use frust_material::app_bar;
 
 use crate::HuddleState;
 use crate::features::messages::domain::repositories::MessageRepository;
@@ -109,7 +109,7 @@ fn avatar_color(user_id: u32) -> Color {
 }
 
 /// A quick, static header timestamp — mirrors `channel_feed`'s own
-/// placeholder ("real color-glyph rendering, verified in wave A"; there is no
+/// placeholder ("real color-glyph rendering"; there is no
 /// real per-message timestamp in the mock dataset).
 const PLACEHOLDER_TIME: &str = "9:41 AM";
 
@@ -413,9 +413,8 @@ fn root_bubble(
         lines.push(reactions);
     }
 
-    // FLAT ROW (device-parity-round2 task R2b, mirroring
-    // `channel_feed::message_bubble`): a plain padded content column
-    // (12h/6v), no `elevated_card` wrapper.
+    // FLAT ROW (mirroring `channel_feed::message_bubble`): a plain padded
+    // content column (12h/6v), no `elevated_card` wrapper.
     let inner = Padding(
         EdgeInsets::symmetric(12.0, 6.0),
         FlexView::new(
@@ -504,11 +503,13 @@ fn reaction_chips(
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = root.id;
-        chips.push(inflexible(any(frust::filter_chip::<HuddleState, _>(
-            label,
-            reaction.mine,
-            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-        ))));
+        chips.push(inflexible(any(
+            frust_material::filter_chip::<HuddleState, _>(
+                label,
+                reaction.mine,
+                move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
+            ),
+        )));
         chips.push(inflexible(any(SizedBox(Some(6.0), None))));
     }
 
@@ -578,9 +579,9 @@ fn empty_replies_state() -> AnyView<HuddleState> {
 
 /// One compact reply row: author + text, no reactions/thread affordance (the
 /// spec's "compact bubbles" — this thread has no nested sub-threads). FLAT
-/// (task R2b, matching `channel_feed::message_bubble`'s 12h/6v inset exactly)
-/// — no `outlined_card` wrapper; the row carries no rounded chrome of its own
-/// any more (a headless test locates a new reply by its glyph runs, not a
+/// (matching `channel_feed::message_bubble`'s 12h/6v inset exactly) — no
+/// `outlined_card` wrapper; the row carries no rounded chrome of its own any
+/// more (a headless test locates a new reply by its glyph runs, not a
 /// rounded-rect count — see `tests/thread.rs`).
 fn reply_bubble(
     controller: &Arc<MessagesController>,

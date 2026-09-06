@@ -1,12 +1,12 @@
-//! The fuzzy command palette (PLAN D5 / workbook Part B): a shadowed, centered
+//! The fuzzy command palette: a shadowed, centered
 //! modal with a query prompt over a ranked command list, each row an enabled
 //! command (executes on click/Enter) or a disabled-with-reason one (muted, not
-//! runnable — the workbook disabled pattern). The base screen is rendered with
+//! runnable). The base screen is rendered with
 //! a *suppressed* `MouseCtx` (see `crate::ui::render`), so only this panel's
-//! regions are live while it's open — the D4 base-layer suppression, plus the
+//! regions are live while it's open — the base-layer suppression, plus the
 //! binding `[Esc] Close` title affordance.
 //!
-//! Layering (D2): renders `&AppState` (the query + the ranked registry derived
+//! Layering: renders `&AppState` (the query + the ranked registry derived
 //! from it) and only *registers* interaction; it never mutates the engine. The
 //! command list comes from `crate::engine::palette` — this view carries no
 //! command knowledge of its own.

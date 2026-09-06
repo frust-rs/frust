@@ -20,8 +20,9 @@
 //!   [`VelocityTracker`](input::VelocityTracker), and the fling-decay math the
 //!   interactive widgets build on.
 //! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
-//! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper and
-//!   [`WidgetPod`](tree::WidgetPod).
+//! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper,
+//!   [`WidgetPod`](tree::WidgetPod), and the read-only
+//!   [`InspectNode`](tree::InspectNode) walk tooling reads the tree through.
 //! * [`app`] — the [`RenderRoot`](app::RenderRoot) that drives rebuild → layout
 //!   → paint. This is what each platform shell owns.
 //! * [`component`] — [`Component`](component::Component), Flutter's
@@ -51,11 +52,13 @@ pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
-pub use app::RenderRoot;
+pub use app::{Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
-    EditingState, EventCtx, EventOutcome, EventResult, ImeEvent, ImeState, InputEvent, Key,
-    KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent,
+    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
+    PointerPhase, ScrollDelta, has_pending_result_flush, mark_focus_orphaned,
+    mark_pending_result_flush, take_focus_orphaned, take_pending_result_flush,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
@@ -64,9 +67,9 @@ pub use input::{
 pub use insets::{EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
-pub use tree::{WidgetPod, WidgetTree};
+pub use tree::{InspectNode, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
 pub use widget::{
-    ChildPod, HeroDirective, HeroFrames, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, TickClass,
-    Widget,
+    ChildPod, CornerRadii, DashPattern, DiscardScene, HeroDirective, HeroFrames, LayoutCtx,
+    PaintCtx, PaintOutcome, PaintScene, TickClass, Widget,
 };

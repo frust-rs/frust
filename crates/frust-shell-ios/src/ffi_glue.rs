@@ -51,11 +51,11 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use anyhow::{Context, Result, bail};
 
-use frust_core::event::{EditingState, ImeState};
+use frust_core::event::{EditingState, ImeContentType, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
@@ -74,19 +74,129 @@ use crate::app::{
 };
 use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 
-/// Startup-span name: `create_handle` is about to join the
-/// background font-preload thread [`create_handle`] spawned at the top of its
-/// own body (see that fn's doc — iOS has no `JNI_OnLoad`-equivalent
-/// process-wide load hook to spawn it earlier from, so the thread is spawned
-/// as early as possible inside `create_handle` itself instead, overlapping the
-/// synchronous GPU surface/device bring-up below it). Mirrors the Android
-/// shell's `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
+/// Startup-span name: the font-preload overlap window
+/// opens — the background thread [`create_handle`] spawned at the top of its own
+/// body is from here on the only thing the UI thread is still waiting for (see
+/// that fn's doc — iOS has no `JNI_OnLoad`-equivalent process-wide load hook to
+/// spawn it earlier from, so the thread is spawned as early as possible inside
+/// `create_handle` itself instead). On the split path this is recorded *before*
+/// the render thread is started, so the GPU surface/device bring-up is paid
+/// inside the window rather than after it. Mirrors the Android shell's
+/// `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
 const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
 
 /// Startup-span name: the background font-preload join returned —
 /// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
-/// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
+/// a synchronous [`TextContext::new`]. On the split path the UI thread records
+/// it onto the recorder the render thread is writing to as well, so
+/// `adapter_ready`/`device_ready`/`renderer_ready` normally come *before* it in
+/// the startup line — that overlap is the point, not a reordered wire name. See
+/// [`SPAN_FONT_PREINIT_STARTED`].
 const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
+
+/// The split path's startup-span recorder, shared between the UI thread and the
+/// render thread. The render thread owns the line from `adapter_ready` onward and
+/// emits it on the first present ([`render_scene`] takes the recorder to do so);
+/// the UI thread still records [`SPAN_FONT_PREINIT_JOINED`] on it from
+/// [`spawn_split_executor`]. The two now run concurrently, so one shared recorder
+/// — rather than one moved render-side — is what keeps both sets of spans on a
+/// single epoch and in a single line.
+///
+/// Contention is bounded to that one UI-side record, and it cannot collide with
+/// [`render_loop`]'s per-frame use of the same mutex: the UI-side write happens
+/// strictly before the first scene is handed off, because layout cannot run
+/// before the joined `TextContext` exists — and, from the first handed-off
+/// scene on, [`StartupRecorder`] below only ever takes this lock for the short
+/// body of one record/take call, never across a frame's surrounding work.
+type SharedStartupSpans = Arc<Mutex<Option<StartupSpans>>>;
+
+/// Record `names`, in order, on a shared startup recorder. A no-op once the
+/// startup line has been emitted (the recorder is gone by then), and
+/// poison-tolerant: a panicked holder costs instrumentation, never a frame.
+///
+/// Used for the one-shot, non-per-frame writes (`adapter_ready`/`device_ready`/
+/// `renderer_ready` in [`install_surface`], `first_rebuild_done` and
+/// `font_preinit_joined`); the per-frame render tail goes through
+/// [`StartupRecorder`] instead, whose contract is never to hold this lock
+/// across a frame's own GPU work.
+fn record_startup_spans(startup_spans: &Mutex<Option<StartupSpans>>, names: &[&'static str]) {
+    let mut guard = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(spans) = guard.as_mut() {
+        for name in names {
+            spans.record(name);
+        }
+    }
+}
+
+/// A startup-span recorder handle passed into [`crate::app::render_scene`],
+/// abstracting over how the caller stores its `Option<StartupSpans>`: owned
+/// directly ([`InlineExecutor`](crate::app::InlineExecutor) — no
+/// synchronization needed at all) or shared with the UI thread via a
+/// [`Mutex`] ([`SharedStartupSpans`] — [`render_loop`]'s split path).
+///
+/// The one contract every variant keeps, and the reason this type exists:
+/// a lock, if any, is held only for the body of a single record/take call —
+/// **never** across the caller's surrounding work, and in particular never
+/// across `render_scene`'s blocking GPU tail (`nextDrawable` acquire + Metal
+/// submit). Before this type, [`render_loop`] locked the mutex once and held
+/// the guard across the *whole* `render_scene` call, including that blocking
+/// tail — a latent watchdog hazard (any future
+/// UI-thread caller reaching for this mutex would block behind a vsync/
+/// drawable wait, the classic `0x8badf00d` watchdog-kill shape), defense in
+/// depth today since nothing currently reaches for it from the UI thread.
+pub(crate) enum StartupRecorder<'a> {
+    /// Owned directly — the inline executor's plain `Option<StartupSpans>`.
+    Owned(&'a mut Option<StartupSpans>),
+    /// Shared with the UI thread — the split's [`SharedStartupSpans`]. Each
+    /// method below locks only for its own short body.
+    Shared(&'a Mutex<Option<StartupSpans>>),
+}
+
+impl StartupRecorder<'_> {
+    /// Record `name` once — a no-op if the recorder has already drained (the
+    /// startup line was already emitted) or already carries this span.
+    pub(crate) fn record_once(&mut self, name: &'static str) {
+        fn record_if_missing(spans: &mut Option<StartupSpans>, name: &'static str) {
+            if let Some(spans) = spans.as_mut()
+                && !spans.spans().iter().any(|(n, _)| *n == name)
+            {
+                spans.record(name);
+            }
+        }
+        match self {
+            StartupRecorder::Owned(spans) => record_if_missing(spans, name),
+            StartupRecorder::Shared(mutex) => {
+                let mut guard = mutex.lock().unwrap_or_else(|err| err.into_inner());
+                record_if_missing(&mut guard, name);
+            }
+        }
+    }
+
+    /// Take the recorder (if still live), record `name` on it, and emit the
+    /// accumulated startup line — once. The record+emit that follow the take
+    /// run on the now-fully-owned local value, off any mutex entirely — the
+    /// `Shared` variant's lock is held only for the `take()` itself.
+    ///
+    /// Returns whether this call performed the take (the frame that just
+    /// retired the recorder), so a caller juggling a `Shared` handle across
+    /// many frames (see [`render_loop`]'s `startup_retired` fast path) knows
+    /// when it can drop to a lock-free `Owned(&mut None)` handle from the
+    /// next frame on — the per-frame lock cost this removes.
+    pub(crate) fn take_and_emit(&mut self, name: &'static str) -> bool {
+        let taken = match self {
+            StartupRecorder::Owned(spans) => spans.take(),
+            StartupRecorder::Shared(mutex) => {
+                mutex.lock().unwrap_or_else(|err| err.into_inner()).take()
+            }
+        };
+        let drained = taken.is_some();
+        if let Some(mut spans) = taken {
+            spans.record(name);
+            spans.emit_log();
+        }
+        drained
+    }
+}
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init`].
 ///
@@ -170,6 +280,17 @@ pub fn init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    // Devtools, compiled in only under this crate's `devtools` feature. Started
+    // here — after `init_logger_once` above, never before it — because the
+    // service's discovery line (`frust-devtools listening on <port>`) is a
+    // `log::info!` call that must reach this shell's stderr logger for tooling
+    // to recover the port. No wake callback: the `CADisplayLink` loop drains
+    // the hop queue every tick (see `IosAppHandle::frame`).
+    #[cfg(feature = "devtools")]
+    frust_shell_common::devtools::start(
+        frust_shell_common::devtools::app_name_from_process(),
+        None,
+    );
     guard("frust_init", std::ptr::null_mut(), || {
         match create_handle(metal_layer, width, height, scale, make_app) {
             Ok(handle) => handle,
@@ -303,7 +424,7 @@ fn install_surface(
     metal_layer: *mut c_void,
     width: u32,
     height: u32,
-    startup_spans: &mut Option<StartupSpans>,
+    startup_spans: &Mutex<Option<StartupSpans>>,
     first_install: bool,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: &AtomicBool,
@@ -322,10 +443,10 @@ fn install_surface(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
-    // Publish the surface's RESOLVED translucency to the UI thread (review
-    // finding M1): `alpha` above is only what we ASKED for — `frust-render`
-    // resolves it against the layer's advertised alpha modes and can fall back
-    // to an opaque swapchain. The UI thread reads this flag every frame
+    // Publish the surface's RESOLVED translucency to the UI thread: `alpha`
+    // above is only what we ASKED for — `frust-render` resolves it against the
+    // layer's advertised alpha modes and can fall back to an opaque
+    // swapchain. The UI thread reads this flag every frame
     // (`IosAppHandle::sync_translucent_resolved`) before choosing the base
     // color and pushing `set_surface_translucent`, so a fallback degrades to
     // the Mode A contract instead of `DestOut`-punching black rectangles.
@@ -334,10 +455,15 @@ fn install_surface(
         translucent_resolved,
         Some(renderer.surface_resolved_translucent()),
     );
-    if first_install && let Some(spans) = startup_spans.as_mut() {
-        spans.record(perf::SPAN_ADAPTER_READY);
-        spans.record(perf::SPAN_DEVICE_READY);
-        spans.record(perf::SPAN_RENDERER_READY);
+    if first_install {
+        record_startup_spans(
+            startup_spans,
+            &[
+                perf::SPAN_ADAPTER_READY,
+                perf::SPAN_DEVICE_READY,
+                perf::SPAN_RENDERER_READY,
+            ],
+        );
     }
     Ok(())
 }
@@ -347,9 +473,12 @@ fn install_surface(
 /// and the freshest handed-off scene from the channel, and run
 /// encode→acquire→submit for each frame — the single perf emitter (folding the UI
 /// thread's `UiSpans` with its own render spans via [`render_scene`]). Owns the
-/// startup line from `adapter_ready` onward (the UI thread recorded `init_entry` +
-/// the font-preinit spans before moving the recorder here). Exits cleanly when the
-/// `RenderSender` is dropped.
+/// startup line from `adapter_ready` onward and emits it on the first present —
+/// through a recorder that is *shared* rather than moved
+/// ([`SharedStartupSpans`]), because the UI thread is still waiting on the font
+/// preinit while this thread brings the GPU up and stamps `font_preinit_joined`
+/// onto the same line when that wait ends. Exits cleanly when the `RenderSender`
+/// is dropped.
 ///
 /// # iOS surface recovery
 ///
@@ -394,7 +523,7 @@ fn install_surface(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
-    startup_spans: StartupSpans,
+    startup_spans: SharedStartupSpans,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
     presented: Arc<AtomicU64>,
@@ -425,11 +554,15 @@ pub(crate) fn render_loop(
 
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
-    let mut startup_spans = Some(startup_spans);
     let mut frame_stats = FrameStats::new();
     let mut phase = RenderPhase::NoSurface;
     let mut first_install_done = false;
     let mut first_rebuild_recorded = false;
+    // Set once `StartupRecorder::take_and_emit` reports the startup line has
+    // been emitted (the first successful present) — from then on this loop
+    // never touches `startup_spans`'s mutex again for the per-frame render
+    // tail (see the per-frame block below and `StartupRecorder`'s docs).
+    let mut startup_retired = false;
     // iOS self-recovery state (the layer is permanent — recreate from it on loss).
     let mut metal_layer: Option<*mut c_void> = None;
     let mut physical: (u32, u32) = (1, 1);
@@ -458,7 +591,7 @@ pub(crate) fn render_loop(
                         ptr,
                         size.width,
                         size.height,
-                        &mut startup_spans,
+                        &startup_spans,
                         first_install,
                         alpha,
                         &translucent_resolved,
@@ -524,23 +657,35 @@ pub(crate) fn render_loop(
                 // the render thread's stand-in for `first_rebuild_done` (it owns
                 // the startup line in the split).
                 if !first_rebuild_recorded {
-                    if let Some(spans) = startup_spans.as_mut() {
-                        spans.record(perf::SPAN_FIRST_REBUILD_DONE);
-                    }
+                    record_startup_spans(&startup_spans, &[perf::SPAN_FIRST_REBUILD_DONE]);
                     first_rebuild_recorded = true;
                 }
                 // FFI-path perf convention: read `perf::enabled()` once per
                 // frame, gate every `Instant::now()` behind it (inside
                 // `render_scene`).
                 let perf_on = perf::enabled();
-                render_scene(
+                // Build this frame's startup-span recorder handle. Before
+                // retirement, `Shared` locks `startup_spans`'s mutex only for
+                // the short body of each individual record/take call inside
+                // `render_scene` — never across the surrounding GPU tail
+                // (`nextDrawable` acquire + Metal submit). Once retired, a
+                // fresh always-`None` owned handle stands in, so this thread
+                // never touches the mutex again for the steady-state
+                // per-frame path (see `StartupRecorder`'s docs).
+                let mut retired_spans: Option<StartupSpans> = None;
+                let recorder = if startup_retired {
+                    StartupRecorder::Owned(&mut retired_spans)
+                } else {
+                    StartupRecorder::Shared(&startup_spans)
+                };
+                let (_, just_retired) = render_scene(
                     &mut renderer,
                     &render_cx,
                     &frame.scene.scene,
                     frame.scene.base_color,
                     frame.ui_spans,
                     &mut frame_stats,
-                    &mut startup_spans,
+                    recorder,
                     perf_on,
                     &presented,
                     // Present-sync: park this frame under its own id so the UI
@@ -548,6 +693,9 @@ pub(crate) fn render_loop(
                     // frame it just put on screen.
                     Some((&present, frame.meta.frame_id)),
                 );
+                if just_retired {
+                    startup_retired = true;
+                }
 
                 // iOS self-heals a lost surface from the retained layer (nothing
                 // external re-drives creation), bounded by the failure budget so
@@ -576,7 +724,7 @@ pub(crate) fn render_loop(
                         ptr,
                         physical.0,
                         physical.1,
-                        &mut startup_spans,
+                        &startup_spans,
                         false,
                         alpha,
                         &translucent_resolved,
@@ -668,7 +816,7 @@ fn create_handle(
     //   `RenderContext`/`SurfaceRenderer` + surface and does all GPU work
     //   (drawable acquisition, encode, present) — so `frust_init` returns without
     //   blocking on adapter/device/surface bring-up (it happens render-side). The
-    //   `startup` recorder is moved into the render thread, which owns the startup
+    //   `startup` recorder is shared with the render thread, which owns the startup
     //   line from `adapter_ready` on.
     // - Inline (kill switch engaged): create the surface + renderer on this UI
     //   thread exactly as the pre-split shell did, recording the full startup line
@@ -833,8 +981,11 @@ fn build_inline_executor(
 /// The GPU work — surface creation, drawable acquisition,
 /// encode, present, adapter/device/renderer spans — happens *on the render thread*
 /// ([`render_loop`]), so `frust_init` never blocks the UI thread on it. Only the
-/// font-preload join (needed by UI-side layout) stays on this UI thread. Returns
-/// the executor plus the joined [`TextContext`].
+/// font-preload join (needed by UI-side layout) stays on this UI thread, and it
+/// runs *after* the thread is spawned and handed its surface — so the
+/// adapter/device bring-up is paid inside the font wait (the longest serial
+/// stretch of iOS cold start) instead of after it. Returns the executor plus the
+/// joined [`TextContext`].
 #[allow(clippy::too_many_arguments)]
 fn spawn_split_executor(
     mut startup: StartupSpans,
@@ -846,19 +997,13 @@ fn spawn_split_executor(
     translucent_resolved: Arc<AtomicBool>,
     present: Arc<PresentHandoff>,
 ) -> (FrameExecutor, TextContext) {
-    // Font/`TextContext` warmup stays UI-side — layout runs on the UI
-    // thread. The GPU work is off-thread now, so this join's ordering vs surface
-    // bring-up no longer matters; record it before the recorder moves into the
-    // render thread below.
+    // Font/`TextContext` warmup stays UI-side — layout runs on the UI thread —
+    // but waiting for it is the longest thing left on this thread's startup path,
+    // so it is spent LAST: everything below gets the render thread going first and
+    // only then joins, leaving the adapter/device/surface bring-up to run inside
+    // the wait. This span opens that window; its `JOINED` partner is recorded
+    // after the join, on the recorder this thread shares with the render thread.
     startup.record(SPAN_FONT_PREINIT_STARTED);
-    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
-        log::warn!(
-            "frust-shell-ios: font pre-init thread panicked; \
-             falling back to synchronous TextContext::new"
-        );
-        TextContext::new()
-    });
-    startup.record(SPAN_FONT_PREINIT_JOINED);
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableMetalLayer>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
@@ -894,11 +1039,16 @@ fn spawn_split_executor(
     let surface_reinstalled = Arc::new(AtomicBool::new(false));
     let surface_reinstalled_render = Arc::clone(&surface_reinstalled);
 
-    // Move `startup` (init_entry + font spans already recorded) into the render
-    // thread, which owns the rest of the startup line. The raw `metal_layer`
-    // pointer is NOT captured by the closure (it is `!Send`); it crosses the
-    // channel wrapped in `SendableMetalLayer` via the `SurfaceCreated` command
-    // sent from this UI thread below.
+    // Share `startup` (`init_entry` + `font_preinit_started` recorded) with the
+    // render thread, which owns the rest of the startup line and emits it on the
+    // first present. This thread keeps a clone for the one span it still owes —
+    // `font_preinit_joined` — which the render thread cannot stamp on its behalf
+    // now that the two run concurrently. The raw `metal_layer` pointer is NOT
+    // captured by the closure (it is `!Send`); it crosses the channel wrapped in
+    // `SendableMetalLayer` via the `SurfaceCreated` command sent from this UI
+    // thread below.
+    let startup: SharedStartupSpans = Arc::new(Mutex::new(Some(startup)));
+    let startup_render = Arc::clone(&startup);
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
         // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
@@ -908,7 +1058,7 @@ fn spawn_split_executor(
             run_guarded_thread("frust-render (ios)", move || {
                 render_loop(
                     receiver,
-                    startup,
+                    startup_render,
                     fatal_render,
                     scene_return_tx,
                     presented_render,
@@ -928,6 +1078,25 @@ fn spawn_split_executor(
         window: SendableMetalLayer::new(metal_layer),
         size,
     });
+
+    // Only now block on the font preinit: the render thread has its surface
+    // command in hand, so adapter/device/renderer bring-up proceeds while this
+    // thread waits. Best-effort join — a panicked thread falls back to a
+    // synchronous `TextContext::new` with a log line, killing nothing and
+    // deferring nothing silently. The "layout never runs before `TextContext`
+    // exists" invariant is untouched: `create_handle`'s initial `rebuild()` is
+    // downstream of this join.
+    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+        log::warn!(
+            "frust-shell-ios: font pre-init thread panicked; \
+             falling back to synchronous TextContext::new"
+        );
+        TextContext::new()
+    });
+    // The last UI-side span, and this thread's last touch of the shared recorder.
+    // It lands after `adapter_ready` in the emitted line whenever the GPU won the
+    // race — which is the whole point of the ordering above.
+    record_startup_spans(&startup, &[SPAN_FONT_PREINIT_JOINED]);
 
     (
         FrameExecutor::Split(SplitExecutor::new(
@@ -1216,9 +1385,43 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
         .into_owned()
 }
 
+/// Map [`ImeContentType`] onto the stable wire string
+/// [`crate::ffi_support::ime_state_json`] embeds as `"contentType"`.
+///
+/// `ImeContentType` is `#[non_exhaustive]`, and this crate is not the crate
+/// that defines it, so (unlike `ImeContentType::is_secret`/
+/// `suppresses_suggestions`, defined alongside the enum) a wildcard arm is
+/// mandatory here — `rustc` will not let this bridge compile against a future
+/// variant it hasn't seen. Rather than let that wildcard silently default to
+/// `"normal"` (exactly the downgrade the type's own docs warn about), it
+/// fails closed using the same [`ImeContentType::is_secret`]/
+/// [`ImeContentType::suppresses_suggestions`] predicates the enum's docs
+/// mandate matching on for this reason: an unrecognized variant becomes the
+/// *strictest* wire string its own predicates justify, never the loosest.
+/// Mirrors `frust_shell_android::jni_glue::content_type_wire` byte-for-byte
+/// (same four wire strings, same fail-closed rule).
+fn content_type_wire(content_type: ImeContentType) -> &'static str {
+    match content_type {
+        ImeContentType::Normal => "normal",
+        ImeContentType::Password => "password",
+        ImeContentType::NoSuggestions => "noSuggestions",
+        ImeContentType::Terminal => "terminal",
+        other => {
+            if other.is_secret() {
+                "password"
+            } else if other.suppresses_suggestions() {
+                "noSuggestions"
+            } else {
+                "normal"
+            }
+        }
+    }
+}
+
 /// Convert the focused widget's published [`ImeState`] (or its absence) into the
 /// bridge JSON, mapping the logical-pixel caret rect into the flat
-/// caretX/Y/W/H the Swift side expects.
+/// caretX/Y/W/H the Swift side expects and [`ImeContentType`] into the
+/// `"contentType"` wire string (see [`content_type_wire`]).
 fn ime_state_to_json(state: Option<ImeState>) -> String {
     match state {
         Some(s) => {
@@ -1236,10 +1439,20 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
                 s.editing.composing_base,
                 s.editing.composing_extent,
                 caret,
+                content_type_wire(s.content_type),
             )
         }
         // No focused field / no published surface: the inactive sentinel.
-        None => crate::ffi_support::ime_state_json(false, "", -1, -1, -1, -1, None),
+        None => crate::ffi_support::ime_state_json(
+            false,
+            "",
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+            content_type_wire(ImeContentType::Normal),
+        ),
     }
 }
 
@@ -1283,6 +1496,27 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.set_appearance(dark != 0);
+        }
+    });
+}
+
+/// `frust_set_reduce_motion`: apply the platform's reduced-motion
+/// accessibility preference to the active theme's `MotionScheme`, re-publishing
+/// it through both delivery paths — the reduced-motion twin of
+/// [`set_appearance`].
+///
+/// `reduce` is Swift's `UIAccessibility.isReduceMotionEnabled` read, as `0`/`1`
+/// (the same no-`<stdbool.h>` convention `frust_set_appearance`'s `dark`
+/// follows). Reduced motion is NOT a `UITraitCollection` trait, so Swift
+/// sources it from `UIAccessibility.reduceMotionStatusDidChangeNotification`
+/// rather than `traitCollectionDidChange`. The continuous `CADisplayLink` loop
+/// repaints the next tick with no extra wake needed. A missing handle is a
+/// no-op.
+pub fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
+    guard("frust_set_reduce_motion", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_reduce_motion(reduce != 0);
         }
     });
 }
@@ -1594,4 +1828,96 @@ mod macro_expansion_state_factory {
     }
 
     crate::ios_app!(NonDefaultState, init_state, test_logic);
+}
+
+/// `content_type_wire`/`ime_state_to_json` coverage. Compiled (and would run)
+/// only under `#[cfg(target_os = "ios")]` — this crate's C-ABI/`frust-core`
+/// dependency is iOS-target-gated (see the crate's `Cargo.toml`), so unlike
+/// [`crate::ffi_support`]'s tests this module never executes on the Linux
+/// host `cargo test --workspace` runs on; it is verified only by
+/// `cargo check --all-targets --target aarch64-apple-ios-sim -p
+/// frust-shell-ios` (compiles, does not run) until an iOS test runner exists.
+#[cfg(test)]
+mod ime_content_type_wire {
+    use frust_core::event::{EditingState, ImeContentType, ImeState};
+
+    use super::{content_type_wire, ime_state_to_json};
+
+    #[test]
+    fn every_variant_maps_to_its_stable_wire_string() {
+        assert_eq!(content_type_wire(ImeContentType::Normal), "normal");
+        assert_eq!(content_type_wire(ImeContentType::Password), "password");
+        assert_eq!(
+            content_type_wire(ImeContentType::NoSuggestions),
+            "noSuggestions"
+        );
+        assert_eq!(content_type_wire(ImeContentType::Terminal), "terminal");
+    }
+
+    #[test]
+    fn absent_state_encodes_as_normal() {
+        // No focused field: the inactive sentinel must not default to a
+        // secret classification (that would be over-restrictive, not a leak,
+        // but it's still the wrong default — "normal" is what "no field" is).
+        assert!(ime_state_to_json(None).contains(r#""contentType":"normal""#));
+    }
+
+    #[test]
+    fn published_password_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hunter2".to_string(),
+                selection_base: 7,
+                selection_extent: 7,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Password,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"password""#));
+        // The leak this finding closes is the suggestion strip, not the
+        // published text — the core deliberately still carries the real
+        // text for the platform mirror (see `ImeState` docs); confirm this
+        // bridge doesn't (re)introduce redaction that would desync it.
+        assert!(json.contains(r#""text":"hunter2""#));
+    }
+
+    #[test]
+    fn published_no_suggestions_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "AB12-CD34".to_string(),
+                selection_base: 9,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::NoSuggestions,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn published_terminal_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "ls -la".to_string(),
+                selection_base: 6,
+                selection_extent: 6,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Terminal,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"terminal""#));
+    }
 }

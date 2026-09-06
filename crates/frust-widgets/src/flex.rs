@@ -256,7 +256,7 @@ impl<State: 'static> View<State> for FlexView<State> {
         let mut children = Vec::with_capacity(self.children.len());
         let mut flex = Vec::with_capacity(self.children.len());
         for child in &self.children {
-            children.push(crate::build_child(&child.view, ctx));
+            children.push(crate::authoring::build_child(&child.view, ctx));
             flex.push(child.flex);
         }
         FlexWidget {
@@ -286,7 +286,7 @@ impl<State: 'static> View<State> for FlexView<State> {
         // teardown + focus/capture retention for unchanged siblings across a
         // structural change). Keyed children (`|child| child.key`) opt the list
         // into key-matched reconciliation; an all-unkeyed list stays positional.
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev.children,
             &self.children,
             &mut element.children,
@@ -311,7 +311,7 @@ impl<State: 'static> View<State> for FlexView<State> {
 
     fn teardown(&self, element: &mut FlexWidget, ctx: &mut BuildCtx<'_>) {
         for (child, pod) in self.children.iter().zip(element.children.iter_mut()) {
-            crate::teardown_child(&child.view, pod, ctx);
+            crate::authoring::teardown_child(&child.view, pod, ctx);
         }
     }
 }
@@ -465,7 +465,7 @@ impl Widget for FlexWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Hit-test in reverse paint order (topmost/last-painted child first).
-        crate::route_event(&mut self.children, ctx, event)
+        crate::authoring::route_event(&mut self.children, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -475,6 +475,8 @@ impl Widget for FlexWidget {
             pod.semantics_child(ctx);
         }
     }
+
+    crate::authoring::visit_children!(children);
 }
 
 #[cfg(test)]
@@ -789,6 +791,7 @@ mod tests {
                     composing_extent: -1,
                 },
                 caret: None,
+                content_type: Default::default(),
             });
         }
     }

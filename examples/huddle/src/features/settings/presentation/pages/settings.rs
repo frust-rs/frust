@@ -7,8 +7,9 @@
 
 use frust::{
     AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, NavigatorController, Padding,
-    any, app_bar, flexible, icon, icons, inflexible, list_item, scroll_view,
+    any, flexible, icon, icons, inflexible, scroll_view,
 };
+use frust_material::{app_bar, list_item};
 
 use crate::HuddleState;
 

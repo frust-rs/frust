@@ -55,7 +55,7 @@ use frust_render::{
 };
 use frust_scene::Scene;
 use frust_shell_common::perf::{
-    FramePasses, FrameStats, RenderSpans, SPAN_ADAPTER_READY, SPAN_DEVICE_READY,
+    FramePasses, FrameStats, GpuPasses, RenderSpans, SPAN_ADAPTER_READY, SPAN_DEVICE_READY,
     SPAN_FIRST_ENCODE_DONE, SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
     SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans, UiSpans,
 };
@@ -335,6 +335,7 @@ impl InlineExecutor {
             &mut self.renderer_spans_recorded,
             hit,
         );
+        publish_gpu_handle(&self.render_cx);
         Ok(())
     }
 
@@ -766,7 +767,43 @@ fn install_detached(
     ))
     .context("frust: failed to install render surface")?;
     persist_and_record(renderer, startup, renderer_spans_recorded, hit);
+    publish_gpu_handle(render_cx);
     Ok(())
+}
+
+/// Install this render context's live GPU device into the process-wide slot
+/// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
+/// through, once — the first time a surface (and so a device) exists. A
+/// no-op past the first successful call from either executor (the slot is
+/// install-once; see its own module docs), and compiled to nothing under a
+/// default (non-`gpu`) build of this crate.
+///
+/// `device_handle` is panic-free at both call sites
+/// ([`InlineExecutor::ensure_surface`], [`install_detached`]): both run this
+/// strictly after a successful `on_surface_created`/`on_surface_installed`,
+/// exactly the precondition `RenderContext::device_handle`'s own doc comment
+/// names. Cloning it is cheap — `DeviceHandle`'s wgpu resources are
+/// themselves `Arc`-backed, so this hands the slot another handle to the
+/// same device, never a second one.
+#[cfg(feature = "gpu")]
+fn publish_gpu_handle(render_cx: &RenderContext) {
+    frust_shell_common::gpu::install_gpu_handle(render_cx.device_handle().clone());
+}
+
+#[cfg(not(feature = "gpu"))]
+fn publish_gpu_handle(_render_cx: &RenderContext) {}
+
+/// This surface's most recent real GPU pass timing, folded into the
+/// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
+/// surface produces no such measurement (a device that never offered
+/// `TIMESTAMP_QUERY`, or simply no reading landed yet — see [`SurfaceRenderer::gpu_pass_timings`]).
+fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
+    renderer.gpu_pass_timings().map(|timings| GpuPasses {
+        prepass: timings.prepass,
+        main: timings.main,
+        composite: timings.composite,
+        blit: timings.blit,
+    })
 }
 
 /// Run the encode→acquire→submit tail for one painted `scene`, timing each span
@@ -826,15 +863,21 @@ fn render_frame(
     let submit_dur = submit_start.elapsed();
 
     // One folded frame record through the single emitter:
-    // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit.
-    frame_stats.record(FramePasses::from_split(
+    // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit,
+    // with this surface's real GPU pass timing attached when it produces one
+    // (engine tier, `perf-trace`, a device that offered `TIMESTAMP_QUERY`).
+    let mut passes = FramePasses::from_split(
         ui_spans,
         RenderSpans {
             encode: encode_dur,
             acquire: acquire_dur,
             submit: submit_dur,
         },
-    ));
+    );
+    if let Some(gpu) = gpu_passes(renderer) {
+        passes = passes.with_gpu(gpu);
+    }
+    frame_stats.record(passes);
     if frame_stats.should_emit() {
         frame_stats.emit_log();
     }

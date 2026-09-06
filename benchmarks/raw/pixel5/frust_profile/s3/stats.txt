@@ -1,0 +1,5 @@
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== frust s3 ==
+frames: 26604 total, 26604 active, 0 skipped
+p50=6.61ms  p95=10.84ms  p99=13.21ms  worst=144.59ms
+missed_60hz=140 (budget 16.67ms)  missed_120hz=3965 (budget 8.33ms)

@@ -15,6 +15,12 @@
 //! The component's `Owner` is a CHILD of the root owner created BEFORE the
 //! re-provide — the risky half: context resolution must walk to the root
 //! owner's replaced value at read time, not a captured snapshot.
+//!
+//! The probe reads only `Theme::brightness`, so the baseline it seeds is
+//! arbitrary: it uses the design-language-free `Theme::neutral()` — the one
+//! baseline no design system owns — so this pin keeps running in every feature
+//! configuration of the facade, including
+//! `cargo test -p frust --no-default-features`.
 
 use std::sync::{Arc, Mutex};
 
@@ -78,7 +84,7 @@ fn use_context_theme_param_rebuilds_on_set_app_theme() {
 
     // Shell seed: platform-derived light theme, provided before frame 1 —
     // the same call `apply_theme`/`push_theme` makes on every shell.
-    let mut seeded = Theme::glyph_baseline();
+    let mut seeded = Theme::neutral();
     seeded.brightness = Brightness::Light;
     root.with(|| provide_context(seeded));
 
@@ -94,7 +100,7 @@ fn use_context_theme_param_rebuilds_on_set_app_theme() {
     });
 
     // App code forces a theme mid-session (callable from any thread).
-    let mut forced = Theme::glyph_baseline();
+    let mut forced = Theme::neutral();
     forced.brightness = Brightness::Dark;
     frust::set_app_theme(forced);
 
@@ -133,7 +139,7 @@ fn use_context_theme_param_rebuilds_on_set_app_theme() {
 #[test]
 fn component_build_reruns_on_every_rebuild_without_state_change() {
     let root = Owner::new();
-    root.with(|| provide_context(Theme::glyph_baseline()));
+    root.with(|| provide_context(Theme::neutral()));
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let view = component(ThemeProbe { seen: seen.clone() });

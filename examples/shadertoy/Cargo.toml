@@ -25,21 +25,18 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 frust = { path = "../../crates/frust" }
 
-# `frust-core` + `frust-scene` + `kurbo` + `peniko`: the facade's documented
-# "low-level escape hatch" (see `docs/ARCHITECTURE.md`, `docs/CODE_STANDARDS.md`'s
-# State & Reactivity Conventions), the same production dependency
-# `examples/huddle` carries for hand-rolled widgets. Here
-# it backs the `ShaderProgram` widget — a custom `View`/`Widget`
-# pair painting a fragment-shader-driven fill directly through
-# `frust-scene`'s `PaintScene`/`Command` vocabulary, which no facade widget
-# covers. `frust-text` is intentionally omitted from *production* code: HUD
-# text uses facade widgets, not hand-shaped glyph runs (it reappears below as
-# a dev-dependency, needed only by the headless test harness). Everything
-# else in this crate depends on the `frust` facade alone.
-frust-core = { path = "../../crates/frust-core" }
-frust-scene = { path = "../../crates/frust-scene" }
-kurbo = "0.13.1"
-peniko = "0.6.1"
+# frust-material: the one Material 3 dark baseline this example forces app-wide
+# (`ShadertoyApp::init`, matching `benchmarks/frust_bench`'s shell) — no other
+# Material/Cupertino/Glyph widget is used anywhere in this app. The catalog
+# feature graph the baseline used to reach through `frust` directly was
+# dissolved (see docs/DEVELOPMENT.md's Version-Pin Policy); the design-system
+# plugin crates carry it now.
+frust-material = { path = "../../plugins/material" }
+
+# The hand-rolled `ShaderView` `View`/`Widget` pair reaches its whole
+# vocabulary through `frust::authoring` (trait vocabulary + geometry) and
+# `frust::authoring::scene::ShaderProgram` — so nothing production pins a
+# framework internal like `kurbo`/`peniko` any more.
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -61,7 +58,20 @@ log = "0.4"
 # runtime/owner types and the text-shaping context the desktop shell would
 # otherwise supply. Same literal specs as huddle's `[dev-dependencies]`.
 [dev-dependencies]
+# Test-harness-only, NOT an escape hatch: `tests/showcase.rs` drives
+# `RenderRoot` directly, and `RenderRoot` is deliberately not in
+# `frust::authoring` (it is shell-owned, not something an app constructs), so
+# the harness still names these crates the long way. Migrating headless test
+# harnesses onto the facade is a separate design question — see this feature's
+# TASKS.md § Deferred. Production code names none of them.
+frust-core = { path = "../../crates/frust-core" }
+frust-scene = { path = "../../crates/frust-scene" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
 frust-reactive = { path = "../../crates/frust-reactive" }
+# `frust-text` stays dev-only for the original reason, unchanged by the facade
+# migration: production HUD text uses facade widgets, not hand-shaped glyph
+# runs — only the headless harness needs a `TextContext`.
 frust-text = { path = "../../crates/frust-text" }
 reactive_graph = "0.2"
 
@@ -81,7 +91,7 @@ lean = ["log/release_max_level_warn"]
 # no override needed) shrank the prior baseline (lto="thin", no cgu
 # override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
 # unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
-# shader/render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3` —
+# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3` —
 # the config that would actually ship, since sacrificing encode-path CPU
 # perf isn't acceptable — and under that carve-out "s" measured 7.36MB
 # (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
@@ -106,7 +116,7 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
+# wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. This app's
@@ -115,15 +125,6 @@ strip = "none"
 # `opt-level = 1`; `opt-level = 2` is used here for the
 # shader-compile-heavy crates specifically (see frust's own root
 # `Cargo.toml` for the full rationale — the same override, kept in sync).
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

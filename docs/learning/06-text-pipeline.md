@@ -16,9 +16,9 @@ and only the cheap half re-runs when your window resizes.
 | Shape cache — 128-entry LRU, keyed `(text, style)` — **no width in the key** | `shape_cache.rs` | ≈10–226 |
 | `ShapeCacheStats { shapes, line_breaks, hits, evictions }` | `shape_cache.rs` ≈30–42; exposed at `context.rs` ≈102 |
 | `TextLayout::to_scene_runs()` — memoized conversion + origin re-translate | `layout.rs` | ≈52–70 |
-| Parley layout → `frust_scene::GlyphRun` walk | `convert.rs` | ≈37–74 |
+| Parley layout → `frust_scene::GlyphRun` lowering | `crates/frust-engine/src/text/mod.rs` | `lower_glyph_run` ≈188 |
 | `TextEditor` (Parley `PlainEditor` wrapper for `TextInput`/IME) | `editor.rs` | ≈154–287 |
-| Where render meets text: `draw_glyph_run` → `vello::Scene::draw_glyphs` | `crates/frust-render/src/convert.rs` | ≈154–169 |
+| Where render meets text: GlyphRun compilation into strips + glyph atlas | `crates/frust-engine/src/compile/mod.rs` | `compile_glyph_run` ≈1176 |
 | A widget using all of it: `Text` (layout ≈273, paint ≈283) | `crates/frust-widgets/src/text.rs` | |
 
 The purity rule holds here too: no Parley type escapes `frust-text`
@@ -57,14 +57,15 @@ cache boundary made visible in two counters.
 
 ### 6.3 — From glyphs to pixels
 
-Read `crates/frust-render/src/convert.rs` ≈154–169: the sink maps each
-`frust_scene::Glyph` to `vello::Glyph` and calls
-`draw_glyphs(font).font_size(..).brush(..).transform(..).draw(..)`. Note
-what's *absent*: no rasterization here. Vello turns glyph outlines into
-paths in its own pipeline (chapter 5) — frust ships outlines and positions,
-not bitmaps. (Color emoji ride the same call — vello 0.9 resolves
-COLR/sbix internally; see `docs/DEVELOPMENT.md` Known Issues for the CBDT
-caveat.)
+Read `crates/frust-engine/src/compile/mod.rs`'s `compile_glyph_run` function
+(≈1176–1240): the sink maps each `frust_scene::GlyphRun` to a set of `RunRoute`
+entries that classify glyphs into strips (atlas, color, fallback) and route
+them through the glyph atlas for coordinate and outline caching. The engine
+handles both shape complexity — outlines ride the atlas's own coverage —
+and atlas pressure — color glyphs and uncacheable large runs render direct
+to the frame. Note what's here: no rasterization — the engine ships outlines
+and positions. (Color emoji ride the atlas path; see `docs/DEVELOPMENT.md`
+Known Issues for details.)
 
 ### 6.4 — One theme-contract gotcha worth meeting early
 

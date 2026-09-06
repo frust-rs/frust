@@ -1,9 +1,11 @@
 //! [`ThemeBuilder`]: the `defineTheme`/`copyWith` analog for composing a
 //! [`Theme`](crate::theme::Theme) from a baseline plus layered edits.
 //!
-//! A theme starts from one of [`Theme::m3_baseline`](crate::theme::Theme::m3_baseline)/
-//! [`Theme::cupertino_baseline`](crate::theme::Theme::cupertino_baseline) (or any other
-//! already-built `Theme`), then layers edits through [`Theme::builder`](crate::theme::Theme::builder)
+//! A theme starts from a baseline — [`Theme::neutral`](crate::theme::Theme::neutral),
+//! the language-free floor, or any other already-built `Theme` (a design
+//! system's own baseline; this is also how a design system assembles that
+//! baseline in the first place) — then layers edits through
+//! [`Theme::builder`](crate::theme::Theme::builder)
 //! in **application order** — whichever call runs last for a given group wins
 //! (`ThemeExtensions`' own last-write-wins `insert` for extensions, mirrored
 //! here at the group level):
@@ -40,19 +42,19 @@
 //!
 //! const BRAND: Color = Color::from_rgb8(0xFF, 0x6A, 0x00);
 //!
-//! let theme = Theme::builder(Theme::m3_baseline())
+//! let theme = Theme::builder(Theme::neutral())
 //!     .colors_dark(ColorScheme {
 //!         primary: BRAND,
-//!         ..ColorScheme::m3_baseline_dark()
+//!         ..ColorScheme::neutral_dark()
 //!     }) // whole-group swap
 //!     .map_shape(|s| ShapeScale { medium: 8.0, ..s }) // per-token closure edit
-//!     .design_language(DesignLanguage::Material3)
+//!     .design_language(DesignLanguage::Custom("acme"))
 //!     .build();
 //!
 //! assert_eq!(theme.dark.primary, BRAND);
 //! assert_eq!(theme.shape.medium, 8.0);
 //! // Every other shape token is untouched (struct-update `..` above).
-//! assert_eq!(theme.shape.large, ShapeScale::m3().large);
+//! assert_eq!(theme.shape.large, ShapeScale::neutral().large);
 //! ```
 //!
 //! Attaching a typed extension (see [`crate::extensions`]):
@@ -65,7 +67,7 @@
 //!     logo_glow: bool,
 //! }
 //!
-//! let theme = Theme::builder(Theme::m3_baseline())
+//! let theme = Theme::builder(Theme::neutral())
 //!     .extension(BrandTokens { logo_glow: true })
 //!     .build();
 //!
@@ -92,9 +94,9 @@ pub struct ThemeBuilder {
 
 impl ThemeBuilder {
     /// Start a builder from `base` — typically
-    /// [`Theme::m3_baseline`](crate::theme::Theme::m3_baseline)/
-    /// [`Theme::cupertino_baseline`](crate::theme::Theme::cupertino_baseline), but any
-    /// already-built `Theme` works (e.g. re-deriving one theme from another).
+    /// [`Theme::neutral`](crate::theme::Theme::neutral) or a design system's
+    /// own baseline, but any already-built `Theme` works (e.g. re-deriving
+    /// one theme from another).
     pub fn new(base: Theme) -> Self {
         Self { theme: base }
     }
@@ -243,22 +245,32 @@ mod tests {
 
     #[test]
     fn round_trip_is_field_for_field_identical() {
-        // Acceptance criterion 1: `Theme::builder(x).build() == x`.
-        let base = Theme::m3_baseline();
+        // `Theme::builder(x).build() == x`, for the framework baseline and
+        // for a design-system-shaped theme built over it (a differently
+        // tagged, differently coloured value — so the round-trip isn't
+        // proved against one shape only).
+        let base = Theme::neutral();
         let rebuilt = Theme::builder(base.clone()).build();
         assert_eq!(rebuilt, base);
 
-        let cupertino = Theme::cupertino_baseline();
-        let rebuilt = Theme::builder(cupertino.clone()).build();
-        assert_eq!(rebuilt, cupertino);
+        let design_system = Theme::builder(Theme::neutral())
+            .design_language(DesignLanguage::Cupertino)
+            .map_colors_light(|c| ColorScheme {
+                primary: BRAND,
+                ..c
+            })
+            .build();
+        assert_ne!(design_system, base);
+        let rebuilt = Theme::builder(design_system.clone()).build();
+        assert_eq!(rebuilt, design_system);
     }
 
     #[test]
     fn whole_group_swap_replaces_only_that_group() {
-        let base = Theme::m3_baseline();
+        let base = Theme::neutral();
         let swapped_dark = ColorScheme {
             primary: BRAND,
-            ..ColorScheme::m3_baseline_dark()
+            ..ColorScheme::neutral_dark()
         };
         let theme = Theme::builder(base.clone())
             .colors_dark(swapped_dark)
@@ -278,7 +290,7 @@ mod tests {
 
     #[test]
     fn closure_edit_changes_only_the_named_token() {
-        let base = Theme::m3_baseline();
+        let base = Theme::neutral();
         let theme = Theme::builder(base.clone())
             .map_shape(|s| ShapeScale { medium: 8.0, ..s })
             .build();
@@ -298,7 +310,7 @@ mod tests {
             brand_name: &'static str,
         }
 
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .extension(AppTokens { brand_name: "Acme" })
             .build();
 
@@ -306,11 +318,11 @@ mod tests {
             theme.extension::<AppTokens>(),
             Some(&AppTokens { brand_name: "Acme" })
         );
-        // The pre-attached StatusPalette extension (m3_baseline) survives
-        // alongside the newly-inserted one.
+        // The pre-attached StatusPalette extension (from the baseline)
+        // survives alongside the newly-inserted one.
         assert_eq!(
             theme.extension::<StatusPalette>(),
-            Some(&StatusPalette::m3())
+            Some(&StatusPalette::neutral())
         );
     }
 
@@ -319,7 +331,7 @@ mod tests {
         #[derive(Debug, Clone, PartialEq)]
         struct Marker(u32);
 
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .extension(Marker(1))
             .extension(Marker(2))
             .build();
@@ -332,20 +344,20 @@ mod tests {
         // Two whole-group swaps to the same group: the later call wins.
         let first = ShapeScale {
             medium: 8.0,
-            ..ShapeScale::m3()
+            ..ShapeScale::neutral()
         };
         let second = ShapeScale {
             medium: 16.0,
-            ..ShapeScale::m3()
+            ..ShapeScale::neutral()
         };
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .shape(first)
             .shape(second)
             .build();
         assert_eq!(theme.shape.medium, 16.0);
 
         // A closure edit after a whole-group swap sees the swapped value.
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .shape(first)
             .map_shape(|s| ShapeScale { large: 99.0, ..s })
             .build();
@@ -355,7 +367,7 @@ mod tests {
 
     #[test]
     fn brightness_and_design_language_setters_apply() {
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .brightness(Brightness::Dark)
             .design_language(DesignLanguage::Cupertino)
             .build();

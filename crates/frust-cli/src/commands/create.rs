@@ -2,9 +2,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
-use frust_drive::scaffold::{self, TemplateContext};
+use frust_drive::scaffold::{self, DesignSystemContext, TemplateContext, context};
 
 /// Parsed + defaulted arguments for `frust create` (mirrors
 /// `cli::Command::Create`; kept separate so `scaffold` stays decoupled
@@ -28,9 +28,16 @@ pub struct CreateArgs {
     /// `String` rather than `crate::cli::ArchArg` so `scaffold` stays
     /// decoupled from `clap` (mirrors every other field here).
     pub arch: Option<String>,
+    /// `--design-system`: scaffold a design-system crate (see
+    /// `cli::Command::Create`'s doc comment) instead of an app.
+    pub design_system: bool,
 }
 
 pub fn run(args: CreateArgs) -> Result<u8> {
+    if args.design_system {
+        return run_design_system(args);
+    }
+
     let dest = PathBuf::from(&args.dir);
     let project_name = match args.project_name {
         Some(name) => name,
@@ -53,7 +60,7 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         org: args.org,
         description: args.description,
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust_path: resolve_frust_path(args.frust_path.as_deref()),
+        frust_path: resolve_frust_path(args.frust_path.as_deref())?,
         deeplink_scheme: args.deeplink_scheme,
         deeplink_host: args.deeplink_host,
     };
@@ -80,19 +87,92 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// `frust create --design-system`: scaffolds a design-system crate instead
+/// of an app. A design-system crate is a plain library with no platform
+/// project, so this bypasses the app-only options entirely rather than
+/// threading dummy values through them (`context::DesignSystemContext` is a
+/// strict subset of `TemplateContext`'s fields — see that struct's doc).
+/// `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright if
+/// passed alongside `--design-system`, since silently ignoring them would
+/// look like they took effect; `--org`/`--description` don't apply either
+/// but are harmlessly unused (both carry a default value already, so a
+/// caller can't tell whether one was explicitly passed).
+fn run_design_system(args: CreateArgs) -> Result<u8> {
+    if args.deeplink_scheme.is_some() || args.deeplink_host.is_some() {
+        bail!(
+            "--deeplink-scheme/--deeplink-host don't apply to --design-system (a design-system \
+             crate has no platform manifest)"
+        );
+    }
+    if args.arch.is_some() {
+        bail!(
+            "--arch doesn't apply to --design-system (a design-system crate has no app \
+             architecture variant)"
+        );
+    }
+
+    let dest = PathBuf::from(&args.dir);
+    let name = match args.project_name {
+        Some(name) => name,
+        None => infer_project_name(&dest).with_context(|| {
+            format!(
+                "could not derive a crate name from `{}`; pass --project-name",
+                args.dir
+            )
+        })?,
+    };
+    scaffold::validate_project_name(&name)?;
+
+    let ctx = DesignSystemContext {
+        name: name.clone(),
+        frust_version: env!("CARGO_PKG_VERSION").to_string(),
+        frust_path: resolve_frust_path(args.frust_path.as_deref())?,
+    };
+
+    let template_dir_override = args.template_dir.as_deref().map(Path::new);
+    let written =
+        scaffold::generate_design_system(&dest, &ctx, template_dir_override, args.overwrite)?;
+
+    println!("Created {} file(s) in {}", written.len(), dest.display());
+    println!();
+    println!("All done! `{name}` is ready.");
+    println!();
+    println!("To build it:");
+    if args.dir != "." {
+        println!("  cd {}", args.dir);
+    }
+    println!("  cargo build");
+
+    Ok(0)
+}
+
 /// Resolves `--frust-path`, defaulting to this repo's `crates/frust`
 /// (a temporary mechanism until Frust crates are
 /// published), derived from `frust-cli`'s own compile-time manifest
 /// directory.
-fn resolve_frust_path(overridden: Option<&str>) -> String {
+///
+/// An override accepts either the facade crate itself or its repo root
+/// (see [`context::resolve_frust_crate_path`]); a repo-root value is
+/// canonicalised to the nested facade crate directory with a printed note,
+/// and anything else is a hard error naming both accepted shapes — a
+/// repo-root value can otherwise silently bake `frust = { path =
+/// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
+/// and a hard Cargo error at build time instead of scaffold time.
+fn resolve_frust_path(overridden: Option<&str>) -> Result<String> {
     if let Some(path) = overridden {
-        return path.to_string();
+        let resolved = context::resolve_frust_crate_path(Path::new(path))?;
+        let resolved = resolved.to_string_lossy().into_owned();
+        if resolved != path {
+            println!("note: --frust-path `{path}` normalised to `{resolved}`");
+        }
+        return Ok(resolved);
     }
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    raw.canonicalize()
+    Ok(raw
+        .canonicalize()
         .unwrap_or(raw)
         .to_string_lossy()
-        .into_owned()
+        .into_owned())
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`
@@ -182,6 +262,7 @@ mod tests {
             deeplink_scheme: None,
             deeplink_host: None,
             arch: None,
+            design_system: false,
         }
     }
 
@@ -211,6 +292,53 @@ mod tests {
         let manifest =
             std::fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
         assert!(manifest.contains("android:scheme=\"myapp\""), "{manifest}");
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn run_design_system_scaffolds_a_library_crate() {
+        let dest = unique_temp_dir("design-system");
+        let mut args = base_args(&dest);
+        args.design_system = true;
+
+        assert!(run(args).is_ok());
+        assert!(dest.join("Cargo.toml").exists());
+        assert!(dest.join("src/lib.rs").exists());
+        assert!(dest.join("src/tokens.rs").exists());
+        assert!(!dest.join("android").exists());
+        assert!(!dest.join("frust.toml").exists());
+
+        let cargo_toml = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains("name = \"my_app\""), "{cargo_toml}");
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn run_design_system_rejects_deeplink_scheme() {
+        let dest = unique_temp_dir("design-system-rejects-deeplink");
+        let mut args = base_args(&dest);
+        args.design_system = true;
+        args.deeplink_scheme = Some("myapp".to_string());
+
+        let err = run(args).unwrap_err();
+        assert!(err.to_string().contains("--design-system"), "{err}");
+        assert!(!dest.join("Cargo.toml").exists());
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn run_design_system_rejects_arch() {
+        let dest = unique_temp_dir("design-system-rejects-arch");
+        let mut args = base_args(&dest);
+        args.design_system = true;
+        args.arch = Some("clean-signals".to_string());
+
+        let err = run(args).unwrap_err();
+        assert!(err.to_string().contains("--design-system"), "{err}");
+        assert!(!dest.join("Cargo.toml").exists());
 
         let _ = std::fs::remove_dir_all(&dest);
     }

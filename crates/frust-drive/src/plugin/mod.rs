@@ -16,6 +16,15 @@
 //! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
 //! and a hand-appended keep rule both drift from the plugin they came from.
 //!
+//! The desktop lane ([`Contribution::MacosPlistEntry`]/
+//! [`Contribution::MacosEntitlement`]/[`Contribution::LinuxDesktopEntry`])
+//! never edits a project file at all: unlike every mobile contribution above,
+//! `add_plugin` only *records* one (reporting
+//! [`AddOutcome::AppliedAtBuild`]), and the desktop bundle a later
+//! `frust build macos|windows|linux` assembles applies it fresh every time —
+//! see [`apply::desktop_contributions`], the detection API a bundle-assembly
+//! task consumes.
+//!
 //! v1 is a **static in-crate registry** ([`known_plugins`]): the
 //! `frust-plugin.toml` cargo-metadata discovery ARCHITECTURE.md sketches stays
 //! the deferred v2 path (needed only once plugins live outside this repo).
@@ -26,7 +35,7 @@
 pub mod apply;
 pub mod registry;
 
-pub use apply::add_plugin;
+pub use apply::{DesktopContribution, add_plugin, desktop_contributions};
 pub use registry::known_plugins;
 
 use std::path::PathBuf;
@@ -53,9 +62,12 @@ pub struct PluginSpec {
     /// secure-storage's `"biometric-gate"`), each adding further contributions.
     pub optional_features: &'static [FeatureSpec],
     /// A sibling checkout this plugin needs present (facade-tier plugins whose
-    /// own deps path into it), declared relative to the frust repo root — e.g.
-    /// clean-signals-frust's `"../clean-signals-rs"`. [`add_plugin`] errors
-    /// [`PluginAddError::SiblingCheckoutMissing`] when it isn't on disk.
+    /// own deps path into it), declared relative to the frust repo root.
+    /// [`add_plugin`] errors [`PluginAddError::SiblingCheckoutMissing`] when
+    /// it isn't on disk. No current registry entry sets this —
+    /// `clean-signals-frust` was the sole user until `clean-signals` moved to
+    /// a git+rev pin (see `registry.rs`'s `CLEAN_SIGNALS_FRUST`) — but the
+    /// mechanism stays in place for a future facade-tier plugin that does.
     pub requires_sibling: Option<&'static str>,
 }
 
@@ -173,6 +185,96 @@ pub enum Contribution {
         /// to carry this.
         comment: &'static str,
     },
+    /// Enables a cargo feature on an already-contributed plugin dependency
+    /// line in the app's `Cargo.toml`.
+    ///
+    /// The dependency **must already exist** — a [`Contribution::CargoDep`]
+    /// for `name` applied by the same or an earlier contribution. Applying
+    /// this to a missing dep is [`PluginAddError::NoSuchCargoDep`], never a
+    /// silent dep creation (a feature with no base dependency line is a
+    /// registry bug, not something to paper over). The edit is
+    /// **idempotent**: re-applying pushes the feature into the dep's
+    /// `features` array only if it isn't already there, never duplicating
+    /// it.
+    CargoFeature {
+        /// The dependency name whose inline table gets a `features` entry —
+        /// must match a `name` already contributed via
+        /// [`Contribution::CargoDep`].
+        name: &'static str,
+        /// The cargo feature to enable, e.g. `"turso"`.
+        feature: &'static str,
+    },
+    /// Creates a file at `rel_path` (relative to the project root) with
+    /// exact `contents`, if it doesn't already exist — parent directories
+    /// are created as needed.
+    ///
+    /// Every other variant above edits an existing project file at an
+    /// anchor; this is the one that creates a file that might not exist
+    /// yet. The idempotency guard is **presence alone**, never a content
+    /// comparison: an existing file — even one whose contents differ from
+    /// `contents`, because the user hand-edited it (a locale string, for
+    /// instance) — is left untouched and reports
+    /// [`AddOutcome::AlreadyPresent`]. `rel_path` must be a relative path
+    /// with no `..` component ([`PluginAddError::UnsafeScaffoldPath`]) —
+    /// checked defensively even though every registry entry is a static,
+    /// trusted string, matching this module's existing defensive tone.
+    ScaffoldFile {
+        /// The path to create, relative to the project root, e.g.
+        /// `"locales/en/main.ftl"`.
+        rel_path: &'static str,
+        /// The exact contents written when the file is absent.
+        contents: &'static str,
+        /// A short human-readable explanation for a selection/report UI —
+        /// not written into the file itself.
+        comment: &'static str,
+    },
+    /// A `<key>/<string>` pair merged into the assembled macOS bundle's
+    /// `Contents/Info.plist` at `frust build macos` time — **not** into the
+    /// project's own `macos/Info.plist` (a later bundle-assembly task
+    /// consumes it via [`apply::desktop_contributions`]).
+    ///
+    /// Project desktop files (`macos/Info.plist`, `macos/app.entitlements`,
+    /// `linux/app.desktop`) are user-owned, hand-editable, reconciled files
+    /// — and a pre-Phase-B project may not even have them yet. So, unlike
+    /// [`Contribution::PlistEntry`]'s mobile counterpart, a desktop
+    /// contribution is never written into a project file at Add Plugin
+    /// time: `add_plugin` only *records* it (reporting
+    /// [`AddOutcome::AppliedAtBuild`]), and the assembled bundle applies it
+    /// fresh on **every** `frust build macos|windows|linux` — the same
+    /// "cannot outlive the plugin" property [`Contribution::GradleModule`]'s
+    /// own doc argues for, reached here by build-time application instead of
+    /// a manifest merger: remove the plugin dependency and the contribution
+    /// simply stops being applied, with no file left carrying it.
+    MacosPlistEntry {
+        key: &'static str,
+        value: &'static str,
+        comment: &'static str,
+    },
+    /// A boolean-true entitlement (`<key>k</key>` / `<true/>`) merged into
+    /// the entitlements passed to `codesign` at `frust build macos` time.
+    ///
+    /// v1 is boolean-true only — the dominant entitlement shape;
+    /// value-carrying entitlements are a future widening. Applied at build
+    /// time for the same reason [`Contribution::MacosPlistEntry`] is (see
+    /// its doc comment): `macos/app.entitlements` is a user-owned,
+    /// hand-editable project file, not an Add Plugin write target.
+    MacosEntitlement {
+        key: &'static str,
+        comment: &'static str,
+    },
+    /// A `[Desktop Entry]` `key=value` line merged into the assembled Linux
+    /// bundle's `<identifier>.desktop` at `frust build linux` time, only
+    /// when the key is absent — an existing key (user-owned) always wins.
+    ///
+    /// Applied at build time for the same reason
+    /// [`Contribution::MacosPlistEntry`] is (see its doc comment):
+    /// `linux/app.desktop` is a user-owned, hand-editable project file a
+    /// pre-Phase-B project may not even have at all.
+    LinuxDesktopEntry {
+        key: &'static str,
+        value: &'static str,
+        comment: &'static str,
+    },
 }
 
 impl Contribution {
@@ -194,6 +296,21 @@ impl Contribution {
             Contribution::AppCrateMacro { invocation, .. } => {
                 format!("app crate `src/lib.rs` invocation `{invocation}`")
             }
+            Contribution::CargoFeature { name, feature } => {
+                format!("Cargo.toml dependency `{name}` feature `{feature}`")
+            }
+            Contribution::ScaffoldFile { rel_path, .. } => {
+                format!("scaffolded file `{rel_path}`")
+            }
+            Contribution::MacosPlistEntry { key, .. } => {
+                format!("Info.plist key `{key}` (applied at `frust build macos`)")
+            }
+            Contribution::MacosEntitlement { key, .. } => {
+                format!("entitlement `{key}` (applied at `frust build macos`)")
+            }
+            Contribution::LinuxDesktopEntry { key, .. } => {
+                format!("desktop entry `{key}` (applied at `frust build linux`)")
+            }
         }
     }
 }
@@ -206,6 +323,12 @@ pub enum AddOutcome {
     Applied,
     /// The edit was already present; nothing was written.
     AlreadyPresent,
+    /// The contribution is recorded in the registry and applied by every
+    /// `frust build <os>`; `add_plugin` performs no project-file edit for it
+    /// (see [`Contribution::MacosPlistEntry`] and its two siblings). Never
+    /// [`AddOutcome::AlreadyPresent`] — nothing is written here for a second
+    /// run to find already present.
+    AppliedAtBuild,
 }
 
 /// One line of an [`AddReport`]: what the edit was and whether it applied.
@@ -229,7 +352,18 @@ pub struct AddReport {
 }
 
 impl AddReport {
-    /// `(applied, already_present)` line-item counts — a report header summary.
+    /// `(applied, other)` line-item counts — a report header summary. The
+    /// second bucket lumps [`AddOutcome::AlreadyPresent`] and
+    /// [`AddOutcome::AppliedAtBuild`] together (neither wrote anything this
+    /// run): a caller rendering its own per-bucket label must not
+    /// blanket-describe that bucket as "already present" — a desktop-lane
+    /// item's honest outcome is [`AddOutcome::AppliedAtBuild`], never
+    /// [`AddOutcome::AlreadyPresent`].
+    ///
+    /// Kept for compatibility with any caller that only needs the coarse
+    /// two-bucket shape; a caller that renders a per-outcome label (every
+    /// current one does) wants [`Self::outcome_counts`] instead — the one
+    /// counting rule the whole codebase shares.
     pub fn counts(&self) -> (usize, usize) {
         let applied = self
             .items
@@ -237,6 +371,25 @@ impl AddReport {
             .filter(|i| i.outcome == AddOutcome::Applied)
             .count();
         (applied, self.items.len() - applied)
+    }
+
+    /// `(applied, already_present, applied_at_build)` line-item counts — the
+    /// one truthful counting rule every report-rendering caller (the TUI
+    /// engine's toast, the add-plugin view's header) shares, so a
+    /// desktop-lane item is never mislabeled "already present". Additive to
+    /// [`Self::counts`], which stays for its coarser two-bucket callers.
+    pub fn outcome_counts(&self) -> (usize, usize, usize) {
+        let mut applied = 0;
+        let mut already_present = 0;
+        let mut applied_at_build = 0;
+        for item in &self.items {
+            match item.outcome {
+                AddOutcome::Applied => applied += 1,
+                AddOutcome::AlreadyPresent => already_present += 1,
+                AddOutcome::AppliedAtBuild => applied_at_build += 1,
+            }
+        }
+        (applied, already_present, applied_at_build)
     }
 }
 
@@ -295,4 +448,91 @@ pub enum PluginAddError {
     /// A filesystem write failed.
     #[error("writing `{path}`: {message}")]
     Io { path: String, message: String },
+    /// A [`Contribution::CargoFeature`] named a dependency with no existing
+    /// `[dependencies]` entry — a `CargoDep` contribution for that name must
+    /// apply first (in the same or an earlier `add_plugin` call).
+    #[error("no `[dependencies].{name}` entry to enable feature `{feature}` on")]
+    NoSuchCargoDep { name: String, feature: String },
+    /// A [`Contribution::ScaffoldFile`]'s `rel_path` is not a safe relative
+    /// path — absolute, or containing a `..` component. Registry entries
+    /// are static, trusted strings, but the check stays defensive rather
+    /// than assuming that forever.
+    #[error("scaffold file path `{0}` must be a relative path with no `..` component")]
+    UnsafeScaffoldPath(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_lane_describe_strings_name_their_build_time() {
+        assert_eq!(
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                value: "NO",
+                comment: "test",
+            }
+            .describe(),
+            "Info.plist key `NSSupportsSuddenTermination` (applied at `frust build macos`)"
+        );
+        assert_eq!(
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                comment: "test",
+            }
+            .describe(),
+            "entitlement `com.apple.security.network.client` (applied at `frust build macos`)"
+        );
+        assert_eq!(
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                value: "Utility;",
+                comment: "test",
+            }
+            .describe(),
+            "desktop entry `Categories` (applied at `frust build linux`)"
+        );
+    }
+
+    fn item(outcome: AddOutcome) -> AddItem {
+        AddItem {
+            description: "test item".to_string(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn outcome_counts_buckets_all_three_outcomes_separately() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![
+                item(AddOutcome::Applied),
+                item(AddOutcome::Applied),
+                item(AddOutcome::AlreadyPresent),
+                item(AddOutcome::AppliedAtBuild),
+            ],
+        };
+        assert_eq!(report.outcome_counts(), (2, 1, 1));
+        // `counts()` stays the coarser two-bucket shape it always was.
+        assert_eq!(report.counts(), (2, 2));
+    }
+
+    #[test]
+    fn outcome_counts_of_an_empty_report_is_all_zero() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![],
+        };
+        assert_eq!(report.outcome_counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn outcome_counts_never_lumps_applied_at_build_with_already_present() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![item(AddOutcome::AppliedAtBuild)],
+        };
+        assert_eq!(report.outcome_counts(), (0, 0, 1));
+    }
 }

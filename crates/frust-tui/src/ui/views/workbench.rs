@@ -1,6 +1,6 @@
-//! The workbench shell (D5 / workbook B2): titlebar / sidebar / main / status.
-//! Static content in Phase 1 — project detection, sessions, and interactivity
-//! land in Phase 2.
+//! The workbench shell: titlebar / sidebar / main / status.
+//! Started as static content — project detection, sessions, and
+//! interactivity layered on top afterward.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use crate::engine::{AppState, ContextTarget, DeviceRow, DoctorState, DragKind, Message, RegionId};
+use crate::supervise::{DapStatus, McpStatus};
 use crate::ui::layout::{Shell, sidebar_main_at};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
@@ -27,14 +28,14 @@ pub fn render(
     let shell = Shell::split(area);
     titlebar(frame, shell.titlebar, state, theme, mouse);
 
-    // Responsive breakpoint (T05 / D5): below `NARROW_WIDTH` the sidebar
+    // Responsive breakpoint: below `NARROW_WIDTH` the sidebar
     // collapses out of the inline layout, reachable instead as a
     // toggleable floating overlay (`s` / `AppState::sidebar_overlay_open`).
     let narrow = crate::ui::layout::is_narrow(area);
     if narrow && state.sidebar_overlay_open {
         // The body renders full-width but non-interactive beneath the
         // floating panel — the same base-layer suppression every
-        // workbench-blocking modal uses (D4), scoped to the body only (the
+        // workbench-blocking modal uses, scoped to the body only (the
         // titlebar/status stay live underneath).
         let mut suppressed = MouseCtx::suppressed();
         render_main_area(frame, shell.body, state, theme, &mut suppressed);
@@ -45,8 +46,8 @@ pub fn render(
         } else {
             let (sidebar, main) = sidebar_main_at(shell.body, state.sidebar_width);
             render_sidebar(frame, sidebar, state, theme, mouse);
-            // The sidebar's right border is a drag-to-resize splitter (T04 /
-            // D4): a left-press on that column starts a `SidebarSplitter`
+            // The sidebar's right border is a drag-to-resize splitter: a
+            // left-press on that column starts a `SidebarSplitter`
             // drag whose absolute column maps to a new sidebar width via
             // `x - body_left`.
             if sidebar.width > 0 && sidebar.height > 0 {
@@ -87,7 +88,7 @@ fn render_main_area(
     }
 }
 
-/// The narrow-terminal sidebar overlay (T05 / D5): a floating, bordered panel
+/// The narrow-terminal sidebar overlay: a floating, bordered panel
 /// pinned to the left edge of `body`, reusing [`render_sidebar`]'s exact
 /// content/regions — the same sidebar, just not part of the inline layout.
 fn render_sidebar_overlay(
@@ -294,6 +295,10 @@ fn render_sidebar(
     lines.push(item("Build · b"));
     let clean_row = lines.len();
     lines.push(item("Clean · c"));
+    let mcp_row = lines.len();
+    lines.push(mcp_line(state, theme));
+    let dap_row = lines.len();
+    lines.push(dap_line(state, theme));
     frame.render_widget(Paragraph::new(lines), inner);
 
     // Register the interactive regions now that row indices are known (a row
@@ -332,12 +337,89 @@ fn render_sidebar(
     if let Some(rect) = row_rect(add_plugin_row) {
         mouse.click(rect, RegionId::AddPluginAction, Message::OpenAddPlugin);
     }
+    // The whole MCP row *toggles* the server (workbook §B13's switch-and-
+    // readout row), exactly as `M` does; the panel behind it is `m` / the
+    // palette, so no single row carries two different click meanings.
+    if let Some(rect) = row_rect(mcp_row) {
+        mouse.click(rect, RegionId::McpToggle, Message::ToggleMcpServer);
+    }
+    // The DAP row *opens the dialog* rather than toggling the server: unlike
+    // MCP, the switch is not the whole surface — when the server starts by
+    // itself, and what it writes into the editor's config, live there too.
+    if let Some(rect) = row_rect(dap_row) {
+        mouse.click(rect, RegionId::DapAction, Message::OpenDapSettings);
+    }
 }
 
-/// The titlebar toolchain chip's glyph/label/color (D6a): the component-level
+/// The sidebar ACTIONS "MCP" row: the label, the server's current state, and
+/// the `M` keyhint (workbook §B13). The state token carries the color —
+/// muted off, warn while starting, success once listening, error after a
+/// failure — since the row is the switch *and* the readout.
+///
+/// The connected-client count is shown only when there is one to show:
+/// `(0)` beside a listening server would read as a problem rather than as an
+/// idle server waiting for an agent.
+fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let (text, color) = mcp_state_token(&state.mcp_status(), state.mcp_error.is_some(), theme);
+    Line::from(vec![
+        Span::styled("  MCP ", Style::default().fg(theme.muted())),
+        Span::styled(text, Style::default().fg(color)),
+        Span::styled(" · M", Style::default().fg(theme.muted())),
+    ])
+}
+
+/// The sidebar ACTIONS "DAP" row: the label, the embedded debug-adapter
+/// server's current state, and the `D` keyhint. The state token carries the
+/// color the same way the MCP row's does — but this row is a *readout plus a
+/// way in*, not the switch: clicking it opens the settings dialog, where the
+/// switch lives beside the preferences that can flip it without being asked.
+fn dap_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let (text, color) = dap_state_token(&state.dap_status(), state.dap_error.is_some(), theme);
+    Line::from(vec![
+        Span::styled("  DAP ", Style::default().fg(theme.muted())),
+        Span::styled(text, Style::default().fg(color)),
+        Span::styled(" · D", Style::default().fg(theme.muted())),
+    ])
+}
+
+/// The DAP row's state token + its color — the same four states the MCP row
+/// shows, and `failed` is derived the same way (a *stopped* server carrying a
+/// retained reason).
+fn dap_state_token(
+    status: &DapStatus,
+    failed: bool,
+    theme: &Theme,
+) -> (String, ratatui::style::Color) {
+    match status {
+        DapStatus::Stopped if failed => ("failed".to_string(), theme.error()),
+        DapStatus::Stopped => ("off".to_string(), theme.muted()),
+        DapStatus::Starting => ("start…".to_string(), theme.warn()),
+        DapStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
+        DapStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
+    }
+}
+
+/// The MCP row's state token + its color — the four §B13 states. `failed` is
+/// a *stopped* server that carries a reason, so it is derived from the
+/// retained error rather than from a state of its own.
+fn mcp_state_token(
+    status: &McpStatus,
+    failed: bool,
+    theme: &Theme,
+) -> (String, ratatui::style::Color) {
+    match status {
+        McpStatus::Stopped if failed => ("failed".to_string(), theme.error()),
+        McpStatus::Stopped => ("off".to_string(), theme.muted()),
+        McpStatus::Starting => ("start…".to_string(), theme.warn()),
+        McpStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
+        McpStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
+    }
+}
+
+/// The titlebar toolchain chip's glyph/label/color: the component-level
 /// bootstrap report's rollup when one is cached (its `Ok`/`Partial`/`Missing`
 /// is the chip's real source), falling back to the flat doctor `overall`
-/// (TUI2-07) until the first report lands, then to "checking…" before either
+/// until the first report lands, then to "checking…" before either
 /// preflight completes. Shared with `views::welcome::titlebar`'s chip; clicking
 /// it opens the bootstrap wizard.
 pub(crate) fn toolchain_chip(
@@ -445,8 +527,8 @@ fn device_glyph(
     (color, format!("{platform}·{kind}"))
 }
 
-/// One line per detected project (F5 bounded-walk detection); the active one
-/// (`state.project_root`, first found for now — a full switcher is Phase 2)
+/// One line per detected project (bounded-walk detection); the active one
+/// (`state.project_root`, first found for now — a full switcher isn't built yet)
 /// gets the hover chevron and accent color, the rest render muted.
 fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     if state.projects.is_empty() {
@@ -537,4 +619,141 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
         .style(Style::default().bg(theme.surface())),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sidebar ACTIONS "MCP" row is the switch *and* the readout
+    /// (workbook §B13), so its four states must each read differently — and
+    /// a listening server with nobody attached must not read as `(0)`.
+    #[test]
+    fn the_mcp_row_reads_its_four_states_distinctly() {
+        let theme = Theme::frust_dark();
+        let token = |status: &McpStatus, failed: bool| mcp_state_token(status, failed, &theme).0;
+
+        assert_eq!(token(&McpStatus::Stopped, false), "off");
+        assert_eq!(token(&McpStatus::Stopped, true), "failed");
+        assert_eq!(token(&McpStatus::Starting, false), "start…");
+        assert_eq!(
+            token(
+                &McpStatus::Listening {
+                    port: 4848,
+                    clients: 0
+                },
+                false
+            ),
+            ":4848"
+        );
+        assert_eq!(
+            token(
+                &McpStatus::Listening {
+                    port: 4848,
+                    clients: 2
+                },
+                false
+            ),
+            ":4848 (2)"
+        );
+    }
+
+    /// Every state's row still fits the *default* sidebar (26 columns, less
+    /// its border and padding) — the row is a status readout, and a truncated
+    /// port number would be worse than no readout at all.
+    #[test]
+    fn the_mcp_row_fits_the_default_sidebar_width() {
+        let theme = Theme::frust_dark();
+        let inner_width = (crate::engine::SIDEBAR_DEFAULT_WIDTH - 3) as usize;
+        for (status, failed) in [
+            (McpStatus::Stopped, false),
+            (McpStatus::Stopped, true),
+            (McpStatus::Starting, false),
+            (
+                McpStatus::Listening {
+                    port: 65535,
+                    clients: 12,
+                },
+                false,
+            ),
+        ] {
+            let (token, _) = mcp_state_token(&status, failed, &theme);
+            // The row is `"  MCP " + token + " · M"` (see `mcp_line`).
+            let width = "  MCP ".chars().count() + token.chars().count() + " · M".chars().count();
+            assert!(
+                width <= inner_width,
+                "`{token}` row is {width} cols, sidebar inner is {inner_width}"
+            );
+        }
+    }
+
+    /// The DAP row is a readout (the switch lives in the dialog behind it),
+    /// but it reads its states exactly the way the MCP row does — the two sit
+    /// next to each other, so a reader must not have to learn two vocabularies.
+    #[test]
+    fn the_dap_row_reads_its_states_the_same_way_the_mcp_row_does() {
+        let theme = Theme::frust_dark();
+        let dap = |status: &DapStatus, failed: bool| dap_state_token(status, failed, &theme).0;
+        let mcp = |status: &McpStatus, failed: bool| mcp_state_token(status, failed, &theme).0;
+
+        assert_eq!(
+            dap(&DapStatus::Stopped, false),
+            mcp(&McpStatus::Stopped, false)
+        );
+        assert_eq!(
+            dap(&DapStatus::Stopped, true),
+            mcp(&McpStatus::Stopped, true)
+        );
+        assert_eq!(
+            dap(&DapStatus::Starting, false),
+            mcp(&McpStatus::Starting, false)
+        );
+        assert_eq!(
+            dap(
+                &DapStatus::Listening {
+                    port: 4849,
+                    clients: 0
+                },
+                false
+            ),
+            ":4849"
+        );
+        assert_eq!(
+            dap(
+                &DapStatus::Listening {
+                    port: 4849,
+                    clients: 2
+                },
+                false
+            ),
+            ":4849 (2)"
+        );
+    }
+
+    /// …and fits the default sidebar in every state, for the same reason.
+    #[test]
+    fn the_dap_row_fits_the_default_sidebar_width() {
+        let theme = Theme::frust_dark();
+        let inner_width = (crate::engine::SIDEBAR_DEFAULT_WIDTH - 3) as usize;
+        for (status, failed) in [
+            (DapStatus::Stopped, false),
+            (DapStatus::Stopped, true),
+            (DapStatus::Starting, false),
+            (
+                DapStatus::Listening {
+                    port: 65535,
+                    clients: 12,
+                },
+                false,
+            ),
+        ] {
+            let (token, _) = dap_state_token(&status, failed, &theme);
+            // The row is `"  DAP " + token + " · D"` (see `dap_line`).
+            let width = "  DAP ".chars().count() + token.chars().count() + " · D".chars().count();
+            assert!(
+                width <= inner_width,
+                "`{token}` row is {width} cols, sidebar inner is {inner_width}"
+            );
+        }
+    }
 }

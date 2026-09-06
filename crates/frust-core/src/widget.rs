@@ -8,12 +8,21 @@
 //! * **paint** — emit draw commands into a scene.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+/// The per-corner radii and dash-pattern vocabulary [`PaintScene`]'s own
+/// signatures name, re-exported from `frust-scene` so a widget calling
+/// [`PaintScene::fill_rounded_rect_radii`]/[`PaintScene::push_clip_rounded_radii`]/
+/// [`PaintScene::stroke_path_dashed`] can name their arguments through the same
+/// paint surface it already paints through (mirrors the crate-root `accesskit`
+/// re-export).
+pub use frust_scene::{CornerRadii, DashPattern};
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
@@ -49,6 +58,27 @@ pub trait PaintScene {
     /// `SceneBuilder` implementation records a real rounded-rect command.
     fn fill_rounded_rect(&mut self, _origin: Point, _size: Size, _radius: f64, _color: Color) {}
 
+    /// Emit a filled axis-aligned rectangle with per-corner `radii` — the
+    /// shape a uniform [`PaintScene::fill_rounded_rect`] cannot express (a
+    /// bottom-anchored sheet with only its top corners rounded, a segmented
+    /// control's end caps).
+    ///
+    /// Defaulted to the uniform call with the *largest* corner rather than to a
+    /// no-op: a recorder scene that only implements `fill_rounded_rect` still
+    /// sees a rect painted here, in the spirit of
+    /// [`PaintScene::fill_rect_brush`]'s "see something rather than nothing"
+    /// fallback. The `SceneBuilder` implementation overrides it and records
+    /// every corner faithfully.
+    fn fill_rounded_rect_radii(
+        &mut self,
+        origin: Point,
+        size: Size,
+        radii: CornerRadii,
+        color: Color,
+    ) {
+        self.fill_rounded_rect(origin, size, radii.largest(), color);
+    }
+
     /// Stroke a straight line from `p0` to `p1` with the given `width` and solid
     /// `color`.
     ///
@@ -63,8 +93,33 @@ pub trait PaintScene {
     /// implementation honors the clip by recording a push/pop command pair.
     fn push_clip(&mut self, _origin: Point, _size: Size) {}
 
-    /// Pop the most recently pushed clip. Defaulted to a no-op; see
-    /// [`PaintScene::push_clip`].
+    /// Push a clip with uniformly rounded corners (at `origin`/`size`, corner
+    /// `radius`) onto the backend clip stack; subsequent draws are clipped to
+    /// the rounded shape until the matching [`PaintScene::pop_clip`] — the same
+    /// pop [`PaintScene::push_clip`] uses, since there is one clip stack.
+    ///
+    /// Lets paint code express a radiused mask over content a rectangular clip
+    /// cannot shape — a rounded bitmap (avatar/thumbnail) being the motivating
+    /// case. Defaulted to a no-op so recorder scenes stay valid; the
+    /// `SceneBuilder` implementation honors it by recording a real
+    /// [`frust_scene::Command::PushClipRounded`]/[`frust_scene::Command::PopClip`]
+    /// pair.
+    fn push_clip_rounded(&mut self, _origin: Point, _size: Size, _radius: f64) {}
+
+    /// Push a clip with per-corner `radii` onto the backend clip stack, popped
+    /// by the same [`PaintScene::pop_clip`] as every other push.
+    ///
+    /// Defaulted to the uniform [`PaintScene::push_clip_rounded`] with the
+    /// largest corner rather than to a no-op — a defaulted *push* against an
+    /// implemented *pop* would unbalance a recorder scene's clip stack, so this
+    /// one delegates for correctness, not just for visibility (see
+    /// [`PaintScene::fill_rounded_rect_radii`]).
+    fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
+        self.push_clip_rounded(origin, size, radii.largest());
+    }
+
+    /// Pop the most recently pushed clip, rectangular or rounded. Defaulted to
+    /// a no-op; see [`PaintScene::push_clip`].
     fn pop_clip(&mut self) {}
 
     /// Emit a run of *unshaped* text anchored at `origin`.
@@ -102,6 +157,12 @@ pub trait PaintScene {
     /// recorder scenes stay valid; the `SceneBuilder` implementation records a
     /// real shader-quad command.
     ///
+    /// **Currently paints nothing on the engine renderer** — the command is
+    /// recognised and dropped with a once-per-process warning; see
+    /// `docs/LIMITATIONS.md`'s `engine-shader-quad-unwired` (removed when the
+    /// GPU-seam work wires the command through). The contract below still
+    /// binds: it is the correct usage the wiring will serve.
+    ///
     /// # Cache-once contract
     ///
     /// `program` must be a retained, already-created `ShaderProgram` handle
@@ -118,6 +179,23 @@ pub trait PaintScene {
     /// exactly once per widget instance and is a correct place to construct
     /// one.
     fn draw_shader(&mut self, _program: &ShaderProgram, _dest: Rect, _time: f32) {}
+
+    /// Composite a bound scene texture (pre-rendered via [`ExternalPass`](frust_gpu::ExternalPass))
+    /// into the scene.
+    ///
+    /// An additive method on this otherwise layer-2 trait — authorized because the
+    /// texture id and destination have to reach the scene through the same
+    /// `&mut dyn PaintScene` seam every other paint call uses. `id` is a
+    /// `SceneTextureId::get()`; `dest` is in the scene's coordinate space.
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real scene-texture command.
+    ///
+    /// The engine renders nothing if the id is unbound and warns once per
+    /// process. Output is always blended (never replaces). The binding is
+    /// established outside this paint call by [`ExternalPass::record`](frust_gpu::ExternalPass::record);
+    /// a texture whose pass has not bound anything yet simply draws nothing
+    /// that frame, never an error.
+    fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {}
 
     /// Draw a gaussian-blurred rounded-rectangle elevation shadow (an
     /// approximation of a CSS `box-shadow`) at `origin`/`size`.
@@ -220,6 +298,24 @@ pub trait PaintScene {
     /// [`PaintScene::fill_path`].
     fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
 
+    /// Stroke an arbitrary vector path at `origin` as a dashed line: the same
+    /// stroke [`PaintScene::stroke_path`] paints, broken into `dash`'s on/off
+    /// runs by the render crate at encode time.
+    ///
+    /// Defaulted to the solid [`PaintScene::stroke_path`] rather than to a
+    /// no-op — dashing is a visual refinement, so a scene that cannot express
+    /// it still draws the path.
+    fn stroke_path_dashed(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        _dash: DashPattern,
+        brush: &Brush,
+    ) {
+        self.stroke_path(origin, path, width, brush);
+    }
+
     /// Push an affine `transform`, composed with the current one, onto the
     /// backend transform stack; subsequent draws are transformed until the
     /// matching [`PaintScene::pop_transform`].
@@ -236,6 +332,61 @@ pub trait PaintScene {
     /// Pop the most recently pushed transform, restoring the previous one.
     /// Defaulted to a no-op; see [`PaintScene::push_transform`].
     fn pop_transform(&mut self) {}
+
+    /// Push a snapshot bracket: the body is rasterizable once and cached by
+    /// `key` across frames. The `alpha` and `scale` are presentation parameters
+    /// applied to the whole cached body (alpha blending, uniform scale).
+    ///
+    /// The default implementation emulates the presentation for recorders
+    /// that don't have a snapshot concept: it pushes a transform (scale about
+    /// the rect's center), then a layer (at the rect with the given alpha).
+    /// A renderer may cache and apply both as a whole; a recorder sees the
+    /// component pieces. The matching [`PaintScene::pop_snapshot`] pops both
+    /// in the reverse order.
+    ///
+    /// [`SceneBuilder`] overrides this to call the snapshot-aware builder
+    /// methods directly, which record `Command::PushSnapshot`/`PopSnapshot`
+    /// and no extra transform/layer commands.
+    fn push_snapshot(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+        self.push_transform(Affine::scale_about(scale, center));
+        self.push_layer(origin, size, alpha);
+    }
+
+    /// Pop the most recently pushed snapshot bracket. Defaulted to the reverse
+    /// of [`PaintScene::push_snapshot`]'s default: pop layer, then transform.
+    /// Recorders that don't override both may see unbalanced stacks if only one
+    /// is overridden; the default pair is provided for source compatibility.
+    fn pop_snapshot(&mut self) {
+        self.pop_layer();
+        self.pop_transform();
+    }
+}
+
+/// A [`PaintScene`] sink that accepts every paint command and records
+/// nothing — the zero-GPU-cost target for a subtree that still needs its
+/// `paint` pass driven for the pass's *side effects* (hero-rect reporting
+/// through [`PaintCtx::with_hero_registry`], other paint-time widget state)
+/// even though its pixels will never be composited. The navigator's
+/// transition machinery is the motivating case: a page whose resolved alpha
+/// is 0 still has to paint to report hero rects and advance animating
+/// children, but every command it emits is otherwise wasted GPU work.
+///
+/// # Guarantee
+///
+/// No paint command reaches any scene: every [`PaintScene`] method on
+/// [`DiscardScene`] is a no-op, whether overridden here directly or
+/// inherited from the trait's own no-op (or no-op-delegating) default.
+/// Anything driven through [`PaintCtx`] rather than through
+/// `&mut dyn PaintScene` — the hero registry, the frame clock, paced-class
+/// bubbling — is unaffected, since none of that machinery routes through the
+/// scene it's handed.
+pub struct DiscardScene;
+
+impl PaintScene for DiscardScene {
+    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+
+    fn draw_text(&mut self, _origin: Point, _text: &str) {}
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
@@ -255,12 +406,35 @@ impl PaintScene for SceneBuilder<'_> {
         SceneBuilder::fill_rounded_rect(self, rect_at(origin, size), radius, Brush::Solid(color));
     }
 
+    fn fill_rounded_rect_radii(
+        &mut self,
+        origin: Point,
+        size: Size,
+        radii: CornerRadii,
+        color: Color,
+    ) {
+        SceneBuilder::fill_rounded_rect_radii(
+            self,
+            rect_at(origin, size),
+            radii,
+            Brush::Solid(color),
+        );
+    }
+
     fn stroke_line(&mut self, p0: Point, p1: Point, width: f64, color: Color) {
         SceneBuilder::stroke_line(self, p0, p1, width, Brush::Solid(color));
     }
 
     fn push_clip(&mut self, origin: Point, size: Size) {
         SceneBuilder::push_clip(self, rect_at(origin, size));
+    }
+
+    fn push_clip_rounded(&mut self, origin: Point, size: Size, radius: f64) {
+        SceneBuilder::push_clip_rounded(self, rect_at(origin, size), radius);
+    }
+
+    fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
+        SceneBuilder::push_clip_rounded_radii(self, rect_at(origin, size), radii);
     }
 
     fn pop_clip(&mut self) {
@@ -281,6 +455,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
         SceneBuilder::draw_shader(self, program, dest, time);
+    }
+
+    fn draw_scene_texture(&mut self, id: u64, dest: Rect) {
+        SceneBuilder::scene_texture(self, id, dest);
     }
 
     fn draw_shadow(&mut self, origin: Point, size: Size, radius: f64, std_dev: f64, color: Color) {
@@ -321,12 +499,31 @@ impl PaintScene for SceneBuilder<'_> {
         SceneBuilder::stroke_path(self, path_at(origin, path), width, brush.clone());
     }
 
+    fn stroke_path_dashed(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        dash: DashPattern,
+        brush: &Brush,
+    ) {
+        SceneBuilder::stroke_path_dashed(self, path_at(origin, path), width, dash, brush.clone());
+    }
+
     fn push_transform(&mut self, transform: Affine) {
         SceneBuilder::push_transform(self, transform);
     }
 
     fn pop_transform(&mut self) {
         SceneBuilder::pop_transform(self);
+    }
+
+    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::push_snapshot(self, key, rect_at(origin, size), alpha, scale);
+    }
+
+    fn pop_snapshot(&mut self) {
+        SceneBuilder::pop_snapshot(self);
     }
 }
 
@@ -485,6 +682,11 @@ impl Default for LayoutCtx<'static> {
 /// all leaves the frame as it is today — the class is only meaningful once a
 /// frame was actually requested (see [`PaintCtx::frame_class`]).
 ///
+/// A `CosmeticLoop` request may additionally name *how often* it wants to be
+/// re-run ([`PaintCtx::request_frame_paced_at`]); those intervals aggregate on
+/// their own **MIN**-lattice, orthogonal to this max-lattice over classes (see
+/// [`PaintCtx::paced_interval`]).
+///
 /// The *gate-side* pacing behavior is implemented separately (the mobile frame
 /// gate); this type is only the vocabulary a widget uses to declare intent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,6 +742,20 @@ pub struct PaintCtx<'a> {
     /// Transition (a layout animation is user-visible motion), and the
     /// unchanged `request_frame` sets it too (today's every-vsync behavior).
     frame_unpaced: bool,
+    /// The **MIN** over every paced ([`TickClass::CosmeticLoop`]) request's
+    /// named interval this (sub)paint — the tightest cadence anything asked
+    /// for. `None` until the first paced request; a bare
+    /// [`PaintCtx::request_frame_paced`] contributes [`Duration::ZERO`] ("as
+    /// often as the theme cap allows"), which is the MIN-lattice's absorbing
+    /// element and therefore dominates any slower explicit request.
+    ///
+    /// Orthogonal to `frame_unpaced` (the class max-lattice): it is only
+    /// *meaningful* while the aggregate class is `CosmeticLoop`, but a later
+    /// Transition request never clears it. Bubbles up through
+    /// [`ChildPod::paint_child`]/[`PaintCtx::with_hero_registry`] exactly like
+    /// `frame_unpaced`, and surfaces on [`PaintOutcome::paced_interval`] for the
+    /// mobile frame gate to resolve against the theme's cap.
+    paced_interval: Option<Duration>,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
     /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
@@ -551,6 +767,22 @@ pub struct PaintCtx<'a> {
     /// the widget's `event()` — is finally observed here (see
     /// [`PaintCtx::has_focus`]).
     has_focus: bool,
+    /// Whether the widget being painted is on the recorded hover path (it or a
+    /// descendant holds the link) — seeded from its
+    /// pod's recorded hover stamp ([`ChildPod::hover_epoch`], compared against
+    /// `hover_epoch` below) by [`ChildPod::paint_child`], and from
+    /// [`crate::app::RenderRoot`]'s hover mirror at the root. The paint-pass
+    /// mirror of [`EventCtx::is_hovered`] and the *authoritative* hover read for a
+    /// widget's own chrome: a pointer that left the widget routes its next move
+    /// elsewhere, so the widget's own `event()` never hears about the loss (see
+    /// [`PaintCtx::is_hovered`]).
+    hovered: bool,
+    /// The live hover epoch — the epoch of the last completed hover pass, threaded
+    /// from [`crate::app::RenderRoot::paint`] and copied into each child by
+    /// [`ChildPod::paint_child`] (global, like the clock). A pod's recorded stamp
+    /// counts as hovered only while it equals this; see the [`crate::event`] module
+    /// docs for the epoch mechanism.
+    hover_epoch: u64,
     /// The shell-provided time for this frame, threaded from
     /// [`crate::app::RenderRoot::paint`] and seeded into each child by
     /// [`ChildPod::paint_child`]. Defaults to [`FrameTime::ZERO`] (the "no time
@@ -646,8 +878,11 @@ impl<'a> PaintCtx<'a> {
             needs_frame: false,
             needs_layout: false,
             frame_unpaced: false,
+            paced_interval: None,
             ime_state: None,
             has_focus: false,
+            hovered: false,
+            hover_epoch: 0,
             frame_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
@@ -676,6 +911,26 @@ impl<'a> PaintCtx<'a> {
     pub fn with_translucent(mut self, translucent: bool) -> Self {
         self.translucent = translucent;
         self
+    }
+
+    /// Build a paint context at `origin`/`size` seeded with an arbitrary
+    /// [`FrameTime`], for exercising clock-dependent paint logic (caret blink,
+    /// a hand-advanced [`crate::anim::AnimationController`], …) from outside
+    /// this crate.
+    ///
+    /// [`PaintCtx::set_frame_time`] is deliberately `pub(crate)` — only
+    /// [`crate::app::RenderRoot::paint`] (the shell-owned clock source) may
+    /// advance it in a production build — so an app crate testing a widget
+    /// from its own `src/` has no other way to construct a `PaintCtx` at a
+    /// chosen time. This constructor is that sanctioned seam. Gated behind
+    /// `cfg(test)`/the `test-support` feature so the symbol does not exist in
+    /// a normal app build; see the crate's `test-support` feature docs in
+    /// `Cargo.toml`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(origin: Point, size: Size, frame_time: FrameTime) -> Self {
+        let mut ctx = Self::new(origin, size);
+        ctx.frame_time = frame_time;
+        ctx
     }
 
     /// Recover the threaded theme as `&T`, or `None` if no theme was threaded
@@ -754,7 +1009,17 @@ impl<'a> PaintCtx<'a> {
         self.presented_frames = presented;
     }
 
-    /// The widget's origin in its parent's coordinate space.
+    /// The widget's absolute origin in window-space coordinates.
+    ///
+    /// This origin is accumulated as the paint pass descends the widget tree:
+    /// [`ChildPod::paint_child`] adds the child's parent-relative `origin` to the
+    /// parent's already-absolute `ctx.origin()`, threading the result down through
+    /// nested levels. Contrast [`ChildPod::origin`], which is parent-relative and
+    /// correct as documented, and [`EventCtx::origin`], which is **also**
+    /// parent-relative — the event pass translates the event into the child's
+    /// local space instead of accumulating the origin. This is therefore the only
+    /// context origin an overlay, popup, or reported window-space rect may be
+    /// anchored from.
     pub fn origin(&self) -> Point {
         self.origin
     }
@@ -784,6 +1049,49 @@ impl<'a> PaintCtx<'a> {
     /// of [`EventCtx::set_has_focus`].
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
+    }
+
+    /// Whether the pointer is over the widget being painted **or over a descendant
+    /// of it** — i.e. whether this widget is on the recorded hover path.
+    ///
+    /// A container therefore reads `true` while the pointer is over a claiming
+    /// child, the way CSS `:hover` applies to an element while the pointer is over
+    /// one of its descendants; a sibling or any other off-path widget reads
+    /// `false`.
+    ///
+    /// This is the **authoritative** hover signal, for the same reason
+    /// [`PaintCtx::has_focus`] is authoritative for focus, only more strongly: a
+    /// pointer leaving a widget routes its next move to whatever it moved *onto*,
+    /// so the widget it left never receives an event telling it so. A hover
+    /// consumer keeps its own hover flag (that is what earns it a repaint on entry
+    /// — see [`EventCtx::claim_hover`] for the whole contract) and **self-corrects
+    /// that flag from this read every paint**, which is what fixes it whenever an
+    /// event never came.
+    ///
+    /// Hover is opt-in: a widget in a tree where nothing ever calls
+    /// [`claim_hover`](EventCtx::claim_hover) always reads `false` here.
+    pub fn is_hovered(&self) -> bool {
+        self.hovered
+    }
+
+    /// Seed whether the widget being painted holds the hover link. Called by
+    /// [`ChildPod::paint_child`] (from the pod's recorded stamp) and by
+    /// [`crate::app::RenderRoot::paint`] (from its hover mirror) — the paint mirror
+    /// of [`EventCtx::set_hovered`].
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered;
+    }
+
+    /// Seed the live hover epoch. Called by [`crate::app::RenderRoot::paint`] at
+    /// the root and by [`ChildPod::paint_child`] for each child, mirroring how
+    /// `frame_time` is threaded (copied down unchanged).
+    pub(crate) fn set_hover_epoch(&mut self, epoch: u64) {
+        self.hover_epoch = epoch;
+    }
+
+    /// The live hover epoch a pod's recorded stamp is compared against.
+    pub(crate) fn hover_epoch(&self) -> u64 {
+        self.hover_epoch
     }
 
     /// The shell-provided time for this frame (monotonic, arbitrary origin).
@@ -835,21 +1143,116 @@ impl<'a> PaintCtx<'a> {
     /// [`Self::request_frame`]/[`Self::request_layout`] elsewhere in the tree
     /// re-forces every-vsync cadence, so a paced request is never a downgrade of
     /// user-visible motion.
+    ///
+    /// This names no interval, which means "at the theme's own
+    /// `MotionScheme::cosmetic_loop_rate`" — exactly
+    /// `request_frame_paced_at(Duration::ZERO)`, since that rate is the cap every
+    /// paced request resolves against (see [`Self::request_frame_paced_at`]).
     pub fn request_frame_paced(&mut self) {
-        self.request_frame_class(TickClass::CosmeticLoop);
+        self.request_frame_paced_at(Duration::ZERO);
     }
+
+    /// Request a pacable decorative repaint **no more often than** once per
+    /// `interval` — [`Self::request_frame_paced`] with an explicit cadence, for a
+    /// loop far slower than the theme's cosmetic rate (a ~500ms caret blink
+    /// against a 30Hz shimmer cap).
+    ///
+    /// Same class as [`Self::request_frame_paced`] ([`TickClass::CosmeticLoop`]);
+    /// only the requested cadence differs. Two contracts govern the value:
+    ///
+    /// - **MIN-lattice aggregation.** Multiple paced requests in one paint pass
+    ///   fold to the *tightest* interval, so every requester is repainted at
+    ///   least as often as it asked. A 30Hz shimmer (a bare
+    ///   [`Self::request_frame_paced`], i.e. [`Duration::ZERO`]) beside a 500ms
+    ///   caret paces the frame at 30Hz — the caret is then simply repainted more
+    ///   often than it needs, which is visually indistinguishable from its own
+    ///   cadence and costs nothing beyond frames the shimmer already forced. That
+    ///   asymmetry is by design: a *slow* request can never starve a fast one.
+    /// - **The theme rate is a ceiling, not a target.** The frame gate resolves
+    ///   the aggregate against `1 / MotionScheme::cosmetic_loop_rate` and takes
+    ///   the *longer* of the two, so an interval tighter than the cap is clamped
+    ///   to it. Motion that genuinely must run every vsync is not cosmetic —
+    ///   use [`Self::request_frame`] ([`TickClass::Transition`]) for that.
+    ///
+    /// `frust-core` never reads a clock or a theme, so neither the MIN-lattice
+    /// fold above nor the shell-side theme-cap clamp happens here: the
+    /// aggregate rides out on [`PaintOutcome::paced_interval`] and the shell's
+    /// frame gate resolves it.
+    ///
+    /// One clamp DOES happen here, though: `interval` is capped at
+    /// [`Self::MAX_PACED_INTERVAL`] before it is folded in, so no caller
+    /// (buggy or otherwise) can push a runaway value out to the shell's
+    /// pacing arithmetic. See that constant's doc comment for the full
+    /// rationale. This is a pure ceiling, never a target — every real cadence
+    /// in this codebase (a bare [`Duration::ZERO`] "theme rate" request, the
+    /// ~500ms caret blink above, or any plausible slow pulse) sits far below
+    /// it and passes through completely unchanged.
+    pub fn request_frame_paced_at(&mut self, interval: Duration) {
+        self.needs_frame = true;
+        self.merge_paced_interval(interval.min(Self::MAX_PACED_INTERVAL));
+    }
+
+    /// Ceiling on the `interval` [`Self::request_frame_paced_at`] accepts.
+    ///
+    /// 10 seconds comfortably clears every real cosmetic cadence in this
+    /// codebase — a bare [`Duration::ZERO`] "theme rate" request, the ~500ms
+    /// caret blink, muxr's ~550ms blink, or any plausible slow pulse — while
+    /// keeping the shell's downstream pacing arithmetic
+    /// (`frust-shell-common::frame_gate`'s `interval * 2` /
+    /// `interval.as_nanos() as u64`, `frust-shell-desktop::paced_wake`'s
+    /// `Instant + interval`) far below overflow or truncation even at the
+    /// widest legal input. [`Self::request_frame_paced_at`] is the single
+    /// entry point every paced interval flows through (see
+    /// [`Self::merge_paced_interval`]'s doc comment), so clamping here bounds
+    /// every downstream consumer for free — this must never change behavior
+    /// for any existing caller, since every shipped cadence is orders of
+    /// magnitude under it.
+    pub const MAX_PACED_INTERVAL: Duration = Duration::from_secs(10);
 
     /// Request a continuation frame of an explicit [`TickClass`] — the general
     /// form behind [`Self::request_frame`] (Transition) and
-    /// [`Self::request_frame_paced`] (CosmeticLoop).
+    /// [`Self::request_frame_paced`] (CosmeticLoop, at the theme's own rate).
     ///
     /// Always sets `needs_frame`; a [`TickClass::Transition`] request additionally
     /// marks the aggregate unpaced (the max-lattice OR — see [`TickClass`]). A
-    /// `CosmeticLoop` request never clears an already-unpaced aggregate.
+    /// `CosmeticLoop` request never clears an already-unpaced aggregate, and —
+    /// naming no interval — folds [`Duration::ZERO`] into the MIN-lattice like
+    /// [`Self::request_frame_paced`] does.
     pub fn request_frame_class(&mut self, class: TickClass) {
-        self.needs_frame = true;
-        if class == TickClass::Transition {
-            self.frame_unpaced = true;
+        match class {
+            TickClass::Transition => {
+                self.needs_frame = true;
+                self.frame_unpaced = true;
+            }
+            TickClass::CosmeticLoop => self.request_frame_paced(),
+        }
+    }
+
+    /// Fold one paced request's interval into this context's MIN-lattice
+    /// aggregate — the single mutation point for `paced_interval`, called
+    /// directly by [`Self::request_frame_paced_at`] and, for an already-`Some`
+    /// bubbled interval, by [`Self::absorb_paced_interval`] (the two paint
+    /// bubble sites' shared entry point).
+    fn merge_paced_interval(&mut self, interval: Duration) {
+        self.paced_interval = Some(match self.paced_interval {
+            Some(current) => current.min(interval),
+            None => interval,
+        });
+    }
+
+    /// Fold a bubbled child's paced interval into this context's own
+    /// MIN-lattice aggregate — the one rule shared by both paced-interval
+    /// absorb sites ([`ChildPod::paint_child`], [`Self::with_hero_registry`]):
+    /// skip entirely when the child named none, rather than defaulting to
+    /// [`Duration::ZERO`] (the lattice's own tightest/absorbing element,
+    /// meaning "at the theme's own rate"). Folding that default in for a
+    /// child that named no interval at all would silently re-tighten this
+    /// context to the theme cap even though nothing downstream actually asked
+    /// for a frame at all — see [`Self::request_frame_paced_at`]'s MIN-lattice
+    /// contract.
+    fn absorb_paced_interval(&mut self, interval: Option<Duration>) {
+        if let Some(interval) = interval {
+            self.merge_paced_interval(interval);
         }
     }
 
@@ -881,6 +1284,20 @@ impl<'a> PaintCtx<'a> {
     /// `frame_class() == Some(TickClass::CosmeticLoop)`.
     pub fn needs_frame_paced_only(&self) -> bool {
         self.needs_frame && !self.frame_unpaced
+    }
+
+    /// The tightest (MIN) interval any paced request named during this
+    /// (sub)paint, or `None` if no paced request was made at all.
+    ///
+    /// [`Duration::ZERO`] — what a bare [`Self::request_frame_paced`] folds in —
+    /// means "at the theme's own `cosmetic_loop_rate`", so `Some(Duration::ZERO)`
+    /// and `None` resolve identically at the frame gate; the distinction is only
+    /// whether *any* paced request was made. Meaningful only while
+    /// [`Self::frame_class`] is [`TickClass::CosmeticLoop`] — a concurrent
+    /// Transition request makes the whole frame unpaced, at which point no
+    /// interval applies (see [`PaintOutcome::paced_interval`]).
+    pub fn paced_interval(&self) -> Option<Duration> {
+        self.paced_interval
     }
 
     /// Signal that this paint advanced animation state that changes the widget's
@@ -1047,8 +1464,11 @@ impl<'a> PaintCtx<'a> {
             needs_frame: false,
             needs_layout: false,
             frame_unpaced: false,
+            paced_interval: None,
             ime_state: None,
             has_focus: self.has_focus,
+            hovered: self.hovered,
+            hover_epoch: self.hover_epoch,
             frame_time: self.frame_time,
             theme: self.theme,
             window_insets: self.window_insets,
@@ -1071,6 +1491,12 @@ impl<'a> PaintCtx<'a> {
         if child.frame_unpaced {
             self.frame_unpaced = true;
         }
+        // MIN-lattice fold of the paced interval, the orthogonal half of the
+        // same absorb: a slower interval inside never loosens the outer
+        // aggregate, and a tighter one tightens it. `absorb_paced_interval`
+        // is the shared rule with `ChildPod::paint_child`'s own bubble below —
+        // skip on `None` rather than folding in `Duration::ZERO`.
+        self.absorb_paced_interval(child.paced_interval);
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
         }
@@ -1367,6 +1793,10 @@ pub struct PlatformViewFrame {
 /// in. The mobile frame gate may throttle such a purely-cosmetic frame
 /// to a lower cadence; a `false` here means the frame runs every vsync as today.
 /// Only meaningful when `needs_frame` is `true`.
+///
+/// `paced_interval` is *how fast* that paced frame asked to be re-run: the MIN
+/// over every paced request this pass (see [`PaintCtx::request_frame_paced_at`]).
+/// Only meaningful alongside `needs_frame_paced_only`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
@@ -1379,6 +1809,14 @@ pub struct PaintOutcome {
     /// may throttle (see [`PaintCtx::needs_frame_paced_only`]). Meaningful only
     /// when `needs_frame` is set.
     pub needs_frame_paced_only: bool,
+    /// The tightest (MIN) interval any paced request this frame named — see
+    /// [`PaintCtx::paced_interval`]. `None` (no paced request) and
+    /// `Some(Duration::ZERO)` (a bare [`PaintCtx::request_frame_paced`]) both
+    /// mean "the theme's own `cosmetic_loop_rate`"; a longer value asks the gate
+    /// to pace this loop slower than that cap. Meaningful only alongside
+    /// `needs_frame_paced_only`; a shell latches it beside that flag and hands it
+    /// to the frame gate, which resolves it against the live theme's cap.
+    pub paced_interval: Option<Duration>,
 }
 
 /// A retained UI element living in the widget tree.
@@ -1424,6 +1862,46 @@ pub trait Widget: Any {
     /// [`SemanticsCtx::origin`]/[`SemanticsCtx::size`] carry valid absolute
     /// geometry.
     fn semantics(&self, _ctx: &mut SemanticsCtx) {}
+
+    /// This widget's concrete type name, for read-only tooling.
+    ///
+    /// Defaulted to [`core::any::type_name`] of the implementing type, so every
+    /// widget reports its own name through the vtable — including one reached
+    /// as a `dyn Widget`, where the concrete type is otherwise unrecoverable.
+    /// Asking the live widget beats recording a name when it was built: a
+    /// rebuild that swaps a child's concrete type cannot leave a stale name
+    /// behind, not even through the doubly-erased pods no reconciler can
+    /// observe (`docs/LIMITATIONS.md`'s `focus-double-erasure-swap-blind`).
+    ///
+    /// Diagnostic only: `type_name`'s output is not a stable contract across
+    /// compiler versions, so never parse or match on it. Overriding it is
+    /// sanctioned only for a transparent wrapper reporting what it wraps (the
+    /// `Box<dyn Widget>` blanket impl is the one in-crate case).
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
+
+    /// Visit this widget's owned [`ChildPod`]s, in declaration (paint) order —
+    /// the read-only seam that makes the retained hierarchy enumerable.
+    ///
+    /// Containers own their children as `ChildPod` fields rather than as arena
+    /// nodes (see [`ChildPod`]), so nothing outside a container could walk into
+    /// its subtree; this is that walk, and
+    /// [`WidgetTree::inspect`](crate::tree::WidgetTree::inspect) is its one
+    /// in-crate consumer.
+    ///
+    /// **Defaulted to visiting nothing**, exactly like [`Widget::event`] and
+    /// [`Widget::semantics`]: a leaf widget needs no impl and pays nothing, and
+    /// a container that never overrides it simply reads as a leaf to tooling. It
+    /// runs behind `&self` and must not mutate anything a pass depends on — no
+    /// build/layout/paint/event behavior may be routed through it.
+    ///
+    /// **No cycles by construction.** A `ChildPod` owns its widget (`Box<dyn
+    /// Widget>`); ownership is a tree, so a descent through `visit_children`
+    /// terminates without any runtime cycle check. A widget that handed the
+    /// visitor a pod it does not own would break that, which is why the visitor
+    /// takes `&ChildPod` — there is no way to publish a shared one.
+    fn visit_children(&self, _visitor: &mut dyn FnMut(&ChildPod)) {}
 }
 
 impl dyn Widget {
@@ -1462,6 +1940,17 @@ impl Widget for Box<dyn Widget> {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         (**self).semantics(ctx);
     }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        (**self).visit_children(visitor);
+    }
+
+    /// Report the *boxed* widget's name, not `Box<dyn Widget>` — the box is a
+    /// storage detail of type erasure, never a tree element in its own right,
+    /// and it nests (a doubly-boxed pod resolves through both layers).
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
 }
 
 /// A container's owned child: a boxed widget plus the layout geometry and
@@ -1478,6 +1967,12 @@ impl Widget for Box<dyn Widget> {
 /// `origin`/`size` are in the **container's** local coordinate space;
 /// [`ChildPod::event_child`] translates events into the child's local space and
 /// [`ChildPod::paint_child`] offsets the child's paint origin accordingly.
+///
+/// Because the arena cannot see into a container, the pod also carries what
+/// read-only tooling needs to describe the element it wraps —
+/// [`type_name`](ChildPod::type_name), [`debug_label`](ChildPod::debug_label),
+/// [`inspect_id`](ChildPod::inspect_id), plus the geometry above — and
+/// [`Widget::visit_children`] is how a walk reaches it.
 pub struct ChildPod {
     widget: Box<dyn Widget>,
     origin: Point,
@@ -1491,6 +1986,33 @@ pub struct ChildPod {
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     focused: bool,
+    /// The hover epoch this pod's recorded hover link belongs to — stamped by
+    /// [`ChildPod::event_child`] when a [`EventCtx::claim_hover`] bubbles through
+    /// it, and never explicitly cleared. `0` until a claim first passes through —
+    /// a [`RenderRoot`](crate::app::RenderRoot)'s live epoch starts past `0`, so a
+    /// never-claimed pod reads unhovered.
+    ///
+    /// The hover analog of `active`/`focused`, but a stamp rather than a flag,
+    /// because hover has no leave event to clear it with: the pointer moving
+    /// elsewhere advances the live epoch, which strands every stale stamp at once
+    /// without the container that owns it having to hear about the move. See the
+    /// [`crate::event`] module docs.
+    ///
+    /// The one move the epoch cannot strand is the pod's own removal, which is
+    /// why this field is also what `Drop` reports on (see the `Drop` impl and
+    /// `mark_hover_orphaned`).
+    hover_epoch: u64,
+    /// The identity of the [`RenderRoot`](crate::app::RenderRoot) whose pass
+    /// stamped `hover_epoch`, recorded with it and never cleared either. `0` until
+    /// a claim first passes through.
+    ///
+    /// Epoch counters are per-root and all start at `1`, so two roots on one
+    /// thread produce colliding integers by construction. Only `Drop` reads this:
+    /// it is what tells this pod's own root's live link from another root's
+    /// identically-numbered epoch, so a dying pod can never end a hover it was
+    /// never part of. The event/paint comparisons need no such qualifier — a pod
+    /// is only ever visited by the root that owns its tree.
+    hover_root: u64,
     /// This pod's persistent semantics base id, lazily assigned on
     /// the pod's first [`ChildPod::semantics_child`] visit from the
     /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
@@ -1501,9 +2023,71 @@ pub struct ChildPod {
     /// "id 0 is not a valid base". `None` until the first semantics pass reaches
     /// this pod.
     semantics_id: Cell<Option<NonZeroU64>>,
+    /// An optional human name for tooling, `None` unless something calls
+    /// [`ChildPod::set_debug_label`]. Mirrors
+    /// [`WidgetPod::debug_label`](crate::tree::WidgetPod::debug_label).
+    debug_label: Option<Cow<'static, str>>,
+    /// This pod's persistent tooling id, lazily assigned on its first
+    /// [`ChildPod::inspect_id`] call and reused for the whole pod lifetime —
+    /// the same shape (and the same reason) as `semantics_id` above: an id a
+    /// devtools client selected must survive the next frame's rebuild, and must
+    /// survive a keyed reorder, which relocates the whole pod. `None` until a
+    /// walk first reaches this pod, so a process that never inspects allocates
+    /// nothing.
+    inspect_id: Cell<Option<NonZeroU64>>,
+}
+
+thread_local! {
+    /// The next tooling id [`ChildPod::inspect_id`] hands out.
+    ///
+    /// Thread-local and UI-thread-affine, mirroring `mark_focus_orphaned`'s
+    /// shape: the widget tree is single-threaded, and an inspect walk runs
+    /// behind `&self` with no allocator in scope to thread down.
+    static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
+}
+
+impl Drop for ChildPod {
+    /// Report a **live** hover link severed by the pod's own removal, so
+    /// [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) ends the hover
+    /// before the frame ends.
+    ///
+    /// The epoch mechanism strands a stale stamp on every hover pass, but a pass
+    /// is exactly what a removed widget no longer gets: a rebuild that drops the
+    /// claimant leaves the root's mirror standing (`is_hover_active()` keeps
+    /// reporting a link nothing holds) and leaves every surviving ancestor of the
+    /// dead claimant reading hovered off its own still-matching stamp, until some
+    /// later `Move` happens to re-derive — which never arrives on a pointer the
+    /// user has stopped moving. This destructor is the hover analog of the
+    /// focus-orphan mark, and lives here rather than in the reconcilers because
+    /// the stamp has no setter for a container to cooperate through; see
+    /// `crate::event::mark_hover_orphaned` for the full rationale and the
+    /// "only when the link was live" invariant this comparison enforces.
+    ///
+    /// The comparison is against the published `(root, epoch)` pair, not the epoch
+    /// alone: per-root counters collide, so an unqualified match would let a pod
+    /// of one root end another root's live hover (see `hover_root`).
+    ///
+    /// Costs one predictable branch on a `u64` field per pod dropped; the
+    /// thread-local read happens only for the pod chain that has actually held a
+    /// claim at some point.
+    fn drop(&mut self) {
+        if crate::event::live_hover_link_is(self.hover_root, self.hover_epoch) {
+            crate::event::mark_hover_orphaned(self.hover_root);
+        }
+    }
 }
 
 impl ChildPod {
+    /// Where [`ChildPod::inspect_id`]'s allocator starts.
+    ///
+    /// Pod ids and arena [`WidgetId`](crate::view::WidgetId)s share one
+    /// namespace in an inspect snapshot, and the arena's are allocated from zero
+    /// upward by `BuildCtx::alloc_id`. Starting the pod allocator at 2^48 keeps
+    /// the two apart for any tree an app could plausibly build (the arena would
+    /// have to allocate 281 trillion ids to reach it) without threading a shared
+    /// counter through a read-only walk.
+    pub const INSPECT_ID_BASE: u64 = 1 << 48;
+
     /// Wrap a freshly built child widget at the origin, with zero size until its
     /// first layout.
     pub fn new(widget: Box<dyn Widget>) -> Self {
@@ -1513,8 +2097,70 @@ impl ChildPod {
             size: Size::ZERO,
             active: false,
             focused: false,
+            hover_epoch: 0,
+            hover_root: 0,
             semantics_id: Cell::new(None),
+            debug_label: None,
+            inspect_id: Cell::new(None),
         }
+    }
+
+    /// The wrapped widget's concrete type name, asked of the live widget
+    /// ([`Widget::type_name`]) rather than recorded at build time — so a
+    /// rebuild that swapped the child's type can never leave a stale name here,
+    /// and the double box `build_child` stores resolves through both layers.
+    ///
+    /// Diagnostic only: `type_name`'s output is not a stable contract across
+    /// compiler versions, so never parse or match on it.
+    pub fn type_name(&self) -> &'static str {
+        self.widget.type_name()
+    }
+
+    /// The human name attached for tooling, if any. `None` by default.
+    pub fn debug_label(&self) -> Option<&str> {
+        self.debug_label.as_deref()
+    }
+
+    /// Attach a human name for tooling (an inspector shows it beside the type
+    /// name). Purely descriptive — nothing in the build/layout/paint/event path
+    /// reads it.
+    pub fn set_debug_label(&mut self, label: impl Into<Cow<'static, str>>) {
+        self.debug_label = Some(label.into());
+    }
+
+    /// Drop any attached debug label.
+    pub fn clear_debug_label(&mut self) {
+        self.debug_label = None;
+    }
+
+    /// The attached label as an owned [`Cow`] for a snapshot, cloning the
+    /// borrowed case for free — what [`crate::tree::WidgetTree::inspect`] needs
+    /// and [`ChildPod::debug_label`]'s `&str` cannot give.
+    pub(crate) fn debug_label_cow(&self) -> Option<Cow<'static, str>> {
+        self.debug_label.clone()
+    }
+
+    /// This pod's tooling id, assigning one on the first call and reusing it
+    /// thereafter — so the id a devtools client holds keeps naming the same pod
+    /// across frames, and across a keyed reorder that relocates the pod.
+    ///
+    /// Behind `&self` (interior mutability) because the whole introspection
+    /// seam is read-only; ids come from [`INSPECT_ID_BASE`](ChildPod::INSPECT_ID_BASE)
+    /// upward and never collide with an arena `WidgetId`.
+    pub fn inspect_id(&self) -> crate::view::WidgetId {
+        let id = match self.inspect_id.get() {
+            Some(id) => id,
+            None => {
+                let id = NEXT_INSPECT_ID.with(|next| {
+                    let id = next.get();
+                    next.set(id + 1);
+                    NonZeroU64::new(id).expect("the allocator starts at 2^48, never zero")
+                });
+                self.inspect_id.set(Some(id));
+                id
+            }
+        };
+        crate::view::WidgetId(id.get())
     }
 
     /// Shared access to the boxed child widget.
@@ -1574,6 +2220,40 @@ impl ChildPod {
         self.focused = focused;
     }
 
+    /// The hover epoch this pod's recorded hover link belongs to — the hover
+    /// counterpart of [`ChildPod::is_focused`], reported as a stamp rather than a
+    /// flag because "is it hovered?" is only answerable against the live epoch
+    /// (`0` means no claim has ever passed through this pod).
+    ///
+    /// There is no setter: the stamp is maintained solely by
+    /// [`ChildPod::event_child`] from a claim bubble, so a container cannot record
+    /// or clear a hover link by hand — which is what keeps at most one path
+    /// hovered. See the [`crate::event`] module docs.
+    ///
+    /// # A bare stamp answers nothing
+    ///
+    /// The returned `u64` is an identity, not an ordering and not a boolean. It
+    /// means something only compared **for equality against the live epoch**, and
+    /// that comparison is the pipeline's own: the live epoch rides the running
+    /// context (`PaintCtx::hover_epoch`/`EventCtx::hover_epoch`), both
+    /// crate-private, and the comparison is already ANDed with the ancestor chain
+    /// by `paint_child`/`event_child` before any widget sees it. Treating a
+    /// non-zero stamp as "hovered", or ordering two pods' stamps, reads reasonable
+    /// and is wrong: a stamp is never cleared, only stranded by the next epoch
+    /// advance, so a pod the pointer left an hour ago still carries a non-zero
+    /// one, and the counter wraps.
+    ///
+    /// **Read [`PaintCtx::is_hovered`] instead** (authoritative), or
+    /// [`EventCtx::is_hovered`] for the state as of the previous pass; between
+    /// them they answer "is this widget or its subtree hovered" — which is the
+    /// question a widget actually has. A container asking the narrower "*which* of
+    /// my children" answers it with the same hit test its own claim rides, not
+    /// from here. This accessor is diagnostic — tooling, tests, and the debug
+    /// dump — the way [`ChildPod::type_name`] is.
+    pub fn hover_epoch(&self) -> u64 {
+        self.hover_epoch
+    }
+
     /// Lay the child out under `bc`, recording and returning its chosen size.
     pub fn layout_child(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = self.widget.layout(ctx, bc);
@@ -1627,6 +2307,15 @@ impl ChildPod {
         // link force `has_focus == false` for the whole subtree below it,
         // matching the effective gating focus-path routing gives events.
         child_ctx.set_has_focus(self.focused && ctx.has_focus());
+        // Thread the live hover epoch down unchanged (global, like the clock), and
+        // seed this child's hover link from its own recorded stamp against it —
+        // ANDed with the ancestor's hover, exactly like `focused` above. Both halves
+        // are load-bearing: the stamp is what distinguishes the current claim path
+        // from a stale one no container ever cleared, and the chain is what keeps a
+        // context carrying no live epoch at all (a bare `PaintCtx::new`, whose `0`
+        // would match a never-claimed pod's `0`) from reading as hovered.
+        child_ctx.set_hover_epoch(ctx.hover_epoch());
+        child_ctx.set_hovered(self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered());
         self.widget.paint(&mut child_ctx, scene);
         // Bubble the child's continuation-frame request AND its tick class up
         // unchanged: forwarding the aggregate class (rather than always calling
@@ -1634,8 +2323,41 @@ impl ChildPod {
         // subtree stay paceable through nested containers. `frame_class()` is
         // `None` when the child asked for nothing, so a still child bubbles
         // nothing (the max-lattice identity).
-        if let Some(class) = child_ctx.frame_class() {
-            ctx.request_frame_class(class);
+        match child_ctx.frame_class() {
+            Some(TickClass::Transition) => ctx.request_frame_class(TickClass::Transition),
+            // Deliberately NOT `request_frame_class(CosmeticLoop)`: that folds
+            // `Duration::ZERO` (the theme cap) into the parent's MIN-lattice and
+            // would silently re-tighten a child that asked for a *slower*
+            // cadence. Forward the child's own aggregate interval instead — the
+            // MIN-lattice's bubbling identity — via `absorb_paced_interval`,
+            // the same rule `with_hero_registry` uses.
+            Some(TickClass::CosmeticLoop) => {
+                // Bubble `needs_frame` unconditionally: a CosmeticLoop
+                // `frame_class` means the child genuinely requested a frame,
+                // independent of whether an interval merges below (mirrors
+                // `with_hero_registry`'s unconditional `needs_frame` bubble,
+                // which is likewise separate from its interval fold).
+                ctx.needs_frame = true;
+                // Invariant: `frame_class() == Some(CosmeticLoop)` requires
+                // `needs_frame && !frame_unpaced`, and the only paths that can
+                // produce that pair — `request_frame_paced_at` directly, or a
+                // nested `paint_child`/`with_hero_registry` bubble grounded in
+                // the same call by this identical induction — always merge a
+                // paced interval in the same step. So `paced_interval()` is
+                // never actually `None` here through the public
+                // `request_frame_paced*` API; this documents that belief
+                // rather than silently trusting it. `absorb_paced_interval`
+                // (below) is what actually implements the fallback, so
+                // behavior stays correct even if a future caller manages to
+                // trip this.
+                debug_assert!(
+                    child_ctx.paced_interval().is_some(),
+                    "CosmeticLoop frame_class with no merged paced_interval — \
+                     a new caller must be bypassing request_frame_paced_at"
+                );
+                ctx.absorb_paced_interval(child_ctx.paced_interval());
+            }
+            None => {}
         }
         // Bubble the child's layout-continuation request the same way as
         // `needs_frame`, so a nested widget animating its layout keeps layout
@@ -1706,11 +2428,32 @@ impl ChildPod {
     /// child.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let local = event.translated(-self.origin.to_vec2());
-        let (captured, focus_req, focus_rel, redraw, ime, result) = {
-            let mut child_ctx = ctx.child_ctx(self.origin, self.size, self.focused);
+        // The child's hover link, composed with the ancestor chain exactly like
+        // `focused` (see `paint_child`).
+        let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
+        // Two narrowings on top of whatever the root allowed, both structural:
+        // a pod holding the capture path can never let a claim through (a drag
+        // must not paint hover under the pointer, whatever the root's own capture
+        // mirror says), and a pass that already recorded a claim is closed to
+        // further ones, so the first claim recorded wins. With topmost-first hit
+        // testing and containers claiming only *after* they route (see
+        // `EventCtx::claim_hover`'s contract), that first claim is the topmost
+        // claimant's; a container that claims before it forwards is recorded first
+        // instead and closes the pass to its own subtree.
+        let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
+        let claim_epoch = ctx.hover_claim_epoch();
+        let (captured, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
+            let mut child_ctx = ctx.child_ctx(
+                self.origin,
+                self.size,
+                self.focused,
+                hovered,
+                hover_eligible,
+            );
             let result = self.widget.event(&mut child_ctx, &local);
             (
                 child_ctx.is_pointer_captured(),
+                child_ctx.is_hover_claimed(),
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
                 child_ctx.needs_redraw(),
@@ -1720,6 +2463,16 @@ impl ChildPod {
         };
         if captured {
             self.active = true;
+        }
+        // Stamp the claim onto this pod so the whole path from the claimant up to
+        // the root carries the epoch the next paint compares against. Never
+        // cleared: a stale stamp is stranded by the next epoch advance instead.
+        // The running root's identity rides along, so this pod's destructor can
+        // tell its own root's live link from another root's identical epoch
+        // integer (see `hover_root`).
+        if hover_claimed {
+            self.hover_epoch = claim_epoch;
+            self.hover_root = ctx.hover_root();
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
@@ -1731,7 +2484,7 @@ impl ChildPod {
         if focus_req {
             self.focused = true;
         }
-        ctx.absorb_child(redraw, captured, focus_req, focus_rel, ime);
+        ctx.absorb_child(redraw, captured, hover_claimed, focus_req, focus_rel, ime);
         result
     }
 
@@ -1815,12 +2568,31 @@ mod tests {
         }
     }
 
+    /// The interval a [`SlowPacedAnimator`] asks for — a ~2Hz caret blink,
+    /// deliberately far slower than any theme's cosmetic-loop cap.
+    const SLOW_PACE: Duration = Duration::from_millis(500);
+
+    /// A leaf widget whose decorative loop names its own (slow) cadence via
+    /// [`PaintCtx::request_frame_paced_at`] — stands in for a blinking caret.
+    struct SlowPacedAnimator;
+
+    impl Widget for SlowPacedAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced_at(SLOW_PACE);
+        }
+    }
+
     /// A scene recorder used to assert paint output without any GPU dependency.
     #[derive(Default)]
     struct RecordingScene {
         rects: Vec<(Point, Size)>,
         texts: Vec<(Point, String)>,
         shaders: Vec<(u64, Rect, f32)>,
+        scene_textures: Vec<(u64, Rect)>,
     }
 
     impl PaintScene for RecordingScene {
@@ -1832,6 +2604,9 @@ mod tests {
         }
         fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
             self.shaders.push((program.id(), dest, time));
+        }
+        fn draw_scene_texture(&mut self, id: u64, dest: Rect) {
+            self.scene_textures.push((id, dest));
         }
     }
 
@@ -2005,6 +2780,35 @@ mod tests {
         assert_eq!(scene.shaders[0].0, program.id());
         assert_eq!(scene.shaders[0].1, dest);
         assert_eq!(scene.shaders[0].2, time);
+    }
+
+    #[test]
+    fn widget_paint_emits_scene_texture_into_scene() {
+        /// A leaf widget that paints a scene texture.
+        struct SceneTextureWidget {
+            id: u64,
+            dest: Rect,
+        }
+
+        impl Widget for SceneTextureWidget {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, _ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                scene.draw_scene_texture(self.id, self.dest);
+            }
+        }
+
+        let id = 42u64;
+        let dest = Rect::new(10.0, 20.0, 100.0, 150.0);
+        let mut w = SceneTextureWidget { id, dest };
+        let mut scene = RecordingScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 200.0));
+        w.paint(&mut ctx, &mut scene);
+        assert_eq!(scene.scene_textures.len(), 1);
+        assert_eq!(scene.scene_textures[0].0, id);
+        assert_eq!(scene.scene_textures[0].1, dest);
     }
 
     #[test]
@@ -2242,6 +3046,68 @@ mod tests {
     }
 
     #[test]
+    fn paint_ctx_origin_is_absolute_through_nested_offsets() {
+        // Nest a leaf widget under two levels of offset containers: the leaf
+        // must observe the summed absolute window-space origin, not a
+        // parent-relative one. This pins the accumulation contract that external
+        // design systems (anchored overlays) depend on.
+        use std::cell::Cell;
+
+        struct OriginRecorder {
+            recorded_origin: Cell<Option<Point>>,
+        }
+
+        impl Widget for OriginRecorder {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.recorded_origin.set(Some(ctx.origin()));
+            }
+        }
+
+        let mut lctx = LayoutCtx::new();
+
+        // Inner recorder at (20, 30) relative to middle container.
+        let recorder = OriginRecorder {
+            recorded_origin: Cell::new(None),
+        };
+        let inner = ChildPod::new(Box::new(recorder));
+        let mut middle = TranslatingWrapper { child: inner };
+        middle.child.set_origin(Point::new(20.0, 30.0));
+        middle
+            .child
+            .layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Middle container at (50, 70) relative to outer.
+        let mut outer = ChildPod::new(Box::new(middle));
+        outer.set_origin(Point::new(50.0, 70.0));
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Paint from root at (0, 0).
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        outer.paint_child(&mut pctx, &mut scene);
+
+        // Verify: leaf's origin must be sum of all offsets:
+        // root(0,0) + outer(50,70) + middle(20,30) = (70, 100).
+        let leaf = outer
+            .widget_mut()
+            .downcast_mut::<TranslatingWrapper>()
+            .unwrap()
+            .child
+            .widget_mut()
+            .downcast_mut::<OriginRecorder>()
+            .unwrap();
+        assert_eq!(
+            leaf.recorded_origin.get(),
+            Some(Point::new(70.0, 100.0)),
+            "leaf must observe summed absolute origin"
+        );
+    }
+
+    #[test]
     fn request_frame_alone_does_not_set_needs_layout() {
         // A paint-only animation (request_frame, no request_layout) must leave
         // `needs_layout` clear — the mobile intra-frame layout-skip depends on this.
@@ -2374,6 +3240,85 @@ mod tests {
         assert!(ctx.needs_frame());
         assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
         assert!(ctx.needs_frame_paced_only());
+        // The bare form names no interval: `Duration::ZERO` is "at the theme's
+        // own cosmetic rate" — unchanged behavior for all six shimmer widgets.
+        assert_eq!(ctx.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn request_frame_paced_at_carries_its_interval() {
+        // The explicit form is the same class, only slower: a ~500ms caret.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(500));
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(ctx.needs_frame_paced_only());
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn request_frame_paced_at_clamps_past_the_ten_second_ceiling() {
+        // Past the ceiling: clamps DOWN to it rather than carrying the raw
+        // caller value out to the shell's pacing arithmetic unbounded.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_secs(10) + Duration::from_secs(1));
+        assert_eq!(ctx.paced_interval(), Some(PaintCtx::MAX_PACED_INTERVAL));
+    }
+
+    #[test]
+    fn request_frame_paced_at_leaves_a_real_cadence_untouched() {
+        // Every shipped cadence (the ~500ms caret above, muxr's ~550ms blink)
+        // sits nowhere near the ceiling and must pass through byte-for-byte —
+        // the clamp must never change behavior for any existing caller.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(550));
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(550)));
+    }
+
+    #[test]
+    fn paced_intervals_aggregate_on_the_min_lattice() {
+        // Two paced requests at different rates in one pass: the TIGHTEST wins,
+        // so both are honored (the slower one is merely repainted more often
+        // than it asked — see `request_frame_paced_at`'s contract).
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(500));
+        ctx.request_frame_paced_at(Duration::from_millis(33));
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(33)));
+        assert!(ctx.needs_frame_paced_only());
+
+        // Order-independent (a lattice fold, not a last-writer-wins slot).
+        let mut reversed = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        reversed.request_frame_paced_at(Duration::from_millis(33));
+        reversed.request_frame_paced_at(Duration::from_millis(500));
+        assert_eq!(reversed.paced_interval(), Some(Duration::from_millis(33)));
+
+        // A bare `request_frame_paced` (the theme cap, `Duration::ZERO`) is the
+        // absorbing element: a 30Hz shimmer beside a 2Hz caret paces at 30Hz.
+        let mut shimmer_and_caret = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        shimmer_and_caret.request_frame_paced_at(Duration::from_millis(500));
+        shimmer_and_caret.request_frame_paced();
+        assert_eq!(shimmer_and_caret.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn request_frame_class_cosmetic_matches_the_bare_paced_request() {
+        // The general form must stay interchangeable with `request_frame_paced`
+        // (the widgets' `cull_pacing`/`pacing_integration` suites drive it).
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_class(TickClass::CosmeticLoop);
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert_eq!(ctx.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn no_paced_request_names_no_interval() {
+        // Nothing requested, and a Transition-only request, both leave the
+        // interval unset — there is no paced loop to pace.
+        let ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert_eq!(ctx.paced_interval(), None);
+        let mut transition = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        transition.request_frame();
+        assert_eq!(transition.paced_interval(), None);
     }
 
     #[test]
@@ -2446,6 +3391,99 @@ mod tests {
     }
 
     #[test]
+    fn child_pod_bubbles_a_named_interval_unchanged() {
+        // A slow caret nested under a container must reach the root with its own
+        // interval intact — bubbling must never re-tighten it to the theme cap
+        // (which a blanket `request_frame_class(CosmeticLoop)` forward would).
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(SlowPacedAnimator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame_paced_only());
+        assert_eq!(
+            pctx.paced_interval(),
+            Some(SLOW_PACE),
+            "a nested slow paced loop keeps its own cadence up the tree"
+        );
+    }
+
+    #[test]
+    fn absorb_paced_interval_skips_on_none_without_tightening_to_zero() {
+        // The one rule shared by both paced-interval absorb sites
+        // (`ChildPod::paint_child`'s CosmeticLoop arm, `with_hero_registry`):
+        // a `None` interval must leave the aggregate untouched rather than
+        // defaulting to `Duration::ZERO` (the MIN-lattice's own tightest,
+        // most-tightening value) — the exact defect class `unwrap_or_default`
+        // used to risk in `paint_child`.
+        //
+        // Exercised directly against the shared fold rather than through
+        // `paint_child`'s real bubble: that call site's `debug_assert!`
+        // documents `frame_class() == Some(CosmeticLoop)` with no merged
+        // interval as unreachable through the public `request_frame_paced*`
+        // API (a provable invariant — see its doc comment), so forcing that
+        // exact state through the full `ChildPod::paint_child` path would
+        // trip the tripwire instead of exercising the fallback it guards.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.absorb_paced_interval(None);
+        assert_eq!(
+            ctx.paced_interval(),
+            None,
+            "a None interval must not tighten the aggregate to Duration::ZERO"
+        );
+
+        // A pre-existing aggregate is likewise untouched by a `None` fold.
+        let mut ctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx2.request_frame_paced_at(Duration::from_millis(500));
+        ctx2.absorb_paced_interval(None);
+        assert_eq!(
+            ctx2.paced_interval(),
+            Some(Duration::from_millis(500)),
+            "a None fold must not override an already-merged interval either"
+        );
+    }
+
+    #[test]
+    fn sibling_paced_intervals_fold_to_the_tightest() {
+        // A shimmer (theme cap) beside a slow caret under one container: the
+        // container's aggregate paces at the shimmer's rate. The caret is then
+        // repainted more often than it asked — no visual harm, by design.
+        struct TwoChildContainer {
+            a: ChildPod,
+            b: ChildPod,
+        }
+        impl Widget for TwoChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.a.layout_child(ctx, bc);
+                self.b.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.a.paint_child(ctx, scene);
+                self.b.paint_child(ctx, scene);
+            }
+        }
+
+        let mut outer = ChildPod::new(Box::new(TwoChildContainer {
+            a: ChildPod::new(Box::new(SlowPacedAnimator)),
+            b: ChildPod::new(Box::new(PacedAnimator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame_paced_only());
+        assert_eq!(
+            pctx.paced_interval(),
+            Some(Duration::ZERO),
+            "the tightest sibling request (the theme cap) wins the fold"
+        );
+    }
+
+    #[test]
     fn mixed_sibling_requests_aggregate_to_unpaced() {
         // Two sibling children under one container: one paced, one Transition.
         // The container's aggregate must be unpaced (any Transition dominates).
@@ -2504,6 +3542,20 @@ mod tests {
         });
         assert_eq!(ctx2.frame_class(), Some(TickClass::Transition));
         assert!(!ctx2.needs_frame_paced_only());
+
+        // The interval half of the absorb: a named interval inside surfaces
+        // outside, and folds on the MIN-lattice with an outer request.
+        let mut ctx3 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx3.with_hero_registry(&registry, |child| {
+            child.request_frame_paced_at(SLOW_PACE);
+        });
+        assert_eq!(ctx3.paced_interval(), Some(SLOW_PACE));
+        ctx3.request_frame_paced();
+        assert_eq!(
+            ctx3.paced_interval(),
+            Some(Duration::ZERO),
+            "the outer theme-cap request tightens the folded aggregate"
+        );
     }
 
     #[test]
@@ -2551,6 +3603,157 @@ mod tests {
     }
 
     #[test]
+    fn child_pod_stamps_a_hover_claim_and_seeds_it_by_epoch() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// A probe that claims hover on every event it receives and records what
+        /// `is_hovered()` each pass reported.
+        struct HoverProbe {
+            event_seen: Rc<Cell<Option<bool>>>,
+            paint_seen: Rc<Cell<Option<bool>>>,
+        }
+        impl Widget for HoverProbe {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.paint_seen.set(Some(ctx.is_hovered()));
+            }
+            fn event(&mut self, ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+                self.event_seen.set(Some(ctx.is_hovered()));
+                ctx.claim_hover();
+                EventResult::Ignored
+            }
+        }
+
+        let event_seen = Rc::new(Cell::new(None));
+        let paint_seen = Rc::new(Cell::new(None));
+        let mut pod = ChildPod::new(Box::new(HoverProbe {
+            event_seen: event_seen.clone(),
+            paint_seen: paint_seen.clone(),
+        }));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut state = ();
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+
+        // A never-claimed pod carries no stamp, and reads unhovered against any
+        // live epoch (the root's starts past `0` for exactly this reason).
+        assert_eq!(pod.hover_epoch(), 0);
+
+        // Dispatch on an INELIGIBLE pass (the default): the claim records nothing.
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(4);
+            pod.event_child(&mut ctx, &event);
+            assert!(!ctx.is_hover_claimed(), "nothing bubbled up");
+        }
+        assert_eq!(pod.hover_epoch(), 0, "no stamp from an ineligible pass");
+
+        // Dispatch on an eligible pass: the pod is stamped with the *next* epoch
+        // (the root advances its own when the pass ends) and the claim bubbles.
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(4);
+            ctx.set_hovered(true);
+            ctx.set_hover_eligible(true);
+            pod.event_child(&mut ctx, &event);
+            assert!(ctx.is_hover_claimed());
+            assert_eq!(
+                event_seen.get(),
+                Some(false),
+                "the pod held no link going into this pass"
+            );
+        }
+        assert_eq!(pod.hover_epoch(), 5);
+
+        // Paint against the epoch the claim recorded: hovered, and the ancestor
+        // chain is ANDed in exactly like focus.
+        let mut live = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        live.set_hover_epoch(5);
+        live.set_hovered(true);
+        pod.paint_child(&mut live, &mut scene);
+        assert_eq!(paint_seen.get(), Some(true));
+
+        // Same stamp under an UNHOVERED ancestor: the chain wins.
+        let mut unhovered_parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        unhovered_parent.set_hover_epoch(5);
+        unhovered_parent.set_hovered(false);
+        pod.paint_child(&mut unhovered_parent, &mut scene);
+        assert_eq!(paint_seen.get(), Some(false));
+
+        // The epoch moves on (the pointer went elsewhere): the stamp is stranded
+        // with nobody clearing it — the whole point of stamping rather than
+        // flagging.
+        let mut later = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        later.set_hover_epoch(6);
+        later.set_hovered(true);
+        pod.paint_child(&mut later, &mut scene);
+        assert_eq!(paint_seen.get(), Some(false));
+
+        // A pod holding the capture path refuses a claim outright, whatever the
+        // pass says — a drag never paints hover under the pointer.
+        pod.set_active(true);
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(6);
+            ctx.set_hover_eligible(true);
+            pod.event_child(&mut ctx, &event);
+            assert!(!ctx.is_hover_claimed());
+        }
+        assert_eq!(pod.hover_epoch(), 5, "the captured pod kept its old stamp");
+    }
+
+    /// Two overlapping children can both hit-test a point (a Stack, or any
+    /// container whose topmost child ignores the move). Only the first claim in
+    /// **dispatch order** is recorded, which is the primitive; "the topmost
+    /// claimant wins" is the consequence of dispatching topmost-first *and* of
+    /// every container claiming after it routes (see `EventCtx::claim_hover`),
+    /// not a rule this level enforces. Either way, no pass can leave two widgets
+    /// hovered.
+    #[test]
+    fn only_the_first_hover_claim_in_a_pass_is_recorded() {
+        struct Claimer;
+        impl Widget for Claimer {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+                ctx.claim_hover();
+                EventResult::Ignored
+            }
+        }
+
+        let mut first = ChildPod::new(Box::new(Claimer));
+        let mut second = ChildPod::new(Box::new(Claimer));
+        let mut state = ();
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+        let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, Size::ZERO);
+        ctx.set_hover_epoch(2);
+        ctx.set_hover_eligible(true);
+
+        first.event_child(&mut ctx, &event);
+        second.event_child(&mut ctx, &event);
+        assert_eq!(first.hover_epoch(), 3, "the first claim is recorded");
+        assert_eq!(
+            second.hover_epoch(),
+            0,
+            "the pass was closed to further claims"
+        );
+    }
+
+    #[test]
     fn child_pod_contains_uses_container_space_bounds() {
         let mut pod = ChildPod::new(Box::new(FixedBox {
             intrinsic: Size::ZERO,
@@ -2565,7 +3768,7 @@ mod tests {
         assert!(!pod.contains(Point::new(9.9, 15.0)));
     }
 
-    /// A scene recorder that overrides the task-08 shadow/layer additions, to
+    /// A scene recorder that overrides the shadow/layer `PaintScene` additions, to
     /// prove they reach an implementor that opts in.
     #[derive(Default)]
     struct ShadowLayerRecordingScene {
@@ -2600,7 +3803,7 @@ mod tests {
 
     #[test]
     fn draw_shadow_and_push_layer_are_no_ops_when_not_overridden() {
-        // `RecordingScene` (defined above) does not override the task-08
+        // `RecordingScene` (defined above) does not override the shadow/layer
         // additions — the trait's default no-op bodies must compile
         // unchanged and simply do nothing.
         let mut scene = RecordingScene::default();
@@ -2613,7 +3816,7 @@ mod tests {
 
     #[test]
     fn fill_path_and_stroke_path_are_no_ops_when_not_overridden() {
-        // `RecordingScene` does not override the task-05 path additions
+        // `RecordingScene` does not override the path additions
         // either — the trait's default no-op bodies must compile unchanged.
         let mut scene = RecordingScene::default();
         let mut path = BezPath::new();
@@ -2625,7 +3828,7 @@ mod tests {
         assert!(scene.texts.is_empty());
     }
 
-    /// A scene recorder overriding the task-05 path additions, proving they
+    /// A scene recorder overriding the path additions, proving they
     /// reach an implementor that opts in.
     #[derive(Default)]
     struct PathRecordingScene {
@@ -2763,6 +3966,54 @@ mod tests {
         assert_eq!(seen.get(), None);
     }
 
+    /// A leaf widget whose visible appearance is driven purely by
+    /// [`PaintCtx::frame_time`] — stands in for a caret-blink widget: it fills
+    /// a rect only during the "on" half of a 1-second blink cycle, with no
+    /// internal state of its own.
+    struct BlinkBox;
+
+    impl Widget for BlinkBox {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(4.0, 4.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            let millis = ctx.frame_time().as_nanos() / 1_000_000;
+            if (millis / 500).is_multiple_of(2) {
+                scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+            }
+        }
+    }
+
+    #[test]
+    fn for_test_seeds_the_requested_frame_time() {
+        let ctx = PaintCtx::for_test(Point::ZERO, Size::new(1.0, 1.0), FrameTime::from_nanos(42));
+        assert_eq!(ctx.frame_time(), FrameTime::from_nanos(42));
+    }
+
+    /// End-to-end proof the seam actually drives a clock-dependent widget:
+    /// the same [`BlinkBox`] paints differently at two [`FrameTime`]s built
+    /// via [`PaintCtx::for_test`] alone — no [`crate::app::RenderRoot`]
+    /// involved, exactly how an app crate outside this workspace would use
+    /// the seam.
+    #[test]
+    fn for_test_drives_a_clock_dependent_widget_to_two_appearances() {
+        let mut widget = BlinkBox;
+        let size = Size::new(4.0, 4.0);
+
+        let mut on_ctx = PaintCtx::for_test(Point::ZERO, size, FrameTime::from_nanos(0));
+        let mut on_scene = RecordingScene::default();
+        widget.paint(&mut on_ctx, &mut on_scene);
+        assert_eq!(on_scene.rects.len(), 1, "expected the caret painted on");
+
+        let mut off_ctx = PaintCtx::for_test(Point::ZERO, size, FrameTime::from_nanos(500_000_000));
+        let mut off_scene = RecordingScene::default();
+        widget.paint(&mut off_ctx, &mut off_scene);
+        assert!(
+            off_scene.rects.is_empty(),
+            "expected the caret painted off half a blink cycle later"
+        );
+    }
+
     #[test]
     fn draw_shadow_and_push_layer_reach_an_overriding_implementor() {
         let mut scene = ShadowLayerRecordingScene::default();
@@ -2775,5 +4026,448 @@ mod tests {
         assert_eq!(scene.shadows, vec![(origin, size, 6.0, 3.0, Color::BLACK)]);
         assert_eq!(scene.layers, vec![(origin, size, 0.25)]);
         assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn a_pods_type_name_resolves_through_every_box() {
+        // A pod's widget is always erased, and the container plumbing stores it
+        // double-boxed — the name must still be the widget's own, at any depth.
+        let single = ChildPod::new(Box::new(Animator));
+        assert!(
+            single.type_name().ends_with("Animator"),
+            "{}",
+            single.type_name()
+        );
+
+        let boxed: Box<dyn Widget> = Box::new(Animator);
+        let double = ChildPod::new(Box::new(boxed));
+        assert!(
+            double.type_name().ends_with("Animator"),
+            "{}",
+            double.type_name()
+        );
+    }
+
+    #[test]
+    fn a_pods_tooling_id_is_assigned_once_and_never_shared() {
+        let a = ChildPod::new(Box::new(Animator));
+        let b = ChildPod::new(Box::new(Animator));
+        let first = a.inspect_id();
+        assert_eq!(a.inspect_id(), first, "a pod keeps the id it was given");
+        assert_ne!(b.inspect_id(), first, "two pods never share an id");
+        assert!(
+            first.0 >= ChildPod::INSPECT_ID_BASE,
+            "pod ids stay in the range reserved against arena WidgetIds"
+        );
+    }
+
+    #[test]
+    fn a_leaf_visits_no_children_and_a_container_visits_all_of_its_own() {
+        struct Two {
+            children: Vec<ChildPod>,
+        }
+        impl Widget for Two {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+                for child in &self.children {
+                    visitor(child);
+                }
+            }
+        }
+
+        // The trait default: a widget that says nothing publishes nothing.
+        let mut seen = 0;
+        Animator.visit_children(&mut |_| seen += 1);
+        assert_eq!(seen, 0);
+
+        let container = Two {
+            children: vec![
+                ChildPod::new(Box::new(Animator)),
+                ChildPod::new(Box::new(Animator)),
+            ],
+        };
+        let mut ids = Vec::new();
+        container.visit_children(&mut |child| ids.push(child.inspect_id()));
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// A recorder that implements only the *uniform* rounded methods and the
+    /// solid stroke — i.e. every pre-per-corner recorder scene in the wild —
+    /// so the per-corner/dashed trait defaults can be observed falling back.
+    #[derive(Default)]
+    struct UniformOnlyScene {
+        fills: Vec<(Point, Size, f64)>,
+        clips: Vec<(Point, Size, f64)>,
+        strokes: Vec<(Point, f64)>,
+        pops: usize,
+    }
+
+    impl PaintScene for UniformOnlyScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, _color: Color) {
+            self.fills.push((origin, size, radius));
+        }
+        fn push_clip_rounded(&mut self, origin: Point, size: Size, radius: f64) {
+            self.clips.push((origin, size, radius));
+        }
+        fn pop_clip(&mut self) {
+            self.pops += 1;
+        }
+        fn stroke_path(&mut self, origin: Point, _path: &BezPath, width: f64, _brush: &Brush) {
+            self.strokes.push((origin, width));
+        }
+    }
+
+    fn corner_probe_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path
+    }
+
+    #[test]
+    fn per_corner_paint_defaults_fall_back_to_the_uniform_methods() {
+        // A scene that predates per-corner radii still paints something, at the
+        // largest corner — and its clip stack stays balanced, which is why the
+        // push delegates rather than no-op'ing against a real `pop_clip`.
+        let mut scene = UniformOnlyScene::default();
+        let origin = Point::new(2.0, 3.0);
+        let size = Size::new(20.0, 10.0);
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+
+        scene.fill_rounded_rect_radii(origin, size, radii, Color::BLACK);
+        scene.push_clip_rounded_radii(origin, size, radii);
+        scene.pop_clip();
+
+        assert_eq!(scene.fills, vec![(origin, size, 12.0)]);
+        assert_eq!(scene.clips, vec![(origin, size, 12.0)]);
+        assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn dashed_stroke_default_falls_back_to_the_solid_stroke() {
+        let mut scene = UniformOnlyScene::default();
+        let origin = Point::new(5.0, 6.0);
+        scene.stroke_path_dashed(
+            origin,
+            &corner_probe_path(),
+            2.0,
+            DashPattern::new(4.0, 2.0),
+            &Brush::Solid(Color::BLACK),
+        );
+
+        assert_eq!(scene.strokes, vec![(origin, 2.0)]);
+    }
+
+    #[test]
+    fn scene_builder_records_per_corner_radii_translated_by_origin() {
+        // The `SceneBuilder` impl overrides the defaults above: every corner
+        // reaches the command intact, under the same origin→rect convention the
+        // uniform methods use.
+        let mut scene = frust_scene::Scene::new();
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.fill_rounded_rect_radii(
+                Point::new(2.0, 3.0),
+                Size::new(20.0, 10.0),
+                radii,
+                Color::BLACK,
+            );
+            paint.push_clip_rounded_radii(Point::new(0.0, 0.0), Size::new(5.0, 5.0), radii);
+            paint.pop_clip();
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::RoundedRect {
+                rect, radii: got, ..
+            } => {
+                assert_eq!(*rect, Rect::new(2.0, 3.0, 22.0, 13.0));
+                assert_eq!(*got, radii);
+            }
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[1] {
+            frust_scene::Command::PushClipRounded { radii: got, .. } => assert_eq!(*got, radii),
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+        assert!(matches!(scene.commands()[2], frust_scene::Command::PopClip));
+    }
+
+    #[test]
+    fn scene_builder_records_a_dashed_stroke_translated_by_origin() {
+        let mut scene = frust_scene::Scene::new();
+        let dash = DashPattern::new(4.0, 2.0).with_phase(1.0);
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.stroke_path_dashed(
+                Point::new(5.0, 0.0),
+                &corner_probe_path(),
+                2.0,
+                dash,
+                &Brush::Solid(Color::BLACK),
+            );
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::Path { path, style, .. } => {
+                assert_eq!(
+                    *style,
+                    frust_scene::PathStyle::Stroke {
+                        width: 2.0,
+                        dash: Some(dash)
+                    }
+                );
+                // Same origin translation `stroke_path` applies.
+                assert_eq!(path.elements().len(), 2);
+                assert!(matches!(
+                    path.elements()[0],
+                    kurbo::PathEl::MoveTo(p) if p == Point::new(5.0, 0.0)
+                ));
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uniform_paint_calls_still_encode_the_commands_they_always_did() {
+        // The additive contract: the uniform methods every existing call site
+        // uses keep producing the same commands, now spelled as four equal
+        // corners / an undashed stroke.
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.fill_rounded_rect(
+                Point::new(0.0, 0.0),
+                Size::new(10.0, 10.0),
+                4.0,
+                Color::BLACK,
+            );
+            paint.push_clip_rounded(Point::new(0.0, 0.0), Size::new(10.0, 10.0), 4.0);
+            paint.pop_clip();
+            paint.draw_shadow(
+                Point::new(0.0, 0.0),
+                Size::new(10.0, 10.0),
+                4.0,
+                2.0,
+                Color::BLACK,
+            );
+            paint.stroke_path(
+                Point::new(0.0, 0.0),
+                &corner_probe_path(),
+                1.0,
+                &Brush::Solid(Color::BLACK),
+            );
+        }
+
+        let uniform = CornerRadii::uniform(4.0);
+        match &scene.commands()[0] {
+            frust_scene::Command::RoundedRect { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[1] {
+            frust_scene::Command::PushClipRounded { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+        match &scene.commands()[3] {
+            frust_scene::Command::BlurredRoundedRect { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected BlurredRoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[4] {
+            frust_scene::Command::Path { style, .. } => assert_eq!(
+                *style,
+                frust_scene::PathStyle::Stroke {
+                    width: 1.0,
+                    dash: None
+                }
+            ),
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_paint_scene_method_terminates_on_discard_scene() {
+        // Every `PaintScene` method — including the delegating defaults
+        // (per-corner/dashed variants, the additive image/shader/shadow
+        // surface) — is reachable and terminates on `DiscardScene` without
+        // panicking; a future `todo!()` or an infinitely-recursive default
+        // would fail here. The records-nothing guarantee itself is asserted
+        // where a scene actually exists, at the navigator/switcher call
+        // sites, not here.
+        use frust_scene::{FontHandle, Glyph};
+
+        let mut scene = DiscardScene;
+        let origin = Point::new(2.0, 3.0);
+        let size = Size::new(20.0, 10.0);
+        let color = Color::BLACK;
+        let brush = Brush::Solid(color);
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+        let path = corner_probe_path();
+
+        scene.fill_rect(origin, size, color);
+        scene.fill_rounded_rect(origin, size, 4.0, color);
+        scene.fill_rounded_rect_radii(origin, size, radii, color);
+        scene.stroke_line(origin, Point::new(10.0, 10.0), 1.0, color);
+        scene.push_clip(origin, size);
+        scene.push_clip_rounded(origin, size, 4.0);
+        scene.push_clip_rounded_radii(origin, size, radii);
+        scene.pop_clip();
+        scene.draw_text(origin, "discarded");
+
+        let font = FontHandle::new(peniko::FontData::new(
+            peniko::Blob::from(Vec::<u8>::new()),
+            0,
+        ));
+        let run = GlyphRun {
+            font,
+            font_size: 16.0,
+            brush: brush.clone(),
+            transform: Affine::IDENTITY,
+            glyphs: vec![Glyph {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+            }],
+        };
+        scene.draw_glyph_run(run);
+
+        let image = peniko::ImageData {
+            data: peniko::Blob::from(vec![0u8; 2 * 2 * 4]),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 2,
+            height: 2,
+        };
+        scene.draw_image(&image, Rect::new(0.0, 0.0, 20.0, 20.0));
+
+        let program = ShaderProgram::new("fn main() {}");
+        scene.draw_shader(&program, Rect::new(0.0, 0.0, 10.0, 10.0), 1.5);
+
+        scene.draw_shadow(origin, size, 4.0, 2.0, color);
+        scene.fill_rect_brush(origin, size, &brush);
+        scene.fill_rounded_rect_brush(origin, size, 4.0, &brush);
+        scene.push_layer(origin, size, 0.5);
+        scene.pop_layer();
+        scene.clear_rect(origin, size);
+        scene.fill_path(origin, &path, &brush);
+        scene.stroke_path(origin, &path, 1.0, &brush);
+        scene.stroke_path_dashed(origin, &path, 1.0, DashPattern::new(4.0, 2.0), &brush);
+        scene.push_transform(Affine::translate((1.0, 2.0)));
+        scene.pop_transform();
+    }
+
+    /// A minimal recorder that tracks only transform and layer stack operations
+    /// to verify the default [`PaintScene::push_snapshot`]/[`PaintScene::pop_snapshot`]
+    /// implementation emulates the presentation correctly.
+    #[derive(Default)]
+    struct MinimalSnapshotRecorder {
+        operations: Vec<String>,
+    }
+
+    impl PaintScene for MinimalSnapshotRecorder {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_transform(&mut self, _transform: Affine) {
+            self.operations.push("push_transform".to_string());
+        }
+        fn pop_transform(&mut self) {
+            self.operations.push("pop_transform".to_string());
+        }
+        fn push_layer(&mut self, _origin: Point, _size: Size, _alpha: f32) {
+            self.operations.push("push_layer".to_string());
+        }
+        fn pop_layer(&mut self) {
+            self.operations.push("pop_layer".to_string());
+        }
+    }
+
+    #[test]
+    fn default_push_snapshot_pop_snapshot_emulates_presentation_for_recorders() {
+        // The default `push_snapshot` and `pop_snapshot` implementation
+        // ensures recorders that override only the transform/layer methods
+        // see a consistent sequence: push_transform, push_layer, paint body,
+        // pop_layer, pop_transform — the reverse order matching the push ops.
+        let mut recorder = MinimalSnapshotRecorder::default();
+        let origin = Point::new(10.0, 20.0);
+        let size = Size::new(100.0, 50.0);
+        let alpha = 0.8;
+        let scale = 0.9;
+
+        // Emulate a body that doesn't call any paint methods (just has side effects).
+        recorder.push_snapshot(1, origin, size, alpha, scale);
+        // Body paint code would go here
+        recorder.pop_snapshot();
+
+        // Verify the sequence: transform, layer, pop_layer, pop_transform.
+        assert_eq!(
+            recorder.operations,
+            vec![
+                "push_transform".to_string(),
+                "push_layer".to_string(),
+                "pop_layer".to_string(),
+                "pop_transform".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn scene_builder_records_push_pop_snapshot_commands_directly_without_extra_transforms() {
+        // The `SceneBuilder` impl overrides `push_snapshot`/`pop_snapshot` to
+        // record the snapshot commands directly, without the emulating
+        // transform/layer pairs. It records Command::PushSnapshot with the
+        // key, rect (converted from origin/size), alpha, scale, and the current
+        // transform, and Command::PopSnapshot with no extra layer/transform commands.
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+
+            paint.push_snapshot(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
+            // Paint some content inside the snapshot.
+            paint.fill_rect(Point::new(10.0, 15.0), Size::new(20.0, 25.0), Color::BLACK);
+            paint.pop_snapshot();
+        }
+
+        // Verify the command sequence: PushSnapshot, FillRect, PopSnapshot.
+        // No PushLayer, PopLayer, PushTransform, or PopTransform commands.
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 3);
+
+        match &commands[0] {
+            frust_scene::Command::PushSnapshot {
+                key,
+                rect,
+                alpha,
+                scale,
+                ..
+            } => {
+                assert_eq!(*key, 7);
+                assert_eq!(*rect, Rect::new(5.0, 10.0, 85.0, 50.0));
+                assert_eq!(*alpha, 0.5);
+                assert_eq!(*scale, 1.2);
+            }
+            other => panic!("expected PushSnapshot, got {other:?}"),
+        }
+
+        match &commands[1] {
+            frust_scene::Command::FillRect { rect, .. } => {
+                assert_eq!(*rect, Rect::new(10.0, 15.0, 30.0, 40.0));
+            }
+            other => panic!("expected FillRect, got {other:?}"),
+        }
+
+        assert!(
+            matches!(commands[2], frust_scene::Command::PopSnapshot),
+            "expected PopSnapshot, got {:?}",
+            commands[2]
+        );
     }
 }

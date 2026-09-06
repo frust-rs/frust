@@ -1,12 +1,14 @@
 //! parley layout -> `frust_scene` glyph-run conversion.
 //!
-//! This module owns the parley -> vello-0.9 glyph-mapping contract
-//! (`frust-render` consumes the resulting [`frust_scene::GlyphRun`]s on the vello side).
+//! This module owns the parley -> [`frust_scene::GlyphRun`] glyph-mapping
+//! contract — the one `frust-engine`'s text lowering (`text/`, built on
+//! `glifo`) consumes.
 //!
 //! # Coordinate convention
 //!
 //! Each emitted [`frust_scene::Glyph`] carries **run-local** coordinates that
-//! are exactly what `vello::Glyph` expects:
+//! are exactly what `glifo`'s own `Glyph` (`x`/`y`, each documented "offset in
+//! run, relative to transform") expects:
 //!
 //! - `x` is the glyph's absolute horizontal position within its run, measured
 //!   from the run origin — parley's per-glyph advance offset plus the run's
@@ -19,8 +21,9 @@
 //!
 //! The block-level placement (`origin`, passed by the widget) is **not** baked
 //! into the glyph coordinates; it lives on [`frust_scene::GlyphRun::transform`]
-//! as a translation. The render backend applies that transform to the whole run,
-//! matching vello's `draw_glyphs(...).transform(..)` model. Keeping origin in the
+//! as a translation. The render backend applies that transform to the whole
+//! run — the engine compiler composes it into the run's paint and its glyph
+//! outlines alike (`frust-engine`'s `compile_glyph_run`). Keeping origin in the
 //! transform (rather than added into every glyph) lets the scene builder compose
 //! ancestor transforms cheaply (see `frust_scene::SceneBuilder::draw_glyph_run`).
 

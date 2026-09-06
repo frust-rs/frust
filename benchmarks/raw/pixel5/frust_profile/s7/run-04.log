@@ -1,0 +1,54 @@
+frust-perf activity-create
+frust_render::context: frust-perf render-path engine-direct (frust-engine into the acquired swapchain view (RENDER_ATTACHMENT, surface-reported format, surface-owned depth))
+frust_engine::cache::images: frust-perf atlas tier=desktop budget=2048x2048x8 downlevel=Full transient_saves_memory=false adapter=Adreno (TM) 620
+frust_shell_common::perf: frust-perf startup init_entry=0ms font_preinit_started=0ms font_preinit_joined=0ms preinit_started=0ms preinit_joined=25ms cache_loaded=25ms pipeline_cache_restored=25ms adapter_ready=59ms device_ready=59ms renderer_ready=59ms first_rebuild_done=64ms first_encode_done=64ms first_frame_presented=186ms
+frust_shell_common::perf: bench-scenario-start n=1 s1
+frust_shell_common::perf: bench-scenario-end n=1 s1
+frust_shell_common::perf: bench-scenario-start n=1 s7
+frust_shell_common::perf: bench-scenario-start n=1 s7-idle
+frust_shell_common::perf: frust-perf raw n=1 total_us=123468 rebuild_us=84 layout_us=831 paint_us=62 encode_us=15 acquire_us=39 submit_us=122436 skipped=0 gpu_q=0
+frust_shell_common::perf: frust-perf raw n=2 total_us=8350 rebuild_us=406 layout_us=1 paint_us=140 encode_us=20 acquire_us=21 submit_us=7760 skipped=0 gpu_q=0
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=120 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=240 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=360 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=480 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=600 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=720 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=840 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=960 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1080 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1200 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1320 expected_present_us=0 acquire_us=34 period_us=11145
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1440 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1560 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1680 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1800 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=1920 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2040 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2160 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2280 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2400 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2520 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2640 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2760 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=2880 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3000 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3120 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3240 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3360 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3480 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3600 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3720 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3840 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=3960 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4080 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4200 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4320 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4440 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4560 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4680 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4800 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=4920 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=5040 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=5160 expected_present_us=0 acquire_us=34 period_us=11139
+frust_shell_android::app::frame: frust-perf platform-view tail depth=0 target=0 acquire_bound=false frame=5280 expected_present_us=0 acquire_us=34 period_us=11139

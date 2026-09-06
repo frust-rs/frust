@@ -1,28 +1,19 @@
-//! Material 3 shape scale: 10 corner-radius tokens (post-Expressive scale).
+//! [`ShapeScale::neutral`]: the design-language-free 10 corner-radius tokens
+//! (post-Expressive scale shape).
+//!
+//! This crate constructs no other `ShapeScale` — a design system builds its
+//! own from its own plugin crate (`frust-material`'s `tokens` module carries
+//! the Material 3 corner-radius scale these numbers originate from, source
+//! cited there; `frust-cupertino`'s carries the iOS-idiom mapping). The
+//! values below are the M3 numbers reused verbatim: a corner-radius *scale*
+//! isn't a branded artifact the way a color palette is, so there's no
+//! design-language-specific value here to invent (see
+//! `crate::theme::Theme::neutral`'s module docs).
 //!
 //! Source: <https://m3.material.io/styles/shape/corner-radius-scale>
 //! (verified 2026-07-17; the pre-Expressive scale had 7 tokens, not
 //! 10). Radii are dp, treated 1:1 as logical px, matching
 //! this crate's other length fields.
-//!
-//! # Cupertino (iOS) mapping
-//!
-//! [`ShapeScale::cupertino`] fills the same 10 slots with iOS-idiom corner
-//! radii. Apple does not publish a numeric corner-radius scale the way M3
-//! does — every value below is a **community-approximate** convention
-//! (retrieved 2026-07-17): `small` (8pt) is
-//! the widely-cited standard `UIButton`/control corner radius; `medium`
-//! (10pt) approximates a text field/small card; `large`/`large_increased`
-//! (13pt/14pt) bracket the community-cited alert/action-sheet radius range
-//! (Apple's own HIG text does not publish this figure);
-//! `extra_large`/`extra_large_increased` (20pt/24pt) approximate a sheet or
-//! large modal card; `extra_extra_large` (36pt) has no iOS precedent at all
-//! and is a Frust linear extrapolation to fill the scale's largest slot.
-//! **iOS corners are visually "continuous" (superellipse/"squircle") curves,
-//! not circular arcs** — a numeric radius here approximates the visual size
-//! of that curve, not an exact geometric equivalent; Frust's own corner
-//! painting (a circular-arc rounded rect) does not reproduce the continuous
-//! curve shape, only its rough footprint.
 
 /// The 10 Material 3 corner-radius tokens, dp (logical px). `full` is
 /// represented as [`f64::INFINITY`] rather than a separate enum variant —
@@ -45,8 +36,9 @@ pub struct ShapeScale {
 }
 
 impl ShapeScale {
-    /// The Material 3 baseline shape scale.
-    pub const fn m3() -> Self {
+    /// The neutral, design-language-free shape scale — see the module docs
+    /// for why these are the M3 numbers reused verbatim.
+    pub const fn neutral() -> Self {
         Self {
             none: 0.0,
             extra_small: 4.0,
@@ -57,24 +49,6 @@ impl ShapeScale {
             extra_large: 28.0,
             extra_large_increased: 32.0,
             extra_extra_large: 48.0,
-            full: f64::INFINITY,
-        }
-    }
-
-    /// The Cupertino (iOS) shape scale — see the module docs' "Cupertino
-    /// (iOS) mapping" section for the per-field rationale; every radius
-    /// here is community-approximate, not an Apple-published spec.
-    pub const fn cupertino() -> Self {
-        Self {
-            none: 0.0,
-            extra_small: 4.0,
-            small: 8.0,
-            medium: 10.0,
-            large: 13.0,
-            large_increased: 14.0,
-            extra_large: 20.0,
-            extra_large_increased: 24.0,
-            extra_extra_large: 36.0,
             full: f64::INFINITY,
         }
     }
@@ -141,7 +115,7 @@ mod tests {
 
     #[test]
     fn matches_table() {
-        let s = ShapeScale::m3();
+        let s = ShapeScale::neutral();
         assert_eq!(s.none, 0.0);
         assert_eq!(s.extra_small, 4.0);
         assert_eq!(s.small, 8.0);
@@ -155,28 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn cupertino_matches_table() {
-        let s = ShapeScale::cupertino();
-        assert_eq!(s.none, 0.0);
-        assert_eq!(s.small, 8.0);
-        assert_eq!(s.medium, 10.0);
-        assert_eq!(s.large, 13.0);
-        assert_eq!(s.large_increased, 14.0);
-        assert_eq!(s.extra_large, 20.0);
-        assert_eq!(s.extra_large_increased, 24.0);
-        assert_eq!(s.extra_extra_large, 36.0);
-        assert!(s.full.is_infinite());
-    }
-
-    #[test]
     fn full_resolves_to_pill_radius() {
-        let s = ShapeScale::m3();
+        let s = ShapeScale::neutral();
         assert_eq!(ShapeScale::resolve(s.full, 100.0, 40.0), 20.0);
     }
 
     #[test]
     fn finite_radius_passes_through_when_smaller_than_pill() {
-        let s = ShapeScale::m3();
+        let s = ShapeScale::neutral();
         assert_eq!(ShapeScale::resolve(s.medium, 200.0, 200.0), 12.0);
     }
 

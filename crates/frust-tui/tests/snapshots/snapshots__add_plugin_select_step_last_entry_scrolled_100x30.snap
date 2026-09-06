@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: rendered
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+  ▸ huddle        │                                                              │▓▓                
+                  │  Choose a plugin to add to this project  (6-14 of 14)        │▓▓                
+ DEVICES ↻ r      │    ( ) clipboard                                             │▓▓                
+   none found     │        Synchronous plain-text clipboard access               │▓▓                
+                  │    ( ) haptics                                               │▓▓                
+ SESSIONS         │        Minimal haptic feedback (selection tick, impact,      │▓▓                
+   none running   │    ( ) iap                                                   │▓▓                
+                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
+ ACTIONS          │    ( ) database                                              │▓▓                
+   New project · n│        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+   Add plugin · a │    ( ) i18n                                                  │▓▓                
+   Doctor · d     │        Fluent Project-based                                  │▓▓                
+   Build · b      │    ( ) glyph                                                 │▓▓                
+   Clean · c      │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
+   MCP off · M    │    ( ) material                                              │▓▓                
+   DAP off · D    │        Material 3 catalog; needs frust_material::install()   │▓▓                
+                  │    ( ) cupertino                                             │▓▓                
+                  │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
+                  │  ▸ (o) shadcn                                                │▓▓                
+                  │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+                  │                                                              │▓▓                
+                  │   Back    Next    Cancel                                     │▓▓                
+                  │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

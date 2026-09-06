@@ -1,21 +1,23 @@
-//! The "Add plugin" dialog state machine (`frust-secure-storage` PLAN Phase 7):
+//! The "Add plugin" dialog state machine:
 //! select a registry plugin → toggle its optional features → apply its
 //! contributions to the open generated project off-thread → show a per-edit
 //! report (or an error).
 //!
 //! Everything here is plain data + pure transitions — no filesystem, no
-//! threads. The two pieces of real work — the `../clean-signals-rs` sibling
-//! probe that gates a facade-tier plugin card, and the
-//! [`frust_drive::plugin::add_plugin`] run itself — both happen off-thread in
-//! `crate::runner`, feeding their results back as messages
-//! ([`super::Message::CleanSignalsProbed`] /
-//! [`super::Message::AddPluginSucceeded`] / [`super::Message::AddPluginFailed`]).
+//! threads. The [`frust_drive::plugin::add_plugin`] run itself happens
+//! off-thread in `crate::runner`, feeding its result back as a message
+//! ([`super::Message::AddPluginSucceeded`] / [`super::Message::AddPluginFailed`]).
 //! `crate::ui::views::add_plugin` renders it; the runner enacts the
 //! [`Effect`](super::update::Effect)s the pure transition requests.
 //!
 //! Cloned in shape from [`super::create_wizard`] (the create-wizard modal
 //! precedent): a linear step enum, sibling-gated selection cards, an off-thread
-//! action step, and an error step with retry.
+//! action step, and an error step with retry. No registry entry is
+//! sibling-gated today — `clean-signals-frust` was the sole
+//! `requires_sibling` user before `clean-signals` moved to a git+rev pin
+//! — but [`PluginEntry::sibling_gated`]/
+//! [`AddPluginDialog::set_sibling_available`] stay in place as the generic
+//! mechanism a future facade-tier plugin would reuse.
 
 use std::path::PathBuf;
 
@@ -335,15 +337,30 @@ mod tests {
     }
 
     #[test]
-    fn a_sibling_gated_card_starts_disabled_and_the_probe_enables_it() {
+    fn no_registry_entry_is_currently_sibling_gated() {
+        // clean-signals-frust was the sole `requires_sibling` user before
+        // clean-signals moved to a git+rev pin; every card starts
+        // enabled today.
+        let d = dialog();
+        assert!(d.entries.iter().all(|e| !e.sibling_gated && e.enabled));
+    }
+
+    /// The generic sibling-gating mechanism ([`PluginEntry::sibling_gated`] /
+    /// [`AddPluginDialog::set_sibling_available`]) has no live registry user
+    /// today — exercise it directly against a synthetic gated entry rather
+    /// than through a real plugin id.
+    #[test]
+    fn set_sibling_available_toggles_a_gated_entrys_enabled_state() {
         let mut d = dialog();
-        let idx = d
-            .entries
-            .iter()
-            .position(|e| e.sibling_gated)
-            .expect("a facade-tier plugin requires a sibling");
-        assert!(!d.entries[idx].enabled);
-        assert!(d.entries[idx].disabled_reason.is_some());
+        d.entries.push(PluginEntry {
+            id: "future-facade-plugin".to_string(),
+            summary: "stand-in for a future sibling-gated plugin".to_string(),
+            enabled: false,
+            disabled_reason: Some(SIBLING_PENDING.to_string()),
+            sibling_gated: true,
+            features: Vec::new(),
+        });
+        let idx = d.entries.len() - 1;
 
         d.set_sibling_available(true);
         assert!(d.entries[idx].enabled);
@@ -369,7 +386,18 @@ mod tests {
     #[test]
     fn advancing_a_disabled_card_is_blocked() {
         let mut d = dialog();
-        let idx = d.entries.iter().position(|e| e.sibling_gated).unwrap();
+        // No registry entry starts disabled today (see
+        // `no_registry_entry_is_currently_sibling_gated`), so exercise the
+        // disabled-blocks-advance contract against a synthetic gated entry.
+        d.entries.push(PluginEntry {
+            id: "future-facade-plugin".to_string(),
+            summary: "stand-in for a future sibling-gated plugin".to_string(),
+            enabled: false,
+            disabled_reason: Some(SIBLING_PENDING.to_string()),
+            sibling_gated: true,
+            features: Vec::new(),
+        });
+        let idx = d.entries.len() - 1;
         d.cursor = idx;
         d.set_sibling_available(false);
         assert_eq!(d.advance(), AddPluginAdvance::Blocked);

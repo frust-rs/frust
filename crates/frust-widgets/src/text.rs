@@ -12,7 +12,8 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, TextContext, TextLayout, TextStyle,
+    FontFamily, FontStyle, FontWeight, LineHeight, TextAlign, TextContext, TextLayout,
+    TextOverflow, TextStyle,
 };
 use frust_theme::Theme;
 use kurbo::Size;
@@ -28,24 +29,27 @@ use peniko::Color;
 /// an app-supplied `.color()` always wins (precedence: explicit > theme >
 /// fallback). With no theme threaded in, the style's own color (black by default)
 /// is the unthemed fallback.
+///
+/// Part of the widget-authoring toolkit — re-exported as
+/// [`crate::authoring::ThemeTextColor`], which is the path a design system
+/// outside this crate names it by.
 // Every variant names an M3 "on_*" color role (`on_surface`/`on_primary`/
 // `on_surface_variant`/`on_primary_container`) — the shared `On` prefix
 // reflects the token vocabulary, not a naming smell.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ThemeTextColor {
+pub enum ThemeTextColor {
     /// `colors.on_surface` — the default for standalone/body text.
     OnSurface,
     /// `colors.on_primary` — a label painted over a `primary`-filled surface
     /// (used by [`crate::Button`]).
     OnPrimary,
     /// `colors.on_surface_variant` — a de-emphasized label/caption on the app
-    /// surface (used by [`crate::material::navbar`]'s unselected item labels
-    /// and [`crate::material::appbar`]'s trailing action slots' guidance).
+    /// surface (a navigation bar's unselected item labels, an app bar's
+    /// trailing action slots).
     OnSurfaceVariant,
     /// `colors.on_primary_container` — a label painted over a
-    /// `primary_container`-filled surface (used by
-    /// [`crate::material::fab`]'s extended-FAB visible label).
+    /// `primary_container`-filled surface (an extended FAB's visible label).
     OnPrimaryContainer,
     /// `colors.error` — a label reading as a destructive/error action (used
     /// by [`crate::Button`]'s `ButtonStyle::Danger`).
@@ -58,8 +62,14 @@ pub(crate) enum ThemeTextColor {
 /// string and hands the finished text in. Styling is applied with the
 /// [`TextView::size`]/[`TextView::color`]/[`TextView::weight`]/
 /// [`TextView::family`]/[`TextView::italic`]/[`TextView::letter_spacing`]/
-/// [`TextView::line_height`] builder methods, or in bulk with
-/// [`TextView::style`].
+/// [`TextView::line_height`]/[`TextView::align`] builder methods, or in bulk
+/// with [`TextView::style`].
+///
+/// [`TextView::align`] positions each wrapped line within the layout's
+/// width (centre/right-aligned paragraphs, not just the block's own
+/// position within its parent). It applies to this static leaf only; a
+/// live-edited `TextInput`'s text is always start-aligned — see
+/// `frust_text::TextEditor`'s docs.
 pub struct TextView {
     content: String,
     style: TextStyle,
@@ -69,6 +79,13 @@ pub struct TextView {
     color_explicit: bool,
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
+    /// The maximum number of lines to render, set via [`Self::max_lines`].
+    /// `None` (default) is unbounded — today's behavior.
+    max_lines: Option<usize>,
+    /// How content past `max_lines` is handled, set via [`Self::overflow`].
+    /// Only meaningful alongside `max_lines`; defaults to
+    /// [`TextOverflow::Clip`], a no-op with no `max_lines` set.
+    overflow: TextOverflow,
 }
 
 /// Create a text view rendering `content` with default styling (16px). Its glyph
@@ -80,6 +97,8 @@ pub fn text(content: impl Into<String>) -> TextView {
         style: TextStyle::default(),
         color_explicit: false,
         role: ThemeTextColor::OnSurface,
+        max_lines: None,
+        overflow: TextOverflow::default(),
     }
 }
 
@@ -128,6 +147,17 @@ impl TextView {
         self
     }
 
+    /// Set the paragraph alignment (start/center/end/left/right/justify).
+    ///
+    /// Only visible once the text wraps to more than one line under a
+    /// bounded width — a single-line layout's width already equals the
+    /// line's own content width, so every alignment renders identically to
+    /// the default ([`TextAlign::Start`]).
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.style.align = align;
+        self
+    }
+
     /// Replace the whole style in one call. Treated as an explicit color choice
     /// (the supplied style carries its own color), so it wins over the themed
     /// default.
@@ -137,9 +167,29 @@ impl TextView {
         self
     }
 
+    /// Cap the rendered line count. Content past the limit is handled per
+    /// [`Self::overflow`] (default [`TextOverflow::Clip`]: extra lines are
+    /// dropped, nothing else changes). `0` renders nothing.
+    pub fn max_lines(mut self, max_lines: usize) -> Self {
+        self.max_lines = Some(max_lines);
+        self
+    }
+
+    /// Set how content past [`Self::max_lines`] is handled. A no-op without
+    /// `max_lines` set — there is nothing to overflow past.
+    pub fn overflow(mut self, overflow: TextOverflow) -> Self {
+        self.overflow = overflow;
+        self
+    }
+
     /// Set the themed default color role used when no explicit color was set
-    /// (crate-internal: [`crate::Button`] labels their text `OnPrimary`).
-    pub(crate) fn themed_role(mut self, role: ThemeTextColor) -> Self {
+    /// (e.g. [`crate::Button`] labels its text [`ThemeTextColor::OnPrimary`] so it
+    /// reads against the primary-filled button).
+    ///
+    /// Part of the widget-authoring toolkit (see [`crate::authoring`]): it stays
+    /// an inherent method here — an inherent impl cannot be added from another
+    /// crate — while the role enum itself is re-exported from `authoring`.
+    pub fn themed_role(mut self, role: ThemeTextColor) -> Self {
         self.role = role;
         self
     }
@@ -154,6 +204,8 @@ impl<State: 'static> View<State> for TextView {
             style: self.style.clone(),
             color_explicit: self.color_explicit,
             role: self.role,
+            max_lines: self.max_lines,
+            overflow: self.overflow,
             layout: None,
             laid_out_max_width: None,
             laid_out_style: None,
@@ -185,6 +237,15 @@ impl<State: 'static> View<State> for TextView {
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
+        // Truncation inputs feed into shaping the same way content/style do
+        // (`layout_bounded` reshapes on overflow) — a change here must
+        // invalidate the cache exactly like those.
+        if prev.max_lines != self.max_lines || prev.overflow != self.overflow {
+            element.max_lines = self.max_lines;
+            element.overflow = self.overflow;
+            element.layout = None;
+            flags |= ChangeFlags::LAYOUT;
+        }
         flags
     }
 }
@@ -198,6 +259,10 @@ pub struct TextWidget {
     color_explicit: bool,
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
+    /// The maximum rendered line count — see [`TextView::max_lines`].
+    max_lines: Option<usize>,
+    /// How content past `max_lines` is handled — see [`TextView::overflow`].
+    overflow: TextOverflow,
     /// `None` until the first layout pass, or after a content/style change
     /// invalidates it.
     layout: Option<TextLayout>,
@@ -274,7 +339,13 @@ impl Widget for TextWidget {
         }
 
         let text_ctx = ctx.text_context::<TextContext>();
-        let layout = text_ctx.layout(&self.content, &style, max_width);
+        let layout = text_ctx.layout_bounded(
+            &self.content,
+            &style,
+            max_width,
+            self.max_lines,
+            self.overflow,
+        );
         let size = bc.constrain(layout.size());
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
@@ -313,7 +384,10 @@ mod tests {
             .family(FontFamily::named("Inter"))
             .letter_spacing(2.0)
             .line_height(LineHeight::Absolute(30.0))
-            .color(Color::from_rgb8(1, 2, 3));
+            .align(TextAlign::Center)
+            .color(Color::from_rgb8(1, 2, 3))
+            .max_lines(2)
+            .overflow(frust_text::TextOverflow::Ellipsis);
 
         assert_eq!(view.style.size, 20.0);
         assert_eq!(view.style.weight, FontWeight::MEDIUM);
@@ -321,7 +395,17 @@ mod tests {
         assert_eq!(view.style.family, FontFamily::named("Inter"));
         assert_eq!(view.style.letter_spacing, 2.0);
         assert_eq!(view.style.line_height, LineHeight::Absolute(30.0));
+        assert_eq!(view.style.align, TextAlign::Center);
         assert_eq!(view.style.color, Color::from_rgb8(1, 2, 3));
+        assert_eq!(view.max_lines, Some(2));
+        assert_eq!(view.overflow, frust_text::TextOverflow::Ellipsis);
+    }
+
+    #[test]
+    fn default_max_lines_and_overflow_are_unbounded_clip() {
+        let view = text("x");
+        assert_eq!(view.max_lines, None);
+        assert_eq!(view.overflow, frust_text::TextOverflow::Clip);
     }
 
     #[test]
@@ -384,7 +468,7 @@ mod tests {
 
     #[test]
     fn themed_text_defaults_to_on_surface() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert_eq!(
             painted_color(text("x"), Some(&theme)),
             theme.scheme().on_surface
@@ -393,14 +477,14 @@ mod tests {
 
     #[test]
     fn on_primary_role_resolves_to_on_primary() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnPrimary);
         assert_eq!(painted_color(view, Some(&theme)), theme.scheme().on_primary);
     }
 
     #[test]
     fn on_surface_variant_role_resolves_to_on_surface_variant() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnSurfaceVariant);
         assert_eq!(
             painted_color(view, Some(&theme)),
@@ -410,7 +494,7 @@ mod tests {
 
     #[test]
     fn on_primary_container_role_resolves_to_on_primary_container() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnPrimaryContainer);
         assert_eq!(
             painted_color(view, Some(&theme)),
@@ -420,7 +504,7 @@ mod tests {
 
     #[test]
     fn error_role_resolves_to_error() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::Error);
         assert_eq!(painted_color(view, Some(&theme)), theme.scheme().error);
     }
@@ -428,7 +512,7 @@ mod tests {
     #[test]
     fn explicit_color_wins_over_theme() {
         // Precedence: an app-set `.color()` beats the themed default.
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let custom = Color::from_rgb8(1, 2, 3);
         assert_eq!(painted_color(text("x").color(custom), Some(&theme)), custom);
     }
@@ -481,7 +565,164 @@ mod tests {
         assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
     }
 
-    // --- Theme-swap regression (review F1) ---
+    // --- Paragraph alignment, end-to-end through the widget ---
+
+    /// Builds, lays out, and paints `view` at `bc`, returning the painted
+    /// glyph runs (unlike [`painted_color`], which discards everything but
+    /// the brush).
+    fn painted_runs(view: TextView, bc: BoxConstraints) -> Vec<GlyphRun> {
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let mut rec = GlyphRunRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, bc.max());
+        widget.paint(&mut pctx, &mut rec);
+        rec.runs
+    }
+
+    /// A recording scene that captures every painted glyph run in full
+    /// (unlike [`GlyphRecorder`], which keeps only the brush color).
+    #[derive(Default)]
+    struct GlyphRunRecorder {
+        runs: Vec<GlyphRun>,
+    }
+
+    impl PaintScene for GlyphRunRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.runs.push(run);
+        }
+    }
+
+    /// Groups `runs`' glyphs by line (glyphs on the same line share a `y` —
+    /// `frust_text`'s coordinate contract) and returns each line's minimum
+    /// `x` (its rendered left edge), in line order.
+    fn line_min_x(runs: &[GlyphRun]) -> Vec<f32> {
+        let mut by_y: Vec<(f32, f32)> = Vec::new();
+        for run in runs {
+            for g in &run.glyphs {
+                match by_y.iter_mut().find(|(y, _)| (*y - g.y).abs() < 0.01) {
+                    Some((_, min_x)) => *min_x = min_x.min(g.x),
+                    None => by_y.push((g.y, g.x)),
+                }
+            }
+        }
+        by_y.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        by_y.into_iter().map(|(_, x)| x).collect()
+    }
+
+    #[test]
+    fn text_view_align_centers_and_right_aligns_wrapped_lines() {
+        // The end-to-end path the finding names: `Align(CENTER, text(..))`
+        // must actually centre every line, not just the block. Asserts on
+        // per-line origins (via the painted glyph runs), not on the style
+        // merely being set.
+        let content = "A\nBBBBBBBBBB";
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+
+        let start_x = line_min_x(&painted_runs(text(content), bc));
+        let center_x = line_min_x(&painted_runs(text(content).align(TextAlign::Center), bc));
+        let right_x = line_min_x(&painted_runs(text(content).align(TextAlign::Right), bc));
+
+        assert_eq!(start_x.len(), 2, "expected two hard-broken lines");
+        assert_eq!(center_x.len(), 2);
+        assert_eq!(right_x.len(), 2);
+
+        assert!(
+            start_x[0].abs() < 0.5 && start_x[1].abs() < 0.5,
+            "default (start) alignment must hug the left edge: {start_x:?}"
+        );
+        assert!(
+            center_x[0] > center_x[1] + 1.0,
+            "the shorter line must center further right than the longer one: {center_x:?}"
+        );
+        assert!(
+            right_x[0] > right_x[1] + 1.0,
+            "the shorter line's right-aligned left edge must sit further right: {right_x:?}"
+        );
+    }
+
+    // --- max_lines / TextOverflow, end-to-end through the widget ---
+
+    use frust_text::TextOverflow;
+
+    #[test]
+    fn max_lines_truncates_wrapped_content_to_one_line() {
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let unbounded = line_min_x(&painted_runs(text(content), bc));
+        assert!(
+            unbounded.len() > 1,
+            "fixture sanity: expected this phrase to wrap at 80px, got {} line(s)",
+            unbounded.len()
+        );
+
+        let bounded = line_min_x(&painted_runs(
+            text(content).max_lines(1).overflow(TextOverflow::Ellipsis),
+            bc,
+        ));
+        assert_eq!(
+            bounded.len(),
+            1,
+            "max_lines(1) must render exactly one line"
+        );
+    }
+
+    #[test]
+    fn clip_overflow_also_drops_extra_lines() {
+        // Clip is the default overflow — `.max_lines()` alone must already
+        // cap the rendered line count, with no `.overflow()` call needed.
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let clipped = line_min_x(&painted_runs(text(content).max_lines(1), bc));
+        assert_eq!(clipped.len(), 1);
+    }
+
+    #[test]
+    fn changing_max_lines_between_rebuilds_invalidates_the_cached_shape() {
+        // `TextWidget::layout`'s fast path skips reshaping when nothing that
+        // affects shaping changed; `max_lines`/`overflow` must be wired into
+        // that invalidation the same way content/style already are, or a
+        // rebuild that only changes the line cap would keep painting the
+        // stale (differently-truncated) layout.
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let view_a = text(content).max_lines(1).overflow(TextOverflow::Ellipsis);
+        let mut widget = View::<()>::build(&view_a, &mut frust_core::BuildCtx::new(&mut 0u64));
+        {
+            let mut tcx = TextContext::new();
+            let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            widget.layout(&mut lctx, &bc);
+        }
+
+        let view_b = text(content).max_lines(2).overflow(TextOverflow::Ellipsis);
+        View::<()>::rebuild(
+            &view_b,
+            &view_a,
+            &mut widget,
+            &mut frust_core::BuildCtx::new(&mut 0u64),
+        );
+
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let mut rec = GlyphRunRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, bc.max());
+        widget.paint(&mut pctx, &mut rec);
+        assert_eq!(
+            line_min_x(&rec.runs).len(),
+            2,
+            "the rebuild must have re-shaped against the new max_lines(2), \
+             not replayed the max_lines(1) cache"
+        );
+    }
+
+    // --- Theme-swap regression ---
     //
     // `effective_style` (above) resolves the themed color at LAYOUT time and
     // bakes it into the cached `TextLayout`'s glyph brush; `paint` only replays
@@ -504,7 +745,7 @@ mod tests {
         let mut root: RenderRoot<(), TextView> = RenderRoot::new();
         let mut state = ();
 
-        let mut theme_a = Theme::m3_baseline();
+        let mut theme_a = Theme::neutral();
         theme_a.brightness = frust_theme::Brightness::Light;
         let color_a = theme_a.scheme().on_primary;
         root.set_theme(Box::new(theme_a));
@@ -525,7 +766,7 @@ mod tests {
         // mirroring a live appearance flip. Every shell re-lays-out/repaints
         // unconditionally on the next frame regardless of `rebuild`'s own
         // ChangeFlags, so drive layout/paint again here without a view change.
-        let mut theme_b = Theme::m3_baseline();
+        let mut theme_b = Theme::neutral();
         theme_b.brightness = frust_theme::Brightness::Dark;
         let color_b = theme_b.scheme().on_primary;
         assert_ne!(

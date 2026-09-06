@@ -25,21 +25,25 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # NOTE: temporary path dependencies pointing at the Frust repo checkout that
 # owns this benchmark (the `frust_path` mechanism is explicitly
 # temporary). Once Frust crates are published, these become version deps.
+#
+# `frust` is now the ONLY framework line this bench ships in production. Every
+# scenario's hand-rolled `View`/`Widget` pair (S1's `BubbleChart`, S2/S5's
+# scripted virtualized lists, S4/S6's paint-driven animators, ...) reaches
+# `BoxConstraints`/`LayoutCtx`/`PaintCtx`/`View`/`Widget`/... through
+# `frust::authoring`, text shaping through `frust::authoring::text` (the
+# `TextContext` the shell threads through `LayoutCtx`), and the handful of
+# geometry/color types `authoring` doesn't lift by name (e.g. S1's
+# `Circle`/`Gradient`/`DynamicColor`) through the `frust::kurbo`/`frust::peniko`
+# long-tail valves — nothing production pins a framework internal any more.
 frust = { path = "../../crates/frust" }
 
-# `frust-core` + `kurbo` + `peniko`: the facade's documented "low-level escape
-# hatch" (see `docs/ARCHITECTURE.md`), the same production dependency
-# `examples/huddle` carries. Here it backs the S1 animation-storm scenario's
-# hand-rolled `BubbleChart` `View`/`Widget` pair (originally a copy of the
-# now-removed `examples/bubblebench`'s `chart.rs`, painting gradient circles +
-# shaped text through `PaintScene::fill_path`/`stroke_path`/`draw_glyph_run`)
-# which no facade widget covers. `frust-text` is the shaping surface that
-# chart drives from layout (the same `TextContext` the shell threads through
-# `LayoutCtx`).
-frust-core = { path = "../../crates/frust-core" }
-frust-text = { path = "../../crates/frust-text" }
-kurbo = "0.13.1"
-peniko = "0.6.1"
+# frust-material: the one Material 3 dark baseline `BenchApp::init` forces
+# app-wide (matching S1's `0xFF0D1421` canvas) — no other Material/Cupertino/
+# Glyph widget is used anywhere in this bench. The catalog feature graph the
+# baseline used to reach through `frust` directly was dissolved (see
+# docs/DEVELOPMENT.md's Version-Pin Policy); the design-system plugin crates
+# carry it now.
+frust-material = { path = "../../plugins/material" }
 
 # `frust-shell-common::perf`: the scenario-marker API
 # (`mark_scenario_start`/`mark_scenario_end`) the scenario driver brackets
@@ -57,6 +61,20 @@ frust-shell-common = { path = "../../crates/frust-shell-common" }
 # Conventions).
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 
+# `frust-database`: used by the DB op-latency scenarios (`d1_db_write.rs`,
+# `d2_db_read.rs` — PROTOCOL.md §9). Same directly-added-plugin model as
+# `frust-shared-preferences` above; default features (`engine-sqlite`) are
+# enough today — the crate's own default-engine resolution is what lets a
+# future `engine-turso` column reach these scenarios with no scenario-code
+# change (see `plugins/database/src/lib.rs`'s module doc, *Engines*).
+#
+# Optional, behind the default-ON `db` feature below: it statically links a
+# bundled SQLite (~1 MB of C in the release `libfrustbench.so`) that only the
+# two `d*` scenarios ever call, so the S1–S8 frame-class matrix builds it out
+# with `--no-default-features`. Default-on keeps every existing invocation
+# (`frust run`, `frust build`, `cargo test`, the harness) unchanged.
+frust-database = { path = "../../plugins/database", optional = true }
+
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
 # `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
@@ -71,10 +89,19 @@ frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 # `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
-# Dev-only: the headless tests drive Frust's `RenderRoot` directly (the
-# desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
-# same harness shape as `examples/huddle`'s own headless `tests/*.rs`.
+# Test-harness-only, NOT an escape hatch: `tests/driver.rs`'s headless tests
+# drive Frust's `RenderRoot` directly — the desktop shell's own
+# rebuild/layout/paint seam, no GPU, no window, the same harness shape as
+# `examples/huddle`'s own headless `tests/*.rs`. `RenderRoot` is deliberately
+# not in `frust::authoring` (it is shell-owned, not something an app
+# constructs), so the harness still names `frust-core`/`frust-scene`/
+# `frust-text`/`kurbo`/`peniko` the long way. Production code (every
+# `src/scenarios/*.rs` file) names none of them any more.
 [dev-dependencies]
+frust-core = { path = "../../crates/frust-core" }
+frust-text = { path = "../../crates/frust-text" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
@@ -85,6 +112,31 @@ reactive_graph = "0.2"
 # Version-Pin Policy hand-sync rule) — see either of those manifests for the
 # full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
 [features]
+# `db` ON by default so every existing invocation — `frust run`, `frust build
+# apk/ios`, `cargo test`, the benchmark harness — keeps building all ten
+# scenarios with no new flag. Only a deliberate `--no-default-features` build
+# drops it.
+default = ["db"]
+
+# The DB op-latency class (`d1`/`d2`, PROTOCOL.md §9): the `frust-database`
+# dependency, its bundled SQLite, and the two scenario modules + their
+# `SCENARIOS` registry entries (`src/scenarios/mod.rs`).
+#
+# Turning it OFF yields the S1–S8 frame-class app used for the app-size
+# matrix. There is no CLI route to a no-`db` APK today: `frust build`'s
+# Gradle plumbing forwards `--features` only (`-Pfrust.cargoFeatures`,
+# base64) and has no `--no-default-features` knob, so build the S1–S8 arm
+# with cargo-ndk directly:
+#
+#   cd benchmarks/frust_bench
+#   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs \
+#       build --release --no-default-features --features lean
+#
+# and, for a packaged APK, follow it with
+# `./android/gradlew -p android assembleRelease -x cargoNdkBuild`, which
+# packages the jniLibs that command just wrote instead of rebuilding them.
+db = ["dep:frust-database"]
+
 # Release-lean log ceiling — see the `log` dependency above for why this is a
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit
@@ -109,22 +161,13 @@ debug = true
 strip = "none"
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline translation runs at
+# wgpu/naga's shader-pipeline translation runs at
 # `opt-level = 0` by default, slow enough on a physical iOS device that the OS
 # SIGKILLs a debug `frust run` before the synchronous launch-time shader
 # compile finishes. This app's own code stays at the default dev opt-level
 # (fast incremental rebuilds) — only these dependencies are bumped. See
 # Frust's own root `Cargo.toml` for the full rationale (the same override,
 # kept in sync).
-[profile.dev.package.vello]
-opt-level = 2
-
-[profile.dev.package.vello_shaders]
-opt-level = 2
-
-[profile.dev.package.vello_encoding]
-opt-level = 2
-
 [profile.dev.package.wgpu]
 opt-level = 2
 

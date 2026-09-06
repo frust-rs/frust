@@ -1,0 +1,11 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: buffer_to_string(terminal.backend().buffer())
+---
+ Frame Timing  FPS 79.7 · p50 12.6ms · p95 13.0ms · p99 13.1ms · jank 0 (0.0%)                      
+▅▆▆▆▆▆▇▇▇▇▇█                                                                                        
+████████████                                                                                        
+████████████                                                                                        
+ 0└────────────────────────────────────────────────────────────────12-frame ring · live (frame #12) 
+ Frame #12 · total 13.1ms                                                                           
+ breakdown unavailable — log fallback carries frame totals only

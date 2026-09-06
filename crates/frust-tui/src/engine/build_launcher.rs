@@ -1,12 +1,12 @@
 //! The build-launcher modal: artifact type
-//! (`apk`/`appbundle`/`ios`/`ipa`, iOS kinds only where host-appropriate) +
-//! the `BuildInfo` funnel (mode/flavor/defines) plus artifact-specific flags
-//! (split-per-ABI, iOS simulator/codesign, `.ipa` export method), resolving
-//! into a [`BuildSpec`] the runner drives directly through `frust-drive`'s
-//! `android_build`/`ios_build` pipelines (never shelling out itself) as a
-//! session reusing the same tab/log-view machinery every other session
-//! uses — see `crate::runner`'s
-//! `Effect::LaunchBuild` enactment.
+//! (`apk`/`appbundle`/`ios`/`ipa`/the host's own desktop bundle, iOS and
+//! desktop kinds only where host-appropriate) + the `BuildInfo` funnel
+//! (mode/flavor/defines) plus artifact-specific flags (split-per-ABI, iOS
+//! simulator/codesign, `.ipa` export method), resolving into a [`BuildSpec`]
+//! the runner drives directly through `frust-drive`'s
+//! `android_build`/`ios_build`/`desktop_build` pipelines (never shelling out
+//! itself) as a session reusing the same tab/log-view machinery every other
+//! session uses — see `crate::runner`'s `Effect::LaunchBuild` enactment.
 //!
 //! Everything here is plain data + pure transitions — no threads, no
 //! process — so the modal's focus/toggle/launch-spec logic is unit-tested
@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
+use frust_drive::desktop_build::DesktopBundleTarget;
 
 /// Android ABI names `frust build apk`'s `--target-platform` maps to —
 /// `frust-drive`'s own copy (`android_build::tasks::ALL_ABIS`) is
@@ -38,6 +39,12 @@ pub enum ArtifactKind {
     Ios,
     /// An archived + exported iOS `.ipa`.
     Ipa,
+    /// A macOS `.app` bundle (`dist/macos`) — macOS hosts only.
+    Macos,
+    /// A Windows `.exe` layout (`dist/windows`) — Windows hosts only.
+    Windows,
+    /// A Linux bundle directory (`dist/linux`) — Linux hosts only.
+    Linux,
 }
 
 impl ArtifactKind {
@@ -48,17 +55,53 @@ impl ArtifactKind {
             ArtifactKind::Appbundle => "appbundle",
             ArtifactKind::Ios => "ios",
             ArtifactKind::Ipa => "ipa",
+            ArtifactKind::Macos => "macos",
+            ArtifactKind::Windows => "windows",
+            ArtifactKind::Linux => "linux",
+        }
+    }
+
+    /// The desktop bundle this kind builds, or `None` for a mobile kind.
+    pub fn desktop_target(self) -> Option<DesktopBundleTarget> {
+        match self {
+            ArtifactKind::Macos => Some(DesktopBundleTarget::Macos),
+            ArtifactKind::Windows => Some(DesktopBundleTarget::Windows),
+            ArtifactKind::Linux => Some(DesktopBundleTarget::Linux),
+            ArtifactKind::Apk | ArtifactKind::Appbundle | ArtifactKind::Ios | ArtifactKind::Ipa => {
+                None
+            }
+        }
+    }
+
+    /// The kind that builds `target`.
+    fn from_desktop_target(target: DesktopBundleTarget) -> ArtifactKind {
+        match target {
+            DesktopBundleTarget::Macos => ArtifactKind::Macos,
+            DesktopBundleTarget::Windows => ArtifactKind::Windows,
+            DesktopBundleTarget::Linux => ArtifactKind::Linux,
         }
     }
 
     /// Every kind buildable from this host: Android kinds always, iOS kinds
     /// only on a macOS host (Xcode) — mirrors `frust build`'s
-    /// `require_macos_host` gate (`frust-cli`'s `commands/build.rs`).
+    /// `require_macos_host` gate (`frust-cli`'s `commands/build.rs`) — and
+    /// **exactly one** desktop kind, this host's own.
+    ///
+    /// Desktop bundles are host-locked by the pipeline itself
+    /// (`DesktopBundleTarget::supported_on_host`): a macOS `.app` can only be
+    /// assembled on macOS, a `.exe` only on Windows. Asking the drive which
+    /// target this host owns — rather than listing all three and refusing two
+    /// of them at launch time — is why the selector can never reach a build
+    /// that is guaranteed to fail. A host with no desktop layout of its own (a
+    /// BSD) offers no desktop kind at all.
     pub fn available() -> Vec<ArtifactKind> {
         let mut kinds = vec![ArtifactKind::Apk, ArtifactKind::Appbundle];
         if cfg!(target_os = "macos") {
             kinds.push(ArtifactKind::Ios);
             kinds.push(ArtifactKind::Ipa);
+        }
+        if let Some(host) = DesktopBundleTarget::host() {
+            kinds.push(ArtifactKind::from_desktop_target(host));
         }
         kinds
     }
@@ -107,6 +150,13 @@ pub enum BuildTargetSpec {
     IosApp { simulator: bool, codesign: bool },
     /// `IosArtifact::Ipa`.
     Ipa { export_method: String },
+    /// A `frust-drive` `desktop_build` bundle — macOS, Windows or Linux,
+    /// carried as the drive's own [`DesktopBundleTarget`] rather than
+    /// re-declared as three variants here: unlike the Android/iOS artifact
+    /// enums (which the modal re-shapes because it resolves the ABI list /
+    /// export method itself), this one carries no extra resolved state, and
+    /// the host lock the runner enforces lives on that type.
+    DesktopBundle { target: DesktopBundleTarget },
 }
 
 /// A fully-resolved build launch request — what [`BuildLauncher::launch`]
@@ -175,7 +225,14 @@ impl BuildLauncher {
         ];
         match self.kind {
             ArtifactKind::Apk => order.push(BuildFocus::SplitPerAbi),
-            ArtifactKind::Appbundle => {}
+            // A desktop bundle takes its every knob from `frust.toml`'s
+            // `[desktop]`/`[macos]`/`[windows]`/`[linux]` sections and the
+            // project's own template files, so the modal has nothing extra to
+            // ask for — mode/flavor/defines and go.
+            ArtifactKind::Appbundle
+            | ArtifactKind::Macos
+            | ArtifactKind::Windows
+            | ArtifactKind::Linux => {}
             ArtifactKind::Ios => {
                 order.push(BuildFocus::Simulator);
                 order.push(BuildFocus::NoCodesign);
@@ -314,6 +371,16 @@ impl BuildLauncher {
                     }
                 },
             },
+            ArtifactKind::Macos | ArtifactKind::Windows | ArtifactKind::Linux => {
+                BuildTargetSpec::DesktopBundle {
+                    // Infallible for these three arms by construction —
+                    // `desktop_target` answers `None` only for a mobile kind.
+                    target: self
+                        .kind
+                        .desktop_target()
+                        .expect("a desktop kind always names a bundle target"),
+                }
+            }
         };
         BuildSpec {
             project_root: self.project_root.clone(),
@@ -368,6 +435,61 @@ mod tests {
         let kinds = ArtifactKind::available();
         assert!(!kinds.contains(&ArtifactKind::Ios));
         assert!(!kinds.contains(&ArtifactKind::Ipa));
+    }
+
+    /// The host lock, from the selector's side: exactly one desktop kind is
+    /// offered — this host's — and the other two are never reachable, so the
+    /// modal can't launch a build `desktop_build` would refuse outright.
+    #[test]
+    fn exactly_the_hosts_own_desktop_kind_is_offered() {
+        let kinds = ArtifactKind::available();
+        let desktop: Vec<ArtifactKind> = kinds
+            .iter()
+            .copied()
+            .filter(|k| k.desktop_target().is_some())
+            .collect();
+        match DesktopBundleTarget::host() {
+            Some(host) => {
+                assert_eq!(desktop.len(), 1, "{kinds:?}");
+                assert_eq!(desktop[0].desktop_target(), Some(host));
+                assert!(host.supported_on_host());
+            }
+            // A host with no desktop bundle layout of its own offers none.
+            None => assert!(desktop.is_empty(), "{kinds:?}"),
+        }
+    }
+
+    #[test]
+    fn a_desktop_kind_carries_no_kind_conditional_rows() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            return;
+        };
+        let mut l = launcher();
+        l.kind = ArtifactKind::from_desktop_target(host);
+        assert_eq!(
+            l.focus_order(),
+            vec![
+                BuildFocus::Kind,
+                BuildFocus::Mode,
+                BuildFocus::Flavor,
+                BuildFocus::Defines,
+                BuildFocus::Launch,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_spec_desktop_bundle_names_the_hosts_target() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            return;
+        };
+        let mut l = launcher();
+        l.kind = ArtifactKind::from_desktop_target(host);
+        l.mode = BuildMode::Release;
+        let spec = l.build_spec();
+        assert_eq!(spec.target, BuildTargetSpec::DesktopBundle { target: host });
+        assert_eq!(spec.info.mode, BuildMode::Release);
+        assert_eq!(spec.project_root, PathBuf::from("/tmp/huddle"));
     }
 
     #[test]

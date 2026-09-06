@@ -442,7 +442,7 @@ impl<State: 'static> View<State> for ShieldView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ShieldWidget {
         ShieldWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
         }
     }
 
@@ -452,11 +452,11 @@ impl<State: 'static> View<State> for ShieldView<State> {
         element: &mut ShieldWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
     fn teardown(&self, element: &mut ShieldWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -477,7 +477,7 @@ impl Widget for ShieldWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -485,6 +485,8 @@ impl Widget for ShieldWidget {
         // Conventions — a container that skips this drops its whole subtree).
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]
@@ -747,7 +749,7 @@ mod tests {
 
     #[test]
     fn a_resolved_translucency_downgrade_stops_the_punch_in_the_real_display_list() {
-        // Review finding M1: the shells now push the surface's RESOLVED
+        // The shells push the surface's RESOLVED
         // translucency (`SurfaceRenderer::surface_resolved_translucent`), not
         // the request latch, so a surface that asked for translucency and
         // fell back to an opaque swapchain flips this to `false` — and the

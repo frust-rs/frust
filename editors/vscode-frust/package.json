@@ -1,0 +1,84 @@
+{
+  "name": "vscode-frust",
+  "displayName": "Frust",
+  "description": "Debug adapter registration for Frust apps: connects to the embedded frust TUI DAP server.",
+  "version": "0.1.0",
+  "publisher": "f0x-it",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:frust"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Frust",
+      "properties": {
+        "frust.dapPort": {
+          "type": "number",
+          "default": 4849,
+          "description": "Port that the embedded frust TUI DAP server listens on. Configure via the TUI's DAP settings dialog."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "frust",
+        "label": "Frust",
+        "languages": [
+          "rust"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "projectRoot": {
+                "type": "string",
+                "description": "Path to the Frust project root. Defaults to the workspace folder.",
+                "default": "${workspaceFolder}"
+              },
+              "device": {
+                "type": "string",
+                "description": "Target device ID to run/debug on. Defaults to the desktop preview when omitted."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "debug",
+                  "profile",
+                  "release"
+                ],
+                "description": "Build mode to launch.",
+                "default": "debug"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "frust",
+            "request": "launch",
+            "name": "Frust (TUI DAP)",
+            "debugServer": 4849
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Frust (TUI DAP)",
+            "description": "Connect to the embedded frust TUI DAP server.",
+            "body": {
+              "type": "frust",
+              "request": "launch",
+              "name": "Frust (TUI DAP)",
+              "debugServer": 4849
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

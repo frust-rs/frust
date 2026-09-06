@@ -1,0 +1,5 @@
+-- stats.py (discarding first 2 runs, per protocol convention) --
+== flutter s3 ==
+frames: 923 total, 923 active, 0 skipped
+p50=19.22ms  p95=33.85ms  p99=35.66ms  worst=90.35ms
+missed_60hz=608 (budget 16.67ms)  missed_120hz=905 (budget 8.33ms)

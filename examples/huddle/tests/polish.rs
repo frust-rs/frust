@@ -119,11 +119,11 @@ fn mount_feed(
     (root, state, logic, tcx, t_ms, scene)
 }
 
-/// The topmost (other-user) message row anchor. As of device-parity-round2 task
-/// R2 the feed rows are FLAT (no `filled_card`/`elevated_card` bubble
-/// background), so the row's only recorded rounded chrome is its leading 40px
-/// avatar disc — the leftmost small rounded rect in the content region. Its `y`
-/// is the row's top, a safe row target.
+/// The topmost (other-user) message row anchor. The feed rows are FLAT (no
+/// `filled_card`/`elevated_card` bubble background), so the row's only
+/// recorded rounded chrome is its leading 40px avatar disc — the leftmost
+/// small rounded rect in the content region. Its `y` is the row's top, a
+/// safe row target.
 fn first_bubble(scene: &RecScene) -> (Point, Size) {
     scene
         .rounded

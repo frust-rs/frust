@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "zabin": {
+      "type": "http",
+      "url": "${ZABIN_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${ZABIN_MCP_TOKEN}"
+      }
+    },
+    "zabin-worker": {
+      "type": "http",
+      "url": "${ZABIN_MCP_WORKER_URL}",
+      "headers": {
+        "Authorization": "Bearer ${ZABIN_MCP_WORKER_TOKEN}"
+      }
+    }
+  }
+}

@@ -8,7 +8,7 @@
 //!
 //! Rebuild only — no layout/paint, so no `TextContext` is needed.
 
-use frust::{AnyView, Brightness, Component, DesignLanguage, Theme};
+use frust::{AnyView, Brightness, Component, DesignLanguage};
 use frust_core::RenderRoot;
 
 use huddle::{HuddleApp, HuddleState};
@@ -53,9 +53,13 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
 
     for (design, brightness) in combos {
         let theme = match design {
-            DesignLanguage::Material3 => Theme::m3_baseline(),
-            DesignLanguage::Cupertino => Theme::cupertino_baseline(),
-            DesignLanguage::Glyph => Theme::glyph_baseline(),
+            DesignLanguage::Material3 => frust_material::baseline(),
+            DesignLanguage::Cupertino => frust_cupertino::baseline(),
+            DesignLanguage::Glyph => frust_glyph::baseline(),
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                frust_material::baseline()
+            }
         }
         .with_brightness(brightness);
         frust::provide_context(theme);

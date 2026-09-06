@@ -18,13 +18,20 @@
 //! sequence; and the keyed-identity headline — adding three notes and deleting
 //! the *middle* one by its own Delete button removes the right row, not
 //! whatever index it sat at. Decode-once is asserted across many frames.
+//!
+//! A second fixture (see *Disabled and obscured fields*, below) drives the same
+//! event seam over a bare `text_input` to cover
+//! [`frust::TextInputView::enabled`]/[`frust::TextInputView::obscured`]: a
+//! disabled field refuses focus and stays inert through the whole
+//! pointer/key/IME matrix, and an obscured field paints bullets while every
+//! edit still lands on the real value — including across a multi-byte grapheme.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use frust::{
-    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row, SizedBox, any,
-    keyed, scroll_view, text, text_input,
+    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row, SizedBox,
+    TextInputView, any, keyed, scroll_view, text, text_input,
 };
 use frust_core::{
     AnyView, FrameTime, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene,
@@ -559,4 +566,255 @@ fn keyed_delete_removes_the_correct_middle_row() {
         2,
         "two note rows remain after the middle delete"
     );
+}
+
+// --- Disabled and obscured fields ---
+
+/// A minimal one-field app state: the controlled value plus an `on_change`
+/// counter, so a test can tell "no edit happened" from "an edit was reverted".
+#[derive(Default)]
+struct FieldState {
+    value: String,
+    changes: u32,
+}
+
+/// A bare controlled `text_input` with `enabled`/`obscured` dialled in.
+fn field_logic(
+    enabled: bool,
+    obscured: bool,
+) -> impl FnMut(&mut FieldState) -> TextInputView<FieldState> {
+    move |state: &mut FieldState| {
+        text_input(state.value.clone(), |s: &mut FieldState, v: String| {
+            s.changes += 1;
+            s.value = v;
+        })
+        .placeholder("secret")
+        .enabled(enabled)
+        .obscured(obscured)
+    }
+}
+
+/// Build + lay out a root over `logic`, ready for events.
+fn field_root(
+    logic: &mut impl FnMut(&mut FieldState) -> TextInputView<FieldState>,
+    state: &mut FieldState,
+    tcx: &mut TextContext,
+) -> RenderRoot<FieldState, TextInputView<FieldState>> {
+    let mut root = RenderRoot::new();
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(Size::new(W, H), tcx_any);
+    root
+}
+
+/// Records the glyph ids of every painted run, in order — enough to prove two
+/// fields shape the *same characters* without a GPU.
+#[derive(Default)]
+struct GlyphIdScene {
+    ids: Vec<u32>,
+}
+
+impl PaintScene for GlyphIdScene {
+    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+    fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+    fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    fn draw_glyph_run(&mut self, run: GlyphRun) {
+        self.ids.extend(run.glyphs.iter().map(|g| g.id));
+    }
+}
+
+/// Paint `root` and return every painted glyph id.
+fn glyph_ids(root: &mut RenderRoot<FieldState, TextInputView<FieldState>>) -> Vec<u32> {
+    let mut scene = GlyphIdScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+    scene.ids
+}
+
+#[test]
+fn disabled_field_is_inert_through_the_whole_input_matrix() {
+    let mut tcx = TextContext::new();
+    let mut state = FieldState::default();
+    let mut logic = field_logic(false, false);
+    let mut root = field_root(&mut logic, &mut state, &mut tcx);
+
+    // A tap neither focuses nor captures, so nothing is consumed.
+    let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 20.0));
+    assert!(
+        !outcome.handled,
+        "a disabled field consumes no pointer event"
+    );
+    assert!(!root.is_focus_active(), "…and never takes focus");
+    assert!(
+        root.ime_state().is_none(),
+        "…so no IME surface is published"
+    );
+
+    // Keys and IME are focus-routed, so they cannot reach an unfocusable field;
+    // injecting them anyway must still change nothing.
+    for event in [
+        ch("x"),
+        named(NamedKey::Backspace, Modifiers::default()),
+        named(NamedKey::Enter, Modifiers::default()),
+        InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        InputEvent::Ime(ImeEvent::Compose {
+            text: "ni".to_string(),
+            cursor: Some((2, 2)),
+        }),
+    ] {
+        root.event(&mut state, &event);
+    }
+    assert_eq!(state.value, "", "a disabled field is inert to every input");
+    assert_eq!(state.changes, 0, "on_change never fires");
+
+    // Drag-selection is armed by the same `Down` we refused, so a Move/Up pair
+    // is inert too.
+    root.event(&mut state, &pointer(PointerPhase::Move, 60.0, 20.0));
+    root.event(&mut state, &pointer(PointerPhase::Up, 60.0, 20.0));
+    assert_eq!(state.changes, 0);
+}
+
+#[test]
+fn disabling_a_focused_field_drops_the_keyboard_and_releases_focus() {
+    let mut tcx = TextContext::new();
+    let mut state = FieldState::default();
+    let mut enabled = field_logic(true, false);
+    let mut root = field_root(&mut enabled, &mut state, &mut tcx);
+
+    root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 20.0));
+    root.event(&mut state, &ch("h"));
+    assert_eq!(state.value, "h");
+    assert!(root.ime_state().expect("focused").active);
+
+    // Flip to disabled on a rebuild while the field is focused.
+    let mut disabled = field_logic(false, false);
+    root.rebuild(&mut disabled, &mut state);
+    let tcx_any: &mut dyn Any = &mut tcx;
+    root.layout_with_text(Size::new(W, H), tcx_any);
+    let mut scene = RecScene::default();
+    let outcome = root.paint(&mut scene, FrameTime::ZERO);
+
+    assert!(
+        root.ime_state().is_none(),
+        "the next paint publishes an inactive IME surface, which releases the session \
+         (the shells serialise `None` to that same inactive wire form, so the keyboard \
+         still drops — see `RenderRoot::ime_state`)"
+    );
+    assert!(
+        !root.is_focus_active(),
+        "the released session takes the root's focus mirror with it"
+    );
+    assert!(
+        !outcome.needs_frame,
+        "a disabled field stops asking for caret-blink frames"
+    );
+
+    // The first event to reach the field releases the stranded focus path, and
+    // edits nothing on its way out.
+    root.event(&mut state, &ch("i"));
+    assert!(!root.is_focus_active(), "focus is released");
+    assert!(root.ime_state().is_none());
+    assert_eq!(state.value, "h", "the key never edited the field");
+    assert_eq!(state.changes, 1, "only the pre-disable keystroke counted");
+}
+
+#[test]
+fn obscured_field_paints_bullets_while_editing_the_real_value() {
+    let mut tcx = TextContext::new();
+    let mut state = FieldState::default();
+    let mut logic = field_logic(true, true);
+    let mut root = field_root(&mut logic, &mut state, &mut tcx);
+
+    // Type a secret containing a 4-byte grapheme.
+    root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 20.0));
+    for c in "pa\u{1F600}ss".chars() {
+        root.event(&mut state, &ch(&c.to_string()));
+    }
+    assert_eq!(
+        state.value, "pa\u{1F600}ss",
+        "the app still receives the real text through on_change"
+    );
+    assert_eq!(
+        root.ime_state().expect("focused").editing.text,
+        "pa\u{1F600}ss",
+        "the platform IME mirror is fed the real text (documented consequence)"
+    );
+
+    // What is *painted* is one bullet per char — byte-identical to a clear
+    // field holding the equivalent bullet string, and different from a clear
+    // field holding the secret itself.
+    let secret_ids = glyph_ids(&mut root);
+
+    let mut clear_logic = field_logic(true, false);
+    let mut bullets_state = FieldState {
+        value: "\u{2022}".repeat(5),
+        ..FieldState::default()
+    };
+    let mut bullets = field_root(&mut clear_logic, &mut bullets_state, &mut tcx);
+    let mut clear_state = FieldState {
+        value: "pa\u{1F600}ss".to_string(),
+        ..FieldState::default()
+    };
+    let mut clear = field_root(&mut clear_logic, &mut clear_state, &mut tcx);
+
+    assert_eq!(
+        secret_ids,
+        glyph_ids(&mut bullets),
+        "an obscured field paints one U+2022 per character (the emoji included)"
+    );
+    assert_ne!(
+        secret_ids,
+        glyph_ids(&mut clear),
+        "…and never the real characters"
+    );
+}
+
+#[test]
+fn obscured_editing_matches_a_clear_field_across_a_multi_byte_grapheme() {
+    let mut tcx = TextContext::new();
+    let mut secret_state = FieldState::default();
+    let mut secret_logic = field_logic(true, true);
+    let mut secret = field_root(&mut secret_logic, &mut secret_state, &mut tcx);
+    let mut clear_state = FieldState::default();
+    let mut clear_logic = field_logic(true, false);
+    let mut clear = field_root(&mut clear_logic, &mut clear_state, &mut tcx);
+
+    let plain = Modifiers::default();
+    let meta = Modifiers {
+        meta: true,
+        ..Modifiers::default()
+    };
+    // Caret motion over a 4-byte grapheme, a backspace that must remove the
+    // whole emoji, and select-all + replace — masking must not perturb any of
+    // the index arithmetic these depend on.
+    let script = vec![
+        pointer(PointerPhase::Down, 20.0, 20.0),
+        ch("a"),
+        ch("\u{1F600}"),
+        ch("b"),
+        named(NamedKey::ArrowLeft, plain),
+        named(NamedKey::Backspace, plain),
+        named(NamedKey::End, plain),
+        ch("z"),
+        InputEvent::Key(KeyEvent {
+            key: Key::Character("a".to_string()),
+            modifiers: meta,
+            repeat: false,
+        }),
+        ch("q"),
+    ];
+    for (i, event) in script.iter().enumerate() {
+        secret.event(&mut secret_state, event);
+        clear.event(&mut clear_state, event);
+        assert_eq!(
+            secret_state.value, clear_state.value,
+            "obscured editing diverged from clear editing at step {i}"
+        );
+        assert_eq!(secret_state.changes, clear_state.changes);
+    }
+    assert_eq!(
+        secret_state.value, "q",
+        "select-all + type replaced the field"
+    );
+    // The backspace mid-script removed the emoji as one grapheme in both.
+    assert_eq!(clear_state.value, "q");
 }

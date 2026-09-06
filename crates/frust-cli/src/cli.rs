@@ -15,8 +15,13 @@ pub struct Cli {
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Subcommand to run. With none given, `frust` opens the TUI workbench
+    /// when both stdin and stdout are terminals; otherwise it prints this
+    /// help and exits 2 (see `main.rs`'s `default_command` and the `None`
+    /// branch in `main` that resolves this field before ever calling
+    /// `commands::dispatch`).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -48,8 +53,11 @@ pub enum Command {
         template_dir: Option<String>,
 
         /// Override the computed path to the `frust` facade crate
-        /// (development only; a temporary `frust_path`
-        /// mechanism).
+        /// (development only; a temporary `frust_path` mechanism).
+        /// Accepts either the facade crate itself (a directory whose
+        /// Cargo.toml names package `frust`, e.g. `<repo>/crates/frust`)
+        /// or that repo's root (e.g. `<repo>`), which is normalised to the
+        /// nested facade crate directory; anything else is rejected.
         #[arg(long = "frust-path", value_name = "PATH", hide = true)]
         frust_path: Option<String>,
 
@@ -69,13 +77,29 @@ pub enum Command {
         /// Opt-in clean-architecture variant: scaffolds a controller +
         /// use-case + `async_view` screen wired to `clean-signals-frust`
         /// instead of the default notes-app demo.
-        /// **Dev-machine-only while `clean-signals` is unpublished**:
-        /// the generated `Cargo.toml` path-deps into this Frust checkout
-        /// plus a sibling `clean-signals-rs` checkout (see
-        /// `docs/DEVELOPMENT.md`'s Prerequisites/Version-Pin Policy) — the
-        /// project won't build without both present.
+        /// **Dev-machine-only while `frust` is unpublished**: the generated
+        /// `Cargo.toml` path-deps into this Frust checkout for `frust` and
+        /// the in-repo `clean-signals-frust` plugin — the project won't
+        /// build without this checkout present. `clean-signals` itself is
+        /// git+rev-pinned to its public repo (see `docs/DEVELOPMENT.md`'s
+        /// Version-Pin Policy), so no sibling `clean-signals-rs` checkout
+        /// is required.
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
+
+        /// Scaffold an out-of-tree **design-system** crate instead of an
+        /// app: a themed widget catalog crate depending on nothing but
+        /// `frust`, with no platform (`android`/`ios`) project. `dir` is
+        /// still the target directory and `--project-name` still overrides
+        /// the inferred crate name (also the design system's identity tag);
+        /// `--overwrite`/`--template-dir`/`--frust-path` still apply.
+        /// `--org`/`--description` are unused (a design-system crate has no
+        /// bundle identifier or app manifest); `--deeplink-scheme`/
+        /// `--deeplink-host`/`--arch` are rejected outright rather than
+        /// silently ignored, since a plain library crate has no deep-link
+        /// config or app-architecture variant for them to apply to.
+        #[arg(long = "design-system")]
+        design_system: bool,
     },
     /// Validate the Frust toolchain (Rust targets, NDK, Android SDK, Xcode).
     Doctor,
@@ -90,18 +114,7 @@ pub enum Command {
     /// no Android device selected → `cargo run` passthrough.
     Run {
         #[command(flatten)]
-        build: BuildArgs,
-
-        /// Force the render tier (`gpu`/`cpu`) `frust-render` probes for
-        /// at startup, by setting `FRUST_RENDER_TIER` for the launched
-        /// process (see docs/DEVELOPMENT.md; `frust_render::select_render_tier`
-        /// / `RENDER_TIER_ENV_VAR`). **Desktop-preview only in v1**: the
-        /// `cargo run` fallback gets the env var directly; plumbing an
-        /// override to a launched Android/iOS device (`adb`/`devicectl`
-        /// env/intent extras) is not implemented yet — the on-device tier
-        /// probe still runs regardless, it just can't be forced from here.
-        #[arg(long = "render-tier", value_name = "TIER")]
-        render_tier: Option<RenderTierArg>,
+        build: BuildFlags,
 
         /// Desktop-only rebuild-relaunch dev loop:
         /// watches the project's `src/` tree and `Cargo.toml`, and on
@@ -131,7 +144,7 @@ pub enum BuildTarget {
     /// Release-signed APK via Gradle.
     Apk {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Produce one APK per target ABI instead of a single fat APK.
         #[arg(long = "split-per-abi")]
@@ -146,7 +159,7 @@ pub enum BuildTarget {
     #[command(alias = "aab")]
     Appbundle {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Comma-separated target ABIs (`android-arm64`, `android-arm`,
         /// `android-x64`); defaults to all three.
@@ -156,7 +169,7 @@ pub enum BuildTarget {
     /// iOS device/simulator build via `xcodebuild` (macOS host only).
     Ios {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Build for the iOS Simulator instead of a physical device.
         #[arg(long)]
@@ -170,35 +183,152 @@ pub enum BuildTarget {
     /// distribution (macOS host only).
     Ipa {
         #[command(flatten)]
-        build: BuildArgs,
+        build: BuildFlags,
 
         /// Export method: `app-store-connect`, `release-testing`,
         /// `debugging`, or `enterprise`.
         #[arg(long = "export-method", value_name = "METHOD")]
         export_method: String,
     },
+    /// macOS `.app` bundle via `cargo build` (macOS host only — desktop
+    /// targets are host-locked, like every other desktop toolchain: a
+    /// `.app`/`.exe`/Linux bundle can only be assembled on that same OS).
+    /// Defaults to release mode, like every other `frust build` target. Code
+    /// signing is config-driven (`[macos] signing-identity` in
+    /// `frust.toml`), not a flag — there is no `--no-codesign` here, unlike
+    /// `build ios`.
+    Macos {
+        #[command(flatten)]
+        build: BuildFlags,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — a `.dmg` on macOS — via a pinned `cargo-packager`
+        /// (`docs/CLI_DEVELOPMENT.md`'s Version Pins).
+        #[arg(long)]
+        installer: bool,
+    },
+    /// Windows `.exe` bundle via `cargo build` (Windows host only — see
+    /// `Macos`'s doc comment for the host-lock rule this shares). Defaults
+    /// to release mode, like every other `frust build` target.
+    Windows {
+        #[command(flatten)]
+        build: BuildFlags,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — an NSIS `.exe` and a WiX `.msi` on Windows — via a
+        /// pinned `cargo-packager` (`docs/CLI_DEVELOPMENT.md`'s Version
+        /// Pins).
+        #[arg(long)]
+        installer: bool,
+    },
+    /// Linux bundle (binary + `.desktop` entry + hicolor icon tree) via
+    /// `cargo build` (Linux host only — see `Macos`'s doc comment for the
+    /// host-lock rule this shares). Defaults to release mode, like every
+    /// other `frust build` target.
+    Linux {
+        #[command(flatten)]
+        build: BuildFlags,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — a `.deb` and an `.AppImage` on Linux — via a pinned
+        /// `cargo-packager` (`docs/CLI_DEVELOPMENT.md`'s Version Pins).
+        #[arg(long)]
+        installer: bool,
+    },
 }
 
-/// `frust run --render-tier` value (see `Command::Run`'s doc comment).
-/// Deliberately independent of `frust_render::RenderTier` — `frust-cli`
-/// has no compile-time dependency on the rendering stack (see
-/// `docs/ARCHITECTURE.md`) — but its two variants and their lowercase env
-/// string ([`RenderTierArg::env_value`]) must stay in sync with
-/// `frust_render::parse_render_tier_override`'s accepted values by hand.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum RenderTierArg {
-    Gpu,
-    Cpu,
+/// The whole flag surface a build-producing subcommand exposes: the shared
+/// mode/flavor/defines/version funnel plus the app cargo-feature passthrough.
+///
+/// A wrapper around [`BuildArgs`] rather than two more fields on it, because
+/// that struct mirrors [`frust_drive::build_info::BuildArgs`] field-for-field
+/// and converts into it — and `--features` is deliberately outside that
+/// funnel. A `BuildInfo` describes *what* is being built (mode, flavor,
+/// defines, version); these features are appended to whatever
+/// `BuildMode::cargo_features` already selected, at each platform's own
+/// cargo-argv site, and never reach the funnel's validation.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BuildFlags {
+    #[command(flatten)]
+    pub build: BuildArgs,
+
+    /// Extra cargo features to compile the app with, on top of the ones the
+    /// build mode already selects (`frust/perf-trace`+`frust/devtools` for
+    /// debug/profile, `lean` for release). Repeatable, and a single value may
+    /// itself be a space- or comma-separated list, matching cargo's own
+    /// `--features` syntax. Strictly additive — it never replaces the mode's
+    /// selection, it is appended after it, so a `--profile` build keeps its
+    /// instrumentation. Reaches the app's own `[features]` table, so a name
+    /// the app does not declare is cargo's error to report, not this CLI's.
+    /// On `frust build`'s four release lanes (`apk`/`appbundle`/`ios`/`ipa`)
+    /// every token is additionally charset-validated
+    /// ([`feature_token_charset_ok`]) and refused outright if it would
+    /// enable the in-app devtools listener
+    /// (`commands::build::refuse_devtools_features`) — see
+    /// `docs/DEVTOOLS_ARCHITECTURE.md`'s Trust model; `run` is unaffected.
+    #[arg(long = "features", value_name = "FEATURES")]
+    pub features: Vec<String>,
 }
 
-impl RenderTierArg {
-    /// The value `FRUST_RENDER_TIER` is set to for the spawned process.
-    pub fn env_value(self) -> &'static str {
-        match self {
-            RenderTierArg::Gpu => "gpu",
-            RenderTierArg::Cpu => "cpu",
-        }
+impl BuildFlags {
+    /// The passthrough features as one flat list: every `--features`
+    /// occurrence split on commas and whitespace (cargo's own accepted
+    /// syntax, so `--features "a,b"`, `--features "a b"` and `--features a
+    /// --features b` are equivalent), trimmed, empty tokens dropped, order
+    /// preserved. Splitting here rather than downstream keeps every funnel
+    /// site handling one feature per element, which is what the Android
+    /// `-Pfrust.cargoFeatures` CSV and the iOS `FRUST_FEATURES` CSV both need.
+    ///
+    /// Deliberately infallible and unvalidated — every existing caller
+    /// (including `frust run`, which this task leaves unchanged) depends on
+    /// a plain `Vec<String>` here. [`validate_feature_token_charset`] is the
+    /// separate, opt-in check `frust build`'s release lanes run over this
+    /// result before forwarding it anywhere.
+    pub fn extra_features(&self) -> Vec<String> {
+        self.features
+            .iter()
+            .flat_map(|spec| spec.split([',', ' ', '\t', '\n']))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// Whether a single `--features` passthrough token matches the strict
+/// charset a release lane's own cargo-argv site requires: cargo's own
+/// bare-feature-name charset (`[A-Za-z0-9_.-]+`), optionally prefixed by one
+/// `<pkg>/` segment of the same charset — cargo's `pkg/feature`
+/// conditional-dependency-feature syntax. Anything else (in particular a
+/// shell metacharacter) is rejected: a validated CSV of these tokens is
+/// still base64-decoded and re-spliced, **unquoted**, into a shell command
+/// by the iOS release lane's own build phase
+/// (`templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s `cargo
+/// build ... $CARGO_FEATURES`), so a token carrying a shell metacharacter
+/// that reached that far would be a shell-injection primitive, not merely
+/// an odd cargo argument.
+pub(crate) fn feature_token_charset_ok(token: &str) -> bool {
+    fn segment_ok(segment: &str) -> bool {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    }
+    match token.split_once('/') {
+        Some((pkg, feature)) => segment_ok(pkg) && segment_ok(feature),
+        None => segment_ok(token),
+    }
+}
+
+/// Validates every token in `tokens` against [`feature_token_charset_ok`],
+/// returning the first offending token (owned, so the caller can name it in
+/// an error) on failure. `frust build`'s release lanes
+/// (`commands::build::validate_extra_features`) are the sole caller — see
+/// that function and [`feature_token_charset_ok`] for why.
+pub(crate) fn validate_feature_token_charset(tokens: &[String]) -> Result<(), String> {
+    match tokens.iter().find(|token| !feature_token_charset_ok(token)) {
+        Some(bad) => Err(bad.clone()),
+        None => Ok(()),
     }
 }
 
@@ -235,10 +365,18 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Bare `frust` (no subcommand) parses fine — `command` resolves to
+    /// `None`, letting `main` decide the default action (TUI vs. help).
+    #[test]
+    fn parses_no_subcommand_as_none() {
+        let cli = Cli::try_parse_from(["frust"]).expect("bare `frust` should parse");
+        assert!(cli.command.is_none());
+    }
+
     #[test]
     fn parses_doctor() {
         let cli = Cli::parse_from(["frust", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor));
+        assert!(matches!(cli.command, Some(Command::Doctor)));
     }
 
     #[test]
@@ -246,13 +384,13 @@ mod tests {
         let cli = Cli::parse_from(["frust", "-v", "-v", "devices", "-d", "pixel"]);
         assert_eq!(cli.verbose, 2);
         assert_eq!(cli.device_id.as_deref(), Some("pixel"));
-        assert!(matches!(cli.command, Command::Devices));
+        assert!(matches!(cli.command, Some(Command::Devices)));
     }
 
     #[test]
     fn parses_create_dir_with_defaults() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 dir,
                 org,
@@ -281,7 +419,7 @@ mod tests {
             "dev.f0x",
             "--overwrite",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 dir,
                 org,
@@ -309,7 +447,7 @@ mod tests {
             "--deeplink-host",
             "open",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 deeplink_scheme,
                 deeplink_host,
@@ -325,7 +463,7 @@ mod tests {
     #[test]
     fn parses_create_without_deeplink_flags_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 deeplink_scheme,
                 deeplink_host,
@@ -342,7 +480,7 @@ mod tests {
     #[test]
     fn parses_create_with_arch_clean_signals() {
         let cli = Cli::parse_from(["frust", "create", "myapp", "--arch", "clean-signals"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create { arch, .. } => {
                 assert_eq!(arch, Some(ArchArg::CleanSignals));
             }
@@ -354,7 +492,7 @@ mod tests {
     #[test]
     fn parses_create_without_arch_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create { arch, .. } => assert_eq!(arch, None),
             other => panic!("expected Create, got {other:?}"),
         }
@@ -376,16 +514,11 @@ mod tests {
     #[test]
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["frust", "run"]);
-        match cli.command {
-            Command::Run {
-                build,
-                render_tier,
-                watch,
-            } => {
-                assert!(!build.debug);
-                assert!(!build.profile);
-                assert!(!build.release);
-                assert_eq!(render_tier, None);
+        match cli.command.unwrap() {
+            Command::Run { build, watch } => {
+                assert!(!build.build.debug);
+                assert!(!build.build.profile);
+                assert!(!build.build.release);
                 assert!(!watch);
             }
             other => panic!("expected Run, got {other:?}"),
@@ -393,9 +526,143 @@ mod tests {
     }
 
     #[test]
+    fn run_features_flag_is_repeatable_and_splits_lists() {
+        // The three spellings cargo itself accepts must be equivalent here,
+        // since every downstream funnel joins the result back into one CSV.
+        for argv in [
+            vec!["frust", "run", "--features", "devtools,perf-trace"],
+            vec!["frust", "run", "--features", "devtools perf-trace"],
+            vec![
+                "frust",
+                "run",
+                "--features",
+                "devtools",
+                "--features",
+                "perf-trace",
+            ],
+        ] {
+            let cli = Cli::parse_from(argv.clone());
+            match cli.command.unwrap() {
+                Command::Run { build, .. } => assert_eq!(
+                    build.extra_features(),
+                    vec!["devtools".to_string(), "perf-trace".to_string()],
+                    "argv {argv:?}"
+                ),
+                other => panic!("expected Run, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn features_flag_defaults_to_empty_on_every_build_target() {
+        // The passthrough is opt-in: an untouched invocation must resolve to
+        // no extras at all, which is what keeps every existing argv
+        // byte-identical.
+        for argv in [
+            vec!["frust", "run"],
+            vec!["frust", "build", "apk"],
+            vec!["frust", "build", "appbundle"],
+            vec!["frust", "build", "ios"],
+            vec!["frust", "build", "macos"],
+        ] {
+            let cli = Cli::parse_from(argv.clone());
+            let flags = match cli.command.unwrap() {
+                Command::Run { build, .. } => build,
+                Command::Build { target } => match target {
+                    BuildTarget::Apk { build, .. }
+                    | BuildTarget::Appbundle { build, .. }
+                    | BuildTarget::Ios { build, .. }
+                    | BuildTarget::Ipa { build, .. }
+                    | BuildTarget::Macos { build, .. }
+                    | BuildTarget::Windows { build, .. }
+                    | BuildTarget::Linux { build, .. } => build,
+                },
+                other => panic!("expected Run/Build, got {other:?}"),
+            };
+            assert!(flags.extra_features().is_empty(), "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn build_apk_accepts_features_beside_the_mode_and_define_flags() {
+        let cli = Cli::parse_from([
+            "frust",
+            "build",
+            "apk",
+            "--profile",
+            "--features",
+            "devtools",
+            "--define",
+            "FRUST_TRACE=1",
+        ]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Apk { build, .. },
+            } => {
+                assert!(build.build.profile);
+                assert_eq!(build.build.defines, vec!["FRUST_TRACE=1"]);
+                assert_eq!(build.extra_features(), vec!["devtools".to_string()]);
+            }
+            other => panic!("expected Build/Apk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn feature_token_charset_ok_accepts_plain_and_pkg_qualified_names() {
+        for token in [
+            "perf-trace",
+            "perf_trace",
+            "v1.2",
+            "frust/devtools",
+            "a-b_c.d/e-f_g.h",
+        ] {
+            assert!(feature_token_charset_ok(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn feature_token_charset_ok_rejects_shell_metacharacters() {
+        for token in [
+            "perf-trace;rm",
+            "$(rm -rf /)",
+            "a b",
+            "`whoami`",
+            "a|b",
+            "frust/devtools/extra",
+            "",
+            "frust/",
+            "/devtools",
+        ] {
+            assert!(!feature_token_charset_ok(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn validate_feature_token_charset_passes_on_all_valid_tokens() {
+        let tokens = vec!["perf-trace".to_string(), "frust/devtools".to_string()];
+        assert!(validate_feature_token_charset(&tokens).is_ok());
+    }
+
+    #[test]
+    fn validate_feature_token_charset_names_the_first_bad_token() {
+        let tokens = vec!["perf-trace".to_string(), "evil;touch".to_string()];
+        let err = validate_feature_token_charset(&tokens).unwrap_err();
+        assert_eq!(err, "evil;touch");
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_feature_values_resolve_to_no_extras() {
+        let cli = Cli::parse_from(["frust", "run", "--features", " , ,", "--features", ""]);
+        match cli.command.unwrap() {
+            Command::Run { build, .. } => assert!(build.extra_features().is_empty()),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_run_with_watch_flag() {
         let cli = Cli::parse_from(["frust", "run", "--watch"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { watch, .. } => assert!(watch),
             other => panic!("expected Run, got {other:?}"),
         }
@@ -405,53 +672,26 @@ mod tests {
     fn parses_run_with_device_and_mode_flags() {
         let cli = Cli::parse_from(["frust", "-d", "emulator-5554", "run", "--release"]);
         assert_eq!(cli.device_id.as_deref(), Some("emulator-5554"));
-        match cli.command {
-            Command::Run { build, .. } => assert!(build.release),
+        match cli.command.unwrap() {
+            Command::Run { build, .. } => assert!(build.build.release),
             other => panic!("expected Run, got {other:?}"),
         }
     }
 
+    /// The retired tier-selection flag is now an unknown argument, not a flag
+    /// with one legal value: `frust-render` contains exactly one renderer, so
+    /// there is nothing left to force. Pinned as a test because the flag was
+    /// documented and scripted against — clap must refuse it outright rather
+    /// than accept it and set an env var nothing reads.
     #[test]
-    fn parses_run_with_render_tier_gpu() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "gpu"]);
-        match cli.command {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Gpu));
-            }
-            other => panic!("expected Run, got {other:?}"),
+    fn rejects_the_retired_render_tier_flag() {
+        for value in ["engine", "gpu", "cpu", "vello"] {
+            assert!(
+                Cli::try_parse_from(["frust", "run", "--render-tier", value]).is_err(),
+                "--render-tier {value} must be rejected"
+            );
         }
-    }
-
-    #[test]
-    fn parses_run_with_render_tier_cpu() {
-        let cli = Cli::parse_from(["frust", "run", "--render-tier", "cpu"]);
-        match cli.command {
-            Command::Run { render_tier, .. } => {
-                assert_eq!(render_tier, Some(RenderTierArg::Cpu));
-            }
-            other => panic!("expected Run, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_run_without_render_tier_is_none() {
-        let cli = Cli::parse_from(["frust", "run"]);
-        match cli.command {
-            Command::Run { render_tier, .. } => assert_eq!(render_tier, None),
-            other => panic!("expected Run, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_render_tier_value() {
-        let result = Cli::try_parse_from(["frust", "run", "--render-tier", "hybrid"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn render_tier_arg_env_values() {
-        assert_eq!(RenderTierArg::Gpu.env_value(), "gpu");
-        assert_eq!(RenderTierArg::Cpu.env_value(), "cpu");
+        assert!(Cli::try_parse_from(["frust", "run", "--render-tier"]).is_err());
     }
 
     #[test]
@@ -469,14 +709,14 @@ mod tests {
             "--define",
             "A=B",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Apk { build, .. },
             } => {
-                assert_eq!(build.flavor.as_deref(), Some("paid"));
-                assert_eq!(build.build_name.as_deref(), Some("1.2.3"));
-                assert_eq!(build.build_number, Some(42));
-                assert_eq!(build.defines, vec!["A=B".to_string()]);
+                assert_eq!(build.build.flavor.as_deref(), Some("paid"));
+                assert_eq!(build.build.build_name.as_deref(), Some("1.2.3"));
+                assert_eq!(build.build.build_number, Some(42));
+                assert_eq!(build.build.defines, vec!["A=B".to_string()]);
             }
             other => panic!("expected Build/Apk, got {other:?}"),
         }
@@ -492,7 +732,7 @@ mod tests {
             "--target-platform",
             "android-arm64,android-x64",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target:
                     BuildTarget::Apk {
@@ -516,16 +756,16 @@ mod tests {
         let cli = Cli::parse_from(["frust", "build", "aab"]);
         assert!(matches!(
             cli.command,
-            Command::Build {
+            Some(Command::Build {
                 target: BuildTarget::Appbundle { .. }
-            }
+            })
         ));
     }
 
     #[test]
     fn parses_build_ios_flags() {
         let cli = Cli::parse_from(["frust", "build", "ios", "--simulator", "--no-codesign"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target:
                     BuildTarget::Ios {
@@ -550,7 +790,7 @@ mod tests {
             "--export-method",
             "app-store-connect",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Ipa { export_method, .. },
             } => {
@@ -567,14 +807,84 @@ mod tests {
     }
 
     #[test]
+    fn parses_build_macos_with_installer_flag() {
+        let cli = Cli::parse_from(["frust", "build", "macos", "--installer"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Macos { installer, .. },
+            } => assert!(installer),
+            other => panic!("expected Build/Macos, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_macos_without_installer_defaults_to_false() {
+        let cli = Cli::parse_from(["frust", "build", "macos"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Macos { installer, .. },
+            } => assert!(!installer),
+            other => panic!("expected Build/Macos, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_windows_with_full_flag_surface() {
+        let cli = Cli::parse_from([
+            "frust",
+            "build",
+            "windows",
+            "--installer",
+            "--build-name",
+            "1.2.3",
+        ]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Windows { build, installer },
+            } => {
+                assert!(installer);
+                assert_eq!(build.build.build_name.as_deref(), Some("1.2.3"));
+            }
+            other => panic!("expected Build/Windows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_linux_with_installer_flag() {
+        let cli = Cli::parse_from(["frust", "build", "linux", "--installer"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Linux { installer, .. },
+            } => assert!(installer),
+            other => panic!("expected Build/Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_linux_without_flags_uses_build_arg_defaults() {
+        let cli = Cli::parse_from(["frust", "build", "linux"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Linux { build, installer },
+            } => {
+                assert!(!installer);
+                assert!(!build.build.debug);
+                assert!(!build.build.profile);
+                assert!(!build.build.release);
+            }
+            other => panic!("expected Build/Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_clean() {
         let cli = Cli::parse_from(["frust", "clean"]);
-        assert!(matches!(cli.command, Command::Clean));
+        assert!(matches!(cli.command, Some(Command::Clean)));
     }
 
     #[test]
     fn parses_tui() {
         let cli = Cli::parse_from(["frust", "tui"]);
-        assert!(matches!(cli.command, Command::Tui));
+        assert!(matches!(cli.command, Some(Command::Tui)));
     }
 }

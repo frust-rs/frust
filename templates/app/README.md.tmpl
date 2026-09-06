@@ -4,34 +4,38 @@ A Frust app created with `frust create`.
 
 ## Theming
 
-This app uses the **Glyph design system** by default, which automatically
-adapts to the device's light/dark preference. To opt back to Material or
-Cupertino:
+This app uses the **Glyph design system** by default — brought in as the
+`frust-glyph` plugin crate dependency in `Cargo.toml` and installed by the
+`frust_glyph::install()` call in `src/lib.rs`'s `frust::app!(setup = {..})`
+block — which automatically adapts to the device's light/dark preference.
+To swap to Material 3 or Cupertino instead, replace the `frust-glyph`
+dependency with `frust-material`/`frust-cupertino` and swap the setup call:
 
 ```rust
-use frust::{Component, set_app_theme, Theme};
+frust::app!(MyAppApp, setup = {
+    // Material 3 (M3)
+    frust_material::install();
 
-impl Component for MyAppApp {
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
-        // Material 3 (M3)
-        set_app_theme(Theme::m3_baseline());
-
-        // Or Cupertino
-        set_app_theme(Theme::cupertino_baseline());
-    }
-}
+    // Or Cupertino
+    // frust_cupertino::install();
+});
 ```
+
+Each `install()` is shorthand for
+`frust::set_default_theme(frust_material::baseline())` /
+`frust::set_default_theme(frust_cupertino::baseline())` — call
+`set_default_theme` directly instead if you want the tokens without the
+crate's install-timing contract.
 
 ## Custom Fonts
 
-By default, Frust includes IBM Plex Mono and Space Mono fonts. To drop bundled fonts:
+By default, this app's Glyph design system bundles IBM Plex Mono and Space
+Mono fonts (`frust-glyph`'s `install()` registers them unconditionally — see
+above). Dropping the `frust-glyph` dependency (or swapping to
+`frust-material`/`frust-cupertino`, neither of which bundles a font) drops
+the bundled fonts too.
 
-```toml
-# Cargo.toml
-frust = { ..., default-features = false, features = ["..."] }
-```
-
-Then register your own at app startup:
+Register your own fonts at app startup regardless of design system:
 
 ```rust
 use frust::register_app_fonts;

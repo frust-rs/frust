@@ -102,8 +102,10 @@ class _ListRow extends StatelessWidget {
                     color: Colors.white, fontWeight: FontWeight.bold)),
           ),
         ),
-        title: Text('Row $index — long-list scroll benchmark'),
-        subtitle: Text('Deterministic content for row number $index'),
+        title: Text('Row $index — long-list scroll benchmark',
+            maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text('Deterministic content for row number $index',
+            maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: Icon(_trailingIcons[index % _trailingIcons.length]),
       ),
     );

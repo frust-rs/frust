@@ -22,7 +22,7 @@ fn applied(decision: ThemeDecision) -> Box<Theme> {
 
 #[test]
 fn accent_swap_composes_the_expected_primary_into_the_theme() {
-    let current = Theme::m3_baseline(); // light M3
+    let current = frust_material::baseline(); // light M3
     for accent in AccentChoice::SWATCHES {
         let theme = applied(compose(
             DesignChoice::System,
@@ -42,7 +42,7 @@ fn accent_swap_composes_the_expected_primary_into_the_theme() {
 
 #[test]
 fn accent_dark_table_applies_under_forced_dark() {
-    let current = Theme::m3_baseline();
+    let current = frust_material::baseline();
     let theme = applied(compose(
         DesignChoice::System,
         BrightnessChoice::Dark,
@@ -59,8 +59,8 @@ fn accent_dark_table_applies_under_forced_dark() {
 
 #[test]
 fn type_factor_scales_a_known_role_size() {
-    let current = Theme::m3_baseline();
-    let baseline = Theme::m3_baseline().type_scale.headline_small.size;
+    let current = frust_material::baseline();
+    let baseline = frust_material::baseline().type_scale.headline_small.size;
     for factor in [TYPE_SCALE_MAX, 1.15_f32] {
         let theme = applied(compose(
             DesignChoice::System,
@@ -79,7 +79,7 @@ fn type_factor_scales_a_known_role_size() {
 
 #[test]
 fn default_axes_and_unity_type_clear_the_override() {
-    let current = Theme::m3_baseline();
+    let current = frust_material::baseline();
     assert_eq!(
         compose(
             DesignChoice::System,
@@ -95,8 +95,8 @@ fn default_axes_and_unity_type_clear_the_override() {
 #[test]
 fn the_three_axes_compose_independently() {
     // Change brightness, accent, and type all at once; each lands independently.
-    let current = Theme::m3_baseline();
-    let base_title = Theme::m3_baseline().type_scale.title_large.size;
+    let current = frust_material::baseline();
+    let base_title = frust_material::baseline().type_scale.title_large.size;
     let theme = applied(compose(
         DesignChoice::System,
         BrightnessChoice::Dark,
@@ -118,8 +118,8 @@ fn the_three_axes_compose_independently() {
 
 #[test]
 fn changing_the_accent_leaves_brightness_and_type_at_default() {
-    let current = Theme::m3_baseline();
-    let base_body = Theme::m3_baseline().type_scale.body_large.size;
+    let current = frust_material::baseline();
+    let base_body = frust_material::baseline().type_scale.body_large.size;
     let theme = applied(compose(
         DesignChoice::System,
         BrightnessChoice::System,

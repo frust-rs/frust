@@ -6,29 +6,29 @@ expression: "render_to_string(100, 30, &state)"
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │huddle:  1 ▶ desktop                                                      
-  ▸ huddle               │line 36                                                                   
-                         │line 37                                                                   
- DEVICES ↻ r             │line 38                                                                   
-   none found            │line 39                                                                   
-                         │line 40                                                                   
- SESSIONS                │line 41                                                                   
-   huddle                │line 42                                                                   
-   ▸ ▶ desktop           │line 43                                                                   
-                         │line 44                                                                   
- ACTIONS                 │line 45                                                                   
-   New project · n       │line 46                                                                   
-   Add plugin · a        │line 47                                                                   
-   Doctor · d            │line 48                                                                   
-   Build · b             │line 49                                                                   
-   Clean · c             │line 50                                                                   
-                         │line 51                                                                   
-                         │line 52                                                                   
-                         │line 53                                                                   
-                         │line 54                                                                   
-                         │line 55                                                                   
-                         │line 56                                                                   
-                         │line 57                                                                   
-                         │line 58                                                                   
-                         │line 59                                                                  █
-                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
+  ▸ huddle               │   12:00:36 [app]    line 36                                              
+                         │   12:00:37 [app]    line 37                                              
+ DEVICES ↻ r             │   12:00:38 [app]    line 38                                              
+   none found            │   12:00:39 [app]    line 39                                              
+                         │   12:00:40 [app]    line 40                                              
+ SESSIONS                │   12:00:41 [app]    line 41                                              
+   huddle                │   12:00:42 [app]    line 42                                              
+   ▸ ▶ desktop           │   12:00:43 [app]    line 43                                              
+                         │   12:00:44 [app]    line 44                                              
+ ACTIONS                 │   12:00:45 [app]    line 45                                              
+   New project · n       │   12:00:46 [app]    line 46                                              
+   Add plugin · a        │   12:00:47 [app]    line 47                                              
+   Doctor · d            │   12:00:48 [app]    line 48                                              
+   Build · b             │   12:00:49 [app]    line 49                                              
+   Clean · c             │   12:00:50 [app]    line 50                                              
+   MCP off · M           │   12:00:51 [app]    line 51                                              
+   DAP off · D           │   12:00:52 [app]    line 52                                              
+                         │   12:00:53 [app]    line 53                                              
+                         │   12:00:54 [app]    line 54                                              
+                         │   12:00:55 [app]    line 55                                              
+                         │   12:00:56 [app]    line 56                                              
+                         │   12:00:57 [app]    line 57                                              
+                         │   12:00:58 [app]    line 58                                              
+                         │   12:00:59 [app]    line 59                                             █
+                         │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
 ● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

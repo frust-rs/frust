@@ -3,8 +3,12 @@ package dev.frust
 import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
+import android.database.ContentObserver
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -136,12 +140,16 @@ class FrustSurfaceView(
         }
 
         /**
-         * How many frames to keep re-polling the IME surface after an editor
-         * action, so [doFrame] catches the submit's next-frame rebuild (which
-         * clears/replaces the field) and reseeds the IME mirror. A small budget
-         * (a couple of frames) covers the one-frame rebuild latency with slack.
+         * Wire values `nativeImeState`'s `"contentType"` field carries
+         * (encoded on the Rust side by
+         * `frust_shell_android::jni_glue::content_type_wire` from
+         * `frust_core::event::ImeContentType`). `"password"` has no named
+         * constant here — every unrecognized/unhandled value, including it,
+         * falls through to [applyImeContentType]'s fail-closed `else` arm.
          */
-        private const val IME_RESYNC_FRAMES = 3
+        private const val CONTENT_TYPE_NORMAL = "normal"
+        private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
+        private const val CONTENT_TYPE_TERMINAL = "terminal"
 
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
@@ -256,6 +264,30 @@ class FrustSurfaceView(
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
+    // The read half of the appearance seam: whether the APP's currently
+    // active theme is dark right now — NOT a re-read of `Configuration.
+    // uiMode`. Kotlin trusted the device's own dark-mode preference for
+    // status-bar icon contrast ([updateSystemBarsAppearance]); that silently
+    // disagrees with the app's actual theme whenever an app-forced
+    // `frust::set_app_theme` override (or a design system's seeded default)
+    // is in play, painting invisible (light-on-light or dark-on-dark) icons.
+    // Called right after every [nativeSetAppearance] ([surfaceCreated],
+    // [onConfigurationChanged]) and once per frame ([pollAppBrightness]) —
+    // the per-frame poll is what picks up a runtime `set_app_theme`/
+    // `clear_app_theme` call, which has no `Configuration` event of its own
+    // to ride in on.
+    private external fun nativeAppIsDark(handle: Long): Boolean
+
+    // Reduced motion: apply the platform's reduce-motion
+    // accessibility preference to the app's motion tokens. `reduce` mirrors
+    // `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` — see
+    // [reduceMotionEnabled]. Called once right after `nativeInit` returns a
+    // handle, again from [onResume] (the setting is toggled in Settings, i.e.
+    // while this app is backgrounded), and on every [reduceMotionObserver]
+    // fire. NOT driven by `onConfigurationChanged`: animation scale is not a
+    // `Configuration` field and that callback never fires for it.
+    private external fun nativeSetReduceMotion(handle: Long, reduce: Boolean)
+
     // Deep links. `url` is the raw `Intent.data` Uri's `toString()`,
     // forwarded to `frust_reactive::push_deep_link` on the Rust side.
     private external fun nativeOnDeepLink(handle: Long, url: String)
@@ -351,17 +383,6 @@ class FrustSurfaceView(
     private var imeActive = false
 
     /**
-     * Frames remaining to re-poll the IME surface after an editor action
-     * ([performEditorAction] / a hardware Enter). A submit clears/replaces the
-     * field's text through the framework's *next-frame* rebuild — not
-     * synchronously — so the [InputConnection]'s mirror [Editable] would keep the
-     * pre-submit text and the next keystroke would append to it. Counting a few
-     * frames lets [doFrame] observe the post-rebuild state and reseed the mirror
-     * (see [resyncImeMirror]).
-     */
-    private var imeResyncFrames = 0
-
-    /**
      * The live [FrustInputConnection] Gboard is bound to (set in
      * [onCreateInputConnection]). Held so a framework-side edit (a submit
      * clearing the field) can reseed its mirror [Editable] directly, instead of
@@ -385,6 +406,16 @@ class FrustSurfaceView(
      * that never calls the API never fires [onSystemUiModeChanged].
      */
     private var lastSystemUiGeneration: Long = 0
+
+    /**
+     * The last brightness [updateSystemBarsAppearance] was actually applied
+     * with, so [pollAppBrightness] only touches
+     * `WindowInsetsControllerCompat` on a real change instead of re-setting
+     * the same two booleans every Choreographer tick. `null` until the first
+     * call ([surfaceCreated]), matching "nothing applied yet" distinctly from
+     * either boolean value.
+     */
+    private var lastAppliedDark: Boolean? = null
 
     /**
      * Set by `MainActivity` (which owns the `Window` a
@@ -459,6 +490,76 @@ class FrustSurfaceView(
     private val isDarkMode: Boolean
         get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
+
+    /**
+     * Whether the platform currently reports a reduce-motion preference.
+     *
+     * Android has no single "reduce motion" switch: the user-facing controls
+     * (Settings > Accessibility > *Remove animations*, and Developer options >
+     * *Animator duration scale: off*) both land on
+     * `Settings.Global.ANIMATOR_DURATION_SCALE`, and a scale of exactly `0`
+     * means "no animations" — the same signal the platform's own
+     * `ValueAnimator.areAnimatorsEnabled()` consults. Read with a default of
+     * `1f` (the untouched-setting value), so a device that has never written
+     * the row reports "animate normally" rather than "reduced".
+     *
+     * Deliberately NOT sourced from `Configuration`/`onConfigurationChanged`:
+     * animation scale is not a configuration field, so that callback never
+     * fires for it — hence [reduceMotionObserver].
+     */
+    private val reduceMotionEnabled: Boolean
+        get() = Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f,
+        ) == 0f
+
+    /**
+     * Change notification for [reduceMotionEnabled]. Registered on
+     * [onResume] and unregistered on [onPause], so a backgrounded app holds no
+     * resolver registration; the [onResume] re-read below covers the far more
+     * common path — the user leaves the app to flip the setting and comes back
+     * — while this observer covers a toggle made with the app still visible
+     * (split screen, a quick-settings tile).
+     *
+     * Constructed against the main `Looper` so `onChange` is dispatched on the
+     * same thread every other native call here runs on; the native side is not
+     * thread-safe.
+     */
+    private val reduceMotionObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            pushReduceMotion()
+        }
+    }
+
+    /** Whether [reduceMotionObserver] is currently registered (idempotence guard). */
+    private var reduceMotionObserverRegistered = false
+
+    /**
+     * Push the current [reduceMotionEnabled] value to the native side. A
+     * missing handle is a no-op — [surfaceCreated] pushes once the handle
+     * exists, mirroring `nativeSetAppearance`'s seeding.
+     */
+    private fun pushReduceMotion() {
+        if (handle == 0L) return
+        nativeSetReduceMotion(handle, reduceMotionEnabled)
+    }
+
+    private fun registerReduceMotionObserver() {
+        if (reduceMotionObserverRegistered) return
+        context.contentResolver.registerContentObserver(
+            Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE),
+            false,
+            reduceMotionObserver,
+        )
+        reduceMotionObserverRegistered = true
+    }
+
+    private fun unregisterReduceMotionObserver() {
+        if (!reduceMotionObserverRegistered) return
+        context.contentResolver.unregisterContentObserver(reduceMotionObserver)
+        reduceMotionObserverRegistered = false
+    }
 
     init {
         holder.addCallback(this)
@@ -538,15 +639,45 @@ class FrustSurfaceView(
      * (not the deprecated `ViewCompat.getWindowInsetsController(View)`)
      * needs the hosting `Activity`'s `Window` — always available here since
      * `MainActivity` is this view's sole constructor caller (see
-     * `dev.frust.FrustSurfaceView`'s class doc). Called alongside
-     * every `nativeSetAppearance` — see [surfaceCreated]/[onConfigurationChanged].
+     * `dev.frust.FrustSurfaceView`'s class doc).
+     *
+     * `dark` must be the APP's resolved brightness ([nativeAppIsDark]), not
+     * the device's raw [isDarkMode] — the two legitimately disagree once an
+     * app-forced `frust::set_app_theme` override is active (FINDINGS #43: the
+     * device-sourced call this used to receive produced invisible
+     * light-on-light or dark-on-dark icons whenever they did). Called from
+     * [surfaceCreated], [onConfigurationChanged], and every frame via
+     * [pollAppBrightness] (change-gated by [lastAppliedDark] there).
      */
     private fun updateSystemBarsAppearance(dark: Boolean) {
+        lastAppliedDark = dark
         val window = (context as? Activity)?.window ?: return
         WindowCompat.getInsetsController(window, this).apply {
             isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark
         }
+    }
+
+    /**
+     * Per-frame poll of the app's resolved brightness ([nativeAppIsDark]),
+     * applying [updateSystemBarsAppearance] only on an actual change (mirrors
+     * [pollSystemUiState]'s generation-gated shape, minus the generation — a
+     * cheap direct `Boolean` compare is enough here since the value itself,
+     * not a monotonic counter, is what Kotlin polls).
+     *
+     * This is what reaches a runtime `frust::set_app_theme`/`clear_app_theme`
+     * call: unlike the device's `uiMode`, an app theme swap has no
+     * `Configuration` event of its own to ride in on, so without this poll
+     * the status bar would only catch up at the next unrelated
+     * `onConfigurationChanged` (or never, if the device config never
+     * changes). Called only while `handle != 0L` (see [doFrame]) — before
+     * that, the native side has nothing to report, and the system bars are
+     * simply left at the platform default until [surfaceCreated] seeds them.
+     */
+    private fun pollAppBrightness() {
+        val dark = nativeAppIsDark(handle)
+        if (dark == lastAppliedDark) return
+        updateSystemBarsAppearance(dark)
     }
 
     /**
@@ -594,7 +725,18 @@ class FrustSurfaceView(
             handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
-                updateSystemBarsAppearance(isDarkMode)
+                // Seed system-bar icon contrast from the APP's just-resolved
+                // brightness, not the device's `isDarkMode` we just fed in —
+                // with no override active yet they agree, but sourcing this
+                // from the app keeps `surfaceCreated` on the same one true
+                // path [pollAppBrightness]/[onConfigurationChanged] use (see
+                // [updateSystemBarsAppearance]'s doc).
+                updateSystemBarsAppearance(nativeAppIsDark(handle))
+                // Seed the reduce-motion accessibility preference beside the
+                // appearance: [onResume] already ran (and re-runs on every
+                // foreground), but it fires before this handle exists on a cold
+                // start, so its push was a no-op.
+                pushReduceMotion()
                 // Attach the accesskit accessibility adapter to this view.
                 // Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
@@ -645,12 +787,24 @@ class FrustSurfaceView(
      * The `android:configChanges` manifest entry includes `uiMode`, so a
      * system light/dark toggle reaches here instead of recreating the
      * activity — re-seed the theme's brightness from the fresh configuration.
+     *
+     * Only appearance: the reduce-motion preference is a `Settings.Global`
+     * row, not a `Configuration` field, so it never reaches this callback —
+     * see [reduceMotionObserver].
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (handle != 0L) {
             nativeSetAppearance(handle, isDarkMode)
-            updateSystemBarsAppearance(isDarkMode)
+            // Re-derive system-bar icon contrast from the APP's just-resolved
+            // brightness, not `isDarkMode` directly: if an app-forced
+            // `frust::set_app_theme` override is active, `nativeSetAppearance`
+            // above is a no-op on `theme.brightness` (the override-wins
+            // rule — see `frust_shell_common::theme_override`), so re-reading
+            // the device here would have flipped the icons to disagree with
+            // what the override is actually painting. `nativeAppIsDark`
+            // reports the resolved value either way.
+            updateSystemBarsAppearance(nativeAppIsDark(handle))
         }
     }
 
@@ -726,7 +880,6 @@ class FrustSurfaceView(
         ) {
             nativeImeAction(handle, EditorInfo.IME_ACTION_DONE)
             pollImeAfterDispatch()
-            imeResyncFrames = IME_RESYNC_FRAMES
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -736,9 +889,8 @@ class FrustSurfaceView(
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
-        outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
         val state = lastKnownState
+        applyImeContentType(outAttrs, state?.contentType ?: CONTENT_TYPE_NORMAL)
         outAttrs.initialSelStart = state?.selBase ?: -1
         outAttrs.initialSelEnd = state?.selExt ?: -1
         return FrustInputConnection().also {
@@ -748,15 +900,99 @@ class FrustSurfaceView(
     }
 
     /**
+     * Map the wire `"contentType"` string (`"normal"` / `"password"` /
+     * `"noSuggestions"` / `"terminal"` — encoded on the Rust side by
+     * `frust_shell_android::jni_glue::content_type_wire` from
+     * `frust_core::event::ImeContentType`) onto the `EditorInfo`/`InputType`
+     * flags that actually close FINDINGS #31: typing into a `Password` field
+     * must not surface the composed text in Gboard's suggestion strip, nor
+     * let Gboard commit it to its learned-word dictionary.
+     *
+     * `TYPE_TEXT_VARIATION_PASSWORD` is what switches to secure entry;
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING`
+     * are set alongside it, never omitted — the former suppresses the
+     * suggestion strip, the latter stops the IME persisting the secret into
+     * its learned word list, the *persistent* half of the leak.
+     * `"noSuggestions"` is the non-secret sibling: entry stays visible, but
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` still switches off the suggestion strip
+     * and autocorrect, and `IME_FLAG_NO_PERSONALIZED_LEARNING` still stops
+     * the typed text feeding the IME's learned-word dictionary (no secure-
+     * entry masking — this is not a secret field).
+     *
+     * `"terminal"` (task F1) is a raw byte-entry surface: same non-secret
+     * flags as `"noSuggestions"` (`TYPE_TEXT_FLAG_NO_SUGGESTIONS` +
+     * `IME_FLAG_NO_PERSONALIZED_LEARNING`) — Android's `InputType`/`EditorInfo`
+     * vocabulary has no separate "no smart punctuation" bit the way iOS's
+     * `UITextInputTraits` does (`smartQuotesType`/`smartDashesType`), so
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` is already the whole available lever.
+     * Deliberately does **not** add `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`: an
+     * S2-spike device check found it can disable swipe typing on some IMEs,
+     * and zero-composing was already verified without it — reach for that
+     * variation as a per-IME fallback only if a specific keyboard is still
+     * seen suggesting into a `"terminal"` field on a device gate.
+     *
+     * Any wire value this `when` doesn't recognize — including an absent
+     * `lastKnownState` (nothing focused/published yet) — falls through to
+     * the `"password"` arm: the same fail-closed rule
+     * `content_type_wire`'s Rust-side doc comment states, applied here at the
+     * boundary that actually renders it. A field state-sync forgot to
+     * classify becomes stricter than intended, never a secret field that got
+     * de-classified into a plaintext keyboard. `onCreateInputConnection`
+     * passes [CONTENT_TYPE_NORMAL] explicitly for the "nothing published
+     * yet" case instead, since no field is even focused there.
+     */
+    private fun applyImeContentType(outAttrs: EditorInfo, contentType: String) {
+        when (contentType) {
+            CONTENT_TYPE_NORMAL -> {
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+            }
+            CONTENT_TYPE_NO_SUGGESTIONS -> {
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+            CONTENT_TYPE_TERMINAL -> {
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
+                        EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            }
+            else -> { // "password", or any unrecognized/future value — fail closed.
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+        }
+    }
+
+    /**
      * After every native dispatch, reconcile the soft keyboard with the focused
      * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
      * restart input so a fresh [FrustInputConnection] is seeded from the new
      * state); newly-inactive ⇒ hide it.
+     *
+     * A **steady-active** field whose [ImeWireState.contentType] changed since
+     * the last poll (e.g. a field that starts `"normal"` and flips to
+     * `"password"` while still focused, without ever losing/regaining focus)
+     * also forces [InputMethodManager.restartInput]: `EditorInfo`/`InputType`
+     * are fixed at [onCreateInputConnection] time and Android never re-queries
+     * them on an already-bound `InputConnection`, so without this restart a
+     * field that becomes secret *after* the IME already connected would keep
+     * leaking into the suggestion strip under the stale, non-secure
+     * `EditorInfo` (the exact gap this task closes — see `onCreateInputConnection`'s
+     * doc for how the fresh `EditorInfo` is derived).
      */
     private fun pollImeAfterDispatch() {
         if (handle == 0L) return
         val state = parseImeState(nativeImeState(handle)) ?: return
+        val previous = lastKnownState
         lastKnownState = state
+        val contentTypeChanged = previous != null && previous.contentType != state.contentType
         if (state.active && !imeActive) {
             imeActive = true
             requestFocus()
@@ -766,12 +1002,21 @@ class FrustSurfaceView(
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
+        } else if (state.active && contentTypeChanged) {
+            // Same field, no show/hide edge, but the content-type hint
+            // changed under it — force a fresh EditorInfo/InputType (see this
+            // function's doc). `restartInput` re-invokes
+            // `onCreateInputConnection`, which reseeds the mirror from the
+            // already-updated `lastKnownState`, so no separate `reconcileTo`
+            // call is needed on this path.
+            imm.restartInput(this)
         } else if (state.active) {
-            // Steady active (no show/hide edge): reconcile the live mirror to the
-            // focused field's published state — a caret moved by a tap, or a
-            // whole-field text change from a field switch or a submit-clear.
-            // `reconcileTo` compares against the LIVE editable (not the racing
-            // `lastKnownState`), so a pre-advanced snapshot can't hide a change.
+            // Steady active (no show/hide edge, same content type): reconcile
+            // the live mirror to the focused field's published state — a
+            // caret moved by a tap, or a whole-field text change from a field
+            // switch or a submit-clear. `reconcileTo` compares against the
+            // LIVE editable (not the racing `lastKnownState`), so a
+            // pre-advanced snapshot can't hide a change.
             activeConnection?.reconcileTo(state)
         }
     }
@@ -806,6 +1051,7 @@ class FrustSurfaceView(
                 selExt = obj.optInt("selExt", -1),
                 compBase = obj.optInt("compBase", -1),
                 compExt = obj.optInt("compExt", -1),
+                contentType = obj.optString("contentType", CONTENT_TYPE_NORMAL),
             )
         } catch (e: JSONException) {
             null
@@ -820,6 +1066,14 @@ class FrustSurfaceView(
         val selExt: Int,
         val compBase: Int,
         val compExt: Int,
+        /**
+         * The wire `"contentType"` string (`"normal"` / `"password"` /
+         * `"noSuggestions"`) `nativeImeState` encodes from
+         * `frust_core::event::ImeContentType`. Drives
+         * [applyImeContentType]'s `EditorInfo`/`InputType` mapping and
+         * [pollImeAfterDispatch]'s content-type-change restart.
+         */
+        val contentType: String,
     )
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -857,6 +1111,12 @@ class FrustSurfaceView(
             // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
+            // Per-frame app-brightness poll: cheap `Boolean`-gated
+            // JNI read, applied only on an actual change — this is what picks
+            // up a runtime `frust::set_app_theme`/`clear_app_theme` call
+            // (see [pollAppBrightness]'s doc for why that needs a per-frame
+            // poll rather than riding on `onConfigurationChanged`).
+            pollAppBrightness()
             // Per-frame platform-view command poll:
             // the null-return fast path keeps a no-change frame allocation-free
             // (a null string means "nothing to do" — no JSON parse); only a
@@ -907,36 +1167,18 @@ class FrustSurfaceView(
         }
     }
 
-    /**
-     * Reconcile the IME with the focused widget's *current* published editing
-     * state after a framework-initiated edit (a submit clearing the field) that
-     * the [InputConnection] did not originate. If the text changed since the IME
-     * last knew it, its mirror [Editable] is stale, so `restartInput` rebuilds
-     * the connection — reseeding the mirror from the fresh state
-     * ([onCreateInputConnection] seeds from [lastKnownState]). A pure
-     * selection/caret move (same text) needs no restart.
-     */
-    private fun resyncImeMirror() {
-        if (handle == 0L) return
-        val state = parseImeState(nativeImeState(handle)) ?: return
-        val prev = lastKnownState
-        lastKnownState = state
-        if (state.active && prev != null && prev.text != state.text) {
-            // Reseed the live connection's mirror to match the widget, then tell
-            // the IMM the text/selection changed under it and restart input so
-            // Gboard re-reads from the fresh (e.g. cleared) editable.
-            activeConnection?.seed(state)
-            imm.updateSelection(this, state.selBase, state.selExt, state.compBase, state.compExt)
-            imm.restartInput(this)
-        }
-    }
-
     /** Called by `MainActivity.onResume` — starts the Choreographer loop. */
     fun onResume() {
         running = true
         if (handle != 0L) {
             nativeOnResume(handle)
         }
+        // Reduce motion: re-read on every foreground and (re)arm the observer.
+        // The setting lives in Settings/Developer options, so the user is
+        // necessarily out of this app while flipping it — this re-read, not the
+        // observer, is the path that normally catches the change.
+        registerReduceMotionObserver()
+        pushReduceMotion()
         Choreographer.getInstance().postFrameCallback(this)
     }
 
@@ -944,6 +1186,9 @@ class FrustSurfaceView(
     fun onPause() {
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
+        // Hold no resolver registration while backgrounded; [onResume] re-arms
+        // it and re-reads the value that may have changed in between.
+        unregisterReduceMotionObserver()
         if (handle != 0L) {
             nativeOnPause(handle)
         }
@@ -951,6 +1196,10 @@ class FrustSurfaceView(
 
     /** Called by `MainActivity.onDestroy` — releases the native handle. */
     fun onDestroy() {
+        // Belt-and-suspenders: [onPause] normally precedes destruction, but a
+        // ContentObserver outliving its view would keep calling into a dead
+        // handle.
+        unregisterReduceMotionObserver()
         if (handle != 0L) {
             nativeOnDestroy(handle)
             handle = 0
@@ -1118,12 +1367,33 @@ class FrustSurfaceView(
             return handled
         }
 
+        /**
+         * Forward an editor action (Gboard's Done key /
+         * `EditorInfo.imeOptions = IME_ACTION_DONE`) to Rust as a submit, then
+         * reconcile the mirror synchronously — the same two-step shape
+         * [onKeyDown]'s hardware-Enter path already uses.
+         *
+         * The synchronous [pollImeAfterDispatch] call catches a focused widget
+         * that republishes its IME surface *during this very event pass*
+         * (`EventCtx::publish_ime_state`, "refreshed on every event" per
+         * `RenderRoot::ime_state`'s doc) — the common case and the fix for the
+         * gap this method used to leave open. Without it, the mirror [Editable]
+         * kept the pre-submit text until some *other* IME callback happened to
+         * fire and push it back to Rust (`sync()`) against an already-cleared
+         * app-side baseline — a stale full-line resend of whatever was just
+         * submitted, including a password.
+         *
+         * A *controlled* field's clear-on-submit is instead a signal write whose
+         * new value only reaches the widget's own editable buffer (and therefore
+         * its next `publish_ime_state`) on the *next rebuild* — the synchronous
+         * poll above can still observe stale text in that case. [doFrame]'s own
+         * **unconditional** per-frame [pollImeAfterDispatch] call is what
+         * actually closes it, on whichever frame the rebuild lands.
+         */
         override fun performEditorAction(actionCode: Int): Boolean {
             if (handle != 0L) {
                 nativeImeAction(handle, actionCode)
-                // A submit clears the field on the next-frame rebuild; re-poll for
-                // a few frames so the mirror is reseeded (see [resyncImeMirror]).
-                imeResyncFrames = IME_RESYNC_FRAMES
+                pollImeAfterDispatch()
             }
             return true
         }
@@ -1145,7 +1415,11 @@ class FrustSurfaceView(
             val selEnd = Selection.getSelectionEnd(editable)
             val compStart = getComposingSpanStart(editable)
             val compEnd = getComposingSpanEnd(editable)
-            val snapshot = ImeWireState(true, text, selStart, selEnd, compStart, compEnd)
+            // `contentType` is irrelevant to this dedup snapshot — it never
+            // compares against `lastKnownState`, only against a prior call's
+            // own `snapshot` — so a fixed placeholder is correct here.
+            val snapshot =
+                ImeWireState(true, text, selStart, selEnd, compStart, compEnd, CONTENT_TYPE_NORMAL)
             if (snapshot == lastPushed) return
             lastPushed = snapshot
 
@@ -1158,6 +1432,8 @@ class FrustSurfaceView(
             if (wholesale) {
                 // Rust replaced the text: rebuild the mirror to match.
                 editable.replace(0, editable.length, state.text)
+                // A later identical `sync()` must not short-circuit on a stale snapshot.
+                lastPushed = null
             }
             val len = editable.length
             if (state.selBase in 0..len && state.selExt in 0..len) {

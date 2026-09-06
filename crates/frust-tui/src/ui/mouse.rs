@@ -9,7 +9,7 @@
 //! 2. During render, views receive a [`MouseCtx`] and register clickable /
 //!    hoverable / scrollable surfaces (`button`/`click`/`hover`/`scroll`). A
 //!    **suppressed** ctx ([`MouseCtx::suppressed`]) drops every registration —
-//!    the modal base-layer suppression D4 calls for (pass `None`).
+//!    the modal base-layer suppression (pass `None`).
 //! 3. On a pointer event the loop hit-tests the registry:
 //!    [`MouseRegions::hover_at`] (topmost region id under the cursor, drives
 //!    hover-change redraws), [`MouseRegions::click_at`] (topmost bound click
@@ -46,7 +46,7 @@ struct ScrollRegion {
 
 /// A drag region (splitter / scrollbar thumb): a left-press inside `rect`
 /// begins a drag of `kind`, whose geometry the pure engine uses to map later
-/// pointer positions to a result (T04 / D4 — see [`DragKind`]).
+/// pointer positions to a result (see [`DragKind`]).
 #[derive(Debug, Clone)]
 struct DragRegion {
     rect: Rect,
@@ -55,7 +55,7 @@ struct DragRegion {
 }
 
 /// A context region: a right-press inside `rect` opens a context menu built for
-/// `target` (T04 / D4 — see `crate::engine::context_menu`).
+/// `target` (see `crate::engine::context_menu`).
 #[derive(Debug, Clone)]
 struct ContextRegion {
     rect: Rect,
@@ -125,7 +125,7 @@ impl MouseRegions {
     }
 
     /// The [`DragKind`] of the topmost drag region under `(x, y)`, if any — the
-    /// splitter/scrollbar-thumb grab source (T04).
+    /// splitter/scrollbar-thumb grab source.
     pub fn drag_at(&self, x: u16, y: u16) -> Option<DragKind> {
         let pos = Position::new(x, y);
         self.drags
@@ -137,7 +137,7 @@ impl MouseRegions {
     }
 
     /// The [`ContextTarget`] of the topmost context region under `(x, y)`, if
-    /// any — the right-click menu source (T04).
+    /// any — the right-click menu source.
     pub fn context_at(&self, x: u16, y: u16) -> Option<ContextTarget> {
         let pos = Position::new(x, y);
         self.contexts
@@ -167,7 +167,7 @@ impl MouseRegions {
 /// The render-time handle views push regions through.
 ///
 /// Wraps `Option<&mut MouseRegions>`: a **suppressed** ctx (`None`) makes every
-/// registration a no-op, the modal base-layer suppression D4 specifies.
+/// registration a no-op — the modal base-layer suppression.
 pub struct MouseCtx<'a> {
     regions: Option<&'a mut MouseRegions>,
 }
@@ -247,7 +247,7 @@ impl<'a> MouseCtx<'a> {
         }
     }
 
-    /// Register a drag region (T04 — the sidebar splitter or a log scrollbar
+    /// Register a drag region (the sidebar splitter or a log scrollbar
     /// thumb). A left-press inside `rect` begins a drag of `kind`.
     pub fn drag(&mut self, rect: Rect, kind: DragKind) {
         if rect.is_empty() {
@@ -262,7 +262,7 @@ impl<'a> MouseCtx<'a> {
         }
     }
 
-    /// Register a context region (T04 — a right-clickable row/pane). A
+    /// Register a context region (a right-clickable row/pane). A
     /// right-press inside `rect` opens a context menu built for `target`.
     pub fn context(&mut self, rect: Rect, target: ContextTarget) {
         if rect.is_empty() {
