@@ -66,7 +66,10 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
+# examples/web-spike (web-shell plan Phase 0) is a throwaway standalone
+# workspace that compiles the engine graph for wasm32 with its own target
+# and RUSTFLAGS; it must never be absorbed by the `examples/*` glob.
+exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
