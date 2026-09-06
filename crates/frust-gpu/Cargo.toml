@@ -59,9 +59,11 @@ android_system_properties.workspace = true
 # what is COMPILED IN, never what is requested. Do not "simplify" a target to
 # one backend to match its default adapter.
 #
-# wasm gets no arm on purpose: it is neither `unix` nor `windows`, so it
-# resolves to zero backends, which is right — Frust ships no wasm shell, and
-# the browser arm would be `webgpu`, deliberately dropped in the workspace row.
+# wasm32-unknown-unknown and wasm32-wasip1 are neither `unix` nor `windows`,
+# so they resolve to zero backends (no arm needed). wasm32-unknown-emscripten
+# is `unix` and routes to the vulkan arm, but that feature is inert there.
+# Frust ships no wasm shell; the browser arm would be `webgpu`, deliberately
+# dropped in the workspace row.
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }

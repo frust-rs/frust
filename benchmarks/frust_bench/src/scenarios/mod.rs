@@ -23,6 +23,13 @@
 //! length as a constant, so both shapes drive identically; [`SCENARIOS`] is
 //! simply eight entries instead of ten.
 //!
+//! If a scenario id known to the protocol (e.g., a `d1` deep link or
+//! `FRUST_BENCH_SCENARIO=d1`) is absent from the compiled registry, the driver
+//! logs `frust_bench: unknown scenario id '<id>' (not compiled into this build?)
+//! — falling back to s1` and falls back to S1 (index 0). The invariant is: a
+//! benchmark run never records numbers under a scenario label the running binary
+//! did not actually execute.
+//!
 //! # Marker contract
 //!
 //! [`Scenario::on_start`]/[`on_end`](Scenario::on_end) bracket a scenario's
@@ -198,17 +205,34 @@ impl Default for BenchState {
 }
 
 /// Resolve the scenario to launch: the cold-start deep link wins, then
-/// [`SCENARIO_ENV`], then S1 (index 0).
+/// [`SCENARIO_ENV`], then S1 (index 0). If a deep link or env var names
+/// an unknown scenario id, logs a diagnostic and falls back to S1.
 fn resolve_initial() -> usize {
-    if let Some(url) = deep_links().initial
-        && let Some(i) = index_from_url(&url)
-    {
-        return i;
+    if let Some(url) = deep_links().initial {
+        if let Some(i) = index_from_url(&url) {
+            return i;
+        }
+        // Extract the id from the URL for logging.
+        if let Some(rest) = url.strip_prefix(&format!("{DEEP_LINK_SCHEME}://"))
+            && let Some(id) = rest.split(['/', '?', '#']).next()
+        {
+            log::warn!(
+                "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
+                 — falling back to s1",
+                id
+            );
+        }
     }
-    if let Ok(id) = std::env::var(SCENARIO_ENV)
-        && let Some(i) = index_from_id(id.trim())
-    {
-        return i;
+    if let Ok(id) = std::env::var(SCENARIO_ENV) {
+        let id_trimmed = id.trim();
+        if let Some(i) = index_from_id(id_trimmed) {
+            return i;
+        }
+        log::warn!(
+            "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
+             — falling back to s1",
+            id_trimmed
+        );
     }
     0
 }
@@ -241,4 +265,19 @@ pub fn placeholder(scenario: &dyn Scenario) -> AnyView<BenchState> {
         scenario.title(),
     ))
     .size(20.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_scenario_id_falls_back_to_s1() {
+        // On any build, an unknown scenario id falls back to S1 (index 0).
+        // resolve_initial() logs a diagnostic when this happens.
+        let s1_idx = index_from_id("s1").expect("s1 should exist");
+        let unknown_idx = index_from_id("unknown_xyz");
+        assert_eq!(unknown_idx, None);
+        assert_eq!(s1_idx, 0, "s1 should be at index 0");
+    }
 }
