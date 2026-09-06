@@ -808,6 +808,24 @@ fn one_blob_drawn_at_two_extents_in_a_frame_keeps_the_first_draws_texels() {
         frame.image_evictions.is_empty(),
         "and no clear over the rectangle the first draw is sampling"
     );
+
+    // The scene-level counters above are silent about *why* the second draw
+    // was refused; pin the exact reason directly against a residency over the
+    // same budget and the same two extents — a same-frame ordering conflict,
+    // not an atlas out of room.
+    let mut images = ImageResidency::new(TEST_BUDGET);
+    images.begin_frame();
+    images
+        .resolve(&square)
+        .expect("the first extent still takes a rectangle");
+    let skip = images
+        .resolve(&transposed)
+        .expect_err("the second extent is refused on the same terms");
+    assert!(
+        matches!(skip, ImageSkip::SameFrameExtentConflict { .. }),
+        "a same-frame extent conflict is not an atlas-capacity refusal: {skip:?}"
+    );
+
     compiler.acknowledge_image_plan();
 
     // On a later frame the release is ordinary again: nothing has sampled the

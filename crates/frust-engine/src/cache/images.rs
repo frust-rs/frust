@@ -118,12 +118,20 @@
 //!
 //! The model is deliberately *optimistic*: it can see this residency's own
 //! rectangles but not the glyph pages sharing the same allocator (see below),
-//! so it never refuses a request eviction could have satisfied — a placement
-//! that clears the real occupants clears the model's subset of them too. The
-//! reverse can happen: the packer may still refuse a plan the model approved,
-//! which costs the planned evictions and no allocation. That case is bounded by
-//! the same plan budget rather than open-ended, and it is the one residual the
-//! planner cannot rule out without knowing where every glyph page sits.
+//! so it never refuses a request eviction could have satisfied on a given
+//! layer — a placement that clears the real occupants clears the model's
+//! subset of them too. The reverse can happen: the packer may still refuse a
+//! plan the model approved, which costs the planned evictions and no
+//! allocation. That case is bounded by the same plan budget rather than
+//! open-ended, and it is the one residual the planner cannot rule out without
+//! knowing where every glyph page sits.
+//!
+//! The bounded search itself is scoped *per layer*: each atlas layer gets its
+//! own candidate-count and area allowance rather than the whole residency
+//! sharing one pool, so a request only one layer could ever satisfy is not
+//! starved by candidates on layers that were never going to host it — each
+//! layer is either cleared within its own allowance or ruled out on its own
+//! terms, never on account of what another layer's candidates already cost.
 //!
 //! The one entry never freed on either route is one *this frame* has already
 //! resolved. The plan clears before it uploads, so handing back a rectangle the
@@ -133,7 +141,9 @@
 //! evictable. The same guard covers the *extent-mismatch* release in
 //! [`ImageResidency::resolve`], where a blob redrawn at a new extent gives its
 //! old rectangle back: on a frame that already sampled that rectangle the
-//! second draw is skipped instead.
+//! second draw is skipped instead, as
+//! [`ImageSkip::SameFrameExtentConflict`] rather than as a capacity refusal —
+//! the atlas may hold nothing at all beside the first extent's own rectangle.
 //!
 //! ## One allocator for images *and* glyphs
 //!
@@ -273,6 +283,26 @@ pub enum ImageSkip {
         atlas_width: u32,
         /// Configured atlas height.
         atlas_height: u32,
+    },
+    /// The same blob was already resolved earlier in this same frame at a
+    /// different extent.
+    ///
+    /// Not an atlas-capacity refusal: the atlas may be nearly empty. The plan
+    /// clears before it uploads (see the module doc), so releasing this
+    /// blob's rectangle to make room for its own second extent would schedule
+    /// a clear over texels this frame already sampled — the first extent's
+    /// draw keeps its texels and the second is skipped until the next frame
+    /// instead.
+    #[error(
+        "image {width}x{height} already resolved this frame at a different extent; the first \
+         extent's texels are kept until the next frame"
+    )]
+    SameFrameExtentConflict {
+        /// The refused extent's width, after [`fit_extent`] the same way
+        /// [`NoAtlasSpace`](Self::NoAtlasSpace) reports it.
+        width: u32,
+        /// The refused extent's height, after [`fit_extent`].
+        height: u32,
     },
 }
 
@@ -755,6 +785,11 @@ pub struct ImageResidency {
     pressure_order: Vec<usize>,
     /// Scratch for each layer's modelled free area, indexed by layer.
     pressure_free_area: Vec<u64>,
+    /// Scratch for the distinct layers [`Self::pressure_order`] names, in the
+    /// order their stalest candidate appears — the per-layer walk's own visit
+    /// order, kept for the same no-allocation-while-evicting reason as the
+    /// other pressure scratch.
+    pressure_layers: Vec<u32>,
     /// Scratch for the keys an accepted plan releases.
     pressure_plan: Vec<u64>,
 }
@@ -801,6 +836,7 @@ impl ImageResidency {
             pressure_rects: Vec::new(),
             pressure_order: Vec::new(),
             pressure_free_area: Vec::new(),
+            pressure_layers: Vec::new(),
             pressure_plan: Vec::new(),
         }
     }
@@ -1044,19 +1080,17 @@ impl ImageResidency {
         // so freeing that rectangle would schedule a clear over texels a draw
         // this same frame already recorded, which is exactly what the pressure
         // path refuses to do. The second extent is skipped instead, on the same
-        // terms as a frame whose own working set outgrows the atlas.
+        // terms as a frame whose own working set outgrows the atlas — but this
+        // is a same-frame ordering conflict on one blob key, not an atlas
+        // capacity shortage, so it is reported as its own reason rather than
+        // folded into [`ImageSkip::NoAtlasSpace`].
         if self
             .entries
             .get(&key)
             .is_some_and(|entry| entry.last_seen == self.frame)
         {
             let (width, height) = fit_extent([data.width, data.height], self.budget.atlas_size);
-            return Err(ImageSkip::NoAtlasSpace {
-                width,
-                height,
-                atlas_width: self.budget.atlas_size.0,
-                atlas_height: self.budget.atlas_size.1,
-            });
+            return Err(ImageSkip::SameFrameExtentConflict { width, height });
         }
         self.release(key);
 
@@ -1171,16 +1205,21 @@ impl ImageResidency {
     ///    order is by age, an entry drawn on the *immediately preceding* frame
     ///    is reached only after every staler one has already been planned —
     ///    which is what keeps a large image redrawn every frame from thrashing
-    ///    a working set that is merely idle.
+    ///    a working set that is merely idle. The candidates are then walked one
+    ///    *layer* at a time, layers visited in that same staleness order (the
+    ///    layer whose stalest candidate sorts earliest goes first).
     /// 3. **Fit.** After each candidate joins the plan, the layer it sat on is
     ///    re-tested: the request must fit inside the freed area that layer now
     ///    models, and must clear every rectangle still occupying it
     ///    ([`layer_admits`]). The first prefix that passes ends the search.
-    /// 4. **Budget.** The walk stops after
-    ///    [`MAX_PRESSURE_EVICTION_CANDIDATES`] candidates or once the plan has
-    ///    freed [`PRESSURE_EVICTION_AREA_BUDGET`] times the requested area, so
-    ///    one request can never strip the atlas. A walk that ends on the budget
-    ///    releases nothing at all.
+    /// 4. **Budget, per layer.** Each layer's own walk stops after
+    ///    [`MAX_PRESSURE_EVICTION_CANDIDATES`] of *that layer's* candidates, or
+    ///    once *that layer's* plan has freed [`PRESSURE_EVICTION_AREA_BUDGET`]
+    ///    times the requested area — a fresh allowance per layer rather than one
+    ///    pool the whole residency shares, so candidates on a layer too
+    ///    fragmented to ever admit the request cannot spend the allowance a
+    ///    later layer needed to prove it could. A layer that ends on its own
+    ///    budget contributes nothing and the walk moves to the next layer.
     /// 5. **Commit.** Only the planned rectangles *on the layer the fit was
     ///    found in* are released — a candidate the walk passed over on another
     ///    layer contributed nothing and is left resident.
@@ -1190,9 +1229,11 @@ impl ImageResidency {
     /// not in this entry map, so [`layer_admits`] tests a subset of the real
     /// obstacles. That direction is the safe one — a placement clearing every
     /// real occupant clears the subset too, so a request eviction could satisfy
-    /// is never refused here. The converse is possible: the packer may refuse a
-    /// plan the model approved, which costs the plan's evictions and no
-    /// allocation. It is bounded by the same budget as the plan itself.
+    /// on a *given layer* is never refused for that reason. The converse is
+    /// possible: the packer may refuse a plan the model approved, which costs
+    /// the plan's evictions and no allocation. It is bounded by the same
+    /// per-layer budget as the plan itself, and it is the one residual the
+    /// planner cannot rule out without knowing where every glyph page sits.
     fn allocate_under_pressure(&mut self, width: u32, height: u32) -> Option<ImageId> {
         // The overwhelmingly common refusal — a frame that filled the atlas
         // with its own draws — costs one pass over the entry map and no model
@@ -1210,6 +1251,7 @@ impl ImageResidency {
         let mut rects = std::mem::take(&mut self.pressure_rects);
         let mut order = std::mem::take(&mut self.pressure_order);
         let mut free_area = std::mem::take(&mut self.pressure_free_area);
+        let mut layers = std::mem::take(&mut self.pressure_layers);
         let mut plan = std::mem::take(&mut self.pressure_plan);
 
         self.model_layers(&mut rects, &mut order, &mut free_area);
@@ -1220,6 +1262,7 @@ impl ImageResidency {
             &mut rects,
             &order,
             &mut free_area,
+            &mut layers,
         );
 
         plan.clear();
@@ -1246,10 +1289,12 @@ impl ImageResidency {
         rects.clear();
         order.clear();
         free_area.clear();
+        layers.clear();
         plan.clear();
         self.pressure_rects = rects;
         self.pressure_order = order;
         self.pressure_free_area = free_area;
+        self.pressure_layers = layers;
         self.pressure_plan = plan;
         allocated
     }
@@ -1258,9 +1303,10 @@ impl ImageResidency {
     ///
     /// `rects` takes one entry per resident image, grouped by layer so a fit
     /// test reads one layer's slice; `order` takes the candidate indices, least
-    /// recently seen first; `free_area` takes each layer's free area *as the
-    /// packer reports it*, which is the one figure that accounts for the glyph
-    /// pages this map cannot see.
+    /// recently seen first across the *whole* residency — [`plan_pressure_eviction`]
+    /// is what regroups it per layer for its own bounded walk; `free_area` takes
+    /// each layer's free area *as the packer reports it*, which is the one
+    /// figure that accounts for the glyph pages this map cannot see.
     fn model_layers(
         &self,
         rects: &mut Vec<PressureRect>,
@@ -1380,23 +1426,29 @@ impl ImageResidency {
     }
 }
 
-/// The most rectangles one refused allocation may plan to take back.
+/// The most rectangles one refused allocation may plan to take back from a
+/// single atlas layer.
 ///
-/// A bound on the *search*, not only on the damage: a walk that reaches it
-/// without finding a fit releases nothing at all, so the cost of an
-/// unsatisfiable request stays a skip. Sixty-four is far past what any
-/// satisfiable request has needed — a fit is normally found in one, since the
-/// rectangle handed back is usually the size of the one being asked for — while
-/// still being a small fraction of what a mobile-tier layer can hold.
+/// A bound on the *search*, not only on the damage: a layer whose walk
+/// reaches it without finding a fit contributes nothing to the plan, so the
+/// cost of one hopeless layer stays bounded rather than eating into the
+/// allowance a later, satisfiable layer needs to prove itself. Sixty-four is
+/// far past what any satisfiable request has needed — a fit is normally found
+/// in one, since the rectangle handed back is usually the size of the one
+/// being asked for — while still being a small fraction of what a
+/// mobile-tier layer can hold. Applied once per layer a refused allocation
+/// considers, never once across every layer together — see
+/// [`plan_pressure_eviction`].
 const MAX_PRESSURE_EVICTION_CANDIDATES: usize = 64;
 
-/// How much area one refused allocation may plan to free, as a multiple of the
-/// area it asked for.
+/// How much area one refused allocation may plan to free from a single atlas
+/// layer, as a multiple of the area it asked for.
 ///
 /// The other half of the bound, and the one that scales with the request: a
-/// plan that has already given back four times the texels it wants and still
-/// has nowhere to put them is fighting fragmentation, not scarcity, and freeing
-/// more of the atlas will not fix it.
+/// layer that has already given back four times the texels the request wants
+/// and still has nowhere to put them is fighting fragmentation, not scarcity,
+/// and freeing more of that same layer will not fix it. Applied per layer,
+/// the same way [`MAX_PRESSURE_EVICTION_CANDIDATES`] is.
 const PRESSURE_EVICTION_AREA_BUDGET: u64 = 4;
 
 /// One resident rectangle as the pressure planner sees it.
@@ -1433,7 +1485,17 @@ struct PressureRect {
 /// The layer a bounded prefix of `order` would make room in, or `None`.
 ///
 /// Frees nothing: it marks `rects` and grows `free_area` in the model only, so
-/// a request no prefix satisfies leaves the residency untouched. See
+/// a request no prefix satisfies leaves the residency untouched. `order` is
+/// least-recently-seen-first across the *whole* residency; this regroups it
+/// one layer at a time — `layers` scratch, cleared and refilled here, in the
+/// order each layer's stalest candidate appears in `order` — and gives each
+/// layer its own [`MAX_PRESSURE_EVICTION_CANDIDATES`]/
+/// [`PRESSURE_EVICTION_AREA_BUDGET`] allowance rather than pooling one across
+/// every layer. Without that split, a layer with many candidates that could
+/// never admit the request (too fragmented, or blocked by an occupant no
+/// eviction touches) spends the whole budget before a later, satisfiable
+/// layer is ever tried — the request is then refused even though a bounded
+/// eviction on that later layer would have placed it. See
 /// [`ImageResidency::allocate_under_pressure`] for the whole shape and for why
 /// the answer is a layer rather than a bool — only the planned rectangles on
 /// the fitting layer are worth releasing.
@@ -1444,6 +1506,7 @@ fn plan_pressure_eviction(
     rects: &mut [PressureRect],
     order: &[usize],
     free_area: &mut [u64],
+    layers: &mut Vec<u32>,
 ) -> Option<u32> {
     let padding = u32::from(ATLAS_PADDING).saturating_mul(2);
     let request_w = width.saturating_add(padding);
@@ -1451,30 +1514,50 @@ fn plan_pressure_eviction(
     let request_area = u64::from(request_w).saturating_mul(u64::from(request_h));
     let area_budget = request_area.saturating_mul(PRESSURE_EVICTION_AREA_BUDGET);
 
-    let mut freed_area = 0_u64;
-    for (step, index) in order.iter().enumerate() {
-        if step >= MAX_PRESSURE_EVICTION_CANDIDATES || freed_area > area_budget {
-            return None;
-        }
-
-        let (layer, area) = {
-            let Some(rect) = rects.get_mut(*index) else {
-                continue;
-            };
-            rect.freed = true;
-            (rect.layer, rect.area)
-        };
-        freed_area = freed_area.saturating_add(area);
-
-        let Some(free) = free_area.get_mut(layer as usize) else {
+    layers.clear();
+    for &index in order {
+        let Some(rect) = rects.get(index) else {
             continue;
         };
-        *free = free.saturating_add(area);
-        // Area first because it is exact — it comes off the packer's own
-        // accounting, so it counts the glyph pages `layer_admits` cannot see —
-        // and because it is the cheaper of the two questions.
-        if *free >= request_area && layer_admits(rects, layer, request_w, request_h, atlas_size) {
-            return Some(layer);
+        if !layers.contains(&rect.layer) {
+            layers.push(rect.layer);
+        }
+    }
+
+    for &layer in layers.iter() {
+        let mut layer_freed_area = 0_u64;
+        let mut step = 0_usize;
+
+        for &index in order {
+            let on_this_layer = rects.get(index).is_some_and(|rect| rect.layer == layer);
+            if !on_this_layer {
+                continue;
+            }
+            if step >= MAX_PRESSURE_EVICTION_CANDIDATES || layer_freed_area > area_budget {
+                break;
+            }
+            step += 1;
+
+            let area = {
+                let Some(rect) = rects.get_mut(index) else {
+                    continue;
+                };
+                rect.freed = true;
+                rect.area
+            };
+            layer_freed_area = layer_freed_area.saturating_add(area);
+
+            let Some(free) = free_area.get_mut(layer as usize) else {
+                continue;
+            };
+            *free = free.saturating_add(area);
+            // Area first because it is exact — it comes off the packer's own
+            // accounting, so it counts the glyph pages `layer_admits` cannot see —
+            // and because it is the cheaper of the two questions.
+            if *free >= request_area && layer_admits(rects, layer, request_w, request_h, atlas_size)
+            {
+                return Some(layer);
+            }
         }
     }
 
@@ -2513,7 +2596,10 @@ mod tests {
             .resolve(&transposed)
             .expect_err("the second extent cannot take the first one's rectangle");
 
-        assert!(matches!(skip, ImageSkip::NoAtlasSpace { .. }));
+        assert!(
+            matches!(skip, ImageSkip::SameFrameExtentConflict { .. }),
+            "a same-frame ordering conflict, not an atlas-capacity refusal: {skip:?}"
+        );
         assert!(
             residency.evictions().is_empty(),
             "no clear over a rectangle this frame already sampled"
@@ -2604,15 +2690,116 @@ mod tests {
             .collect();
         let order: Vec<usize> = (0..rects.len()).collect();
         let mut free_area = vec![0_u64];
+        let mut layers = Vec::new();
 
         assert_eq!(
-            plan_pressure_eviction(64, 64, (64, 64), &mut rects, &order, &mut free_area),
+            plan_pressure_eviction(
+                64,
+                64,
+                (64, 64),
+                &mut rects,
+                &order,
+                &mut free_area,
+                &mut layers
+            ),
             None,
             "a walk that cannot fit the request inside its budget plans nothing"
         );
         assert!(
             rects.iter().filter(|rect| rect.freed).count() <= MAX_PRESSURE_EVICTION_CANDIDATES + 1,
             "and it stopped walking rather than marking the whole residency"
+        );
+    }
+
+    #[test]
+    fn a_satisfiable_layer_is_not_starved_by_a_hopeless_ones_candidates() {
+        // The multi-layer shape the per-layer budget exists for. Layer 0 is
+        // "this frame's" 64x40 anchor plus more than
+        // `MAX_PRESSURE_EVICTION_CANDIDATES` one-pixel stale fillers packed
+        // into the 64x24 strip left over — every one of them stale (older
+        // than the incoming request's frame) and none of them, individually
+        // or together, ever able to free a 32-tall rectangle, since the strip
+        // they sit in is only 24 pixels tall. Layer 1 is four 32-square
+        // quadrants exactly tiling the layer, three "this frame's" and one
+        // stale. Layers 2 and 3 are each one "this frame's" 64-square image,
+        // filling them outright so the incoming request cannot simply grow
+        // into an unused layer.
+        //
+        // A single pooled budget spends its whole allowance walking layer 0's
+        // fillers — none of which can ever satisfy the request — and never
+        // reaches layer 1's one satisfiable candidate at all. A per-layer
+        // budget exhausts layer 0's own allowance the same way, then gives
+        // layer 1 a fresh one and finds the fit immediately.
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (64, 64),
+            max_atlases: 4,
+        });
+
+        let anchor = image(64, 40);
+        let fillers: Vec<ImageData> = (0..MAX_PRESSURE_EVICTION_CANDIDATES + 6)
+            .map(|_| image(1, 1))
+            .collect();
+        let quadrants: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
+        let layer2_filler = image(64, 64);
+        let layer3_filler = image(64, 64);
+
+        residency.begin_frame();
+        residency
+            .resolve(&anchor)
+            .expect("the anchor takes layer 0's top");
+        for filler in &fillers {
+            residency
+                .resolve(filler)
+                .expect("a one-pixel filler always finds room in the leftover strip");
+        }
+        for quadrant in &quadrants {
+            residency
+                .resolve(quadrant)
+                .expect("a 32-square quadrant packs layer 1's empty corners");
+        }
+        residency
+            .resolve(&layer2_filler)
+            .expect("a whole-layer image grows into a fresh layer 2");
+        residency
+            .resolve(&layer3_filler)
+            .expect("a whole-layer image grows into a fresh layer 3");
+        residency.acknowledge_plan();
+        assert_eq!(
+            residency.layers(),
+            4,
+            "fixture precondition: all four layers exist"
+        );
+
+        // Refresh everything except the fillers and the first quadrant, so
+        // only they are stale candidates when the request arrives — the
+        // fillers sort ahead of the stale quadrant because they were
+        // resolved first and share the same `last_seen`.
+        residency.begin_frame();
+        residency.resolve(&anchor).expect("still resident");
+        residency.resolve(&quadrants[1]).expect("still resident");
+        residency.resolve(&quadrants[2]).expect("still resident");
+        residency.resolve(&quadrants[3]).expect("still resident");
+        residency.resolve(&layer2_filler).expect("still resident");
+        residency.resolve(&layer3_filler).expect("still resident");
+
+        let arrival = residency
+            .resolve(&image(32, 32))
+            .expect("a per-layer budget reaches layer 1's satisfiable candidate");
+
+        assert_eq!(
+            residency.pressure_evictions(),
+            1,
+            "exactly the one quadrant needed, not layer 0's hopeless fillers"
+        );
+        assert_eq!(residency.evictions().len(), 1);
+        assert_eq!(
+            residency.evictions()[0].layer,
+            arrival.region.layer,
+            "the eviction and the arrival land on the same, single layer"
+        );
+        assert_ne!(
+            arrival.region.layer, 0,
+            "the winning layer is not the one full of hopeless fillers"
         );
     }
 

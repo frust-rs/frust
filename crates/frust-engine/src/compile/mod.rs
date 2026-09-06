@@ -340,8 +340,9 @@ pub struct CompiledFrame {
     /// How many of this frame's draws painted with an atlas-backed image.
     pub image_draws: u32,
     /// How many image draws were dropped because the image could not be made
-    /// resident (unsupported format, oversized, malformed, atlas full, or the
-    /// atlas disabled outright).
+    /// resident (unsupported format, oversized, malformed, atlas full, the
+    /// same blob already resolved this frame at another extent, or the atlas
+    /// disabled outright).
     ///
     /// Observational, and the counter that makes "an image the engine cannot
     /// hold is a skipped draw, not a panicked frame" measurable rather than
