@@ -107,6 +107,9 @@ split as `frust-gpu`, mandatory on a multi-adapter host:
 # Host-only arm, no GPU/environment needed:
 cargo test -p frust-engine
 
+# Host-only arm with perf-trace instrumentation tests:
+cargo test -p frust-engine --features perf-trace
+
 # Real-adapter arm, pinned runner (adapter pin mandatory on a multi-adapter host):
 WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> cargo test -p frust-engine -- --ignored
 
@@ -118,6 +121,11 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
 # Diagnostic only — never a gate:
 cargo bench -p frust-engine -- --quick
 ```
+
+Engine-owned instrumentation (`frust-perf img`, `frust-perf atlas`, `frust-perf enc` counters, and
+`PhaseClock`/`EncodeTrace` types) compiles only under the `perf-trace` feature and is deliberately
+NOT gated by the shell's runtime `FRUST_TRACE` dial — the engine cannot observe shell-side
+instrumentation state and cannot condition its own on it.
 
 `bash scripts/testing/engine-lean-check.sh` is the engine's lean-weight gate (same SKIP≠FAIL exit
 shape as `scripts/release-lean-check.sh`; manual gate, no CI): a single default arm builds

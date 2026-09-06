@@ -647,11 +647,16 @@ presence is the signal.
 - `resident` — images holding an atlas rectangle at the end of the frame.
 - `budget` — the resolved `AtlasBudget`: per-layer extent and maximum layers.
 
-`evicted` counts rectangles a *successful* arrival displaced. An allocation the
-atlas cannot satisfy at all displaces nothing — the engine plans the eviction
-before it frees anything and abandons a plan that would not have produced the
-allocation — so `skipped>0 evicted=0` is the honest reading "this content does
-not fit", not "the atlas thrashed and gave up".
+`evicted` counts rectangles a pressure plan released this frame, whether or not
+the allocation that motivated the plan then succeeded. A plan is committed only
+when the fit model predicts the allocation will succeed, but the model is
+necessary-not-sufficient (it cannot see glyph pages sharing the allocator), so a
+committed plan the packer still refuses yields `skipped>0 evicted>0` on the same
+frame — that combination is the residual-thrash signal a grader must escalate,
+not discount. `skipped>0 evicted=0` has two readings: an unsatisfiable request
+(nothing freed, zero cost) or a planner that stopped at its candidate/area
+budget (still has more candidates to evaluate) — and cannot by itself be read as
+"this content does not fit".
 
 ```
 frust-perf atlas tier=<mobile|desktop> budget=<w>x<h>x<layers> downlevel=<Full|WebGl2> transient_saves_memory=<true|false> adapter=<name>

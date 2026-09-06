@@ -135,6 +135,25 @@ cargo test -p frust-shell-common --features perf-trace
 cargo clippy -p frust-shell-common --features perf-trace --all-targets -- -D warnings
 ```
 
+`frust-engine`'s `frust-perf` line-format tests (field order, percentile, format_us rounding in `src/renderer.rs`;
+residency/atlas-tier lines in `tests/images.rs`) — compile and assert only behind `perf-trace`:
+
+```bash
+cargo test -p frust-engine --features perf-trace
+cargo clippy -p frust-engine --features perf-trace --all-targets -- -D warnings
+```
+
+`frust-shell-ios`'s `pace_trace` unit tests (`src/app/executor.rs`) run only for iOS (the `app` module is
+`cfg(target_os = "ios")`), testing the `frust-perf p2p_us` line:
+
+```bash
+cargo test -p frust-shell-ios --features perf-trace
+cargo clippy -p frust-shell-ios --all-targets --features perf-trace --target aarch64-apple-ios -- -D warnings
+```
+
+The iOS clippy line currently reports 19 known pre-existing errors (18× `not_unsafe_ptr_arg_deref` on
+C-ABI exports, 1× `let_unit_value`); a change must add zero new ones.
+
 Target compile gates and slow ignored scaffold/build tests remain listed in
 `docs/DEVELOPMENT.md`.
 
