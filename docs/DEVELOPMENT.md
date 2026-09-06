@@ -598,3 +598,7 @@ upstream in glifo 0.3.0) go missing rather than landing wrong. **Safe** for hudd
 emoji set (bundled fonts ship COLR); **at-risk**: Android's CBDT-strike system emoji. See
 [LIMITATIONS.md](LIMITATIONS.md)'s `engine-bitmap-glyphs-gap` for the full evidence and trigger
 for removal.
+
+## Website
+
+Site source: [frust-rs/website](https://github.com/frust-rs/website), cloned at `apps/website` (gitignored, never a submodule — see `.gitignore`). It's a Docusaurus site whose gates run in Docker since this toolchain has no Node; `apps/website/CONTRIBUTING.md` is the canonical gate definition — install (`pnpm install --frozen-lockfile`), typecheck (`pnpm typecheck`), lint (`pnpm lint`), and build (`pnpm build`), each via `docker compose run --rm dev`. The production image is compose's `web` service: `docker compose up --build web` (serves `:8080`; image `ghcr.io/frust-rs/website:local`). Content is authored there and cites frust files at a pinned SHA; `docs/` here stays contributor documentation under `DOC_POLICY.md` budgets and is not mirrored. Brand assets: `docs/assets/branding/` (source of truth, copied by the site). API reference tree: produced by `cargo doc --workspace --no-deps` — a generation script is planned but not yet in the repo.
