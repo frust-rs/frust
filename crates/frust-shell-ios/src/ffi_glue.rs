@@ -140,7 +140,7 @@ fn record_startup_spans(startup_spans: &Mutex<Option<StartupSpans>>, names: &[&'
 /// across `render_scene`'s blocking GPU tail (`nextDrawable` acquire + Metal
 /// submit). Before this type, [`render_loop`] locked the mutex once and held
 /// the guard across the *whole* `render_scene` call, including that blocking
-/// tail — closing the Phase 2 review's minor #11/#19 finding (any future
+/// tail — a latent watchdog hazard (any future
 /// UI-thread caller reaching for this mutex would block behind a vsync/
 /// drawable wait, the classic `0x8badf00d` watchdog-kill shape), defense in
 /// depth today since nothing currently reaches for it from the UI thread.
@@ -181,8 +181,7 @@ impl StartupRecorder<'_> {
     /// retired the recorder), so a caller juggling a `Shared` handle across
     /// many frames (see [`render_loop`]'s `startup_retired` fast path) knows
     /// when it can drop to a lock-free `Owned(&mut None)` handle from the
-    /// next frame on — the per-frame cost this closes out (Phase 2 review
-    /// minor #5).
+    /// next frame on — the per-frame lock cost this removes.
     pub(crate) fn take_and_emit(&mut self, name: &'static str) -> bool {
         let taken = match self {
             StartupRecorder::Owned(spans) => spans.take(),

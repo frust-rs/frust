@@ -106,8 +106,7 @@ mod pace_trace {
         /// nothing (`Redraw`/`SurfaceLost`/`Skipped`/`Err` — see
         /// [`record`]'s `presented` parameter) leaves this untouched: `p2p_us`
         /// measures the presented cadence specifically, so its base may only
-        /// ever advance on a frame that actually presented (Phase 2 review
-        /// minor #6 / act_000001a075af175599YuJ0qa — the prior unconditional
+        /// ever advance on a frame that actually presented (an earlier unconditional
         /// advance let one long present-to-present gap get reported as two
         /// short, misleading intervals).
         submit_end: Option<Instant>,
@@ -927,7 +926,7 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 /// `Option<StartupSpans>` so the split's shared-with-the-UI-thread variant can
 /// keep its lock scoped to each individual record/take call — never held
 /// across this function's own blocking GPU tail (acquire + submit) below. See
-/// that type's docs for the finding this closes (Phase 2 review minor #11/#19).
+/// that type's docs for the hazard this avoids.
 ///
 /// # Autorelease pool
 ///

@@ -22,8 +22,7 @@
 //! [`SpinBox`] animates). A failed task (`AsyncValue::Error`, e.g. a
 //! `spawn_blocking` panic/abort) raises no `end` marker at all — a window
 //! bracketing an error is not a measurement a harness grading by marker pair
-//! could tell apart from a genuine ~50MB generate-and-parse (Phase 2 review
-//! minor #9 / act_000001a075af19cbXlrxBysI: the prior guard,
+//! could tell apart from a genuine ~50MB generate-and-parse (an earlier guard,
 //! `!is_loading() && !is_idle()`, admitted `Error` alongside `Ready`). The
 //! half-open window therefore spans every frame produced while the whole
 //! off-thread call — payload generation and parse together, since both run
@@ -425,8 +424,8 @@ impl Component for S4Heavy {
         // `spawn_blocking` result reach `Ready` — see `S4State::end_marked`.
         // A failed task (`AsyncValue::Error`) never closes the window: `end`
         // must bracket a successful generate-and-parse, not a run that
-        // errored out (Phase 2 review minor #9 — the prior condition,
-        // `!is_loading() && !is_idle()`, admitted `Error` here too).
+        // errored out (an earlier condition, `!is_loading() && !is_idle()`,
+        // admitted `Error` here too).
         if !state.end_marked && value.is_ready() {
             frust_shell_common::perf::mark_scenario_end("s4-parse");
             state.end_marked = true;
@@ -644,9 +643,9 @@ mod tests {
     }
 
     /// A failed task (`AsyncValue::Error`) must close no `s4-parse` window at
-    /// all — see the module doc and `S4State::end_marked` (Phase 2 review
-    /// minor #9 / act_000001a075af19cbXlrxBysI: the prior end condition,
-    /// `!is_loading() && !is_idle()`, admitted `Error` alongside `Ready`).
+    /// all — see the module doc and `S4State::end_marked` (an earlier end
+    /// condition, `!is_loading() && !is_idle()`, admitted `Error` alongside
+    /// `Ready`).
     ///
     /// `S4Heavy::init`'s own generate-then-parse call cannot fail, so this
     /// drives a throwaway, instantly-resolving `use_task` instead (never the
