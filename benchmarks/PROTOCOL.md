@@ -125,6 +125,11 @@ cross-renderer comparison that bounds the switch is recorded once in
 computed from were retired from `benchmarks/raw/` afterwards and live in git
 history (the section names the commit).
 
+**The 2026-09-06 post-optimization pass supersedes the 2026-09-05 pass** on
+every device it covers (OnePlus 9, iPhone SE, Pixel 5): its raw series replace
+theirs under `benchmarks/raw/`, and `RESULTS.md` carries a per-device delta
+table against them.
+
 ## 3. Environmental controls
 
 Applied identically to both apps, every run, every device:
@@ -255,6 +260,19 @@ frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_
 > double-counts the frame. `total_us` is unchanged v3 arithmetic
 > (`rebuild+layout+paint+encode+acquire+submit`), and every percentile in this
 > document is still computed from it alone.
+>
+> **`total_us` is a cost sum, not a frame interval.** Under the render-thread
+> split the six spans are measured on two threads that run concurrently for one
+> frame — `rebuild`/`layout`/`paint` on the UI thread, `encode`/`acquire`/
+> `submit` on the render thread, folded by `FramePasses::from_split` and
+> emitted once. Their sum is therefore the frame's total CPU cost across both
+> threads, and it can exceed the display period while the pipeline still
+> presents on every vsync. Do not read "`total_us` over one budget" as "missed
+> a vsync", and do not read "over two budgets" as "took two vsyncs": the
+> budget columns count cost, and the present-side quantity the sanitized series
+> carries is the achieved rate (active frames / capture seconds). A capture
+> showing a p50 cost sum above the frame period at the panel's full rate is the
+> ordinary pipelined case, not a contradiction.
 >
 > **The reading lags its own line.** A frame's queries are mapped without ever
 > blocking the frame path, so the `gpu_*_us` values on frame *n*'s line are a
@@ -395,8 +413,7 @@ shape it parses.
 > the window when both edges carry an index, so an S3 per-op window is
 > exactly one frame: the op's own.
 >
-> **Why the frame has to stamp it** (action item
-> `act_000001a070c818837NtGqevW`): with the render-thread split the UI
+> **Why the frame has to stamp it:** with the render-thread split the UI
 > thread that raises a marker cannot know whether the render thread has
 > recorded the previous frame yet, so neither a marker's log position nor a
 > frame number guessed on the UI side is a reliable proxy for which frames

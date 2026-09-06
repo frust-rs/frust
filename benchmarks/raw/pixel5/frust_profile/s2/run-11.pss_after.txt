@@ -1,43 +1,43 @@
 Applications Memory Usage (in Kilobytes):
-Uptime: 30045553 Realtime: 178844101
+Uptime: 64955546 Realtime: 298923788
 
-** MEMINFO in pid 16729 [it.f0x.frustbench] **
+** MEMINFO in pid 11015 [it.f0x.frustbench] **
                    Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
                  Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
                 ------   ------   ------   ------   ------   ------   ------   ------
-  Native Heap    17835    17808        0       19    19860    26728    16439     6843
-  Dalvik Heap      686      608        0       75     4704    26768     2192    24576
- Dalvik Other      585      552        0        1     1240                           
+  Native Heap    18112    18088        0       15    20140    26884    16905     6565
+  Dalvik Heap     1276     1204        0       68     5300    26756     2180    24576
+ Dalvik Other      563      532        0        1     1220                           
         Stack      524      524        0        0      532                           
-       Ashmem       15        0        0        0      684                           
-      Gfx dev     4152     4152        0        0     4152                           
-    Other dev      119        0       16        0      688                           
-     .so mmap     5003      292     1944        2    46388                           
-    .jar mmap      665        0        0        0    22984                           
-    .apk mmap     7427      324     7040        0     8352                           
-    .ttf mmap       72        0       16        0      344                           
-    .dex mmap      212        4      196        0      972                           
-    .oat mmap      356        0        0        0    11372                           
-    .art mmap      934      464        4       39    24960                           
-   Other mmap       43       40        0        0      660                           
+       Ashmem       14        0        0        0      688                           
+      Gfx dev     4300     4300        0        0     4300                           
+    Other dev       73        0       20        0      692                           
+     .so mmap    11783      292     3844        0    48620                           
+    .jar mmap      671        0        0        0    23328                           
+    .apk mmap     7759      324     7292        0     8636                           
+    .ttf mmap      249        0      184        0      380                           
+    .dex mmap      211        4      196        0      952                           
+    .oat mmap      303        0        0        0    11372                           
+    .art mmap      890      464        4       36    24960                           
+   Other mmap       54       40        0        0      608                           
    EGL mtrack    50360    50360        0        0    50360                           
     GL mtrack      576      576        0        0      576                           
-      Unknown      588      520       64        1     1252                           
-        TOTAL    90289    76224     9280      137   200080    53496    18631    31419
+      Unknown      592      532       56        1     1248                           
+        TOTAL    98431    77240    11596      121   203912    53640    19085    31141
  
  App Summary
                        Pss(KB)                        Rss(KB)
                         ------                         ------
-           Java Heap:     1076                          29664
-         Native Heap:    17808                          19860
-                Code:     9816                          90476
+           Java Heap:     1672                          30260
+         Native Heap:    18088                          20140
+                Code:    12136                          93352
                Stack:      524                            532
-            Graphics:    55088                          55088
-       Private Other:     1192
-              System:     4785
-             Unknown:                                    4460
+            Graphics:    55236                          55236
+       Private Other:     1180
+              System:     9595
+             Unknown:                                    4392
  
-           TOTAL PSS:    90289            TOTAL RSS:   200080       TOTAL SWAP PSS:      137
+           TOTAL PSS:    98431            TOTAL RSS:   203912       TOTAL SWAP PSS:      121
  
  Objects
                Views:        8         ViewRootImpl:        1

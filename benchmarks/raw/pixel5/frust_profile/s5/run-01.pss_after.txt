@@ -1,43 +1,43 @@
 Applications Memory Usage (in Kilobytes):
-Uptime: 32069337 Realtime: 180867885
+Uptime: 66976089 Realtime: 300944331
 
-** MEMINFO in pid 30187 [it.f0x.frustbench] **
+** MEMINFO in pid 23207 [it.f0x.frustbench] **
                    Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
                  Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
                 ------   ------   ------   ------   ------   ------   ------   ------
-  Native Heap    77738    77712        0       16    79764    89324    77688     6232
-  Dalvik Heap      685      608        0       73     4704    26768     2192    24576
- Dalvik Other      584      552        0        1     1240                           
-        Stack      580      580        0        0      588                           
-       Ashmem       15        0        0        0      684                           
-      Gfx dev     5980     5980        0        0     5980                           
-    Other dev      118        0       16        0      688                           
-     .so mmap     4891      292     1736        2    46412                           
-    .jar mmap      654        0        0        0    22984                           
-    .apk mmap     7597      324     7212        0     8524                           
-    .ttf mmap       40        0        4        0      260                           
-    .dex mmap      212        4      196        0      972                           
-    .oat mmap      350        0        0        0    11308                           
-    .art mmap      925      464        4       39    24960                           
-   Other mmap       42       40        0        0      660                           
+  Native Heap    77713    77688        0       16    79740    89464    77744     6226
+  Dalvik Heap     1270     1196        0       71     5292    26766     2190    24576
+ Dalvik Other      565      532        0        1     1220                           
+        Stack      576      576        0        0      584                           
+       Ashmem       14        0        0        0      688                           
+      Gfx dev     6100     6100        0        0     6100                           
+    Other dev       69        0       16        0      688                           
+     .so mmap     9944      292     1792        0    48644                           
+    .jar mmap      686        0        0        0    23328                           
+    .apk mmap     7829      324     7392        0     8736                           
+    .ttf mmap      111        0        0        0      320                           
+    .dex mmap      211        4      196        0      952                           
+    .oat mmap      306        0        0        0    11308                           
+    .art mmap      907      464        4       37    24960                           
+   Other mmap       55       40        0        0      608                           
    EGL mtrack    50360    50360        0        0    50360                           
     GL mtrack      576      576        0        0      576                           
-      Unknown      584      532       48        1     1240                           
-        TOTAL   152063   138024     9216      132   261904   116092    79880    30808
+      Unknown      589      528       56        1     1248                           
+        TOTAL   158007   138680     9456      126   265352   116230    79934    30802
  
  App Summary
                        Pss(KB)                        Rss(KB)
                         ------                         ------
-           Java Heap:     1076                          29664
-         Native Heap:    77712                          79764
-                Code:     9768                          90524
-               Stack:      580                            588
-            Graphics:    56916                          56916
-       Private Other:     1188
-              System:     4823
-             Unknown:                                    4448
+           Java Heap:     1664                          30252
+         Native Heap:    77688                          79740
+                Code:    10000                          93352
+               Stack:      576                            584
+            Graphics:    57036                          57036
+       Private Other:     1172
+              System:     9871
+             Unknown:                                    4388
  
-           TOTAL PSS:   152063            TOTAL RSS:   261904       TOTAL SWAP PSS:      132
+           TOTAL PSS:   158007            TOTAL RSS:   265352       TOTAL SWAP PSS:      126
  
  Objects
                Views:        8         ViewRootImpl:        1

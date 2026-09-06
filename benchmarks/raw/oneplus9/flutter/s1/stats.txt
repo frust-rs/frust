@@ -1,5 +1,5 @@
 -- stats.py (discarding first 2 runs, per protocol convention) --
 == flutter s1 ==
-frames: 29203 total, 29203 active, 0 skipped
-p50=9.44ms  p95=17.15ms  p99=19.47ms  worst=40.11ms
-missed_60hz=1517 (budget 16.67ms)  missed_120hz=26710 (budget 8.33ms)
+frames: 29337 total, 29337 active, 0 skipped
+p50=9.50ms  p95=16.96ms  p99=19.47ms  worst=87.02ms
+missed_60hz=1501 (budget 16.67ms)  missed_120hz=26519 (budget 8.33ms)
