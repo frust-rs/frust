@@ -58,6 +58,7 @@ pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
 use std::collections::HashSet;
 use std::sync::Once;
+use std::time::Duration;
 
 use kurbo::{
     Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
@@ -119,6 +120,131 @@ static SHADER_QUAD_SKIP_WARNING: Once = Once::new();
 /// conflating the two would tell an operator who set the switch that something
 /// went wrong.
 static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
+
+/// A stopwatch for the CPU phases one frame's encode splits into, compiled
+/// away entirely without `perf-trace`.
+///
+/// The engine's own CPU profile is measured by lapping this once per phase
+/// rather than by sampling: a phase is tens to hundreds of microseconds and no
+/// sampling profiler rides along on a phone under a benchmark harness, while a
+/// lap is two clock reads. Under `perf-trace` a lap reads
+/// [`std::time::Instant`]; without it the type is zero-sized, [`Self::lap`]
+/// answers [`Duration::ZERO`] and no clock is read at all — the "zero clock
+/// reads in a disabled build" terms `docs/CODE_STANDARDS.md`'s instrumentation
+/// conventions set for an FFI-sensitive path, met at compile time rather than
+/// by a runtime branch.
+///
+/// Laps are cumulative by construction: each one both reports the span since
+/// the previous lap and opens the next, so a phase can never be double-counted
+/// or silently skipped the way two independent `Instant` pairs could.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PhaseClock {
+    /// When the phase now being timed began.
+    #[cfg(feature = "perf-trace")]
+    last: std::time::Instant,
+}
+
+impl PhaseClock {
+    /// Opens the first phase at "now".
+    #[must_use]
+    pub(crate) fn start() -> Self {
+        Self {
+            #[cfg(feature = "perf-trace")]
+            last: std::time::Instant::now(),
+        }
+    }
+
+    /// Closes the phase in flight, answering what it cost, and opens the next.
+    #[must_use]
+    pub(crate) fn lap(&mut self) -> Duration {
+        #[cfg(feature = "perf-trace")]
+        {
+            let now = std::time::Instant::now();
+            // Saturating rather than `-`: a clock that went backwards across a
+            // lap is a measurement artefact, and a zero span reports it far
+            // better than a panicked frame would (E17).
+            let span = now.saturating_duration_since(self.last);
+            self.last = now;
+            span
+        }
+        #[cfg(not(feature = "perf-trace"))]
+        Duration::ZERO
+    }
+}
+
+/// What one [`SceneCompiler::compile`] call spent, phase by phase.
+///
+/// Zero across the board in a build without `perf-trace` — see [`PhaseClock`].
+/// The phases partition the call exactly, in the order they run, so their sum
+/// is the whole compile minus call overhead:
+///
+/// 1. [`validate`](Self::validate) — the up-front finiteness and geometry
+///    sweep over every command. A frame is refused whole or not at all, so
+///    this sweep runs before the walk records anything and is paid on every
+///    frame in the command count.
+/// 2. [`prepare`](Self::prepare) — resetting the per-frame scratch (strip
+///    generator, clip/group/snapshot stacks, punches) and ageing the two
+///    caches that span frames (image residency, `glifo`'s prep cache).
+/// 3. [`classify`](Self::classify) — routing every glyph run through
+///    [`crate::text::atlas_policy`] before any of them is drawn.
+/// 4. [`admit`](Self::admit) — closing the glyph atlas's own frame, which is
+///    where admission packs what the routing pass asked for.
+/// 5. [`walk`](Self::walk) — the command walk itself: strip generation and
+///    paint encoding, and on a text-heavy scene the bulk of the call. The
+///    part of it spent inside glyph runs is reported separately by
+///    [`glyphs`](Self::glyphs), which is a subset of this rather than a phase
+///    of its own.
+/// 6. [`finish`](Self::finish) — closing open groups, generating the hole
+///    punches, ageing the glyph atlas and taking the frame's image plan.
+///
+/// Observational only: nothing downstream branches on any of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompileSpans {
+    /// The up-front finiteness and geometry sweep over every command.
+    pub validate: Duration,
+    /// Per-frame scratch resets and the two cross-frame caches' ageing.
+    pub prepare: Duration,
+    /// Glyph-run routing, ahead of the walk.
+    pub classify: Duration,
+    /// Glyph atlas admission, closing the routing pass.
+    pub admit: Duration,
+    /// The command walk: strip generation and paint encoding.
+    pub walk: Duration,
+    /// The part of [`walk`](Self::walk) spent inside glyph runs.
+    ///
+    /// A **subset** of `walk`, not a seventh phase beside it, and so
+    /// deliberately excluded from [`Self::total`]: adding it would count the
+    /// glyph work twice. It exists because "the walk dominates" is not on its
+    /// own an actionable measurement on a text-heavy scene — whether the cost
+    /// is the text or everything drawn around it is the question that decides
+    /// where a lever could go.
+    ///
+    /// Accumulated per [`Command::GlyphRun`] rather than per glyph: a run is
+    /// the unit the cache and the atlas policy both work in, and two clock
+    /// reads a glyph would cost more than the phase being measured.
+    pub glyphs: Duration,
+    /// Closing groups, punch generation, atlas ageing, the image plan.
+    pub finish: Duration,
+}
+
+impl CompileSpans {
+    /// What the six phases sum to.
+    ///
+    /// Saturating rather than `+`: a sum is only ever read by a diagnostic
+    /// line, and overflowing one must not take the frame with it (E17).
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        [
+            self.prepare,
+            self.classify,
+            self.admit,
+            self.walk,
+            self.finish,
+        ]
+        .iter()
+        .fold(self.validate, |acc, span| acc.saturating_add(*span))
+    }
+}
 
 /// Where one glyph an atlas-routed draw sampled lives in the atlas array.
 ///
@@ -278,6 +404,14 @@ pub struct CompiledFrame {
     /// [`SceneCompiler::acknowledge_glyph_clears`]. A frame compiled and then
     /// refused takes none of them with it.
     pub glyph_clears: Vec<PendingClearRect>,
+    /// What compiling this frame cost, phase by phase — all zero without
+    /// `perf-trace` (see [`CompileSpans`]).
+    ///
+    /// Carried on the frame rather than kept on the compiler because the
+    /// consumer is the renderer's own encode-phase accounting, which already
+    /// holds the frame and would otherwise have to reach back into the
+    /// compiler for a number belonging to this frame alone.
+    pub compile_spans: CompileSpans,
 }
 
 impl CompiledFrame {
@@ -600,6 +734,10 @@ impl SceneCompiler {
         root: Affine,
         size: (u16, u16),
     ) -> Result<CompiledFrame, EngineError> {
+        // The compiler's half of the encode's CPU accounting; the renderer
+        // laps the rest of the call around it (see [`CompileSpans`]). Free
+        // without `perf-trace`.
+        let mut clock = PhaseClock::start();
         let (width, height) = size;
         check_tile_addressable(width, height)?;
         check_finite(root)?;
@@ -612,6 +750,8 @@ impl SceneCompiler {
             }
             check_geometry(command)?;
         }
+
+        let validate = clock.lap();
 
         self.generator.reset(width, height);
         self.frame_extent = (width, height);
@@ -629,6 +769,7 @@ impl SceneCompiler {
         // draw should be stamped as used *after* the ageing pass, not before
         // it.
         self.glyphs.maintain();
+        let prepare = clock.lap();
 
         // Phase one of the frame: every glyph run is *routed* before any of
         // them is drawn. Opened here, beside the residency's own frame, because
@@ -641,6 +782,8 @@ impl SceneCompiler {
         // writes (see [`CompiledFrame::glyph_clears`]).
         self.glyph_atlas.begin_frame();
         self.classify_runs(scene, root);
+        let classify = clock.lap();
+
         let glyph_clears = self
             .glyph_atlas
             .build(self.images.allocator_mut(), |_| {
@@ -652,6 +795,7 @@ impl SceneCompiler {
                 None
             })
             .clears;
+        let admit = clock.lap();
 
         let mut frame = CompiledFrame {
             strips: StripStorage::new(GenerationMode::Append),
@@ -675,12 +819,14 @@ impl SceneCompiler {
             atlas_glyph_draws: 0,
             glyph_slots: Vec::new(),
             glyph_clears,
+            compile_spans: CompileSpans::default(),
         };
         let mut depth = DepthCounter::new();
 
         for command in scene.commands() {
             self.compile_command(command, root, &mut frame, &mut depth);
         }
+        let walk = clock.lap();
 
         self.close_open_groups(&mut frame);
         self.generate_punches(&mut frame);
@@ -706,6 +852,17 @@ impl SceneCompiler {
         frame.atlas_layers = self.images.layers();
 
         note_image_pressure(&frame, &self.images);
+
+        // Field by field rather than as a whole struct, so the glyph subset
+        // the walk accumulated into `frame` survives. Last, so `finish` covers
+        // every phase above it and the six partition the call rather than
+        // sampling parts of it.
+        frame.compile_spans.validate = validate;
+        frame.compile_spans.prepare = prepare;
+        frame.compile_spans.classify = classify;
+        frame.compile_spans.admit = admit;
+        frame.compile_spans.walk = walk;
+        frame.compile_spans.finish = clock.lap();
 
         Ok(frame)
     }
@@ -1111,7 +1268,12 @@ impl SceneCompiler {
                 }
             }
             Command::GlyphRun(run) => {
+                // Two clock reads a run, free without `perf-trace` (see
+                // [`PhaseClock`]); the accumulated total is a subset of the
+                // walk this arm runs inside.
+                let mut clock = PhaseClock::start();
                 self.compile_glyph_run(run, combined * run.transform, route, frame, depth);
+                frame.compile_spans.glyphs = frame.compile_spans.glyphs.saturating_add(clock.lap());
             }
             // A fragment program's own pixels were produced before the frame
             // was compiled, into a texture registered under an id derived from

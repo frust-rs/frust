@@ -173,6 +173,7 @@
 use core::ops::Range;
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
+use std::time::Duration;
 
 use frust_gpu::{PipelineCache, PooledTexture, SceneTextureId, ShaderLibrary, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
@@ -189,7 +190,7 @@ use crate::cache::{
     AtlasBudget, BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, ResidentImage,
 };
 use crate::compile::paint::resolve_lut_request;
-use crate::compile::{ClearPunch, CompiledFrame, SceneCompiler};
+use crate::compile::{ClearPunch, CompileSpans, CompiledFrame, PhaseClock, SceneCompiler};
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
@@ -280,6 +281,332 @@ static INDEXED_PAINT_WARNING: Once = Once::new();
 /// frame.
 static ATLAS_REFUSAL_WARNING: Once = Once::new();
 
+/// The CPU phases one [`EngineRenderer::encode_traced`] call splits into.
+///
+/// The GPU half of a frame is [`EngineSpan`]'s, measured by the timestamp ring
+/// at pass boundaries; this is the CPU half, measured by lapping a
+/// [`PhaseClock`] between the encode's own steps. The two answer different
+/// questions and neither substitutes for the other — a text-heavy scene can
+/// cost milliseconds here while its passes cost a fraction of one there.
+///
+/// The phases partition the call in the order they run, so [`Self::total`] is
+/// the whole encode. [`counts`](Self::counts) trails them and is not one of
+/// them.
+///
+/// - [`compile`](Self::compile) — [`SceneCompiler::compile`] end to end,
+///   itself split six ways by [`CompileSpans`].
+/// - [`schedule`](Self::schedule) — building the frame's pass plan and
+///   settling its depth attachment.
+/// - [`paints`](Self::paints) — resolving every draw's paint to a texel of the
+///   encoded-paint texture.
+/// - [`instances`](Self::instances) — building the per-round GPU instance
+///   arrays from the recording.
+/// - [`resize`](Self::resize) — the fallible capacity checks, the image
+///   atlas's own growth, the glyph-rectangle clears an earlier frame's
+///   eviction owes, and the three resource-texture resizes.
+/// - [`upload`](Self::upload) — the frame's queue writes: alpha coverage,
+///   encoded paints, gradient ramps, image texels and the instance arrays.
+/// - [`replay`](Self::replay) — the render-to-atlas pass that draws newly
+///   cached glyphs into their array layers (zero on a steady frame, which
+///   caches none).
+/// - [`pipelines`](Self::pipelines) — taking (or building) this frame's
+///   pipelines and bind groups, and preparing the filter blocks.
+/// - [`record`](Self::record) — recording the frame's passes into the caller's
+///   encoder.
+///
+/// All zero in a build without `perf-trace`; see [`PhaseClock`].
+#[derive(Debug, Clone, Copy, Default)]
+struct EncodeSpans {
+    /// Scene compilation, split further by its own six phases.
+    compile: CompileSpans,
+    /// Whole-call cost of [`SceneCompiler::compile`], call overhead included.
+    ///
+    /// Deliberately measured from outside rather than summed from
+    /// [`Self::compile`]: the difference between the two is the part of the
+    /// call the six inner phases do not cover, and a breakdown that could only
+    /// report its own sum could never show that gap.
+    compile_total: Duration,
+    /// Pass planning and depth settlement.
+    schedule: Duration,
+    /// Paint resolution.
+    paints: Duration,
+    /// Instance-array building.
+    instances: Duration,
+    /// Capacity checks, atlas growth, glyph-rectangle clears, resource resizes.
+    resize: Duration,
+    /// The frame's queue writes.
+    upload: Duration,
+    /// The render-to-atlas pass for newly cached glyphs.
+    replay: Duration,
+    /// Pipeline/bind-group acquisition and filter preparation.
+    pipelines: Duration,
+    /// Recording the frame's passes into the caller's encoder.
+    record: Duration,
+    /// This frame's own draw, strip, alpha and glyph counts.
+    ///
+    /// Last because it is not a phase: it is what the phases above were spent
+    /// on. Carried here because a phase's cost is only readable against the
+    /// work it did — "the walk cost two milliseconds" says nothing on its own,
+    /// while "two milliseconds over three thousand strips and three hundred
+    /// glyphs" says where a lever would have to bite.
+    counts: EncodeCounts,
+}
+
+/// The columns one `frust-perf enc` line reports, in row order.
+///
+/// The first seven are [`CompileSpans`]' own — six phases plus the `glyphs`
+/// subset of the walk — and `compile` after them is the whole compile they sit
+/// inside (so the six sum to at most it, never past it). The next eight are
+/// [`EncodeSpans`]' remaining phases, and `total` closes the line. Pinned as
+/// one list because the line's field order is what a capture is graded by —
+/// the same contract the `frust-perf img` line keeps.
+const ENCODE_TRACE_COLUMNS: [&str; 17] = [
+    "validate",
+    "prepare",
+    "classify",
+    "admit",
+    "walk",
+    "glyphs",
+    "finish",
+    "compile",
+    "schedule",
+    "paints",
+    "instances",
+    "resize",
+    "upload",
+    "replay",
+    "pipelines",
+    "record",
+    "total",
+];
+
+/// The unitless per-frame counts the line reports after its phases, in row
+/// order — what the phases above were spent on.
+const ENCODE_TRACE_COUNTS: [&str; 5] = ["draws", "strips", "alphas", "glyph_draws", "atlas_glyphs"];
+
+/// Width of one window row: every phase column followed by every count.
+const ENCODE_TRACE_ROW: usize = ENCODE_TRACE_COLUMNS.len() + ENCODE_TRACE_COUNTS.len();
+
+/// What one frame drew, carried beside its phases.
+///
+/// Counts rather than durations, and so reported without a unit suffix.
+#[derive(Debug, Clone, Copy, Default)]
+struct EncodeCounts {
+    /// Recorded draws.
+    draws: u32,
+    /// Strips generated.
+    strips: u32,
+    /// Bytes of alpha coverage those strips index — the frame's largest
+    /// single queue write.
+    alphas: u32,
+    /// Draws that painted one glyph outline.
+    glyph_draws: u32,
+    /// How many of those sampled the glyph atlas rather than rasterizing.
+    atlas_glyphs: u32,
+}
+
+impl EncodeCounts {
+    /// What `frame` drew.
+    fn of(frame: &CompiledFrame) -> Self {
+        fn count(len: usize) -> u32 {
+            u32::try_from(len).unwrap_or(u32::MAX)
+        }
+        Self {
+            draws: count(frame.draws().len()),
+            strips: count(frame.strip_buf().len()),
+            alphas: count(frame.alphas().len()),
+            glyph_draws: frame.glyph_draws,
+            atlas_glyphs: frame.atlas_glyph_draws,
+        }
+    }
+}
+
+/// Frames one `frust-perf enc` line summarises — one line a second at 60 Hz.
+///
+/// A window rather than a line per frame: the encode is the very thing being
+/// measured, so formatting and logging inside it once per frame would charge
+/// the measurement to its own subject. One line per sixty frames keeps that
+/// charge under a microsecond a frame while still resolving a scenario's
+/// phases (a thirty-second run reports thirty times), and it matches the
+/// cadence `frust-shell-common`'s own rate-limited frame summary already
+/// emits at.
+const ENCODE_TRACE_WINDOW: usize = 60;
+
+impl EncodeSpans {
+    /// The whole encode.
+    ///
+    /// Saturating throughout: a diagnostic sum must not take the frame with it
+    /// on overflow (E17).
+    fn total(&self) -> Duration {
+        // `compile.glyphs` is deliberately absent: it is a subset of the walk
+        // inside `compile_total`, and adding it would count text twice.
+        [
+            self.schedule,
+            self.paints,
+            self.instances,
+            self.resize,
+            self.upload,
+            self.replay,
+            self.pipelines,
+            self.record,
+        ]
+        .iter()
+        .fold(self.compile_total, |acc, span| acc.saturating_add(*span))
+    }
+
+    /// This frame's row, in [`ENCODE_TRACE_COLUMNS`] order, in nanoseconds.
+    ///
+    /// Nanoseconds in a `u32` rather than a `Duration` per column: a window of
+    /// sixty rows is then three kilobytes of plain integers to sort, and no
+    /// single phase of one frame reaches the four-second ceiling that would
+    /// saturate one.
+    fn row(&self) -> [u32; ENCODE_TRACE_ROW] {
+        fn ns(span: Duration) -> u32 {
+            u32::try_from(span.as_nanos()).unwrap_or(u32::MAX)
+        }
+        [
+            ns(self.compile.validate),
+            ns(self.compile.prepare),
+            ns(self.compile.classify),
+            ns(self.compile.admit),
+            ns(self.compile.walk),
+            ns(self.compile.glyphs),
+            ns(self.compile.finish),
+            ns(self.compile_total),
+            ns(self.schedule),
+            ns(self.paints),
+            ns(self.instances),
+            ns(self.resize),
+            ns(self.upload),
+            ns(self.replay),
+            ns(self.pipelines),
+            ns(self.record),
+            ns(self.total()),
+            self.counts.draws,
+            self.counts.strips,
+            self.counts.alphas,
+            self.counts.glyph_draws,
+            self.counts.atlas_glyphs,
+        ]
+    }
+}
+
+/// The rolling window of per-frame [`EncodeSpans`] one `frust-perf enc` line
+/// is computed over.
+///
+/// Inert in a build without `perf-trace`: [`PhaseClock`] reads no clock there,
+/// so every span reaching [`Self::record`] is zero, and `record` returns on a
+/// compile-time-constant branch before the window is ever touched. Two empty
+/// `Vec`s and a counter is all the renderer carries for it, and no frame pays
+/// a push, a sort or a format.
+#[derive(Debug, Default)]
+struct EncodeTrace {
+    /// One row per frame in the window, in [`ENCODE_TRACE_COLUMNS`] order.
+    window: Vec<[u32; ENCODE_TRACE_ROW]>,
+    /// The column being ranked, kept across windows so a steady stream of
+    /// them allocates once.
+    ranked: Vec<u32>,
+    /// Frames recorded since this renderer was built — the line's own `n`,
+    /// which is the engine's count and deliberately not the host's raw-line
+    /// `n` (a different emitter counting different frames).
+    frames: u64,
+}
+
+impl EncodeTrace {
+    /// Adds one frame's phases to the window, emitting the window's line when
+    /// it fills.
+    ///
+    /// Called at the very end of the encode, so the formatting a full window
+    /// costs falls outside every phase the line reports — the numbers describe
+    /// the encode, not the encode plus its own accounting.
+    fn record(&mut self, spans: &EncodeSpans) {
+        // The whole instrumentation's one gate. A build without `perf-trace`
+        // takes no clock reads at all ([`PhaseClock`]), so every row it could
+        // push would be zeros; returning here on a constant the compiler folds
+        // is what keeps such a build from paying for them anyway.
+        if !cfg!(feature = "perf-trace") {
+            return;
+        }
+        self.frames += 1;
+        self.window.push(spans.row());
+        if self.window.len() < ENCODE_TRACE_WINDOW {
+            return;
+        }
+        let line = self.line();
+        self.window.clear();
+        log::info!("{line}");
+    }
+
+    /// The `frust-perf enc` line the current window reports.
+    ///
+    /// Each column is its own median over the window and the trailing field is
+    /// the whole encode's 95th percentile, so a column answers "what does this
+    /// phase usually cost" while the tail answers "how bad is a bad frame".
+    /// Medians are taken per column and so do not sum to the `total_us`
+    /// median exactly — they are close on a steady scene, and the gap is
+    /// itself the signal that the phases are not moving together.
+    fn line(&mut self) -> String {
+        // Sized for the longest line the loops below write: a
+        // `<name>_us=<7 digits>.<1>` field per phase, a `<name>=<10 digits>`
+        // field per count, the two `n`/`w` fields and the p95 tail, with room
+        // to spare rather than a byte-exact fit.
+        let mut line = String::with_capacity(640);
+        line.push_str("frust-perf enc n=");
+        line.push_str(&self.frames.to_string());
+        line.push_str(" w=");
+        line.push_str(&self.window.len().to_string());
+        for (column, name) in ENCODE_TRACE_COLUMNS.iter().enumerate() {
+            let p50 = self.percentile(column, 50);
+            line.push(' ');
+            line.push_str(name);
+            line.push_str("_us=");
+            line.push_str(&format_us(p50));
+        }
+        let tail = self.percentile(ENCODE_TRACE_COLUMNS.len() - 1, 95);
+        line.push_str(" total_p95_us=");
+        line.push_str(&format_us(tail));
+        for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
+            let p50 = self.percentile(ENCODE_TRACE_COLUMNS.len() + offset, 50);
+            line.push(' ');
+            line.push_str(name);
+            line.push('=');
+            line.push_str(&p50.to_string());
+        }
+        line
+    }
+
+    /// The `pct`-th percentile of `column` over the window, in nanoseconds.
+    ///
+    /// Nearest-rank on the sorted column, which needs no interpolation and so
+    /// reports a value the window really contains — the same choice
+    /// `frust-shell-common`'s frame summary makes, and the one that keeps a
+    /// sixty-sample window honest.
+    fn percentile(&mut self, column: usize, pct: usize) -> u32 {
+        self.ranked.clear();
+        self.ranked
+            .extend(self.window.iter().filter_map(|row| row.get(column)));
+        self.ranked.sort_unstable();
+        let len = self.ranked.len();
+        if len == 0 {
+            return 0;
+        }
+        let rank = (len * pct).div_ceil(100).clamp(1, len);
+        self.ranked.get(rank - 1).copied().unwrap_or(0)
+    }
+}
+
+/// Nanoseconds as microseconds with one decimal — the unit every
+/// `frust-perf enc` field is reported in.
+///
+/// Fixed-point rather than a float format: a phase can be tens of nanoseconds
+/// (an empty punch pass) or milliseconds (a ten-thousand-row table's walk), and
+/// one decimal microsecond reads the same either way without a float's
+/// locale-dependent formatting reaching a capture the harness greps.
+fn format_us(nanos: u32) -> String {
+    let tenths = u64::from(nanos).div_ceil(100);
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
 /// One surface's 2D render engine: a scene in, recorded passes out.
 ///
 /// Create one per surface and keep it across frames — the retained scene
@@ -331,6 +658,11 @@ pub struct EngineRenderer {
     /// never blurs should own neither a sampler nor a resource texture it will
     /// not read. Created by the first frame that schedules a filter round.
     filters: Option<FilterResources>,
+    /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
+    ///
+    /// Two empty `Vec`s and a counter in a build without `perf-trace`, which
+    /// never pushes a row into it — see [`EncodeTrace`].
+    encode_trace: EncodeTrace,
 }
 
 impl EngineRenderer {
@@ -390,6 +722,7 @@ impl EngineRenderer {
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
             filters: None,
+            encode_trace: EncodeTrace::default(),
         })
     }
 
@@ -691,8 +1024,13 @@ impl EngineRenderer {
         root: Affine,
         timestamps: FrameTimestamps<'_>,
     ) -> Result<(), EngineError> {
+        // The CPU half of the frame's accounting, lapped phase by phase
+        // through to the end of the call (see [`EncodeSpans`]). Free without
+        // `perf-trace` — no clock is read at all.
+        let mut clock = PhaseClock::start();
         let size = grid_size(target.width, target.height)?;
         let mut frame = self.compiler.compile(scene, root, size)?;
+        let compile_total = clock.lap();
 
         // The frame's pass plan, settled before anything is allocated or
         // recorded: a layer shape this scheduler does not serve, or one larger
@@ -733,6 +1071,7 @@ impl EngineRenderer {
         // the only such statement `encode` is handed, so it is what the skip
         // `compile::clear`'s contract calls for is decided on.
         let punches = !frame.clears.is_empty() && !is_opaque(base_color);
+        let schedule_span = clock.lap();
 
         // Paints are resolved before instances are built: an instance names
         // its paint by the texel its record starts at, which only exists once
@@ -740,6 +1079,7 @@ impl EngineRenderer {
         let atlas_budget = self.compiler.images().budget();
         self.resources
             .resolve_paints(&frame, &mut self.gradients, atlas_budget, &self.textures);
+        let paints_span = clock.lap();
         self.scratch.build(
             &frame,
             &rounds,
@@ -747,6 +1087,7 @@ impl EngineRenderer {
             punches,
             &self.resources.paint_slots,
         );
+        let instances_span = clock.lap();
 
         // Everything that can fail does so here, ahead of the first
         // `begin_render_pass` AND ahead of the first thing this frame changes
@@ -791,6 +1132,7 @@ impl EngineRenderer {
         self.resources.resize_alphas(device, alphas_grown);
         self.resources.resize_paints(device, paints_grown);
         self.resources.resize_gradients(device, gradients_grown);
+        let resize_span = clock.lap();
         let atlas_serviced =
             self.resources
                 .upload(queue, &mut frame, &mut self.gradients, size, dim);
@@ -805,6 +1147,7 @@ impl EngineRenderer {
         if atlas_serviced {
             self.compiler.acknowledge_image_plan();
         }
+        let upload_span = clock.lap();
 
         // The glyph pixels themselves, last of the atlas work and strictly
         // before the scene pass: every page `glifo` dirtied this frame is
@@ -831,6 +1174,8 @@ impl EngineRenderer {
             self.compiler.acknowledge_glyph_replay();
         }
 
+        let replay_span = clock.lap();
+
         let format = target.format;
         let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
 
@@ -852,9 +1197,29 @@ impl EngineRenderer {
                 );
         }
 
+        let pipelines_span = clock.lap();
+
         self.record_frame(
             device, queue, encoder, &target, depth_view, base_color, &pipelines, timestamps,
         );
+
+        // Last, so the window's own formatting is charged to no phase it
+        // reports. A frame refused above records nothing: its phases are a
+        // partial encode and would drag every percentile toward a frame that
+        // was never presented.
+        self.encode_trace.record(&EncodeSpans {
+            compile: frame.compile_spans,
+            compile_total,
+            schedule: schedule_span,
+            paints: paints_span,
+            instances: instances_span,
+            resize: resize_span,
+            upload: upload_span,
+            replay: replay_span,
+            pipelines: pipelines_span,
+            record: clock.lap(),
+            counts: EncodeCounts::of(&frame),
+        });
 
         Ok(())
     }
@@ -3945,6 +4310,105 @@ mod tests {
     use std::collections::BTreeMap;
     use vello_common::geometry::RectU16;
     use vello_common::paint::IndexedPaint;
+
+    /// The `frust-perf enc` line is a contract: a capture is graded by
+    /// grepping its fields, so the field order and the names are pinned here
+    /// rather than only by the formatter.
+    #[test]
+    fn an_encode_trace_line_reports_every_column_in_order() {
+        let mut trace = EncodeTrace {
+            frames: 7,
+            ..EncodeTrace::default()
+        };
+        // One row per column, each carrying a distinct value in its own
+        // column, so a transposed or dropped field shows up as a wrong number
+        // rather than only as a wrong name.
+        let mut row = [0_u32; ENCODE_TRACE_ROW];
+        for (column, slot) in row.iter_mut().enumerate() {
+            *slot = (column as u32 + 1) * 1_000;
+        }
+        trace.window.push(row);
+
+        let line = trace.line();
+        let phases: Vec<String> = ENCODE_TRACE_COLUMNS
+            .iter()
+            .enumerate()
+            .map(|(column, name)| format!("{name}_us={}.0", column + 1))
+            .collect();
+        // The counts carry no unit suffix and are reported as the raw values
+        // the row holds, not scaled to microseconds like the phases above.
+        let counts: Vec<String> = ENCODE_TRACE_COUNTS
+            .iter()
+            .enumerate()
+            .map(|(offset, name)| {
+                format!(
+                    "{name}={}",
+                    (ENCODE_TRACE_COLUMNS.len() + offset + 1) * 1_000
+                )
+            })
+            .collect();
+        assert_eq!(
+            line,
+            format!(
+                "frust-perf enc n=7 w=1 {} total_p95_us={}.0 {}",
+                phases.join(" "),
+                ENCODE_TRACE_COLUMNS.len(),
+                counts.join(" "),
+            ),
+        );
+    }
+
+    /// A window's percentile is nearest-rank over the column it names, so the
+    /// value reported is one the window really contains.
+    #[test]
+    fn an_encode_trace_percentile_is_nearest_rank_per_column() {
+        let mut trace = EncodeTrace::default();
+        for value in [4_000_u32, 1_000, 3_000, 2_000] {
+            let mut row = [0_u32; ENCODE_TRACE_ROW];
+            row[0] = value;
+            trace.window.push(row);
+        }
+        assert_eq!(trace.percentile(0, 50), 2_000);
+        assert_eq!(trace.percentile(0, 95), 4_000);
+        // An empty window reports zero rather than reaching past its end.
+        trace.window.clear();
+        assert_eq!(trace.percentile(0, 50), 0);
+    }
+
+    /// Nanoseconds round up to a tenth of a microsecond, so a phase that cost
+    /// anything at all never reports as free.
+    #[test]
+    fn a_span_that_cost_anything_never_formats_as_zero() {
+        assert_eq!(format_us(0), "0.0");
+        assert_eq!(format_us(1), "0.1");
+        assert_eq!(format_us(4_170_000), "4170.0");
+    }
+
+    /// The compile phases partition the compile they sit inside, so their sum
+    /// is the whole call minus the overhead the renderer measures around it.
+    #[test]
+    fn compile_phases_sum_without_overflowing() {
+        let spans = CompileSpans {
+            validate: Duration::from_micros(10),
+            prepare: Duration::from_micros(20),
+            classify: Duration::from_micros(30),
+            admit: Duration::from_micros(40),
+            walk: Duration::from_micros(50),
+            // A subset of `walk`, so the sum must not grow by it.
+            glyphs: Duration::from_micros(45),
+            finish: Duration::from_micros(60),
+        };
+        assert_eq!(spans.total(), Duration::from_micros(210));
+        assert_eq!(
+            CompileSpans {
+                validate: Duration::MAX,
+                walk: Duration::MAX,
+                ..CompileSpans::default()
+            }
+            .total(),
+            Duration::MAX,
+        );
+    }
 
     #[test]
     fn a_target_past_the_u16_grid_is_refused() {
