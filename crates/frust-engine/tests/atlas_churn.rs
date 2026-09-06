@@ -1735,6 +1735,78 @@ fn evicting_one_class_leaves_the_others_slots_exactly_where_they_were() {
     );
 }
 
+/// A runaway *image* working set churns its own rectangles and never a glyph's.
+///
+/// The eviction that keeps a scrolling list of distinct images painting — a
+/// refused allocation frees the least-recently-seen image rather than dropping
+/// the draw — is deliberately blind to everything but the residency's own entry
+/// map. The two classes share one allocator and each may free only the handles
+/// it allocated itself (`frust_engine::cache::images`' module doc states that
+/// contract), so a pressure path that reached across it would hand a live
+/// glyph's rectangle to an image while the same frame was still sampling it.
+#[test]
+fn images_churning_under_pressure_never_take_a_glyph_slot() {
+    let mut residency = ImageResidency::new(AtlasBudget {
+        atlas_size: (128, 128),
+        max_atlases: 1,
+    });
+    let mut engine = AtlasPolicy::new(residency.allocator(), false);
+    let font = next_font();
+
+    // Text settles first, so the glyphs the churn must not disturb are already
+    // holding rectangles in the one layer the images are about to fight over.
+    residency.begin_frame();
+    let glyph_slots = frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)])
+        .uploads
+        .iter()
+        .map(|upload| (upload.key.clone(), upload.slot))
+        .collect::<Vec<_>>();
+    assert_eq!(glyph_slots.len(), 4, "fixture precondition: `Hello` cached");
+
+    // Then far more distinct images than the rest of the layer holds, one a
+    // frame — inside the age window throughout, so every reclamation below is a
+    // pressure eviction rather than the reap — with the text redrawn beside
+    // them every frame.
+    for tag in 0..40_u8 {
+        residency.begin_frame();
+        residency
+            .resolve(&image(32, 32, tag))
+            .expect("a full atlas displaces an image rather than dropping a draw");
+        residency.acknowledge_plan();
+        frame(&mut engine, residency.allocator_mut(), &[(font, 16.0)]);
+    }
+
+    assert_eq!(residency.skipped(), 0, "no image draw was refused");
+    assert!(
+        residency.pressure_evictions() > 0,
+        "fixture precondition: the images really outgrew what was left of the layer"
+    );
+    assert!(
+        residency.entry_count() < 40,
+        "fixture precondition: they cannot all have stayed resident"
+    );
+
+    // A slot is only answerable in the draw phase, so the check runs inside a
+    // frame of its own.
+    engine.begin_frame();
+    collect_hello(&mut engine, font, 16.0);
+    let pass = engine.build(residency.allocator_mut(), raster);
+    assert!(
+        pass.uploads.is_empty(),
+        "image pressure re-rasterized text that never left the screen"
+    );
+    for (key, slot) in &glyph_slots {
+        assert_eq!(
+            engine
+                .slot(key)
+                .map(|live| (live.page_index, live.x, live.y)),
+            Some((slot.page_index, slot.x, slot.y)),
+            "an image eviction moved a glyph that was still on screen"
+        );
+    }
+    engine.end_frame(residency.allocator_mut());
+}
+
 #[test]
 fn a_display_list_run_is_keyed_by_the_font_blob_it_already_carries() {
     let font = FontHandle::new(FontData::new(Blob::new(Arc::new(LATIN_FONT)), 0));

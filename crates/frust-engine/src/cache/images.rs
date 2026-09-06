@@ -76,13 +76,33 @@
 //!    uploaded, and image draws fall back to painting nothing — the switch's
 //!    whole point being to take the atlas out of a frame under diagnosis.
 //!
-//! ## Residency is bounded by age, not by count
+//! ## Residency is bounded by age, and by pressure
 //!
 //! An entry unseen for [`MAX_UNSEEN_FRAMES`] consecutive frames is deallocated
 //! and its rectangle reported for clearing — the same age-based reap
 //! `frust-render`'s shader-effect cache uses, and for the same reason: a screen
 //! that stops drawing an image should give its texels back promptly, while an
 //! image drawn every other frame must never be mistaken for gone.
+//!
+//! Age alone is not a bound on *population*, though: it says nothing about how
+//! many distinct images a screen draws inside one age window. A list scrolling
+//! faster than [`MAX_UNSEEN_FRAMES`] streams more of them past the viewport
+//! than the atlas has rectangles for, and every one past the last free
+//! rectangle used to be an [`ImageSkip::NoAtlasSpace`] — a draw that painted
+//! nothing, on a screen whose solid fills all still landed, which reads as a
+//! hole rather than as a cache miss. So an allocation the packer refuses now
+//! *evicts* instead of giving up: [`ImageResidency::resolve`] frees resident
+//! images in least-recently-seen order until the packer has room, and each one
+//! whose rectangle was taken re-uploads on the next frame that draws it. A
+//! working set larger than the atlas therefore degrades to re-uploads —
+//! bandwidth — rather than to missing content, and
+//! [`ImageResidency::pressure_evictions`] counts how often that trade was made.
+//!
+//! The one entry never freed that way is one *this frame* has already resolved.
+//! The plan clears before it uploads, so handing back a rectangle the frame is
+//! about to sample would erase exactly the image the eviction was meant to make
+//! room for. A working set that outgrows the atlas inside a single frame is
+//! therefore still a skip, and honestly so: nothing is evictable.
 //!
 //! ## One allocator for images *and* glyphs
 //!
@@ -113,6 +133,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust_gpu::{DownlevelProfile, TierCaps};
 use peniko::color::PremulRgba8;
@@ -206,7 +227,10 @@ pub enum ImageSkip {
     /// mapping for the shader to sample through.
     #[error("image paint transform is singular or non-finite")]
     SingularTransform,
-    /// The image fits the ceiling but not the configured atlas budget.
+    /// The image fits the ceiling but not the configured atlas budget, and no
+    /// resident image could be evicted to make room for it — either the atlas
+    /// holds nothing but images this same frame drew, or what it holds beside
+    /// them still leaves no rectangle this one fits in.
     #[error("image {width}x{height} does not fit the {atlas_width}x{atlas_height} atlas budget")]
     NoAtlasSpace {
         /// Declared width in pixels.
@@ -264,6 +288,13 @@ impl AtlasBudget {
     /// itself would. Clamped to the adapter last, because an override is a
     /// request and a request the adapter cannot honour is still narrowed to what
     /// it can.
+    ///
+    /// The resolved budget is reported once per process through
+    /// [`atlas_tier_line`], because which of the two tiers a given phone takes
+    /// is otherwise an inference from behaviour rather than an observation: the
+    /// signals [`is_mobile_tier`] reads are the driver's own answers, and a
+    /// device whose driver answers differently from the one it resembles is
+    /// exactly the case a benchmark capture has to be able to name.
     #[must_use]
     pub fn for_caps(caps: &TierCaps) -> Self {
         let tier = if is_mobile_tier(caps) {
@@ -271,16 +302,18 @@ impl AtlasBudget {
         } else {
             Self::DESKTOP
         };
-        let Some(atlas_size) = config::atlas_size() else {
-            return tier.clamped(caps);
+        let resolved = match config::atlas_size() {
+            None => tier.clamped(caps),
+            Some(atlas_size) => Self {
+                atlas_size,
+                max_atlases: tier.max_atlases,
+            }
+            .within_total_bytes(tier.total_bytes())
+            .clamped(caps),
         };
 
-        Self {
-            atlas_size,
-            max_atlases: tier.max_atlases,
-        }
-        .within_total_bytes(tier.total_bytes())
-        .clamped(caps)
+        ATLAS_TIER_LOG.emit(caps, resolved);
+        resolved
     }
 
     /// This budget narrowed so a fully grown array costs at most `total_bytes`.
@@ -413,6 +446,76 @@ pub const ATLAS_FORMAT_BYTES: u64 = 4;
 #[must_use]
 pub fn is_mobile_tier(caps: &TierCaps) -> bool {
     caps.downlevel_profile != DownlevelProfile::Full || caps.transient_saves_memory
+}
+
+/// The process's latch for the resolved-tier line, held by
+/// [`AtlasBudget::for_caps`].
+static ATLAS_TIER_LOG: TierLogOnce = TierLogOnce::new();
+
+/// A one-shot latch for the resolved-tier line.
+///
+/// Once per *process* rather than once per call: a budget is resolved once per
+/// surface, and the question the line answers — which tier this adapter took —
+/// is about the device, so one line per run answers it completely while a line
+/// per surface would repeat it.
+///
+/// A latch value rather than a bare [`std::sync::Once`] because the rule it
+/// keeps is worth testing: [`emit`](Self::emit) answers whether *this* call was
+/// the one that wrote the line, so a test constructs a latch of its own and
+/// pins "the first call writes and no later one does" without installing a
+/// process-global logger.
+#[derive(Debug, Default)]
+pub struct TierLogOnce {
+    emitted: AtomicBool,
+}
+
+impl TierLogOnce {
+    /// A latch that has not emitted yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            emitted: AtomicBool::new(false),
+        }
+    }
+
+    /// Log [`atlas_tier_line`] for `caps` and `budget` if this latch has not
+    /// fired, answering whether this call was the one that did.
+    pub fn emit(&self, caps: &TierCaps, budget: AtlasBudget) -> bool {
+        if self.emitted.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+
+        log::info!("{}", atlas_tier_line(caps, budget));
+        true
+    }
+}
+
+/// The one line a run records the resolved atlas tier as.
+///
+/// `frust-perf`-prefixed deliberately: a benchmark capture keeps every line
+/// carrying that prefix and drops the rest, so this is what lets a run's own
+/// log say which budget the device was given rather than leaving it to be
+/// inferred from whether images went missing. The adapter name is last because
+/// it is the one field that can contain spaces, which keeps every `key=value`
+/// field ahead of it parseable by splitting on whitespace.
+#[must_use]
+pub fn atlas_tier_line(caps: &TierCaps, budget: AtlasBudget) -> String {
+    let tier = if is_mobile_tier(caps) {
+        "mobile"
+    } else {
+        "desktop"
+    };
+
+    format!(
+        "frust-perf atlas tier={tier} budget={}x{}x{} downlevel={:?} \
+         transient_saves_memory={} adapter={}",
+        budget.atlas_size.0,
+        budget.atlas_size.1,
+        budget.max_atlases,
+        caps.downlevel_profile,
+        caps.transient_saves_memory,
+        caps.adapter_name,
+    )
 }
 
 /// Where one image's texels live in the atlas array.
@@ -568,6 +671,14 @@ pub struct ImageResidency {
     uploads: Vec<ImageUpload>,
     evictions: Vec<AtlasRegion>,
     skipped: u64,
+    /// Rectangles taken back from a resident image because the packer had no
+    /// room for a new one, over this residency's lifetime.
+    pressure_evictions: u64,
+    /// The same count for the current frame alone, zeroed by
+    /// [`begin_frame`](Self::begin_frame) — what a per-frame report reads, since
+    /// the lifetime total says nothing about whether the atlas is churning
+    /// *now*.
+    frame_pressure_evictions: u64,
     minified: u64,
     /// Blob keys whose minification has already been reported, so a source that
     /// is redrawn — or reaped and made resident again — logs once rather than
@@ -576,6 +687,10 @@ pub struct ImageResidency {
     /// Scratch for the reap's key list, kept so a frame that evicts allocates
     /// nothing.
     reaped: Vec<u64>,
+    /// Scratch for the pressure eviction's candidate list, kept for the same
+    /// reason: the frame that has to evict is the one least able to afford an
+    /// allocation.
+    pressure_order: Vec<(u64, u32, u64)>,
 }
 
 impl ImageResidency {
@@ -611,9 +726,12 @@ impl ImageResidency {
             uploads: Vec::new(),
             evictions: Vec::new(),
             skipped: 0,
+            pressure_evictions: 0,
+            frame_pressure_evictions: 0,
             minified: 0,
             reported_minify: HashSet::new(),
             reaped: Vec::new(),
+            pressure_order: Vec::new(),
         }
     }
 
@@ -700,11 +818,38 @@ impl ImageResidency {
     ///
     /// Counts only images that could not be uploaded at all — a format or
     /// extent the conversion refuses, a disabled atlas, or an atlas with no
-    /// room left. A source merely larger than one atlas layer is minified to
-    /// fit and never reaches this counter.
+    /// room left *and nothing evictable to make room with*. A source merely
+    /// larger than one atlas layer is minified to fit, and one that displaced
+    /// another image is counted by
+    /// [`pressure_evictions`](Self::pressure_evictions) instead; neither
+    /// reaches this counter.
     #[must_use]
     pub fn skipped(&self) -> u64 {
         self.skipped
+    }
+
+    /// How many resident images have been evicted to make room for another
+    /// over this residency's lifetime.
+    ///
+    /// The price of never refusing a draw the atlas could hold *something*
+    /// for: each one is an image that will re-upload the next frame it is
+    /// drawn on. A steady screen leaves this at zero; a scroll through more
+    /// distinct images than the atlas has rectangles for grows it once per
+    /// displaced image, which is the signal that the budget — not the
+    /// mechanism — is what a frame is paying for.
+    #[must_use]
+    pub fn pressure_evictions(&self) -> u64 {
+        self.pressure_evictions
+    }
+
+    /// How many resident images the *current* frame has evicted to make room.
+    ///
+    /// Zeroed by [`begin_frame`](Self::begin_frame), so a per-frame report reads
+    /// this rather than differencing
+    /// [`pressure_evictions`](Self::pressure_evictions) itself.
+    #[must_use]
+    pub fn frame_pressure_evictions(&self) -> u64 {
+        self.frame_pressure_evictions
     }
 
     /// How many sources have been downsampled to fit the atlas over this
@@ -719,8 +864,11 @@ impl ImageResidency {
 
     /// The regions whose texels must be cleared before the pending uploads.
     ///
-    /// Pending rather than per-frame: an entry reaped on a frame nobody
-    /// serviced is still waiting to be cleared on the next one.
+    /// Pending rather than per-frame: an entry freed on a frame nobody
+    /// serviced is still waiting to be cleared on the next one. Both kinds of
+    /// eviction land here — the age-based reap at the head of a frame and a
+    /// rectangle taken back under pressure mid-frame — so the consumer's
+    /// clear-then-upload contract covers the second without knowing it exists.
     #[must_use]
     pub fn evictions(&self) -> &[AtlasRegion] {
         &self.evictions
@@ -775,6 +923,7 @@ impl ImageResidency {
     /// a refused frame into a permanently unwritten atlas region.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.saturating_add(1);
+        self.frame_pressure_evictions = 0;
         self.reap();
     }
 
@@ -845,23 +994,29 @@ impl ImageResidency {
             Arc::new(minify(&pixels, width, height))
         };
 
-        let no_space = || ImageSkip::NoAtlasSpace {
+        let no_space = ImageSkip::NoAtlasSpace {
             width,
             height,
             atlas_width: self.budget.atlas_size.0,
             atlas_height: self.budget.atlas_size.1,
         };
 
-        let id = self
-            .cache
-            .allocate(width, height, ATLAS_PADDING)
-            .map_err(|_| no_space())?;
+        let id = match self.cache.allocate(width, height, ATLAS_PADDING) {
+            Ok(id) => id,
+            // The atlas is full. Take a rectangle back from an image no longer
+            // on screen rather than dropping this draw — see
+            // [`allocate_under_pressure`](Self::allocate_under_pressure), and
+            // the module doc for why a hole is worse than a re-upload.
+            Err(_) => self
+                .allocate_under_pressure(width, height)
+                .ok_or(no_space)?,
+        };
 
         let Some(resource) = self.cache.get(id) else {
             // A successful allocation always populates its slot; refusing here
             // keeps the frame path free of the `expect` the reference renderer
             // takes at this same point.
-            return Err(no_space());
+            return Err(no_space);
         };
 
         let region = AtlasRegion {
@@ -898,6 +1053,57 @@ impl ImageResidency {
         })
     }
 
+    /// Allocate `width` x `height` by taking rectangles back from resident
+    /// images, least recently seen first, once the packer has refused.
+    ///
+    /// Answers the handle that finally fit, or `None` when the atlas held
+    /// nothing that could be given up — which is what
+    /// [`ImageSkip::NoAtlasSpace`] then reports.
+    ///
+    /// **Only an entry last seen on an earlier frame is a candidate.** The
+    /// frame path services [`evictions`](Self::evictions) *before*
+    /// [`uploads`](Self::uploads) (see the module doc), so freeing a rectangle
+    /// this frame has already resolved would schedule a clear over texels the
+    /// same frame is about to sample — painting the very hole this eviction
+    /// exists to prevent. A frame whose own working set outgrows the atlas
+    /// therefore still skips, because everything in the atlas belongs to it.
+    ///
+    /// Candidates are taken in `(last_seen, slot)` order: the slot index breaks
+    /// a tie between two entries last drawn on the same frame, so which image
+    /// is displaced is a property of the residency rather than of the entry
+    /// map's iteration order. The allocation is retried after *each* eviction
+    /// rather than after freeing a computed amount of area, because a packer
+    /// answers on where the free space is and not only on how much of it there
+    /// is: the first rectangle handed back need not be one this image fits in.
+    /// The loop is bounded by the candidate list, so it visits each entry at
+    /// most once.
+    fn allocate_under_pressure(&mut self, width: u32, height: u32) -> Option<ImageId> {
+        // Taken from the residency's own scratch, so the frame least able to
+        // afford an allocation does not make one to evict with.
+        let mut candidates = std::mem::take(&mut self.pressure_order);
+        candidates.clear();
+        candidates.extend(self.entries.iter().filter_map(|(key, entry)| {
+            (entry.last_seen < self.frame).then_some((entry.last_seen, entry.id.as_u32(), *key))
+        }));
+        candidates.sort_unstable();
+
+        let mut allocated = None;
+        for (_, _, key) in &candidates {
+            self.release(*key);
+            self.pressure_evictions = self.pressure_evictions.saturating_add(1);
+            self.frame_pressure_evictions = self.frame_pressure_evictions.saturating_add(1);
+
+            if let Ok(id) = self.cache.allocate(width, height, ATLAS_PADDING) {
+                allocated = Some(id);
+                break;
+            }
+        }
+
+        candidates.clear();
+        self.pressure_order = candidates;
+        allocated
+    }
+
     /// Count and report one source downsampled to fit the atlas.
     ///
     /// Once per blob id, at warning level: a minified image is a silent quality
@@ -923,6 +1129,12 @@ impl ImageResidency {
 
     /// Deallocate every entry unseen for [`MAX_UNSEEN_FRAMES`], recording each
     /// one's rectangle for clearing.
+    ///
+    /// The age half of the two bounds; the population half is
+    /// [`allocate_under_pressure`](Self::allocate_under_pressure), which runs
+    /// only when an allocation has already failed. Keeping them separate is
+    /// what makes an idle screen give its texels back promptly whether or not
+    /// anything is asking for them.
     fn reap(&mut self) {
         let mut reaped = std::mem::take(&mut self.reaped);
         reaped.clear();
@@ -1661,6 +1873,214 @@ mod tests {
                 upload.region
             );
         }
+    }
+
+    /// A budget holding exactly two 64-square images: one per layer, with no
+    /// room to pack a third anywhere, so "the atlas is full" is reachable in
+    /// two allocations and needs no fragmentation reasoning.
+    fn two_slot_residency() -> ImageResidency {
+        ImageResidency::new(AtlasBudget {
+            atlas_size: (64, 64),
+            max_atlases: 2,
+        })
+    }
+
+    #[test]
+    fn a_working_set_larger_than_the_atlas_re_uploads_rather_than_skipping() {
+        // The scrolling-list shape: more distinct images pass the viewport
+        // inside one age window than the atlas has rectangles for. Every draw
+        // must still resolve — the price is a re-upload, never a hole.
+        let mut residency = two_slot_residency();
+        let images: Vec<ImageData> = (0..12).map(|_| image(64, 64)).collect();
+
+        for data in &images {
+            residency.begin_frame();
+            residency
+                .resolve(data)
+                .expect("a full atlas gives a rectangle back rather than refusing");
+            residency.acknowledge_plan();
+        }
+
+        assert_eq!(residency.skipped(), 0, "no draw was ever dropped");
+        assert_eq!(
+            residency.pressure_evictions(),
+            10,
+            "the ten images past the two slots each displaced one"
+        );
+        assert_eq!(residency.entry_count(), 2, "and residency stays bounded");
+    }
+
+    #[test]
+    fn an_image_resolved_this_frame_is_never_the_one_evicted() {
+        // The ordering contract's own boundary: the plan clears before it
+        // uploads, so a rectangle this frame already resolved cannot be handed
+        // back inside it. A frame whose own working set outgrows the atlas is
+        // still a skip, and nothing is scheduled for clearing.
+        let mut residency = two_slot_residency();
+        residency.begin_frame();
+        residency.resolve(&image(64, 64)).expect("takes layer 0");
+        residency.resolve(&image(64, 64)).expect("takes layer 1");
+
+        let skip = residency
+            .resolve(&image(64, 64))
+            .expect_err("nothing this frame drew is evictable");
+
+        assert!(matches!(skip, ImageSkip::NoAtlasSpace { .. }));
+        assert_eq!(residency.skipped(), 1);
+        assert_eq!(residency.pressure_evictions(), 0);
+        assert_eq!(residency.entry_count(), 2, "both occupants stayed put");
+        assert!(
+            residency.evictions().is_empty(),
+            "no region a frame is about to sample was scheduled for clearing"
+        );
+    }
+
+    #[test]
+    fn the_least_recently_seen_image_is_the_one_displaced() {
+        let mut residency = two_slot_residency();
+        let old = image(64, 64);
+        let refreshed = image(64, 64);
+
+        residency.begin_frame();
+        let refreshed_region = residency.resolve(&refreshed).expect("takes a layer").region;
+        residency.begin_frame();
+        let old_region = residency.resolve(&old).expect("takes the other").region;
+        residency.acknowledge_plan();
+
+        // The older entry is drawn again, which makes the *other* one the least
+        // recently seen despite having been made resident second.
+        residency.begin_frame();
+        residency.resolve(&refreshed).expect("still resident");
+        let arrival = residency.resolve(&image(64, 64)).expect("displaces one");
+
+        assert_eq!(residency.pressure_evictions(), 1);
+        assert_eq!(
+            arrival.region, old_region,
+            "the rectangle taken is the least recently seen one"
+        );
+        assert_eq!(
+            residency.resolve(&refreshed).map(|again| again.region),
+            Ok(refreshed_region),
+            "the image drawn this frame kept its own"
+        );
+    }
+
+    #[test]
+    fn a_pressure_eviction_reports_its_rectangle_once_and_withdraws_its_upload() {
+        let mut residency = two_slot_residency();
+        let displaced = image(64, 64);
+
+        residency.begin_frame();
+        let displaced_region = residency.resolve(&displaced).expect("takes a layer").region;
+        residency.resolve(&image(64, 64)).expect("takes the other");
+        // Deliberately NOT acknowledged: the displaced image still has an
+        // upload pending, which must go with its entry rather than be written
+        // into a rectangle its new occupant now owns.
+        assert_eq!(residency.uploads().len(), 2);
+
+        residency.begin_frame();
+        let arrival = residency
+            .resolve(&image(64, 64))
+            .expect("displaces the oldest");
+
+        assert_eq!(
+            residency.evictions(),
+            &[padded(displaced_region, ATLAS_PADDING)],
+            "exactly one rectangle, reported exactly once"
+        );
+        assert_eq!(
+            arrival.region, displaced_region,
+            "and the freed rectangle is what the new occupant took"
+        );
+        assert_eq!(
+            residency.uploads().len(),
+            2,
+            "the displaced image's unserviced upload went with its entry — \
+             writing it would put an evicted image back over its successor"
+        );
+    }
+
+    #[test]
+    fn an_age_reap_and_a_pressure_eviction_are_counted_separately() {
+        // The two bounds answer different questions: one says a screen moved
+        // on, the other says the atlas is too small for what is on it.
+        let mut residency = two_slot_residency();
+        let data = image(64, 64);
+
+        residency.begin_frame();
+        residency.resolve(&data).expect("fits");
+        for _ in 0..=MAX_UNSEEN_FRAMES {
+            residency.begin_frame();
+        }
+
+        assert_eq!(residency.entry_count(), 0, "the age reap ran");
+        assert_eq!(
+            residency.pressure_evictions(),
+            0,
+            "an age reap is not a pressure eviction"
+        );
+        assert_eq!(residency.frame_pressure_evictions(), 0);
+    }
+
+    #[test]
+    fn the_per_frame_eviction_count_is_this_frames_alone() {
+        let mut residency = two_slot_residency();
+        residency.begin_frame();
+        residency.resolve(&image(64, 64)).expect("takes a layer");
+        residency.resolve(&image(64, 64)).expect("takes the other");
+
+        residency.begin_frame();
+        residency.resolve(&image(64, 64)).expect("displaces one");
+        assert_eq!(residency.frame_pressure_evictions(), 1);
+        assert_eq!(residency.pressure_evictions(), 1);
+
+        residency.begin_frame();
+        assert_eq!(
+            residency.frame_pressure_evictions(),
+            0,
+            "a new frame starts from nothing"
+        );
+        assert_eq!(
+            residency.pressure_evictions(),
+            1,
+            "while the lifetime total keeps counting"
+        );
+    }
+
+    #[test]
+    fn the_resolved_tier_line_names_the_tier_and_is_written_once() {
+        let mobile = TierCaps::fake(DownlevelProfile::WebGl2);
+        assert_eq!(
+            atlas_tier_line(&mobile, AtlasBudget::MOBILE),
+            "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
+             transient_saves_memory=false adapter=fake-webgl2"
+        );
+
+        let mut tiler = TierCaps::fake(DownlevelProfile::Full);
+        tiler.adapter_name = "Adreno (TM) 660".to_string();
+        assert_eq!(
+            atlas_tier_line(&tiler, AtlasBudget::DESKTOP),
+            "frust-perf atlas tier=desktop budget=2048x2048x8 downlevel=Full \
+             transient_saves_memory=false adapter=Adreno (TM) 660"
+        );
+
+        // The signal that decides the tier is the one the line reports, so a
+        // tile-based adapter reading `Full` still says `mobile`.
+        tiler.transient_saves_memory = true;
+        assert!(atlas_tier_line(&tiler, AtlasBudget::MOBILE).contains("tier=mobile"));
+        assert!(
+            atlas_tier_line(&tiler, AtlasBudget::MOBILE).contains("transient_saves_memory=true")
+        );
+
+        let latch = TierLogOnce::new();
+        assert!(
+            latch.emit(&mobile, AtlasBudget::MOBILE),
+            "the first call writes the line"
+        );
+        assert!(
+            !latch.emit(&mobile, AtlasBudget::MOBILE),
+            "and no later one repeats it"
+        );
     }
 
     #[test]

@@ -705,6 +705,8 @@ impl SceneCompiler {
         frame.image_uploads = uploads;
         frame.atlas_layers = self.images.layers();
 
+        note_image_pressure(&frame, &self.images);
+
         Ok(frame)
     }
 
@@ -1713,6 +1715,54 @@ fn note_image_skip(skip: ImageSkip) {
         log::warn!("image draw skipped: {skip} (further skips are logged at debug level)");
     });
     log::debug!("image draw skipped: {skip}");
+}
+
+/// Report what this frame's image residency cost, on a frame where it cost
+/// anything.
+///
+/// The counterpart to [`note_image_skip`]'s once-per-process warning, which
+/// says *that* an image was refused and then goes quiet: this says how many
+/// draws a given frame lost and how hard the atlas is being churned to avoid
+/// losing more. `frust-perf`-prefixed and at info level, which is what carries
+/// it into a benchmark capture — the harness keeps every line with that prefix
+/// and drops the rest, so a run's own log answers "did the atlas hold this
+/// scene?" without a parallel system-log capture beside it.
+///
+/// Silent on a frame that skipped nothing and evicted nothing, which is every
+/// frame of a steady scene: the common path pays two comparisons and writes no
+/// line. `skipped` is the frame's own count of image draws that painted
+/// nothing, so it includes the few refusals decided before residency is even
+/// consulted (a singular paint transform, a destination with no area) as well
+/// as the atlas's own — every one of them is a draw the display list asked for
+/// and the frame did not paint, which is the question the line answers.
+fn note_image_pressure(frame: &CompiledFrame, images: &ImageResidency) {
+    if let Some(line) = image_pressure_line(frame, images) {
+        log::info!("{line}");
+    }
+}
+
+/// The `frust-perf img` line `frame` reports against `images`, or `None` when
+/// the frame skipped nothing and evicted nothing, and so reports nothing.
+///
+/// Separate from the logging above because the *text* is a contract: a
+/// benchmark capture is graded by grepping these fields, so the field order and
+/// the names are pinned by a test rather than only by this module.
+#[must_use]
+pub fn image_pressure_line(frame: &CompiledFrame, images: &ImageResidency) -> Option<String> {
+    let evicted = images.frame_pressure_evictions();
+    if frame.skipped_images == 0 && evicted == 0 {
+        return None;
+    }
+
+    let budget = images.budget();
+    Some(format!(
+        "frust-perf img skipped={} evicted={evicted} resident={} budget={}x{}x{}",
+        frame.skipped_images,
+        images.entry_count(),
+        budget.atlas_size.0,
+        budget.atlas_size.1,
+        budget.max_atlases,
+    ))
 }
 
 /// Report a glyph run whose font could not be read.

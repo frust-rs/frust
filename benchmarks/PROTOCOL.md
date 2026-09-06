@@ -588,6 +588,56 @@ scenarios (§9) are the first to require it; extending `stats.py` (or an
 equivalent) to parse per-op lines — both S8's shipped shape and the
 canonical shape — is the harness task's job.
 
+### Frust: `frust-perf img …` / `frust-perf atlas …` (engine image residency, always on)
+
+Two lines the render engine itself emits through the same `log::info!` facade
+the frame lines use, so `run.sh`'s `frust-perf` whitelist keeps both in every
+`run-NN.log` with no build flag, define or env var to turn on. Neither is
+parsed by `stats.py` (the prefix is not `frust-perf raw`), and neither changes
+the per-frame raw line — the v4 format above is untouched.
+
+```
+frust-perf img skipped=<u32> evicted=<u64> resident=<usize> budget=<w>x<h>x<layers>
+```
+
+Emitted by `frust_engine::compile` at most **once per compiled frame**, and
+only on a frame where at least one of the first two counters is non-zero — a
+scene the atlas holds comfortably emits nothing at all, so the line's mere
+presence is the signal.
+
+- `skipped` — image draws this frame painted nothing. The atlas refusing an
+  image is the usual cause; a singular paint transform or a destination with no
+  area also lands here, because every one of them is a draw the display list
+  asked for and the frame did not paint.
+- `evicted` — resident images this frame displaced to make room for another
+  (`ImageResidency::pressure_evictions`' per-frame delta). Each one costs a
+  re-upload the next frame that draws it, so `evicted>0` with `skipped=0` is
+  the healthy degradation: the working set is larger than the atlas and the
+  screen is still complete.
+- `resident` — images holding an atlas rectangle at the end of the frame.
+- `budget` — the resolved `AtlasBudget`: per-layer extent and maximum layers.
+
+```
+frust-perf atlas tier=<mobile|desktop> budget=<w>x<h>x<layers> downlevel=<Full|WebGl2> transient_saves_memory=<true|false> adapter=<name>
+```
+
+Emitted **once per process**, when `AtlasBudget::for_caps` first resolves a
+tier (renderer construction). `tier` is `is_mobile_tier`'s answer and the two
+fields after `budget` are the signals it read, so a device landing on a
+surprising tier is explained by the line itself rather than re-derived from the
+adapter. `adapter` is last because it is the one value that can contain spaces.
+
+> **The OnePlus 9 S5 row of the 2026-09-05 pass predates both lines and the
+> engine fix they report on.** That capture was taken while a full atlas
+> refused an image draw outright, so roughly half the S5 image composites it
+> timed were never performed (the phones disagreed: the OnePlus 9 refused on
+> every run, the Pixel 5 on none). Its S5 number is therefore not comparable
+> with Flutter's, nor with any S5 capture taken after the fix — a post-fix S5
+> run composites the content the pre-fix one dropped and pays re-uploads for
+> the images the atlas cannot hold at once. The Pixel 5 row of the same pass is
+> unaffected. Any re-run must be judged on `frust-perf img`: no line at all, or
+> lines with `skipped=0`, is the content gate; `evicted>0` is expected.
+
 ### Frust: `frust-perf s5 …` (S5 content diagnostic, opt-in)
 
 `ImageStreamWidget::paint` (`frust_bench/src/scenarios/s5_image.rs`) can
@@ -660,6 +710,13 @@ whole matrix):
   geometry (`(viewport.width − 2·pad) × 256`, `ImageFit::Cover`). S5 numbers
   captured before this date are not cross-app comparable and were retired
   with the 2026-07-21 results reset.
+- **Atlas residency is part of S5's content gate.** S5 streams more distinct
+  images past the viewport than a mobile-tier atlas holds at once, so a capture
+  is only comparable if the engine painted every cell it was asked for. Read
+  `frust-perf img` (§7) alongside the frame series: no line, or lines with
+  `skipped=0`, means the content was complete; `evicted>0` is the expected cost
+  of a working set larger than the atlas. The 2026-09-05 OnePlus 9 row predates
+  the engine change that made this true — see §7's note.
 
 ### S7-specific notes
 

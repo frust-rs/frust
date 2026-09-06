@@ -18,6 +18,14 @@
 //! is reported, ordered ahead of the frame's uploads, and describes exactly the
 //! texels a clear has to write — is pinned below.
 //!
+//! A full atlas is the other half of that. Residency is bounded by population
+//! as well as by age — an allocation the packer refuses displaces the
+//! least-recently-seen image rather than dropping the draw — so the cases below
+//! pin both ends of the trade: a working set larger than the atlas keeps every
+//! draw and pays in re-uploads, while a working set larger than the atlas
+//! *within one frame* is still a skip, because everything resident belongs to
+//! the frame that is about to sample it.
+//!
 //! One thing here is *not* about lowering: the plan's own lifetime. A compiled
 //! frame can still be refused before it reaches a queue, so residency is only
 //! committed when a consumer acknowledges having serviced the plan, and the
@@ -29,9 +37,10 @@
 use std::sync::Arc;
 
 use frust_engine::cache::images::{
-    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES,
+    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES, TierLogOnce,
+    atlas_tier_line,
 };
-use frust_engine::compile::CompiledFrame;
+use frust_engine::compile::{CompiledFrame, image_pressure_line};
 use frust_engine::gpu::atlas::{MAX_ATLAS_INDEX, atlas_texture_descriptor, lower_encoded_image};
 use frust_engine::schedule::{PageConfig, Schedule};
 use frust_engine::{EngineError, GpuEncodedPaint, SceneCompiler};
@@ -552,6 +561,226 @@ fn an_atlas_with_no_room_left_is_still_a_skip() {
     assert_eq!(residency.skipped(), 1);
 }
 
+/// An atlas of exactly four 32-square rectangles: one layer, two by two, so
+/// "the atlas is full" needs no reasoning about how a packer splits free space.
+const FOUR_SLOT_BUDGET: AtlasBudget = AtlasBudget {
+    atlas_size: (64, 64),
+    max_atlases: 1,
+};
+
+#[test]
+fn a_working_set_larger_than_the_atlas_re_uploads_rather_than_dropping_draws() {
+    // The scrolling-list shape, scaled to a host test: a hundred distinct
+    // images cycling past a window four cells wide, against an atlas that holds
+    // thirty-two of them. Before residency was bounded by population, every
+    // draw past the last free rectangle painted nothing — a hole on a screen
+    // whose solid fills all still landed. It must now cost a re-upload instead.
+    let mut compiler = compiler();
+    let images: Vec<ImageData> = (0..100).map(|_| image(16, 16)).collect();
+
+    let mut skipped = 0_u32;
+    let mut drawn = 0_u32;
+    for frame_index in 0..100_usize {
+        let window: Vec<&ImageData> = (0..4)
+            .map(|cell| &images[(frame_index * 4 + cell) % images.len()])
+            .collect();
+        let frame = compile(
+            &mut compiler,
+            &scene_of(|b| {
+                for data in window {
+                    b.draw_image(data, DEST);
+                }
+            }),
+        );
+
+        skipped += frame.skipped_images;
+        drawn += frame.image_draws;
+        compiler.acknowledge_image_plan();
+    }
+
+    assert_eq!(drawn, 400, "every cell of every frame painted");
+    assert_eq!(skipped, 0, "and none of them was dropped for want of room");
+    assert_eq!(compiler.images().skipped(), 0);
+    assert!(
+        compiler.images().pressure_evictions() > 0,
+        "fixture precondition: the working set really outgrew the atlas"
+    );
+    assert!(
+        compiler.images().entry_count() <= 32,
+        "residency stays inside the budget it was given: {} entries",
+        compiler.images().entry_count()
+    );
+}
+
+#[test]
+fn an_atlas_filled_inside_one_frame_still_skips_and_schedules_no_clear() {
+    // The boundary the eviction must not cross. The frame path clears the
+    // evicted rectangles before it writes the new ones, so freeing a rectangle
+    // this same frame resolved would zero texels the frame is about to sample —
+    // painting exactly the hole the eviction exists to prevent. Everything
+    // resident here belongs to this frame, so the overflow is honestly a skip.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let images: Vec<ImageData> = (0..8).map(|_| image(32, 32)).collect();
+
+    let frame = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            for data in &images {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+
+    assert!(
+        frame.skipped_images > 0,
+        "fixture precondition: eight 32-square images cannot share four slots"
+    );
+    assert_eq!(
+        frame.image_draws + frame.skipped_images,
+        8,
+        "every draw is accounted for as either painted or skipped"
+    );
+    assert_eq!(
+        compiler.images().pressure_evictions(),
+        0,
+        "nothing this frame drew was evicted for something else this frame drew"
+    );
+    assert!(
+        frame.image_evictions.is_empty(),
+        "and no clear was scheduled over a rectangle the frame is sampling"
+    );
+}
+
+#[test]
+fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload() {
+    // The consumer contract eviction has always kept, now reached by the second
+    // route: `image_evictions` names each freed rectangle once, and the plan is
+    // serviced clears-first, so the rectangle can be re-used by an upload in
+    // the very same plan without the clear erasing it.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
+
+    let filled = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            for data in &resident {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    assert_eq!(filled.skipped_images, 0, "the four slots take four images");
+    assert_eq!(filled.image_uploads.len(), 4);
+    assert!(filled.image_evictions.is_empty());
+    // The first image allocated is the one displaced below: every entry was
+    // last seen on the same frame, and the slot index breaks that tie.
+    let displaced = filled.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let arrival = image(32, 32);
+    let frame = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
+
+    assert_eq!(frame.skipped_images, 0, "the fifth image still paints");
+    assert_eq!(
+        frame.image_evictions,
+        vec![displaced],
+        "exactly one rectangle, reported exactly once"
+    );
+    assert_eq!(frame.image_uploads.len(), 1);
+    assert_eq!(
+        frame.image_uploads[0].region, displaced,
+        "the freed rectangle is what the new occupant took, which is why the \
+         plan has to be serviced clears-first"
+    );
+    assert!(
+        FOUR_SLOT_BUDGET.contains(frame.image_uploads[0].region, frame.atlas_layers),
+        "and it still lies inside the atlas this frame asks for"
+    );
+}
+
+#[test]
+fn a_displaced_image_becomes_resident_again_on_the_frame_that_draws_it() {
+    // What "degrades to re-uploads" means at the seam: the image that lost its
+    // rectangle is not lost, it is merely no longer resident, and the next
+    // frame that draws it schedules a fresh upload rather than a skipped draw.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let first = image(32, 32);
+    let rest: Vec<ImageData> = (0..3).map(|_| image(32, 32)).collect();
+
+    compile(
+        &mut compiler,
+        &scene_of(|b| {
+            b.draw_image(&first, DEST);
+            for data in &rest {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    compiler.acknowledge_image_plan();
+
+    let arrival = image(32, 32);
+    compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
+    compiler.acknowledge_image_plan();
+    assert_eq!(compiler.images().pressure_evictions(), 1);
+
+    let redrawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    assert_eq!(redrawn.skipped_images, 0, "the displaced image draws again");
+    assert_eq!(redrawn.image_draws, 1);
+    assert_eq!(
+        redrawn.image_uploads.len(),
+        1,
+        "at the cost of one upload — the trade the eviction made"
+    );
+}
+
+#[test]
+fn the_per_frame_residency_line_is_written_only_when_something_happened() {
+    // The line a benchmark capture is graded by: its absence means the atlas
+    // held the scene, `skipped>0` means draws were lost, and `evicted>0` alone
+    // means the working set is larger than the atlas and the screen is still
+    // complete. Field names and order are pinned here because a capture is
+    // read by grepping them.
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
+
+    let quiet = compile(
+        &mut compiler,
+        &scene_of(|b| {
+            for data in &resident {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    assert_eq!(
+        image_pressure_line(&quiet, compiler.images()),
+        None,
+        "a frame the atlas held reports nothing at all"
+    );
+    compiler.acknowledge_image_plan();
+
+    let arrival = image(32, 32);
+    let evicting = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
+    assert_eq!(
+        image_pressure_line(&evicting, compiler.images()).as_deref(),
+        Some("frust-perf img skipped=0 evicted=1 resident=4 budget=64x64x1"),
+    );
+
+    // And a frame that genuinely lost draws says so in the same line.
+    let mut full = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
+    let crowd: Vec<ImageData> = (0..6).map(|_| image(32, 32)).collect();
+    let skipping = compile(
+        &mut full,
+        &scene_of(|b| {
+            for data in &crowd {
+                b.draw_image(data, DEST);
+            }
+        }),
+    );
+    assert_eq!(
+        image_pressure_line(&skipping, full.images()).as_deref(),
+        Some("frust-perf img skipped=2 evicted=0 resident=4 budget=64x64x1"),
+    );
+}
+
 #[test]
 fn an_unsupported_or_malformed_image_is_skipped_with_the_frame_still_drawing() {
     let mut malformed = image(4, 4);
@@ -813,6 +1042,36 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
         assert!(budget.atlas_size.0 <= 2048 && budget.atlas_size.1 <= 2048);
         assert!(budget.max_atlases <= usize::try_from(MAX_ATLAS_INDEX + 1).expect("fits"));
     }
+}
+
+#[test]
+fn the_resolved_atlas_tier_is_reported_once_in_a_line_a_capture_keeps() {
+    // Which of the two tiers a device takes is otherwise an inference from
+    // whether its images went missing. The line is `frust-perf`-prefixed
+    // because that is what a benchmark capture keeps, and it names both signals
+    // `is_mobile_tier` reads so a surprising tier can be explained from the log
+    // alone rather than re-derived from the adapter.
+    let caps = TierCaps::fake(DownlevelProfile::WebGl2);
+    assert_eq!(
+        atlas_tier_line(&caps, AtlasBudget::for_caps(&caps)),
+        "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
+         transient_saves_memory=false adapter=fake-webgl2"
+    );
+
+    let desktop = TierCaps::fake(DownlevelProfile::Full);
+    let line = atlas_tier_line(&desktop, AtlasBudget::for_caps(&desktop));
+    assert!(line.starts_with("frust-perf atlas tier=desktop budget=2048x2048x8"));
+
+    // Once, not once per surface: the question is about the device.
+    let latch = TierLogOnce::new();
+    assert!(
+        latch.emit(&caps, AtlasBudget::MOBILE),
+        "the first call writes it"
+    );
+    assert!(
+        !latch.emit(&caps, AtlasBudget::MOBILE),
+        "no later one repeats it"
+    );
 }
 
 #[test]
