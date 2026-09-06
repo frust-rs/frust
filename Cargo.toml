@@ -89,10 +89,10 @@ license = "MIT OR Apache-2.0"
 # Deliberately dropped everywhere: `gles` (no shipping shell surfaces a
 # GLES-only device; the engine tier's own downlevel design covers the
 # WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL` tested against a desktop
-# adapter, per `docs/RENDER_DEVELOPMENT.md`; the web arm is cancelled,
-# `engine-webgl2-unhosted`) and `webgpu` (wasm target only, Frust ships no
-# wasm shell). Confirmed via `cargo tree -e features`: these two (and their
-# naga frontends/backends) are absent from every target's dependency graph.
+# adapter, per `docs/RENDER_DEVELOPMENT.md`) and `webgpu`/`webgl` (wasm target
+# only; the web-shell plan owns the wasm arm via `crates/frust-gpu/Cargo.toml`'s
+# target-gated section). Confirmed via `cargo tree -e features`: these features
+# (and their naga frontends/backends) are absent from the native target graph.
 #
 # The pin itself (30.0.1) is LAW — docs/DEVELOPMENT.md's Version-Pin Policy,
 # row owned by docs/RENDER_DEVELOPMENT.md. Moving features between this row
