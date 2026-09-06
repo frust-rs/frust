@@ -144,15 +144,38 @@ cargo clippy -p frust-engine --features perf-trace --all-targets -- -D warnings
 ```
 
 `frust-shell-ios`'s `pace_trace` unit tests (`src/app/executor.rs`) run only for iOS (the `app` module is
-`cfg(target_os = "ios")`), testing the `frust-perf p2p_us` line:
+`cfg(target_os = "ios")`), testing the `frust-perf ios-pace` line. A bare `cargo test -p frust-shell-ios
+--features perf-trace` builds and runs for the HOST target, where `app` compiles out — it executes none
+of these tests. These tests are compile-checked only, never executed by any gate in this repo: even the
+documented way to run an iOS-gated test host-side (`docs/DEVELOPMENT.md`'s `CARGO_TARGET_..._RUNNER`
+note), `CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn booted" cargo test --target
+aarch64-apple-ios-sim -p frust-shell-ios --features perf-trace --lib`, fails to LINK, not merely to
+run — `ffi_glue.rs`'s own `#[cfg(test)]` `macro_expansion` module expands `crate::ios_app!` a second
+time, and the `#[unsafe(no_mangle)] extern "C" fn frust_destroy` it generates collides with the crate's
+real one (`error: symbol frust_destroy is already defined`) — a pre-existing collision unrelated to
+`perf-trace`/`pace_trace`, and present on every target this crate compiles for, not just the Simulator.
+Verify instead with the type-check-only recipe `ffi_glue.rs`'s own doc comment names:
 
 ```bash
-cargo test -p frust-shell-ios --features perf-trace
+cargo check --target aarch64-apple-ios-sim -p frust-shell-ios --features perf-trace --tests
+```
+
+The iOS clippy line below is the same shape — a compile check, not an assertion gate — and currently
+reports 19 known pre-existing errors (18× `not_unsafe_ptr_arg_deref` on C-ABI exports, 1×
+`let_unit_value`); a change must add zero new ones:
+
+```bash
 cargo clippy -p frust-shell-ios --all-targets --features perf-trace --target aarch64-apple-ios -- -D warnings
 ```
 
-The iOS clippy line currently reports 19 known pre-existing errors (18× `not_unsafe_ptr_arg_deref` on
-C-ABI exports, 1× `let_unit_value`); a change must add zero new ones.
+`benchmarks/frust_bench` (a standalone workspace, gate from its own directory) has the same shape for
+its `db` feature, default-on: turning it off is the app-size-matrix build, and the resulting 8-entry
+`SCENARIOS` registry (`S1`-`S8` only, no `D1`/`D2`) is asserted only under this gate:
+
+```bash
+(cd benchmarks/frust_bench && cargo test -p frustbench --no-default-features)
+(cd benchmarks/frust_bench && cargo clippy -p frustbench --no-default-features --all-targets -- -D warnings)
+```
 
 Target compile gates and slow ignored scaffold/build tests remain listed in
 `docs/DEVELOPMENT.md`.

@@ -1,8 +1,7 @@
 # Frust - Development Guide
 
-The canonical test-tier, golden-image, headless GPU, and Android emulator runbook is
-`docs/TESTING.md`. This guide retains the concise build/test commands and platform
-prerequisites used during ordinary development.
+The canonical test-tier, golden-image, headless GPU, and Android emulator runbook is `docs/TESTING.md`.
+This guide retains the concise build/test commands and platform prerequisites used during ordinary development.
 
 This is the shared index — prerequisites, build/run/test gates, benchmarks, instrumentation,
 the version-pin *policy*, platform-support floors, known issues. Per-unit device gates,
@@ -29,20 +28,18 @@ WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is
   target add aarch64-linux-android`; `cargo install cargo-ndk`; JDK 17+ on `JAVA_HOME`
   (Android Studio's bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
   and `ANDROID_NDK_HOME` set — `frust doctor` checks all of these.
-- **iOS** (only needed for `frust run`/`build`/`create`'s iOS output; macOS host only):
-  Xcode 26+ resolved by `xcode-select -p`; `rustup target add aarch64-apple-ios-sim
-  aarch64-apple-ios`. A booted Simulator suffices for a debug `frust run`; a signed build
-  needs a codesigning identity (`frust` auto-detects `DEVELOPMENT_TEAM`, or set
-  `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run also needs iOS 17+,
-  unlocked/paired/trusted with Developer Mode on (`frust doctor` checks Rust targets on
-  macOS hosts only).
-- **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its
-  public repo (*Version-Pin Policy*; row in [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)),
-  consumed by `examples/huddle`,
-  `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold variant.
-  Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
-  iteration on `clean-signals` itself, via a `[patch]` override in the consuming
-  workspace — not needed for ordinary development.
+- **iOS** (only needed for `frust run`/`build`/`create`'s iOS output; macOS host only): Xcode 26+
+  resolved by `xcode-select -p`; `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A
+  booted Simulator suffices for a debug `frust run`; a signed build needs a codesigning identity
+  (`frust` auto-detects `DEVELOPMENT_TEAM`, or set `FRUST_IOS_TEAM`/`[ios] team`), and a physical
+  iPhone run also needs iOS 17+, unlocked/paired/trusted with Developer Mode on (`frust doctor`
+  checks Rust targets on macOS hosts only).
+- **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its public
+  repo (*Version-Pin Policy*; row in [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)), consumed by
+  `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold
+  variant. Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
+  iteration on `clean-signals` itself, via a `[patch]` override in the consuming workspace — not
+  needed for ordinary development.
 - **`frust-database --features engine-turso`**: needs libclang on the host (pulls
   `bindgen`/`clang-sys` as a build dependency). The default (`engine-sqlite`) build does
   not — `rusqlite`'s `bundled` feature only needs a `cc`-compatible C toolchain.
@@ -205,10 +202,13 @@ declared in the project. **Android release minification.** A generated app's
 true`) against `proguard-rules.pro` (keeps the Frust JNI surface and the vendored
 `accesskit_android` delegate); `--debug` is unaffected. NDK r27+ already 16KB-aligns
 `.so` LOAD segments, so Android 15's page-size rule needs no linker-flag change.
-**Release-lean mode.** `--release` also compiles out all `perf-trace` instrumentation
-and enables the app's `lean` feature (`log/release_max_level_warn`), matching Flutter's
-release log-level parity; `scripts/release-lean-check.sh` is the manual strings-absence
-gate confirming both before shipping.
+**Release-lean mode.** `--release` also compiles out all `perf-trace` instrumentation and enables
+the app's `lean` feature (`log/release_max_level_warn`), matching Flutter's release log-level
+parity; `scripts/release-lean-check.sh` is the manual strings-absence gate confirming both before
+shipping. **The no-`db` `frust_bench` size-matrix APK is a debug-signed measurement artifact, not a
+release** — built via cargo-ndk + `gradlew assembleRelease` (`benchmarks/frust_bench/Cargo.toml`'s
+`db` comment), not `frust build apk --release` (which refuses without signing material, above);
+never distribute what `benchmarks/harness/app_size.sh` measures there.
 
 ## Test
 
@@ -220,11 +220,10 @@ cargo build --workspace --locked \
   && cargo fmt --check
 ```
 
-`frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do
-the five design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`/
-`frust-shadcn`/`frust-beui`, `plugins/{glyph,material,cupertino,shadcn,beui}`) — root
-workspace members like any other plugin, with no separate feature-off build to gate (`frust` has no catalog feature left to
-unify or drop — see *Build*'s design-system note above).
+`frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do the
+five design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`/
+`frust-shadcn`/`frust-beui`, `plugins/{glyph,material,cupertino,shadcn,beui}`) — root workspace
+members like any other plugin, with no separate feature-off build to gate (*Build*'s design-system note above).
 
 `ScrollView`/`ListView`'s default scroll feel is platform-adaptive
 (`frust_widgets::physics::default_physics`): Android → Clamping+Stretch, every other host →
@@ -426,6 +425,7 @@ coreutils`) until fixed.
 | `FRUST_WINDOW_SIZE` | Desktop preview-window initial logical size, `<width>x<height>` (`frust-shell-desktop::app_handler`) — strict `^[0-9]+x[0-9]+$`, both ≥ 1; unset/invalid falls back to the default, invalid also logging one `log::warn!` naming the bad value. Compile-time-or-runtime like `FRUST_TRACE`, runtime winning; changing the knob's *value* (not just presence) forces a relink of `frust-shell-desktop` and downstream, so prefer the runtime env on desktop and reserve `--define` for device builds with no runtime env. Effective size/maximized/source logged once. | `800x600` |
 | `FRUST_WINDOW_MAXIMIZED` | Desktop preview-window `1`/`true` (case-insensitive) maximizes it at creation, winning visually over `FRUST_WINDOW_SIZE` when both are set. Same compile-time-or-runtime shape as `FRUST_TRACE`. | off |
 | `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`, requiring the same `perf-trace` build: with both set, `FrameStats::record` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries) — this dial's only remaining job. Setting `FRUST_TRACE_RAW` alone does nothing; `FRUST_TRACE` must also be on. Scenario markers no longer need this dial: `mark_scenario_start`/`mark_scenario_end` (`frust-shell-common::perf`) queue a marker, it rides the scene handoff (`RenderSender::send_scene` → inbox → `drain`, `frust-shell-common::render_split`), and `FrameStats::record` — on the thread that recorded the frame — logs it as `bench-scenario-start/end n=<u64> <name>` next to that frame's own raw line, gated on `FRUST_TRACE` alone; `n` is the recorded frame, not a guess made where the marker was raised. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v4 (adds per-pass GPU-timestamp fields; v3 split `acquire_us`/`submit_us` from v2's single `present_us`); `stats.py` parses key=value so v1–v4 logs stay parseable. In the default render-thread split, a gate-skipped frame never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md` §7 for the raw-format and marker-attribution changelogs. | off |
+| `FRUST_PACE_TRACE` | iOS-only render-thread pacing diagnostic (`frust-shell-ios`'s `app::executor::pace_trace`), gated by both the crate's `perf-trace` feature and this dial: emits one `frust-perf ios-pace` line per frame (wake/idle/acquire/submit/loop/p2p microsecond fields), zero-cost when off. Compile-time-or-runtime parsing like `FRUST_TRACE` (any value but `"0"` enables); left off during a measured run so its own line cannot perturb what is being measured. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/SHELLS_ARCHITECTURE.md`'s `frust-shell-common` kill-switch data flow) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
 
@@ -474,9 +474,9 @@ The rules below bind every pin, wherever its row lives:
   `{ workspace = true }`; gate each from its own directory (`cargo test` + `cargo clippy
   --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
-  `cargo generate-lockfile` then confirm `cargo build --workspace --locked` succeeds.
-  Exception: changes that only **remove** dependencies use `cargo build` instead (prunes
-  orphaned entries); `cargo generate-lockfile` is reserved for adding/widening, review the diff.
+  `cargo generate-lockfile`, then confirm `cargo build --workspace --locked` succeeds **before
+  committing**. Removal-only changes — nothing added, no range widened — may use `cargo build`
+  instead (prunes orphaned entries); `cargo generate-lockfile` is for adding/widening; review the diff.
 - **wgpu's GPU backends route per target; the `30.0.1` pin stays workspace-owned.** The
   `[workspace.dependencies]` row carries only `std`/`parking_lot`/`wgsl`; `crates/frust-gpu/Cargo.toml`'s
   `[target.'cfg(...)'.dependencies]` tables add `metal` (apple), `vulkan` (other unix: Android, Linux) and
@@ -512,7 +512,7 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 | iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
 | macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | Three separate literals, none referencing another: `crates/frust-drive/src/manifest.rs`'s private `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` (the manifest-parsed default, read back at build time); `crates/frust-drive/src/scaffold/context.rs`'s own `pub` const of the same name (the scaffold-time default that fills `{{ macos_minimum_system_version }}` in `templates/app/macos.tmpl/Info.plist.tmpl`); and a hard-coded `<string>11.0</string>` test literal in `crates/frust-drive/src/scaffold/mod.rs`. This trio needs the same lockstep discipline as the Android table below but none of the three sites carries the in-file lockstep comment yet — treat that as open follow-up work |
 | Windows | **10**, de facto — winit itself supports 7+ and only tests 10 regularly | Not an in-repo literal. The floor comes from the Win10-era API `frust-shell-windows` actually drives: winit's `Window::set_theme` (native titlebar light/dark theming) reaches DWM immersive dark-mode support, which requires Windows 10 1809+ |
-| Linux | No distro floor; a GPU adapter able to run `frust-engine`'s ordinary (no-compute) render passes | Not declared per-distro anywhere in this repo. wgpu itself imposes no Vulkan requirement (`crates/frust-gpu/src/context.rs` requests `Backends::from_env().unwrap_or_default()`, i.e. all backends including GL) — the engine's downlevel design rules ask for no compute pass, no storage buffer, no indirect draw, a materially lower bar than the deleted vello-classic tier, and it is an untested assumption while the Linux desktop runtime gate is owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`) |
+| Linux | No distro floor; a GPU adapter able to run `frust-engine`'s ordinary (no-compute) render passes | Not declared per-distro anywhere in this repo. `crates/frust-gpu/src/context.rs` requests `Backends::from_env().unwrap_or_default()`, but there is no live GL fallback behind that request: `gles` is deliberately never compiled in for any target (Version-Pin Policy's per-target `wgpu`-backend bullet — Linux routes through the `vulkan`-only arm), so a Vulkan-less host has no backend to fall back to. The WebGL2/GLES3.0 ceiling itself is covered separately, by the engine's downlevel design rehearsing it against a real desktop adapter via `FRUST_ENGINE_DOWNLEVEL` ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) — a materially lower bar than the deleted vello-classic tier — and Linux support remains an untested assumption while the desktop runtime gate is owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`) |
 
 **Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
 target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's

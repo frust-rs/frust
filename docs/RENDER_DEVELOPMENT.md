@@ -22,6 +22,18 @@ a 256-byte uniform alignment (the Simulator misreports its own) — kept until u
 [gfx-rs/wgpu#10189](https://github.com/gfx-rs/wgpu/pull/10189) ships; see
 [DEVELOPMENT.md](DEVELOPMENT.md)'s Known Issues.
 
+**The wgpu pin's per-target backend routing is not a size lever — do not re-open it as one.**
+[DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy documents the routing itself (backend
+features added per target in `crates/frust-gpu/Cargo.toml`'s `[target.'cfg(...)'.dependencies]`
+tables rather than one unioned `[workspace.dependencies]` row). Measured under this workspace's
+`lto = "fat"`/`codegen-units = 1` release profile, that routing changes ~0 bytes of output: the
+unused naga shader writers the old unioned row dragged in were already dead-stripped by fat LTO.
+The real, measured size lever lives in `frust_bench` instead: its `db` feature (default-on)
+shrinks arm64 release `libfrustbench.so` from 11.35 MB to 9.41 MB under `--no-default-features`
+(build recipe in `benchmarks/frust_bench/Cargo.toml`'s `db` feature comment; the resulting APK is
+a debug-signed measurement artifact only — [DEVELOPMENT.md](DEVELOPMENT.md)'s Release Builds
+section).
+
 ## Engine
 
 `frust-engine`/`frust-gpu` are plain, unconditional dependencies of `frust-render`
@@ -122,10 +134,13 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
 cargo bench -p frust-engine -- --quick
 ```
 
-Engine-owned instrumentation (`frust-perf img`, `frust-perf atlas`, `frust-perf enc` counters, and
-`PhaseClock`/`EncodeTrace` types) compiles only under the `perf-trace` feature and is deliberately
-NOT gated by the shell's runtime `FRUST_TRACE` dial — the engine cannot observe shell-side
-instrumentation state and cannot condition its own on it.
+Engine-owned instrumentation — the `frust-perf img`/`frust-perf atlas`/`frust-perf enc` counter lines
+and the `EncodeTrace` type — compiles only under the `perf-trace` feature (an island, absent entirely
+otherwise) and is deliberately NOT gated by the shell's runtime `FRUST_TRACE` dial — the engine cannot
+observe shell-side instrumentation state and cannot condition its own on it. `PhaseClock`
+(`compile/mod.rs`) is not one of these islands: the type compiles unconditionally on every build —
+only its clock field and reads are `perf-trace`-only, so without the feature it is zero-sized and every
+lap answers `Duration::ZERO` with no clock ever read — inert, not absent.
 
 `bash scripts/testing/engine-lean-check.sh` is the engine's lean-weight gate (same SKIP≠FAIL exit
 shape as `scripts/release-lean-check.sh`; manual gate, no CI): a single default arm builds
