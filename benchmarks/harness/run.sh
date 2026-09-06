@@ -562,7 +562,7 @@ ios_run_matrix() {
     fi
     if [ "${IS_DCLASS}" -eq 1 ]; then
       assert_captured_adapter "${run_log}"
-      frames="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
+      frames="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' -e 'frust-perf plugin scenario=' -e 'flutter-perf plugin scenario=' "${run_log}" 2>/dev/null || true)"
       echo "  captured ${run_log} (${frames:-0} per-op lines)"
     else
       frames="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
@@ -714,7 +714,7 @@ for i in $(seq 1 "${RUNS}"); do
 
   if [ "${IS_DCLASS}" -eq 1 ]; then
     assert_captured_adapter "${run_log}"
-    op_count="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
+    op_count="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' -e 'frust-perf plugin scenario=' -e 'flutter-perf plugin scenario=' "${run_log}" 2>/dev/null || true)"
     echo "  captured ${run_log} (${op_count:-0} per-op lines)"
   else
     frame_count="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
