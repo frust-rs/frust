@@ -421,7 +421,22 @@ shape it parses.
 > rule, and why the alternative would be exactly the guess this route exists
 > to remove). A scenario measuring off-thread work must bracket it from the
 > build that shows the result, not from inside the worker — see the
-> S8/`d*` notes below for the four sub-markers this currently silences.
+> S8/`d*` notes below for the six sub-markers this still silences
+> (`s8-write`, `s8-read`, `d1-insert-batch`, `d1-insert-single`,
+> `d2-select-point`, `d2-range-scan`), all of which stamp from inside a
+> `spawn_blocking` closure.
+>
+> **`s4-parse` restored to the UI thread, 2026-09-06.** Unlike the six
+> above, S4's `s4-parse` window has no per-op line of its own to fall back
+> on, so a silenced window was its only bound — it has been re-sited onto
+> the UI thread rather than added to the silenced list: `start` is raised
+> in the build that hands the generate-then-parse call to `spawn_blocking`,
+> `end` in the first build that observes the result
+> (`benchmarks/frust_bench/src/scenarios/s4_heavy.rs`), so the half-open
+> window spans every frame produced while that call was in flight. Frust
+> and Flutter are symmetric for `s4-parse` again
+> (`benchmarks/flutter_bench/lib/scenarios/s4_heavy.dart` brackets the same
+> `Isolate.run` round trip from its own UI/main isolate).
 >
 > **This is the only shape Frust emits now** — there is no config toggle
 > back to the older name-only `bench-scenario-start <name>` shape, and
