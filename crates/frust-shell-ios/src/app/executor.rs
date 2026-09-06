@@ -100,15 +100,17 @@ mod pace_trace {
     struct Prev {
         /// End of the previous frame's acquire — the base of `loop_us`.
         acquire_end: Option<Instant>,
-        /// End of the previous **presenting** frame's submit — the instant
-        /// its present was issued, and so the base of `p2p_us`. Unlike
+        /// End of the previous **presenting** frame's submit — the base of
+        /// `p2p_us`, which measures submit-to-submit cadence between frames
+        /// whose GPU work was submitted for presentation (`FrameOutcome::Rendered`).
+        /// On the inline path, submit and present coincide. Under armed
+        /// present-sync, the UI thread commits the drawable later and the
+        /// render thread does not observe it, so a parked frame that the UI
+        /// thread overwrites before painting is an unmeasured gap. Unlike
         /// [`Self::acquire_end`]/[`Self::loop_end`], a frame that presented
         /// nothing (`Redraw`/`SurfaceLost`/`Skipped`/`Err` — see
         /// [`record`]'s `presented` parameter) leaves this untouched: `p2p_us`
-        /// measures the presented cadence specifically, so its base may only
-        /// ever advance on a frame that actually presented (an earlier unconditional
-        /// advance let one long present-to-present gap get reported as two
-        /// short, misleading intervals).
+        /// reports `NA` for such frames and does not advance the base.
         submit_end: Option<Instant>,
         /// End of the previous loop iteration's last render-thread work (its
         /// submit) — the base of `idle_us`, which is therefore the time this
@@ -139,13 +141,16 @@ mod pace_trace {
     /// `frust-engine::renderer::EncodeTrace::line`'s directly-tested-formatter
     /// shape).
     ///
-    /// `presented` is whether *this* frame actually presented
-    /// (`FrameOutcome::Rendered` on the inline path; the UI-thread present
-    /// under armed present-sync — see [`super::pace_record`]'s caller). When
-    /// `false`, `p2p_us` reports the literal `NA` sentinel rather than a
-    /// number (a wrong-looking interval reads as measured; `NA` cannot), and
-    /// the returned [`Prev::submit_end`] carries `prev.submit_end` through
-    /// unchanged — the base advances only on a frame that actually presented.
+    /// `presented` is whether *this* frame's GPU work was submitted for
+    /// presentation (`FrameOutcome::Rendered`). The render thread observes
+    /// this on the inline path (where submit and present coincide) and on the
+    /// split path with present-sync armed (where the drawable is parked for
+    /// the UI thread to commit later, but the render thread still reached the
+    /// submit with a frame to present). When `false`, `p2p_us` reports the
+    /// literal `NA` sentinel rather than a number (a wrong-looking interval
+    /// reads as measured; `NA` cannot), and the returned [`Prev::submit_end`]
+    /// carries `prev.submit_end` through unchanged — the base advances only on
+    /// a frame that actually presented.
     ///
     /// Every argument is one distinct field of the one frame this line
     /// reports on (mirrors [`render_scene`]'s and `ffi_glue::install_surface`'s
