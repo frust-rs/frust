@@ -51,7 +51,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use anyhow::{Context, Result, bail};
 
@@ -74,19 +74,51 @@ use crate::app::{
 };
 use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 
-/// Startup-span name: `create_handle` is about to join the
-/// background font-preload thread [`create_handle`] spawned at the top of its
-/// own body (see that fn's doc — iOS has no `JNI_OnLoad`-equivalent
-/// process-wide load hook to spawn it earlier from, so the thread is spawned
-/// as early as possible inside `create_handle` itself instead, overlapping the
-/// synchronous GPU surface/device bring-up below it). Mirrors the Android
-/// shell's `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
+/// Startup-span name: the font-preload overlap window
+/// opens — the background thread [`create_handle`] spawned at the top of its own
+/// body is from here on the only thing the UI thread is still waiting for (see
+/// that fn's doc — iOS has no `JNI_OnLoad`-equivalent process-wide load hook to
+/// spawn it earlier from, so the thread is spawned as early as possible inside
+/// `create_handle` itself instead). On the split path this is recorded *before*
+/// the render thread is started, so the GPU surface/device bring-up is paid
+/// inside the window rather than after it. Mirrors the Android shell's
+/// `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
 const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
 
 /// Startup-span name: the background font-preload join returned —
 /// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
-/// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
+/// a synchronous [`TextContext::new`]. On the split path the UI thread records
+/// it onto the recorder the render thread is writing to as well, so
+/// `adapter_ready`/`device_ready`/`renderer_ready` normally come *before* it in
+/// the startup line — that overlap is the point, not a reordered wire name. See
+/// [`SPAN_FONT_PREINIT_STARTED`].
 const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
+
+/// The split path's startup-span recorder, shared between the UI thread and the
+/// render thread. The render thread owns the line from `adapter_ready` onward and
+/// emits it on the first present ([`render_scene`] takes the recorder to do so);
+/// the UI thread still records [`SPAN_FONT_PREINIT_JOINED`] on it from
+/// [`spawn_split_executor`]. The two now run concurrently, so one shared recorder
+/// — rather than one moved render-side — is what keeps both sets of spans on a
+/// single epoch and in a single line.
+///
+/// Contention is bounded to that one UI-side record, and it cannot collide with
+/// the render thread's per-frame hold of the guard: it happens strictly before
+/// the first scene is handed off, because layout cannot run before the joined
+/// `TextContext` exists.
+type SharedStartupSpans = Arc<Mutex<Option<StartupSpans>>>;
+
+/// Record `names`, in order, on a shared startup recorder. A no-op once the
+/// startup line has been emitted (the recorder is gone by then), and
+/// poison-tolerant: a panicked holder costs instrumentation, never a frame.
+fn record_startup_spans(startup_spans: &Mutex<Option<StartupSpans>>, names: &[&'static str]) {
+    let mut guard = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(spans) = guard.as_mut() {
+        for name in names {
+            spans.record(name);
+        }
+    }
+}
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init`].
 ///
@@ -314,7 +346,7 @@ fn install_surface(
     metal_layer: *mut c_void,
     width: u32,
     height: u32,
-    startup_spans: &mut Option<StartupSpans>,
+    startup_spans: &Mutex<Option<StartupSpans>>,
     first_install: bool,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: &AtomicBool,
@@ -345,10 +377,15 @@ fn install_surface(
         translucent_resolved,
         Some(renderer.surface_resolved_translucent()),
     );
-    if first_install && let Some(spans) = startup_spans.as_mut() {
-        spans.record(perf::SPAN_ADAPTER_READY);
-        spans.record(perf::SPAN_DEVICE_READY);
-        spans.record(perf::SPAN_RENDERER_READY);
+    if first_install {
+        record_startup_spans(
+            startup_spans,
+            &[
+                perf::SPAN_ADAPTER_READY,
+                perf::SPAN_DEVICE_READY,
+                perf::SPAN_RENDERER_READY,
+            ],
+        );
     }
     Ok(())
 }
@@ -358,9 +395,12 @@ fn install_surface(
 /// and the freshest handed-off scene from the channel, and run
 /// encode→acquire→submit for each frame — the single perf emitter (folding the UI
 /// thread's `UiSpans` with its own render spans via [`render_scene`]). Owns the
-/// startup line from `adapter_ready` onward (the UI thread recorded `init_entry` +
-/// the font-preinit spans before moving the recorder here). Exits cleanly when the
-/// `RenderSender` is dropped.
+/// startup line from `adapter_ready` onward and emits it on the first present —
+/// through a recorder that is *shared* rather than moved
+/// ([`SharedStartupSpans`]), because the UI thread is still waiting on the font
+/// preinit while this thread brings the GPU up and stamps `font_preinit_joined`
+/// onto the same line when that wait ends. Exits cleanly when the `RenderSender`
+/// is dropped.
 ///
 /// # iOS surface recovery
 ///
@@ -405,7 +445,7 @@ fn install_surface(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
-    startup_spans: StartupSpans,
+    startup_spans: SharedStartupSpans,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
     presented: Arc<AtomicU64>,
@@ -436,7 +476,6 @@ pub(crate) fn render_loop(
 
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
-    let mut startup_spans = Some(startup_spans);
     let mut frame_stats = FrameStats::new();
     let mut phase = RenderPhase::NoSurface;
     let mut first_install_done = false;
@@ -469,7 +508,7 @@ pub(crate) fn render_loop(
                         ptr,
                         size.width,
                         size.height,
-                        &mut startup_spans,
+                        &startup_spans,
                         first_install,
                         alpha,
                         &translucent_resolved,
@@ -535,30 +574,36 @@ pub(crate) fn render_loop(
                 // the render thread's stand-in for `first_rebuild_done` (it owns
                 // the startup line in the split).
                 if !first_rebuild_recorded {
-                    if let Some(spans) = startup_spans.as_mut() {
-                        spans.record(perf::SPAN_FIRST_REBUILD_DONE);
-                    }
+                    record_startup_spans(&startup_spans, &[perf::SPAN_FIRST_REBUILD_DONE]);
                     first_rebuild_recorded = true;
                 }
                 // FFI-path perf convention: read `perf::enabled()` once per
                 // frame, gate every `Instant::now()` behind it (inside
                 // `render_scene`).
                 let perf_on = perf::enabled();
-                render_scene(
-                    &mut renderer,
-                    &render_cx,
-                    &frame.scene.scene,
-                    frame.scene.base_color,
-                    frame.ui_spans,
-                    &mut frame_stats,
-                    &mut startup_spans,
-                    perf_on,
-                    &presented,
-                    // Present-sync: park this frame under its own id so the UI
-                    // thread can tell the platform-view release gate which
-                    // frame it just put on screen.
-                    Some((&present, frame.meta.frame_id)),
-                );
+                {
+                    // Hold the shared recorder for the frame — `render_scene`
+                    // stamps `first_encode_done`/`first_frame_presented` and emits
+                    // the startup line from inside it. Scoped so the guard is
+                    // released before the self-heal below, which records through
+                    // the same (non-reentrant) mutex.
+                    let mut spans = startup_spans.lock().unwrap_or_else(|err| err.into_inner());
+                    render_scene(
+                        &mut renderer,
+                        &render_cx,
+                        &frame.scene.scene,
+                        frame.scene.base_color,
+                        frame.ui_spans,
+                        &mut frame_stats,
+                        &mut spans,
+                        perf_on,
+                        &presented,
+                        // Present-sync: park this frame under its own id so the UI
+                        // thread can tell the platform-view release gate which
+                        // frame it just put on screen.
+                        Some((&present, frame.meta.frame_id)),
+                    );
+                }
 
                 // iOS self-heals a lost surface from the retained layer (nothing
                 // external re-drives creation), bounded by the failure budget so
@@ -587,7 +632,7 @@ pub(crate) fn render_loop(
                         ptr,
                         physical.0,
                         physical.1,
-                        &mut startup_spans,
+                        &startup_spans,
                         false,
                         alpha,
                         &translucent_resolved,
@@ -679,7 +724,7 @@ fn create_handle(
     //   `RenderContext`/`SurfaceRenderer` + surface and does all GPU work
     //   (drawable acquisition, encode, present) — so `frust_init` returns without
     //   blocking on adapter/device/surface bring-up (it happens render-side). The
-    //   `startup` recorder is moved into the render thread, which owns the startup
+    //   `startup` recorder is shared with the render thread, which owns the startup
     //   line from `adapter_ready` on.
     // - Inline (kill switch engaged): create the surface + renderer on this UI
     //   thread exactly as the pre-split shell did, recording the full startup line
@@ -844,8 +889,11 @@ fn build_inline_executor(
 /// The GPU work — surface creation, drawable acquisition,
 /// encode, present, adapter/device/renderer spans — happens *on the render thread*
 /// ([`render_loop`]), so `frust_init` never blocks the UI thread on it. Only the
-/// font-preload join (needed by UI-side layout) stays on this UI thread. Returns
-/// the executor plus the joined [`TextContext`].
+/// font-preload join (needed by UI-side layout) stays on this UI thread, and it
+/// runs *after* the thread is spawned and handed its surface — so the
+/// adapter/device bring-up is paid inside the font wait (the longest serial
+/// stretch of iOS cold start) instead of after it. Returns the executor plus the
+/// joined [`TextContext`].
 #[allow(clippy::too_many_arguments)]
 fn spawn_split_executor(
     mut startup: StartupSpans,
@@ -857,19 +905,13 @@ fn spawn_split_executor(
     translucent_resolved: Arc<AtomicBool>,
     present: Arc<PresentHandoff>,
 ) -> (FrameExecutor, TextContext) {
-    // Font/`TextContext` warmup stays UI-side — layout runs on the UI
-    // thread. The GPU work is off-thread now, so this join's ordering vs surface
-    // bring-up no longer matters; record it before the recorder moves into the
-    // render thread below.
+    // Font/`TextContext` warmup stays UI-side — layout runs on the UI thread —
+    // but waiting for it is the longest thing left on this thread's startup path,
+    // so it is spent LAST: everything below gets the render thread going first and
+    // only then joins, leaving the adapter/device/surface bring-up to run inside
+    // the wait. This span opens that window; its `JOINED` partner is recorded
+    // after the join, on the recorder this thread shares with the render thread.
     startup.record(SPAN_FONT_PREINIT_STARTED);
-    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
-        log::warn!(
-            "frust-shell-ios: font pre-init thread panicked; \
-             falling back to synchronous TextContext::new"
-        );
-        TextContext::new()
-    });
-    startup.record(SPAN_FONT_PREINIT_JOINED);
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableMetalLayer>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
@@ -905,11 +947,16 @@ fn spawn_split_executor(
     let surface_reinstalled = Arc::new(AtomicBool::new(false));
     let surface_reinstalled_render = Arc::clone(&surface_reinstalled);
 
-    // Move `startup` (init_entry + font spans already recorded) into the render
-    // thread, which owns the rest of the startup line. The raw `metal_layer`
-    // pointer is NOT captured by the closure (it is `!Send`); it crosses the
-    // channel wrapped in `SendableMetalLayer` via the `SurfaceCreated` command
-    // sent from this UI thread below.
+    // Share `startup` (`init_entry` + `font_preinit_started` recorded) with the
+    // render thread, which owns the rest of the startup line and emits it on the
+    // first present. This thread keeps a clone for the one span it still owes —
+    // `font_preinit_joined` — which the render thread cannot stamp on its behalf
+    // now that the two run concurrently. The raw `metal_layer` pointer is NOT
+    // captured by the closure (it is `!Send`); it crosses the channel wrapped in
+    // `SendableMetalLayer` via the `SurfaceCreated` command sent from this UI
+    // thread below.
+    let startup: SharedStartupSpans = Arc::new(Mutex::new(Some(startup)));
+    let startup_render = Arc::clone(&startup);
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
         // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
@@ -919,7 +966,7 @@ fn spawn_split_executor(
             run_guarded_thread("frust-render (ios)", move || {
                 render_loop(
                     receiver,
-                    startup,
+                    startup_render,
                     fatal_render,
                     scene_return_tx,
                     presented_render,
@@ -939,6 +986,25 @@ fn spawn_split_executor(
         window: SendableMetalLayer::new(metal_layer),
         size,
     });
+
+    // Only now block on the font preinit: the render thread has its surface
+    // command in hand, so adapter/device/renderer bring-up proceeds while this
+    // thread waits. Best-effort join — a panicked thread falls back to a
+    // synchronous `TextContext::new` with a log line, killing nothing and
+    // deferring nothing silently. The "layout never runs before `TextContext`
+    // exists" invariant is untouched: `create_handle`'s initial `rebuild()` is
+    // downstream of this join.
+    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+        log::warn!(
+            "frust-shell-ios: font pre-init thread panicked; \
+             falling back to synchronous TextContext::new"
+        );
+        TextContext::new()
+    });
+    // The last UI-side span, and this thread's last touch of the shared recorder.
+    // It lands after `adapter_ready` in the emitted line whenever the GPU won the
+    // race — which is the whole point of the ordering above.
+    record_startup_spans(&startup, &[SPAN_FONT_PREINIT_JOINED]);
 
     (
         FrameExecutor::Split(SplitExecutor::new(
