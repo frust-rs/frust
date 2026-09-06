@@ -23,12 +23,14 @@
 //! length as a constant, so both shapes drive identically; [`SCENARIOS`] is
 //! simply eight entries instead of ten.
 //!
-//! If a scenario id known to the protocol (e.g., a `d1` deep link or
-//! `FRUST_BENCH_SCENARIO=d1`) is absent from the compiled registry, the driver
-//! logs `frust_bench: unknown scenario id '<id>' (not compiled into this build?)
-//! — falling back to s1` and falls back to S1 (index 0). The invariant is: a
-//! benchmark run never records numbers under a scenario label the running binary
-//! did not actually execute.
+//! If a scenario id is not found in the registry (e.g., a `d1` deep link on a
+//! `--no-default-features` build, or `FRUST_BENCH_SCENARIO=d1` where the id is
+//! not compiled in), the selection falls back to S1 (index 0). A diagnostic is
+//! logged once when the unknown id is encountered: after logger installation on
+//! the platform (post-init deep links via [`BenchState::consume_deep_link`], or
+//! on the first [`crate::BenchApp::build`] call if the id came from the env var).
+//! The diagnostic echoes a sanitized version of the id (control characters and
+//! length-capped) to avoid log injection.
 //!
 //! # Marker contract
 //!
@@ -164,13 +166,17 @@ pub struct BenchState {
     /// Measured painted-frames-per-second, written ~1×/second by an animating
     /// scenario's paint pass and read by the HUD readout.
     pub fps: RwSignal<f64>,
+    /// If the `FRUST_BENCH_SCENARIO` env var named an unknown scenario id at
+    /// launch, the sanitized id is deferred here to be logged once from
+    /// [`crate::BenchApp::build`] after logger installation.
+    pub pending_unknown_env_id: Option<String>,
 }
 
 impl BenchState {
     /// Construct the initial state with `active`/`selected` resolved from the
     /// launch deep link or [`SCENARIO_ENV`] (defaulting to S1).
     pub fn new() -> Self {
-        let initial = resolve_initial();
+        let (initial, pending_unknown_env_id) = resolve_initial();
         Self {
             active: initial,
             selected: RwSignal::new(initial),
@@ -178,6 +184,7 @@ impl BenchState {
             running: true,
             epoch: 0,
             fps: RwSignal::new(0.0),
+            pending_unknown_env_id,
         }
     }
 
@@ -193,6 +200,16 @@ impl BenchState {
             self.last_link = Some(link.url.clone());
             if let Some(i) = index_from_url(&link.url) {
                 self.selected.set(i);
+            } else if let Some(id) = scenario_id_from_url(&link.url) {
+                // The URL has a valid frustbench:// scheme, but the id is not
+                // in the registry. Log a diagnostic (with sanitized id to prevent
+                // log injection) and leave selected unchanged.
+                let sanitized = sanitize_id(id);
+                log::warn!(
+                    "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
+                     — selection unchanged",
+                    sanitized
+                );
             }
         }
     }
@@ -204,42 +221,32 @@ impl Default for BenchState {
     }
 }
 
-/// Resolve the scenario to launch: the cold-start deep link wins, then
-/// [`SCENARIO_ENV`], then S1 (index 0). If a deep link or env var names
-/// an unknown scenario id, logs a diagnostic and falls back to S1.
-fn resolve_initial() -> usize {
-    if let Some(url) = deep_links().initial {
-        if let Some(i) = index_from_url(&url) {
-            return i;
-        }
-        // Extract the id from the URL for logging.
-        if let Some(rest) = url.strip_prefix(&format!("{DEEP_LINK_SCHEME}://"))
-            && let Some(id) = rest.split(['/', '?', '#']).next()
-        {
-            log::warn!(
-                "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
-                 — falling back to s1",
-                id
-            );
-        }
-    }
+/// Resolve the scenario to launch: the `FRUST_BENCH_SCENARIO` env var wins
+/// (desktop only), then S1 (index 0). Returns the resolved index and an
+/// optional sanitized id that was unknown in the registry (to be logged
+/// from [`crate::BenchApp::build`] after logger installation).
+///
+/// Note: deep-link resolution is not attempted here. On Android/iOS, the
+/// cold-start deep link is queued by the OS and delivered post-init through
+/// [`BenchState::consume_deep_link`]. On desktop, no deep-link producer exists.
+fn resolve_initial() -> (usize, Option<String>) {
     if let Ok(id) = std::env::var(SCENARIO_ENV) {
         let id_trimmed = id.trim();
         if let Some(i) = index_from_id(id_trimmed) {
-            return i;
+            return (i, None);
         }
-        log::warn!(
-            "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
-             — falling back to s1",
-            id_trimmed
-        );
+        // Unknown id: defer the diagnostic to be logged from build() after
+        // logger installation, and fall back to S1.
+        let sanitized = sanitize_id(id_trimmed);
+        return (0, Some(sanitized));
     }
-    0
+    (0, None)
 }
 
-/// Map a `frustbench://<id>[/...]` URL to a [`SCENARIOS`] index, if its host is
-/// a known scenario id.
-pub fn index_from_url(url: &str) -> Option<usize> {
+/// Extract the scenario id host from a `frustbench://<id>[/...]` URL.
+/// Returns `Some(id)` if the URL has the correct scheme, or `None` otherwise.
+/// The returned id may or may not be in the registry.
+pub fn scenario_id_from_url(url: &str) -> Option<&str> {
     let prefix = format!("{DEEP_LINK_SCHEME}://");
     let rest = url.strip_prefix(&prefix)?;
     // The scenario id is the host, up to the first `/`, `?`, or `#`.
@@ -248,7 +255,39 @@ pub fn index_from_url(url: &str) -> Option<usize> {
         .next()
         .unwrap_or(rest)
         .trim_end_matches('/');
-    index_from_id(id)
+    if id.is_empty() { None } else { Some(id) }
+}
+
+/// Sanitize a scenario id for safe logging, preventing log injection.
+/// Keeps only alphanumeric chars, underscore, and hyphen; caps at 32 chars
+/// and marks truncation with `…` if any filtering or truncation occurred.
+pub fn sanitize_id(id: &str) -> String {
+    let original_char_count = id.chars().count();
+    // Count how many safe characters are in the original.
+    let safe_char_count = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .count();
+
+    // Extract up to 32 safe characters.
+    let result: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(32)
+        .collect();
+
+    // Mark with … if we filtered out any chars or if we had to truncate at 32.
+    if safe_char_count < original_char_count || safe_char_count > 32 {
+        format!("{}…", result)
+    } else {
+        result
+    }
+}
+
+/// Map a `frustbench://<id>[/...]` URL to a [`SCENARIOS`] index, if its host is
+/// a known scenario id.
+pub fn index_from_url(url: &str) -> Option<usize> {
+    scenario_id_from_url(url).and_then(index_from_id)
 }
 
 /// Map a bare scenario id (`s1`..=`s8`) to its [`SCENARIOS`] index.
@@ -272,12 +311,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_scenario_id_falls_back_to_s1() {
-        // On any build, an unknown scenario id falls back to S1 (index 0).
-        // resolve_initial() logs a diagnostic when this happens.
-        let s1_idx = index_from_id("s1").expect("s1 should exist");
-        let unknown_idx = index_from_id("unknown_xyz");
-        assert_eq!(unknown_idx, None);
-        assert_eq!(s1_idx, 0, "s1 should be at index 0");
+    fn scenario_id_from_url_extracts_host() {
+        // Valid URLs with the correct scheme extract the host.
+        assert_eq!(scenario_id_from_url("frustbench://s1"), Some("s1"));
+        assert_eq!(scenario_id_from_url("frustbench://d1"), Some("d1"));
+        assert_eq!(
+            scenario_id_from_url("frustbench://s1/extra/path"),
+            Some("s1")
+        );
+        assert_eq!(scenario_id_from_url("frustbench://s3?x=1"), Some("s3"));
+        assert_eq!(scenario_id_from_url("frustbench://s7#fragment"), Some("s7"));
+        // Wrong scheme or malformed URLs return None.
+        assert_eq!(scenario_id_from_url("other://s1"), None);
+        assert_eq!(scenario_id_from_url("frustbench://"), None);
+    }
+
+    #[test]
+    fn sanitize_id_removes_unsafe_chars() {
+        // Normal ids pass through unchanged.
+        assert_eq!(sanitize_id("s1"), "s1");
+        assert_eq!(sanitize_id("my-scenario_1"), "my-scenario_1");
+        // Control characters, spaces, and special chars are filtered out.
+        // Since unsafe chars were removed, mark with …
+        assert_eq!(sanitize_id("s1 with spaces"), "s1withspaces…");
+        assert_eq!(sanitize_id("s1\nwith\nnewlines"), "s1withnewlines…");
+        assert_eq!(sanitize_id("s1=value"), "s1value…");
+        // Truncation at 32 safe chars is marked with …
+        let long_id = "a".repeat(35);
+        let sanitized = sanitize_id(&long_id);
+        assert_eq!(sanitized, format!("{}…", "a".repeat(32)));
+        // Mixed: filter AND hit the 32-char cap.
+        let mixed = format!("{}hello world", "a".repeat(30));
+        // First 32 safe chars: 30 a's + h + e + l = 33 chars, so take(32) gives us 30 a's + h + e
+        let sanitized = sanitize_id(&mixed);
+        assert_eq!(sanitized, format!("{}he…", "a".repeat(30)));
     }
 }

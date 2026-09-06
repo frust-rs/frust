@@ -61,6 +61,16 @@ impl Component for BenchApp {
     }
 
     fn build(&self, state: &mut BenchState) -> AnyView<BenchState> {
+        // Log the deferred env-var unknown-id diagnostic (if any), now that
+        // logger installation has completed on all platforms.
+        if let Some(unknown_id) = state.pending_unknown_env_id.take() {
+            log::warn!(
+                "frust_bench: unknown scenario id '{}' (not compiled into this build?) \
+                 — falling back to s1",
+                unknown_id
+            );
+        }
+
         // Fold a warm deep link into `selected` before reconciling it.
         state.consume_deep_link();
 

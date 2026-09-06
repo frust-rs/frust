@@ -135,8 +135,6 @@ default = ["db"]
 # and, for a packaged APK, follow it with
 # `./android/gradlew -p android assembleRelease -x cargoNdkBuild`, which
 # packages the jniLibs that command just wrote instead of rebuilding them.
-# Note `cargo test` asserts the ten-entry registry, so the test suite runs
-# in the default (`db`-on) configuration only.
 db = ["dep:frust-database"]
 
 # Release-lean log ceiling — see the `log` dependency above for why this is a
