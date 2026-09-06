@@ -63,6 +63,13 @@ frust-gpu = { workspace = true, optional = true }
 # the `gpu` feature so a plugin recording an ExternalPass needs no direct
 # wgpu edge. Optional and off by default; workspace-pinned to keep the
 # version in sync with the rest of the stack.
+#
+# Backend-free like every other wgpu row outside `frust-gpu`: the per-OS
+# backends are added per target by `crates/frust-gpu/Cargo.toml`'s
+# `[target.'cfg(...)'.dependencies]` tables. This row needs none — the `gpu`
+# feature below turns on `dep:frust-gpu` alongside `dep:wgpu` (and
+# `frust-render` pulls `frust-gpu` in unconditionally regardless), so the
+# re-exported `wgpu` is always the one carrying the target's backend.
 wgpu = { workspace = true, optional = true }
 # Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
 # can shape its own glyph runs without naming `frust-text`. Already in the

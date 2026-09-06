@@ -1,4 +1,4 @@
-//! The scenario driver contract shared by all ten benchmark scenarios.
+//! The scenario driver contract shared by every benchmark scenario.
 //!
 //! Every scenario is a zero-sized unit struct implementing [`Scenario`],
 //! registered once in [`SCENARIOS`]. A scenario is selected at launch via a
@@ -14,6 +14,14 @@
 //! selected, switched, and marker-bracketed identically — [`Scenario::id`]
 //! is an opaque string to every mechanism below (deep link, env var, HUD
 //! button row), so nothing here special-cases the `d`-prefix.
+//!
+//! The `d*` namespace rides the crate's default-ON `db` cargo feature: it
+//! carries the `frust-database` dependency and its bundled SQLite, which
+//! only those two scenarios call. A `--no-default-features` build compiles
+//! the S1–S8 frame-class app alone (the app-size matrix arm — see the
+//! feature's own comment in `Cargo.toml`). Nothing below reads the registry
+//! length as a constant, so both shapes drive identically; [`SCENARIOS`] is
+//! simply eight entries instead of ten.
 //!
 //! # Marker contract
 //!
@@ -37,7 +45,9 @@
 
 use frust::{AnyView, Get, RwSignal, Set, any, deep_links, text};
 
+#[cfg(feature = "db")]
 pub mod d1_db_write;
+#[cfg(feature = "db")]
 pub mod d2_db_read;
 pub mod s1_animation;
 pub mod s2_list;
@@ -64,9 +74,9 @@ pub const SCENARIO_ENV: &str = "FRUST_BENCH_SCENARIO";
 /// [`SCENARIOS`] registry as a `&'static dyn Scenario`.
 pub trait Scenario: Sync {
     /// Stable id: the deep-link host (`frustbench://<id>`) and the default
-    /// scenario-marker name. One of `s1`..=`s8` (the frame-class table) or
-    /// `d1`..=`d2` (the DB op-latency class — `benchmarks/PROTOCOL.md` §9
-    /// DB scenarios).
+    /// scenario-marker name. One of `s1`..=`s8` (the frame-class table) or,
+    /// on a `db`-feature build, `d1`..=`d2` (the DB op-latency class —
+    /// `benchmarks/PROTOCOL.md` §9 DB scenarios).
     fn id(&self) -> &'static str;
 
     /// Human-readable title, shown in the HUD and each stub's placeholder.
@@ -91,6 +101,14 @@ pub trait Scenario: Sync {
 /// All ten scenarios (the eight `s*` frame-class scenarios plus the two
 /// `d*` DB op-latency scenarios), in id order. Index into this from
 /// [`BenchState::active`] / [`BenchState::selected`].
+///
+/// The `db`-off arm below drops the two `d*` entries; the `s1`..=`s8`
+/// prefix keeps its order and indices in both, so a deep link, an env var,
+/// or a recorded harness index for a frame-class scenario means the same
+/// thing either way. Keep the two literals in sync when adding an `s*`
+/// scenario — the `s*` prefix is deliberately duplicated rather than
+/// spliced, so that the registry stays one flat `static` per configuration.
+#[cfg(feature = "db")]
 pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s1_animation::S1,
     &s2_list::S2,
@@ -102,6 +120,20 @@ pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s8_prefs::S8,
     &d1_db_write::D1,
     &d2_db_read::D2,
+];
+
+/// The eight `s*` frame-class scenarios, in id order — the registry a
+/// `--no-default-features` (no `db`) build sees. See the `db`-on arm above.
+#[cfg(not(feature = "db"))]
+pub static SCENARIOS: [&dyn Scenario; 8] = [
+    &s1_animation::S1,
+    &s2_list::S2,
+    &s3_table::S3,
+    &s4_heavy::S4,
+    &s5_image::S5,
+    &s6_text::S6,
+    &s7_startup::S7,
+    &s8_prefs::S8,
 ];
 
 /// The single application state every scenario builds over.

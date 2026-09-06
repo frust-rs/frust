@@ -77,26 +77,31 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # rendering stack — pins are LAW (do not bump independently)
 #
-# Feature trim: `wgpu` is trimmed to the backends Frust's three shells can
-# actually reach: `wgsl` is the shader frontend `frust-engine`'s pipelines are
-# written in; `vulkan` + `metal` + `dx12` are the per-OS GPU backends, unioned
-# additively across every target this workspace builds for (Android: vulkan;
-# iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
-# non-backend runtime plumbing, always needed). Deliberately dropped: `gles`
-# (no shipping shell surfaces a GLES-only device; the engine tier's own
-# downlevel design covers the WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL`
-# tested against a desktop adapter, per `docs/RENDER_DEVELOPMENT.md`; the web
-# arm is cancelled, `engine-webgl2-unhosted`)
-# and `webgpu` (wasm target only, Frust ships no wasm shell). Confirmed via
-# `cargo tree -e features`: these two (and their naga frontends/backends) are
-# absent from every target's dependency graph.
+# Feature trim: this row carries only wgpu's target-independent base —
+# `wgsl` (the shader frontend `frust-engine`'s pipelines are written in) plus
+# `std`/`parking_lot` (wgpu's own non-backend runtime plumbing, always
+# needed). The per-OS GPU backends (`vulkan`/`metal`/`dx12`) are NOT here:
+# they are added per target by `crates/frust-gpu/Cargo.toml`'s
+# `[target.'cfg(...)'.dependencies]` tables — see that manifest for the
+# routing and the measured rationale. Adding a backend back to this row
+# re-unions it across every target and undoes that trim; don't.
+#
+# Deliberately dropped everywhere: `gles` (no shipping shell surfaces a
+# GLES-only device; the engine tier's own downlevel design covers the
+# WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL` tested against a desktop
+# adapter, per `docs/RENDER_DEVELOPMENT.md`; the web arm is cancelled,
+# `engine-webgl2-unhosted`) and `webgpu` (wasm target only, Frust ships no
+# wasm shell). Confirmed via `cargo tree -e features`: these two (and their
+# naga frontends/backends) are absent from every target's dependency graph.
+#
+# The pin itself (30.0.1) is LAW — docs/DEVELOPMENT.md's Version-Pin Policy,
+# row owned by docs/RENDER_DEVELOPMENT.md. Moving features between this row
+# and the per-target tables is not a bump and leaves `Cargo.lock` untouched
+# (the lock is the union over all targets and records no features).
 wgpu = { version = "30.0.1", default-features = false, features = [
     "std",
     "parking_lot",
     "wgsl",
-    "vulkan",
-    "metal",
-    "dx12",
 ] }
 winit = "0.30.13"
 parley = "0.11.0"

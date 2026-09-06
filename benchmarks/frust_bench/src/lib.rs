@@ -1,13 +1,24 @@
 //! frust_bench — the Frust side of the cross-framework benchmark
-//! suite. A single app hosting all eight scenarios (S1–S8)
-//! behind one [`scenarios::Scenario`] driver contract, selected via a deep link
+//! suite. A single app hosting every scenario behind one
+//! [`scenarios::Scenario`] driver contract, selected via a deep link
 //! (`frustbench://<id>`) or the `FRUST_BENCH_SCENARIO` env var and switchable at
 //! runtime from a HUD button row.
 //!
-//! The driver, the registry, and all eight scenarios live here: S1 (animation
-//! storm, ported from the since-removed `examples/bubblebench`; see
-//! `scenarios::s1_animation`'s module doc for the provenance) through S8
-//! (plugin-call overhead).
+//! The driver, the registry, and the eight frame-class scenarios live here:
+//! S1 (animation storm, ported from the since-removed `examples/bubblebench`;
+//! see `scenarios::s1_animation`'s module doc for the provenance) through S8
+//! (plugin-call overhead), plus the two `d*` DB op-latency scenarios
+//! (`benchmarks/PROTOCOL.md` §9).
+//!
+//! # Cargo features
+//!
+//! * `db` (**default**) — the `d1`/`d2` DB op-latency scenarios and their
+//!   `frust-database` dependency. On by default so every existing invocation
+//!   (`frust run`, `frust build`, `cargo test`, the harness) is unchanged;
+//!   `--no-default-features` builds the S1–S8 frame-class app alone, without
+//!   the bundled SQLite, which is the arm the app-size matrix measures. See
+//!   `Cargo.toml`'s feature comment for the exact build invocation.
+//! * `lean` — the release-only `log` ceiling the CLI passes for `--release`.
 //!
 //! Measure a run with `FRUST_TRACE=1 FRUST_TRACE_RAW=1` — the shell emits one
 //! parseable `frust-perf raw ...` line per frame plus the driver's
