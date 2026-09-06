@@ -4748,9 +4748,10 @@ keeps two engine-tier surfaces live at once — whichever lands first.
 
 **Observed**: overlapping the render thread's GPU bring-up with the UI thread's font-preinit join
 (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s iOS render-thread split) narrowed but did
-not close the gap: the iPhone SE's first frame lands 89-115 ms, against a 99 ms pre-overlap baseline
-and an 85 ms goal. `TextContext::new`'s font preinit is bimodal — roughly 52 ms on the fast path,
-90-107 ms on the slow one — and once GPU bring-up runs concurrently underneath it, the slow mode is
+not close the gap: the iPhone SE's first frame lands 64-176 ms (median 100) on the published 2026-09-06
+pass in `benchmarks/RESULTS.md`, against a 110 ms pre-overlap baseline and an 85 ms goal (an
+earlier 12-launch probe on the same build read 89-115 ms against a 99 ms baseline). `TextContext::new`'s font preinit is bimodal — 51-65 ms on the fast path,
+100-159 ms on the slow one, the first frame trailing the join by 13-23 ms — and once GPU bring-up runs concurrently underneath it, the slow mode is
 what sets the median first-frame cost. A render-thread-style QoS boost applied to the font-preinit
 thread was measured and did not close the gap either.
 

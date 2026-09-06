@@ -29,7 +29,7 @@ tables rather than one unioned `[workspace.dependencies]` row). Measured under t
 `lto = "fat"`/`codegen-units = 1` release profile, that routing changes ~0 bytes of output: the
 unused naga shader writers the old unioned row dragged in were already dead-stripped by fat LTO.
 The real, measured size lever lives in `frust_bench` instead: its `db` feature (default-on)
-shrinks arm64 release `libfrustbench.so` from 11.35 MB to 9.41 MB under `--no-default-features`
+shrinks arm64 release `libfrustbench.so` from 11,352,488 to 9,405,976 B (-17.1 %) under `--no-default-features --features lean`
 (build recipe in `benchmarks/frust_bench/Cargo.toml`'s `db` feature comment; the resulting APK is
 a debug-signed measurement artifact only — [DEVELOPMENT.md](DEVELOPMENT.md)'s Release Builds
 section).

@@ -18,6 +18,13 @@ import argparse
 import json
 from pathlib import Path
 
+
+def _fps(d):
+    """Achieved fps as text; 'n/a' when the series records none (S3's overall
+    series is event-driven on one side and has no fps entry in the JSON)."""
+    v = d.get('fps')
+    return f"{v:.1f}" if isinstance(v, (int, float)) else 'n/a'
+
 FRAME = ("s1", "s2", "s4", "s5", "s6")
 
 
@@ -66,7 +73,7 @@ def main(argv=None) -> int:
         out.append(
             f"| {label} | {ms(o['p50_us'])}→{ms(n['p50_us'])} | {d50} | {ms(o['p95_us'])}→{ms(n['p95_us'])} | {d95} | "
             f"{ms(o['p99_us'])}→{ms(n['p99_us'])} | {ms(o['worst_us'])}→{ms(n['worst_us'])} | "
-            f"{ro:.2f}%→{rn:.2f}% | {o.get('fps', 0):.1f}→{n.get('fps', 0):.1f} |" if ro is not None and rn is not None else
+            f"{ro:.2f}%→{rn:.2f}% | {_fps(o)}→{_fps(n)} |" if ro is not None and rn is not None else
             f"| {label} | {ms(o['p50_us'])}→{ms(n['p50_us'])} | {d50} | {ms(o['p95_us'])}→{ms(n['p95_us'])} | {d95} | {ms(o['p99_us'])}→{ms(n['p99_us'])} | {ms(o['worst_us'])}→{ms(n['worst_us'])} | n/a | n/a |"
         )
         for name, dv in (("p50", d50), ("p95", d95)):
