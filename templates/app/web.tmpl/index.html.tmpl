@@ -88,9 +88,35 @@
       const moduleUrl =
         new URLSearchParams(location.search).get("module") || "./pkg/{{ web_module_name }}.js";
 
-      import(moduleUrl)
-        .then(({ default: init }) => mount(init, { host: "#frust-host" }))
-        .catch((err) => reportFailure(err));
+      // Validate module parameter if explicitly provided to prevent
+      // same-origin policy bypass via absolute URLs or cross-origin imports.
+      const moduleParam = new URLSearchParams(location.search).get("module");
+      let shouldImport = true;
+      if (moduleParam) {
+        const u = new URL(moduleParam, location.href);
+        const pkgPathPrefix = new URL("./pkg/", location.href).pathname;
+
+        // Accept only same-origin relative URLs under ./pkg/
+        if (
+          u.origin !== location.origin ||
+          /^[a-z][a-z0-9+.-]*:/.test(moduleParam) ||
+          moduleParam.startsWith("//") ||
+          moduleParam.includes("..") ||
+          !u.pathname.startsWith(pkgPathPrefix)
+        ) {
+          reportFailure(
+            "Invalid module URL: must be same-origin, relative, under ./pkg/, " +
+              "with no schemes or // prefix"
+          );
+          shouldImport = false;
+        }
+      }
+
+      if (shouldImport) {
+        import(moduleUrl)
+          .then(({ default: init }) => mount(init, { host: "#frust-host" }))
+          .catch((err) => reportFailure(err));
+      }
     </script>
   </body>
 </html>

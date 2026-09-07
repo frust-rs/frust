@@ -54,12 +54,11 @@ installed.
 
 ## Canvas host / resize / DPR contract
 
-This is the fix for the open review finding filed against w1-06
-(`act_000001a07b899bb2zgSbPaYT`): **winit pins the canvas's inline
-`style.width`/`style.height`, in pixels, at creation** (`DEFAULT_CANVAS_SIZE`,
-800x600 — see `crates/frust-shell-web/src/app_handler.rs`'s `resumed`), and
-an inline declaration always outranks an ordinary stylesheet rule in the CSS
-cascade, `!important` or not, regardless of selector. A page that only adds a
+**winit pins the canvas's inline `style.width`/`style.height`, in pixels, at
+creation** (`DEFAULT_CANVAS_SIZE`, 800x600 — see
+`crates/frust-shell-web/src/app_handler.rs`'s `resumed`), and an inline
+declaration always outranks an ordinary stylesheet rule in the CSS cascade,
+`!important` or not, regardless of selector. A page that only adds a
 `canvas { width: ...; }` rule therefore never sees a live resize reach the
 shell — `examples/web-gallery/index.html`'s own "Milestone 6" section records
 this exact finding, empirically, against a fixed `100vw`/`100vh` target; this
@@ -144,10 +143,13 @@ evidence is fine" allowance:
 **iframe height postMessage is a real, complete implementation** (no missing
 hook): `document.documentElement.scrollHeight` posted as
 `{ type: "frust:height", height }` to `window.parent` with `"*"` as the
-target origin (a preview host is not assumed same-origin), fired once
-`init()` settles and again on every `window` `resize` — which Chrome fires
-inside an iframe's own window when the embedding `<iframe>` element's box
-size changes from the parent page, confirmed during verification below.
+target origin. The wildcard origin is used because the payload contains only
+a non-sensitive height value and the parent page is not assumed to be
+same-origin (a preview host may be served from a different origin). This is
+fired once `init()` settles and again on every `window` `resize` — which
+Chrome fires inside an iframe's own window when the embedding `<iframe>`
+element's box size changes from the parent page, confirmed during verification
+below.
 
 ## Build
 
@@ -170,6 +172,27 @@ Serve with anything that answers a `.wasm` request `application/wasm`
 `examples/web-spike/serve.sh`). `pkg/` and `target/` are build output; do not
 commit them.
 
+## Module parameter validation
+
+The `?module=` query parameter must point to a same-origin, relative module
+under the `./pkg/` directory. `index.html` validates the parameter before
+importing to prevent cross-origin script injection:
+
+- **Same-origin only:** The parameter's origin must match `location.origin`.
+  Cross-origin URLs (e.g., `https://example.com/x.js`) and data URLs are
+  rejected.
+- **No schemes:** The raw parameter must not contain a URL scheme
+  (e.g., `https://`, `file://`, `data:`).
+- **No network paths:** The parameter must not start with `//`.
+- **No directory traversal:** The parameter must not contain `..` segments.
+- **Under `./pkg/`:** The resolved pathname must be within the `pkg/`
+  subdirectory of the page's directory.
+
+If validation fails, `index.html` displays a failure message in the app's
+load-failure area (`#frust-log`) and does not attempt to import an invalid
+module URL. This applies whether a default module is configured or not — a bad
+override is always an error, never silently ignored.
+
 ## Verification performed (this task)
 
 Rig: headed Chrome 151.0.7922.108 inside the `frust-linux-native` container
@@ -181,8 +204,8 @@ own `pkg/` output, built unmodified from this task's base commit) via
 `python3 -m http.server 8932 --bind 127.0.0.1`, reachable from the container
 at `http://localhost:8932/`.
 
-- **The w1-06 app runs unchanged through this embedder.** `examples/
-  web-gallery`'s own `Cargo.toml`/`src/main.rs`/`index.html` were not
+- **The examples/web-gallery app runs unchanged through this embedder.**
+  `examples/web-gallery`'s own `Cargo.toml`/`src/main.rs`/`index.html` were not
   touched; only its `wasm-bindgen` output was staged behind this embedder's
   `index.html?module=./pkg/web_gallery.js`. The index page (case list,
   live-filtered search, ticking signal-driven counter) rendered and
