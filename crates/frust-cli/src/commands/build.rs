@@ -1,7 +1,8 @@
-//! `frust build apk|appbundle|ios|ipa`: validates the
+//! `frust build apk|appbundle|ios|ipa|macos|windows|linux|web`: validates the
 //! full `BuildTarget` flag surface into a [`BuildInfo`] + platform artifact
 //! enum, resolves the project root (mirrors `run`'s `frust.toml`
-//! detection), and dispatches to the `android_build`/`ios_build` pipelines.
+//! detection), and dispatches to the `android_build`/`ios_build`/
+//! `desktop_build`/`web_build` pipelines.
 
 use std::path::Path;
 
@@ -18,6 +19,7 @@ use frust_drive::desktop_build::{
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::ios_run;
 use frust_drive::process::ProcessRunner;
+use frust_drive::web_build::{self, WebBuildReport};
 
 /// `--target-platform` value -> Gradle ABI name.
 const TARGET_PLATFORMS: &[(&str, &str)] = &[
@@ -161,6 +163,12 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                 DesktopBundleTarget::Linux,
                 installer,
             )
+        }
+        BuildTarget::Web { build } => {
+            reject_unplumbed_features("build web", &build)?;
+            let info = BuildInfo::from_args(build.build.into_drive(), BuildMode::Release)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            build_web(runner, project_dir, &info)
         }
     }
 }
@@ -350,6 +358,27 @@ fn build_desktop(
     }
 
     Ok(0)
+}
+
+/// Drives [`web_build::build`] and renders the resulting artifact
+/// directory. No host lock (unlike `build_desktop`) — every desktop OS can
+/// cross-compile to `wasm32-unknown-unknown`. Print-free drive core (see
+/// `build_android`/`build_ios`/`build_desktop` above); the CLI `println!`s
+/// each streamed line to keep its stdout verbatim.
+fn build_web(runner: &dyn ProcessRunner, project_dir: &Path, info: &BuildInfo) -> Result<u8> {
+    let report = web_build::build(runner, project_dir, info, &mut |line| println!("{line}"))?;
+    print_web_report(&report);
+    Ok(0)
+}
+
+fn print_web_report(report: &WebBuildReport) {
+    println!("Bundle: {}", report.root.display());
+    for artifact in &report.artifacts {
+        println!("Built: {}", artifact.display());
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
 }
 
 fn print_artifacts(paths: &[std::path::PathBuf]) {
@@ -945,6 +974,44 @@ mod tests {
         let err = run_in(&runner, &dir, target).unwrap_err();
         assert!(
             err.to_string().contains("cargo install cargo-packager"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `web_build::build` is real, not a stub — the fixture project carries a
+    /// `frust.toml` (from `unique_project_dir`) but no `Cargo.toml`, so
+    /// dispatch reaches (and fails at) the pipeline's own package-name read,
+    /// proving `run_in` dispatches into it rather than stopping earlier.
+    #[test]
+    fn build_web_reaches_the_web_build_pipeline() {
+        let dir = unique_project_dir("web-stub");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Web {
+            build: BuildFlags::default(),
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(err.to_string().contains("Cargo.toml"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--features` is refused outright before anything is read from disk —
+    /// `web_build::build`'s entry point carries no parameter for it, the same
+    /// reason `build macos|windows|linux` refuse it
+    /// ([`reject_unplumbed_features`]'s own doc comment).
+    #[test]
+    fn build_web_rejects_features_passthrough() {
+        let dir = unique_project_dir("web-features-rejected");
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Web {
+            build: BuildFlags {
+                features: vec!["devtools".to_string()],
+                ..Default::default()
+            },
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(
+            err.to_string().contains("does not support --features"),
             "{err}"
         );
         let _ = fs::remove_dir_all(&dir);

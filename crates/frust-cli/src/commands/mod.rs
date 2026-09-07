@@ -65,9 +65,18 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             clean::run_in(&*runner, &cwd)
         }
         Command::Tui => tui::run(),
-        Command::Run { build, watch } => {
-            run::run_in(&*runner, build, cli.device_id.clone(), watch, verbose)
-        }
+        Command::Run {
+            build,
+            watch,
+            no_open,
+        } => run::run_in(
+            &*runner,
+            build,
+            cli.device_id.clone(),
+            watch,
+            verbose,
+            no_open,
+        ),
         Command::Build { target } => {
             let cwd = std::env::current_dir().context("reading current directory")?;
             build::run_in(&*runner, &cwd, target)
