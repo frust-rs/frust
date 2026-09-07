@@ -752,8 +752,13 @@ impl Widget for InputWidget {
             let row_y = origin.y + self.field.max_y() + ROW_GAP;
             let rise = MESSAGE_RISE * (1.0 - presence);
             let size = message.size();
+            // The layer's origin matches the message's own paint origin
+            // (`+ LABEL_PADDING_X`, same as the label row) so its right edge
+            // lands at the text's right edge instead of `LABEL_PADDING_X`
+            // short of it — the old mismatch clipped the last few px of
+            // every message (e.g. a trailing period).
             scene.push_layer(
-                Point::new(origin.x, row_y - MESSAGE_RISE),
+                Point::new(origin.x + LABEL_PADDING_X, row_y - MESSAGE_RISE),
                 Size::new(size.width.max(1.0), size.height + MESSAGE_RISE),
                 presence as f32,
             );
@@ -817,6 +822,9 @@ mod tests {
         strokes: Vec<(Rect, f64, Color)>,
         glyphs: Vec<Point>,
         layers: Vec<f32>,
+        /// `(origin, size)` of each pushed layer, in paint order — matches
+        /// `layers` index-for-index.
+        layer_rects: Vec<(Point, Size)>,
         transforms: Vec<Affine>,
     }
 
@@ -838,8 +846,9 @@ mod tests {
             let t = run.transform.translation();
             self.glyphs.push(Point::new(t.x, t.y));
         }
-        fn push_layer(&mut self, _o: Point, _s: Size, alpha: f32) {
+        fn push_layer(&mut self, o: Point, s: Size, alpha: f32) {
             self.layers.push(alpha);
+            self.layer_rects.push((o, s));
         }
         fn push_transform(&mut self, transform: Affine) {
             self.transforms.push(transform);
@@ -1257,6 +1266,32 @@ mod tests {
 
         let gone = h.paint_at(3_000.0);
         assert!(gone.layers.is_empty(), "nothing left to composite");
+    }
+
+    #[test]
+    fn the_message_layer_reaches_the_message_runs_right_edge() {
+        // Regression for the clip where the layer stopped `LABEL_PADDING_X`
+        // short of the text it was compositing, chopping the last few px off
+        // every error/success message (e.g. a trailing period).
+        let view: InputView<String> =
+            input("", |_s: &mut String, _t| {}).error("That handle is taken.");
+        let mut w = build(&view);
+        let size = layout(&mut w, 200.0);
+        let message_width = w.message.as_ref().expect("an error message").size().width;
+        assert!(message_width > 0.0, "the message shaped to something");
+
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, size, FrameTime::ZERO);
+        w.paint(&mut ctx, &mut rec);
+
+        let (layer_origin, layer_size) = *rec.layer_rects.first().expect("the message layer");
+        let text_origin = *rec.glyphs.last().expect("the message glyph run");
+        let text_right_edge = text_origin.x + message_width;
+        let layer_right_edge = layer_origin.x + layer_size.width;
+        assert!(
+            layer_right_edge >= text_right_edge - 1e-6,
+            "layer right edge {layer_right_edge} clips the message's right edge {text_right_edge}"
+        );
     }
 
     #[test]
