@@ -106,3 +106,9 @@ js-sys = { workspace = true }
 # to exactly that: `Window` alone, no `Document`, no `HtmlCanvasElement`, no
 # `console` — each of those belongs to work that actually touches the DOM.
 web-sys = { workspace = true, features = ["Window"] }
+# stderr is a silent no-op in a browser: `console_log` routes the `log` facade
+# to `console.*` and `console_error_panic_hook` routes panics to
+# `console.error` (the facade's `web_app!` bootstrap installs both; the shell's
+# own `logging` module owns the sink's shape and level). Workspace rows.
+console_log = { workspace = true }
+console_error_panic_hook = { workspace = true }

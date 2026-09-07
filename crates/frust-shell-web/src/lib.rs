@@ -34,6 +34,8 @@
 //! [`app_handler::sync_cursor`].
 
 pub mod app_handler;
+pub mod input;
+pub mod logging;
 pub mod pacing;
 pub mod render;
 
