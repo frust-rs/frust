@@ -31,6 +31,9 @@ WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is
   (`frust` auto-detects `DEVELOPMENT_TEAM`, or set `FRUST_IOS_TEAM`/`[ios] team`), and a physical
   iPhone run also needs iOS 17+, unlocked/paired/trusted with Developer Mode on (`frust doctor`
   checks Rust targets on macOS hosts only).
+- **Web** (only needed for browser output): `rustup target add wasm32-unknown-unknown` (no
+  RUSTFLAGS/cfg needed on the `wgpu` 30.0.1 pin). Packaging needs host `wasm-bindgen-cli` 0.2.128
+  (must equal the `wasm-bindgen` pin) and `wasm-opt` — see `examples/web-gallery/README.md` § Build.
 - **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its public
   repo (*Version-Pin Policy*; row in [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)), consumed by
   `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold
@@ -57,22 +60,20 @@ CPUs to trip the iOS launch watchdog. They stay hand-synced via that tripwire (`
 test -p frust-cli --test profile_sync`); a `[profile.dev.package."*"]` wildcard
 (`opt-level = 1`) widens every other dependency's debug optimization the same way.
 
-**Release-profile hardening.** `[profile.release]` (the same five hand-synced
-manifests) sets `lto =
-"fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
-`opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a
-5% bar against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh`
-below). **No design-system cargo features.** `frust` carries `default = []` (only the
-tooling opt-ins `perf-trace`/`devtools`) — there is no catalog feature to enable or
-disable. The three built-in design systems — `frust-glyph`/`frust-material`/
-`frust-cupertino` (`plugins/{glyph,material,cupertino}`) — are ordinary sibling plugin
-crates an app depends on beside `frust`, each installed via its own `install()` call
-(see *Run*'s design-system-install gate below); each also resolves `kurbo`/`peniko` via
-`{ workspace = true }`, riding the same single pin as every other crate rather than
-declaring one of its own. **Widget-authoring test fixtures.** `frust-widgets`'
-non-default `test-support` feature compiles in the crate's GPU-free container-widget
-fixtures (`frust_widgets::test_support`), so a design system built outside this crate
-can test its own containers the same way; off by default in a normal app build.
+**Release-profile hardening.** `[profile.release]` (the same five hand-synced manifests) sets
+`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
+`opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a 5% bar
+against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh` below). **No
+design-system cargo features.** `frust` carries `default = []` (only the tooling opt-ins
+`perf-trace`/`devtools`) — there is no catalog feature to enable or disable. The three built-in
+design systems — `frust-glyph`/`frust-material`/`frust-cupertino`
+(`plugins/{glyph,material,cupertino}`) — are ordinary sibling plugin crates an app depends on
+beside `frust`, each installed via its own `install()` call (see *Run*'s design-system-install
+gate below); each also resolves `kurbo`/`peniko` via `{ workspace = true }`, riding the same
+single pin as every other crate rather than declaring one of its own. **Widget-authoring test
+fixtures.** `frust-widgets`' non-default `test-support` feature compiles in the crate's GPU-free
+container-widget fixtures (`frust_widgets::test_support`), so a design system built outside this
+crate can test its own containers the same way; off by default in a normal app build.
 
 ## Run
 
@@ -89,12 +90,11 @@ wake (e.g. a timer-driven completion) renders content with zero mouse movement, 
 on an input-triggered redraw. `examples/huddle`'s own verify gate (`cargo test` plus
 clippy, from its own directory) is part of *Test* below.
 
-**Design-system install gate.** `examples/huddle`'s appearance settings expose a
-four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
-(desktop, Android, iOS) plus a reduced-motion pass round out the manual gate above — no
-automated check exists for either. `examples/huddle` seeds its own Glyph first-launch
-default via `frust_glyph::install()` (`app!`'s setup block); a shell with no design
-system installed falls back to `Theme::neutral()`.
+**Design-system install gate.** `examples/huddle`'s appearance settings expose a four-way
+`System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check (desktop, Android, iOS)
+plus a reduced-motion pass round out the manual gate above — no automated check exists for
+either. `examples/huddle` seeds its own Glyph first-launch default via `frust_glyph::install()`
+(`app!`'s setup block); a shell with no design system installed falls back to `Theme::neutral()`.
 
 **shadcn gallery.** `cargo run -p shadcn-demo` (a root-workspace member, unlike `huddle` — no
 `cd`/standalone gate needed) opens the `frust-shadcn` catalog's desktop gallery: the manual visual
@@ -119,16 +119,15 @@ The template `frust create` scaffolds is its own demo (a notes app,
 repo; check scaffold changes via *Template development*
 ([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) or the scaffold end-to-end test in *Test*.
 
-In a generated project, `frust run [-d <device>] [--release|--profile] [--flavor
-<name>]` builds and launches on a connected Android device/emulator (preflight →
-variant-aware `gradlew assemble<Flavor><Mode>` via cargo-ndk → `adb install`/`launch` →
-streamed `logcat`; release needs the signing keystore, see Prerequisites), a booted
-iOS Simulator (`xcodebuild build` → `simctl install`/`launch --console-pty`), or a
-physical iPhone (iOS 17+: a signed build → `xcrun devicectl device install
-app`/`process launch --console --terminate-existing` — failures hint at
-unlocking/pairing/Developer Mode). `run` defaults to debug (`build` defaults to
-release); with no device selected it falls back to a streamed `cargo run` (desktop
-preview, or `--watch` below) — first Android/iOS builds take a few minutes.
+In a generated project, `frust run [-d <device>] [--release|--profile] [--flavor <name>]` builds
+and launches on a connected Android device/emulator (preflight → variant-aware `gradlew
+assemble<Flavor><Mode>` via cargo-ndk → `adb install`/`launch` → streamed `logcat`; release needs
+the signing keystore, see Prerequisites), a booted iOS Simulator (`xcodebuild build` → `simctl
+install`/`launch --console-pty`), or a physical iPhone (iOS 17+: a signed build → `xcrun
+devicectl device install app`/`process launch --console --terminate-existing` — failures hint at
+unlocking/pairing/Developer Mode). `run` defaults to debug (`build` defaults to release); with no
+device selected it falls back to a streamed `cargo run` (desktop preview, or `--watch` below) —
+first Android/iOS builds take a few minutes.
 
 **`--features <spec>` passthrough**
 (`run`, `build apk|appbundle|ios|ipa`; repeatable/comma-splittable; appended after the
@@ -249,9 +248,10 @@ Additionally run:
 `examples/huddle`, `examples/playground`, `examples/design-system-sample`,
 `examples/material3-demo`, and `plugins/clean-signals-frust` each gate from their own directory
 rather than `-p` from the repo root because all five are standalone workspaces excluded from the
-root one (*Version-Pin Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog`
-gate under, per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin `clean-signals`
-to its public repo, so no local sibling checkout is required to run this gate.
+root one (*Version-Pin Policy*) — the same shape `examples/shadertoy`, `examples/glyph-catalog`,
+`examples/web-gallery`, and `examples/web-spike` gate under, per their own READMEs (the latter two
+against the wasm32 target, see *Prerequisites*). `huddle` and `clean-signals-frust` git+rev-pin
+`clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
 `design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
 (from its own directory) to print **no** `frust feature "..."` line — no longer a catalog-off
 proof (`frust` carries no catalog feature anywhere for any dependent to print), but the
@@ -335,16 +335,20 @@ cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features de
 # Same --all-targets rationale as Android above:
 cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p frust-iap
 
-# Windows compile gate (cross-check; host-side if mingw-w64 + the rustup
-# target are installed, else the containerized recipe below): the shell+
-# facade graph must compile, AND the other two per-OS shells must compile
-# inert off-target (the frust-shell-android precedent, extended to desktop).
+# wasm compile gate (no browser needed): the facade's whole default graph + web_app! must
+# compile for wasm32-unknown-unknown, and so must the web shell crate + gallery registry.
+cargo check --target wasm32-unknown-unknown -p frust --tests
+cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery
+
+# Windows compile gate (cross-check; host-side if mingw-w64 + the rustup target are
+# installed, else the containerized recipe below): the shell+facade graph must compile,
+# AND the other two per-OS shells must compile inert off-target (the frust-shell-android
+# precedent, extended to desktop).
 cargo check --target x86_64-pc-windows-gnu \
   -p frust -p frust-shell-windows -p frust-shell-macos -p frust-shell-linux
 
-# macOS compile gate (cross-check; proven feasible from a non-macOS host —
-# objc2/muda are pure Rust, no Apple SDK needed for a type-check). Same
-# inert-off-target coverage of the other two shells as the Windows gate.
+# macOS compile gate (cross-check; proven from a non-macOS host — objc2/muda are pure
+# Rust, no Apple SDK needed). Same inert-off-target coverage as the Windows gate.
 cargo check --target aarch64-apple-darwin \
   -p frust -p frust-shell-macos -p frust-shell-windows -p frust-shell-linux
 
@@ -354,12 +358,11 @@ cargo check --target aarch64-apple-darwin \
 # by construction (`yeslogic-fontconfig-sys` needs a pkg-config sysroot).
 ```
 
-**Containerized recipe** for the two cross-checks above on a host without mingw-w64
-(e.g. devbox): `docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c
-'apt-get update && apt-get install -y gcc-mingw-w64-x86-64 && rustup target add
-x86_64-pc-windows-gnu aarch64-apple-darwin && <the two cargo check commands above>'`.
-Proven both ways: host-side (mingw-w64 + `rustup target add x86_64-pc-windows-gnu`)
-and via this container recipe.
+**Containerized recipe** for the two cross-checks above on a host without mingw-w64 (e.g.
+devbox): `docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c 'apt-get update &&
+apt-get install -y gcc-mingw-w64-x86-64 && rustup target add x86_64-pc-windows-gnu
+aarch64-apple-darwin && <the two cargo check commands above>'`. Proven both ways: host-side
+(mingw-w64 + `rustup target add x86_64-pc-windows-gnu`) and via this container recipe.
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification (TalkBack/VoiceOver)
@@ -379,12 +382,11 @@ above); compiling Swift needs an Xcode build (macOS only).
 ### Per-unit device gates
 
 The **deep-link** and **safe-area / keyboard / back** manual tests
-([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), the **shared-preferences**,
-**secure-storage**, **camera**, and **IAP** manual tests
-([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)), and **template development**
-([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) live in their unit spokes. Every one is a
-person-driven device/emulator check with no automated counterpart — none of them ride the
-gate chain above.
+([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), the **shared-preferences**, **secure-storage**,
+**camera**, and **IAP** manual tests ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)), and
+**template development** ([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) live in their unit spokes.
+Every one is a person-driven device/emulator check with no automated counterpart — none of them
+ride the gate chain above.
 
 ## Benchmarks
 
@@ -400,13 +402,12 @@ IME-capability probes live in `examples/playground` instead.
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
 ```
 
-`benchmarks/PROTOCOL.md` is the published methodology (device matrix, run counts,
-statistics, fairness gates, raw-line formats); `benchmarks/RESULTS.md` is the filled
-record of actual device runs (never placeholder/projected numbers), with every
-methodology deviation labeled per run. **macOS `mktemp` caveat.** `harness/run.sh`'s
-`mktemp` only expands correctly under GNU mktemp — BSD/macOS returns the template
-unexpanded, silently colliding runs; alias `mktemp` to `gmktemp` (`brew install
-coreutils`) until fixed.
+`benchmarks/PROTOCOL.md` is the published methodology (device matrix, run counts, statistics,
+fairness gates, raw-line formats); `benchmarks/RESULTS.md` is the filled record of actual device
+runs (never placeholder/projected numbers), with every methodology deviation labeled per run.
+**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` only expands correctly under GNU mktemp —
+BSD/macOS returns the template unexpanded, silently colliding runs; alias `mktemp` to `gmktemp`
+(`brew install coreutils`) until fixed.
 
 ## Instrumentation
 
@@ -431,11 +432,10 @@ Android scroll-sync tail. `frust-camera`'s backends separately `log::debug!` the
 platform's own expected frame-rate range at session configure (`FRUST_LOG=debug`),
 so a stream's fps reading can be compared against it.
 
-`scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds the arm64-v8a
-release `.so` via `cargo ndk`, reporting unstripped/stripped size, an APK/AAB per-ABI
-`.so`+dex breakdown when Gradle output already exists, and a desktop `cargo bloat
---release -n 20` breakdown when installed — every missing-tool/artifact path degrades to
-a printed note.
+`scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds the arm64-v8a release
+`.so` via `cargo ndk`, reporting unstripped/stripped size, an APK/AAB per-ABI `.so`+dex breakdown
+when Gradle output already exists, and a desktop `cargo bloat --release -n 20` breakdown when
+installed — every missing-tool/artifact path degrades to a printed note.
 
 ## Version-Pin Policy
 
@@ -449,7 +449,7 @@ owns them:
 | `wgpu`, `image`, `vello_common`/`glifo` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
-| `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
+| `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above); web shell tier: `wasm-bindgen` (=0.2.128 exact — must equal the host `wasm-bindgen-cli`), `wasm-bindgen-futures`, `js-sys`/`web-sys`, `web-time`, `console_log`, `console_error_panic_hook` | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 | The Rust toolchain itself (`rust-toolchain.toml`: stable 1.98.1 with `rustfmt` + `clippy`) | this section, rule below |
