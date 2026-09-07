@@ -44,3 +44,65 @@ kurbo = { workspace = true }
 # `log` facade rather than failing silently, so a browser console (once a
 # `log` sink is installed) shows which host signal is unsupported.
 log = { workspace = true }
+# The frame path's payload and its consumer: the painted display list this
+# shell builds each frame (`Scene`/`SceneBuilder`) and the GPU backend that
+# encodes and presents it (`RenderContext`/`SurfaceRenderer` plus the
+# `EncodeOutcome`/`AcquireOutcome`/`FrameOutcome` vocabulary the loop branches
+# on). `frust-render` is buildable for `wasm32-unknown-unknown` through
+# `frust-gpu`'s own target-gated `wgpu` row (`webgpu` + `webgl`); nothing is
+# selected or overridden here — `frust-engine` is the only renderer this tier
+# contains.
+frust-scene = { workspace = true }
+frust-render = { workspace = true }
+# The shell-owned `TextContext` the layout pass shapes through, handed to
+# `RenderRoot::layout_with_text` type-erased.
+frust-text = { workspace = true }
+# `Color`: the live theme's surface colour, which rides with each frame as the
+# clear colour it was painted for.
+peniko = { workspace = true }
+# Every instant in this crate. `std::time::Instant::now()` PANICS on
+# `wasm32-unknown-unknown` (no clock syscall on that target), and `web-time` is
+# the drop-in winit 0.30 itself already uses internally — so on wasm this is
+# `performance.now()` and on every other target it is a plain re-export of
+# `std::time`, which is what lets the pacing arithmetic be unit-tested on the
+# build host. Using anything else here would also mistype
+# `ControlFlow::WaitUntil`, which winit declares over `web_time::Instant` on
+# this target.
+web-time = { workspace = true }
+
+# Browser-only rows: reached exclusively by the `target_arch = "wasm32"` frame
+# loop in `src/app_handler.rs` and the surface-bring-up retry in
+# `src/render.rs`, so a native build of this crate resolves none of them and
+# behaves identically with or without them.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Not imported by a single `use` in this crate, and not removable either: it is
+# the row that pins the *whole graph's* `wasm-bindgen` identity. The crate and
+# the `wasm-bindgen-cli` that post-processes the build must carry the identical
+# schema version — a stricter contract than semver, failing at glue-generation
+# time rather than at `cargo check` — and this host's CLI is 0.2.128 while the
+# version `winit`/`web-sys` resolve on their own is 0.2.127, which the CLI
+# refuses. The workspace row is an exact `=0.2.128` for exactly that reason,
+# and an exact pin only takes effect where something depends on it: this crate
+# is the browser tier's only entry point, so it is where the pin is anchored.
+# The three rows below then move to their lockstep partners (`js-sys`/`web-sys`
+# 0.3.105, `wasm-bindgen-futures` 0.4.78 — each declares an exact
+# `wasm-bindgen` requirement of its own, so this is forced, not chosen), which
+# the workspace's caret rows already permit.
+wasm-bindgen = { workspace = true }
+# `spawn_local`: `SurfaceRenderer::on_surface_created` is `async` and a browser
+# has no blocking executor to drive it with (the desktop shell's
+# `pollster::block_on` is not an option on a thread that must not block), so
+# surface bring-up runs on the browser's own microtask queue. Also supplies the
+# `JsFuture` half of the bring-up retry's wait.
+wasm-bindgen-futures = { workspace = true }
+# One type, one reason: `js_sys::Promise`, the object a `setTimeout` callback
+# resolves so the bring-up retry's wait is awaitable. There is no
+# `std::thread::sleep` on this target and nothing else in the graph carries a
+# timer future.
+js-sys = { workspace = true }
+# `window.setTimeout(...)` — the other half of that same wait, and the only web
+# API this crate calls directly today (winit owns the canvas, the event
+# handlers and the animation-frame registration). The feature list is trimmed
+# to exactly that: `Window` alone, no `Document`, no `HtmlCanvasElement`, no
+# `console` — each of those belongs to work that actually touches the DOM.
+web-sys = { workspace = true, features = ["Window"] }

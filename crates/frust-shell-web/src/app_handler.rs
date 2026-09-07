@@ -762,6 +762,660 @@ pub fn pump_devtools() {
     );
 }
 
+// --- the browser frame loop ----------------------------------------------
+
+/// The browser's frame loop: window creation, the asynchronous surface
+/// bring-up, the reactive wake path, and the `rebuild → layout → paint →
+/// encode → present` turn, all of it `wasm32`-only.
+///
+/// Everything above this point in the file is winit-generic translation that
+/// compiles, runs and is unit-tested on the build host. Everything in here
+/// owns a browser resource — a canvas, `requestAnimationFrame`, the browser's
+/// task scheduler — and there is no non-browser host of this crate for it to
+/// serve, so it is gated rather than stubbed. The decisions it makes are not
+/// gated: they live in [`crate::pacing`] and [`crate::render`] as pure
+/// functions with host-side tests, and this module only applies them.
+#[cfg(target_arch = "wasm32")]
+mod browser_loop {
+    use std::any::Any;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use frust_core::view::View;
+    use frust_core::{FrameTime, RenderRoot};
+    use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
+    use frust_scene::{Scene, SceneBuilder};
+    use frust_shell_common::font_registry::FontRegistryWatcher;
+    use frust_shell_common::{
+        ThemeOverrideWatcher, WindowMetricsPublisher, anim_pacing_kill_switch_engaged,
+        default_theme,
+    };
+    use frust_text::TextContext;
+    use frust_theme::Theme;
+    use kurbo::{Affine, Size};
+    use web_time::Instant;
+    use winit::application::ApplicationHandler;
+    use winit::dpi::PhysicalSize;
+    use winit::error::EventLoopError;
+    use winit::event::WindowEvent;
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+    use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+    use winit::window::{Window, WindowId};
+
+    use crate::pacing::{
+        ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, next_paced_wake, overshoot, paced_wake_action,
+    };
+    use crate::render::{FrameFollowUp, WebFrameExecutor};
+
+    /// The canvas this shell asks winit for when nothing else sized it, in
+    /// physical pixels.
+    ///
+    /// A placeholder, not a policy: winit creates its own canvas here and
+    /// appends it to the page body, and an un-sized `<canvas>` element falls
+    /// back to HTML's own 300x150 default, which is too small to see an app
+    /// in. Adopting a host page's canvas at its real device-pixel ratio is
+    /// the canvas-binding work that replaces this.
+    const DEFAULT_CANVAS_SIZE: PhysicalSize<u32> = PhysicalSize::new(800, 600);
+
+    /// The one thing a browser event loop is ever woken *out of band* for: a
+    /// tracked signal was written, so the view must be rebuilt.
+    ///
+    /// A single variant where the desktop core has five. There is no render
+    /// thread to route a surface re-creation back from, no `accesskit` adapter
+    /// to service, and no devtools transport, so the four other desktop
+    /// user-events have no counterpart here. It stays an `enum` rather than
+    /// `()` so the loop's wake vocabulary is nameable and extending it later
+    /// is not a breaking change to the event type.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ShellUserEvent {
+        /// A tracked signal was written; rebuild and repaint.
+        SignalsDirty,
+    }
+
+    thread_local! {
+        /// The live event loop's proxy, reachable from a waker closure that
+        /// captures nothing.
+        ///
+        /// `frust_reactive::FrameWaker` is `Arc<dyn Fn() + Send + Sync>`, and
+        /// winit's *web* `EventLoopProxy` is neither `Send` nor `Sync` (it
+        /// holds an `Rc`-backed runner handle and an `mpsc::Sender`), so a
+        /// closure that captured one directly would not satisfy that bound.
+        /// The desktop core has no such problem — its proxies really do cross
+        /// real OS threads.
+        ///
+        /// Parking the proxy in a thread-local and capturing *nothing* closes
+        /// the gap without `unsafe`: the alternative, an `unsafe impl
+        /// Send + Sync` wrapper asserting "wasm has no threads", would make
+        /// this the only shell crate outside the sanctioned platform-FFI zones
+        /// listed in `docs/CODE_STANDARDS.md` to carry `unsafe` at all. This
+        /// crate stays `unsafe`-free instead, and the single-thread argument
+        /// becomes something the type system enforces rather than something a
+        /// comment promises: a `wasm32-unknown-unknown` page runs entirely on
+        /// the one JS thread that installed this slot, so the waker can only
+        /// ever run where the proxy already is, and any other thread would
+        /// simply find its own slot empty rather than touching this one.
+        static WAKE_PROXY: RefCell<Option<EventLoopProxy<ShellUserEvent>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Park `proxy` in this thread's [`WAKE_PROXY`] slot and answer the
+    /// [`FrameWaker`] `frust-reactive` fires on a tracked-signal write.
+    ///
+    /// The returned closure captures nothing, which is what makes it
+    /// `Send + Sync` — see [`WAKE_PROXY`]. `send_event` fails only once the
+    /// loop has closed (a shutdown race), which is benign and ignored, the
+    /// same as every other shell's waker.
+    fn install_wake_proxy(proxy: EventLoopProxy<ShellUserEvent>) -> FrameWaker {
+        WAKE_PROXY.with(|slot| *slot.borrow_mut() = Some(proxy));
+        Arc::new(|| {
+            WAKE_PROXY.with(|slot| {
+                if let Some(proxy) = slot.borrow().as_ref() {
+                    let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
+                }
+            });
+        })
+    }
+
+    /// The shared home of the frame executor, which does not exist until an
+    /// `async` bring-up completes.
+    ///
+    /// Shaped as `Rc<SurfaceSlot>` because the bring-up future must own the
+    /// executor across its `await` and hand it back afterwards, while the
+    /// event loop keeps a handle to draw through. `pending` is the guard that
+    /// keeps a second bring-up from being spawned (and a second `wgpu` device
+    /// from being created) while the first is still in flight — a `resumed`
+    /// re-entry or a redraw arriving mid-bring-up would otherwise do exactly
+    /// that, since the executor slot reads as empty the whole time.
+    #[derive(Default)]
+    struct SurfaceSlot {
+        executor: RefCell<Option<WebFrameExecutor>>,
+        pending: Cell<bool>,
+    }
+
+    /// Start (or restart) the asynchronous surface bring-up for `window`,
+    /// unless one is already in flight.
+    ///
+    /// One path serves both the cold start and `FrameOutcome::SurfaceLost`
+    /// recovery: an executor already in the slot is *taken* and re-used, so a
+    /// recovery keeps the live `wgpu` device and only replaces the surface,
+    /// while a cold start builds a fresh one. Frames drawn while the slot is
+    /// empty are simply skipped, which is the same thing the renderer would do
+    /// internally in `SurfacePhase::NoSurface`.
+    fn spawn_surface_bringup(slot: &Rc<SurfaceSlot>, window: &Arc<Window>) {
+        if slot.pending.get() {
+            return;
+        }
+        slot.pending.set(true);
+        let mut executor = slot.executor.borrow_mut().take().unwrap_or_default();
+        let slot = Rc::clone(slot);
+        let window = Arc::clone(window);
+        let size = window.inner_size();
+        wasm_bindgen_futures::spawn_local(async move {
+            let outcome = executor
+                .ensure_surface_with_retry(Arc::clone(&window), size.width, size.height)
+                .await;
+            slot.pending.set(false);
+            match outcome {
+                Ok(attempts) => {
+                    log::info!(
+                        "frust: render surface online at {}x{} after {attempts} attempt(s)",
+                        size.width,
+                        size.height
+                    );
+                    *slot.executor.borrow_mut() = Some(executor);
+                    // Drive the first frame explicitly rather than waiting for
+                    // one to be asked for: every redraw requested before this
+                    // point was serviced against an empty slot and drew
+                    // nothing.
+                    window.request_redraw();
+                }
+                // Terminal: the retry already logged every attempt verbatim.
+                // The executor is dropped with its context, so a later
+                // lifecycle event starts a genuinely fresh bring-up.
+                Err(err) => log::error!("{err}"),
+            }
+        });
+    }
+
+    /// Apply a [`ControlFlowIntent`] to the live event loop.
+    fn apply_control_flow(event_loop: &ActiveEventLoop, intent: ControlFlowIntent) {
+        match intent {
+            ControlFlowIntent::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+            ControlFlowIntent::WaitUntil(deadline) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline))
+            }
+            ControlFlowIntent::Unchanged => {}
+        }
+    }
+
+    /// The browser shell's winit `ApplicationHandler` — the retained tree, the
+    /// reactive plumbing, the shell-owned appearance state, and the wake
+    /// bookkeeping the frame loop runs on.
+    struct WebShellHandler<State: 'static, Logic, V: View<State>> {
+        state: State,
+        app_logic: Logic,
+        /// The process-wide reactive runtime, initialized on this (the page's
+        /// only) thread. Per-frame rebuilds run under its root `Owner`, and
+        /// `pump_local` drains the local task queue on each wake and frame.
+        runtime: &'static ReactiveRuntime,
+        /// Records which signals the last rebuild read, so a later write
+        /// dirties the scope and (via the frame waker) wakes the loop for one
+        /// more frame. Re-tracked from scratch every rebuild.
+        scope: TrackedScope,
+        root: RenderRoot<State, V>,
+        text_ctx: TextContext,
+        /// The frame executor, absent until its `async` bring-up lands — see
+        /// [`SurfaceSlot`].
+        surface: Rc<SurfaceSlot>,
+        /// Reused across frames; `reset()` each frame rather than
+        /// reallocated. There is no scene hand-off on this shell, so unlike
+        /// the desktop split the same scene is drawn from in place.
+        scene: Scene,
+        /// Created in `resumed`, which winit calls once the page is ready for
+        /// one.
+        window: Option<Arc<Window>>,
+        /// The app's active theme — the seeded base (a design system's
+        /// `set_default_theme`, else the built-in fallback) until an app-forced
+        /// override replaces it. Its `brightness` is seeded from the browser's
+        /// `prefers-color-scheme` answer in `resumed` and flipped live on
+        /// `WindowEvent::ThemeChanged`.
+        theme: Theme,
+        /// Whether the initial theme has been pushed to the render root and
+        /// the reactive context yet.
+        theme_seeded: bool,
+        /// Polls the process-wide app-facing theme override slot once per
+        /// frame, before rebuild.
+        theme_override: ThemeOverrideWatcher,
+        /// Whether an app-forced theme override is active. While `true`, a
+        /// `prefers-color-scheme` flip must not move `theme.brightness`.
+        theme_override_active: bool,
+        /// Polls the process-wide pending-font registry once per frame,
+        /// draining any late registration into `text_ctx`.
+        font_registry: FontRegistryWatcher,
+        /// Change detector for the app-facing `WindowMetrics` context: seeded
+        /// in `resumed` and re-polled on `WindowEvent::Resized`, never per
+        /// frame.
+        window_metrics: WindowMetricsPublisher,
+        /// The pending paced redraw deadline, or `None` when nothing paced is
+        /// owed — see [`crate::pacing`].
+        paced_wake: Option<Instant>,
+        /// Whether animation pacing is enabled (the pacing kill switch,
+        /// resolved once at construction). A browser has no environment to
+        /// read, so this is always `true` there; it is resolved through the
+        /// shared helper anyway so the two shell tiers cannot disagree about
+        /// what the switch means.
+        anim_pacing: bool,
+        /// The shell-owned monotonic epoch every per-frame `FrameTime` is
+        /// measured from. `frust-core` never reads a clock itself — time
+        /// enters from the shell — and on this target the clock is
+        /// `performance.now()` behind `web_time`.
+        epoch: Instant,
+    }
+
+    impl<State, Logic, V> WebShellHandler<State, Logic, V>
+    where
+        State: 'static,
+        V: View<State>,
+        Logic: FnMut(&mut State) -> V + 'static,
+    {
+        /// The whole `rebuild → layout → paint → encode → present` turn, run
+        /// inside the `requestAnimationFrame` callback winit services
+        /// `RedrawRequested` from.
+        fn frame(&mut self, event_loop: &ActiveEventLoop, window: &Arc<Window>) {
+            // Drain any local tasks queued since the last turn before
+            // rebuilding, so their signal writes are visible to this frame.
+            self.runtime.pump_local();
+
+            // Poll the app-facing theme override slot once per frame, before
+            // rebuild. Reverting an override lands on the base this shell
+            // seeded itself from, with brightness re-derived from the
+            // browser's current `prefers-color-scheme` answer rather than
+            // inherited from the cleared override.
+            if let Some((theme, override_active)) =
+                super::theme_after_override_poll(self.theme_override.poll(), default_theme, || {
+                    super::brightness_from_winit(window.theme())
+                })
+            {
+                self.theme = theme;
+                self.theme_override_active = override_active;
+                super::apply_theme(self.runtime, &mut self.root, &self.theme);
+            }
+
+            // Drain any late-registered fonts, and on a real drain force the
+            // relayout `register_fonts` documents by re-pushing the active
+            // theme (the same LAYOUT|PAINT contract a theme swap uses).
+            if self.font_registry.drain_into(&mut self.text_ctx) {
+                self.root.set_theme(Box::new(self.theme.clone()));
+            }
+
+            // The rebuild runs under the reactive runtime's root `Owner` (so
+            // signals created during it are root-owned) and inside the
+            // `TrackedScope` (so every signal read subscribes this frame — a
+            // later write dirties the scope and fires the waker). Fields are
+            // borrowed disjointly so the tracking closure captures only what
+            // the rebuild needs.
+            let rebuild_start = Instant::now();
+            let runtime = self.runtime;
+            let scope = &self.scope;
+            let root = &mut self.root;
+            let app_logic = &mut self.app_logic;
+            let state = &mut self.state;
+            let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
+            let rebuild = rebuild_start.elapsed();
+
+            // HiDPI: lay out in logical pixels, then scale the whole scene by
+            // the browser's `devicePixelRatio` so glyph outlines are
+            // re-rasterised sharp at the canvas's real backing resolution.
+            let physical = window.inner_size();
+            let scale = window.scale_factor();
+            let logical = Size::new(
+                f64::from(physical.width) / scale,
+                f64::from(physical.height) / scale,
+            );
+            let text_ctx: &mut dyn Any = &mut self.text_ctx;
+            let layout_start = Instant::now();
+            self.root.layout_with_text(logical, text_ctx);
+            let layout = layout_start.elapsed();
+
+            self.scene.reset();
+            // One clock read per frame, handed to paint; every animating
+            // widget differences it against its own stored time.
+            let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
+            // Push the presented-frame count so a widget measuring FPS reports
+            // the presented rate, not its paint cadence. A pure observation —
+            // it dirties nothing.
+            if let Ok(slot) = self.surface.executor.try_borrow()
+                && let Some(executor) = slot.as_ref()
+            {
+                self.root.set_presented_frames(executor.presented_frames());
+            }
+            let paint_start = Instant::now();
+            let paint_outcome = {
+                let mut builder = SceneBuilder::new(&mut self.scene);
+                builder.push_transform(Affine::scale(scale));
+                let outcome = self.root.paint(&mut builder, frame_time);
+                builder.pop_transform();
+                outcome
+            };
+            let paint = paint_start.elapsed();
+
+            // Animation driver: if paint advanced animation state it asks for
+            // another frame here. A paced-only decorative loop (a caret blink,
+            // a shimmer) schedules a *delayed* wake instead of an immediate
+            // redraw, so it runs at the theme's cosmetic-loop cadence rather
+            // than at every display refresh; a real transition keeps the
+            // immediate every-frame path. A settled loop clears any stale
+            // deadline AND returns the control flow to `Wait`. The decision
+            // bundles all three effects into one value so the field can never
+            // be updated without also deciding the control flow — see
+            // `crate::pacing`.
+            let decision = next_paced_wake(
+                paint_outcome.needs_frame,
+                paint_outcome.needs_frame_paced_only,
+                self.anim_pacing,
+                Instant::now(),
+                self.theme.motion.cosmetic_loop_rate.hz(),
+                paint_outcome.paced_interval,
+            );
+            self.paced_wake = decision.paced_wake;
+            if decision.request_redraw {
+                window.request_redraw();
+            }
+            apply_control_flow(event_loop, decision.control_flow);
+
+            // A tracked signal written *during* this frame already re-dirtied
+            // the scope after `track` cleared it. The waker's clean-to-dirty
+            // edge fired inside `track`, so no user event will arrive for it —
+            // request the follow-up frame here.
+            if self.scope.is_dirty() {
+                window.request_redraw();
+            }
+
+            // Hand the finished frame to the executor, if one exists yet: a
+            // redraw can be serviced while the bring-up future is still in
+            // flight, and skipping is correct — that future drives its own
+            // first frame when it lands.
+            let ui_spans = frust_shell_common::perf::UiSpans {
+                rebuild,
+                layout,
+                paint,
+                skipped: false,
+            };
+            let base_color = self.theme.scheme().surface;
+            let follow_up = match self.surface.executor.try_borrow_mut() {
+                Ok(mut slot) => slot.as_mut().map(|executor| {
+                    // Reconcile the swapchain against the canvas's size before
+                    // drawing into it: on this host the first size the surface
+                    // was configured at is necessarily stale, because winit
+                    // reports 0x0 until its `ResizeObserver` has run. See
+                    // `WebFrameExecutor::ensure_size`.
+                    executor.ensure_size(physical.width, physical.height);
+                    executor.submit_frame(&self.scene, base_color, ui_spans)
+                }),
+                Err(_) => None,
+            };
+            match follow_up {
+                Some(FrameFollowUp::Redraw) => window.request_redraw(),
+                Some(FrameFollowUp::RecreateSurface) => {
+                    spawn_surface_bringup(&self.surface, window)
+                }
+                Some(FrameFollowUp::Idle) | None => {}
+            }
+        }
+    }
+
+    impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for WebShellHandler<State, Logic, V>
+    where
+        State: 'static,
+        V: View<State>,
+        Logic: FnMut(&mut State) -> V + 'static,
+    {
+        /// A tracked-signal write routes here through the frame waker and the
+        /// event-loop proxy. Pump the local task queue first (a completing
+        /// local task may have driven the write), then ask for the one frame
+        /// that write owes.
+        ///
+        /// This is the entire background-wake path: nothing about it involves
+        /// an input event, which is what lets a signal written by a timer or a
+        /// completing task repaint a page nobody is touching.
+        fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellUserEvent) {
+            self.runtime.pump_local();
+            match event {
+                ShellUserEvent::SignalsDirty => {
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
+            }
+        }
+
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.window.is_none() {
+                // `with_append`: winit creates the canvas but never inserts it
+                // into the page on its own, so an un-appended canvas renders
+                // to nothing visible. Adopting a host page's own canvas
+                // instead is the canvas-binding work this default stands in
+                // for.
+                let attributes = Window::default_attributes()
+                    .with_inner_size(DEFAULT_CANVAS_SIZE)
+                    .with_append(true);
+                match event_loop.create_window(attributes) {
+                    Ok(window) => self.window = Some(Arc::new(window)),
+                    Err(err) => {
+                        // A page has no exit path and no error to return to —
+                        // report and leave the loop idle rather than
+                        // pretending a window exists.
+                        log::error!("frust: failed to create the browser window: {err}");
+                        return;
+                    }
+                }
+            }
+            let window = self
+                .window
+                .clone()
+                .expect("window was just created or already present");
+
+            // Seed the theme once, before the first rebuild: read the
+            // browser's `prefers-color-scheme` answer into the baseline, then
+            // push it to the render root and the reactive context. Live
+            // changes arrive later via `WindowEvent::ThemeChanged`.
+            if !self.theme_seeded {
+                self.theme.brightness = super::brightness_from_winit(window.theme());
+                self.theme_seeded = true;
+                super::apply_theme(self.runtime, &mut self.root, &self.theme);
+            }
+
+            // Seed the app-facing window-shape context before the first frame,
+            // so a `Component::build` calling `use_context::<WindowMetrics>()`
+            // in the very first rebuild resolves a real value rather than
+            // `None`. Self-guarded, so a redundant `resumed` publishes nothing.
+            let physical = window.inner_size();
+            super::publish_window_metrics(
+                self.runtime,
+                &mut self.window_metrics,
+                (physical.width, physical.height),
+                window.scale_factor(),
+            );
+
+            // Bring the surface online. `resumed` can fire more than once and
+            // the bring-up is asynchronous, so both the "already live" and the
+            // "already starting" cases are guarded.
+            if self.surface.executor.borrow().is_none() {
+                spawn_surface_bringup(&self.surface, &window);
+            }
+            window.request_redraw();
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            // Drain any local tasks that became runnable while dispatching
+            // this batch of events, before the loop parks. A task that writes
+            // a signal here re-dirties a scope and fires the waker, which
+            // re-arms the loop rather than parking it.
+            self.runtime.pump_local();
+
+            let now = Instant::now();
+            // A wake delivered far past its deadline means the browser paused
+            // this page — a hidden tab, a battery-saver throttle, a long
+            // main-thread task. Reported rather than absorbed, because from
+            // inside the loop it is otherwise indistinguishable from a wedge.
+            // Exactly one frame is owed however long the gap was; see
+            // `crate::pacing`'s long-gap section.
+            if let Some(late) = overshoot(self.paced_wake, now)
+                && late >= OVERSHOOT_LOG_THRESHOLD
+            {
+                log::debug!(
+                    "frust: paced wake delivered {}ms late (the page was throttled or hidden); \
+                     one frame is owed, not a backlog",
+                    late.as_millis()
+                );
+            }
+
+            let decision = paced_wake_action(self.paced_wake, now);
+            self.paced_wake = decision.paced_wake;
+            if decision.request_redraw
+                && let Some(window) = self.window.as_ref()
+            {
+                window.request_redraw();
+            }
+            apply_control_flow(event_loop, decision.control_flow);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            _window_id: WindowId,
+            event: WindowEvent,
+        ) {
+            let Some(window) = self.window.clone() else {
+                return;
+            };
+            match event {
+                WindowEvent::RedrawRequested => self.frame(event_loop, &window),
+
+                // Minimal, deliberately: reconfigure the swapchain, republish
+                // the app-facing window shape, and draw. Everything that makes
+                // a browser resize interesting — observing the host element,
+                // reconciling a `devicePixelRatio` change against the canvas's
+                // backing store — belongs with the canvas binding, not with
+                // the frame loop.
+                WindowEvent::Resized(size) => {
+                    if let Ok(mut slot) = self.surface.executor.try_borrow_mut()
+                        && let Some(executor) = slot.as_mut()
+                    {
+                        executor.resize_surface(size.width, size.height);
+                    }
+                    super::publish_window_metrics(
+                        self.runtime,
+                        &mut self.window_metrics,
+                        (size.width, size.height),
+                        window.scale_factor(),
+                    );
+                    window.request_redraw();
+                }
+
+                // A browser zoom or a move between displays changes
+                // `devicePixelRatio`; winit guarantees a following `Resized`,
+                // which is the one place the change is acted on, so there is
+                // nothing to do here.
+                WindowEvent::ScaleFactorChanged { .. } => {}
+
+                // The `prefers-color-scheme` media query flipped. An
+                // app-forced override wins entirely until it is cleared.
+                WindowEvent::ThemeChanged(theme) => {
+                    super::follow_platform_brightness(
+                        &mut self.theme,
+                        self.theme_override_active,
+                        super::brightness_from_winit(Some(theme)),
+                    );
+                    super::apply_theme(self.runtime, &mut self.root, &self.theme);
+                    window.request_redraw();
+                }
+
+                // A page cannot close itself, and winit's web backend never
+                // emits this today; answering it by tearing the app down would
+                // be inventing a lifecycle the host does not have.
+                WindowEvent::CloseRequested => {}
+
+                // Input events fall through unhandled: mapping them onto the
+                // framework's own vocabulary is what this module's
+                // `InputState`/`map_*` half exists for, and wiring that half
+                // into the loop is its own piece of work.
+                _ => {}
+            }
+        }
+    }
+
+    /// Start a Frust app in the browser: create the event loop, initialize the
+    /// reactive runtime against it, and hand the loop to the browser's own
+    /// task queue.
+    ///
+    /// **Returns immediately on success.** winit's web backend implements
+    /// `run_app` by throwing a JS exception to unwind out of the caller's
+    /// stack, which surfaces as an uncaught error out of whatever `init()`
+    /// glue called it; `spawn_app` instead hands control back normally and
+    /// drives the loop from the browser's task queue. So this returning `Ok`
+    /// means the app is *running*, not that it finished — there is no "after"
+    /// for a page, and the app lives until the document goes away.
+    ///
+    /// The reactive runtime is initialized here, on the page's only thread,
+    /// because that thread must be the one that owns the local task queue
+    /// `pump_local` drains.
+    pub fn spawn_app<State, Logic, V>(state: State, app_logic: Logic) -> Result<(), EventLoopError>
+    where
+        State: 'static,
+        V: View<State>,
+        Logic: FnMut(&mut State) -> V + 'static,
+    {
+        // Captured before anything else, so the frame clock's origin is the
+        // earliest moment this shell exists.
+        let epoch = Instant::now();
+
+        let event_loop = EventLoop::<ShellUserEvent>::with_user_event().build()?;
+        // Dirty-driven, exactly like the desktop core: a frame runs when
+        // something asks for one. `ControlFlow::Poll` would schedule a task
+        // per turn whether or not a frame was owed.
+        event_loop.set_control_flow(ControlFlow::Wait);
+
+        let waker = install_wake_proxy(event_loop.create_proxy());
+        let runtime = ReactiveRuntime::init(waker);
+
+        let mut handler = WebShellHandler {
+            state,
+            app_logic,
+            runtime,
+            scope: TrackedScope::new(),
+            root: RenderRoot::new(),
+            text_ctx: TextContext::new(),
+            surface: Rc::new(SurfaceSlot::default()),
+            scene: Scene::new(),
+            window: None,
+            // The seeded base theme, carrying that base's own brightness only
+            // until `resumed` seeds the browser's real preference over it.
+            theme: super::base_theme(default_theme()),
+            theme_seeded: false,
+            theme_override: ThemeOverrideWatcher::new(),
+            theme_override_active: false,
+            font_registry: FontRegistryWatcher::new(),
+            window_metrics: WindowMetricsPublisher::new(),
+            paced_wake: None,
+            anim_pacing: !anim_pacing_kill_switch_engaged(),
+            epoch,
+        };
+
+        // Apply any fonts registered before the app started, before the first
+        // layout — pre-first-layout, so no invalidation is needed; the
+        // per-frame poll picks up any later registration.
+        handler.font_registry.drain_into(&mut handler.text_ctx);
+
+        event_loop.spawn_app(handler);
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use browser_loop::{ShellUserEvent, spawn_app};
+
 #[cfg(test)]
 mod tests {
     use super::{

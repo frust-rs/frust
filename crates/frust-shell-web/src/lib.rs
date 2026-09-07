@@ -32,9 +32,21 @@
 //! [`app_handler::sync_cursor`].
 
 pub mod app_handler;
+pub mod pacing;
+pub mod render;
 
 pub use app_handler::{
     ComposeLatch, InputState, apply_theme, base_theme, brightness_from_winit, event_under_owner,
     follow_platform_brightness, publish_window_metrics, pump_devtools, push_semantics,
     reverted_theme, sync_cursor, sync_ime, theme_after_override_poll,
+};
+#[cfg(target_arch = "wasm32")]
+pub use app_handler::{ShellUserEvent, spawn_app};
+pub use pacing::{
+    ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, PacedDecision, RAF_PERIOD_60HZ, next_paced_wake,
+    overshoot, paced_interval, paced_wake_action, raf_quantized,
+};
+pub use render::{
+    BRINGUP_ATTEMPTS, BRINGUP_RETRY_INTERVAL, FrameFollowUp, WebFrameExecutor, bringup_retry_delay,
+    follow_up_for,
 };
