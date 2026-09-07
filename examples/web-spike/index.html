@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  Frust web-shell Phase 0 spike (w0-02) — static host page skeleton.
+
+  This spike itself only runs `cargo check --target wasm32-unknown-unknown`
+  (see RESULTS.md for the verdict — currently RED, on a `frust-gpu` blocker
+  outside w0-02's write scope); it does not build or run a `.wasm` binary,
+  and this page is not loaded by anything in this task. A skeleton for
+  w0-03 ("Browser render probe: frust-engine on WebGPU then WebGL2 in
+  Chrome") to build on, following wasm-bindgen's standard
+  `--target web` glue-import shape (a JS `<script type="module">` calling the
+  generated `init()`); w0-03 owns choosing the actual `wasm-pack build`
+  invocation, the generated module's real filename, and the canvas element
+  the render surface attaches to.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Frust web-shell spike</title>
+  </head>
+  <body>
+    <!-- w0-03 attaches the frust-render surface to a canvas here. -->
+    <canvas id="frust-canvas"></canvas>
+    <script type="module">
+      // Placeholder wasm-bindgen `--target web` glue import. The generated
+      // module name (`./pkg/web_spike.js`, wasm-pack's default `--out-dir`
+      // convention for this package's name) does not exist yet — this file
+      // compiles no `.wasm`, w0-02 only checks the Rust graph. w0-03 fills
+      // in the real `wasm-pack build --target web` invocation and updates
+      // this import to match its output.
+      import init from "./pkg/web_spike.js";
+      init();
+    </script>
+  </body>
+</html>

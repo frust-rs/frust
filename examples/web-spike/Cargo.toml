@@ -1,0 +1,47 @@
+# Standalone package (own `[workspace]` root, own `Cargo.lock`) — a
+# throwaway spike, NOT a shipping example. The root `Cargo.toml`'s
+# `[workspace]` `exclude` list already carries `examples/web-spike` (added
+# alongside this task's own base commit), so the root `examples/*` glob never
+# absorbs it; precedent is `examples/huddle`'s identical standalone shape (see
+# that manifest's own header comment).
+#
+# web-shell plan Phase 0 (w0-02): probes whether the render-engine graph
+# (frust-scene + frust-text + frust-gpu + frust-engine + frust-render)
+# compiles for `wasm32-unknown-unknown` and records the exact flags/cfgs that
+# turned out to be needed in RESULTS.md. `frust-reactive` is deliberately NOT
+# a dependency here — its `tokio` multi-thread runtime init fails on wasm32
+# (see RESULTS.md); w0-04 lands that arm. No browser is driven from this
+# crate; that is w0-03's job.
+[workspace]
+
+[package]
+name = "web-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Path deps only, by design (Version-Pin Policy — root CLAUDE.md's Agent
+# Guardrails / docs/DEVELOPMENT.md's Version-Pin Policy): this manifest
+# declares no `wgpu`/`wasm-bindgen`/`web-sys`/`js-sys` row of its own. The
+# wasm32 arm of `wgpu` is reached ONLY transitively, through
+# `frust-gpu`'s target-gated
+# `[target.'cfg(target_arch = "wasm32")'.dependencies]` row (landed by w0-01:
+# `wgpu = { workspace = true, features = ["webgpu", "webgl"] }`), so the graph
+# carries a single `wgpu` identity end to end — see RESULTS.md's flags table
+# for the empirical trace confirming no second identity was introduced.
+frust-scene = { path = "../../crates/frust-scene" }
+frust-text = { path = "../../crates/frust-text" }
+frust-gpu = { path = "../../crates/frust-gpu" }
+frust-engine = { path = "../../crates/frust-engine" }
+frust-render = { path = "../../crates/frust-render" }
+# `frust-scene`/`frust-text`'s public API surfaces (`Scene`/`SceneBuilder`,
+# `TextStyle`/`TextLayout`) are named directly by `src/main.rs` below (same
+# renderer-agnostic-seam pattern `examples/huddle`'s dev-dependencies and
+# `examples/shadertoy`/`examples/glyph-catalog` use), so this binary declares
+# the same two geometry/brush crates those crates are built on. Pinned to the
+# exact versions the root `[workspace.dependencies]` table pins (`kurbo`
+# 0.13.1, `peniko` 0.6.1) — precedent: `examples/huddle`'s identical
+# `kurbo = "0.13.1"` / `peniko = "0.6.1"` dev-dependency rows.
+kurbo = "0.13.1"
+peniko = "0.6.1"
