@@ -2626,6 +2626,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-shell-web"
+version = "0.1.0"
+dependencies = [
+ "frust-core",
+ "frust-reactive",
+ "frust-shell-common",
+ "frust-theme",
+ "kurbo",
+ "log",
+ "winit",
+]
+
+[[package]]
 name = "frust-shell-windows"
 version = "0.1.0"
 dependencies = [

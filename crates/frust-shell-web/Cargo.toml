@@ -1,0 +1,46 @@
+[package]
+name = "frust-shell-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The browser shell tier. Unlike the three per-OS desktop crates, this one does
+# NOT depend on `frust-shell-desktop`: that crate's winit core is entangled with
+# `accesskit_winit`, `pollster::block_on` surface bring-up, a render thread and
+# `frust-paths` cache I/O, none of which exist on `wasm32-unknown-unknown`. The
+# winit-GENERIC halves of it (input mapping, the reactive-owner event wrap, the
+# window-metrics publish, brightness-follow) are ported here instead, so this
+# crate sits directly on `frust-shell-common` the way the two mobile shells do.
+# See docs/SHELLS_ARCHITECTURE.md for the unit's shape.
+[dependencies]
+# The retained tree this shell drives: `RenderRoot`, the `InputEvent`
+# vocabulary every mapping below produces, `WindowInsets`, and the
+# `WindowMetrics` context type.
+frust-core = { workspace = true }
+# The shell owns the active `Theme` and boxes it into `RenderRoot`'s
+# type-erased slot, exactly as the other shells do — see
+# docs/SHELLS_ARCHITECTURE.md's Theme delivery.
+frust-theme = { workspace = true }
+# The reactive root `Owner` the event pass and both app-facing
+# `provide_context` publishes run under (`ReactiveRuntime::with_owner`). Its
+# own `wasm32` arm (`Executor::init_wasm_bindgen`) is what makes this edge
+# buildable for the browser at all — see that crate's `src/runtime.rs`.
+frust-reactive = { workspace = true }
+# The platform-free plumbing this shell is built on: `WindowMetricsPublisher`
+# (the change-guarded window-shape publish), the app-facing theme override
+# watcher, and the seeded-default theme slot.
+frust-shell-common = { workspace = true }
+# The event source. winit 0.30 carries a first-class web backend (canvas-hosted
+# event loop, `requestAnimationFrame` redraws, `devicePixelRatio` scale factor,
+# `prefers-color-scheme` theme reporting), so this shell shares the desktop
+# tier's winit vocabulary rather than binding the DOM itself. Rides the single
+# workspace `winit` pin — a second winit identity between the two shell tiers
+# would be a resolution hazard, not a convenience.
+winit = { workspace = true }
+# `Point`, the logical-pixel pointer coordinate every mapping here produces.
+kurbo = { workspace = true }
+# The gap-reporting sink: the no-op seams below log at `debug` through the
+# `log` facade rather than failing silently, so a browser console (once a
+# `log` sink is installed) shows which host signal is unsupported.
+log = { workspace = true }
