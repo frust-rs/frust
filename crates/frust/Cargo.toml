@@ -93,18 +93,24 @@ frust-shell-ios = { workspace = true }
 anyhow = { workspace = true }
 
 # The shared desktop core (winit event loop + render stack), off both mobile
-# targets. Android was always excluded — winit pulls in android-activity, which
-# does not compile for an Android target and is dead weight there anyway, since
-# the app is driven by `android_app!`/JNI. iOS is excluded for the same reason
-# (its app is driven by `ios_app!`'s C-ABI entry points, and winit's UIKit
-# backend is never entered), which additionally keeps winit, accesskit_winit and
-# their transitive graph out of an iOS build entirely.
+# targets and off wasm32. Android was always excluded — winit pulls in
+# android-activity, which does not compile for an Android target and is dead
+# weight there anyway, since the app is driven by `android_app!`/JNI. iOS is
+# excluded for the same reason (its app is driven by `ios_app!`'s C-ABI entry
+# points, and winit's UIKit backend is never entered), which additionally
+# keeps winit, accesskit_winit and their transitive graph out of an iOS build
+# entirely. wasm32 is excluded for the analogous reason on the fourth host
+# tier: `frust-shell-desktop`'s `accesskit_winit` adapter, `pollster::block_on`
+# surface bring-up, render thread and `frust-paths` cache I/O do not compile
+# for `wasm32-unknown-unknown` (see `crates/frust-shell-web`'s own crate
+# docs) — the app is driven by `web_app!`'s wasm-bindgen start shim instead
+# (see lib.rs).
 #
-# Deliberately `not(mobile)` rather than a list of desktop targets: a BSD-ish or
-# other niche desktop host keeps the generic core (and, with no per-OS table
-# below matching it, the no-op `NoExtensions` — see `lib.rs`'s
+# Deliberately `not(mobile-or-wasm)` rather than a list of desktop targets: a
+# BSD-ish or other niche desktop host keeps the generic core (and, with no
+# per-OS table below matching it, the no-op `NoExtensions` — see `lib.rs`'s
 # `desktop_extensions`).
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+[target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies]
 frust-shell-desktop = { workspace = true }
 
 # The three per-OS desktop shells, each wired into the run path by `lib.rs`'s
@@ -129,6 +135,27 @@ frust-shell-windows = { workspace = true }
 # it is one `cfg` here plus the matching arm in `lib.rs`'s `desktop_extensions`.
 [target.'cfg(target_os = "linux")'.dependencies]
 frust-shell-linux = { workspace = true }
+
+# The fourth host tier: the browser shell, off both mobile targets and off
+# desktop (see the `frust-shell-desktop` table's doc comment above for why the
+# three don't overlap). `web_app!`'s generated wasm-bindgen start shim (see
+# lib.rs) is what `lib.rs`'s `desktop_extensions`/`App::run` are to the three
+# desktop tables above.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+frust-shell-web = { workspace = true }
+# `web_app!`'s own wasm-bindgen entry point (`#[wasm_bindgen(start)]`) plus the
+# browser panic/log boilerplate every wasm entry needs (routing a Rust panic to
+# `console.error` instead of an opaque `unreachable` trap, and the `log` facade
+# to `console.*` — see the Phase-0 spike, `examples/web-spike/src/main.rs`'s
+# `mod web::start`, for the proven shape). Named here (not just transitively
+# through `frust-shell-web`, which does not depend on any of these) and
+# re-exported hidden from `lib.rs` so a generated app never needs these in its
+# own `Cargo.toml` — mirroring `frust-shell-android`'s `__jni` re-export for
+# the identical reason.
+wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 # Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
