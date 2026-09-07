@@ -177,7 +177,22 @@ impl TemplateContext {
                 self.frust_embedding_android_dir(),
             ),
             ("frust_embedding_ios_dir", self.frust_embedding_ios_dir()),
+            ("web_module_name", self.web_module_name().to_string()),
         ])
+    }
+
+    /// The `wasm-bindgen --out-name` a browser build of this project
+    /// produces, and therefore the module the generated host page's
+    /// `?module=` default points at (`./pkg/<this>.js`).
+    ///
+    /// The crate name, because that is what `wasm-bindgen`'s own default
+    /// `--out-name` would be and what `manifest::WebSection::out_name_or`
+    /// falls back to (`[app] name`, which the scaffolded `frust.toml`
+    /// renders from this same `project_name`). One derivation, named once:
+    /// the generated page and the generated build config agree on the module
+    /// name without either reading the other.
+    pub fn web_module_name(&self) -> &str {
+        &self.project_name
     }
 
     /// Placeholder values usable as *literal path segments* (the

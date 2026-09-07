@@ -1,0 +1,96 @@
+<!doctype html>
+<!--
+  The host page for this app's browser build.
+
+  Rendered from the framework's own `platform/web/index.html` embedder
+  template, which is the source of truth for everything below the `<html>`
+  tag: this copy differs from it only in the page title and in the
+  `?module=` default, both of which name this project. Its sibling
+  `frust_web.js` is a byte-identical copy of the framework's — see the
+  framework's `platform/web/README.md` for the whole host-page contract
+  (canvas host element, resize/DPR sync, the CSS constraints the canvas
+  needs, and what the glue forwards as console evidence only).
+
+  `frust build web` assembles this file, `frust_web.js`, and the
+  `wasm-bindgen` output under `pkg/` into the `[web] out-dir` from
+  `frust.toml`; serve that directory with anything that answers a `.wasm`
+  request `application/wasm`. Point the page at a differently-named build
+  with `?module=./pkg/<name>.js`, matching the `[web] out-name` your build
+  used.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ title_case_name }}</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      /* The canvas host element `frust_web.js` reparents winit's own canvas
+         into, once it appears. Sized to the viewport by default; embed the
+         app in a smaller box by resizing this rule instead (or by sizing
+         `#frust-host` from your own page's stylesheet — this ID is the only
+         part of the contract `frust_web.js` depends on by default, see
+         README.md). `frust_web.js`'s own `ResizeObserver` tracks whatever
+         box this element resolves to and keeps the canvas in sync with it,
+         live — see README.md's "Canvas host / resize / DPR contract"
+         section for why an ordinary `canvas { ... }` stylesheet rule cannot
+         do this job on its own. */
+      #frust-host {
+        display: block;
+        width: 100%;
+        height: 100%;
+        line-height: 0;
+      }
+      /* winit's own canvas: no border, padding, or transform on it — see
+         README.md's "CSS constraints" section for why each one desyncs
+         pointer coordinates from what the shell actually painted.
+         `frust_web.js` sets the load-bearing size/border/padding rules
+         itself (a stylesheet rule cannot outrank the inline style winit
+         pins at creation — see `frust_web.js`'s own comments); this rule is
+         a `display` cosmetic only. */
+      #frust-host > canvas {
+        display: block;
+      }
+      /* Load-failure mirror only — hidden unless something is written into
+         it, so a successful load shows nothing but the app's own canvas.
+         Mirrors `examples/web-gallery/index.html`'s identical `#log`. */
+      #frust-log:empty {
+        display: none;
+      }
+      #frust-log {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: 0;
+        padding: 6px 8px;
+        background: #3a0d0d;
+        color: #ffd7d7;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="frust-host"></div>
+    <pre id="frust-log"></pre>
+    <script type="module">
+      import { mount, reportFailure } from "./frust_web.js";
+
+      // `?module=./pkg/<name>.js` selects which app's wasm-bindgen glue to
+      // load. Defaults to `./pkg/{{ web_module_name }}.js` so this page works unedited once a
+      // build's output is placed there under that name.
+      const moduleUrl =
+        new URLSearchParams(location.search).get("module") || "./pkg/{{ web_module_name }}.js";
+
+      import(moduleUrl)
+        .then(({ default: init }) => mount(init, { host: "#frust-host" }))
+        .catch((err) => reportFailure(err));
+    </script>
+  </body>
+</html>

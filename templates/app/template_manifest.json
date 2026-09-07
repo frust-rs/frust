@@ -76,5 +76,7 @@
   "macos.tmpl/Info.plist.tmpl",
   "macos.tmpl/app.entitlements.tmpl",
   "windows.tmpl/build.rs.tmpl",
-  "linux.tmpl/app.desktop.tmpl"
+  "linux.tmpl/app.desktop.tmpl",
+  "web.tmpl/index.html.tmpl",
+  "web.tmpl/frust_web.js.tmpl"
 ]
