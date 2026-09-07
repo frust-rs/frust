@@ -7,7 +7,12 @@
 //! `wasm-bindgen` CLI whose version differs from the crate's fails *after* a
 //! full release compile with a schema-mismatch message, and a missing
 //! `wasm-opt` silently ships an artifact several megabytes larger than the one
-//! the project's own size numbers were measured against.
+//! the project's own size numbers were measured against. Two more rows check
+//! what [`super::build`] itself checks before compiling: which host page it
+//! would stage ([`EMBEDDER_COMPONENT`], now aware of an app's own `[web]
+//! host-dir`, not just the framework fallback) and, when that page is the
+//! app's own, whether its `?module=` default agrees with the `--out-name`
+//! this build would resolve ([`HOST_PAGE_COMPONENT`]).
 //!
 //! # Reported in `doctor`'s shape, not a shape of its own
 //!
@@ -38,23 +43,28 @@
 //! [`WebPreflight::is_ready`] is false only for a [`ComponentStatus::Missing`]
 //! row. `wasm-opt` can never produce one — it is a size optimization, and a
 //! build without it runs identically — so its absence is a `Partial` a front
-//! end may report and proceed past. The target, the CLI and the embedder can:
-//! without any one of them there is no artifact to serve.
+//! end may report and proceed past. The target, the CLI, the manifest, the
+//! embedder and the host-page-module check can: without any one of them there
+//! is no build [`super::build`] would actually run to completion.
 
 use std::path::Path;
 
+use crate::build_info::WASM_TARGET_TRIPLE;
 use crate::doctor::report::{Component, ComponentStatus, FixCommand};
+use crate::manifest::{self, WebSection};
 use crate::process::ProcessRunner;
 
-use super::{WASM_TARGET, bundle};
+use super::bundle;
 
 /// The component names this module reports under. Named constants because a
 /// front-end filtering or ordering the rows should key off the same strings
 /// this module emits.
+pub const MANIFEST_COMPONENT: &str = "frust.toml [web] section";
 pub const TARGET_COMPONENT: &str = "wasm32 Rust target";
 pub const BINDGEN_COMPONENT: &str = "wasm-bindgen CLI";
 pub const WASM_OPT_COMPONENT: &str = "wasm-opt";
-pub const EMBEDDER_COMPONENT: &str = "Browser embedder (platform/web)";
+pub const EMBEDDER_COMPONENT: &str = "Browser host page";
+pub const HOST_PAGE_COMPONENT: &str = "Host page module name";
 
 /// Every browser-build environment check, in report order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,17 +112,74 @@ impl WebPreflight {
 
 /// Checks everything [`super::build`] needs from the host and the project.
 ///
+/// Loads the project's `frust.toml` itself (`crate::manifest::load_optional`,
+/// the same optional-input contract [`super::build`] uses) so the embedder and
+/// host-page-module rows reflect the project's actual `[web]` section rather
+/// than always assuming the defaults.
+///
 /// Never fails: an unrunnable probe is a `Missing` row with a fix command, not
 /// an error — the entire point is to answer "what is wrong" in one pass
 /// instead of surfacing the first problem and hiding the rest.
 pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight {
+    let (manifest_component, manifest) = manifest_check(project_dir);
+    let crate_name = bundle::package_name(project_dir).ok();
+    let app_name = manifest
+        .as_ref()
+        .map(|m| m.app.name.clone())
+        .or(crate_name)
+        .unwrap_or_default();
+    let web = manifest
+        .as_ref()
+        .and_then(|m| m.web.clone())
+        .unwrap_or_default();
+
     WebPreflight {
         components: vec![
+            manifest_component,
             target_check(runner),
             bindgen_check(runner, project_dir),
             wasm_opt_check(runner),
-            embedder_check(project_dir),
+            embedder_check(project_dir, &web),
+            host_page_module_check(project_dir, &web, &app_name),
         ],
+    }
+}
+
+/// The project's `frust.toml`, read the same optional way [`super::build`]
+/// does: `Ok(None)` for a genuinely absent manifest reports `Ok` (this
+/// pipeline needs none), and a present-but-unparsable one reports `Missing`
+/// with the parse error — the same reason [`super::build`] itself refuses to
+/// build against one.
+fn manifest_check(project_dir: &Path) -> (Component, Option<crate::manifest::Manifest>) {
+    let name = MANIFEST_COMPONENT.to_string();
+    match manifest::load_optional(project_dir) {
+        Ok(Some(manifest)) => (
+            Component {
+                name,
+                status: ComponentStatus::Ok,
+                summary: "frust.toml read".to_string(),
+                fix_commands: Vec::new(),
+            },
+            Some(manifest),
+        ),
+        Ok(None) => (
+            Component {
+                name,
+                status: ComponentStatus::Ok,
+                summary: "no frust.toml — using [web] section defaults".to_string(),
+                fix_commands: Vec::new(),
+            },
+            None,
+        ),
+        Err(err) => (
+            Component {
+                name,
+                status: ComponentStatus::Missing,
+                summary: format!("{err:#}"),
+                fix_commands: Vec::new(),
+            },
+            None,
+        ),
     }
 }
 
@@ -143,25 +210,28 @@ fn target_check(runner: &dyn ProcessRunner) -> Component {
         }
     };
 
-    if installed.lines().any(|line| line.trim() == WASM_TARGET) {
+    if installed
+        .lines()
+        .any(|line| line.trim() == WASM_TARGET_TRIPLE)
+    {
         Component {
             name: TARGET_COMPONENT.to_string(),
             status: ComponentStatus::Ok,
-            summary: format!("{WASM_TARGET} installed"),
+            summary: format!("{WASM_TARGET_TRIPLE} installed"),
             fix_commands: Vec::new(),
         }
     } else {
         Component {
             name: TARGET_COMPONENT.to_string(),
             status: ComponentStatus::Missing,
-            summary: format!("{WASM_TARGET} is not installed on the active toolchain"),
+            summary: format!("{WASM_TARGET_TRIPLE} is not installed on the active toolchain"),
             fix_commands: vec![FixCommand {
-                display: format!("rustup target add {WASM_TARGET}"),
+                display: format!("rustup target add {WASM_TARGET_TRIPLE}"),
                 program: "rustup".to_string(),
                 args: vec![
                     "target".to_string(),
                     "add".to_string(),
-                    WASM_TARGET.to_string(),
+                    WASM_TARGET_TRIPLE.to_string(),
                 ],
                 auto_runnable: true,
                 doc_link: None,
@@ -263,21 +333,75 @@ fn wasm_opt_check(runner: &dyn ProcessRunner) -> Component {
     }
 }
 
-/// The host page the artifact directory is staged from, reachable through the
-/// project's own `frust` path dependency.
-fn embedder_check(project_dir: &Path) -> Component {
+/// The host page a build would stage — the project's own `[web] host-dir`
+/// when it carries both host-page files, else the framework's `platform/web`,
+/// reachable through the project's `frust` path dependency. Mirrors
+/// [`super::bundle::resolve_embedder`] exactly, so this row never disagrees
+/// with what [`super::build`] itself would pick.
+fn embedder_check(project_dir: &Path, web: &WebSection) -> Component {
     let name = EMBEDDER_COMPONENT.to_string();
-    match bundle::embedder_dir(project_dir) {
-        Ok(dir) => Component {
+    match bundle::resolve_embedder(project_dir, web) {
+        Ok((dir, bundle::EmbedderSource::App)) => Component {
             name,
             status: ComponentStatus::Ok,
-            summary: format!("found at {}", dir.display()),
+            summary: format!("the project's own host page at {}", dir.display()),
+            fix_commands: Vec::new(),
+        },
+        Ok((dir, bundle::EmbedderSource::Framework)) => Component {
+            name,
+            status: ComponentStatus::Ok,
+            summary: format!("no project host page — framework page at {}", dir.display()),
             fix_commands: Vec::new(),
         },
         Err(err) => Component {
             name,
             status: ComponentStatus::Missing,
             summary: format!("{err}"),
+            fix_commands: Vec::new(),
+        },
+    }
+}
+
+/// Whether the host page [`embedder_check`] would stage carries a `?module=`
+/// default that agrees with the `--out-name` this build would resolve —
+/// [`super::bundle::verify_host_page_module`]'s check, surfaced here so a
+/// mismatched `[web] out-name` shows up before a build is even attempted, not
+/// only as [`super::WebBuildError::OutNameHostPageMismatch`] after one starts.
+///
+/// Nothing to check when the framework page would be staged (its `--out-name`
+/// is always [`super::BINDGEN_OUT_NAME`], which is defined to match it) or
+/// when no host page resolves at all ([`embedder_check`] already reports
+/// that).
+fn host_page_module_check(project_dir: &Path, web: &WebSection, app_name: &str) -> Component {
+    let name = HOST_PAGE_COMPONENT.to_string();
+    match bundle::resolve_embedder(project_dir, web) {
+        Ok((_, bundle::EmbedderSource::Framework)) => Component {
+            name,
+            status: ComponentStatus::Ok,
+            summary: "framework page in use — nothing to verify".to_string(),
+            fix_commands: Vec::new(),
+        },
+        Ok((dir, bundle::EmbedderSource::App)) => {
+            let out_name = web.out_name_or(app_name);
+            match bundle::verify_host_page_module(&dir, out_name) {
+                Ok(()) => Component {
+                    name,
+                    status: ComponentStatus::Ok,
+                    summary: format!("matches out-name `{out_name}`"),
+                    fix_commands: Vec::new(),
+                },
+                Err(err) => Component {
+                    name,
+                    status: ComponentStatus::Missing,
+                    summary: format!("{err}"),
+                    fix_commands: Vec::new(),
+                },
+            }
+        }
+        Err(_) => Component {
+            name,
+            status: ComponentStatus::Ok,
+            summary: "no host page resolved yet — see the host page check above".to_string(),
             fix_commands: Vec::new(),
         },
     }
@@ -423,7 +547,7 @@ mod tests {
         assert_eq!(report.status(), ComponentStatus::Ok, "{report:?}");
         assert!(report.is_ready());
         assert!(report.blocking().is_empty());
-        assert_eq!(report.components.len(), 4);
+        assert_eq!(report.components.len(), 6);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -554,6 +678,89 @@ mod tests {
         assert!(!report.is_ready());
         assert_eq!(report.blocking().len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app's own host page is preferred over the framework, and reported
+    /// as such — the same precedence [`super::build`] follows.
+    #[test]
+    fn an_app_host_page_is_reported_ok_without_the_framework() {
+        let (root, project) = checkout("app-page", PINNED_MANIFEST);
+        let host = project.join("web");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(host.join("index.html"), "|| \"./pkg/app.js\";").unwrap();
+        fs::write(host.join("frust_web.js"), "// stub").unwrap();
+        let report = preflight(&healthy_runner(), &project);
+        let embedder = component(&report, EMBEDDER_COMPONENT);
+        assert_eq!(embedder.status, ComponentStatus::Ok);
+        assert!(
+            embedder.summary.contains("project's own"),
+            "{}",
+            embedder.summary
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A mismatched `[web] out-name` against the app's page blocks, before a
+    /// build is attempted.
+    #[test]
+    fn a_host_page_module_mismatch_blocks() {
+        let (root, project) = checkout(
+            "module-mismatch",
+            "[package]\nname = \"app\"\n\n\
+             [dependencies]\nfrust = { path = \"../../crates/frust\" }\n\n\
+             [target.'cfg(target_arch = \"wasm32\")'.dependencies]\n\
+             wasm-bindgen = \"=0.2.128\"\n",
+        );
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"app\"\norg = \"dev.f0x\"\n\n[web]\nout-name = \"renamed\"\n",
+        )
+        .unwrap();
+        let host = project.join("web");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(host.join("index.html"), "|| \"./pkg/app.js\";").unwrap();
+        fs::write(host.join("frust_web.js"), "// stub").unwrap();
+        let report = preflight(&healthy_runner(), &project);
+        let module = component(&report, HOST_PAGE_COMPONENT);
+        assert_eq!(module.status, ComponentStatus::Missing);
+        assert!(module.summary.contains("renamed"), "{}", module.summary);
+        assert!(!report.is_ready());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The framework page's fixed `--out-name` needs no verification.
+    #[test]
+    fn the_framework_page_needs_no_module_verification() {
+        let (root, project) = checkout("framework-page", PINNED_MANIFEST);
+        let report = preflight(&healthy_runner(), &project);
+        let module = component(&report, HOST_PAGE_COMPONENT);
+        assert_eq!(module.status, ComponentStatus::Ok);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// No `frust.toml` at all is reported `Ok`, not `Missing` — this
+    /// pipeline needs none.
+    #[test]
+    fn no_manifest_is_reported_ok() {
+        let (root, project) = checkout("no-manifest", PINNED_MANIFEST);
+        let report = preflight(&healthy_runner(), &project);
+        let manifest = component(&report, MANIFEST_COMPONENT);
+        assert_eq!(manifest.status, ComponentStatus::Ok);
+        assert!(report.is_ready());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A malformed `frust.toml` blocks, rather than being silently treated as
+    /// absent.
+    #[test]
+    fn a_malformed_manifest_blocks() {
+        let (root, project) = checkout("malformed-manifest", PINNED_MANIFEST);
+        fs::write(project.join("frust.toml"), "[web]\nout_name = \"x\"\n").unwrap();
+        let report = preflight(&healthy_runner(), &project);
+        let manifest = component(&report, MANIFEST_COMPONENT);
+        assert_eq!(manifest.status, ComponentStatus::Missing);
+        assert!(!report.is_ready());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

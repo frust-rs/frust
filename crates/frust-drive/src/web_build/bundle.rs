@@ -1,6 +1,6 @@
 //! Assembly primitives for the browser artifact directory: where it lives,
-//! the guarded rebuild of it, and the staging of `platform/web`'s host page
-//! over a `wasm-bindgen` build's own output.
+//! which host page it stages, the guarded rebuild of it, and the staging of
+//! that host page over a `wasm-bindgen` build's own output.
 //!
 //! The web tier's counterpart to [`crate::desktop_build::bundle`], and
 //! deliberately much smaller: a browser "bundle" is a directory a static file
@@ -10,71 +10,112 @@
 //! so [`prepare_dir`] carries the same containment guard, positioned at the
 //! delete itself rather than at the caller.
 //!
-//! # The embedder is consumed by path, never copied into the project
+//! # Two embedders, resolved in priority order
 //!
-//! `platform/web` is the browser embedder (`index.html` + `frust_web.js`), the
-//! third host tier alongside `platform/android`'s `frust-embedding` and
-//! `platform/ios`'s `FrustEmbedding`. Like those two it lives in the framework
-//! checkout and is reached from a consuming app by path, derived the one way
-//! this crate already derives every framework-relative directory:
-//! `<frust>/../../<repo-relative path>`, where `<frust>` is the app's own
-//! `frust` dependency path (the facade crate directory, two levels below the
-//! repo root). `crate::plugin::apply`'s `resolve_sibling`/`plugin_dep_path`
-//! and `crate::scaffold::context`'s `frust_embedding_android_dir` are the same
-//! walk; those helpers are private to their own modules, so [`embedder_dir`]
-//! restates it rather than widening someone else's surface — the convention is
-//! shared, the code is not.
+//! A build stages one of two host pages, decided by [`resolve_embedder`]:
+//!
+//! 1. **The app's own page**, at `<project>/<host-dir>` (`[web] host-dir`,
+//!    default `web` — the exact directory `templates/app/web.tmpl/` renders
+//!    to). Used when both [`EMBEDDER_FILES`] exist there.
+//! 2. **The framework's `platform/web`**, otherwise — reached through the
+//!    project's own `frust` path dependency, the same way
+//!    `platform/android`'s `frust-embedding` and `platform/ios`'s
+//!    `FrustEmbedding` are: `<frust>/../../platform/web`, where `<frust>` is
+//!    the app's `frust` dependency path (the facade crate directory, two
+//!    levels below the repo root). `crate::plugin::apply`'s
+//!    `resolve_sibling`/`plugin_dep_path` and `crate::scaffold::context`'s
+//!    `frust_embedding_android_dir` are the same walk; those helpers are
+//!    private to their own modules, so [`embedder_dir`] restates it rather
+//!    than widening someone else's surface — the convention is shared, the
+//!    code is not.
 //!
 //! This inherits the same machine-specific-checkout trade-off those accessors
-//! document: an app whose `frust` path dependency has moved cannot build for
-//! the browser until it is repointed. The mitigation is the same one, too —
-//! the path is a placeholder for a published artifact once the embedder ships
-//! to a registry.
+//! document: an app whose `frust` path dependency has moved cannot fall back
+//! to the framework page until it is repointed. The mitigation is the same
+//! one, too — the path is a placeholder for a published artifact once the
+//! embedder ships to a registry. A project that supplies its own host page
+//! never needs the fallback at all.
 //!
 //! # Staged, not templated
 //!
-//! Both embedder files are copied **verbatim**. `index.html` resolves the app
-//! module from `?module=`, defaulting to `./pkg/app.js`, so nothing in it
-//! needs rewriting for an ordinary app — the pipeline instead names its
-//! `wasm-bindgen` output `app` ([`super::BINDGEN_OUT_NAME`]) so a plain load
-//! with no query string finds it. Choosing the output name over an edit keeps
-//! a file this crate does not own byte-identical in the artifact directory,
-//! which is what makes a hand edit to `platform/web/index.html` reach every
-//! served build without a code change here.
+//! Both embedder files are copied **verbatim**, from whichever directory
+//! [`resolve_embedder`] picked. Each host page resolves its app module from
+//! `?module=`, defaulting to `./pkg/<name>.js` for its own `<name>` — the
+//! app's page defaults to its project name (`templates/app/web.tmpl/`'s
+//! `web_module_name`), the framework's to `app`
+//! ([`super::BINDGEN_OUT_NAME`]). Nothing in either page is rewritten; the
+//! pipeline instead names its `wasm-bindgen` output to match whichever page
+//! it staged, and refuses the build rather than silently drifting when it
+//! cannot (see [`verify_host_page_module`]).
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::manifest::WebSection;
+
 use super::WebBuildError;
 
-/// The project-relative output root every build target writes under — the same
-/// `dist/` the desktop pipeline uses, so one directory holds every artifact a
-/// project produces.
-pub(super) const DIST_DIR: &str = "dist";
-
-/// The `dist/` subdirectory this pipeline owns: `dist/web`.
-pub(super) const WEB_DIR: &str = "web";
-
 /// The artifact-directory subdirectory `wasm-bindgen` output lands in, fixed
-/// by `platform/web/index.html`'s own `./pkg/<name>.js` default.
+/// by both host pages' own `./pkg/<name>.js` shape.
 pub(super) const PKG_DIR: &str = "pkg";
 
-/// The embedder's repo-root-relative directory.
+/// The embedder's repo-root-relative directory, when the framework's own page
+/// is staged.
 const EMBEDDER_REL_PATH: &str = "platform/web";
 
-/// The embedder files staged into every artifact directory, in copy order.
-/// Both are required: `index.html` imports `./frust_web.js` directly, so a
-/// directory carrying only the first serves a page that fails to boot.
+/// The host-page files every embedder — the app's own or the framework's —
+/// must carry, in copy order. Both are required: `index.html` imports
+/// `./frust_web.js` directly, so a directory carrying only the first serves a
+/// page that fails to boot.
 pub(super) const EMBEDDER_FILES: &[&str] = &["index.html", "frust_web.js"];
 
-/// Where a browser build for `project_dir` lands: `<project>/dist/web`.
+/// Where a browser build for `project_dir` lands: `<project>/<out-dir>`
+/// (`[web] out-dir`, default `build/web` — see
+/// [`WebSection::out_dir_or_default`]).
 ///
 /// Pure path arithmetic — nothing is created or checked. Public so a
 /// front-end can name the directory (a "serving …" line, a `--open` URL)
 /// without re-deriving the layout, and so [`serve`](super::serve) has an
-/// obvious default root to be pointed at.
-pub fn artifact_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join(DIST_DIR).join(WEB_DIR)
+/// obvious default root to be pointed at. Takes the resolved section (rather
+/// than a whole `Manifest`) so a caller that already read one section out of
+/// an optional manifest is not made to reconstruct one.
+pub fn artifact_dir(project_dir: &Path, web: &WebSection) -> PathBuf {
+    project_dir.join(web.out_dir_or_default())
+}
+
+/// Which host page a build staged — [`resolve_embedder`]'s answer, and the
+/// deciding fact behind a build's `wasm-bindgen --out-name` and every note
+/// [`super::build`] attaches about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EmbedderSource {
+    /// The project's own host page, at `<project>/<host-dir>`.
+    App,
+    /// The framework's `platform/web`, staged because the project supplies
+    /// no host page of its own.
+    Framework,
+}
+
+/// Picks the host page a build stages: the project's own `<host-dir>` when it
+/// carries both [`EMBEDDER_FILES`], the framework's `platform/web` otherwise.
+///
+/// Checked in that order and cheaply (two [`Path::is_file`] probes) — no
+/// partial-app-page case exists the way [`embedder_dir`]'s typed refusal
+/// exists for the framework page: an app that starts one of its own two files
+/// but not the other is read as "no app page here", and the framework page is
+/// tried next rather than the build failing on an incomplete `<host-dir>` a
+/// project may never have meant to populate.
+pub(super) fn resolve_embedder(
+    project_dir: &Path,
+    web: &WebSection,
+) -> Result<(PathBuf, EmbedderSource), WebBuildError> {
+    let app_dir = project_dir.join(web.host_dir_or_default());
+    if EMBEDDER_FILES
+        .iter()
+        .all(|file| app_dir.join(file).is_file())
+    {
+        return Ok((app_dir, EmbedderSource::App));
+    }
+    embedder_dir(project_dir).map(|dir| (dir, EmbedderSource::Framework))
 }
 
 /// The absolute `platform/web` directory this project's `frust` dependency
@@ -88,7 +129,8 @@ pub fn artifact_dir(project_dir: &Path) -> PathBuf {
 /// Fails with a typed error rather than degrading: unlike a missing icon (a
 /// quality question the desktop pipeline answers with a note), a missing
 /// embedder means the artifact directory would contain a `pkg/` and no page
-/// to load it from — servable, and broken in the browser.
+/// to load it from — servable, and broken in the browser. [`resolve_embedder`]
+/// only reaches this when the project supplies no host page of its own.
 pub fn embedder_dir(project_dir: &Path) -> Result<PathBuf, WebBuildError> {
     let manifest = project_dir.join("Cargo.toml");
     let frust_path = frust_dep_path(&manifest).ok_or_else(|| WebBuildError::NoFrustDependency {
@@ -132,13 +174,14 @@ fn frust_dep_path(manifest: &Path) -> Option<String> {
 
 /// The app crate's package name, as `Cargo.toml`'s `[package] name` spells it
 /// — the stem `cargo build` names its `wasm32` artifact after, once cargo's
-/// own `-` → `_` normalization is applied by [`super::wasm_file_stem`].
+/// own `-` → `_` normalization is applied by [`super::wasm_file_stems`], and
+/// the fallback [`super::build`] resolves `[web] out-name` and `[app] name`
+/// against when the project carries no `frust.toml` at all.
 ///
-/// A hard error rather than a soft fallback (the desktop pipeline's stance for
-/// the same value): there is no `frust.toml` display name to fall back to here
-/// because this pipeline deliberately requires no `frust.toml` at all — a
-/// plain `wasm32` app crate is a legitimate input — so an unreadable or
-/// nameless manifest leaves nothing to look for on disk.
+/// A hard error rather than a soft fallback: `Cargo.toml` is the one input
+/// this pipeline always requires (a `frust.toml` is not — see the module doc
+/// on `super`), so an unreadable or nameless manifest leaves nothing to look
+/// for on disk.
 pub(super) fn package_name(project_dir: &Path) -> Result<String, WebBuildError> {
     let manifest = project_dir.join("Cargo.toml");
     let text = fs::read_to_string(&manifest).map_err(|source| WebBuildError::Io {
@@ -163,30 +206,107 @@ pub(super) fn package_name(project_dir: &Path) -> Result<String, WebBuildError> 
         })
 }
 
+/// The basename `X` a host page's `"./pkg/X.js"` `?module=` default names, or
+/// `None` when `html` does not carry that literal shape.
+///
+/// Deliberately lenient rather than a full HTML/JS parse: both shipped pages
+/// (`templates/app/web.tmpl/index.html.tmpl`'s render and
+/// `platform/web/index.html`) write the default as a plain JS string literal
+/// (`|| "./pkg/<name>.js";`) this substring search finds directly, and a
+/// hand-authored page that restructures the script is a page
+/// [`verify_host_page_module`] declines to second-guess rather than misreads.
+///
+/// The search requires the literal quote on both sides (`"./pkg/` …
+/// `.js"`), not a bare `./pkg/` substring: both shipped pages also describe
+/// the same shape in prose, backtick-quoted (`` `?module=./pkg/<name>.js` ``)
+/// ahead of the real default in file order — a bare substring search would
+/// find that placeholder text first and misread its literal `<name>` as the
+/// page's actual default. Requiring the surrounding double quotes matches
+/// only the real JS string literal, which neither backtick-quoted prose ever
+/// carries.
+pub(super) fn page_module_default(html: &str) -> Option<String> {
+    const MARKER: &str = "\"./pkg/";
+    const TERMINATOR: &str = ".js\"";
+    let start = html.find(MARKER)? + MARKER.len();
+    let rest = &html[start..];
+    let end = rest.find(TERMINATOR)?;
+    let name = &rest[..end];
+    if name.is_empty() || name.contains(['"', '\'', '/', '\\', '\n', ' ', '<', '>']) {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Refuses the build when the app's own staged page's `?module=` default
+/// disagrees with `out_name` — the `wasm-bindgen --out-name` this build
+/// resolved. A user who overrides `[web] out-name` without also editing their
+/// page would otherwise get a build that succeeds and a browser console that
+/// 404s: this pipeline stages pages verbatim (see the module doc), so it
+/// cannot fix the mismatch itself and refuses instead, before the compile
+/// (the module doc's ordering rule).
+///
+/// Only ever called for [`EmbedderSource::App`]: the framework page's default
+/// is fixed and this pipeline's own `out_name` choice for it
+/// ([`super::BINDGEN_OUT_NAME`]) is defined to match it, so there is nothing
+/// to verify there.
+pub(super) fn verify_host_page_module(
+    embedder: &Path,
+    out_name: &str,
+) -> Result<(), WebBuildError> {
+    let path = embedder.join("index.html");
+    let html = fs::read_to_string(&path).map_err(|source| WebBuildError::Io {
+        action: "reading the host page to verify its `?module=` default",
+        path: path.clone(),
+        source,
+    })?;
+    match page_module_default(&html) {
+        Some(expected) if expected != out_name => Err(WebBuildError::OutNameHostPageMismatch {
+            path,
+            page_module: expected,
+            out_name: out_name.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `dir` is a strict descendant of `project_dir` — never
+/// `project_dir` itself, never reached through a `..` (or a bare `.`
+/// contributing nothing) component. Lexical, like the rest of this guard:
+/// symlinks are not resolved (see [`prepare_dir`]).
+fn is_strictly_contained(dir: &Path, project_dir: &Path) -> bool {
+    let Ok(suffix) = dir.strip_prefix(project_dir) else {
+        return false;
+    };
+    let mut has_real_component = false;
+    for component in suffix.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(_) => has_real_component = true,
+            _ => return false,
+        }
+    }
+    has_real_component
+}
+
 /// Creates `dir` fresh: an existing directory is removed first, so a rebuild
 /// can never serve a previous run's file (a renamed module, a stale
 /// `frust_web.js`) out of the artifact directory it hands back.
 ///
 /// **Guarded**, for the reason [`crate::desktop_build::bundle`]'s twin is:
 /// `remove_dir_all` is the most dangerous primitive in this module, so `dir`
-/// must be a strict descendant of `<project_dir>/dist` or the call is a typed
-/// refusal ([`WebBuildError::UnsafeArtifactDir`]) that touches nothing. The
-/// check is lexical and runs in two parts, both needed — a `..` component
-/// anywhere is refused outright (`Path::starts_with` compares components, so
-/// `dist/web/../../..` "starts with" `dist` while resolving nowhere near it),
-/// and what remains must sit under the dist root. Symlinks are not resolved:
-/// [`fs::remove_dir_all`] unlinks a symlinked directory rather than following
-/// it, so a link inside `dist/` cannot be used to delete the tree it points
-/// at.
+/// must be a strict descendant of `project_dir` ([`is_strictly_contained`]) or
+/// the call is a typed refusal ([`WebBuildError::UnsafeArtifactDir`]) that
+/// touches nothing. `[web] out-dir` is project-configurable (unlike the old
+/// hard-coded `dist/web`), so the boundary this guard enforces is the project
+/// directory itself rather than a fixed subdirectory of it — an out-dir of
+/// `"."`, `".."`, or anything that steps outside the project is refused the
+/// same way a `dist/web/../../..` traversal always was.
 pub(super) fn prepare_dir(dir: &Path, project_dir: &Path) -> Result<(), WebBuildError> {
-    let dist_root = project_dir.join(DIST_DIR);
-    let contained = !dir.components().any(|c| matches!(c, Component::ParentDir))
-        && dir.starts_with(&dist_root)
-        && dir != dist_root;
-    if !contained {
+    if !is_strictly_contained(dir, project_dir) {
         return Err(WebBuildError::UnsafeArtifactDir {
             path: dir.to_path_buf(),
-            dist_root,
+            project_dir: project_dir.to_path_buf(),
         });
     }
     if dir.exists() {
@@ -221,8 +341,8 @@ pub(super) fn copy_file(from: &Path, to: &Path) -> Result<(), WebBuildError> {
     Ok(())
 }
 
-/// Stages the embedder's host page over an already-populated artifact
-/// directory, returning the files written in copy order.
+/// Stages the resolved embedder's host page over an already-populated
+/// artifact directory, returning the files written in copy order.
 ///
 /// Runs **after** `wasm-bindgen`, not before: `wasm-bindgen --out-dir` writes
 /// into `pkg/` only, so the two never collide, but ordering the copy last
@@ -304,11 +424,19 @@ mod tests {
     }
 
     #[test]
-    fn the_artifact_dir_is_dist_web_under_the_project() {
+    fn the_artifact_dir_honours_out_dir_and_defaults_to_build_web() {
         assert_eq!(
-            artifact_dir(Path::new("/p")),
-            PathBuf::from("/p/dist/web"),
+            artifact_dir(Path::new("/p"), &WebSection::default()),
+            PathBuf::from("/p/build/web"),
             "the layout front-ends print and serve must not drift"
+        );
+        let overridden = WebSection {
+            out_dir: Some("dist".to_string()),
+            ..WebSection::default()
+        };
+        assert_eq!(
+            artifact_dir(Path::new("/p"), &overridden),
+            PathBuf::from("/p/dist")
         );
     }
 
@@ -348,6 +476,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The precedence's first branch: an app that supplies its own complete
+    /// host page never touches the framework, even one that cannot resolve.
+    #[test]
+    fn resolve_embedder_prefers_the_apps_own_host_page() {
+        let project = temp_dir("resolve-app-page");
+        fs::write(project.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        let host = project.join("web");
+        fs::create_dir_all(&host).unwrap();
+        for file in EMBEDDER_FILES {
+            fs::write(host.join(file), "// stub\n").unwrap();
+        }
+        let (dir, source) = resolve_embedder(&project, &WebSection::default()).unwrap();
+        assert_eq!(dir, host);
+        assert_eq!(source, EmbedderSource::App);
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// `[web] host-dir` is read, not just the default.
+    #[test]
+    fn resolve_embedder_honours_a_custom_host_dir() {
+        let project = temp_dir("resolve-custom-host-dir");
+        fs::write(project.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        let host = project.join("page");
+        fs::create_dir_all(&host).unwrap();
+        for file in EMBEDDER_FILES {
+            fs::write(host.join(file), "// stub\n").unwrap();
+        }
+        let web = WebSection {
+            host_dir: Some("page".to_string()),
+            ..WebSection::default()
+        };
+        let (dir, source) = resolve_embedder(&project, &web).unwrap();
+        assert_eq!(dir, host);
+        assert_eq!(source, EmbedderSource::App);
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// No app host page at all (`examples/web-gallery`'s shape: an
+    /// `index.html` at the project root, not under `web/`) falls back to the
+    /// framework embedder.
+    #[test]
+    fn resolve_embedder_falls_back_to_the_framework_when_no_app_page_exists() {
+        let (root, project) = checkout_with_app("resolve-fallback", EMBEDDER_FILES);
+        let (dir, source) = resolve_embedder(&project, &WebSection::default()).unwrap();
+        assert_eq!(
+            dir.canonicalize().unwrap(),
+            root.join("platform/web").canonicalize().unwrap()
+        );
+        assert_eq!(source, EmbedderSource::Framework);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An app page missing one of its two files is read as "no app page",
+    /// not as a partial-page error — the framework is tried next.
+    #[test]
+    fn resolve_embedder_treats_a_partial_app_page_as_absent() {
+        let (root, project) = checkout_with_app("resolve-partial-app-page", EMBEDDER_FILES);
+        fs::create_dir_all(project.join("web")).unwrap();
+        fs::write(project.join("web/index.html"), "<!doctype html>").unwrap();
+        let (_, source) = resolve_embedder(&project, &WebSection::default()).unwrap();
+        assert_eq!(source, EmbedderSource::Framework);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Neither page resolving surfaces the framework's own typed error.
+    #[test]
+    fn resolve_embedder_propagates_the_framework_error_when_neither_page_exists() {
+        let dir = temp_dir("resolve-neither");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        assert!(matches!(
+            resolve_embedder(&dir, &WebSection::default()),
+            Err(WebBuildError::NoFrustDependency { .. })
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_package_name_comes_from_cargo_toml() {
         let (root, project) = checkout_with_app("pkg-name", EMBEDDER_FILES);
@@ -367,9 +571,71 @@ mod tests {
     }
 
     #[test]
+    fn page_module_default_reads_the_scaffolded_and_framework_shapes() {
+        let scaffolded = "const moduleUrl =\n  new URLSearchParams(location.search).get(\"module\") || \"./pkg/myapp.js\";";
+        assert_eq!(page_module_default(scaffolded).as_deref(), Some("myapp"));
+        let framework = "|| \"./pkg/app.js\";";
+        assert_eq!(page_module_default(framework).as_deref(), Some("app"));
+        assert_eq!(page_module_default("<!doctype html>no module here"), None);
+    }
+
+    /// Regression: both shipped pages describe the same `?module=` shape in
+    /// backtick-quoted prose (`` `?module=./pkg/<name>.js` ``) BEFORE the real
+    /// quoted default in file order. A bare `./pkg/` substring search finds
+    /// that placeholder text first and misreads its literal `<name>` as the
+    /// page's actual default, refusing every build of a freshly scaffolded
+    /// app outright — this is the real shape `templates/app/web.tmpl/`
+    /// renders, reproduced verbatim.
+    #[test]
+    fn page_module_default_skips_backtick_quoted_prose_ahead_of_the_real_default() {
+        let html = "\
+             <!--\n\
+             load. Defaults to `./pkg/w205app.js` so this page works unedited once a\n\
+             with `?module=./pkg/<name>.js`, matching the `[web] out-name` your build\n\
+             -->\n\
+             <script type=\"module\">\n\
+               // `?module=./pkg/<name>.js` selects which app's wasm-bindgen glue to\n\
+               const moduleUrl =\n\
+                 new URLSearchParams(location.search).get(\"module\") || \"./pkg/w205app.js\";\n\
+             </script>\n";
+        assert_eq!(page_module_default(html).as_deref(), Some("w205app"));
+    }
+
+    #[test]
+    fn verify_host_page_module_passes_when_the_default_matches() {
+        let project = temp_dir("verify-match");
+        fs::create_dir_all(project.join("web")).unwrap();
+        fs::write(project.join("web/index.html"), "|| \"./pkg/myapp.js\";").unwrap();
+        verify_host_page_module(&project.join("web"), "myapp").unwrap();
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn verify_host_page_module_refuses_a_mismatch_naming_both_values() {
+        let project = temp_dir("verify-mismatch");
+        fs::create_dir_all(project.join("web")).unwrap();
+        fs::write(project.join("web/index.html"), "|| \"./pkg/myapp.js\";").unwrap();
+        let err = verify_host_page_module(&project.join("web"), "renamed").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("myapp"), "{message}");
+        assert!(message.contains("renamed"), "{message}");
+        assert!(matches!(err, WebBuildError::OutNameHostPageMismatch { .. }));
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn verify_host_page_module_is_lenient_about_an_unrecognized_page_shape() {
+        let project = temp_dir("verify-lenient");
+        fs::create_dir_all(project.join("web")).unwrap();
+        fs::write(project.join("web/index.html"), "<!doctype html>\n").unwrap();
+        verify_host_page_module(&project.join("web"), "whatever").unwrap();
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    #[test]
     fn preparing_the_artifact_dir_clears_a_previous_build() {
         let project = temp_dir("prepare");
-        let dir = artifact_dir(&project);
+        let dir = project.join("build/web");
         fs::create_dir_all(dir.join("pkg")).unwrap();
         fs::write(dir.join("pkg/stale.js"), "old").unwrap();
         prepare_dir(&dir, &project).unwrap();
@@ -379,15 +645,17 @@ mod tests {
     }
 
     /// The guard's whole point: every path that is not a strict descendant of
-    /// `<project>/dist` is refused before anything is removed.
+    /// `project_dir` is refused before anything is removed — including an
+    /// `out-dir` of `"."` or `".."`, which a hard-coded `dist/` root never
+    /// had to consider.
     #[test]
-    fn preparing_a_directory_outside_dist_is_refused() {
+    fn preparing_a_directory_outside_the_project_is_refused() {
         let project = temp_dir("prepare-guard");
         for candidate in [
             project.clone(),
-            project.join("src"),
-            project.join(DIST_DIR),
-            project.join("dist/web/../../.."),
+            project.join("."),
+            project.join("build/web/../../.."),
+            project.join(".."),
             PathBuf::from("/"),
         ] {
             let err = prepare_dir(&candidate, &project).unwrap_err();
@@ -400,12 +668,25 @@ mod tests {
         let _ = fs::remove_dir_all(&project);
     }
 
+    /// A nested or single-segment `out-dir` under the project is allowed —
+    /// only escaping or resolving to the project root itself is refused.
+    #[test]
+    fn preparing_any_strict_descendant_of_the_project_is_allowed() {
+        let project = temp_dir("prepare-allowed");
+        for candidate in ["dist", "build/web", "output/site"] {
+            let dir = project.join(candidate);
+            prepare_dir(&dir, &project).unwrap();
+            assert!(dir.is_dir(), "{candidate}");
+        }
+        let _ = fs::remove_dir_all(&project);
+    }
+
     #[test]
     fn staging_copies_both_embedder_files_verbatim() {
         let (root, project) = checkout_with_app("stage", EMBEDDER_FILES);
         let embedder = embedder_dir(&project).unwrap();
         fs::write(embedder.join("index.html"), "<!doctype html>\n").unwrap();
-        let dir = artifact_dir(&project);
+        let dir = artifact_dir(&project, &WebSection::default());
         prepare_dir(&dir, &project).unwrap();
         let written = stage_embedder(&embedder, &dir).unwrap();
         assert_eq!(

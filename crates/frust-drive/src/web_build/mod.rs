@@ -5,44 +5,71 @@
 //!
 //! The web tier's counterpart to [`crate::desktop_build`], and shaped like it
 //! on purpose: one entry point ([`build`]) that compiles through the injected
-//! [`ProcessRunner`], lays out a directory under `dist/`, and returns a typed
-//! [`WebBuildReport`] carrying the artifacts plus every non-fatal observation
-//! as a [`WebBuildNote`].
+//! [`ProcessRunner`], lays out a directory under `[web] out-dir`, and returns
+//! a typed [`WebBuildReport`] carrying the artifacts plus every non-fatal
+//! observation as a [`WebBuildNote`].
+//!
+//! # `frust.toml`'s `[web]` section drives the pipeline, but is never required
+//!
+//! Unlike the desktop and mobile pipelines, this one does not require an app
+//! manifest: there is no bundle identity to resolve, no icon to generate and
+//! no launcher metadata to write, so a plain `wasm32` app crate with no
+//! `frust.toml` at all is a valid input (`examples/web-gallery`'s own
+//! shape — its own proof of this, see below). When a `frust.toml` **is**
+//! present, its `[web]` section (`crate::manifest::WebSection`) governs every
+//! layout decision below; an absent section behaves exactly like
+//! [`WebSection::default`]. [`build`], [`preflight`] and
+//! [`ServeOptions::from_manifest`] each read (or accept) the manifest for
+//! this reason — see their own docs for exactly how.
 //!
 //! # The pipeline, and why the order is not negotiable
 //!
-//! 1. **Resolve the embedder first.** `platform/web` is reached through the
-//!    project's own `frust` path dependency (see [`bundle`]). It is checked
-//!    before the compile because a multi-minute release build that then fails
-//!    on a missing host page is the worst possible place to learn about it.
+//! 1. **Resolve the host page first, and verify it.** [`bundle::resolve_embedder`]
+//!    picks between the project's own `<host-dir>` and the framework's
+//!    `platform/web` (reached through the project's `frust` path dependency —
+//!    see [`bundle`]) before anything is compiled, and
+//!    [`bundle::verify_host_page_module`] refuses a resolved app page whose
+//!    `?module=` default disagrees with the `wasm-bindgen --out-name` this
+//!    build would use. Both checks run before the compile because a
+//!    multi-minute release build that then fails on a missing or
+//!    mismatched host page is the worst possible place to learn about it.
 //! 2. **`cargo build --target wasm32-unknown-unknown`**, with the mode's
 //!    profile flag.
 //! 3. **`wasm-bindgen --target web`** over the produced `.wasm`, straight into
-//!    the artifact directory's `pkg/`. This step is what turns a raw module
-//!    into something a browser can `import` — the `.wasm` cargo emits is not
+//!    the artifact directory's `pkg/`, named `--out-name` to match whichever
+//!    host page step 1 resolved. This step is what turns a raw module into
+//!    something a browser can `import` — the `.wasm` cargo emits is not
 //!    loadable on its own.
 //! 4. **`wasm-opt`, strictly after `wasm-bindgen`, never before.** Optimizing
 //!    the pre-bindgen module strips or reorders the sections `wasm-bindgen`
 //!    reads to generate its glue; the ordering is recorded as a finding in
 //!    `examples/web-gallery/README.md` and is a correctness rule here, not a
-//!    preference. Optional, and skipped rather than fatal — see
+//!    preference. Runs when [`WebSection::wasm_opt_enabled`] says so for this
+//!    build's mode; optional either way, and skipped rather than fatal — see
 //!    [`WebBuildNote`].
 //! 5. **Stage the host page.** `index.html` and `frust_web.js` are copied
-//!    verbatim from the embedder.
+//!    verbatim from whichever directory step 1 resolved.
 //!
-//! # Why the output is named `app`
+//! # `--out-name`, resolved from the host page that gets staged
 //!
-//! `platform/web/index.html` resolves the app module from `?module=`,
-//! defaulting to `./pkg/app.js`. Something has to make a plain load with no
-//! query string work, and there are exactly two ways: name the `wasm-bindgen`
-//! output `app`, or rewrite the copied `index.html`'s default to whatever the
-//! crate is called. This pipeline takes the first ([`BINDGEN_OUT_NAME`]).
-//! Rewriting a file this crate does not own would mean the staged copy is no
-//! longer the embedder's own file, so a hand edit to
-//! `platform/web/index.html` would stop reaching a built app — and the
-//! embedder's README already documents `--out-name app` as the recipe that
-//! matches its default. The crate's real name survives on the artifact
-//! directory's own path and in the report; only the module file is renamed.
+//! Every host page resolves its app module from `?module=`, defaulting to
+//! `./pkg/<name>.js` for its own `<name>`. There are exactly two names in
+//! play, one per [`bundle::EmbedderSource`]:
+//!
+//! - **The app's own page** defaults to the project's own name
+//!   (`templates/app/web.tmpl/`'s `web_module_name`), so this build's
+//!   `--out-name` is `WebSection::out_name_or(&app_name)` — `[web] out-name`
+//!   when set, else `[app] name` (or, with no `frust.toml` at all, the
+//!   `Cargo.toml` package name — see [`bundle::package_name`]).
+//! - **The framework's page** defaults to `app` and this pipeline never
+//!   rewrites a file it does not own (see [`bundle`]'s module doc), so its
+//!   `--out-name` is always [`BINDGEN_OUT_NAME`] regardless of `[web]
+//!   out-name` — an explicit override is reported ignored
+//!   ([`WebBuildNote::FrameworkOutNameIgnored`]).
+//!
+//! [`bundle::verify_host_page_module`] is what keeps the app-page branch
+//! honest: overriding `out-name` without also editing the page's own default
+//! is a typed refusal, not a build that quietly 404s in a browser.
 //!
 //! # Print-free
 //!
@@ -51,20 +78,6 @@
 //! (`docs/CODE_STANDARDS.md`'s printing anti-pattern,
 //! `crates/frust-drive/tests/print_free_cores.rs`). The dev server takes its
 //! own optional log sink for the same reason ([`RequestLog`]).
-//!
-//! # No `frust.toml` required
-//!
-//! Unlike the desktop and mobile pipelines, this one reads no app manifest:
-//! there is no bundle identity to resolve, no icon to generate and no launcher
-//! metadata to write. The only project input is `Cargo.toml` — the package
-//! name and the `frust` dependency path. A plain `wasm32` app crate is
-//! therefore a valid input, which is what lets `examples/web-gallery` (a
-//! standalone workspace with no `frust.toml`) be the pipeline's own proof.
-//!
-//! For the same reason the pipeline consumes only [`BuildInfo::mode`]:
-//! `flavor`, `defines`, `build_name` and `build_number` have no browser
-//! carrier to be written into, exactly as they have no desktop-bundle carrier
-//! in [`crate::desktop_build`].
 
 mod bundle;
 mod preflight;
@@ -73,27 +86,26 @@ mod serve;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::build_info::{BuildInfo, BuildMode};
+use crate::build_info::{BuildInfo, WASM_TARGET_TRIPLE};
 use crate::doctor::{EnvLookup, RealEnv};
+#[cfg(test)]
+use crate::manifest::WebSection;
+use crate::manifest::{self, Manifest};
 use crate::process::{ProcessRunner, tail_lines};
 
 pub use bundle::{artifact_dir, embedder_dir};
 pub use preflight::{
-    BINDGEN_COMPONENT, EMBEDDER_COMPONENT, TARGET_COMPONENT, WASM_OPT_COMPONENT, WebPreflight,
-    preflight,
+    BINDGEN_COMPONENT, EMBEDDER_COMPONENT, HOST_PAGE_COMPONENT, MANIFEST_COMPONENT,
+    TARGET_COMPONENT, WASM_OPT_COMPONENT, WebPreflight, preflight,
 };
 pub use serve::{
     CONTENT_TYPES, DEFAULT_CONTENT_TYPE, DEFAULT_PORT, DevServer, RequestLog, ServeError,
     ServeOptions, Status, content_type, serve,
 };
 
-/// The Rust target every browser build compiles for. There is no second one:
-/// `wasm32-unknown-emscripten` needs a toolchain Frust does not ship against,
-/// and `wasm32-wasi` is not a browser target at all.
-pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
-
-/// The `wasm-bindgen --out-name` every build uses, matching
-/// `platform/web/index.html`'s `./pkg/app.js` default — see the module doc.
+/// The `wasm-bindgen --out-name` a build uses when the framework's
+/// `platform/web` page is staged, matching that page's fixed
+/// `./pkg/app.js` default — see the module doc's `--out-name` section.
 pub const BINDGEN_OUT_NAME: &str = "app";
 
 /// How many trailing output lines a failed tool invocation reports — the same
@@ -103,14 +115,15 @@ const FAILURE_TAIL_LINES: usize = 50;
 /// What a successful browser build produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebBuildReport {
-    /// The artifact directory: `<project>/dist/web`. This is the directory to
-    /// hand [`serve`], to upload, or to copy behind a CDN.
+    /// The artifact directory: `<project>/<out-dir>` (`[web] out-dir`,
+    /// default `build/web`). This is the directory to hand [`serve`], to
+    /// upload, or to copy behind a CDN.
     pub root: PathBuf,
     /// The staged host page — the URL a browser opens.
     pub index_html: PathBuf,
-    /// The `wasm-bindgen` JS glue `index.html` imports (`pkg/app.js`).
+    /// The `wasm-bindgen` JS glue `index.html` imports (`pkg/<out-name>.js`).
     pub module_js: PathBuf,
-    /// The WebAssembly module that glue loads (`pkg/app_bg.wasm`).
+    /// The WebAssembly module that glue loads (`pkg/<out-name>_bg.wasm`).
     pub wasm: PathBuf,
     /// Every file in the artifact directory, `pkg/` contents first and the two
     /// staged host-page files last (write order).
@@ -121,19 +134,29 @@ pub struct WebBuildReport {
 
 /// A non-fatal observation about a build, returned rather than printed so each
 /// front-end renders it its own way.
-///
-/// Every variant here is about `wasm-opt`, and all three of its "did not run"
-/// cases are notes rather than failures for one reason: the pass changes the
-/// artifact's *size*, never its behaviour. A build without it loads and runs
-/// identically, so refusing to produce one would trade a working preview for a
-/// tidier one. This mirrors the desktop pipeline's stance on a missing or
-/// unusable icon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebBuildNote {
-    /// A debug build was not optimized. Deliberate: `wasm-opt` over an
+    /// The project's own host page (`[web] host-dir`, default `web`) was
+    /// staged.
+    AppHostPageStaged,
+    /// No app host page was found; the framework's `platform/web` was staged
+    /// instead.
+    FrameworkHostPageStaged,
+    /// The framework page was staged, so an explicit `[web] out-name` was
+    /// ignored: the framework page's `?module=` default is fixed to
+    /// `pkg/app.js`, and this pipeline never rewrites a file it does not own
+    /// (see the `bundle` module doc).
+    FrameworkOutNameIgnored { out_name: String },
+    /// `wasm-opt` did not run because this build's mode does not default it
+    /// on (`BuildMode::wasm_opt_default` — release only) and no `[web]
+    /// wasm-opt = true` override forced it. Deliberate: `wasm-opt` over an
     /// unoptimized multi-megabyte module costs far more time than it saves in
-    /// an edit-reload loop, and a debug artifact is never shipped.
-    WasmOptSkippedForDebug,
+    /// an edit-reload loop, and a non-release artifact is never shipped.
+    WasmOptSkippedForMode,
+    /// `wasm-opt` did not run because `[web] wasm-opt = false` explicitly
+    /// disabled it, overriding a mode (release) that would otherwise have run
+    /// it.
+    WasmOptDisabled,
     /// `wasm-opt` is not installed, so the module was left as `wasm-bindgen`
     /// emitted it.
     WasmOptUnavailable,
@@ -148,10 +171,28 @@ pub enum WebBuildNote {
 impl fmt::Display for WebBuildNote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WebBuildNote::WasmOptSkippedForDebug => write!(
+            WebBuildNote::AppHostPageStaged => {
+                write!(f, "staged the project's own host page")
+            }
+            WebBuildNote::FrameworkHostPageStaged => write!(
                 f,
-                "debug build — skipped `wasm-opt` (it costs more than it saves in an edit-reload \
-                 loop; build with --release for an optimized module)"
+                "no project host page found — staged the framework's `platform/web` page instead"
+            ),
+            WebBuildNote::FrameworkOutNameIgnored { out_name } => write!(
+                f,
+                "`[web] out-name = \"{out_name}\"` was ignored: the framework page's `?module=` \
+                 default is fixed to `pkg/app.js`, so this build used `--out-name app` instead"
+            ),
+            WebBuildNote::WasmOptSkippedForMode => write!(
+                f,
+                "this build mode does not run `wasm-opt` by default (it costs more than it saves \
+                 in an edit-reload loop) — build with --release, or set `[web] wasm-opt = true` \
+                 to force it here"
+            ),
+            WebBuildNote::WasmOptDisabled => write!(
+                f,
+                "`[web] wasm-opt = false` disabled the optimizer for this build — the shipped \
+                 module is unoptimized by explicit choice"
             ),
             WebBuildNote::WasmOptUnavailable => write!(
                 f,
@@ -176,10 +217,16 @@ impl fmt::Display for WebBuildNote {
 /// [`preflight`].
 #[derive(Debug, thiserror::Error)]
 pub enum WebBuildError {
+    #[error("reading `frust.toml` at '{}': {reason}", project_dir.display())]
+    Manifest {
+        project_dir: PathBuf,
+        reason: String,
+    },
     #[error(
         "the project's `Cargo.toml` at '{}' declares no `frust = {{ path = ... }}` dependency, \
          so the browser embedder (`platform/web`) cannot be located — a browser build stages its \
-         host page from the framework checkout the app is built against",
+         host page from the framework checkout the app is built against, when the project \
+         supplies no host page of its own",
         manifest.display()
     )]
     NoFrustDependency { manifest: PathBuf },
@@ -197,19 +244,32 @@ pub enum WebBuildError {
     #[error("reading `[package] name` from '{}': {reason}", manifest.display())]
     PackageName { manifest: PathBuf, reason: String },
     #[error(
-        "refusing to prepare the artifact directory '{path}': it is not inside the project's own \
-         '{dist_root}' output directory — preparing it deletes it recursively first, so a target \
-         outside `dist/` is never touched"
+        "the staged host page at '{}' defaults its `?module=` query to `pkg/{page_module}.js`, \
+         but this build resolved `[web] out-name` to `{out_name}` — wasm-bindgen would write \
+         `pkg/{out_name}.js`, which the page never loads by default; either drop the `out-name` \
+         override or edit the page's `?module=` default to match",
+        path.display()
     )]
-    UnsafeArtifactDir { path: PathBuf, dist_root: PathBuf },
+    OutNameHostPageMismatch {
+        path: PathBuf,
+        page_module: String,
+        out_name: String,
+    },
+    #[error(
+        "refusing to prepare the artifact directory '{path}': it is not inside the project \
+         directory '{project_dir}' — preparing it deletes it recursively first, so a target \
+         outside the project's own tree is never touched; `[web] out-dir` must resolve to a \
+         subdirectory of the project root"
+    )]
+    UnsafeArtifactDir { path: PathBuf, project_dir: PathBuf },
     #[error("spawning `cargo {args}`: {reason}")]
     CargoSpawn { args: String, reason: String },
     #[error("`cargo {args}` failed:\n{tail}")]
     CargoFailed { args: String, tail: String },
     #[error(
-        "`cargo build --target {WASM_TARGET}` succeeded but produced no `{profile}` module for \
-         `{crate_name}` — looked for {} — check the app crate really builds a binary or cdylib \
-         target named `{crate_name}`",
+        "`cargo build --target {WASM_TARGET_TRIPLE}` succeeded but produced no `{profile}` module \
+         for `{crate_name}` — looked for {} — check the app crate really builds a binary or \
+         cdylib target named `{crate_name}`",
         searched.iter().map(|p| format!("'{}'", p.display())).collect::<Vec<_>>().join(" and ")
     )]
     WasmNotFound {
@@ -240,7 +300,12 @@ pub enum WebBuildError {
 }
 
 /// Builds the Frust project at `project_dir` for the browser, producing a
-/// servable artifact directory at `<project>/dist/web`.
+/// servable artifact directory at `<project>/<out-dir>` (`[web] out-dir`,
+/// default `build/web`).
+///
+/// Loads the project's `frust.toml` itself (`crate::manifest::load_optional`)
+/// — an absent manifest is not an error here (see the module doc); a present
+/// but unreadable one is ([`WebBuildError::Manifest`]).
 ///
 /// `info` is taken as given — the release default belongs to the caller,
 /// exactly as it does for the desktop and mobile pipelines.
@@ -265,20 +330,37 @@ fn build_with_env(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<WebBuildReport, WebBuildError> {
-    // Before the compile, never after: see the module doc's pipeline order.
-    let embedder = bundle::embedder_dir(project_dir)?;
+    let manifest = load_manifest(project_dir)?;
     let crate_name = bundle::package_name(project_dir)?;
+    let app_name = manifest
+        .as_ref()
+        .map(|m| m.app.name.clone())
+        .unwrap_or_else(|| crate_name.clone());
+    let web = manifest
+        .as_ref()
+        .and_then(|m| m.web.clone())
+        .unwrap_or_default();
+
+    // Before the compile, never after: see the module doc's pipeline order.
+    let (embedder, source) = bundle::resolve_embedder(project_dir, &web)?;
+    let out_name = match source {
+        bundle::EmbedderSource::App => web.out_name_or(&app_name).to_string(),
+        bundle::EmbedderSource::Framework => BINDGEN_OUT_NAME.to_string(),
+    };
+    if source == bundle::EmbedderSource::App {
+        bundle::verify_host_page_module(&embedder, &out_name)?;
+    }
 
     cargo_build(runner, project_dir, info, on_line)?;
     let module = locate_wasm(runner, env, project_dir, info, &crate_name)?;
 
-    let root = artifact_dir(project_dir);
+    let root = artifact_dir(project_dir, &web);
     bundle::prepare_dir(&root, project_dir)?;
     let pkg_dir = root.join(bundle::PKG_DIR);
 
-    wasm_bindgen(runner, project_dir, &module, &pkg_dir, on_line)?;
-    let module_js = pkg_dir.join(format!("{BINDGEN_OUT_NAME}.js"));
-    let wasm = pkg_dir.join(format!("{BINDGEN_OUT_NAME}_bg.wasm"));
+    wasm_bindgen(runner, project_dir, &module, &pkg_dir, &out_name, on_line)?;
+    let module_js = pkg_dir.join(format!("{out_name}.js"));
+    let wasm = pkg_dir.join(format!("{out_name}_bg.wasm"));
     for produced in [&module_js, &wasm] {
         if !produced.is_file() {
             return Err(WebBuildError::BindgenOutputMissing {
@@ -288,7 +370,27 @@ fn build_with_env(
     }
 
     let mut notes = Vec::new();
-    wasm_opt(runner, project_dir, info.mode, &wasm, on_line, &mut notes)?;
+    notes.push(match source {
+        bundle::EmbedderSource::App => WebBuildNote::AppHostPageStaged,
+        bundle::EmbedderSource::Framework => WebBuildNote::FrameworkHostPageStaged,
+    });
+    if source == bundle::EmbedderSource::Framework
+        && let Some(requested) = &web.out_name
+    {
+        notes.push(WebBuildNote::FrameworkOutNameIgnored {
+            out_name: requested.clone(),
+        });
+    }
+
+    if web.wasm_opt_enabled(info.mode.wasm_opt_default()) {
+        run_wasm_opt(runner, project_dir, &wasm, on_line, &mut notes)?;
+    } else {
+        notes.push(if web.wasm_opt == Some(false) {
+            WebBuildNote::WasmOptDisabled
+        } else {
+            WebBuildNote::WasmOptSkippedForMode
+        });
+    }
 
     let mut artifacts = bundle::pkg_artifacts(&pkg_dir)?;
     artifacts.extend(bundle::stage_embedder(&embedder, &root)?);
@@ -300,6 +402,16 @@ fn build_with_env(
         wasm,
         artifacts,
         notes,
+    })
+}
+
+/// Reads the project's `frust.toml` when one exists, mapping a present-but-
+/// unreadable manifest to a typed error and an absent one to `None` — the
+/// same "optional input" contract [`preflight`] uses.
+fn load_manifest(project_dir: &Path) -> Result<Option<Manifest>, WebBuildError> {
+    manifest::load_optional(project_dir).map_err(|err| WebBuildError::Manifest {
+        project_dir: project_dir.to_path_buf(),
+        reason: format!("{err:#}"),
     })
 }
 
@@ -327,7 +439,7 @@ fn cargo_build(
         args.push((*arg).to_string());
     }
     args.push("--target".to_string());
-    args.push(WASM_TARGET.to_string());
+    args.push(WASM_TARGET_TRIPLE.to_string());
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let printable = args.join(" ");
 
@@ -360,9 +472,9 @@ fn locate_wasm(
     info: &BuildInfo,
     crate_name: &str,
 ) -> Result<PathBuf, WebBuildError> {
-    let profile = profile_dir(info.mode);
+    let profile = info.mode.cargo_profile_dir();
     let dir = resolve_target_dir(runner, env, project_dir)
-        .join(WASM_TARGET)
+        .join(WASM_TARGET_TRIPLE)
         .join(profile);
     let searched: Vec<PathBuf> = wasm_file_stems(crate_name)
         .into_iter()
@@ -400,16 +512,6 @@ fn wasm_file_stems(crate_name: &str) -> Vec<String> {
         vec![normalized]
     } else {
         vec![crate_name.to_string(), normalized]
-    }
-}
-
-/// The directory name cargo puts a mode's artifacts in — `dev` builds land in
-/// `debug/`, every other profile's directory is named after the profile.
-fn profile_dir(mode: BuildMode) -> &'static str {
-    match mode {
-        BuildMode::Debug => "debug",
-        BuildMode::Profile => "profile",
-        BuildMode::Release => "release",
     }
 }
 
@@ -464,16 +566,19 @@ fn resolve_target_dir(
 }
 
 /// Runs `wasm-bindgen --target web` over `module`, writing the glue and the
-/// processed module straight into the artifact directory's `pkg/`.
+/// processed module straight into the artifact directory's `pkg/`, named
+/// `out_name` — the resolved value from the module doc's `--out-name`
+/// section.
 ///
-/// `--target web` (not `bundler`, not `no-modules`) is what
-/// `platform/web/index.html` requires: it emits an ES module with a `default`
-/// export the page `import()`s and hands to `frust_web.js`'s `mount()`.
+/// `--target web` (not `bundler`, not `no-modules`) is what both host pages
+/// require: it emits an ES module with a `default` export the page
+/// `import()`s and hands to `frust_web.js`'s `mount()`.
 fn wasm_bindgen(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     module: &Path,
     pkg_dir: &Path,
+    out_name: &str,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<(), WebBuildError> {
     bundle::create_dir(pkg_dir)?;
@@ -485,7 +590,7 @@ fn wasm_bindgen(
         "--out-dir",
         out_dir.as_str(),
         "--out-name",
-        BINDGEN_OUT_NAME,
+        out_name,
         module.as_str(),
     ];
 
@@ -503,35 +608,33 @@ fn wasm_bindgen(
     Ok(())
 }
 
-/// Optimizes `wasm` in place, or records why it did not.
+/// Optimizes `wasm` in place, or records why it did not run.
 ///
-/// Runs **after** `wasm-bindgen` (the module doc's step 4) and only for a
-/// non-debug mode. `-O --all-features` is the invocation
-/// `examples/web-gallery/README.md` derived: bare `-O` refuses to parse the
-/// module this toolchain combination produces, so the feature flag is not an
-/// optimization choice but the thing that makes the tool accept the input at
-/// all.
+/// Runs **after** `wasm-bindgen` (the module doc's step 4). Whether it runs
+/// at all is the caller's decision ([`WebSection::wasm_opt_enabled`]); this
+/// function assumes it is wanted and only ever records why the *tool itself*
+/// declined.
+///
+/// `-O --all-features` is the invocation `examples/web-gallery/README.md`
+/// derived: bare `-O` refuses to parse the module this toolchain combination
+/// produces, so the feature flag is not an optimization choice but the thing
+/// that makes the tool accept the input at all.
 ///
 /// Writes to a sibling `.opt.wasm` and renames it over the original only on
-/// success, because `wasm-bindgen`'s generated glue imports `app_bg.wasm` by
-/// that fixed name — the rename is how the optimized module actually ships
-/// (the same two-step the README documents). A failure therefore leaves the
-/// original untouched by construction.
+/// success, because `wasm-bindgen`'s generated glue imports the module by
+/// its fixed `<out-name>_bg.wasm` name — the rename is how the optimized
+/// module actually ships (the same two-step the README documents). A failure
+/// therefore leaves the original untouched by construction.
 ///
 /// Returns `Err` only for a filesystem failure of this pipeline's own making;
 /// every `wasm-opt` outcome is a note.
-fn wasm_opt(
+fn run_wasm_opt(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
-    mode: BuildMode,
     wasm: &Path,
     on_line: &mut dyn FnMut(&str),
     notes: &mut Vec<WebBuildNote>,
 ) -> Result<(), WebBuildError> {
-    if mode == BuildMode::Debug {
-        notes.push(WebBuildNote::WasmOptSkippedForDebug);
-        return Ok(());
-    }
     let optimized = wasm.with_extension("opt.wasm");
     let input = wasm.to_string_lossy().to_string();
     let output = optimized.to_string_lossy().to_string();
@@ -591,6 +694,7 @@ fn failure_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::*;
     use crate::build_info::BuildArgs;
+    use crate::build_info::BuildMode;
     use crate::doctor::FakeEnv;
     use crate::process::{FakeProcessRunner, Output, StreamHandle};
     use std::fs;
@@ -747,7 +851,7 @@ mod tests {
                     Tool::Absent => anyhow::bail!("cargo: no such file or directory"),
                     Tool::Fails => failed("error[E0432]: unresolved import `frust::web`\n"),
                     Tool::Works => {
-                        let dir = self.target_dir.join(WASM_TARGET).join(self.profile);
+                        let dir = self.target_dir.join(WASM_TARGET_TRIPLE).join(self.profile);
                         fs::create_dir_all(&dir)?;
                         fs::write(
                             dir.join(format!("{}.wasm", self.module_stem)),
@@ -800,7 +904,10 @@ mod tests {
         }
     }
 
-    /// A framework checkout plus an app crate, in the real relative shape.
+    /// A framework checkout plus an app crate, in the real relative shape,
+    /// with **no** app-owned host page — every test that wants the framework
+    /// page staged uses this as-is; tests that want the app's own page add a
+    /// `web/` directory of their own.
     /// Returns `(checkout root, project dir, target dir)`.
     fn checkout(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = temp_dir(tag);
@@ -820,14 +927,29 @@ mod tests {
         (root, project, target)
     }
 
+    /// Adds the app's own host page (the `[web] host-dir` default, `web/`) to
+    /// a project built by [`checkout`], with a `?module=` default naming
+    /// `module_name`.
+    fn add_app_host_page(project: &Path, module_name: &str) {
+        let host = project.join("web");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(
+            host.join("index.html"),
+            format!("|| \"./pkg/{module_name}.js\";"),
+        )
+        .unwrap();
+        fs::write(host.join("frust_web.js"), "export function mount() {}").unwrap();
+    }
+
     fn env_for(target: &Path) -> FakeEnv {
         FakeEnv::new().set("CARGO_TARGET_DIR", target.to_str().unwrap())
     }
 
-    /// The acceptance criterion in one test: a library-level call produces a
-    /// servable artifact directory.
+    /// The acceptance criterion in one test: a library-level call with no app
+    /// host page and no `frust.toml` produces a servable artifact directory
+    /// through the framework fallback — `examples/web-gallery`'s own shape.
     #[test]
-    fn a_release_build_produces_a_servable_artifact_directory() {
+    fn a_release_build_with_no_app_page_falls_back_to_the_framework() {
         let (root, project, target) = checkout("release-e2e");
         let runner = PipelineRunner::new(&target, "release", "web_app");
         let mut lines = Vec::new();
@@ -840,11 +962,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.root, project.join("dist/web"));
+        assert_eq!(report.root, project.join("build/web"));
         assert!(report.index_html.is_file(), "the host page must be staged");
-        assert!(project.join("dist/web/frust_web.js").is_file());
-        assert_eq!(report.module_js, project.join("dist/web/pkg/app.js"));
-        assert_eq!(report.wasm, project.join("dist/web/pkg/app_bg.wasm"));
+        assert!(project.join("build/web/frust_web.js").is_file());
+        assert_eq!(report.module_js, project.join("build/web/pkg/app.js"));
+        assert_eq!(report.wasm, project.join("build/web/pkg/app_bg.wasm"));
         assert!(report.wasm.is_file());
         // The staged page is the embedder's own bytes — never rewritten.
         assert_eq!(
@@ -872,8 +994,152 @@ mod tests {
                 "frust_web.js",
             ]
         );
+        assert!(
+            report
+                .notes
+                .contains(&WebBuildNote::FrameworkHostPageStaged)
+        );
         // Compile output reaches the caller's sink, prefixed by stage.
         assert_eq!(lines, vec!["[cargo] Compiling web-app v0.1.0".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The precedence's headline case: an app that supplies its own host page
+    /// gets it staged, named after its own module — never the framework's.
+    #[test]
+    fn a_release_build_with_an_app_page_stages_it_and_names_the_module_after_the_project() {
+        let (root, project, target) = checkout("app-page");
+        add_app_host_page(&project, "web-app");
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&report.index_html).unwrap(),
+            "|| \"./pkg/web-app.js\";".to_string()
+        );
+        assert_eq!(report.module_js, project.join("build/web/pkg/web-app.js"));
+        assert!(report.notes.contains(&WebBuildNote::AppHostPageStaged));
+        assert!(
+            runner
+                .invocations()
+                .iter()
+                .any(|call| call.contains("--out-name web-app"))
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `[web] out-name` overrides the app page's default module name.
+    #[test]
+    fn an_out_name_override_is_used_when_the_app_page_agrees() {
+        let (root, project, target) = checkout("out-name-override");
+        add_app_host_page(&project, "bundle");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nout-name = \"bundle\"\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(report.module_js, project.join("build/web/pkg/bundle.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A user who overrides `out-name` without updating their page's
+    /// `?module=` default gets a typed refusal naming both values, before
+    /// anything is compiled.
+    #[test]
+    fn an_out_name_override_that_disagrees_with_the_page_is_refused_before_the_compile() {
+        let (root, project, target) = checkout("out-name-mismatch");
+        add_app_host_page(&project, "web-app");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nout-name = \"renamed\"\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let err = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("web-app"), "{message}");
+        assert!(message.contains("renamed"), "{message}");
+        assert!(matches!(err, WebBuildError::OutNameHostPageMismatch { .. }));
+        assert!(
+            runner.invocations().is_empty(),
+            "nothing may be compiled before the mismatch is caught"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The framework page's `--out-name` is always `app`, and an override in
+    /// this scenario is reported ignored rather than silently dropped.
+    #[test]
+    fn an_out_name_override_is_ignored_and_noted_when_the_framework_page_is_staged() {
+        let (root, project, target) = checkout("framework-out-name-ignored");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nout-name = \"bundle\"\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(report.module_js, project.join("build/web/pkg/app.js"));
+        assert!(
+            report
+                .notes
+                .contains(&WebBuildNote::FrameworkOutNameIgnored {
+                    out_name: "bundle".to_string()
+                })
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `[web] out-dir` replaces the artifact root.
+    #[test]
+    fn an_out_dir_override_relocates_the_artifact_directory() {
+        let (root, project, target) = checkout("out-dir-override");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nout-dir = \"public\"\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(report.root, project.join("public"));
+        assert!(!project.join("build/web").exists());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -917,21 +1183,21 @@ mod tests {
         let calls = runner.invocations();
         assert_eq!(
             calls[0],
-            format!("cargo build --release --target {WASM_TARGET}")
+            format!("cargo build --release --target {WASM_TARGET_TRIPLE}")
         );
         assert!(
             calls[1].starts_with("wasm-bindgen --target web --out-dir "),
             "{}",
             calls[1]
         );
-        // `--out-name app` is what makes `index.html`'s `?module=` default
-        // resolve with no query string — the module doc's decision.
+        // `--out-name app` is what makes the framework page's `?module=`
+        // default resolve with no query string — the module doc's decision.
         assert!(calls[1].contains(" --out-name app "), "{}", calls[1]);
         assert!(
             calls[1].ends_with(&format!(
                 "{}",
                 target
-                    .join(WASM_TARGET)
+                    .join(WASM_TARGET_TRIPLE)
                     .join("release/web_app.wasm")
                     .display()
             )),
@@ -954,7 +1220,7 @@ mod tests {
     fn no_mode_features_are_passed_to_a_browser_compile() {
         let (root, project, target) = checkout("no-features");
         for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
-            let runner = PipelineRunner::new(&target, profile_dir(mode), "web_app");
+            let runner = PipelineRunner::new(&target, mode.cargo_profile_dir(), "web_app");
             build_with_env(
                 &runner,
                 &env_for(&target),
@@ -1000,13 +1266,10 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        assert_eq!(
-            report.notes,
-            vec![WebBuildNote::WasmOptApplied {
-                before: BINDGEN_WASM_LEN as u64,
-                after: OPTIMIZED_WASM_LEN as u64,
-            }]
-        );
+        assert!(report.notes.contains(&WebBuildNote::WasmOptApplied {
+            before: BINDGEN_WASM_LEN as u64,
+            after: OPTIMIZED_WASM_LEN as u64,
+        }));
         // The optimized module really replaced the original, under the fixed
         // name the generated glue imports.
         assert_eq!(
@@ -1020,7 +1283,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A debug build skips the optimizer and says so.
+    /// A debug build skips the optimizer and says so, following the mode's
+    /// own default with no `[web] wasm-opt` override.
     #[test]
     fn a_debug_build_skips_wasm_opt_with_a_note() {
         let (root, project, target) = checkout("debug-note");
@@ -1033,9 +1297,80 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        assert_eq!(report.notes, vec![WebBuildNote::WasmOptSkippedForDebug]);
+        assert!(report.notes.contains(&WebBuildNote::WasmOptSkippedForMode));
         assert!(!runner.ran("wasm-opt"), "{:?}", runner.invocations());
         assert!(report.wasm.is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A profile build follows the same mode default a debug build does — no
+    /// override means no `wasm-opt`, closing the gap the pre-w2-05 code left
+    /// (it special-cased only `BuildMode::Debug`).
+    #[test]
+    fn a_profile_build_also_skips_wasm_opt_by_default() {
+        let (root, project, target) = checkout("profile-note");
+        let runner = PipelineRunner::new(&target, "profile", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Profile),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(report.notes.contains(&WebBuildNote::WasmOptSkippedForMode));
+        assert!(!runner.ran("wasm-opt"), "{:?}", runner.invocations());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `[web] wasm-opt = true` forces the optimizer on for a mode that would
+    /// otherwise skip it.
+    #[test]
+    fn wasm_opt_true_forces_it_on_for_a_debug_build() {
+        let (root, project, target) = checkout("wasm-opt-forced-on");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nwasm-opt = true\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "debug", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Debug),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(runner.ran("wasm-opt"));
+        assert!(report.notes.contains(&WebBuildNote::WasmOptApplied {
+            before: BINDGEN_WASM_LEN as u64,
+            after: OPTIMIZED_WASM_LEN as u64,
+        }));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `[web] wasm-opt = false` forces it off for a release build, and the
+    /// note says so rather than reusing the mode-default wording.
+    #[test]
+    fn wasm_opt_false_disables_it_for_a_release_build() {
+        let (root, project, target) = checkout("wasm-opt-forced-off");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nwasm-opt = false\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let report = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(!runner.ran("wasm-opt"));
+        assert!(report.notes.contains(&WebBuildNote::WasmOptDisabled));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1052,7 +1387,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        assert_eq!(report.notes, vec![WebBuildNote::WasmOptUnavailable]);
+        assert!(report.notes.contains(&WebBuildNote::WasmOptUnavailable));
         assert_eq!(
             fs::metadata(&report.wasm).unwrap().len(),
             BINDGEN_WASM_LEN as u64,
@@ -1076,8 +1411,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(&report.notes[..], [WebBuildNote::WasmOptFailed { tail }]
-                if tail.contains("parse exception")),
+            report
+                .notes
+                .iter()
+                .any(|n| matches!(n, WebBuildNote::WasmOptFailed { tail } if tail.contains("parse exception"))),
             "{:?}",
             report.notes
         );
@@ -1118,6 +1455,25 @@ mod tests {
         let _ = fs::remove_dir_all(&project);
     }
 
+    /// A malformed `frust.toml` is a typed error, not a silent fall-through
+    /// to the defaults.
+    #[test]
+    fn a_malformed_manifest_is_a_typed_error() {
+        let (root, project, _target) = checkout("bad-manifest");
+        fs::write(project.join("frust.toml"), "[web]\nout_name = \"x\"\n").unwrap();
+        let runner = PipelineRunner::new(&root.join("target"), "release", "web_app");
+        let err = build_with_env(
+            &runner,
+            &FakeEnv::new(),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(err, WebBuildError::Manifest { .. }), "{err:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_failed_compile_reports_the_tail_of_its_output() {
         let (root, project, target) = checkout("cargo-fail");
@@ -1135,7 +1491,7 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            !project.join("dist/web").exists(),
+            !project.join("build/web").exists(),
             "a failed compile must not leave an artifact directory behind"
         );
         let _ = fs::remove_dir_all(&root);
@@ -1226,13 +1582,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn each_mode_reads_from_its_own_profile_directory() {
-        assert_eq!(profile_dir(BuildMode::Debug), "debug");
-        assert_eq!(profile_dir(BuildMode::Profile), "profile");
-        assert_eq!(profile_dir(BuildMode::Release), "release");
-    }
-
     /// The shared-`build.target-dir` machine: the answer is cargo's, never
     /// `<project>/target`.
     #[test]
@@ -1271,7 +1620,7 @@ mod tests {
     #[test]
     fn a_rebuild_clears_the_previous_artifact_directory() {
         let (root, project, target) = checkout("rebuild");
-        let stale = artifact_dir(&project).join("pkg/web_app.js");
+        let stale = artifact_dir(&project, &WebSection::default()).join("pkg/web_app.js");
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&stale, "previous build").unwrap();
         let runner = PipelineRunner::new(&target, "release", "web_app");
@@ -1339,7 +1688,13 @@ mod tests {
     #[test]
     fn every_note_renders_a_human_message() {
         for note in [
-            WebBuildNote::WasmOptSkippedForDebug,
+            WebBuildNote::AppHostPageStaged,
+            WebBuildNote::FrameworkHostPageStaged,
+            WebBuildNote::FrameworkOutNameIgnored {
+                out_name: "bundle".to_string(),
+            },
+            WebBuildNote::WasmOptSkippedForMode,
+            WebBuildNote::WasmOptDisabled,
             WebBuildNote::WasmOptUnavailable,
             WebBuildNote::WasmOptFailed {
                 tail: "boom".to_string(),

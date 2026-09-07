@@ -57,7 +57,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// The port [`ServeOptions::default`] binds.
+use crate::manifest::Manifest;
+
+/// The port [`ServeOptions::default`] binds, and the port
+/// [`ServeOptions::from_manifest`] falls back to for a project with **no**
+/// `frust.toml` at all (`examples/web-gallery`'s shape). A project that does
+/// carry a manifest gets `[web] port` instead (`WebSection::port_or_default`,
+/// default `8000`) — see [`ServeOptions::from_manifest`].
 ///
 /// Deliberately **not** 8080: that port is the one a developer most often
 /// already has something on (and this repo's own guardrails refuse it), and a
@@ -179,6 +185,32 @@ impl Default for ServeOptions {
         Self {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: DEFAULT_PORT,
+        }
+    }
+}
+
+impl ServeOptions {
+    /// Loopback, on the port `manifest`'s `[web]` section names —
+    /// `WebSection::port_or_default` (default `8000`) when `manifest` is
+    /// `Some`, else [`DEFAULT_PORT`] (`8930`) for a project with no
+    /// `frust.toml` at all. `manifest` is `Option` rather than a bare
+    /// reference for exactly that reason: a manifest-less project
+    /// (`examples/web-gallery`'s shape) is a valid input this pipeline keeps
+    /// working for (see `super::super`'s module doc), and it has no `[web]
+    /// port` to read.
+    ///
+    /// A present manifest with no `[web]` section still resolves to `8000`,
+    /// not `8930` — `WebSection::default().port_or_default()` — so 8930 is
+    /// reserved for the no-manifest-at-all case specifically, never for "a
+    /// manifest exists but says nothing about the port".
+    pub fn from_manifest(manifest: Option<&Manifest>) -> Self {
+        let port = match manifest {
+            Some(manifest) => manifest.web.clone().unwrap_or_default().port_or_default(),
+            None => DEFAULT_PORT,
+        };
+        Self {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
         }
     }
 }
@@ -652,6 +684,27 @@ mod tests {
         fs::write(dir.join("pkg/app.js"), "export default init;").unwrap();
         fs::write(dir.join("pkg/app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
         dir
+    }
+
+    /// [`ServeOptions::from_manifest`]'s three precedence cases: no
+    /// `frust.toml` at all, one present with no `[web]` section, and one
+    /// with an explicit `[web] port`.
+    #[test]
+    fn from_manifest_follows_the_manifest_port_precedence() {
+        assert_eq!(ServeOptions::from_manifest(None).port, DEFAULT_PORT);
+
+        let bare = crate::manifest::parse("[app]\nname = \"a\"\norg = \"o\"\n").unwrap();
+        assert_eq!(ServeOptions::from_manifest(Some(&bare)).port, 8000);
+
+        let with_port =
+            crate::manifest::parse("[app]\nname = \"a\"\norg = \"o\"\n\n[web]\nport = 9000\n")
+                .unwrap();
+        assert_eq!(ServeOptions::from_manifest(Some(&with_port)).port, 9000);
+
+        assert_eq!(
+            ServeOptions::from_manifest(None).host,
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
     }
 
     /// The row the whole module exists for.
