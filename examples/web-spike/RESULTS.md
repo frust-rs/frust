@@ -9,6 +9,13 @@ file rather than in a new one, per the card's own write scope. Everything
 above § 15 is w0-03's, unmodified and re-verified unaffected — see § 15's own
 regression check.)*
 
+*(§ 16 adds w0-05's results — binary size, first-frame time, and the
+single-threaded strip-generation/warm-up cost, per backend — on top of this
+file, same convention. §§ 1–15 are unmodified; w0-05 is evidence only and
+carries no GO/NO-GO verdict of its own, per its own card's acceptance
+criterion — the § "Verdict" table above is w0-03's/w0-04's and is not
+extended by this section.)*
+
 ## Verdict
 
 | Arm | Bring-up | Shapes | Shaped text | Overall |
@@ -688,3 +695,391 @@ future doc pass, not required by this task:
 - If a future task gives `use_task`/`spawn_blocking` a real wasm story, that
   is exactly the kind of change `docs/CORE_ARCHITECTURE.md`'s "Data Flow"
   section would want a line for.
+
+## 16. w0-05 results: binary size, first-frame time, single-threaded strip cost
+
+**Evidence only — no GO/NO-GO verdict.** This section's card was explicit
+that it carries no acceptance thresholds; the numbers below are handed to the
+conductor to write the plan's verdict from, not judged here.
+
+**Hardware/software held constant across every row and every table below**
+(re-verified, not assumed — same rig § 1–§ 15 used):
+
+| | |
+|---|---|
+| Browser | Google Chrome `151.0.7922.108`, in the `frust-linux-native` container |
+| chromedriver | `151.0.7922.108` |
+| GPU | NVIDIA T400 4GB; WebGL2 arm reports `ANGLE (NVIDIA Corporation, NVIDIA T400 4GB/PCIe/SSE2, OpenGL 4.5.0)` |
+| Display | headed, `DISPLAY=:20` (§ 4 — headless WebGPU readback is blank on this rig; this task did not need canvas readback, but the whole probe still runs under the same headed chromedriver session for consistency with § 2/§ 6) |
+| `rustc` / toolchain | `1.98.1`, repo-pinned (`rust-toolchain.toml`), unchanged from § 14 |
+| `wasm-bindgen` (crate + CLI) | `0.2.128`/`0.2.128` — matched, as § 9/§ 14 already established |
+| `wasm-opt` | **`130`**, not `132` as the card's own text guessed — the host binary's real, unmodified version (`wasm-opt --version` → `wasm-opt version 130`); § 14's "not exercised" row is now superseded by this section, which exercises it for the first time |
+| `gzip` | `/usr/bin/gzip`, level `-9` (max) for every gzipped figure below |
+| `python3` | `3.14.6`, unchanged from § 14 |
+
+Nothing above was installed, upgraded, or otherwise modified by this task —
+same discipline as § 14.
+
+### 16.1 Binary size — debug / release / release+wasm-opt, raw and gzipped
+
+**Exact commands**, from `examples/web-spike` (target-dir is
+`/data/cache/target`, this host's `~/.cargo/config.toml`, same as § 2):
+
+```sh
+# debug
+cargo build --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir <scratch>/pkg-debug --out-name web_spike \
+  /data/cache/target/wasm32-unknown-unknown/debug/web-spike.wasm
+
+# release (this task's new [profile.release] applies — see § 16.1's flags
+# note below)
+cargo build --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir pkg --out-name web_spike \
+  /data/cache/target/wasm32-unknown-unknown/release/web-spike.wasm
+
+# release + wasm-opt (STRICTLY after wasm-bindgen, on the pkg/*_bg.wasm it
+# emitted, per the card's own instruction)
+wasm-opt -O --all-features -o <scratch>/web_spike_bg.opt.wasm pkg/web_spike_bg.wasm
+
+# gzip, every row
+gzip -9 -c <file> | wc -c
+```
+
+`--all-features` (`-all`) was **required**, not a tuning choice: a bare
+`wasm-opt -O` refuses to parse this `.wasm` at all —
+
+```
+[wasm-validator error in function 0] unexpected false: memory.copy operations
+require bulk memory operations [--enable-bulk-memory-opt], on ...
+```
+
+— and adding only `--enable-bulk-memory` still leaves `i32.trunc_sat_f32_u`
+(non-trapping float-to-int) and other ops unrecognised (`unexpected false:
+all used features should be allowed`). `rustc` 1.98.1 turns on bulk-memory,
+sign-extension and non-trapping-float-to-int by default for
+`wasm32-unknown-unknown` (has been the default target-features set for
+several stable releases), and `wasm-opt` 130 defaults its own validator to
+the MVP feature set, so the two disagree unless told to agree. `-all` is the
+correct, permissive answer here — it does not *add* SIMD/threads/etc. to the
+module (nothing in this graph emits them), it only stops the validator from
+rejecting features the input already legitimately uses.
+
+**Sizes** (bytes; MiB rounded to 2 places; gzip at `-9`):
+
+| Row | Raw (post-`wasm-bindgen` `*_bg.wasm`, the artifact the browser actually loads) | Gzipped |
+|---|---:|---:|
+| **debug** | 36,742,025 (35.04 MiB) | 6,516,420 (6.21 MiB) |
+| **release** (no `wasm-opt`) | 6,178,556 (5.89 MiB) | 2,035,301 (1.94 MiB) |
+| **release + `wasm-opt -O --all-features`** | 5,703,574 (5.44 MiB) | 2,021,648 (1.93 MiB) |
+
+Both backend arms (`?arm=webgpu`/`?arm=webgl`) ship in the **same** `.wasm` —
+`Arm` is a runtime `?arm=` query read, not a build-time selection (`src/
+main.rs`'s `Arm::from_query`) — so there is one size table, not two.
+
+For context, not itself a browser-loadable artifact: the raw `cargo`-emitted
+`.wasm` *before* `wasm-bindgen` post-processing was 227,593,088 bytes (217.05
+MiB) debug / 7,957,621 bytes (7.59 MiB) release. `wasm-bindgen --target web`
+shrinks both (debug most dramatically) by rewriting/dropping custom sections
+(names, a linking-metadata leftover, etc.) that the browser's own loader
+never reads — an existing wasm-bindgen behaviour, not something this task
+tuned.
+
+**Which release-profile flags applied to which row** (the card's own
+"finalize the flags table" instruction — item (b) of the dispatch's Fact
+list):
+
+| Row | `lto` | `codegen-units` | `strip` | `panic` | `wasm-opt` |
+|---|---|---|---|---|---|
+| debug | Cargo dev default (off) | Cargo dev default (256) | off | `unwind` (default) | not run |
+| release | **`"fat"`** | **`1`** | **`"symbols"`** | **`"abort"`** | not run |
+| release + wasm-opt | **`"fat"`** | **`1`** | **`"symbols"`** | **`"abort"`** | **`-O --all-features`** (post-build transform, not a `cargo` profile flag) |
+
+The bolded four are this task's own addition — `examples/web-spike/
+Cargo.toml`'s new `[profile.release]` block (§ "Conductor scope extension"),
+copied verbatim from the root workspace's `[profile.release]`
+(`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"` —
+`docs/DEVELOPMENT.md`'s Version-Pin Policy release-shape row) and from
+`examples/huddle/Cargo.toml`'s identical hand-synced copy, both read-only
+references. **Before this task, this standalone workspace had no
+`[profile.release]` of its own** and a `--release` build here silently fell
+back to Cargo's own defaults (no LTO, cgu=16, no strip, no `panic=abort`) —
+the same gap the root manifest's own `[profile.release]` comment (read-only,
+`Cargo.toml` line ~671) already named for the example crates it fixed. No
+prior task measured this spike's release size (§ 12: "No measurement.
+Binary size, first-frame time and per-backend `strip_us` are w0-05's"), so
+there is no "before this fix" number to compare against — this is the first
+release-size measurement this spike has ever had, and it is measured with
+the representative profile already in place, per the card's own instruction
+that the release number should be representative.
+
+### 16.2 First-frame time — `init()` resolution to first presented frame
+
+**No public hook exists for this** (unlike § 16.3, where the card names a
+concrete measurement, `first-frame time` has none), so this section defines
+it operationally and states the definition rather than assuming one: `t0` is
+`performance.now()` read at the very first statement of the `#[wasm_bindgen(
+start)]` entry point (`web::start`, `src/main.rs`) — before the canvas is
+even looked up. That start section runs *synchronously inside* `init()`'s
+own work (module fetch, compile, instantiate, run start section) and returns
+almost immediately (it only spawns the async event loop via
+`EventLoopExtWebSys::spawn_app`), so `t0` is within roughly a tick of the
+JS-side `await init()` in `index.html` actually resolving — closer than any
+cross-boundary timestamp handoff this spike could add without touching
+`index.html`'s own async structure. `t1` is `performance.now()` read the
+first time `ApplicationHandler::window_event`'s `RedrawRequested` arm
+completes a **`requestAnimationFrame`-driven** draw (the first `frame 1:
+RENDERED` line) — not the earlier, unlabelled draw `resumed`'s own
+`spawn_local` continuation performs to guarantee at least one submitted
+frame (see § 1's screenshot-capture note); that earlier draw's cost is
+inside § 16.3's `bring-up` span instead, since it runs before this handler
+ever sees a `RedrawRequested` event. First-frame time is `t1 - t0`.
+
+**Exact commands.** Build/serve identical to § 16.1's release recipe (no
+`wasm-opt` — this task's browser measurements use the same non-`wasm-opt`
+`pkg/` the established § 2/§ 6 recipe drives, so the first-frame/`strip_us`
+numbers are not entangled with the separate, size-only `wasm-opt` question);
+`./serve.sh 8931`. Driving the browser: the same chromedriver + plain-HTTP
+W3C WebDriver session as § 2/§ 6 (`--no-sandbox --disable-dev-shm-usage
+--enable-unsafe-webgpu --window-size=880,900 --window-position=0,0`), except
+each of the 3 runs per arm below opened a **fresh WebDriver session**
+(`POST /session` … `DELETE /session/{id}`) and navigated once, rather than
+reusing one session across runs — this is what "cold (fresh page load)" in
+the card's own vocabulary means here: no `document.location.reload()`, no
+session reuse, no wasm/JS state surviving between runs. The chromedriver
+*process* and its underlying Chrome instance were not restarted between
+runs (only impractical to do per-run here); § 16.3's own finding (GL bring-up
+being ~2.1s slower than WebGPU on **every** run, not just the first) is
+itself evidence that this did not mask a warm/cold split the way § 6's
+adapter-race retry-count did.
+
+**All 3 cold runs per arm, plus the median** (milliseconds, from the
+in-page `timing:` log lines — see § 16.4 for one full verbatim transcript
+per arm):
+
+| Arm | Run 1 | Run 2 | Run 3 | **Median** |
+|---|---:|---:|---:|---:|
+| WebGPU (`?arm=webgpu`) | 113.0 | 109.6 | 186.7 | **113.0** |
+| WebGL2 (`?arm=webgl`) | 2299.0 | 2221.3 | 2236.4 | **2236.4** |
+
+WebGL2's first-frame time is **~20×** WebGPU's on this rig. § 16.3 isolates
+where that time goes: it is not the adapter-acquisition retry (both arms
+needed only 1 bring-up attempt on every run — `surface: online after 1
+attempt(s)` in every transcript), it is inside the `bring-up` span itself.
+
+### 16.3 Single-threaded strip generation cost and pipeline warm-up cost
+
+**No `strip_us` hook is reachable from this spike.** Checked, per the card's
+own instruction:
+
+* `crates/frust-engine/src/compile/mod.rs`'s `PhaseClock`/`CompilePhaseCosts`
+  time exactly this (`walk`, the phase that includes "strip generation and
+  paint encoding" per its own doc comment) — but the type and its lap
+  timings are `pub(crate)`, gated behind the `perf-trace` Cargo feature this
+  spike's `Cargo.toml` does not (and, being outside `crates/`, cannot)
+  enable meaningfully, since nothing exposes the costs across the crate
+  boundary even if the feature were on. Not reachable.
+* `crates/frust-gpu/src/pipeline.rs`'s `PipelineCache::warm_up` has no
+  timing of its own at all — `docs/LIMITATIONS.md`'s `engine-wasm-single-
+  thread` entry documents the synchronous-fallback *behaviour* (the `could
+  not spawn the pipeline warm-up thread ... building the listed variants
+  inline` line § 3/§ 15's transcripts already carry), not a cost. Not
+  reachable.
+* `grep -rn "strip_us\|warm_up\|perf::" crates/frust-engine crates/frust-gpu`
+  turns up no per-frame timing hook exposed at either crate's public API
+  surface.
+
+So, per the card's own fallback instruction, this section wraps
+[`SurfaceRenderer::encode`]/`acquire`/`submit` (`src/main.rs`'s `draw`) and
+the whole `RenderContext`/`SurfaceRenderer` bring-up (`src/main.rs`'s
+`bring_up`, called from `resumed`) with `performance.now()` instead —
+`web-sys`'s `Performance` feature, added to `Cargo.toml` this task, since
+`std::time::Instant::now()` panics on `wasm32-unknown-unknown` (no clock
+syscall on this target — this is the same "no threads without
+`SharedArrayBuffer`" single-threaded-wasm shape the card names for
+`multithreading`, just for a clock instead of a thread).
+
+**What each span actually measures** (read directly off
+`crates/frust-render/src/renderer.rs`'s own doc comments, quoted in § 16's
+code comments too):
+
+* **`encode_us`** — `SurfaceRenderer::encode`'s own doc comment: "a memcpy
+  and nothing else" (it stashes the scene for `submit` to compile). Measured
+  ≈0.0–0.1ms every run, on both arms — consistent with "memcpy", and
+  **not** a `strip_us` proxy by itself.
+* **`submit_us`** — the same doc comment: "the whole GPU render runs HERE
+  ... the frame's GPU cost lands in `submit_us`". This is where
+  `EngineRenderer::encode` actually compiles the scene (strip generation +
+  paint encoding, `SceneCompiler::compile`'s `walk` phase) **and** where the
+  compiled draws are submitted to the GPU queue — the two are not
+  separable at this API boundary (`crates/frust-render`'s public seam has no
+  finer split), so `submit_us` is this spike's proxy for the card's
+  `strip_us`, not an isolated CPU-only number. Documented as a proxy, not
+  presented as the real thing.
+* **`bring-up` total** — wraps `bring_up()` end to end: `RenderContext`
+  creation, the retrying `on_surface_created` (§ 6), `frust-gpu`'s inline
+  pipeline warm-up fallback (embedded inside `on_surface_created`, not
+  separately callable), font registration, and the first scene build. Per
+  the card's own instruction, these are reported as **one** span, not
+  decomposed further — the inline warm-up fallback has no separate entry/exit
+  the spike can hook.
+
+**The very first `submit` call** (inside `bring_up`'s own guaranteed draw,
+before `resumed` even returns) is materially more expensive than every
+`submit` after it on both arms — this is the pipeline-variant compile
+happening synchronously on first use, consistent with `PipelineCache::
+get_or_create`'s "steal-and-build-inline" fallback path and with
+`docs/LIMITATIONS.md`'s `engine-wasm-single-thread` entry. `frame 1`'s and
+`frame 2`'s `submit_us` (both drawing the identical static scene, nothing
+new to compile) are the closer read on steady-state single-threaded strip
+cost.
+
+**All 3 cold runs per arm** (milliseconds):
+
+| Arm | | Run 1 | Run 2 | Run 3 | **Median** |
+|---|---|---:|---:|---:|---:|
+| **WebGPU** | bring-up total | 91.9 | 85.5 | 166.5 | **91.9** |
+| | first `submit` (warm-up-inclusive) | 10.2 | 12.2 | 10.0 | **10.2** |
+| | `frame 1` `submit` (`strip_us` proxy) | 0.5 | 0.8 | 0.6 | **0.6** |
+| | `frame 2` `submit` (`strip_us` proxy) | 0.8 | 0.9 | 0.7 | **0.8** |
+| **WebGL2** | bring-up total | 2271.1 | 2192.0 | 2208.1 | **2208.1** |
+| | first `submit` (warm-up-inclusive) | 16.4 | 16.7 | 16.7 | **16.7** |
+| | `frame 1` `submit` (`strip_us` proxy) | 0.8 | 1.0 | 0.9 | **0.9** |
+| | `frame 2` `submit` (`strip_us` proxy) | 0.9 | 1.4 | 1.4 | **1.4** |
+
+`encode_us` and `acquire_us` are omitted from this table (every value on
+every run, both arms, was 0.0–0.2ms — a memcpy and a same-frame swapchain
+acquire, exactly as their doc comments predict); the full per-frame numbers
+are in § 16.4's verbatim transcripts.
+
+**Reading this table:**
+
+1. **Steady-state strip cost is small and close on both backends** — 0.6–1.4
+   ms to re-encode+submit an unchanged 8-command/28-draw scene, WebGPU and
+   WebGL2 within ~1ms of each other. Nothing here suggests the GL backend's
+   § 5 glyph-coverage bug is a *performance* problem; it is a correctness
+   one, as § 5 already concluded.
+2. **The GL arm's `bring-up total` is ~24× the WebGPU arm's** (2208.1ms vs
+   91.9ms median), and this holds on **every** run, not just a cold-cache
+   first one — ruling out the § 6 adapter-race retry as the cause (both
+   arms needed exactly 1 bring-up attempt, every run; see § 16.4). The gap
+   is not explained by the first `submit`'s own pipeline-warm-up cost either
+   (16.7ms vs 10.2ms median — real, but two orders of magnitude too small to
+   account for ~2.1 **seconds**). The remaining ~2.1s sits somewhere inside
+   `on_surface_created`/`RenderContext::ensure_device` on the `Gl` backend
+   path before the probe's own timing spans start — most plausibly ANGLE's
+   GL context/shader-compiler bring-up, which this probe's write scope
+   (`examples/web-spike`, no `crates/` edits) cannot instrument further.
+   **This is a new finding, not previously recorded** (§ 3/§ 5 measured GL
+   *correctness*, never GL *bring-up time*) — worth its own `crates/frust-gpu`
+   task if the web shell plan wants a real answer for it, per this file's own
+   "seams, not changes" convention (§ 11).
+3. **First-submit warm-up cost is real on both arms** (WebGPU: 10.2ms vs
+   0.6–0.8ms steady state, ~13–17×; WebGL2: 16.7ms vs 0.9–1.4ms, ~12–19×) —
+   consistent with `engine-wasm-single-thread`'s prediction that the warm-up
+   queue drains synchronously on `wasm32` with no background thread to hide
+   it behind. Single-digit-to-low-double-digit milliseconds, once, not a
+   per-frame recurring cost.
+
+### 16.4 Console output, verbatim (one representative cold run per arm)
+
+Captured via the same driver approach as § 2/§ 6 (a plain-HTTP W3C WebDriver
+session against chromedriver on `127.0.0.1:9516`), reading back
+`document.getElementById('log').textContent` after the page's title reaches
+a terminal verdict — this DOM mirror carries every `timing:`/`frame N`/
+`verdict:` line this spike's own `log_line` calls write (everything measured
+in § 16.2/§ 16.3 above comes from these lines); it does **not** carry lines
+the `log` crate writes straight to the devtools console (e.g. § 3's `frust-
+gpu: could not spawn the pipeline warm-up thread ...` line), which this
+section did not re-capture since § 3/§ 15 already recorded that behaviour
+verbatim and it is unchanged here.
+
+**WebGPU, run 1 of 3:**
+
+```
+frust w0-03 browser render probe | arm=webgpu | renderer=frust-engine (the only one)
+verdict: frust w0-03 webgpu | starting
+winit: window created over the page canvas
+wgpu: instance restricted to Backends(BROWSER_WEBGPU)
+surface: online after 1 attempt(s), phase=SurfaceReady
+adapter:
+backend: BrowserWebGpu
+downlevel profile: Full
+limits: max_texture_dimension_2d=8192 max_texture_array_layers=256 max_bind_groups=4 max_uniform_buffer_binding_size=65536 min_uniform_buffer_offset_alignment=256 max_vertex_attributes=16
+caps: storage_buffers=true timestamp_query=true resource_texture_dim=4096 downlevel_flags=DownlevelFlags(COMPUTE_SHADERS | FRAGMENT_WRITABLE_STORAGE | INDIRECT_EXECUTION | BASE_VERTEX | READ_ONLY_DEPTH_STENCIL | NON_POWER_OF_TWO_MIPMAPPED_TEXTURES | CUBE_ARRAY_TEXTURES | COMPARISON_SAMPLERS | INDEPENDENT_BLEND | VERTEX_STORAGE | ANISOTROPIC_FILTERING | FRAGMENT_STORAGE | MULTISAMPLED_SHADING | DEPTH_TEXTURE_AND_BUFFER_COPIES | WEBGPU_TEXTURE_FORMAT_SUPPORT | BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED | UNRESTRICTED_INDEX_BUFFER | FULL_DRAW_INDEX_UINT32 | DEPTH_BIAS_CLAMP | VIEW_FORMATS | UNRESTRICTED_EXTERNAL_TEXTURE_COPIES | SURFACE_VIEW_FORMATS | NONBLOCKING_QUERY_RESOLVE | SHADER_F16_IN_F32 | MSL2_1 | TEXTURE_COMPRESSION)
+profile check: OK — Full on BrowserWebGpu, resolved by frust-gpu, not by the probe
+font: registered bundled face -> Named(["Noto Sans"])
+scene: 8 commands -> 28 engine draws (CPU compile)
+timing: bring-up (context create + surface retries + inline pipeline warm-up fallback + font register + scene build) = 91.900ms
+timing: encode=0.100ms (scene memcpy) acquire=0.000ms (swapchain/vsync wait) submit=10.200ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+verdict: frust w0-03 webgpu | RENDERED
+timing: encode=0.000ms (scene memcpy) acquire=0.100ms (swapchain/vsync wait) submit=0.500ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+frame 1: RENDERED
+timing: first-frame (start() entry -> first RAF-driven `frame 1` presented) = 113.000ms
+timing: encode=0.000ms (scene memcpy) acquire=0.000ms (swapchain/vsync wait) submit=0.800ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+frame 2: RENDERED
+```
+
+**WebGL2, run 1 of 3:**
+
+```
+frust w0-03 browser render probe | arm=webgl | renderer=frust-engine (the only one)
+verdict: frust w0-03 webgl | starting
+winit: window created over the page canvas
+wgpu: instance restricted to Backends(GL)
+surface: online after 1 attempt(s), phase=SurfaceReady
+adapter: ANGLE (NVIDIA Corporation, NVIDIA T400 4GB/PCIe/SSE2, OpenGL 4.5.0)
+backend: Gl
+downlevel profile: WebGl2
+limits: max_texture_dimension_2d=2048 max_texture_array_layers=256 max_bind_groups=4 max_uniform_buffer_binding_size=16384 min_uniform_buffer_offset_alignment=256 max_vertex_attributes=16
+caps: storage_buffers=false timestamp_query=false resource_texture_dim=2048 downlevel_flags=DownlevelFlags(NON_POWER_OF_TWO_MIPMAPPED_TEXTURES | COMPARISON_SAMPLERS | ANISOTROPIC_FILTERING | MULTISAMPLED_SHADING | SHADER_F16_IN_F32 | MSL2_1 | TEXTURE_COMPRESSION)
+profile check: OK — WebGl2 on Gl, resolved by frust-gpu, not by the probe
+font: registered bundled face -> Named(["Noto Sans"])
+scene: 8 commands -> 28 engine draws (CPU compile)
+timing: bring-up (context create + surface retries + inline pipeline warm-up fallback + font register + scene build) = 2271.100ms
+timing: encode=0.000ms (scene memcpy) acquire=0.100ms (swapchain/vsync wait) submit=16.400ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+verdict: frust w0-03 webgl | RENDERED
+timing: encode=0.000ms (scene memcpy) acquire=0.000ms (swapchain/vsync wait) submit=0.800ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+frame 1: RENDERED
+timing: first-frame (start() entry -> first RAF-driven `frame 1` presented) = 2299.000ms
+timing: encode=0.000ms (scene memcpy) acquire=0.000ms (swapchain/vsync wait) submit=0.900ms (strip generation + GPU encode/queue-submit — this spike's `strip_us` proxy)
+frame 2: RENDERED
+```
+
+Runs 2 and 3 of both arms (the remaining data behind § 16.2/§ 16.3's tables)
+matched this shape line-for-line except for the `timing:`/adapter-name
+numbers already tabulated; not reproduced a second and third time here to
+keep this section a reasonable size.
+
+### 16.5 Files touched, and what stayed the same
+
+`src/main.rs`, `index.html`'s build/serve comment header (unchanged content,
+still accurate), `Cargo.toml` (`[profile.release]` + the `Performance`
+`web-sys` feature), `Cargo.lock` (regenerated; no dependency version moved —
+`Performance` is a `web-sys` feature of an already-present dependency, not a
+new crate), `README.md` (rewritten — see below), and this file, all under
+the conductor's scope extension. Nothing in `crates/` was touched; nothing
+in `docs/` was touched.
+
+`README.md` was rewritten to the current state (w0-02 through w0-05) — it
+had been stale since w0-02 (§ 11.5 already flagged this). See the rewritten
+file for what changed; the short version is that it now describes what each
+of the four tasks proved, how to build/run both arms, the `pkg/` ignore
+rule, the WebGL2 text defect, and pointers into this file's §§ rather than
+w0-02's now-superseded "expect it to fail" framing.
+
+### `doc_updates_needed` (w0-05)
+
+None of `docs/*.md` need a change for this task's own write scope — it adds
+no new crate dependency, no new cfg, no new build flag reachable outside
+`examples/web-spike`. Two things worth a future task's attention, neither
+blocking this one:
+
+- The GL-arm bring-up cost (§ 16.3 point 2, ~2.1s, unexplained by anything
+  this probe's write scope can instrument) is a strong candidate for its own
+  `crates/frust-gpu` investigation task, parallel to § 5's WebGL2 text-defect
+  task — both are Phase-0 blockers for a WebGL2 fallback, one correctness,
+  one now perf.
+- `docs/LIMITATIONS.md`'s `engine-wasm-single-thread` entry could gain a
+  one-line pointer to this section's measured warm-up cost (10–17ms, once,
+  not per-frame) now that it has been measured rather than only predicted —
+  a documentation task, not required by this one's write scope.

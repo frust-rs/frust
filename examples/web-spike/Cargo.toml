@@ -112,7 +112,11 @@ wasm-bindgen-futures = "0.4.78"
 js-sys = "0.3.105"
 # Feature list is exactly what `src/main.rs` names and nothing more: the
 # canvas element and its document/window ancestors, the `?arm=` query parse,
-# the `<pre id=log>` mirror, and the console sink.
+# the `<pre id=log>` mirror, the console sink, and (w0-05) the
+# `window.performance().now()` clock the timing instrumentation reads —
+# `std::time::Instant` panics on `wasm32-unknown-unknown` (no clock syscall on
+# this target; see RESULTS.md's w0-05 section), so `Performance` is the only
+# clock this spike has.
 web-sys = { version = "0.3.105", features = [
     "console",
     "Document",
@@ -120,6 +124,7 @@ web-sys = { version = "0.3.105", features = [
     "HtmlCanvasElement",
     "HtmlElement",
     "Location",
+    "Performance",
     "UrlSearchParams",
     "Window",
 ] }
@@ -157,3 +162,23 @@ frust-reactive = { path = "../../crates/frust-reactive" }
 # identical range via its path dep above), so this spike's own resolver
 # unifies onto one `reactive_graph` identity rather than forking a second.
 reactive_graph = "0.2"
+
+# --- w0-05 release profile (conductor's scope extension) ------------------
+#
+# This spike is a STANDALONE workspace (its own `[workspace]` root at the
+# top of this file), so the root `Cargo.toml`'s own `[profile.release]`
+# (`docs/DEVELOPMENT.md`'s Version-Pin Policy / release-shape row) never
+# applies here — a plain `cargo build --release` in this directory falls
+# back to Cargo's own release defaults (no LTO, cgu=16, no strip, no
+# `panic=abort`), which would make the w0-05 release/wasm-opt size and
+# first-frame numbers unrepresentative of what a real Frust app ships.
+# Copied verbatim from the root `Cargo.toml`'s `[profile.release]` and from
+# `examples/huddle/Cargo.toml`'s identical hand-synced copy (both read-only
+# references for this task) — not a new choice, the same one re-applied to a
+# third manifest. See RESULTS.md's w0-05 section for exactly which of these
+# flags applied to which measured row (the debug row applies none of them).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

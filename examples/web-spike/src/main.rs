@@ -455,6 +455,15 @@ mod web {
         /// acceptance criterion's "zero input events delivered" is asserted
         /// against this count, not assumed.
         input_events: u32,
+        /// `now_ms()` read at `start()`'s entry, before the canvas/event-loop
+        /// are touched (w0-05). The wasm-bindgen start section this runs in
+        /// executes synchronously *inside* `init()`'s underlying work and
+        /// returns almost immediately (it only spawns the async event
+        /// loop) — so this is within a tick of `init()`'s JS promise
+        /// resolving, and is what [`ProbeApp::window_event`]'s "first-frame"
+        /// timing line is measured from. See RESULTS.md's w0-05 section for
+        /// the exact caveat and the measured numbers.
+        t_start: f64,
     }
 
     /// How many frames get their own log line before the mirror goes quiet.
@@ -472,6 +481,24 @@ mod web {
             .expect("web-spike: no `window` — not running in a browser")
             .document()
             .expect("web-spike: no `document`")
+    }
+
+    /// `window.performance().now()` — a monotonic, sub-millisecond clock, in
+    /// milliseconds since navigation start. `NaN` if `window`/`Performance`
+    /// are unavailable (never happens under the WebDriver rig this spike is
+    /// measured on, but a probe reports rather than panics).
+    ///
+    /// **Why this and not [`std::time::Instant`]:** `Instant::now()` panics
+    /// on `wasm32-unknown-unknown` (this target has no clock syscall — see
+    /// `crates/frust-engine/src/compile/mod.rs`'s `PhaseClock`, which is
+    /// `perf-trace`-feature-gated and `pub(crate)`, i.e. not a hook this
+    /// spike's write scope can reach even with that feature turned on). See
+    /// RESULTS.md's w0-05 section for the full "no reachable `strip_us` hook"
+    /// finding this timing code stands in for.
+    fn now_ms() -> f64 {
+        web_sys::window()
+            .and_then(|window| window.performance())
+            .map_or(f64::NAN, |performance| performance.now())
     }
 
     /// Emits one evidence line three ways: the devtools console (which
@@ -500,6 +527,11 @@ mod web {
     /// *starts* the event loop rather than blocking on it.
     #[wasm_bindgen(start)]
     pub fn start() {
+        // Read first, before anything else in this function: the earliest
+        // timestamp this file can capture, and the base the w0-05
+        // first-frame measurement is computed from (see `ProbeApp::t_start`
+        // and RESULTS.md's w0-05 section).
+        let t_start = now_ms();
         // Installed first: without it a Rust panic reaches JS as a bare
         // `unreachable` trap with no message, which would make every failure
         // mode in this probe indistinguishable.
@@ -599,6 +631,7 @@ mod web {
             scope,
             signal_timer_started: false,
             input_events: 0,
+            t_start,
         });
     }
 
@@ -631,18 +664,36 @@ mod web {
             let arm = self.arm;
             let slot = Rc::clone(&self.gpu);
             wasm_bindgen_futures::spawn_local(async move {
+                // w0-05: the RenderContext/SurfaceRenderer bring-up span —
+                // context creation, the retrying surface bring-up (§ 6's
+                // cold-adapter race), and `frust-gpu`'s inline pipeline
+                // warm-up fallback (§ 3/§ 8's "could not spawn the pipeline
+                // warm-up thread ... building the listed variants inline"),
+                // all inside `bring_up` below — as one span, per the card's
+                // own instruction. See RESULTS.md's w0-05 section.
+                let bringup_start = now_ms();
                 match bring_up(arm, &window).await {
                     Ok(mut gpu) => {
+                        log_line(&format!(
+                            "timing: bring-up (context create + surface retries + \
+                             inline pipeline warm-up fallback + font register + \
+                             scene build) = {:.3}ms",
+                            now_ms() - bringup_start
+                        ));
                         // Draw here rather than only asking for a redraw:
                         // this guarantees at least one submitted frame even
                         // if the redraw request is coalesced away, which is
                         // the frame the screenshot is taken of.
-                        let outcome = draw(&mut gpu);
+                        let outcome = draw(&mut gpu, true);
                         *slot.borrow_mut() = Some(gpu);
                         set_verdict(&format!("frust w0-03 {} | {outcome}", arm.label()));
                         window.request_redraw();
                     }
                     Err(err) => {
+                        log_line(&format!(
+                            "timing: bring-up FAILED after {:.3}ms",
+                            now_ms() - bringup_start
+                        ));
                         set_verdict(&format!("frust w0-03 {} | FAIL: {err}", arm.label()));
                     }
                 }
@@ -664,10 +715,28 @@ mod web {
                     if let Ok(mut slot) = self.gpu.try_borrow_mut()
                         && let Some(gpu) = slot.as_mut()
                     {
-                        let outcome = draw(gpu);
+                        let outcome = draw(gpu, self.frames < LOGGED_FRAMES);
                         self.frames += 1;
                         if self.frames <= LOGGED_FRAMES {
                             log_line(&format!("frame {}: {outcome}", self.frames));
+                        }
+                        if self.frames == 1 {
+                            // w0-05 first-frame time: `t_start` (`start()`'s
+                            // entry, ~= init() resolution — see the field's
+                            // doc comment) to this, the first RAF-driven
+                            // frame `RedrawRequested` presented. The earlier
+                            // draw `resumed`'s own continuation performs
+                            // (this file's "guarantee at least one submitted
+                            // frame" comment) is not itself counted as a
+                            // `frame N` — its cost is inside the `timing:
+                            // bring-up` line above instead, since it runs
+                            // before this handler ever sees a
+                            // `RedrawRequested` event.
+                            log_line(&format!(
+                                "timing: first-frame (start() entry -> first \
+                                 RAF-driven `frame 1` presented) = {:.3}ms",
+                                now_ms() - self.t_start
+                            ));
                         }
                         if self.frames % TITLE_EVERY == 0 {
                             document().set_title(&format!(
@@ -979,26 +1048,61 @@ mod web {
     /// Answers a short human-readable outcome rather than a `Result`: every
     /// arm of the state machine is reportable evidence here, including the
     /// ones a shell would treat as "retry later".
-    fn draw(gpu: &mut Gpu) -> String {
+    ///
+    /// w0-05 timing: each of the three phases is wrapped in `now_ms()` and,
+    /// when `log_timing` is set, reported as one `timing:` line. The card's
+    /// own instruction was to wrap `encode()` (per
+    /// `crates/frust-render/src/renderer.rs`'s own doc comment, `encode` is a
+    /// scene memcpy and nothing else — `encode_us` here should read close to
+    /// zero); `acquire`/`submit` are timed alongside it because that same doc
+    /// comment says the engine's real per-frame CPU work — strip generation
+    /// and paint encoding — plus the GPU queue-submit run inside `submit`,
+    /// which is why `submit_us` is this spike's proxy for the card's
+    /// `strip_us` (no public, spike-reachable hook isolates strip generation
+    /// alone from the GPU submit — see RESULTS.md's w0-05 section).
+    fn draw(gpu: &mut Gpu, log_timing: bool) -> String {
         let Gpu {
             ctx,
             renderer,
             scene,
         } = gpu;
-        match renderer.encode(ctx, scene, BASE_COLOR) {
+        let encode_start = now_ms();
+        let encode_outcome = renderer.encode(ctx, scene, BASE_COLOR);
+        let encode_ms = now_ms() - encode_start;
+        match encode_outcome {
             Err(err) => format!("FAIL: encode: {err:#}"),
             Ok(EncodeOutcome::Skipped) => "skipped: no renderable surface at encode".to_string(),
-            Ok(EncodeOutcome::Encoded) => match renderer.acquire(ctx) {
-                Err(err) => format!("FAIL: acquire: {err:#}"),
-                Ok(AcquireOutcome::Reconfigured) => "reconfigured: swapchain was stale".to_string(),
-                Ok(AcquireOutcome::Lost) => "surface lost at acquire".to_string(),
-                Ok(AcquireOutcome::Skipped) => "skipped: transient acquire failure".to_string(),
-                Ok(AcquireOutcome::Acquired) => match renderer.submit(ctx) {
-                    Err(err) => format!("FAIL: submit: {err:#}"),
-                    Ok(FrameOutcome::Rendered) => "RENDERED".to_string(),
-                    Ok(other) => format!("submitted but not presented: {other:?}"),
-                },
-            },
+            Ok(EncodeOutcome::Encoded) => {
+                let acquire_start = now_ms();
+                let acquire_outcome = renderer.acquire(ctx);
+                let acquire_ms = now_ms() - acquire_start;
+                match acquire_outcome {
+                    Err(err) => format!("FAIL: acquire: {err:#}"),
+                    Ok(AcquireOutcome::Reconfigured) => {
+                        "reconfigured: swapchain was stale".to_string()
+                    }
+                    Ok(AcquireOutcome::Lost) => "surface lost at acquire".to_string(),
+                    Ok(AcquireOutcome::Skipped) => "skipped: transient acquire failure".to_string(),
+                    Ok(AcquireOutcome::Acquired) => {
+                        let submit_start = now_ms();
+                        let submit_outcome = renderer.submit(ctx);
+                        let submit_ms = now_ms() - submit_start;
+                        if log_timing {
+                            log_line(&format!(
+                                "timing: encode={encode_ms:.3}ms (scene memcpy) \
+                                 acquire={acquire_ms:.3}ms (swapchain/vsync wait) \
+                                 submit={submit_ms:.3}ms (strip generation + GPU \
+                                 encode/queue-submit — this spike's `strip_us` proxy)"
+                            ));
+                        }
+                        match submit_outcome {
+                            Err(err) => format!("FAIL: submit: {err:#}"),
+                            Ok(FrameOutcome::Rendered) => "RENDERED".to_string(),
+                            Ok(other) => format!("submitted but not presented: {other:?}"),
+                        }
+                    }
+                }
+            }
         }
     }
 }
