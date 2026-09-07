@@ -189,11 +189,7 @@ fn card_case() -> AnyView<()> {
 fn command_palette_case() -> AnyView<()> {
     framed(
         command_palette::<(), _, _>(
-            vec![
-                PaletteItem::new("Deploy").hint("⌘D"),
-                PaletteItem::new("Rollback").hint("⌘R"),
-                PaletteItem::new("View logs"),
-            ],
+            vec![PaletteItem::new("Deploy").hint("⌘D")],
             |_: &mut (), _: String| {},
             |_: &mut (), _: usize| {},
         )
