@@ -88,9 +88,11 @@ fn slug_prefix_matches_design_tag() {
         } else {
             // Un-prefixed slug: must be Design::Base
             assert_eq!(
-                case.design, Design::Base,
+                case.design,
+                Design::Base,
                 "case slug {}: un-prefixed slug must have Design::Base, found {:?}",
-                case.slug, case.design
+                case.slug,
+                case.design
             );
         }
     }
