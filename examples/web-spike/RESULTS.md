@@ -510,7 +510,7 @@ observed while waiting for it.
   of which is in this task's write scope — keep a real
   `tokio::runtime::Handle` to type-check against. **`use_task`'s background
   half and `spawn_blocking` have no working wasm equivalent**: `spawn_blocking`
-  now fails loudly with a compile error on `wasm32-unknown-unknown` (r0-02's
+  now fails loudly at runtime on `wasm32-unknown-unknown` (an explicit, frust-worded panic before tokio is reached — not a compile error) (r0-02's
   change). Documented on `spawn_blocking` and in `runtime.rs`'s module docs.
 
 `examples/web-spike` (this file plus `src/main.rs`, both in this task's write
