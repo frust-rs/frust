@@ -46,6 +46,8 @@ pub use app_handler::{
 };
 #[cfg(target_arch = "wasm32")]
 pub use app_handler::{ShellUserEvent, run_app, spawn_app};
+pub use input::{TouchTracker, map_touch_phase};
+pub use logging::{DEFAULT_LEVEL, LEVEL_QUERY_PARAM, install, level_from_query, parse_level};
 pub use pacing::{
     ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, PacedDecision, RAF_PERIOD_60HZ, next_paced_wake,
     overshoot, paced_interval, paced_wake_action, raf_quantized,
