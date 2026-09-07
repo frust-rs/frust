@@ -46,17 +46,46 @@
 //! See `README.md` for how to add a case.
 
 pub mod base;
+pub mod beui;
 pub mod case;
+pub mod cupertino;
+pub mod glyph;
+pub mod material;
+pub mod shadcn;
 pub mod theme;
 
 pub use case::{Case, Design, Variant};
 pub use theme::theme;
 
-/// The whole case registry: every per-module `CASES` slice, concatenated.
-/// Currently the whole `Base` page set ([`base::cases`]); later phases add
-/// each design system's own case modules and concatenate them here.
+/// Every design-system case module's `CASES` slice, in the website
+/// sidebar's order (`apps/website/widgets/design-systems/<design>/_category_.json`
+/// `position`: material, cupertino, glyph, shadcn, beui); the `Base` set
+/// comes first via [`base::cases`]. The order is observable — it is the
+/// `--list` order and a fresh manifest's row order — but nothing depends on
+/// it. Adding a design system means adding its module above and its slice
+/// here at the sidebar position — nothing else.
+const DESIGN_PARTS: &[&[Case]] = &[
+    material::CASES,
+    cupertino::CASES,
+    glyph::CASES,
+    shadcn::CASES,
+    beui::CASES,
+];
+
+/// The whole case registry: the `Base` page set ([`base::cases`]) followed by
+/// every design-system module's `CASES` slice ([`DESIGN_PARTS`]),
+/// concatenated once and cached for the process — `Case` is `Copy`, so the
+/// slices are stitched, never rebuilt. Slug uniqueness across the whole
+/// registry is enforced by `tests/registry.rs`.
 pub fn cases() -> &'static [Case] {
-    base::cases()
+    static ALL: std::sync::OnceLock<Vec<Case>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = base::cases().to_vec();
+        for part in DESIGN_PARTS {
+            all.extend_from_slice(part);
+        }
+        all
+    })
 }
 
 /// Look up a single case by its [`Case::slug`]. `None` if no case in the

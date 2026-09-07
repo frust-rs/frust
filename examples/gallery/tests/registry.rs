@@ -43,6 +43,18 @@ const ALL_DESIGNS: &[Design] = &[
 
 const ALL_VARIANTS: &[Variant] = &[Variant::Light, Variant::Dark];
 
+/// Map a [`Design`] to its slug prefix tag (e.g., `material`, `shadcn`).
+fn design_tag(design: Design) -> &'static str {
+    match design {
+        Design::Base => "base",
+        Design::Material => "material",
+        Design::Cupertino => "cupertino",
+        Design::Glyph => "glyph",
+        Design::Shadcn => "shadcn",
+        Design::Beui => "beui",
+    }
+}
+
 #[test]
 fn every_design_has_a_theme_for_both_variants() {
     use frust_theme::Brightness;
@@ -57,6 +69,30 @@ fn every_design_has_a_theme_for_both_variants() {
             assert_eq!(
                 theme.brightness, expected,
                 "design {design:?} variant {variant:?} did not resolve the requested brightness"
+            );
+        }
+    }
+}
+
+#[test]
+fn slug_prefix_matches_design_tag() {
+    for case in frust_gallery::cases() {
+        if let Some((prefix, _stem)) = case.slug.split_once('/') {
+            // Prefixed slug: prefix must match the design's tag
+            let expected_tag = design_tag(case.design);
+            assert_eq!(
+                prefix, expected_tag,
+                "case slug {}: prefix '{}' does not match design tag '{}'",
+                case.slug, prefix, expected_tag
+            );
+        } else {
+            // Un-prefixed slug: must be Design::Base
+            assert_eq!(
+                case.design,
+                Design::Base,
+                "case slug {}: un-prefixed slug must have Design::Base, found {:?}",
+                case.slug,
+                case.design
             );
         }
     }
