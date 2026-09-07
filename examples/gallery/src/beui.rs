@@ -87,7 +87,7 @@
 //! mid-neutral that clears roughly 4:1 against *both* shells. Every other case
 //! in this module leaves its text at the themed default.
 
-use frust_core::{AnyView, View, any};
+use frust_core::{AnyView, any};
 use frust_widgets::{Column, EdgeInsets, Padding, Row, SizedBox, container, text};
 use kurbo::Size;
 use peniko::Color;
@@ -110,6 +110,7 @@ use frust_beui::components::switch::switch;
 use frust_beui::components::tabs::{TabsVariant, tabs, tabs_tab};
 use frust_beui::components::tilt_card::tilt_card;
 
+use crate::base::{framed, framed_in};
 use crate::case::{Case, Design};
 
 /// The ink every `dynamic-island` slot child paints in — see the module docs'
@@ -139,23 +140,6 @@ const ACCENT_SURFACE: Color = frust_beui::BEUI_LIGHT.accent;
 /// system pairs with `accent` (`#0B0B0B` light, `#151515` dark; the light value
 /// reads on both).
 const ACCENT_INK: Color = frust_beui::BEUI_LIGHT.accent_fg;
-
-/// Wrap `child`, centered, in a [`Case::DEFAULT_SIZE`] frame — the beUI mirror
-/// of [`crate::base::framed`], kept local so this module owns its own framing
-/// (and duplicated for exactly that reason: `base`'s helper is the `Base`
-/// catalog's).
-///
-/// Deliberately no `.fill(..)`: see the module docs and [`crate::base`]'s "The
-/// variant has to reach the pixels".
-fn framed<V: View<()>>(child: V) -> AnyView<()> {
-    framed_in(Case::DEFAULT_SIZE, child)
-}
-
-/// [`framed`] at an explicit frame size, for a case that records at its own
-/// viewport rather than [`Case::DEFAULT_SIZE`]. Fills nothing, same reason.
-fn framed_in<V: View<()>>(frame: Size, child: V) -> AnyView<()> {
-    any(container(child).size_centered(frame.width, frame.height))
-}
 
 /// A fixed vertical gap, as an `AnyView` a [`Column`] can take.
 fn gap_y(height: f64) -> AnyView<()> {
@@ -209,7 +193,7 @@ fn input_case() -> AnyView<()> {
         Size::new(360.0, 300.0),
         Column(vec![
             any(SizedBox(Some(280.0), None)
-                .child(input("saurabh@beui.dev", |_: &mut (), _: String| {}).label("Email"))),
+                .child(input("ada@example.com", |_: &mut (), _: String| {}).label("Email"))),
             gap_y(14.0),
             any(SizedBox(Some(280.0), None).child(
                 input("", |_: &mut (), _: String| {})
@@ -217,18 +201,10 @@ fn input_case() -> AnyView<()> {
                     .placeholder("acme-inc"),
             )),
             gap_y(14.0),
-            // The message's trailing period is deliberate. `InputWidget::paint`
-            // opens the message row's layer at `origin.x` but paints the run at
-            // `origin.x + LABEL_PADDING_X`, so the last 4 logical px of every
-            // message are clipped away (`plugins/beui/src/components/input.rs`,
-            // the `push_layer` above `message.paint`). The period takes that
-            // 4px instead of a letter, so the sentence reads whole. Drop it once
-            // that off-by-`LABEL_PADDING_X` is fixed in the plugin — not this
-            // crate's to fix.
             any(SizedBox(Some(280.0), None).child(
                 input("nope", |_: &mut (), _: String| {})
                     .label("Handle")
-                    .error("Already taken."),
+                    .error("That handle is taken."),
             )),
         ]),
     )
