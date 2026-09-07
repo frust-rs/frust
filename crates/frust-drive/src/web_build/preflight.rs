@@ -475,74 +475,43 @@ fn installed_bindgen_version(runner: &dyn ProcessRunner) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the artifact directory would be safe from the host page and source
-/// directory — the artifact dir should not overlap with either, since preparing
-/// it deletes its contents.
+/// Whether `[web] out-dir` can be prepared without destroying anything: the
+/// same judgement [`super::build`] makes before its compile
+/// ([`super::bundle::guard_artifact_dir`] over
+/// [`super::bundle::protected_dirs`]), surfaced as a row and worded with the
+/// build's own error text, so the preflight never says "safe" about a
+/// directory the build would refuse.
+///
+/// Deliberately independent of the host page resolving: the configured
+/// host directory, the framework page when the project's `frust` dependency
+/// locates one, and `src/` are protected whether or not
+/// [`super::bundle::resolve_embedder`] succeeds, because a partial app page
+/// (`index.html` without `frust_web.js`) fails resolution while still being
+/// exactly the directory an `out-dir = "web"` would delete.
 fn artifact_dir_safety_check(project_dir: &Path, web: &WebSection) -> Component {
     let name = ARTIFACT_DIR_COMPONENT.to_string();
     let artifact = bundle::artifact_dir(project_dir, web);
-    match bundle::resolve_embedder(project_dir, web) {
-        Ok((embedder, _)) => {
-            // Try the prepare_dir check to see if it would fail
-            let src_dir = project_dir.join("src");
-            let src_overlap = paths_overlap(&artifact, &src_dir);
-            let embedder_overlap = paths_overlap(&artifact, &embedder);
-            if embedder_overlap || src_overlap {
-                Component {
-                    name,
-                    status: ComponentStatus::Missing,
-                    summary: format!(
-                        "artifact directory '{}' overlaps with {} — it would be deleted \
-                         on each build, destroying the source or host page; reconfigure \
-                         `[web] out-dir` to a safe subdirectory",
-                        artifact.display(),
-                        if embedder_overlap {
-                            format!("the host page at '{}'", embedder.display())
-                        } else {
-                            format!("the project's src directory at '{}'", src_dir.display())
-                        }
-                    ),
-                    fix_commands: Vec::new(),
-                }
-            } else {
-                Component {
-                    name,
-                    status: ComponentStatus::Ok,
-                    summary: format!("artifact directory '{}' is safe", artifact.display()),
-                    fix_commands: Vec::new(),
-                }
-            }
-        }
-        Err(_) => {
-            // If embedder can't resolve, we can't check safety—but the embedder
-            // check will catch the error anyway.
-            Component {
-                name,
-                status: ComponentStatus::Ok,
-                summary: "artifact directory check skipped — see the host page check for issues"
-                    .to_string(),
-                fix_commands: Vec::new(),
-            }
-        }
+    let resolved = bundle::resolve_embedder(project_dir, web)
+        .ok()
+        .map(|(dir, _)| dir);
+    let protected = bundle::protected_dirs(project_dir, web, resolved.as_deref());
+    match bundle::guard_artifact_dir(&artifact, project_dir, &protected) {
+        Ok(()) => Component {
+            name,
+            status: ComponentStatus::Ok,
+            summary: format!(
+                "artifact directory '{}' overlaps no host page or source directory",
+                artifact.display()
+            ),
+            fix_commands: Vec::new(),
+        },
+        Err(err) => Component {
+            name,
+            status: ComponentStatus::Missing,
+            summary: format!("{err}"),
+            fix_commands: Vec::new(),
+        },
     }
-}
-
-/// Whether two paths overlap: one is a descendant of the other, or they are
-/// the same. Mirrors the guard logic in `bundle.rs`.
-fn paths_overlap(a: &Path, b: &Path) -> bool {
-    // Check if a == b
-    if a == b {
-        return true;
-    }
-    // Check if a contains b (b is a descendant of a)
-    if b.strip_prefix(a).is_ok() {
-        return true;
-    }
-    // Check if b contains a (a is a descendant of b)
-    if a.strip_prefix(b).is_ok() {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -750,6 +719,68 @@ mod tests {
         assert!(!report.is_ready());
         assert_eq!(report.blocking().len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The artifact-safety row does not depend on the host page resolving: a
+    /// project whose `frust` dependency locates no framework page and whose
+    /// own page is partial still has its configured host directory
+    /// protected, and the row says so with the build's own refusal text.
+    #[test]
+    fn the_artifact_row_protects_a_partial_host_dir_when_no_page_resolves() {
+        let dir = temp_dir("artifact-partial");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"app\"\norg = \"dev.f0x\"\n\n[web]\nout-dir = \"web\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("web")).unwrap();
+        fs::write(dir.join("web/index.html"), "<!doctype html>").unwrap();
+        let report = preflight(&healthy_runner(), &dir);
+        let row = component(&report, ARTIFACT_DIR_COMPONENT);
+        assert_eq!(row.status, ComponentStatus::Missing, "{row:?}");
+        assert!(
+            row.summary.contains(&dir.join("web").display().to_string()),
+            "{}",
+            row.summary
+        );
+        assert!(!report.is_ready());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The default layout — `build/web` beside `web/` and `src/` — is
+    /// reported safe, and an out-dir escaping the project is reported with
+    /// the build's containment refusal rather than as safe-by-skip.
+    #[test]
+    fn the_artifact_row_reports_the_default_layout_safe_and_an_escape_unsafe() {
+        let (root, project) = checkout("artifact-default", PINNED_MANIFEST);
+        let safe = component(
+            &preflight(&healthy_runner(), &project),
+            ARTIFACT_DIR_COMPONENT,
+        )
+        .clone();
+        assert_eq!(safe.status, ComponentStatus::Ok, "{safe:?}");
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"app\"\norg = \"dev.f0x\"\n\n[web]\nout-dir = \"../escaped\"\n",
+        )
+        .unwrap();
+        let unsafe_row = component(
+            &preflight(&healthy_runner(), &project),
+            ARTIFACT_DIR_COMPONENT,
+        )
+        .clone();
+        assert_eq!(
+            unsafe_row.status,
+            ComponentStatus::Missing,
+            "{unsafe_row:?}"
+        );
+        assert!(
+            unsafe_row.summary.contains("not inside the project"),
+            "{}",
+            unsafe_row.summary
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// An app's own host page is preferred over the framework, and reported

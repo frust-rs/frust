@@ -33,6 +33,11 @@
 //!    build would use. Both checks run before the compile because a
 //!    multi-minute release build that then fails on a missing or
 //!    mismatched host page is the worst possible place to learn about it.
+//!    The artifact directory is judged here too
+//!    ([`bundle::guard_artifact_dir`]): an `[web] out-dir` that would delete
+//!    the configured host directory, the framework page, or `src/` is a
+//!    typed refusal before a single tool runs, and again at the delete
+//!    itself (step 3's [`bundle::prepare_dir`]).
 //! 2. **`cargo build --target wasm32-unknown-unknown`**, with the mode's
 //!    profile flag.
 //! 3. **`wasm-bindgen --target web`** over the produced `.wasm`, straight into
@@ -361,12 +366,18 @@ fn build_with_env(
     if source == bundle::EmbedderSource::App {
         bundle::verify_host_page_module(&embedder, &out_name)?;
     }
+    // Also before the compile: an artifact directory that would delete a
+    // source directory is refused now, at no build cost, and re-checked at
+    // the delete itself by `prepare_dir` below. The protected set does not
+    // depend on which page resolved — see `bundle::protected_dirs`.
+    let root = artifact_dir(project_dir, &web);
+    let protected = bundle::protected_dirs(project_dir, &web, Some(&embedder));
+    bundle::guard_artifact_dir(&root, project_dir, &protected)?;
 
     cargo_build(runner, project_dir, info, on_line)?;
     let module = locate_wasm(runner, env, project_dir, info, &crate_name)?;
 
-    let root = artifact_dir(project_dir, &web);
-    bundle::prepare_dir(&root, project_dir, &embedder)?;
+    bundle::prepare_dir(&root, project_dir, &protected)?;
     let pkg_dir = root.join(bundle::PKG_DIR);
 
     wasm_bindgen(runner, project_dir, &module, &pkg_dir, &out_name, on_line)?;
@@ -1151,6 +1162,49 @@ mod tests {
         .unwrap();
         assert_eq!(report.root, project.join("public"));
         assert!(!project.join("build/web").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `[web] out-dir` naming the configured host directory is refused before
+    /// the compile even when the page there is partial: `web/index.html`
+    /// without `web/frust_web.js` makes the embedder fall through to the
+    /// framework page, and a guard that protected only the resolved page
+    /// then let `prepare_dir` delete the half-written one.
+    #[test]
+    fn an_out_dir_over_a_partial_host_page_is_refused_before_cargo_runs() {
+        let (root, project, target) = checkout("partial-host-dir");
+        let host = project.join("web");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(host.join("index.html"), "<!doctype html>").unwrap();
+        fs::write(
+            project.join("frust.toml"),
+            "[app]\nname = \"web-app\"\norg = \"dev.f0x\"\n\n[web]\nout-dir = \"web\"\n",
+        )
+        .unwrap();
+        let runner = PipelineRunner::new(&target, "release", "web_app");
+        let err = build_with_env(
+            &runner,
+            &env_for(&target),
+            &project,
+            &info(BuildMode::Release),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                WebBuildError::ArtifactDirOverlapsSource { host_page_dir, .. } if *host_page_dir == host
+            ),
+            "{err:?}"
+        );
+        assert!(
+            runner.invocations().is_empty(),
+            "a refused artifact directory costs no compile"
+        );
+        assert!(
+            host.join("index.html").is_file(),
+            "the refusal removed nothing"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
