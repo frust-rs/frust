@@ -42,10 +42,10 @@ pub use case::{Case, Design, Variant};
 pub use theme::theme;
 
 /// The whole case registry: every per-module `CASES` slice, concatenated.
-/// Currently just [`base::CASES`] — g1-03/04/05 add the rest of the Base
-/// page set, and later phases add each design system's own case modules.
+/// Currently the whole `Base` page set ([`base::cases`]); later phases add
+/// each design system's own case modules and concatenate them here.
 pub fn cases() -> &'static [Case] {
-    base::CASES
+    base::cases()
 }
 
 /// Look up a single case by its [`Case::slug`]. `None` if no case in the

@@ -3,7 +3,7 @@
 //! crate docs and `crate::base` for the pure-`View`/slug-rule contract every
 //! case in this registry follows.
 //!
-//! `button`/`container` replace the two seed cases `base::CASES` shipped with
+//! `button`/`container` replace the two seed cases `base::cases()` shipped with
 //! from g1-01 — the conductor drops those two seed entries from
 //! `base/mod.rs` at merge (see the module docs there and this crate's task
 //! summary) so `button` stays a unique slug.

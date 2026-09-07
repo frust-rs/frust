@@ -1,52 +1,35 @@
 //! `Base`-design cases — the framework's own baseline widgets, with no
 //! design-system plugin involved (see [`crate::case::Design::Base`]).
 //!
-//! Each catalog category gets its own submodule; every case is a single
-//! `pub(super) const <NAME>: Case` value (not a per-module slice — see
-//! `basics.rs`/`text.rs`/`layout.rs`/`styling.rs`), and this module's own
-//! [`CASES`] is one literal array naming every case across every submodule.
-//! `button` is still the g1-02 seed case, inlined here rather than in its
-//! own submodule — g1-04's `interaction` module replaces it.
-//!
-//! Concurrent case-batch tasks (g1-04: input/interaction/navigation/
-//! scrolling; g1-05: animation/assets/painting) each own their own
-//! submodule file and do not touch this file's existing lines — see the two
-//! marked spots below for where their `mod` declaration and `CASES` entries
-//! go.
+//! Each catalog category gets its own submodule. Two shapes coexist by
+//! design: `basics`/`text`/`layout`/`styling` expose one
+//! `pub(super) const <NAME>: Case` per case, while the other modules expose a
+//! `pub const CASES: &[Case]` slice. [`PARTS`] lists every module's slice and
+//! [`cases`] concatenates them once at runtime (`Case` is `Copy`, so the
+//! concatenation is a plain copy into a leaked, process-lifetime `Vec`) — a
+//! `const` array literal cannot splice a slice, and a `const fn` concat
+//! would need every length spelled out by hand. To add a category, add its
+//! `mod` line and its slice to [`PARTS`]; `tests/registry.rs` enforces slug
+//! uniqueness across the whole registry.
 
-use frust_core::{AnyView, any};
-use frust_widgets::button;
+use std::sync::OnceLock;
 
-use crate::case::{Case, Design};
+use crate::case::Case;
 
+mod animation;
+mod assets;
 mod basics;
+mod input;
+mod interaction;
 mod layout;
+mod navigation;
+mod painting;
+mod scrolling;
 mod styling;
 mod text;
-// g1-04 adds here: mod input; mod interaction; mod navigation; mod scrolling;
-// g1-05 adds here: mod animation; mod assets; mod painting;
 
-/// Seed case (g1-02) — g1-04's `interaction` module replaces this with the
-/// real `button` case; left in place until then.
-fn button_case() -> AnyView<()> {
-    any(button("Click me", |_state: &mut ()| {}))
-}
-
-const BUTTON: Case = Case {
-    slug: "button",
-    title: "Button",
-    size: Case::DEFAULT_SIZE,
-    scale: Case::DEFAULT_SCALE,
-    time_ms: Case::DEFAULT_TIME_MS,
-    design: Design::Base,
-    build: button_case,
-};
-
-/// This module's slice of the registry [`crate::cases`] concatenates: every
-/// case constant across every submodule, plus the still-seeded [`BUTTON`]
-/// case above.
-pub const CASES: &[Case] = &[
-    BUTTON,
+/// The per-case constants of the modules that expose cases one by one.
+const SINGLES: &[Case] = &[
     // basics (g1-03)
     basics::ANY_VIEW,
     basics::CONTAINER,
@@ -66,6 +49,23 @@ pub const CASES: &[Case] = &[
     styling::COLOR,
     styling::EDGE_INSETS,
     styling::TEXT_STYLE,
-    // g1-04 adds here: input::*, interaction::*, navigation::*, scrolling::*
-    // g1-05 adds here: animation::*, assets::*, painting::*
 ];
+
+/// Every module's contribution, in catalog order. [`cases`] flattens this.
+const PARTS: &[&[Case]] = &[
+    SINGLES,
+    input::CASES,
+    interaction::CASES,
+    navigation::CASES,
+    scrolling::CASES,
+    animation::CASES,
+    assets::CASES,
+    painting::CASES,
+];
+
+/// This module's slice of the registry [`crate::cases`]: every `Base` case
+/// across every submodule, concatenated once and cached for the process.
+pub fn cases() -> &'static [Case] {
+    static ALL: OnceLock<Vec<Case>> = OnceLock::new();
+    ALL.get_or_init(|| PARTS.concat())
+}
