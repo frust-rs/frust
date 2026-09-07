@@ -69,7 +69,7 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # examples/web-spike (web-shell plan Phase 0) is a throwaway standalone
 # workspace that compiles the engine graph for wasm32 with its own target
 # and RUSTFLAGS; it must never be absorbed by the `examples/*` glob.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
