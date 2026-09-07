@@ -166,14 +166,29 @@ fn a_second_filtered_run_merges_into_the_first_filtered_manifest() {
     //    the second run's.
     let mut after_second = manifest_slugs(&dir);
     after_second.sort();
-    let mut expected = vec![
-        ("button".to_string(), "dark".to_string()),
-        ("button".to_string(), "light".to_string()),
-        ("container".to_string(), "dark".to_string()),
-        ("container".to_string(), "light".to_string()),
-        ("icon-button".to_string(), "dark".to_string()),
-        ("icon-button".to_string(), "light".to_string()),
-    ];
+    // Derived from the registry, not hard-coded: `--filter` is a substring
+    // match, so "button" matches the base `button`/`icon-button` pair AND
+    // every design system's `<design>/button`-family slugs as those modules
+    // land. Pinning a literal list here would break each time a case module
+    // is wired in; the invariant under test is only that BOTH runs' rows are
+    // present.
+    let mut expected: Vec<(String, String)> = frust_gallery::cases()
+        .iter()
+        .filter(|case| case.slug.contains("button"))
+        .flat_map(|case| {
+            ["dark", "light"]
+                .into_iter()
+                .map(move |variant| (case.slug.to_string(), variant.to_string()))
+        })
+        .chain([
+            ("container".to_string(), "dark".to_string()),
+            ("container".to_string(), "light".to_string()),
+        ])
+        .collect();
+    assert!(
+        expected.len() > 6,
+        "the registry should carry design-system button slugs by now"
+    );
     expected.sort();
     assert_eq!(
         after_second, expected,

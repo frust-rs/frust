@@ -67,20 +67,19 @@ use frust_shadcn::overlay::{
     HANDLE_RESERVE, ModalConfig, ModalCorners, ModalEntrance, ModalExtent, ModalLimit,
     OverlayAlign, OverlayAnchor, anchor, modal, stack_slots,
 };
-use frust_shadcn::{
-    ButtonVariant, DrawerSide, QuestionnaireShortcuts, SheetSide, SidebarCollapsible,
-    SidebarSide, SidebarVariant, TooltipHover, bubble, card, card_content, card_footer,
-    card_header, card_title, checkbox, dialog_description, dialog_footer, dialog_header,
-    dialog_title, drawer_description, drawer_header, drawer_title, dropdown_menu,
-    dropdown_menu_item, dropdown_menu_label, dropdown_menu_separator, field, input,
-    label as shadcn_label, message, message_content, message_scroller, questionnaire,
-    questionnaire_choice, questionnaire_item, select, select_option, select_trigger,
-    sheet_description, sheet_footer, sheet_header, sheet_title, sidebar, sidebar_content,
-    sidebar_group, sidebar_group_label, sidebar_header, sidebar_inset, sidebar_menu,
-    sidebar_menu_button, sidebar_menu_item, sidebar_provider, table, table_cell, table_row, tabs,
-    tabs_tab, tooltip, tooltip_trigger,
-};
 use frust_shadcn::{BubbleAlign, BubbleVariant, button};
+use frust_shadcn::{
+    ButtonVariant, DrawerSide, QuestionnaireShortcuts, SheetSide, SidebarCollapsible, SidebarSide,
+    SidebarVariant, TooltipHover, bubble, card, card_content, card_footer, card_header, card_title,
+    checkbox, dialog_description, dialog_footer, dialog_header, dialog_title, drawer_description,
+    drawer_header, drawer_title, dropdown_menu, dropdown_menu_item, dropdown_menu_label,
+    dropdown_menu_separator, field, input, label as shadcn_label, message, message_content,
+    message_scroller, questionnaire, questionnaire_choice, questionnaire_item, select,
+    select_option, select_trigger, sheet_description, sheet_footer, sheet_header, sheet_title,
+    sidebar, sidebar_content, sidebar_group, sidebar_group_label, sidebar_header, sidebar_inset,
+    sidebar_menu, sidebar_menu_button, sidebar_menu_item, sidebar_provider, table, table_cell,
+    table_row, tabs, tabs_tab, tooltip, tooltip_trigger,
+};
 use frust_widgets::{
     Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Row, SizedBox, icon, icons,
 };
@@ -93,42 +92,37 @@ use crate::case::{Case, Design};
 /// over two rows so the full variant set fits [`Case::DEFAULT_SIZE`]'s width.
 fn button_case() -> AnyView<()> {
     framed(Column(vec![
-        any(
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    frust_widgets::inflexible(button("Default", |_: &mut ()| {})),
-                    frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                    frust_widgets::inflexible(
-                        button("Secondary", |_: &mut ()| {}).variant(ButtonVariant::Secondary),
-                    ),
-                    frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                    frust_widgets::inflexible(
-                        button("Outline", |_: &mut ()| {}).variant(ButtonVariant::Outline),
-                    ),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
-        ),
+        any(FlexView::new(
+            Axis::Horizontal,
+            vec![
+                frust_widgets::inflexible(button("Default", |_: &mut ()| {})),
+                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
+                frust_widgets::inflexible(
+                    button("Secondary", |_: &mut ()| {}).variant(ButtonVariant::Secondary),
+                ),
+                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
+                frust_widgets::inflexible(
+                    button("Outline", |_: &mut ()| {}).variant(ButtonVariant::Outline),
+                ),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Center)),
         any(SizedBox(None, Some(12.0))),
-        any(
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    frust_widgets::inflexible(
-                        button("Destructive", |_: &mut ()| {})
-                            .variant(ButtonVariant::Destructive),
-                    ),
-                    frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                    frust_widgets::inflexible(
-                        button("Link", |_: &mut ()| {}).variant(ButtonVariant::Link),
-                    ),
-                    frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                    frust_widgets::inflexible(button("Disabled", |_: &mut ()| {}).disabled(true)),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
-        ),
+        any(FlexView::new(
+            Axis::Horizontal,
+            vec![
+                frust_widgets::inflexible(
+                    button("Destructive", |_: &mut ()| {}).variant(ButtonVariant::Destructive),
+                ),
+                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
+                frust_widgets::inflexible(
+                    button("Link", |_: &mut ()| {}).variant(ButtonVariant::Link),
+                ),
+                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
+                frust_widgets::inflexible(button("Disabled", |_: &mut ()| {}).disabled(true)),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Center)),
     ]))
 }
 
@@ -140,10 +134,10 @@ fn card_case() -> AnyView<()> {
         Column(vec![
             any(card(vec![
                 card_header(vec![card_title("Slide 1")]),
-                card_content(frust_widgets::text(
-                    "Drag the slide sideways, or use the outline arrows.",
-                )
-                .size(13.0)),
+                card_content(
+                    frust_widgets::text("Drag the slide sideways, or use the outline arrows.")
+                        .size(13.0),
+                ),
             ])),
             any(SizedBox(None, Some(12.0))),
             any(card(vec![
@@ -175,7 +169,7 @@ fn dialog_case() -> AnyView<()> {
                         dialog_description("This action cannot be undone."),
                     ]),
                     dialog_footer(vec![any(
-                        button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline),
+                        button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline)
                     )]),
                 ],
                 16.0,
@@ -239,14 +233,13 @@ fn dropdown_menu_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 260.0),
         frust_widgets::Stack(vec![
-            any(anchor(
-                &dropdown_anchor,
-                button("Actions", |_: &mut ()| {}),
-            )),
+            any(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {}))),
             any(dropdown_menu(
                 vec![
                     dropdown_menu_label("Actions"),
-                    dropdown_menu_item("Bold").checked(true).shortcut("\u{2318}B"),
+                    dropdown_menu_item("Bold")
+                        .checked(true)
+                        .shortcut("\u{2318}B"),
                     dropdown_menu_item("Italic").shortcut("\u{2318}I"),
                     dropdown_menu_separator(),
                     dropdown_menu_item("Disabled row").disabled(true),
@@ -264,14 +257,12 @@ fn form_controls_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 220.0),
         Column(vec![
-            any(
-                Row(vec![
-                    any(checkbox(true, |_: &mut (), _: bool| {})),
-                    any(SizedBox(Some(8.0), None)),
-                    any(shadcn_label("Accept the terms")),
-                ])
-                .cross_axis(CrossAxisAlignment::Center),
-            ),
+            any(Row(vec![
+                any(checkbox(true, |_: &mut (), _: bool| {})),
+                any(SizedBox(Some(8.0), None)),
+                any(shadcn_label("Accept the terms")),
+            ])
+            .cross_axis(CrossAxisAlignment::Center)),
             any(SizedBox(None, Some(20.0))),
             any(
                 field(input("", |_: &mut (), _: String| {}).placeholder("Full name"))
@@ -288,15 +279,15 @@ fn input_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 200.0),
         Column(vec![
-            any(
-                input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}"),
-            ),
+            any(input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}")),
             any(SizedBox(None, Some(24.0))),
-            any(
-                field(input("", |_: &mut (), _: String| {}).invalid(true).placeholder("Required"))
-                    .label("Invalid example")
-                    .error("This field is required."),
-            ),
+            any(field(
+                input("", |_: &mut (), _: String| {})
+                    .invalid(true)
+                    .placeholder("Required"),
+            )
+            .label("Invalid example")
+            .error("This field is required.")),
         ]),
     )
 }
@@ -326,12 +317,11 @@ fn questionnaire_case() -> AnyView<()> {
         Size::new(420.0, 320.0),
         questionnaire(
             vec![
-                questionnaire_item("framework", "Which framework brought you here?")
-                    .choices(vec![
-                        questionnaire_choice("frust", "Frust"),
-                        questionnaire_choice("flutter", "Flutter"),
-                        questionnaire_choice("other", "Something else"),
-                    ]),
+                questionnaire_item("framework", "Which framework brought you here?").choices(vec![
+                    questionnaire_choice("frust", "Frust"),
+                    questionnaire_choice("flutter", "Flutter"),
+                    questionnaire_choice("other", "Something else"),
+                ]),
             ],
             0,
             vec![Default::default()],
@@ -430,7 +420,9 @@ fn sidebar_case() -> AnyView<()> {
                         .collect(),
                 ),
             ])]))
-            .header(sidebar_header(vec![any(frust_widgets::text("Floating").size(14.0))]))
+            .header(sidebar_header(vec![any(
+                frust_widgets::text("Floating").size(14.0)
+            )]))
             .side(SidebarSide::Right)
             .variant(SidebarVariant::Floating)
             .collapsible(SidebarCollapsible::Icon)

@@ -7,11 +7,13 @@
 
 use frust_core::{AnyView, any};
 use frust_cupertino::{
+    CupertinoActionStyle, CupertinoAlertDialogView, CupertinoButtonSize, CupertinoButtonStyle,
     action, cupertino_activity_indicator, cupertino_button, cupertino_nav_bar, cupertino_switch,
-    cupertino_tab_bar, tab_item, CupertinoActionStyle, CupertinoAlertDialogView,
-    CupertinoButtonSize, CupertinoButtonStyle,
+    cupertino_tab_bar, tab_item,
 };
-use frust_widgets::{Axis, CrossAxisAlignment, FlexView, NavigatorController, SizedBox, inflexible, text};
+use frust_widgets::{
+    Axis, CrossAxisAlignment, FlexView, NavigatorController, SizedBox, inflexible, text,
+};
 
 use super::base::framed;
 use crate::case::{Case, Design};
@@ -56,7 +58,7 @@ fn navbar_case() -> AnyView<()> {
                 inflexible(
                     cupertino_nav_bar("Settings")
                         .leading(any(SizedBox(Some(30.0), Some(30.0))))
-                        .trailing(any(SizedBox(Some(30.0), Some(30.0))))
+                        .trailing(any(SizedBox(Some(30.0), Some(30.0)))),
                 ),
                 inflexible(SizedBox(None, Some(16.0))),
                 inflexible(text("Navbar with leading and trailing content")),
@@ -80,7 +82,7 @@ fn switch_case() -> AnyView<()> {
                             inflexible(cupertino_switch(false, |_: &mut (), _: bool| {})),
                         ],
                     )
-                    .cross_axis(CrossAxisAlignment::Center)
+                    .cross_axis(CrossAxisAlignment::Center),
                 ),
                 inflexible(SizedBox(None, Some(12.0))),
                 inflexible(
@@ -92,7 +94,7 @@ fn switch_case() -> AnyView<()> {
                             inflexible(cupertino_switch(true, |_: &mut (), _: bool| {})),
                         ],
                     )
-                    .cross_axis(CrossAxisAlignment::Center)
+                    .cross_axis(CrossAxisAlignment::Center),
                 ),
             ],
         )
@@ -108,11 +110,7 @@ fn tabbar_case() -> AnyView<()> {
                 inflexible(text("Tab bar (selected: 0)")),
                 inflexible(SizedBox(None, Some(12.0))),
                 inflexible(cupertino_tab_bar::<(), _>(
-                    vec![
-                        tab_item("Home"),
-                        tab_item("Search"),
-                        tab_item("Favorites"),
-                    ],
+                    vec![tab_item("Home"), tab_item("Search"), tab_item("Favorites")],
                     0,
                     |_: &mut (), _: usize| {},
                 )),

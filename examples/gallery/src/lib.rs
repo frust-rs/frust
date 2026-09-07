@@ -46,17 +46,43 @@
 //! See `README.md` for how to add a case.
 
 pub mod base;
+pub mod beui;
 pub mod case;
+pub mod cupertino;
+pub mod glyph;
+pub mod material;
+pub mod shadcn;
 pub mod theme;
 
 pub use case::{Case, Design, Variant};
 pub use theme::theme;
 
-/// The whole case registry: every per-module `CASES` slice, concatenated.
-/// Currently the whole `Base` page set ([`base::cases`]); later phases add
-/// each design system's own case modules and concatenate them here.
+/// Every design-system case module's `CASES` slice, in the order their
+/// slugs sort on the website (the `Base` set comes first via
+/// [`base::cases`]). Adding a design system means adding its module above
+/// and its slice here — nothing else.
+const DESIGN_PARTS: &[&[Case]] = &[
+    material::CASES,
+    shadcn::CASES,
+    glyph::CASES,
+    beui::CASES,
+    cupertino::CASES,
+];
+
+/// The whole case registry: the `Base` page set ([`base::cases`]) followed by
+/// every design-system module's `CASES` slice ([`DESIGN_PARTS`]),
+/// concatenated once and cached for the process — `Case` is `Copy`, so the
+/// slices are stitched, never rebuilt. Slug uniqueness across the whole
+/// registry is enforced by `tests/registry.rs`.
 pub fn cases() -> &'static [Case] {
-    base::cases()
+    static ALL: std::sync::OnceLock<Vec<Case>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = base::cases().to_vec();
+        for part in DESIGN_PARTS {
+            all.extend_from_slice(part);
+        }
+        all
+    })
 }
 
 /// Look up a single case by its [`Case::slug`]. `None` if no case in the
