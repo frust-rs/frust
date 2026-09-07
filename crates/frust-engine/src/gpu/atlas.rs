@@ -238,7 +238,10 @@ pub struct AtlasArray {
 }
 
 impl AtlasArray {
-    /// An atlas array of `width` x `height` texels with a single layer.
+    /// An atlas array of `width` x `height` texels with at least two layers due to
+    /// the floor raised by wgpu-hal 30.0.1's GLES backend heuristic — one resident
+    /// layer is still the logical minimum, but a second layer is allocated to work
+    /// around a target-selection bug in `get_info_from_desc` (see [`atlas_texture_descriptor`]).
     #[must_use]
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         Self::with_layers(device, width, height, 1)
@@ -1322,7 +1325,7 @@ mod tests {
     /// Target and sampler disagreeing makes the texture incomplete per GLES
     /// 3.0 §3.8.2, so every sample reads `(0, 0, 0, 1)`: a solid box in place
     /// of a glyph, a solid black rect in place of an image — reproduced on
-    /// Chrome's WebGL2 backend in `examples/web-spike` (spike w0-07) and fixed
+    /// Chrome's WebGL2 backend by the examples/web-spike probe and fixed
     /// by this floor. Tracked upstream as wgpu issues #1614 and #1574; a later
     /// tidy-up must not "simplify" this back to `max(1)` without wgpu-hal
     /// fixing the heuristic first (see `docs/LIMITATIONS.md`).
