@@ -17,7 +17,7 @@ against the same device.
 | Mid-tier Android | OnePlus 9 (LE2115) | Snapdragon 888 / Adreno 660 | at desk — in the 2026-09-05 engine pass |
 | Budget Android | Google Pixel 5 (redfin) | Snapdragon 765G / Adreno 620 | at desk — in the 2026-09-05 engine pass (first Frust-vs-Flutter pass on it; run over adb-over-Wi-Fi, radios uncontrolled) |
 | iOS | iPhone SE (2nd gen) | Apple A13 (60 Hz panel, no ProMotion) | at desk — in the 2026-09-05 engine pass |
-| Headline Android | Xiaomi 12 (cupid) | Snapdragon 8 Gen 1 / Adreno 730 | **not at desk** — its 2026-07-21 vello-era pass stands until re-run |
+| Headline Android | Xiaomi 12 (cupid) | Snapdragon 8 Gen 1 / Adreno 730 | at desk — in the 2026-09-06 engine pass (USB, 120 Hz pinned), replacing its 2026-07-21 vello-era pass |
 
 `RESULTS.md` records whatever devices actually ran a given matrix pass, not
 an aspirational list — a device column with no runs is left absent, not
@@ -129,6 +129,9 @@ history (the section names the commit).
 every device it covers (OnePlus 9, iPhone SE, Pixel 5): its raw series replace
 theirs under `benchmarks/raw/`, and `RESULTS.md` carries a per-device delta
 table against them.
+The Xiaomi 12 joined the same pass later that day — its first engine-renderer
+pass — replacing its 2026-07-21 vello-era series (`frust_release` raws, now in
+git history) with a renderer-transition comparison in its section.
 
 ## 3. Environmental controls
 

@@ -1,0 +1,56 @@
+== 2026-09-06T22:47:17Z
+4.1% TOTAL: 1.7% user + 1.9% kernel + 0% iowait + 0.4% irq + 0% softirq
+== 2026-09-06T22:47:47Z
+ +0% 28538/it.f0x.flutter_bench: 0% user + 0% kernel
+2.4% TOTAL: 0.9% user + 1.1% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:48:17Z
+ +0% 28538/it.f0x.flutter_bench: 0% user + 0% kernel
+2.4% TOTAL: 0.9% user + 1.1% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:48:47Z
+  0.3% 28538/it.f0x.flutter_bench: 0.2% user + 0.1% kernel / faults: 3004 minor
+0.9% TOTAL: 0.2% user + 0.5% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:49:17Z
+  0.3% 28538/it.f0x.flutter_bench: 0.2% user + 0.1% kernel / faults: 3004 minor
+0.9% TOTAL: 0.2% user + 0.5% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:49:47Z
+2% TOTAL: 0.8% user + 0.9% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:50:17Z
+ +0% 28816/it.f0x.flutter_bench: 0% user + 0% kernel
+1.4% TOTAL: 0.5% user + 0.6% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:50:47Z
+2.6% TOTAL: 0.9% user + 1.4% kernel + 0% iowait + 0.2% irq + 0% softirq
+== 2026-09-06T22:51:18Z
+2.6% TOTAL: 0.9% user + 1.4% kernel + 0% iowait + 0.2% irq + 0% softirq
+== 2026-09-06T22:51:48Z
+1.7% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:52:18Z
+1.7% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:52:48Z
+1.7% TOTAL: 0.7% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:53:18Z
+1.7% TOTAL: 0.7% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:53:48Z
+1.8% TOTAL: 0.8% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:54:18Z
+1.8% TOTAL: 0.8% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:54:48Z
+1.5% TOTAL: 0.6% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:55:18Z
+ +0% 29508/it.f0x.flutter_bench: 0% user + 0% kernel
+1.7% TOTAL: 0.8% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:55:48Z
+1.8% TOTAL: 0.7% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:56:18Z
+1.8% TOTAL: 0.7% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:56:48Z
+1.6% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:57:19Z
+1.6% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:57:49Z
+1.7% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:58:19Z
+1.7% TOTAL: 0.6% user + 0.8% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:58:49Z
+1.6% TOTAL: 0.6% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq
+== 2026-09-06T22:59:19Z
+1.6% TOTAL: 0.6% user + 0.7% kernel + 0% iowait + 0.1% irq + 0% softirq

@@ -1,11 +1,9 @@
 # Frust - Development Guide
 
-The canonical test-tier, golden-image, headless GPU, and Android emulator runbook is `docs/TESTING.md`.
-This guide retains the concise build/test commands and platform prerequisites used during ordinary development.
-
-This is the shared index — prerequisites, build/run/test gates, benchmarks, instrumentation,
-the version-pin *policy*, platform-support floors, known issues. Per-unit device gates,
-template work, and the version-pin rows each unit owns live in its spoke:
+This is the shared index — prerequisites, build/run/test gates, benchmarks, instrumentation, the
+version-pin *policy*, platform-support floors, known issues; the canonical test-tier,
+golden-image, headless GPU, and Android emulator runbook is `docs/TESTING.md`. Per-unit device
+gates, template work, and the version-pin rows each unit owns live in its spoke:
 
 | Unit | Development spoke | Holds |
 |------|-------------------|-------|
@@ -22,8 +20,7 @@ WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is
 
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
 - A real Metal or Vulkan adapter for the GPU smoke gate (`frust-render`'s `--ignored`
-  test). Headless Vulkan needs no display server; see `docs/TESTING.md`. Other hosts can
-  build and run the non-GPU suite.
+  test). Headless Vulkan needs no display server; see `docs/TESTING.md`. Other hosts can build and run the non-GPU suite.
 - **Android** (only needed for `frust run`/`build`/`create`'s Android output): `rustup
   target add aarch64-linux-android`; `cargo install cargo-ndk`; JDK 17+ on `JAVA_HOME`
   (Android Studio's bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
@@ -37,13 +34,11 @@ WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is
 - **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its public
   repo (*Version-Pin Policy*; row in [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)), consumed by
   `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold
-  variant. Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
-  iteration on `clean-signals` itself, via a `[patch]` override in the consuming workspace — not
-  needed for ordinary development.
+  variant. A sibling checkout (`../clean-signals-rs`) is only useful for local `[patch]`-override
+  iteration on `clean-signals` itself — not needed for ordinary development.
 - **`frust-database --features engine-turso`**: needs libclang on the host (pulls
   `bindgen`/`clang-sys` as a build dependency). The default (`engine-sqlite`) build does
   not — `rusqlite`'s `bundled` feature only needs a `cc`-compatible C toolchain.
-- No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
 
@@ -601,4 +596,4 @@ for removal.
 
 ## Website
 
-Site source: [frust-rs/website](https://github.com/frust-rs/website), cloned at `apps/website` (gitignored, never a submodule — see `.gitignore`). It's a Docusaurus site whose gates run in Docker since this toolchain has no Node; `apps/website/CONTRIBUTING.md` is the canonical gate definition — install (`pnpm install --frozen-lockfile`), typecheck (`pnpm typecheck`), lint (`pnpm lint`), and build (`pnpm build`), each via `docker compose run --rm dev`. The production image is compose's `web` service: `docker compose up --build web` (serves `:8080`; image `ghcr.io/frust-rs/website:local`). Content is authored there and cites frust files at a pinned SHA; `docs/` here stays contributor documentation under `DOC_POLICY.md` budgets and is not mirrored. Brand assets: `docs/assets/branding/` (source of truth, copied by the site). API reference tree: produced by `cargo doc --workspace --no-deps` — a generation script is planned but not yet in the repo.
+Site source: [frust-rs/website](https://github.com/frust-rs/website), cloned at `apps/website` (gitignored, never a submodule — see `.gitignore`). It's a Docusaurus site whose gates run in Docker since this toolchain has no Node; `apps/website/CONTRIBUTING.md` is the canonical gate definition — install (`pnpm install --frozen-lockfile`), typecheck (`pnpm typecheck`), lint (`pnpm lint`), and build (`pnpm build`), each via `docker compose run --rm dev`. The production image is compose's `web` service: `docker compose up --build web` (serves `:8080`; image `ghcr.io/frust-rs/website:local`). Content is authored there and cites frust files at a pinned SHA; `docs/` here stays contributor documentation under `DOC_POLICY.md` budgets and is not mirrored. Brand assets: `docs/assets/branding/` (source of truth, copied by the site). API reference tree: `scripts/api-docs.sh` (rustdoc for the root workspace). Widget preview PNGs: `scripts/widget-snapshots.sh` (the `frust-testing` `widget-snapshots` CPU-oracle generator over `examples/gallery`'s case registry — see `docs/TESTING.md`), rsynced into `static/preview/`.

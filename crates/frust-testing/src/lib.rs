@@ -42,6 +42,12 @@
 //!   pushed at paint exactly as a shell pushes it — plus the font-determinism
 //!   proof ([`frame::foreign_font_runs`]) every widget/page baseline is gated
 //!   on.
+//! - [`snapshot`]: the website's widget-preview generator — every
+//!   `frust-gallery` case rendered to a light/dark PNG pair plus a
+//!   [`snapshot::Manifest`], behind the `widget-snapshots` binary. A
+//!   documentation-asset pipeline, NOT a golden gate: it compares against no
+//!   committed baseline and promotes nothing (see that module's own docs for
+//!   the distinction, and for why its fonts are registered but not pinned).
 //! - [`corpus`]: the named golden cases themselves
 //!   ([`corpus::CorpusCase`]/[`corpus::Probe`]) — [`corpus::unit`] (one case
 //!   per `frust_scene::Command` variant), [`corpus::widget`] (baseline widget
@@ -58,6 +64,7 @@ pub mod meta;
 pub mod oracle_cpu;
 pub mod oracle_engine;
 pub mod render;
+pub mod snapshot;
 
 pub use case::{BackendSet, CaseSpec, Tolerance};
 pub use corpus::{
@@ -81,3 +88,9 @@ pub use oracle_engine::{
     AdapterMeta, ENGINE_UNCLASSIFIED_CLASS, EngineOracle, EngineOracleOptions, engine_golden_class,
 };
 pub use render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};
+// `snapshot` is deliberately NOT flattened into the list above, unlike every
+// other module here: it carries its own `render_case` — one gallery case to one
+// PNG — and that name is already taken at this level by `corpus::render_case`,
+// which renders a golden `CorpusCase` on a supplied backend. Two different
+// contracts under one name would be worse than a module path, so
+// `snapshot::render_case` stays spelled out at its call sites.
