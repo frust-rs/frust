@@ -80,13 +80,13 @@ Chrome 15x with WebGPU and check:
 - the index page's ticking counter advances with zero pointer/keyboard events (proves a signal
   write alone drives the repaint, not a poll loop)
 
-Then reload with `?arm=webgl` (forces the WebGL2 fallback arm): shapes, layout, backgrounds and
-theme colours stay pixel-correct, but every glyph paints as a solid opaque box instead of text —
-a known, accepted defect until the atlas two-layer floor lands (see
-[LIMITATIONS.md](LIMITATIONS.md) `engine-webgl2-atlas-target`); do not try to fix it from this
-gate. Chrome's `--disable-features=WebGPU` flag does **not** reach this fallback on this
-stack — `requestAdapter` fails outright instead of falling through to GL — so `?arm=webgl` is
-the only way to exercise the WebGL2 arm (per the README's own record of that finding).
+Then reload with `?arm=webgl` (forces the WebGL2 fallback arm): shapes, layout, backgrounds,
+theme colours and text should now all stay pixel-correct — the atlas two-layer floor (see
+[LIMITATIONS.md](LIMITATIONS.md) `engine-webgl2-atlas-target`) is what makes glyphs render
+instead of painting as solid opaque boxes; a regression here means that floor broke. Chrome's
+`--disable-features=WebGPU` flag does **not** reach this fallback on this stack —
+`requestAdapter` fails outright instead of falling through to GL — so `?arm=webgl` is the only
+way to exercise the WebGL2 arm (per the README's own record of that finding).
 
 ## Version Pins
 
@@ -101,6 +101,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `wasm-bindgen-futures 0.4.77` / `js-sys 0.3.104` / `web-sys 0.3.104` caret | Forced to lockstep by the `wasm-bindgen` exact pin above (this lockfile currently resolves `0.4.78`/`0.3.105`/`0.3.105`). `web-sys` features are declared per crate, not at the workspace level, and trimmed to what each caller actually touches — `frust-shell-web` takes only `Window` (the `setTimeout` half of its surface-bring-up retry wait); `crates/frust`'s own wasm32 table pulls no `web-sys`/`js-sys` row at all. `wasm-bindgen-futures` supplies `spawn_local` (no blocking executor exists on a target that must never block) and the `JsFuture` half of that same retry wait; `js-sys` supplies `Promise`, the object the `setTimeout` callback resolves | `cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery` (docs/DEVELOPMENT.md); `cargo tree -i js-sys -i web-sys -i wasm-bindgen-futures` — watch for a second minor entering the lockstep |
 | `web-time 1.1.0` | `std::time::Instant::now()` panics on `wasm32-unknown-unknown` (no clock syscall on that target); `web-time` is the drop-in replacement winit 0.30.13 itself already resolves internally, so this pin introduces no new identity. Every `Instant` in `frust-shell-web` is `web_time::Instant` — winit types `ControlFlow::WaitUntil` over it on this target, so using anything else would also mistype that contract | `cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery`; `cargo tree -i web-time` — expect exactly one entry, resolved through `winit` |
 | `console_log 1.0.0` / `console_error_panic_hook 0.1.7` caret | (this lockfile currently resolves `console_log 1.1.0` from the `1.0.0` caret; `console_error_panic_hook 0.1.7` exact-matches) stderr is a silent no-op in a browser. The facade's `web_app!` bootstrap (`frust::__web_bootstrap`, the start shim's first call) installs both unconditionally — `console_error_panic_hook::set_once()` and `console_log::init_with_level(log::Level::Warn)` — before `frust_shell_web::logging::install` runs. A second `install` call is treated as "someone got here first" and swallowed rather than erroring (`log` allows exactly one sink per process), so an app or the gallery's own `?log=` query param re-levelling the sink afterward is safe and idempotent | `cargo check --target wasm32-unknown-unknown -p frust --tests`; `cargo test -p frust-shell-web` (the `logging` module's own unit tests) — watch for `frust-shell-web`'s `DEFAULT_LEVEL` (`Warn`) drifting from the facade bootstrap's own default |
+| `wasm-bindgen-test =0.3.78` exact | `crates/frust-testing`'s `tests/wasm_goldens.rs`/`tests/wasm_binary_invariants.rs` browser harness (`wasm_bindgen_test_configure!(run_in_browser)`, `#[wasm_bindgen_test]`), declared under that crate's `[target.'cfg(target_arch = "wasm32")'.dev-dependencies]` behind its non-default `webgl` feature — crate-local, with no root `[workspace.dependencies]` row. Pinned exactly because it is one half of a two-part schema contract, not an ordinary semver dependency: `0.3.78` is the release paired with the `wasm-bindgen =0.2.128` exact pin above, and the host `wasm-bindgen-test-runner` (shipped by that same `wasm-bindgen-cli 0.2.128`) refuses a binary whose schema hash does not match. Bump it only together with the `wasm-bindgen` pin and the installed CLI, never on its own | `CHROMEDRIVER_REMOTE=http://localhost:9517 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -p frust-testing --target wasm32-unknown-unknown --features webgl --release --test wasm_goldens`; `cargo tree -i wasm-bindgen-test` — watch for a second identity or a drift from the `wasm-bindgen` pin's own version |
 
 `objc2-app-kit 0.3` (the `NSApplication`/`NSResponder` slice `frust-shell-macos` names directly,
 for the Dock-reopen observer) joins the objc2 pin family owned by
