@@ -725,50 +725,55 @@ fn run_web(
     Ok(0)
 }
 
-/// Best-effort opens `url` in the host's default browser: `open` on macOS,
-/// `cmd /C start` on Windows (`start` is a `cmd.exe` builtin, not a
+/// Best-effort opens `url` in the host's default browser through the
+/// injected [`ProcessRunner`] — the seam every other child `run` starts goes
+/// through, so the launch is scriptable in tests like the rest of the
+/// command. The opener is [`browser_command`]'s: `open` on macOS, `cmd /C
+/// start` on Windows, `xdg-open` elsewhere.
+///
+/// Spawned, never waited for: [`ProcessRunner::spawn_streaming`] returns as
+/// soon as the opener is running — in its own process group, with its stdio
+/// piped rather than inherited, so it can neither block this process nor
+/// receive its Ctrl-C — and the [`StreamHandle`] it returns is dropped on the
+/// spot. Dropping a handle neither kills nor joins the child (only an
+/// explicit `kill`/`wait` does), so the opener runs to completion on its own
+/// while `run_web` moves straight on to its interrupt wait. The one failure
+/// this can observe is the spawn itself (no `xdg-open` on PATH, say), and
+/// that is returned for the caller to render as a note: the dev server is
+/// already up and its URL already printed, so a missing browser is a
+/// degraded convenience, not a failed `run`.
+fn open_browser(runner: &dyn ProcessRunner, url: &str) -> Result<()> {
+    let (program, args) = browser_command(url);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let handle = runner
+        .spawn_streaming(program, &args, None, &[])
+        .with_context(|| format!("spawning `{program}` to open {url}"))?;
+    drop(handle);
+    Ok(())
+}
+
+/// The host's URL opener and its argv for `url`: `open` on macOS, `cmd /C
+/// start "" <url>` on Windows (`start` is a `cmd.exe` builtin, not a
 /// standalone executable — the empty title argument keeps a URL containing
 /// `&` from being misparsed as a second `start` argument), `xdg-open`
-/// elsewhere. The browser is spawned detached (Stdio::null for all streams)
-/// to avoid blocking the dev server startup or the interrupt wait: a failure
-/// to spawn is reported to the caller to render as a note, never a hard
-/// error. The dev server is already up and its URL already printed, so a
-/// missing browser is a degraded convenience, not a failed `run`.
-///
-/// ProcessRunner seam cannot express detached spawning (its methods either
-/// wait or return a handle that must be managed), so this bypasses the runner
-/// and spawns directly through [`std::process::Command`] — justified because
-/// browser opening is a best-effort convenience, not a core build tool
-/// subject to test mocking.
-fn open_browser(_runner: &dyn ProcessRunner, url: &str) -> Result<()> {
-    use std::process::{Command, Stdio};
-    use std::thread;
-
-    let url = url.to_string();
-    let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
-        ("open", vec![url])
+/// elsewhere. Split out of [`open_browser`] so a test can register the exact
+/// invocation with a [`frust_drive::process::FakeProcessRunner`].
+fn browser_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
     } else if cfg!(target_os = "windows") {
         (
             "cmd",
-            vec!["/C".to_string(), "start".to_string(), String::new(), url],
+            vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                url.to_string(),
+            ],
         )
     } else {
-        ("xdg-open", vec![url])
-    };
-
-    // Spawn in a background thread so we can drop the child handle without
-    // blocking on the browser process. The thread exits immediately after
-    // spawning.
-    thread::spawn(move || {
-        let _ = Command::new(cmd)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    });
-
-    Ok(())
+        ("xdg-open", vec![url.to_string()])
+    }
 }
 
 #[cfg(test)]
@@ -1117,6 +1122,34 @@ mod tests {
 
     /// `-d web` refuses `--features` before touching the filesystem at all —
     /// mirrors `build_web_rejects_features_passthrough` in `commands::build`.
+    /// The browser opener goes through the runner like every other child of
+    /// `run`: the platform's exact invocation, registered as a scripted
+    /// stream, is what gets spawned — and the handle is dropped without
+    /// waiting, so the call returns while the fake "opener" is still alive.
+    #[test]
+    fn open_browser_spawns_the_platform_opener_through_the_runner() {
+        let url = "http://127.0.0.1:8000/";
+        let (program, args) = browser_command(url);
+        let key = std::iter::once(program.to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let runner = FakeProcessRunner::new().with_stream(key, Vec::<String>::new(), true);
+        open_browser(&runner, url).expect("a registered opener spawns");
+    }
+
+    /// A spawn failure (no opener on PATH) is the caller's to report — it
+    /// surfaces as the `Err` `run_web` renders as its "could not open a
+    /// browser" note, instead of being swallowed inside the opener.
+    #[test]
+    fn open_browser_reports_a_spawn_failure_instead_of_swallowing_it() {
+        let runner = FakeProcessRunner::new();
+        let err = open_browser(&runner, "http://127.0.0.1:8000/").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("spawning `"), "{rendered}");
+        assert!(rendered.contains("http://127.0.0.1:8000/"), "{rendered}");
+    }
+
     #[test]
     fn run_web_rejects_features_passthrough() {
         let runner = FakeProcessRunner::new();
