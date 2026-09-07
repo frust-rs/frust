@@ -1411,10 +1411,32 @@ mod browser_loop {
         event_loop.spawn_app(handler);
         Ok(())
     }
+
+    /// The facade's entry point: the shape `frust::web_app!` hands its
+    /// initialised state and app-logic closure to (`run_app(state, logic)`,
+    /// mirroring `frust_shell_desktop::run_desktop_with`'s `(state, logic, ..)`
+    /// convention). A thin wrapper over [`spawn_app`]: the generated
+    /// `#[wasm_bindgen(start)]` shim has nowhere to return an error to, so an
+    /// event-loop construction failure is reported through the `log` facade
+    /// (which the facade routes to the browser console before calling this)
+    /// instead of being propagated. The facade initialises the reactive runtime
+    /// with a no-op waker before building the state; `spawn_app`'s own
+    /// `ReactiveRuntime::init` call then replaces that waker with the
+    /// event-loop proxy — the documented idempotent re-init path.
+    pub fn run_app<State, Logic, V>(state: State, app_logic: Logic)
+    where
+        State: 'static,
+        V: View<State>,
+        Logic: FnMut(&mut State) -> V + 'static,
+    {
+        if let Err(err) = spawn_app(state, app_logic) {
+            log::error!("frust-shell-web: could not start the browser event loop: {err}");
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use browser_loop::{ShellUserEvent, spawn_app};
+pub use browser_loop::{ShellUserEvent, run_app, spawn_app};
 
 #[cfg(test)]
 mod tests {

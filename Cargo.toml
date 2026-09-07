@@ -116,8 +116,10 @@ winit = "0.30.13"
 #
 # The wasm-bindgen CRATE must equal the host `wasm-bindgen-cli` (0.2.128,
 # installed 2026-09-07) — the CLI refuses a mismatched schema — hence the exact
-# pin; wasm-bindgen-futures/js-sys/web-sys ride the versions that pin already
-# resolves in Cargo.lock (0.4.77 / 0.3.104 / 0.3.104).
+# pin; wasm-bindgen-futures/js-sys/web-sys each require their own exact
+# wasm-bindgen, so the pin forces them in lockstep (Cargo.lock resolves
+# 0.4.78 / 0.3.105 / 0.3.105 — the caret rows below are what allowed that
+# forced move without a second edit here).
 wasm-bindgen = "=0.2.128"
 wasm-bindgen-futures = "0.4.77"
 js-sys = "0.3.104"

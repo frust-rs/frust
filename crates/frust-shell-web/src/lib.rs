@@ -12,14 +12,16 @@
 //!
 //! # What this crate is today
 //!
-//! The host-signal translation layer only. The pieces that own a browser
-//! resource — the canvas-bound event loop, the `requestAnimationFrame` frame
-//! pipeline, and the wgpu surface — are not here yet; [`app_handler`]'s
-//! contents are what those are built out of, and every one of them is a pure or
-//! near-pure function that runs and is unit-tested on the build host as well as
-//! on `wasm32-unknown-unknown`. Nothing here is `cfg`-gated to wasm: the whole
-//! surface compiles for both, which is what keeps the browser translation
-//! testable without a browser.
+//! Two layers. The host-signal translation layer ([`app_handler`]'s
+//! winit-generic half, [`pacing`], and [`render`]'s pure pieces) is built out
+//! of pure or near-pure functions that run and are unit-tested on the build
+//! host as well as on `wasm32-unknown-unknown`, which is what keeps the
+//! browser translation testable without a browser. On top of it, gated to
+//! `target_arch = "wasm32"`, sits the part that owns browser resources: the
+//! canvas-bound event loop and `requestAnimationFrame` frame pipeline
+//! ([`spawn_app`], entered by the facade through [`run_app`]) and the
+//! single-thread inline frame executor over the wgpu surface
+//! ([`render::WebFrameExecutor`]).
 //!
 //! # Host signals a browser does not have
 //!
@@ -41,7 +43,7 @@ pub use app_handler::{
     reverted_theme, sync_cursor, sync_ime, theme_after_override_poll,
 };
 #[cfg(target_arch = "wasm32")]
-pub use app_handler::{ShellUserEvent, spawn_app};
+pub use app_handler::{ShellUserEvent, run_app, spawn_app};
 pub use pacing::{
     ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, PacedDecision, RAF_PERIOD_60HZ, next_paced_wake,
     overshoot, paced_interval, paced_wake_action, raf_quantized,
