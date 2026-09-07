@@ -748,7 +748,10 @@ fn open_browser(_runner: &dyn ProcessRunner, url: &str) -> Result<()> {
     let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C".to_string(), "start".to_string(), String::new(), url])
+        (
+            "cmd",
+            vec!["/C".to_string(), "start".to_string(), String::new(), url],
+        )
     } else {
         ("xdg-open", vec![url])
     };
