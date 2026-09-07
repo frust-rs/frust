@@ -187,6 +187,14 @@ importing to prevent cross-origin script injection:
 - **No directory traversal:** The parameter must not contain `..` segments.
 - **Under `./pkg/`:** The resolved pathname must be within the `pkg/`
   subdirectory of the page's directory.
+- **No encoded dot segments:** Every segment of the resolved pathname is
+  percent-decoded and must be a plain name — not `.` or `..`, and containing
+  no `/` or `\`. `new URL()` leaves existing escapes in place, so
+  `pkg/%2e%2e%2fsecret.js` is one opaque segment to the URL parser but
+  `pkg/../secret.js` to a server that decodes it; the decoded check closes
+  that gap. An escape that does not decode is rejected too.
+- **Parsable:** A parameter `new URL()` cannot parse at all is rejected
+  rather than aborting the script before the failure can be reported.
 
 If validation fails, `index.html` displays a failure message in the app's
 load-failure area (`#frust-log`) and does not attempt to import an invalid

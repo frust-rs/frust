@@ -83,25 +83,58 @@
       const moduleUrl =
         new URLSearchParams(location.search).get("module") || "./pkg/app.js";
 
-      // Validate module parameter if explicitly provided to prevent
-      // same-origin policy bypass via absolute URLs or cross-origin imports.
+      // Validate an explicit `?module=` before importing it: a module
+      // specifier is a URL, so an unchecked override could pull attacker JS
+      // (cross-origin, `data:`) into the app's origin. Accepted only when it
+      // is same-origin, scheme-less, not a `//` network path, and resolves
+      // under this page's `./pkg/` — with every pathname segment checked
+      // AFTER percent-decoding, because `new URL()` leaves existing escapes
+      // in place: `pkg/%2e%2e%2fx.js` is one opaque segment to the URL
+      // parser but `pkg/../x.js` to a server that decodes it.
       const moduleParam = new URLSearchParams(location.search).get("module");
       let shouldImport = true;
       if (moduleParam) {
-        const u = new URL(moduleParam, location.href);
         const pkgPathPrefix = new URL("./pkg/", location.href).pathname;
+        let u = null;
+        try {
+          u = new URL(moduleParam, location.href);
+        } catch (_) {
+          u = null;
+        }
+        // Every decoded segment must be a plain file or directory name: not
+        // `.` or `..`, no encoded `/` or `\`, and no undecodable escape.
+        const segmentsAreSafe = (pathname) => {
+          for (const segment of pathname.split("/")) {
+            let decoded;
+            try {
+              decoded = decodeURIComponent(segment);
+            } catch (_) {
+              return false;
+            }
+            if (
+              decoded === "." ||
+              decoded === ".." ||
+              decoded.includes("/") ||
+              decoded.includes("\\")
+            ) {
+              return false;
+            }
+          }
+          return true;
+        };
 
-        // Accept only same-origin relative URLs under ./pkg/
         if (
+          u === null ||
           u.origin !== location.origin ||
-          /^[a-z][a-z0-9+.-]*:/.test(moduleParam) ||
+          /^[a-z][a-z0-9+.-]*:/i.test(moduleParam) ||
           moduleParam.startsWith("//") ||
           moduleParam.includes("..") ||
-          !u.pathname.startsWith(pkgPathPrefix)
+          !u.pathname.startsWith(pkgPathPrefix) ||
+          !segmentsAreSafe(u.pathname)
         ) {
           reportFailure(
             "Invalid module URL: must be same-origin, relative, under ./pkg/, " +
-              "with no schemes or // prefix"
+              "with no scheme, // prefix, or dot segment (encoded or not)"
           );
           shouldImport = false;
         }
