@@ -87,6 +87,18 @@ pub enum Command {
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
 
+        /// Comma-separated list of target platforms to include in the
+        /// scaffold (e.g. `android,ios,macos,windows,linux,web`). Accepted
+        /// values are the platform tags from `scaffold::known_platform_tags()`;
+        /// unknown tags are rejected. Omit to use the default platform set
+        /// (android, ios, macos, windows, linux — all except web), which
+        /// preserves byte-identical output for existing projects. Including
+        /// `web` adds a `web/` host page alongside the native platform
+        /// projects; subsequent `frust build web` produces a browser-runnable
+        /// artifact in `build/web`.
+        #[arg(long = "platforms", value_name = "LIST")]
+        platforms: Option<String>,
+
         /// Scaffold an out-of-tree **design-system** crate instead of an
         /// app: a themed widget catalog crate depending on nothing but
         /// `frust`, with no platform (`android`/`ios`) project. `dir` is
@@ -530,6 +542,40 @@ mod tests {
     #[test]
     fn arch_arg_as_str_matches_scaffold_known_arch_tag() {
         assert_eq!(ArchArg::CleanSignals.as_str(), "clean-signals");
+    }
+
+    /// `--platforms web` is accepted as a valid platforms string.
+    #[test]
+    fn parses_create_with_platforms_web() {
+        let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "web"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => {
+                assert_eq!(platforms.as_deref(), Some("web"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// `--platforms android,web` is accepted as a valid comma-separated list.
+    #[test]
+    fn parses_create_with_multiple_platforms() {
+        let cli = Cli::parse_from(["frust", "create", "myapp", "--platforms", "android,web"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => {
+                assert_eq!(platforms.as_deref(), Some("android,web"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// Omitting `--platforms` defaults to `None` (the default platform set).
+    #[test]
+    fn parses_create_without_platforms_defaults_to_none() {
+        let cli = Cli::parse_from(["frust", "create", "myapp"]);
+        match cli.command.unwrap() {
+            Command::Create { platforms, .. } => assert_eq!(platforms, None),
+            other => panic!("expected Create, got {other:?}"),
+        }
     }
 
     #[test]

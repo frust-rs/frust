@@ -46,6 +46,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch,
+            platforms,
             design_system,
         } => create::run(create::CreateArgs {
             dir,
@@ -58,6 +59,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch: arch.map(|a| a.as_str().to_string()),
+            platforms,
             design_system,
         }),
         Command::Clean => {
