@@ -16,12 +16,16 @@
 //! what it should and replaces what it should).
 //!
 //! Every case renders through the GPU-free CPU oracle (the binary's default;
-//! none of these pass `--gpu`), so this needs no adapter and stays fast: two
-//! known slugs for the write/merge case, one case each for the tamper/delete
-//! cases, and three exhaustive (whole-registry) tests — stray reporting, the
-//! `--check` success path plus the light/dark divergence guard, and pruning —
-//! each of which renders the registry twice; the whole file still runs in a
-//! few seconds.
+//! none of these pass `--gpu`), so this needs no adapter: the write/merge
+//! case renders `container` plus every registry slug containing `button`
+//! (the base pair and each design system's button-family cases — the
+//! expectation is derived from `frust_gallery::cases()`, never hard-coded),
+//! one case each for the tamper/delete cases, and three exhaustive
+//! (whole-registry) tests — stray reporting, the `--check` success path plus
+//! the light/dark divergence guard, and pruning — each of which renders the
+//! registry (35 base + every design-system case, some at 480x360 @2x) twice;
+//! the whole file runs in
+//! about half a minute (24 s measured with 107 cases on 2026-09-07).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

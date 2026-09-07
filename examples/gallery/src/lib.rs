@@ -57,16 +57,19 @@ pub mod theme;
 pub use case::{Case, Design, Variant};
 pub use theme::theme;
 
-/// Every design-system case module's `CASES` slice, in the order their
-/// slugs sort on the website (the `Base` set comes first via
-/// [`base::cases`]). Adding a design system means adding its module above
-/// and its slice here — nothing else.
+/// Every design-system case module's `CASES` slice, in the website
+/// sidebar's order (`apps/website/widgets/design-systems/<design>/_category_.json`
+/// `position`: material, cupertino, glyph, shadcn, beui); the `Base` set
+/// comes first via [`base::cases`]. The order is observable — it is the
+/// `--list` order and a fresh manifest's row order — but nothing depends on
+/// it. Adding a design system means adding its module above and its slice
+/// here at the sidebar position — nothing else.
 const DESIGN_PARTS: &[&[Case]] = &[
     material::CASES,
-    shadcn::CASES,
-    glyph::CASES,
-    beui::CASES,
     cupertino::CASES,
+    glyph::CASES,
+    shadcn::CASES,
+    beui::CASES,
 ];
 
 /// The whole case registry: the `Base` page set ([`base::cases`]) followed by
