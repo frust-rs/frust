@@ -1316,18 +1316,16 @@ pub use wasm_bindgen as __wasm_bindgen;
 
 // Hidden, wasm32-only re-export of the browser shell crate, for the identical
 // reason as `__wasm_bindgen` above. [`web_app!`]'s generated shim hands the
-// initialized state and app-logic closure to `__frust_shell_web::run_app` —
-// **not implemented as of this writing** (`crates/frust-shell-web` carries
-// only the host-signal translation layer today: `InputState`,
-// `event_under_owner`, `publish_window_metrics`, the theme helpers — see that
-// crate's `lib.rs`). This re-export and the reference inside [`web_app!`]'s
-// macro body are the facade's committed contract for that entry point's
-// shape (`fn run_app<State: 'static, Logic>(state: State, app_logic: Logic)`,
+// initialized state and app-logic closure to `__frust_shell_web::run_app`
+// (`fn run_app<State: 'static, Logic, V>(state: State, app_logic: Logic)`,
 // mirroring `frust_shell_desktop::run_desktop_with`'s `(state, logic, ..)`
-// convention); neither is exercised by this crate's own build (the reference
-// lives inside a `macro_rules!` body, only type-checked where a caller
-// actually invokes [`web_app!`]/[`app!`] for a wasm32 target), so landing the
-// real `run_app` is free to happen after this crate merges.
+// convention), the browser shell's entry point: it wraps `spawn_app`, which
+// owns the canvas-bound event loop and the `requestAnimationFrame` frame
+// pipeline, and reports an event-loop construction failure through the `log`
+// facade because the `wasm_bindgen(start)` shim has nowhere to return one to.
+// The reference lives inside a `macro_rules!` body, so it is type-checked
+// only where a caller invokes [`web_app!`]/[`app!`] for a wasm32 target —
+// `cargo check --target wasm32-unknown-unknown -p frust --tests` covers it.
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use frust_shell_web as __frust_shell_web;
@@ -1406,9 +1404,8 @@ pub fn __web_init_state<State: 'static>(state_init: impl FnOnce() -> State) -> S
 /// 3. Hands the initialized state and `$app_logic` to
 ///    `frust_shell_web::run_app` (via the hidden [`__frust_shell_web`]
 ///    re-export) — the browser shell's own entry point, which owns the
-///    canvas-bound event loop and the `requestAnimationFrame` frame pipeline.
-///    **Not implemented as of this writing** — see [`__frust_shell_web`]'s
-///    doc comment for the committed contract this facade hands it.
+///    canvas-bound event loop and the `requestAnimationFrame` frame pipeline
+///    (see [`__frust_shell_web`]'s doc comment for the contract).
 #[macro_export]
 macro_rules! web_app {
     ($state_ty:ty, $app_logic:expr $(,)?) => {
@@ -2057,12 +2054,10 @@ macro_rules! app {
 /// same reason.
 ///
 /// The fourth platform's own compile-check, `cargo check --target
-/// wasm32-unknown-unknown -p frust --tests`, is deliberately **not** listed
-/// as a criterion above: it type-checks `web_app!`'s generated shim, which
-/// calls `frust_shell_web::run_app` — not implemented as of this writing (see
-/// [`__frust_shell_web`]'s doc comment) — so that command fails today and
-/// will start passing once w1-02 lands the real entry point, with no change
-/// needed here.
+/// wasm32-unknown-unknown -p frust --tests`, type-checks `web_app!`'s
+/// generated shim (which calls `frust_shell_web::run_app` — see
+/// [`__frust_shell_web`]'s doc comment) and is part of the documented wasm
+/// gate in `docs/DEVELOPMENT.md`.
 ///
 /// **Exactly one `app!` invocation may be compiled per target** — a second one
 /// would stamp the same fixed JNI/C-ABI export names — so this fixture takes
