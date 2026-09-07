@@ -1,0 +1,32 @@
+== launch 1 2026-09-06T23:12:42Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 100
+WaitTime: 103
+Complete
+== launch 2 2026-09-06T23:12:50Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 108
+WaitTime: 114
+Complete
+== launch 3 2026-09-06T23:12:59Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 105
+WaitTime: 108
+Complete
+== launch 4 2026-09-06T23:13:07Z
+Starting: Intent { act=android.intent.action.VIEW dat=frustbench://s7/... pkg=it.f0x.frustbench }
+Status: ok
+LaunchState: COLD
+Activity: it.f0x.frustbench/.MainActivity
+TotalTime: 107
+WaitTime: 109
+Complete
