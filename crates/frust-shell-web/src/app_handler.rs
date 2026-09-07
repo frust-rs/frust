@@ -1502,6 +1502,12 @@ mod browser_loop {
         let waker = install_wake_proxy(event_loop.create_proxy());
         let runtime = ReactiveRuntime::init(waker);
 
+        // Ahead of `TextContext::new()` below: registers this tier's bundled
+        // default face as the `SystemUi`/`SansSerif` generic-family fallback,
+        // so the context constructed next already resolves default-family
+        // text to it — see `crate::fonts`' module docs.
+        crate::fonts::install_default_fonts();
+
         let mut handler = WebShellHandler {
             state,
             app_logic,

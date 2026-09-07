@@ -32,8 +32,17 @@
 //! cursor setting, *does* have one (winit's web backend drives the canvas's CSS
 //! `cursor` property), so it is a real implementation:
 //! [`app_handler::sync_cursor`].
+//!
+//! # Default text face
+//!
+//! [`fonts::install_default_fonts`] bundles a default face and registers it
+//! as this target's `SystemUi`/`SansSerif` generic-family fallback ahead of
+//! the shell's `TextContext` construction — see that module's docs for why
+//! this target needs it (fontique's system-font backend has no generic-family
+//! map on `wasm32`).
 
 pub mod app_handler;
+pub mod fonts;
 pub mod input;
 pub mod logging;
 pub mod pacing;
@@ -46,6 +55,7 @@ pub use app_handler::{
 };
 #[cfg(target_arch = "wasm32")]
 pub use app_handler::{ShellUserEvent, run_app, spawn_app};
+pub use fonts::install_default_fonts;
 pub use input::{TouchTracker, map_touch_phase};
 pub use logging::{DEFAULT_LEVEL, LEVEL_QUERY_PARAM, install, level_from_query, parse_level};
 pub use pacing::{
