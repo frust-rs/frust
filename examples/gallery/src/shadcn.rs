@@ -88,6 +88,24 @@ use kurbo::Size;
 use crate::base::{framed, framed_in};
 use crate::case::{Case, Design};
 
+/// A wider card frame: two stacked cards or a layout component that needs more
+/// horizontal space.
+const CARD_WIDE: Size = Size::new(360.0, 280.0);
+/// A dialog or dropdown panel frame.
+const DIALOG: Size = Size::new(360.0, 260.0);
+/// A bottom drawer that extends taller to show interaction affordances.
+const DRAWER_TALL: Size = Size::new(360.0, 420.0);
+/// A dropdown menu or message thread preview.
+const DROPDOWN: Size = Size::new(360.0, 260.0);
+/// A questionnaire or form layout that needs extra height and width.
+const QUESTIONNAIRE: Size = Size::new(420.0, 320.0);
+/// A right-edge sheet that extends vertically.
+const SHEET_TALL: Size = Size::new(360.0, 380.0);
+/// A floating sidebar with main content area.
+const SIDEBAR_WIDE: Size = Size::new(480.0, 320.0);
+/// A data table that needs horizontal space for columns.
+const TABLE_WIDE: Size = Size::new(420.0, 220.0);
+
 /// From `examples/shadcn-demo`'s primitives page — the variant row, wrapped
 /// over two rows so the full variant set fits [`Case::DEFAULT_SIZE`]'s width.
 fn button_case() -> AnyView<()> {
@@ -130,7 +148,7 @@ fn button_case() -> AnyView<()> {
 /// primitives page (a footer-actions card), stacked.
 fn card_case() -> AnyView<()> {
     framed_in(
-        Size::new(360.0, 280.0),
+        CARD_WIDE,
         Column(vec![
             any(card(vec![
                 card_header(vec![card_title("Slide 1")]),
@@ -160,7 +178,7 @@ fn card_case() -> AnyView<()> {
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
 fn dialog_case() -> AnyView<()> {
     framed_in(
-        Size::new(360.0, 260.0),
+        DIALOG,
         modal(
             stack_slots(
                 vec![
@@ -192,7 +210,7 @@ fn dialog_case() -> AnyView<()> {
 fn drawer_case() -> AnyView<()> {
     let side = DrawerSide::Bottom;
     framed_in(
-        Size::new(360.0, 420.0),
+        DRAWER_TALL,
         modal(
             stack_slots(
                 vec![drawer_header(vec![
@@ -231,7 +249,7 @@ fn drawer_case() -> AnyView<()> {
 fn dropdown_menu_case() -> AnyView<()> {
     let dropdown_anchor = OverlayAnchor::new();
     framed_in(
-        Size::new(360.0, 260.0),
+        DROPDOWN,
         frust_widgets::Stack(vec![
             any(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {}))),
             any(dropdown_menu(
@@ -296,7 +314,7 @@ fn input_case() -> AnyView<()> {
 /// couple of `message` rows, one per side of the thread.
 fn message_case() -> AnyView<()> {
     framed_in(
-        Size::new(360.0, 260.0),
+        DROPDOWN,
         message_scroller(vec![
             any(message(vec![any(message_content(vec![any(bubble(
                 "Hey — got a minute to review the PR?",
@@ -314,7 +332,7 @@ fn message_case() -> AnyView<()> {
 /// From `examples/shadcn-demo`'s questionnaire page.
 fn questionnaire_case() -> AnyView<()> {
     framed_in(
-        Size::new(420.0, 320.0),
+        QUESTIONNAIRE,
         questionnaire(
             vec![
                 questionnaire_item("framework", "Which framework brought you here?").choices(vec![
@@ -368,7 +386,7 @@ fn select_case() -> AnyView<()> {
 fn sheet_case() -> AnyView<()> {
     let side = SheetSide::Right;
     framed_in(
-        Size::new(360.0, 380.0),
+        SHEET_TALL,
         modal(
             stack_slots(
                 vec![
@@ -401,7 +419,7 @@ fn sheet_case() -> AnyView<()> {
 /// animating shut"), so this case needs no entrance workaround.
 fn sidebar_case() -> AnyView<()> {
     framed_in(
-        Size::new(480.0, 320.0),
+        SIDEBAR_WIDE,
         sidebar_provider(
             sidebar(sidebar_content(vec![sidebar_group(vec![
                 any(sidebar_group_label("Mail")),
@@ -442,7 +460,7 @@ fn table_case() -> AnyView<()> {
         table_row(vec![any(table_cell("Sam Lee")), any(table_cell("Member"))]),
     ];
     framed_in(
-        Size::new(420.0, 220.0),
+        TABLE_WIDE,
         table(rows)
             .header(["Name", "Role"])
             .caption("1 of 2 row(s) selected \u{2014} page 1 of 1"),
@@ -501,7 +519,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/card",
         title: "Card",
-        size: Case::DEFAULT_SIZE,
+        size: CARD_WIDE,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -510,7 +528,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/dialog",
         title: "Dialog",
-        size: Case::DEFAULT_SIZE,
+        size: DIALOG,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -519,7 +537,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/drawer",
         title: "Drawer",
-        size: Case::DEFAULT_SIZE,
+        size: DRAWER_TALL,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -528,9 +546,9 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/dropdown-menu",
         title: "Dropdown Menu",
-        size: Case::DEFAULT_SIZE,
+        size: DROPDOWN,
         scale: Case::DEFAULT_SCALE,
-        time_ms: 300,
+        time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
         build: dropdown_menu_case,
     },
@@ -555,7 +573,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/message",
         title: "Message",
-        size: Case::DEFAULT_SIZE,
+        size: DROPDOWN,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -564,7 +582,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/questionnaire",
         title: "Questionnaire",
-        size: Case::DEFAULT_SIZE,
+        size: QUESTIONNAIRE,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -575,14 +593,14 @@ pub const CASES: &[Case] = &[
         title: "Select",
         size: Case::DEFAULT_SIZE,
         scale: Case::DEFAULT_SCALE,
-        time_ms: 300,
+        time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
         build: select_case,
     },
     Case {
         slug: "shadcn/sheet",
         title: "Sheet",
-        size: Case::DEFAULT_SIZE,
+        size: SHEET_TALL,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -591,7 +609,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/sidebar",
         title: "Sidebar",
-        size: Case::DEFAULT_SIZE,
+        size: SIDEBAR_WIDE,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -600,7 +618,7 @@ pub const CASES: &[Case] = &[
     Case {
         slug: "shadcn/table",
         title: "Table",
-        size: Case::DEFAULT_SIZE,
+        size: TABLE_WIDE,
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
@@ -620,7 +638,7 @@ pub const CASES: &[Case] = &[
         title: "Tooltip",
         size: Case::DEFAULT_SIZE,
         scale: Case::DEFAULT_SCALE,
-        time_ms: 300,
+        time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
         build: tooltip_case,
     },
