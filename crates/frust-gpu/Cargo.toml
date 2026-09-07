@@ -75,8 +75,19 @@ wgpu = { workspace = true, features = ["dx12", "vulkan"] }
 
 # wasm32 targets: `webgl` is wgpu's wasm32 WebGL2 backend; `gles` is the
 # native/Emscripten one (inert on wasm, not used here).
+# `fragile-send-sync-non-atomic-wasm`: wgpu's build.rs marks its handle types
+# `Send`/`Sync` only on native, so `pipeline.rs`'s threaded warm-up
+# (`P: Send + Sync` bounds, a cloned `Device` captured by the compiler
+# closure) fails to type-check on wasm32 without it — 91 E0277 errors, found
+# by the web-shell Phase-0 spike (examples/web-spike/RESULTS.md). The impls
+# are sound on wasm32-unknown-unknown because nothing can cross a thread
+# there, and wgpu gates the feature on `not(target_feature = "atomics")` so
+# it can never take effect on a threads-enabled wasm build. Runtime: the
+# warm-up spawn fails and falls back to the inline path (pipeline.rs
+# handles a failed `Builder::spawn`); cfg-gating the thread off on wasm32
+# outright is the tracked structural follow-up.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { workspace = true, features = ["webgpu", "webgl"] }
+wgpu = { workspace = true, features = ["webgpu", "webgl", "fragile-send-sync-non-atomic-wasm"] }
 
 [dev-dependencies]
 pollster = "0.4"
