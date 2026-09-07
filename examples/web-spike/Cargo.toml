@@ -45,3 +45,97 @@ frust-render = { path = "../../crates/frust-render" }
 # `kurbo = "0.13.1"` / `peniko = "0.6.1"` dev-dependency rows.
 kurbo = "0.13.1"
 peniko = "0.6.1"
+
+# --- w0-03 browser-probe rows (wasm32 only) -------------------------------
+#
+# Target-gated so the native shape w0-02 established is untouched: a plain
+# `cargo check` of this spike still resolves nothing but the five path deps
+# plus kurbo/peniko, and every row below is reached only by the
+# `wasm32-unknown-unknown` build the browser probe actually ships.
+#
+# Version-Pin Policy (root CLAUDE.md's Agent Guardrails / docs/DEVELOPMENT.md
+# § Version-Pin Policy): each row is either copied verbatim from the root
+# `[workspace.dependencies]` table or pinned to the exact version this
+# spike's own committed `Cargo.lock` already resolved at w0-02. Nothing here
+# is a new *workspace* pin — this is a standalone workspace and the root
+# graph never sees it — and nothing in the root `Cargo.toml` or `crates/*`
+# was touched to add it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Copied verbatim from the root `Cargo.toml`'s `winit = "0.30.13"` row, which
+# is what the desktop shell resolves; the web arm must not fork winit's
+# identity away from the shell tier it is a sibling of.
+winit = "0.30.13"
+# A DIRECT `wgpu` row, which w0-02 deliberately did not have — and it stays
+# feature-less on purpose. The probe needs the `wgpu::Backends` *type* to fill
+# `frust_gpu::ContextOptions::backends` (that is how the forced-WebGL2 arm is
+# selected — see `src/main.rs`'s `Arm::backends`), and neither `frust-gpu` nor
+# `frust-render` re-exports `wgpu` (only the `frust` facade does, under its
+# `gpu` feature, and pulling the facade in would drag `frust-reactive` into a
+# graph that deliberately excludes it — see this file's header). Version copied
+# verbatim from the root `[workspace.dependencies]` pin (30.0.1, LAW), and
+# `default-features = false` mirrors the root row, so this edge contributes NO
+# feature at all: the backend features still arrive from exactly one place,
+# `frust-gpu`'s target-gated table. Same version + same source = the same
+# single `wgpu` identity w0-02 measured, not a second one.
+wgpu = { version = "30.0.1", default-features = false }
+# `=0.2.128`, an EXACT pin rather than the caret `0.2.127` the graph resolved
+# on its own at w0-02. wasm-bindgen's crate/CLI contract is stricter than
+# semver — the CLI embeds a schema version that must equal the crate's, and a
+# mismatch fails at `wasm-bindgen` post-processing time, not at `cargo
+# check`. This host's `wasm-bindgen-cli` is 0.2.128 (w0-02's RESULTS.md § 6
+# flagged exactly this one-patch gap for this task), and no host tool may be
+# installed or upgraded here, so the crate moves to meet the CLI. The `=`
+# form (not `"0.2.128"`) is deliberate: it forces cargo to unify the entire
+# spike graph — wgpu's own `^0.2.127` edge included — onto ONE wasm-bindgen
+# identity, which is the property that makes the generated glue loadable.
+wasm-bindgen = "=0.2.128"
+# The async half: `SurfaceRenderer::on_surface_created` is `async` and the
+# browser has no blocking executor to `pollster::block_on` it with (the
+# desktop shell's move), so the surface bring-up is driven by `spawn_local`.
+#
+# 0.4.78 / 0.3.105 rather than w0-02's locked 0.4.77 / 0.3.104: these three
+# crates are not independently versioned, they move in lockstep with
+# `wasm-bindgen` by construction. `js-sys` 0.3.104's manifest reads
+# `wasm-bindgen = "=0.2.127"` and 0.3.105's reads `wasm-bindgen = "=0.2.128"`
+# — an EXACT `=` requirement in the dependency itself. So the `=0.2.128` pin
+# above does not merely permit this bump, it *forces* it; 0.3.104 and
+# `wasm-bindgen` 0.2.128 are not co-satisfiable at all. That is the whole
+# lock delta on this axis, and it is mechanical rather than a judgement call.
+wasm-bindgen-futures = "0.4.78"
+# Same lockstep family as the two rows above (its manifest also carries an
+# exact `wasm-bindgen` requirement), so it moves with them and forks nothing.
+# Needed for exactly one thing: the `Promise`/`setTimeout` pair behind
+# `src/main.rs`'s `sleep_ms`, which backs the adapter-acquisition retry — see
+# RESULTS.md's "first requestAdapter returns null" finding. There is no
+# `std::thread::sleep` on this target and no timer in `web-sys` that yields a
+# future on its own.
+js-sys = "0.3.105"
+# Feature list is exactly what `src/main.rs` names and nothing more: the
+# canvas element and its document/window ancestors, the `?arm=` query parse,
+# the `<pre id=log>` mirror, and the console sink.
+web-sys = { version = "0.3.105", features = [
+    "console",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Location",
+    "UrlSearchParams",
+    "Window",
+] }
+# `log` is pinned to the lockfile's version; the two `console_*` crates are
+# not in the lockfile at all (nothing in the engine graph pulls them), so
+# they take the latest release compatible with it — `console_log` (resolves
+# 1.1.0) and `console_error_panic_hook` 0.1.7, both `log 0.4`/`wasm-bindgen
+# 0.2` consumers that unify onto the pins above rather than forking either.
+#
+# These are diagnostic infrastructure, not decoration: `frust-render`,
+# `frust-gpu` and `wgpu` all report their failures through `log`, and a
+# browser probe whose acceptance criterion is "a concrete NO-GO writeup
+# naming the failing layer and error verbatim" must be able to see them.
+# `console_error_panic_hook` turns a wasm `unreachable` trap — which is all a
+# panic looks like from JS — back into the panic message and a Rust
+# backtrace.
+log = "0.4.34"
+console_log = "1.0.0"
+console_error_panic_hook = "0.1.7"

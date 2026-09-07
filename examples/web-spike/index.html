@@ -1,35 +1,93 @@
 <!doctype html>
 <!--
-  Frust web-shell Phase 0 spike (w0-02) — static host page skeleton.
+  Frust web-shell Phase 0 spike (w0-03) — the browser render probe's host page.
 
-  This spike itself only runs `cargo check --target wasm32-unknown-unknown`
-  (see RESULTS.md for the verdict — currently RED, on a `frust-gpu` blocker
-  outside w0-02's write scope); it does not build or run a `.wasm` binary,
-  and this page is not loaded by anything in this task. A skeleton for
-  w0-03 ("Browser render probe: frust-engine on WebGPU then WebGL2 in
-  Chrome") to build on, following wasm-bindgen's standard
-  `--target web` glue-import shape (a JS `<script type="module">` calling the
-  generated `init()`); w0-03 owns choosing the actual `wasm-pack build`
-  invocation, the generated module's real filename, and the canvas element
-  the render surface attaches to.
+  One page serves BOTH backend arms: `?arm=webgpu` (default) and `?arm=webgl`.
+  The Rust side reads the query off `window.location.search` (see
+  `src/main.rs`'s `Arm::from_query`), so a single `.wasm` and a single
+  `wasm-bindgen` run cover the whole comparison — nothing here selects a
+  renderer, because `frust-engine` is the only one there is.
+
+  Build and serve (from `examples/web-spike`):
+
+      cargo build --target wasm32-unknown-unknown --release
+      wasm-bindgen --target web --out-dir pkg --out-name web_spike \
+        /data/cache/target/wasm32-unknown-unknown/release/web-spike.wasm
+      ./serve.sh
+
+  `pkg/` is generated and deliberately untracked — see RESULTS.md.
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>Frust web-shell spike</title>
+    <style>
+      /* Dark page so a canvas that never got a frame (transparent, or the
+         browser's default white) is obvious rather than looking plausible. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #05070a;
+        color: #cfe3f5;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 8px;
+      }
+      /* Fixed, unscaled: the canvas's backing-store size is set from Rust
+         (CANVAS_WIDTH/CANVAS_HEIGHT) and CSS must not stretch it, or a
+         screenshot would no longer be a pixel-for-pixel record of what the
+         engine drew. */
+      #frust-canvas {
+        width: 800px;
+        height: 600px;
+        display: block;
+        border: 1px solid #22303f;
+      }
+      /* The evidence mirror: every line `src/main.rs` logs to the devtools
+         console is appended here too, so a headless screenshot carries the
+         backend/adapter/profile record without needing a CDP console dump. */
+      #log {
+        margin: 0;
+        padding: 6px 8px;
+        width: 784px;
+        min-height: 120px;
+        background: #0b1017;
+        border: 1px solid #22303f;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
   </head>
   <body>
-    <!-- w0-03 attaches the frust-render surface to a canvas here. -->
-    <canvas id="frust-canvas"></canvas>
+    <main>
+      <canvas id="frust-canvas" width="800" height="600"></canvas>
+      <pre id="log"></pre>
+    </main>
     <script type="module">
-      // Placeholder wasm-bindgen `--target web` glue import. The generated
-      // module name (`./pkg/web_spike.js`, wasm-pack's default `--out-dir`
-      // convention for this package's name) does not exist yet — this file
-      // compiles no `.wasm`, w0-02 only checks the Rust graph. w0-03 fills
-      // in the real `wasm-pack build --target web` invocation and updates
-      // this import to match its output.
+      // wasm-bindgen `--target web` glue. `--out-name web_spike` is passed
+      // explicitly at build time so this import path does not depend on how
+      // cargo happened to spell the artifact (`web-spike.wasm`, with a
+      // hyphen, from the package name).
+      //
+      // `init()` resolves once the module is instantiated; the Rust
+      // `#[wasm_bindgen(start)]` entry has run by then and has already
+      // spawned the winit event loop. A failure before that point never
+      // reaches Rust's panic hook, so it is reported here instead — into the
+      // same `<pre>` and `document.title` the Rust side uses, so the headless
+      // capture path is identical for a JS-side and a Rust-side failure.
       import init from "./pkg/web_spike.js";
-      init();
+      init().catch((err) => {
+        const line = `FAIL: wasm init: ${err}`;
+        document.title = `frust w0-03 | ${line}`;
+        document.getElementById("log").textContent += `${line}\n`;
+        console.error(err);
+      });
     </script>
   </body>
 </html>
