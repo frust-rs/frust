@@ -2639,9 +2639,11 @@ name = "frust-testing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "frust-core",
  "frust-cupertino",
  "frust-engine",
+ "frust-gallery",
  "frust-glyph",
  "frust-gpu",
  "frust-material",
@@ -2659,6 +2661,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "toml 1.1.4+spec-1.1.0",
  "vello_common",
  "vello_cpu",
