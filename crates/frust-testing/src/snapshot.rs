@@ -55,6 +55,27 @@
 //! therefore reaches the host font collection, which makes these PNGs
 //! host-dependent in exactly the way `docs/TESTING.md`'s Deterministic Inputs
 //! forbids for a *baseline* — and is why they are not one.
+//!
+//! # `manifest.json` under `--filter`
+//!
+//! A `--filter` run only renders a subset of the registry, so its own
+//! [`Manifest`] only describes that subset. The binary never writes that
+//! partial manifest over a full one on disk -- [`merge_manifest`] upserts the
+//! fresh subset's rows into whatever `manifest.json` is already at `--out`
+//! (replacing rows for the re-rendered slugs, keeping every other row
+//! untouched) and refuses with a clear error if the two runs disagree on
+//! [`Manifest::backend`], since a CPU-oracle row and a `--gpu` row are not
+//! interchangeable data. Only an EXHAUSTIVE run (no `--filter`) writes a full
+//! manifest outright; see [`manifest_differences`]'s `exhaustive` parameter
+//! for the `--check` side of the same distinction. When `--out` holds no
+//! `manifest.json` yet, a filtered run writes one that describes only its own
+//! rows and says so on stderr -- there is nothing to merge into.
+//!
+//! Writing never prunes a stale `<slug>.<variant>.png` an exhaustive run no
+//! longer produces (only `--check` flags one, via `stray_pngs`).
+//! `scripts/widget-snapshots.sh` documents `rsync -a --delete` as the publish
+//! step, which is where pruning actually happens -- the generator's own
+//! `--out` tree is disposable build output, not the published one.
 
 use std::path::PathBuf;
 
@@ -325,8 +346,14 @@ pub struct SnapshotEntry {
     pub variant: String,
     /// Lowercase hex SHA-256 of the PNG file's bytes.
     pub sha256: String,
-    /// The backend's fidelity gaps for this frame ([`skip_labels`]). Empty
-    /// means faithful; non-empty means the preview shows a downgrade.
+    /// The backend's fidelity gaps for this frame. On the CPU oracle arm this
+    /// is [`skip_labels`]: empty genuinely means faithful (every command had
+    /// a CPU equivalent), non-empty names which downgrade occurred. The
+    /// `--gpu` arm (`render_on_gpu` in the binary) has no [`SkipReport`]
+    /// counterpart to ask, so an empty vector there would silently claim a
+    /// fidelity guarantee that arm cannot make; it instead writes the single
+    /// marker `"unknown:gpu-backend"`, so a reader can tell "verified
+    /// faithful" apart from "fidelity was never checked".
     pub skips: Vec<String>,
 }
 
@@ -489,6 +516,54 @@ pub fn manifest_differences(on_disk: &Manifest, fresh: &Manifest, exhaustive: bo
         }
     }
     out
+}
+
+/// Upserts `fresh`'s rows into `on_disk`'s, for a `--filter` run: every row
+/// `fresh` carries replaces the `on_disk` row of the same `(slug, variant)`
+/// (or is appended, if `on_disk` never had one), and every `on_disk` row
+/// `fresh` does not mention is kept untouched — see the module docs'
+/// `manifest.json` under `--filter` section for why a filtered run must never
+/// simply overwrite the manifest on disk.
+///
+/// The merged manifest's provenance ([`Manifest::frust_revision`],
+/// [`Manifest::generated_at`], [`Manifest::adapter`]) is `fresh`'s: a merge is
+/// still a real run, and the newest provenance is the most useful one to
+/// record. [`Manifest::backend`] is `fresh`'s too, but only once refused
+/// otherwise — [`Manifest::backend`] is not run provenance the way the other
+/// three fields are: a CPU-oracle row and a `--gpu` row are not the same kind
+/// of image, so merging one backend's fresh rows into another backend's
+/// on-disk manifest would silently mislabel every untouched row.
+///
+/// # Errors
+///
+/// Refuses when `on_disk.backend != fresh.backend`.
+pub fn merge_manifest(on_disk: &Manifest, fresh: &Manifest) -> Result<Manifest> {
+    if on_disk.backend != fresh.backend {
+        bail!(
+            "manifest.json on disk was generated with backend {:?}, but this filtered run used \
+             {:?} — merging would mislabel every row this run did not touch; re-run with \
+             --gpu to match, or start a fresh --out directory",
+            on_disk.backend,
+            fresh.backend
+        );
+    }
+
+    let key = |entry: &SnapshotEntry| (entry.slug.clone(), entry.variant.clone());
+    let mut snapshots = on_disk.snapshots.clone();
+    for entry in &fresh.snapshots {
+        match snapshots.iter_mut().find(|d| key(d) == key(entry)) {
+            Some(slot) => *slot = entry.clone(),
+            None => snapshots.push(entry.clone()),
+        }
+    }
+
+    Ok(Manifest {
+        frust_revision: fresh.frust_revision.clone(),
+        generated_at: fresh.generated_at.clone(),
+        backend: fresh.backend.clone(),
+        adapter: fresh.adapter.clone(),
+        snapshots,
+    })
 }
 
 #[cfg(test)]
@@ -738,6 +813,74 @@ mod tests {
             .is_empty(),
             "a filtered run must not report the rows it deliberately skipped"
         );
+    }
+
+    #[test]
+    fn merge_manifest_upserts_the_fresh_rows_and_keeps_the_rest() {
+        let case = a_case();
+        let old_light = snapshot_entry(case, Variant::Light, b"old", vec![]);
+        let dark = snapshot_entry(case, Variant::Dark, b"png", vec![]);
+        let new_light = snapshot_entry(case, Variant::Light, b"new", vec![]);
+
+        // `dark` is untouched by the filtered run; `light` is re-rendered.
+        let on_disk = manifest_of(vec![old_light, dark.clone()]);
+        let fresh = manifest_of(vec![new_light.clone()]);
+
+        let merged = merge_manifest(&on_disk, &fresh).expect("same backend, must merge");
+        assert_eq!(merged.frust_revision, fresh.frust_revision);
+        assert_eq!(merged.generated_at, fresh.generated_at);
+        assert_eq!(merged.adapter, fresh.adapter);
+        assert_eq!(merged.backend, fresh.backend);
+
+        let mut keys: Vec<(&str, &str)> = merged
+            .snapshots
+            .iter()
+            .map(|e| (e.slug.as_str(), e.variant.as_str()))
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![("button", "dark"), ("button", "light")]);
+        assert!(
+            merged.snapshots.contains(&dark),
+            "the untouched row survives"
+        );
+        assert!(
+            merged.snapshots.contains(&new_light),
+            "the re-rendered row's new bytes win, not the stale on-disk ones"
+        );
+    }
+
+    #[test]
+    fn merge_manifest_appends_a_row_the_on_disk_manifest_never_had() {
+        let case = a_case();
+        let light = snapshot_entry(case, Variant::Light, b"png", vec![]);
+        let dark = snapshot_entry(case, Variant::Dark, b"png", vec![]);
+
+        let on_disk = manifest_of(vec![light.clone()]);
+        let fresh = manifest_of(vec![dark.clone()]);
+        let merged = merge_manifest(&on_disk, &fresh).expect("same backend, must merge");
+
+        assert_eq!(merged.snapshots.len(), 2);
+        assert!(merged.snapshots.contains(&light));
+        assert!(merged.snapshots.contains(&dark));
+    }
+
+    #[test]
+    fn merge_manifest_refuses_a_backend_mismatch() {
+        let case = a_case();
+        let row = snapshot_entry(case, Variant::Light, b"png", vec![]);
+        let on_disk = Manifest {
+            backend: "cpu-oracle".to_string(),
+            ..manifest_of(vec![row.clone()])
+        };
+        let fresh = Manifest {
+            backend: "headless-engine".to_string(),
+            ..manifest_of(vec![row])
+        };
+        let err = merge_manifest(&on_disk, &fresh)
+            .expect_err("a backend mismatch must be refused, never silently merged");
+        let message = err.to_string();
+        assert!(message.contains("cpu-oracle"), "{message}");
+        assert!(message.contains("headless-engine"), "{message}");
     }
 
     #[test]

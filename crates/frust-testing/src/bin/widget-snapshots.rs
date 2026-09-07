@@ -21,6 +21,28 @@
 //! `scripts/widget-snapshots.sh` is the wrapper that runs this under the pinned
 //! toolchain and prints the rsync line for the website.
 //!
+//! # `manifest.json` and `--filter`
+//!
+//! Every row is keyed by `(slug, variant)`. A `--filter` run's own manifest
+//! only covers the cases it rendered, so writing it is never a plain
+//! overwrite of `DIR/manifest.json`: the fresh rows are upserted into
+//! whatever is already there ([`frust_testing::snapshot::merge_manifest`]) —
+//! replacing the rows for the slugs this run touched, leaving every other row
+//! exactly as it was. A run with no `--filter` is EXHAUSTIVE and writes a
+//! full manifest describing the whole registry outright, no merge involved.
+//! If `--out` holds no `manifest.json` yet, a filtered run cannot merge into
+//! anything, so it writes one describing only the rows it rendered and says
+//! so on stderr. `--check` makes the same exhaustive/filtered distinction —
+//! see [`frust_testing::snapshot::manifest_differences`]'s `exhaustive`
+//! parameter and the stray-PNG scan below.
+//!
+//! Each row's `skips` field is [`frust_testing::snapshot::SnapshotEntry::skips`]:
+//! on the CPU oracle arm (the default), an empty list is a verified claim of
+//! fidelity. The `--gpu` arm has no equivalent report to ask, so it writes
+//! the single marker `"unknown:gpu-backend"` instead of an empty list — a
+//! website consumer of this schema must not read an empty `skips` on a
+//! `--gpu`-backed row as "faithful"; it means "never checked".
+//!
 //! # Why `--check` holds no temp directory
 //!
 //! The comparison is on the *encoded PNG bytes*, which the run has in memory
@@ -41,8 +63,8 @@ use frust_gallery::{Case, Variant};
 use frust_render::{HeadlessOptions, HeadlessRenderer, HeadlessSpec};
 use frust_testing::snapshot::{
     CaseRender, Manifest, SnapshotEntry, VARIANTS, frust_revision, generated_at,
-    manifest_differences, record_scene, render_spec, snapshot_entry, snapshot_relative_path,
-    snapshot_text_context, to_rgba_image, variant_tag,
+    manifest_differences, merge_manifest, record_scene, render_spec, snapshot_entry,
+    snapshot_relative_path, snapshot_text_context, to_rgba_image, variant_tag,
 };
 use frust_testing::{AlphaKind, BackendMeta, RenderedImage};
 use frust_text::TextContext;
@@ -51,6 +73,12 @@ use image::{ImageFormat, RgbaImage};
 /// The `backend` id `manifest.json` records for the `--gpu` arm — the CPU arm
 /// records `frust_testing::ORACLE_ID` instead, straight off the oracle.
 const GPU_BACKEND_ID: &str = "headless-engine";
+
+/// The single [`SnapshotEntry::skips`] marker `render_on_gpu` writes for
+/// every row it produces: the `--gpu` arm has no `SkipReport` counterpart to
+/// ask, so an empty `skips` there would claim a fidelity guarantee this arm
+/// cannot make (see the module docs' `manifest.json` and `--filter` section).
+const GPU_SKIPS_UNKNOWN: &str = "unknown:gpu-backend";
 
 /// The manifest filename, alongside the PNGs, in the output directory root.
 const MANIFEST_NAME: &str = "manifest.json";
@@ -169,10 +197,17 @@ fn run() -> Result<ExitCode> {
         snapshots: rendered.iter().map(|(_, _, entry)| entry.clone()).collect(),
     };
 
+    let exhaustive = cli.filter.is_none();
+
     if cli.check {
-        check(&out, &rendered, &manifest, cli.filter.is_none())
+        check(&out, &rendered, &manifest, exhaustive)
     } else {
-        write(&out, &rendered, &manifest)?;
+        let to_write = if exhaustive {
+            manifest
+        } else {
+            merge_with_existing(&out, manifest)?
+        };
+        write(&out, &rendered, &to_write)?;
         eprintln!(
             "widget-snapshots: wrote {} PNG(s) + {MANIFEST_NAME} to {} ({} on {})",
             rendered.len(),
@@ -184,6 +219,55 @@ fn run() -> Result<ExitCode> {
     }
 }
 
+/// Resolves the manifest a `--filter` run should write: `fresh` merged onto
+/// whatever `manifest.json` is already at `out` ([`merge_manifest`]), or
+/// `fresh` as-is when there is nothing to merge into.
+///
+/// # Errors
+///
+/// Propagates a parse failure on an existing-but-unreadable manifest, and
+/// [`merge_manifest`]'s own refusal on a backend mismatch.
+fn merge_with_existing(out: &Path, fresh: Manifest) -> Result<Manifest> {
+    let manifest_path = out.join(MANIFEST_NAME);
+    match fs::read_to_string(&manifest_path) {
+        Ok(text) => {
+            let on_disk: Manifest = serde_json::from_str(&text)
+                .with_context(|| format!("parsing existing {}", manifest_path.display()))?;
+            merge_manifest(&on_disk, &fresh)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "widget-snapshots: no existing {MANIFEST_NAME} at {} — writing one that covers \
+                 only this filtered run's {} case(s)",
+                out.display(),
+                fresh.snapshots.len()
+            );
+            Ok(fresh)
+        }
+        Err(err) => {
+            Err(err).with_context(|| format!("reading existing {}", manifest_path.display()))
+        }
+    }
+}
+
+/// Refuses to write through `path` when it already exists as a symlink — a
+/// case, or design-prefixed slug directory, replaced by a link would let a
+/// write land somewhere outside `--out` entirely. A path that does not exist
+/// yet (the ordinary case: `create_dir_all` is about to make it) is not a
+/// symlink and is not refused.
+///
+/// [`std::fs::symlink_metadata`] rather than [`std::path::Path::exists`]/
+/// [`std::fs::metadata`] on purpose: those follow a symlink to ask about its
+/// target, which is exactly the property a symlink swap exploits.
+fn refuse_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("{}: refusing to write through a symlink", path.display())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Writes the whole tree: every PNG under its slug-derived path, then the
 /// manifest.
 fn write(
@@ -191,17 +275,21 @@ fn write(
     rendered: &[(PathBuf, Vec<u8>, SnapshotEntry)],
     manifest: &Manifest,
 ) -> Result<()> {
+    refuse_symlink(out)?;
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     for (relative, png, _) in rendered {
         let path = out.join(relative);
         if let Some(parent) = path.parent() {
+            refuse_symlink(parent)?;
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
+        refuse_symlink(&path)?;
         fs::write(&path, png).with_context(|| format!("writing {}", path.display()))?;
     }
     let mut json = serde_json::to_string_pretty(manifest).context("serializing the manifest")?;
     json.push('\n');
     let path = out.join(MANIFEST_NAME);
+    refuse_symlink(&path)?;
     fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
 }
 
@@ -251,8 +339,15 @@ fn check(
             .iter()
             .map(|(relative, _, _)| out.join(relative))
             .collect();
-        for stray in stray_pngs(out, &expected) {
+        let strays = stray_pngs(out, &expected);
+        for stray in &strays.pngs {
             failures.push(format!("{}: not produced by any case", stray.display()));
+        }
+        for symlink in &strays.symlinks {
+            failures.push(format!(
+                "{}: symlinked entry refused under --check",
+                symlink.display()
+            ));
         }
     }
 
@@ -275,13 +370,33 @@ fn check(
     Ok(ExitCode::FAILURE)
 }
 
-/// Every `.png` under `root` that is not in `expected`, sorted.
+/// [`stray_pngs`]'s result: strays it found, plus every symlinked entry it
+/// refused to follow rather than silently treating as a directory or a file.
+#[derive(Debug, Default)]
+struct StrayScan {
+    /// Every `.png` under the root that is not in the run's expected set,
+    /// sorted.
+    pngs: Vec<PathBuf>,
+    /// Every symlink the scan encountered (file or directory), sorted. A
+    /// symlinked directory is never descended into, and a symlinked `.png`
+    /// is never counted as a stray — either would mean trusting whatever the
+    /// link points at instead of what is really under `--out`.
+    symlinks: Vec<PathBuf>,
+}
+
+/// Every `.png` under `root` that is not in `expected`, sorted — plus any
+/// symlink the walk refused to follow ([`StrayScan::symlinks`]).
 ///
 /// A read error is treated as "no strays here" rather than a failure: this is a
 /// staleness hint over a directory the caller may not have created yet, and the
 /// missing-file checks above already speak for anything that matters.
-fn stray_pngs(root: &Path, expected: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+///
+/// Uses [`fs::symlink_metadata`] rather than [`Path::is_dir`] (which follows
+/// a symlink to ask about its target): a symlinked directory swapped in under
+/// `--out` must not be walked into, and a symlinked `.png` must not be
+/// reported as an ordinary stray file — both are refused instead.
+fn stray_pngs(root: &Path, expected: &BTreeSet<PathBuf>) -> StrayScan {
+    let mut result = StrayScan::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -289,16 +404,22 @@ fn stray_pngs(root: &Path, expected: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                result.symlinks.push(path);
+            } else if meta.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|ext| ext == "png") && !expected.contains(&path)
             {
-                out.push(path);
+                result.pngs.push(path);
             }
         }
     }
-    out.sort();
-    out
+    result.pngs.sort();
+    result.symlinks.sort();
+    result
 }
 
 /// PNG bytes for `image`, encoded in memory so `--check` and the write path
@@ -352,8 +473,9 @@ impl Backend {
 /// Plan OPEN #2 — this exists so a maintainer can eyeball the engine's own
 /// output for the same case, not as a second source of website assets: an
 /// adapter-dependent PNG is not something `--check` can hold to a byte, and no
-/// `SkipReport` counterpart exists on this path, so [`CaseRender::skips`] comes
-/// back empty rather than claiming a fidelity guarantee this arm cannot make.
+/// `SkipReport` counterpart exists on this path, so [`CaseRender::skips`]
+/// carries [`GPU_SKIPS_UNKNOWN`] rather than an empty vector that would claim
+/// a fidelity guarantee this arm cannot make.
 fn render_on_gpu(
     renderer: &mut HeadlessRenderer,
     case: &Case,
@@ -396,7 +518,7 @@ fn render_on_gpu(
     };
     Ok(CaseRender {
         image: to_rgba_image(&rendered)?,
-        skips: Vec::new(),
+        skips: vec![GPU_SKIPS_UNKNOWN.to_string()],
         backend: meta,
     })
 }
