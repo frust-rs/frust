@@ -1,4 +1,4 @@
-//! `web-gallery`: the web-shell plan's Phase-1 gate vehicle (w1-06).
+//! `web-gallery`: the browser gallery — the web shell's milestone gate vehicle.
 //!
 //! An ordinary Frust app — authored through the `frust` facade's
 //! [`frust::web_app!`] entry point (w1-05), the same vocabulary a
@@ -8,7 +8,7 @@
 //! Unlike `examples/web-spike` (which builds a static [`frust_scene::Scene`]
 //! by hand, bypassing the facade to probe `frust-gpu`'s seams one at a time),
 //! this crate exercises the *whole* app-authoring path for `wasm32`: widgets,
-//! the `Component` state boundary, the reactive runtime, and every Phase-1
+//! the `Component` state boundary, the reactive runtime, and every browser
 //! host-signal milestone (pointer/touch/wheel/keyboard input, theme follow,
 //! resize + DPR, and a signal-driven repaint with zero input events) in one
 //! binary.
@@ -350,7 +350,7 @@ mod app {
         );
 
         let header = Column(vec![
-            any(label("frust-gallery — web-shell Phase-1 demo")),
+            any(label("frust-gallery — browser demo")),
             any(label(format!(
                 "{total} cases in the registry ({shown} shown below)"
             ))),
