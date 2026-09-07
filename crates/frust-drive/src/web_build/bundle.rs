@@ -289,6 +289,24 @@ fn is_strictly_contained(dir: &Path, project_dir: &Path) -> bool {
     has_real_component
 }
 
+/// Whether `a` and `b` overlap on the filesystem: one is a descendant of
+/// the other, or they are the same. Lexical, like the other guards.
+fn paths_overlap(a: &Path, b: &Path) -> bool {
+    // Check if a == b
+    if a == b {
+        return true;
+    }
+    // Check if a contains b (b is a descendant of a)
+    if b.strip_prefix(a).is_ok() {
+        return true;
+    }
+    // Check if b contains a (a is a descendant of b)
+    if a.strip_prefix(b).is_ok() {
+        return true;
+    }
+    false
+}
+
 /// Creates `dir` fresh: an existing directory is removed first, so a rebuild
 /// can never serve a previous run's file (a renamed module, a stale
 /// `frust_web.js`) out of the artifact directory it hands back.
@@ -297,16 +315,36 @@ fn is_strictly_contained(dir: &Path, project_dir: &Path) -> bool {
 /// `remove_dir_all` is the most dangerous primitive in this module, so `dir`
 /// must be a strict descendant of `project_dir` ([`is_strictly_contained`]) or
 /// the call is a typed refusal ([`WebBuildError::UnsafeArtifactDir`]) that
-/// touches nothing. `[web] out-dir` is project-configurable (unlike the old
-/// hard-coded `dist/web`), so the boundary this guard enforces is the project
-/// directory itself rather than a fixed subdirectory of it — an out-dir of
-/// `"."`, `".."`, or anything that steps outside the project is refused the
-/// same way a `dist/web/../../..` traversal always was.
-pub(super) fn prepare_dir(dir: &Path, project_dir: &Path) -> Result<(), WebBuildError> {
+/// touches nothing. Further, the artifact directory must not overlap with the
+/// host page directory or the project's `src/` directory — a deletion would
+/// destroy the source code or the host page ([`WebBuildError::ArtifactDirOverlapsSource`]).
+/// `[web] out-dir` is project-configurable (unlike the old hard-coded `dist/web`),
+/// so the boundary this guard enforces is the project directory itself rather
+/// than a fixed subdirectory of it — an out-dir of `"."`, `".."`, or anything
+/// that steps outside the project is refused the same way a `dist/web/../../..`
+/// traversal always was.
+pub(super) fn prepare_dir(
+    dir: &Path,
+    project_dir: &Path,
+    embedder: &Path,
+) -> Result<(), WebBuildError> {
     if !is_strictly_contained(dir, project_dir) {
         return Err(WebBuildError::UnsafeArtifactDir {
             path: dir.to_path_buf(),
             project_dir: project_dir.to_path_buf(),
+        });
+    }
+    if paths_overlap(dir, embedder) {
+        return Err(WebBuildError::ArtifactDirOverlapsSource {
+            artifact_dir: dir.to_path_buf(),
+            host_page_dir: embedder.to_path_buf(),
+        });
+    }
+    let src_dir = project_dir.join("src");
+    if paths_overlap(dir, &src_dir) {
+        return Err(WebBuildError::ArtifactDirOverlapsSource {
+            artifact_dir: dir.to_path_buf(),
+            host_page_dir: src_dir,
         });
     }
     if dir.exists() {
@@ -636,9 +674,10 @@ mod tests {
     fn preparing_the_artifact_dir_clears_a_previous_build() {
         let project = temp_dir("prepare");
         let dir = project.join("build/web");
+        let embedder = project.join("web");
         fs::create_dir_all(dir.join("pkg")).unwrap();
         fs::write(dir.join("pkg/stale.js"), "old").unwrap();
-        prepare_dir(&dir, &project).unwrap();
+        prepare_dir(&dir, &project, &embedder).unwrap();
         assert!(dir.is_dir());
         assert!(!dir.join("pkg/stale.js").exists());
         let _ = fs::remove_dir_all(&project);
@@ -651,6 +690,7 @@ mod tests {
     #[test]
     fn preparing_a_directory_outside_the_project_is_refused() {
         let project = temp_dir("prepare-guard");
+        let embedder = project.join("web");
         for candidate in [
             project.clone(),
             project.join("."),
@@ -658,7 +698,7 @@ mod tests {
             project.join(".."),
             PathBuf::from("/"),
         ] {
-            let err = prepare_dir(&candidate, &project).unwrap_err();
+            let err = prepare_dir(&candidate, &project, &embedder).unwrap_err();
             assert!(
                 matches!(err, WebBuildError::UnsafeArtifactDir { .. }),
                 "{candidate:?} was not refused: {err:?}"
@@ -673,9 +713,10 @@ mod tests {
     #[test]
     fn preparing_any_strict_descendant_of_the_project_is_allowed() {
         let project = temp_dir("prepare-allowed");
+        let embedder = project.join("web");
         for candidate in ["dist", "build/web", "output/site"] {
             let dir = project.join(candidate);
-            prepare_dir(&dir, &project).unwrap();
+            prepare_dir(&dir, &project, &embedder).unwrap();
             assert!(dir.is_dir(), "{candidate}");
         }
         let _ = fs::remove_dir_all(&project);
@@ -687,7 +728,7 @@ mod tests {
         let embedder = embedder_dir(&project).unwrap();
         fs::write(embedder.join("index.html"), "<!doctype html>\n").unwrap();
         let dir = artifact_dir(&project, &WebSection::default());
-        prepare_dir(&dir, &project).unwrap();
+        prepare_dir(&dir, &project, &embedder).unwrap();
         let written = stage_embedder(&embedder, &dir).unwrap();
         assert_eq!(
             written,
@@ -715,5 +756,115 @@ mod tests {
             .collect();
         assert_eq!(files, vec!["app.d.ts", "app.js", "app_bg.wasm"]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Artifact dir equals the app's own host page — a deletion would destroy
+    /// the checked-in host page source.
+    #[test]
+    fn preparing_artifact_dir_equal_to_app_embedder_is_refused() {
+        let project = temp_dir("overlap-equal-app");
+        let embedder = project.join("web");
+        fs::create_dir_all(&embedder).unwrap();
+        let err = prepare_dir(&embedder, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir is the parent of the app's own host page — a deletion would
+    /// destroy the checked-in host page source.
+    #[test]
+    fn preparing_artifact_dir_containing_app_embedder_is_refused() {
+        let project = temp_dir("overlap-contain-app");
+        let artifact = project.join("build");
+        let embedder = artifact.join("web");
+        fs::create_dir_all(&embedder).unwrap();
+        let err = prepare_dir(&artifact, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir is inside the app's own host page — a deletion would destroy
+    /// the checked-in host page source.
+    #[test]
+    fn preparing_artifact_dir_inside_app_embedder_is_refused() {
+        let project = temp_dir("overlap-contained-app");
+        let embedder = project.join("web");
+        fs::create_dir_all(&embedder).unwrap();
+        let artifact = embedder.join("assets");
+        let err = prepare_dir(&artifact, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir equals the framework's host page — a deletion would destroy
+    /// the framework source.
+    #[test]
+    fn preparing_artifact_dir_equal_to_framework_embedder_is_refused() {
+        let project = temp_dir("overlap-equal-fw");
+        // Create a mock framework-like structure
+        let embedder = project.join("framework/platform/web");
+        fs::create_dir_all(&embedder).unwrap();
+        let err = prepare_dir(&embedder, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir equals the project's src directory — a deletion would
+    /// destroy the source code.
+    #[test]
+    fn preparing_artifact_dir_equal_to_src_is_refused() {
+        let project = temp_dir("overlap-equal-src");
+        let src = project.join("src");
+        fs::create_dir_all(&src).unwrap();
+        let embedder = project.join("web");
+        let err = prepare_dir(&src, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir is inside the src directory — a deletion would destroy
+    /// the source code.
+    #[test]
+    fn preparing_artifact_dir_inside_src_is_refused() {
+        let project = temp_dir("overlap-contained-src");
+        let src = project.join("src");
+        let artifact = src.join("build");
+        fs::create_dir_all(&src).unwrap();
+        let embedder = project.join("web");
+        let err = prepare_dir(&artifact, &project, &embedder).unwrap_err();
+        assert!(
+            matches!(err, WebBuildError::ArtifactDirOverlapsSource { .. }),
+            "{err:?}"
+        );
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// Artifact dir as a sibling of the embedder and src is allowed — no overlap.
+    #[test]
+    fn preparing_artifact_dir_separate_from_embedder_and_src_is_allowed() {
+        let project = temp_dir("overlap-sibling");
+        let embedder = project.join("web");
+        let src = project.join("src");
+        let artifact = project.join("build/web");
+        fs::create_dir_all(&embedder).unwrap();
+        fs::create_dir_all(&src).unwrap();
+        prepare_dir(&artifact, &project, &embedder).unwrap();
+        assert!(artifact.is_dir());
+        let _ = fs::remove_dir_all(&project);
     }
 }

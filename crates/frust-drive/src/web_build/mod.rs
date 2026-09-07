@@ -262,6 +262,17 @@ pub enum WebBuildError {
          subdirectory of the project root"
     )]
     UnsafeArtifactDir { path: PathBuf, project_dir: PathBuf },
+    #[error(
+        "refusing to prepare the artifact directory '{artifact_dir}': it overlaps with the host \
+         page directory '{host_page_dir}' or the project's src directory — preparing the \
+         artifact directory deletes its contents, so a build would destroy the host page or \
+         source code; configure `[web] out-dir` to a safe location that does not touch the \
+         project's source or host page"
+    )]
+    ArtifactDirOverlapsSource {
+        artifact_dir: PathBuf,
+        host_page_dir: PathBuf,
+    },
     #[error("spawning `cargo {args}`: {reason}")]
     CargoSpawn { args: String, reason: String },
     #[error("`cargo {args}` failed:\n{tail}")]
@@ -355,7 +366,7 @@ fn build_with_env(
     let module = locate_wasm(runner, env, project_dir, info, &crate_name)?;
 
     let root = artifact_dir(project_dir, &web);
-    bundle::prepare_dir(&root, project_dir)?;
+    bundle::prepare_dir(&root, project_dir, &embedder)?;
     let pkg_dir = root.join(bundle::PKG_DIR);
 
     wasm_bindgen(runner, project_dir, &module, &pkg_dir, &out_name, on_line)?;
@@ -1304,8 +1315,8 @@ mod tests {
     }
 
     /// A profile build follows the same mode default a debug build does — no
-    /// override means no `wasm-opt`, closing the gap the pre-w2-05 code left
-    /// (it special-cased only `BuildMode::Debug`).
+    /// override means no `wasm-opt`. An earlier version special-cased only
+    /// `BuildMode::Debug`, leaving this case to run the optimizer unnecessarily.
     #[test]
     fn a_profile_build_also_skips_wasm_opt_by_default() {
         let (root, project, target) = checkout("profile-note");

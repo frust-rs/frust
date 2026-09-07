@@ -65,6 +65,7 @@ pub const BINDGEN_COMPONENT: &str = "wasm-bindgen CLI";
 pub const WASM_OPT_COMPONENT: &str = "wasm-opt";
 pub const EMBEDDER_COMPONENT: &str = "Browser host page";
 pub const HOST_PAGE_COMPONENT: &str = "Host page module name";
+pub const ARTIFACT_DIR_COMPONENT: &str = "Artifact directory safety";
 
 /// Every browser-build environment check, in report order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,7 @@ pub fn preflight(runner: &dyn ProcessRunner, project_dir: &Path) -> WebPreflight
             wasm_opt_check(runner),
             embedder_check(project_dir, &web),
             host_page_module_check(project_dir, &web, &app_name),
+            artifact_dir_safety_check(project_dir, &web),
         ],
     }
 }
@@ -473,6 +475,76 @@ fn installed_bindgen_version(runner: &dyn ProcessRunner) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether the artifact directory would be safe from the host page and source
+/// directory — the artifact dir should not overlap with either, since preparing
+/// it deletes its contents.
+fn artifact_dir_safety_check(project_dir: &Path, web: &WebSection) -> Component {
+    let name = ARTIFACT_DIR_COMPONENT.to_string();
+    let artifact = bundle::artifact_dir(project_dir, web);
+    match bundle::resolve_embedder(project_dir, web) {
+        Ok((embedder, _)) => {
+            // Try the prepare_dir check to see if it would fail
+            let src_dir = project_dir.join("src");
+            let src_overlap = paths_overlap(&artifact, &src_dir);
+            let embedder_overlap = paths_overlap(&artifact, &embedder);
+            if embedder_overlap || src_overlap {
+                Component {
+                    name,
+                    status: ComponentStatus::Missing,
+                    summary: format!(
+                        "artifact directory '{}' overlaps with {} — it would be deleted \
+                         on each build, destroying the source or host page; reconfigure \
+                         `[web] out-dir` to a safe subdirectory",
+                        artifact.display(),
+                        if embedder_overlap {
+                            format!("the host page at '{}'", embedder.display())
+                        } else {
+                            format!("the project's src directory at '{}'", src_dir.display())
+                        }
+                    ),
+                    fix_commands: Vec::new(),
+                }
+            } else {
+                Component {
+                    name,
+                    status: ComponentStatus::Ok,
+                    summary: format!("artifact directory '{}' is safe", artifact.display()),
+                    fix_commands: Vec::new(),
+                }
+            }
+        }
+        Err(_) => {
+            // If embedder can't resolve, we can't check safety—but the embedder
+            // check will catch the error anyway.
+            Component {
+                name,
+                status: ComponentStatus::Ok,
+                summary: "artifact directory check skipped — see the host page check for issues"
+                    .to_string(),
+                fix_commands: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Whether two paths overlap: one is a descendant of the other, or they are
+/// the same. Mirrors the guard logic in `bundle.rs`.
+fn paths_overlap(a: &Path, b: &Path) -> bool {
+    // Check if a == b
+    if a == b {
+        return true;
+    }
+    // Check if a contains b (b is a descendant of a)
+    if b.strip_prefix(a).is_ok() {
+        return true;
+    }
+    // Check if b contains a (a is a descendant of b)
+    if a.strip_prefix(b).is_ok() {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,7 +619,7 @@ mod tests {
         assert_eq!(report.status(), ComponentStatus::Ok, "{report:?}");
         assert!(report.is_ready());
         assert!(report.blocking().is_empty());
-        assert_eq!(report.components.len(), 6);
+        assert_eq!(report.components.len(), 7);
         let _ = fs::remove_dir_all(&root);
     }
 
