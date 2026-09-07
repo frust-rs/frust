@@ -107,6 +107,28 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "wgsl",
 ] }
 winit = "0.30.13"
+
+# --- Browser shell (wasm32-unknown-unknown) rows -------------------------------
+# Consumed only by `crates/frust-shell-web` and the facade's wasm32 arm; a row
+# no member references never enters Cargo.lock, so these are inert for every
+# native graph. Facts behind each pin were established by the Phase-0 spike
+# (examples/web-spike/RESULTS.md): wgpu 30.0.1 needs no RUSTFLAGS/cfg on wasm32.
+#
+# The wasm-bindgen CRATE must equal the host `wasm-bindgen-cli` (0.2.128,
+# installed 2026-09-07) — the CLI refuses a mismatched schema — hence the exact
+# pin; wasm-bindgen-futures/js-sys/web-sys ride the versions that pin already
+# resolves in Cargo.lock (0.4.77 / 0.3.104 / 0.3.104).
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4.77"
+js-sys = "0.3.104"
+web-sys = "0.3.104"
+# `std::time::Instant` panics on wasm32; `web-time` is the drop-in winit 0.30
+# itself uses (already 1.1.0 in Cargo.lock through winit).
+web-time = "1.1.0"
+# stderr is a silent no-op in a browser: `console_log` routes the `log` facade
+# to `console.*`, `console_error_panic_hook` routes panics to `console.error`.
+console_log = "1.0.0"
+console_error_panic_hook = "0.1.7"
 parley = "0.11.0"
 peniko = "0.6.1"
 kurbo = "0.13.1"
@@ -611,6 +633,7 @@ frust-shell-ios = { path = "crates/frust-shell-ios" }
 frust-shell-macos = { path = "crates/frust-shell-macos" }
 frust-shell-windows = { path = "crates/frust-shell-windows" }
 frust-shell-linux = { path = "crates/frust-shell-linux" }
+frust-shell-web = { path = "crates/frust-shell-web" }
 frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:
