@@ -1083,3 +1083,553 @@ blocking this one:
   one-line pointer to this section's measured warm-up cost (10–17ms, once,
   not per-frame) now that it has been measured rather than only predicted —
   a documentation task, not required by this one's write scope.
+
+## 17. w0-07 results: WebGL2 glyph coverage
+
+**Verdict line, up front:**
+
+```
+WEBGL2 TEXT: FIX-PROPOSED
+```
+
+The failing layer is **`wgpu-hal` 30.0.1's GLES backend, in its GL
+texture-target heuristic** — not naga's GLSL-ES lowering, not ANGLE, not
+`frust-engine`'s shader, and not `frust-gpu`'s downlevel caps clamp. It picks
+a texture's GL target from the `wgpu::TextureDescriptor` alone and binds a
+`GL_TEXTURE_2D` object for a single-layer `D2` texture, whatever view
+dimension is later asked for; `frust-engine`'s glyph/image atlas array is a
+`D2` texture with `depth_or_array_layers == 1` until a second layer is
+needed, and the strip shader samples it through a `D2Array` view
+(`sampler2DArray`). Target and sampler disagree, the texture is *incomplete*
+for that sampler, and GLES 3.0 § 3.8.2 says an incomplete texture reads
+**(0, 0, 0, 1)** — which is precisely the observed glyph symptom, because a
+cached glyph is an image draw with an `AlphaMask` tint whose final colour is
+`alpha * image_tint * sample_color.a`: `sample_color.a == 1.0` everywhere
+paints the run's own colour across the whole glyph quad. A solid box.
+
+`frust-engine` already asks for the right view (`atlas_view_descriptor()` has
+carried `dimension: Some(D2Array)` all along); wgpu-hal never consults it.
+The proposed fix is therefore a *workaround in `frust-engine`* — allocate the
+atlas array with at least two layers, which is the condition wgpu-hal's own
+heuristic keys on — and it is **verified end to end below**: the WebGL2 arm
+renders shaped text, images, gradients, blur and layers identically to the
+WebGPU arm, and the host Vulkan engine goldens still pass.
+
+A second, independent result falls out of step 4: **~1.5–1.8 s of the 2.1 s
+WebGL2 bring-up § 16 recorded is this probe's own `console_log` at `Debug`**,
+printing naga's ~8,900-line typifier trace over the wasm/JS boundary. It is a
+measurement artefact of the spike, not a cost of the WebGL2 backend. § 17.5
+supersedes § 16.2/§ 16.3's WebGL2 rows on that point.
+
+Everything below cites a command and its verbatim output, or a screenshot.
+
+### 17.1 Step 1 — host native-GL repro
+
+**Two blockers had to be cleared before the host could run a GL arm at all,
+and both are findings in their own right.**
+
+(a) `wgpu`'s `gles` feature is deliberately absent from this workspace's
+native graph (root `Cargo.toml`'s `[workspace.dependencies]` comment:
+"Deliberately dropped everywhere: `gles` …"). The card's exact command
+therefore refuses:
+
+```sh
+$ WGPU_BACKEND=gl cargo test -p frust-testing --test engine_goldens -- --ignored
+failed to create the engine oracle: frust-testing engine oracle: no compatible GPU adapter:
+No suitable graphics adapter found; noop not requested, vulkan not requested, metal not
+requested, dx12 not requested, gl support not compiled in, webgpu not requested
+```
+
+and with the card's adapter pin it fails one step earlier, inside wgpu's own
+`util::initialize_adapter_from_env` (`wgpu-30.0.1/src/util/init.rs:44`),
+because the enumeration is empty:
+
+```
+WGPU_ADAPTER_NAME set but no matching adapter found!
+```
+
+(b) With `gles` added **locally and temporarily** to that row (reverted before
+commit — `git status` shows no `crates/` or root-manifest change; the build
+used a private `CARGO_TARGET_DIR=/data/cache/target-w0-07-gles` so no other
+worker's shared target dir was churned), a GL adapter appears but **no device
+can be created**:
+
+```
+ADAPTER: AdapterInfo { name: "NVIDIA T400 4GB/PCIe/SSE2", vendor: 4318, device: 0,
+  device_type: Other, driver_info: "3.3.0 NVIDIA 610.43.03", backend: Gl, ... }
+[ERROR wgpu_core::indirect_validation] indirect-validation error:
+  ComputePipeline(Internal("The selected version doesn't support
+  Features(BUFFER_STORAGE | COMPUTE_SHADER | DYNAMIC_ARRAY_SIZE)"))
+  request_device(adapter.limits()): ERR RequestDeviceError { inner: Core(Device(Lost)) }
+  request_device(downlevel_webgl2_defaults): ERR RequestDeviceError { inner: Core(Device(Lost)) }
+  request_device(Limits::default()): ERR RequestDeviceError { inner: Core(Device(Lost)) }
+```
+
+wgpu-core's indirect-call validation wants a compute pipeline the surfaceless
+EGL context (desktop GL 3.3 — `eglinfo` confirms the *Surfaceless platform* is
+the only one that initialises on this host; GBM/Wayland/X11 all fail with
+`/dev/dri/card1: Permission denied`) cannot build. `WGPU_VALIDATION_INDIRECT_CALL=0`
+clears it and all three `request_device` calls answer `OK`. **No host package
+was installed to get here.**
+
+**The repro.** With those two knobs:
+
+```sh
+WGPU_BACKEND=gl WGPU_VALIDATION_INDIRECT_CALL=0 \
+  cargo test -p frust-testing --test engine_goldens -- --ignored --nocapture
+```
+
+```
+engine goldens: engine arm on backend=gl adapter="NVIDIA T400 4GB/PCIe/SSE2" driver="3.3.0 NVIDIA 610.43.03"
+engine goldens: golden class `engine-unclassified`
+...
+29 engine corpus failure(s) in golden class `engine-unclassified`:
+[unit-glyph-run] engine and `vello-cpu-0.2` disagree beyond Tolerance { channel: 104, alpha: 2,
+  diff_pixels: 0 }: 376 px differ (9.1797%), max |delta| [255, 255, 255, 0], mean [18.672, ...],
+  bbox Some(BoundingBox { min_x: 6, min_y: 23, max_x: 60, max_y: 40 }); first 6 of 376:
+  (37, 23) cpu [92, 92, 92, 255] vs engine [255, 255, 255, 255];
+  (38, 23) cpu [0, 0, 0, 255] vs engine [255, 255, 255, 255]; ...
+```
+
+`unit-glyph-run` is dark ink on a white ground, so `cpu [0,0,0]` /
+`engine [255,255,255]` is the engine losing the glyph, and `cpu [92,92,92]` /
+`engine [255,255,255]` is it losing the antialiased edge — the same
+coverage-destroyed-by-the-atlas failure the browser shows, in the host's own
+opposite polarity. `text-rtl-arabic` (278 px, `cpu [39,39,39]` vs
+`engine [255,255,255]`) and `text-cjk` (553 px, `cpu [0,0,0]` vs
+`engine [255,255,255]`) fail the same way.
+
+**The isolating knob.** Re-run identically plus `FRUST_ENGINE_NO_ATLAS=1`
+(`frust-engine`'s existing kill switch, `config.rs`) and the failure count
+drops 29 → 24, removing **exactly** the four glyph cases:
+
+| | failing cases |
+|---|---|
+| host GL, atlas on | `adv-10k-glyphs` `adv-huge-image` `adv-snapshot-scale-alpha` `adv-unbalanced-pops` `page-glyph-dashboard` `page-glyph-surfaces` `page-material-home` `text-cjk` `text-colr-emoji` `text-gradient-brush` `text-rtl-arabic` `unit-blur-rrect` **`unit-glyph-run`** `unit-image` `unit-layer-alpha` `unit-layer-balance` `unit-layer-nested-pair` `unit-layer-sibling-fan` `unit-snapshot-balance` `unit-snapshot-bracket` |
+| host GL, `FRUST_ENGINE_NO_ATLAS=1` | the same list **minus** `unit-glyph-run`, `adv-10k-glyphs`, `text-cjk`, `text-rtl-arabic` |
+
+So on the host too, the glyph defect lives in the **atlas** route, not in the
+strip `alphas_texture` route: the outline route those four fall back to is
+pixel-clean.
+
+**Honest limits of this arm.** The host GL context is desktop GL 3.3 through
+surfaceless EGL — a configuration this repo does not ship and deliberately
+excludes — and it is broken far more widely than the browser is: images,
+gradients, blurred rounded rects, layers and snapshots all fail there, while
+in Chrome's WebGL2 every one of those is *correct* (§ 17.3). Its failures are
+therefore corroborating, not equivalent; the browser is the authority for what
+a WebGL2 fallback would actually do, and § 17.3/§ 17.4 are measured there.
+
+**The control the card asked for** — the same corpus on Vulkan with the same
+caps clamp — passes clean:
+
+```sh
+$ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+    FRUST_ENGINE_DOWNLEVEL=1 cargo test -p frust-testing --test engine_goldens -- --ignored
+engine goldens: engine arm on backend=vulkan adapter="NVIDIA T400 4GB" driver="NVIDIA (610.43.03)"
+engine goldens: golden class `engine-vulkan-nvidia-t400`
+test result: ok. 1 passed; 0 failed
+```
+
+Same conclusion as w0-03's browser control (`screenshots/w0-03-webgpu-forced-downlevel.png`),
+now on the host: the downlevel limit clamp is not the cause.
+
+### 17.2 Step 2 — naga's GLSL-ES 3.00 lowering is correct
+
+`examples/lower_strip.rs` (this task's new cargo example, `naga = "=30.0.1"`
+with `wgsl-in` + `glsl-out` as a **dev**-dependency, so the shipped wasm is
+byte-identical with and without it) translates `frust_engine::gpu::shader_src::STRIP`
+with the *exact* options `wgpu-hal-30.0.1/src/gles/device.rs` uses —
+`Version::Embedded { version: 300, is_webgl: true }`,
+`WriterFlags::ADJUST_COORDINATE_SPACE | FORCE_POINT_SIZE`, and
+`BoundsCheckPolicies { image_load: Unchecked, .. }` (which is what a WebGL2
+context takes: `image_load` is `ReadZeroSkipWrite` only on non-embedded
+GL ≥ 4.3).
+
+```sh
+cargo run --example lower_strip -- fs_main    # and -- vs_main
+```
+
+Validation passes at `Capabilities::empty()`. The bindings lower to the right
+sampler types:
+
+```glsl
+#version 300 es
+precision highp float;
+precision highp int;
+...
+uniform highp usampler2D _group_0_binding_0_fs;                      // alphas_texture
+layout(std140) uniform Config_block_0Fragment { Config _group_0_binding_1_fs; };
+uniform highp sampler2D _group_0_binding_2_fs;                       // layer_input_texture
+uniform highp sampler2DArray _group_1_binding_0_fs;                  // atlas_texture_array
+uniform highp sampler2D _group_1_binding_1_fs;                       // external_texture
+uniform highp usampler2D _group_2_binding_0_fs;                      // encoded_paints_texture
+uniform highp sampler2D _group_3_binding_0_fs;                       // gradient_texture
+
+flat in uint _vs2fs_location0;
+smooth in vec2 _vs2fs_location1;
+smooth in vec2 _vs2fs_location2;
+flat in uint _vs2fs_location3;
+flat in uint _vs2fs_location4;
+flat in uint _vs2fs_location5;
+```
+
+and the coverage read — the one the lead pointed at — lowers intact:
+
+```glsl
+        if (_e48) {
+            uint alphas_index = uint(floor(tex_coord.x));
+            uint y_3 = uint(floor(tex_coord.y));
+            uvec2 tex_dimensions = uvec2(textureSize(_group_0_binding_0_fs, 0).xy);
+            uint alphas_tex_width = tex_dimensions.x;
+            uint texel_index = (alphas_index / 4u);
+            uint channel_index_1 = (alphas_index % 4u);
+            uint tex_x = (texel_index & (alphas_tex_width - 1u));
+            uint _e67 = _group_0_binding_1_fs.alphas_tex_width_bits;
+            uint tex_y = (texel_index >> _e67);
+            uvec4 rgba_values = texelFetch(_group_0_binding_0_fs, ivec2(uvec2(tex_x, tex_y)), 0);
+            uint _e73 = unpack_alphas_from_channel(rgba_values, channel_index_1);
+            alpha = (float(((_e73 >> (y_3 * 8u)) & 255u)) * 0.003921569);
+        }
+```
+
+The atlas read the glyph path actually uses lowers correctly too:
+
+```glsl
+                            vec2 final_xy_3 = (_e108 + extended_xy);
+                            vec4 _e159 = texelFetch(_group_1_binding_0_fs,
+                                                    ivec3(uvec2(final_xy_3), int(_e111)), 0);
+                            sample_color = _e159;
+...
+                float _e160 = alpha;
+                float _e162 = sample_color.w;
+                vec4 _e164 = sample_color;
+                final_color = (_e160 * (is_multiply ? (_e164 * image_tint) : (image_tint * _e162)));
+```
+
+**Is the lowering obviously wrong? No.** `usampler2D` + `texelFetch` returning
+`uvec4`, the `u32` unpack and the `>> (y*8u) & 255u` extraction intact, the
+uniform-driven shift intact, `highp` precision on both the default int and the
+integer sampler, and `flat` correctly on every `uint` varying (mandatory in
+GLSL ES 3.00 and present). The vertex stage lowers its six `uint` attributes as
+`layout(location = N) in uint` with matching `flat out`. Nothing here is the
+defect. **The card's stated lead — the `alphas_texture` `textureLoad` — is
+exonerated by this section and by § 17.1's `FRUST_ENGINE_NO_ATLAS` split
+independently.**
+
+### 17.3 Step 3 — browser evidence: the defect is the atlas *array binding*
+
+w0-03's scene could not tell a glyph bug from a texture-binding bug, because
+its only non-`alphas_texture` read *was* the glyph atlas: every fill in it
+takes its colour from the strip instance's `payload` and reads no texture.
+This task adds an opt-in `?probe=paints` scene (`src/main.rs`'s
+`add_paint_probes`, off by default so both arms still render w0-03's exact
+frame without it) that reaches the remaining bindings — a linear gradient
+(`encoded_paints_texture` + `gradient_texture`), a blurred rounded rect
+(`encoded_paints_texture`), a half-alpha layer beside a full-opacity white
+control (`layer_input_texture`), and a magnified 2×2 RGBA image
+(`atlas_texture_array` — the *same* binding a glyph reads, reached without a
+glyph).
+
+Build/serve/drive exactly as § 2/§ 16: release wasm + `wasm-bindgen 0.2.128`,
+`./serve.sh 8937`, headed Chrome 151 in `frust-linux-native` on `DISPLAY=:20`
+via chromedriver, one fresh WebDriver session per run.
+
+| Screenshot | What it shows |
+|---|---|
+| `screenshots/w0-07-webgpu-paints-reference.png` | `?arm=webgpu&probe=paints` — the reference. Gradient red→blue, green blurred rrect, magenta/cyan/yellow image quadrants, white control square beside a mid-grey half-alpha band, `Hello` + caption as letterforms. |
+| `screenshots/w0-07-webgl-paints-broken.png` | `?arm=webgl&probe=paints`, current code. **Gradient, blurred rrect, layer and its control are all pixel-correct.** The glyphs are solid boxes and the image is a solid **black** square. |
+| `screenshots/w0-07-webgl-paints-fixed.png` | The same URL with § 17.4's fix applied. Every element matches the WebGPU reference. |
+| `screenshots/w0-07-webgl-fixed-plain.png` | `?arm=webgl` (no `?probe=`) with the fix — w0-03's own frame, now with real letterforms instead of `screenshots/w0-03-webgl.png`'s boxes. |
+| `screenshots/w0-07-webgl-fixed-plain-page.png` | The same run whole-page, with the on-page log mirror in frame. |
+
+That black image square is the decisive reading. The image draw and the glyph
+draw share one shader branch; the difference is only the tint mode. With the
+atlas read returning `(0,0,0,1)`:
+
+* image (`TintMode::Multiply`, white tint) → `sample_color * image_tint` =
+  `(0,0,0,1)` — **an opaque black square**;
+* glyph (`TintMode::AlphaMask`, run colour) → `image_tint * sample_color.a` =
+  the run colour at full alpha — **a solid box**.
+
+Both observed, from one cause. `(0,0,0,1)` is not arbitrary: it is the value
+OpenGL ES 3.0 § 3.8.2 mandates when a sampler's bound texture is *incomplete*.
+
+**The console says why, verbatim.** Captured through chromedriver's
+`goog:loggingPrefs` browser log on `?arm=webgl` (five occurrences; **zero** on
+`?arm=webgpu`, whose entire console is 29 lines):
+
+```
+[SEVERE] "wgpu-hal heuristics assumed that the view dimension will be equal to `D2` rather than `D2Array`.
+`D2` textures with `depth_or_array_layers == 1` are assumed to have view dimension `D2`
+`D2` textures with `depth_or_array_layers > 1` are assumed to have view dimension `D2Array`
+`D2` textures with `depth_or_array_layers == 6` are assumed to have view dimension `Cube`
+`D2` textures with `depth_or_array_layers > 6 && depth_or_array_layers % 6 == 0` are assumed to have view dimension `CubeArray`
+"
+```
+
+The emitter is `wgpu-hal-30.0.1/src/gles/mod.rs:562`
+(`log_failing_target_heuristics`), reached from `get_info_from_desc` at
+`:513`, which is the whole mechanism:
+
+```rust
+wgt::TextureDimension::D2 => {
+    match (desc.is_cube_compatible(), desc.size.depth_or_array_layers) {
+        (false, 1) => glow::TEXTURE_2D,
+        (false, _) => glow::TEXTURE_2D_ARRAY,
+        ...
+```
+
+The GL target is chosen from the **texture** descriptor and the view dimension
+is never consulted — the function's own comment points at wgpu issues #1614 and
+#1574. `frust-engine`'s atlas array is `wgpu::TextureDimension::D2` with
+`depth_or_array_layers: layers.max(1)` (`gpu/atlas.rs`'s
+`atlas_texture_descriptor`), so one resident layer ⇒ `GL_TEXTURE_2D` ⇒ bound
+under a `sampler2DArray` ⇒ incomplete ⇒ `(0,0,0,1)`.
+
+**No local shader edit was needed in the browser** to establish this; the
+console names the layer outright and the `?probe=paints` image square confirms
+the value. (A local, uncommitted shader probe *was* used on the host GL arm
+while narrowing the search — it is described in § 17.6 and was reverted;
+`git status` carries no `crates/` change.)
+
+### 17.4 The proposed fix, and its verification
+
+wgpu's heuristic keys on `depth_or_array_layers > 1`, so allocating the atlas
+array (and the two 1×1 array placeholders bound when no atlas exists yet) with
+a floor of **two** layers makes the GL target `GL_TEXTURE_2D_ARRAY` and the
+sampler complete. It changes no shader, no binding layout, no pin, and no
+behaviour on any other backend — the second layer is simply never allocated
+into until residency needs it.
+
+```diff
+--- a/crates/frust-engine/src/gpu/atlas.rs
++++ b/crates/frust-engine/src/gpu/atlas.rs
+@@ -155,7 +155,7 @@ pub fn atlas_texture_descriptor(
+         size: wgpu::Extent3d {
+             width: width.max(1),
+             height: height.max(1),
+-            depth_or_array_layers: layers.max(1),
++            depth_or_array_layers: layers.max(2),
+         },
+@@ -801,7 +801,7 @@ fn placeholder(
+         size: wgpu::Extent3d {
+             width: 1,
+             height: 1,
+-            depth_or_array_layers: 1,
++            depth_or_array_layers: if array { 2 } else { 1 },
+         },
+--- a/crates/frust-engine/src/renderer.rs
++++ b/crates/frust-engine/src/renderer.rs
+@@ -4157,7 +4157,7 @@ fn placeholder_view(device: &wgpu::Device, label: &str, array: bool) -> wgpu::Te
+         size: wgpu::Extent3d {
+             width: 1,
+             height: 1,
+-            depth_or_array_layers: 1,
++            depth_or_array_layers: if array { 2 } else { 1 },
+         },
+```
+
+**Verified, applied locally and then reverted** (this card commits nothing
+under `crates/`; the fix is the follow-up card's to land):
+
+1. **WebGL2 renders text.** `?arm=webgl` →
+   `screenshots/w0-07-webgl-fixed-plain.png`: `Hello` at 112 px and
+   `Hello, Hello, Héllo` at 28 px as antialiased letterforms, matching
+   `screenshots/w0-03-webgpu.png`. `?arm=webgl&probe=paints` →
+   `screenshots/w0-07-webgl-paints-fixed.png`: image, gradient, blur and layer
+   all match `screenshots/w0-07-webgpu-paints-reference.png`.
+2. **The wgpu-hal error is gone.** Browser-log occurrences of
+   `view dimension` per WebGL2 run: **5** before, **2** after the first two
+   hunks (the `atlas.rs` `placeholder` was the remaining one), **0** after all
+   three.
+3. **The host Vulkan goldens still pass.**
+   ```sh
+   $ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400 \
+       cargo test -p frust-testing --test engine_goldens --test alpha_polarity -- --ignored
+   test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+   test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
+   ```
+4. **One host unit test asserts the old floor and must move with the fix** —
+   this is the whole of the fix's blast radius on `cargo test -p frust-engine
+   -p frust-gpu` (265 passed, 1 failed):
+   ```
+   failures:
+       gpu::atlas::tests::a_zero_extent_descriptor_is_raised_to_a_creatable_one
+   ```
+   (`atlas.rs:1285`, `assert_eq!(descriptor.size.depth_or_array_layers, 1)`).
+
+**Upstream.** The right long-term fix is in wgpu — `wgpu-hal`'s GLES backend
+should take the view dimension from the `TextureViewDescriptor` rather than
+guess it from the texture, which is what its own `log_failing_target_heuristics`
+comment names (wgpu issues #1614 / #1574, referenced in the 30.0.1 source at
+`src/gles/mod.rs:532`). Frust must not wait for it and must not bump the wgpu
+pin for it; the two-layer floor is the local answer, and it is compatible with
+any future upstream repair.
+
+### 17.5 Step 4 — WebGL2 bring-up breakdown (and a correction to § 16)
+
+**What can and cannot be split.** `SurfaceRenderer::on_surface_created`
+performs adapter request, device request, surface configure *and*
+`frust-gpu`'s inline pipeline warm-up behind one `await`, and
+`frust-render`'s public seam offers no finer entry — so `src/main.rs` reports
+the five spans it can actually observe, and puts an independent floor under
+the biggest of them by timing a bare browser `getContext('webgl2')` on a
+detached canvas (`time_raw_webgl2_context`). Nothing was decomposed by
+guessing.
+
+Three cold runs per arm (fresh WebDriver session each, `?arm=` only, default
+`Debug` logging — i.e. exactly § 16's conditions), milliseconds:
+
+| Stage | WebGPU r1 | r2 | r3 | **med** | WebGL2 r1 | r2 | r3 | **med** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw `getContext('webgl2')`, 1st / 2nd | — | — | — | — | 111.6 / 49.8 | 126.9 / 12.4 | 109.7 / 85.2 | **111.6 / 49.8** |
+| 1/5 instance init (`RenderContext::with_options`) | 0.3 | 0.3 | 0.2 | **0.3** | 0.4 | 0.4 | 0.4 | **0.4** |
+| 2/5 surface online (adapter + device + configure + warm-up) | 218.8 | 91.6 | 85.0 | **91.6** | 2146.2 | 2007.2 | 2355.6 | **2146.2** |
+| 3/5 font register | 1.1 | 1.4 | 1.6 | **1.4** | 1.4 | 1.2 | 1.8 | **1.4** |
+| 4/5 scene build (shape + record) | 8.1 | 8.9 | 10.6 | **8.9** | 8.3 | 8.7 | 9.2 | **8.7** |
+| 5/5 diagnostic CPU compile | 8.3 | 6.7 | 9.1 | **8.3** | 8.7 | 8.2 | 7.8 | **8.2** |
+| bring-up total | 241.0 | 112.9 | 110.9 | **112.9** | 2331.7 | 2170.4 | 2574.8 | **2331.7** |
+| first frame (`start()` → RAF `frame 1`) | 266.9 | 139.3 | 137.7 | **139.3** | 2363.3 | 2204.8 | 2611.1 | **2363.3** |
+
+**Where the WebGL2 time goes.** Stage 2 is 92 % of it, and the browser's own
+GL context creation is **not** the cause: a bare `getContext('webgl2')` costs
+~112 ms cold and ~50 ms warm, ~5 % of the span. The remainder is inside
+wgpu — and the browser console dates it precisely. Timestamped console
+entries, `?arm=webgl`, relative to the first entry:
+
+| t | entry |
+|---:|---|
+| +1 ms | `Supported GL Extensions: {…}` |
+| +1 ms | `configuring surface with SurfaceConfiguration { … Rgba8Unorm, 800x600 … }` |
+| +1 ms | first naga typifier line (`Resolving [17] = ImageLoad { … }`) |
+| +2002 ms | **last** naga typifier line |
+| +2035 ms | `frust-gpu: could not spawn the pipeline warm-up thread …; building the listed variants inline` |
+| +2082 ms | `frust-render tier=engine (… adapter \`ANGLE (NVIDIA Corporation, NVIDIA T400 4GB/PCIe/SSE2, OpenGL 4.5.0)\`)` |
+
+8,919 of that arm's 25,330 console lines are naga's own trace. The WebGPU arm
+produces **29 console lines and zero naga lines** — because the WebGPU backend
+hands WGSL to the browser untouched and never runs naga at all. So the ~2 s is
+the shader half of the GL path: naga's WGSL→GLSL-ES translation for every
+pipeline variant, plus ANGLE compiling and linking them, all synchronous on
+the one JS thread.
+
+**The correction.** Because that trace is *logged*, and `console.debug` across
+the wasm/JS boundary is not free, § 16's figure entangles naga's work with the
+printing of it. This task added `?log=info` purely as a control (default
+unchanged at `Debug`, so §§ 1–16 stay comparable) and re-ran the same build:
+
+| WebGL2, `?log=info` | r1 | r2 | r3 |
+|---|---:|---:|---:|
+| stage 2/5 surface online | 559.1 | 511.9 | 165.0 |
+| bring-up total | 729.0 | 670.4 | 409.9 |
+| first frame | 761.3 | 702.6 | 441.1 |
+
+| WebGPU, `?log=info` | r1 | r2 | r3 |
+|---|---:|---:|---:|
+| stage 2/5 surface online | 71.0 | 223.0 | 97.4 |
+| bring-up total | 92.1 | 242.8 | 124.6 |
+| first frame | 114.0 | 265.6 | 146.1 |
+
+Silencing one log level removes **~1.5–1.8 s** of the WebGL2 arm's bring-up
+and nothing measurable from the WebGPU arm's. So:
+
+* § 16.2's "WebGL2 first-frame is ~20× WebGPU's" and § 16.3's "~24× bring-up"
+  are **artefacts of this probe's own Debug console sink**, not properties of
+  the WebGL2 backend. **§ 17.5 supersedes those two rows.**
+* The real cost, measured without the sink, is a WebGL2 first frame of
+  ~0.44–0.76 s against ~0.11–0.27 s on WebGPU — roughly **3–6×**, spent in
+  naga translation and ANGLE shader compilation, both of which a WebGPU build
+  skips entirely.
+* Neither figure is a per-frame cost. § 16.3's steady-state `submit` numbers
+  (0.6–1.4 ms, both arms) are unaffected and stand.
+
+A shipping web shell wanting to close even the corrected gap would attack the
+shader half — fewer pipeline variants compiled at bring-up, `KHR_parallel_shader_compile`
+(the rig's Chrome advertises it), or a warm-up deferred past first paint. That
+is a `crates/frust-gpu` question, not this spike's.
+
+### 17.6 The local experiments, and what was reverted
+
+Three local, **uncommitted** experiments were used to narrow the search and all
+were reverted; `git status` shows no `crates/` and no root-manifest change, and
+the committed diff touches only `examples/web-spike`:
+
+1. `gles` added to the root `Cargo.toml`'s `wgpu` feature row (§ 17.1), built
+   into a private `CARGO_TARGET_DIR` so the shared one was untouched. Reverted
+   with `git checkout -- Cargo.toml Cargo.lock`.
+2. Diagnostic edits to `crates/frust-engine/shaders/strip.wgsl`'s image branch,
+   run against the host GL goldens, replacing the tinted result with a probe
+   colour. The decisive one compared the two integer-texture reads directly and
+   printed *green* when they were byte-equal:
+   ```wgsl
+   let probe_alphas = textureLoad(alphas_texture, encoded_paint_coord(paint_tex_idx), 0);
+   if all(image_texel0 == vec4<u32>(0u)) { final_color = vec4(0.0, 0.0, 1.0, 1.0); }
+   else if all(image_texel0 == probe_alphas) { final_color = vec4(0.0, 1.0, 0.0, 1.0); }
+   else { final_color = vec4(1.0, 0.0, 0.0, 1.0); }
+   ```
+   Host GL answered **green** (`engine [0, 255, 0, 255]`), host Vulkan **red**
+   (`engine [255, 0, 0, 255]`) — i.e. on the *host desktop-GL 3.3* context every
+   sampled-texture binding past `group(0) binding(0)` collapses onto texture
+   unit 0. That is a real second defect of that host configuration and it is
+   what makes its images/gradients/blur/layers fail there, but it is **not** what
+   Chrome does: § 17.3 shows gradient, blur and layer all correct on WebGL2. It
+   is recorded here so the host arm's wider failure list is explained rather than
+   left hanging, and it is explicitly **not** part of the verdict.
+3. The § 17.4 fix itself. Reverted with `git checkout -- crates/` after the
+   verification runs above.
+
+### 17.7 Ready-to-file follow-up card
+
+> **Title.** `frust-engine`: give the image/glyph atlas array a two-layer floor
+> so wgpu's GLES backend binds it as `GL_TEXTURE_2D_ARRAY` (fixes WebGL2 text
+> and images)
+>
+> **write_files.** `crates/frust-engine/src/gpu/atlas.rs`,
+> `crates/frust-engine/src/renderer.rs`, `docs/LIMITATIONS.md`
+>
+> **Background.** `wgpu-hal` 30.0.1's GLES backend picks a texture's GL target
+> from the `TextureDescriptor` alone (`src/gles/mod.rs:513`,
+> `get_info_from_desc`) and never consults the view dimension, so a `D2`
+> texture with `depth_or_array_layers == 1` is bound as `GL_TEXTURE_2D` even
+> when the shader samples it through a `sampler2DArray`. It logs
+> `wgpu-hal heuristics assumed that the view dimension will be equal to \`D2\`
+> rather than \`D2Array\`` and the sampler then reads GLES 3.0's
+> incomplete-texture value `(0,0,0,1)`. On WebGL2 that makes every cached glyph
+> a solid box and every atlas image an opaque black rect. Evidence, screenshots
+> and the measured fix: `examples/web-spike/RESULTS.md` § 17.
+>
+> **Acceptance.**
+> 1. `atlas_texture_descriptor` allocates `layers.max(2)`; both 1×1 array
+>    placeholders (`gpu/atlas.rs`'s `placeholder`, `renderer.rs`'s
+>    `placeholder_view`) allocate 2 layers when `array` is set.
+> 2. `gpu::atlas::tests::a_zero_extent_descriptor_is_raised_to_a_creatable_one`
+>    is updated to the new floor **and** gains a sibling test naming *why* the
+>    floor is two (the wgpu-hal heuristic), so a later "tidy-up" cannot silently
+>    restore `max(1)`.
+> 3. The standard root gate passes: `cargo test --workspace && cargo clippy
+>    --workspace --all-targets -- -D warnings && cargo fmt --check`.
+> 4. The pinned-adapter engine goldens pass unchanged:
+>    `WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 FRUST_GOLDEN_EXPECT_ADAPTER=T400
+>    cargo test -p frust-testing --test engine_goldens --test alpha_polarity -- --ignored`.
+> 5. Re-run `examples/web-spike` on `?arm=webgl` and `?arm=webgl&probe=paints`
+>    and confirm zero `view dimension` lines in the browser console and
+>    letterforms + a correct image square in the canvas, matching
+>    `screenshots/w0-07-webgl-paints-fixed.png`.
+> 6. `docs/LIMITATIONS.md` gains an entry recording the upstream wgpu
+>    constraint (issues #1614 / #1574) and that the two-layer floor is a
+>    workaround to be removed when wgpu honours the view dimension.
+> 7. No pin moves (`wgpu` stays 30.0.1); no render-tier switch is introduced.
+
+### 17.8 `doc_updates_needed` (w0-07)
+
+- `docs/LIMITATIONS.md` wants the wgpu-hal GLES view-dimension entry above.
+  It is listed in the follow-up card's own `write_files` rather than done here:
+  this card commits nothing outside `examples/web-spike`, and a core doc is not
+  this role's to edit.
+- `docs/RENDER_DEVELOPMENT.md`'s golden-invocation section could gain the two
+  host-GL preconditions § 17.1 (a)/(b) found — that `gles` is absent from the
+  native graph by design, and that `WGPU_VALIDATION_INDIRECT_CALL=0` is
+  required for a GL device on a surfaceless EGL host — so the next person
+  trying a GL arm does not re-derive them. A documentation task, not required
+  by this card's write scope.

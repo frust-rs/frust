@@ -32,7 +32,7 @@
 //! produced verbatim, and the exact build/serve/drive commands.
 
 use kurbo::{Affine, Point, Rect};
-use peniko::{Brush, Color};
+use peniko::{Brush, Color, ColorStop, Gradient};
 
 /// The bundled probe font, compiled into the `.wasm`.
 ///
@@ -92,6 +92,7 @@ fn build_scene(
     family: frust_text::FontFamily,
     width: f64,
     height: f64,
+    paint_probes: bool,
 ) -> frust_scene::Scene {
     let mut scene = frust_scene::Scene::new();
     {
@@ -157,8 +158,110 @@ fn build_scene(
         for run in layout.to_scene_runs(Point::new(72.0, 300.0)) {
             builder.draw_glyph_run(run);
         }
+
+        // w0-07: opt-in only, so `?arm=webgpu`/`?arm=webgl` with no
+        // `?probe=` render byte-for-byte the frame w0-03/w0-04/w0-05
+        // screenshotted and measured.
+        if paint_probes {
+            add_paint_probes(&mut builder, width, height);
+        }
     }
     scene
+}
+
+/// w0-07's paint-binding probe scene (`?probe=paints`), drawn *in addition
+/// to* [`build_scene`]'s own commands rather than instead of them.
+///
+/// # Why this exists
+///
+/// w0-03's scene reaches exactly two of the strip shader's six sampled
+/// texture bindings: `alphas_texture` (every antialiased strip) and — only
+/// because a settled glyph run takes the atlas route —
+/// `atlas_texture_array`. Every solid fill takes its colour from the strip
+/// instance's own `payload` and reads no texture at all. So when w0-03 found
+/// "shapes correct, glyphs solid boxes" on WebGL2, that was equally
+/// consistent with a glyph bug and with *every texture binding except
+/// `alphas_texture` being broken* — the scene simply never asked the other
+/// four anything.
+///
+/// These three commands ask them, each through a different binding:
+///
+/// * a **linear-gradient** fill — reads `encoded_paints_texture` (group 2)
+///   for the gradient record and `gradient_texture` (group 3) for the LUT;
+/// * a **blurred rounded rect** — reads `encoded_paints_texture` only, for
+///   the five-texel blur record;
+/// * a **half-alpha layer** wrapping a plain fill — reads
+///   `layer_input_texture` (group 0, binding 2) when the layer composites.
+///
+/// Each is placed over its own patch of the card with a known solid
+/// reference swatch beside it, so a screenshot says which binding answered
+/// and which did not without a readback.
+fn add_paint_probes(builder: &mut frust_scene::SceneBuilder<'_>, width: f64, height: f64) {
+    let top = height - 320.0;
+
+    // (1) Linear gradient, red -> blue, left to right.
+    let grad_rect = Rect::new(width - 296.0, top, width - 176.0, top + 72.0);
+    let gradient = Gradient::new_linear(
+        Point::new(grad_rect.x0, grad_rect.y0),
+        Point::new(grad_rect.x1, grad_rect.y0),
+    )
+    .with_stops([
+        ColorStop::from((0.0_f32, Color::from_rgb8(0xef, 0x53, 0x50))),
+        ColorStop::from((1.0_f32, Color::from_rgb8(0x42, 0xa5, 0xf5))),
+    ]);
+    builder.fill_rect(grad_rect, Brush::Gradient(gradient));
+
+    // (2) Blurred rounded rect (a shadow), offset below the gradient.
+    builder.draw_blurred_rounded_rect(
+        Rect::new(width - 160.0, top + 8.0, width - 72.0, top + 64.0),
+        14.0,
+        8.0,
+        Color::from_rgb8(0x66, 0xbb, 0x6a),
+    );
+
+    // (3) A half-alpha layer over a solid white fill: composites to a mid
+    // grey when `layer_input_texture` answers, and to nothing (or to full
+    // white) when it does not.
+    let layer_rect = Rect::new(width - 296.0, top + 88.0, width - 72.0, top + 136.0);
+    builder.push_layer(layer_rect, 0.5);
+    builder.fill_rect(layer_rect, Brush::Solid(Color::from_rgb8(0xff, 0xff, 0xff)));
+    builder.pop_layer();
+
+    // The control: the same white at full opacity, beside the layer. If the
+    // layer path is sound the two read 50% apart; if the layer is dropped
+    // they read identical (or the layer patch is empty).
+    builder.fill_rect(
+        Rect::new(width - 360.0, top + 88.0, width - 312.0, top + 136.0),
+        Brush::Solid(Color::from_rgb8(0xff, 0xff, 0xff)),
+    );
+
+    // (4) A 2x2 opaque RGBA image, magnified. This is the binding the glyph
+    // atlas itself reads — `atlas_texture_array` (group 1, binding 0, a
+    // `texture_2d_array<f32>`) — reached by an ordinary image draw instead of
+    // a glyph. It is the control that separates "this WebGL2 backend cannot
+    // read the atlas array at all" from "the glyph half of the atlas path is
+    // what is wrong": a correct magenta/cyan/yellow/black quadrant square
+    // here alongside boxed glyphs means the array binding answers and the
+    // defect is glyph-specific.
+    let image = peniko::ImageData {
+        data: peniko::Blob::from(
+            [
+                [0xffu8, 0x00, 0xff, 0xff],
+                [0x00, 0xe5, 0xff, 0xff],
+                [0xff, 0xca, 0x28, 0xff],
+                [0x21, 0x21, 0x21, 0xff],
+            ]
+            .concat(),
+        ),
+        format: peniko::ImageFormat::Rgba8,
+        alpha_type: peniko::ImageAlphaType::Alpha,
+        width: 2,
+        height: 2,
+    };
+    builder.draw_image(
+        &image,
+        Rect::new(width - 440.0, top, width - 376.0, top + 64.0),
+    );
 }
 
 /// Compiles the scene into `frust-engine`'s sparse-strip display list on the
@@ -238,6 +341,7 @@ fn main() {
             family,
             f64::from(CANVAS_WIDTH),
             f64::from(CANVAS_HEIGHT),
+            true,
         );
         let draws = compile_frame(&scene, CANVAS_WIDTH, CANVAS_HEIGHT);
         println!(
@@ -381,6 +485,68 @@ mod web {
             .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
             .and_then(|params| params.get("signal"))
             .is_some_and(|value| value == "timer")
+    }
+
+    /// w0-07's `?probe=paints` flag, orthogonal to [`Arm`] and to
+    /// [`signal_mode_enabled`]: when set, [`super::add_paint_probes`] adds a
+    /// gradient fill, a blurred rounded rect and a half-alpha layer to the
+    /// scene, so the strip shader's `encoded_paints_texture`,
+    /// `gradient_texture` and `layer_input_texture` bindings are exercised in
+    /// the browser instead of only `alphas_texture` and the glyph atlas.
+    ///
+    /// Off by default on purpose: with no `?probe=`, both arms render exactly
+    /// the frame w0-03 screenshotted and w0-05 timed, so this task adds no
+    /// pixel or millisecond to their recorded evidence.
+    fn paint_probes_enabled() -> bool {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+            .and_then(|params| params.get("probe"))
+            .is_some_and(|value| value == "paints")
+    }
+
+    /// w0-07's `?log=info` control (see [`start`]): raises the `console_log`
+    /// threshold from Debug to Info, silencing naga's per-expression
+    /// typifier trace without changing anything else in the build.
+    fn log_level_info() -> bool {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+            .and_then(|params| params.get("log"))
+            .is_some_and(|value| value == "info")
+    }
+
+    /// w0-07 step 4: times a bare `document.createElement('canvas')` +
+    /// `getContext('webgl2')` on a throwaway, never-attached canvas, twice.
+    ///
+    /// This is the one part of the WebGL2 arm's bring-up that `frust-gpu`'s
+    /// public seam cannot separate — `SurfaceRenderer::on_surface_created`
+    /// performs instance init, adapter request, device request, surface
+    /// configure and the engine's inline pipeline warm-up as one `await`, and
+    /// nothing in `examples/web-spike`'s write scope can reach inside it. But
+    /// wgpu's WebGL2 backend gets its GL context from exactly this browser
+    /// call, so timing it directly puts a floor under the span and says how
+    /// much of it is ANGLE's own context bring-up rather than anything Frust
+    /// does. The second call measures the same work once ANGLE's process-wide
+    /// GPU-channel/driver init is already paid for.
+    ///
+    /// Returns `(first_ms, second_ms)`, or `None` if the canvas or the
+    /// context could not be created (an absent context is a real answer, not
+    /// an error to hide).
+    fn time_raw_webgl2_context() -> Option<(f64, f64)> {
+        let document = web_sys::window()?.document()?;
+        let mut timings = [0.0_f64; 2];
+        for slot in &mut timings {
+            let canvas = document.create_element("canvas").ok()?;
+            let canvas: web_sys::HtmlCanvasElement = canvas.dyn_into().ok()?;
+            canvas.set_width(64);
+            canvas.set_height(64);
+            let start = now_ms();
+            let context = canvas.get_context("webgl2").ok()?;
+            *slot = now_ms() - start;
+            context?;
+        }
+        Some((timings[0], timings[1]))
     }
 
     /// Delay before the one-shot signal write, started once the baseline
@@ -539,7 +705,22 @@ mod web {
         // Routes `frust-render`/`frust-gpu`/`wgpu`'s own `log` records into
         // the console, at Debug, so an adapter refusal or a surface
         // configuration warning is captured verbatim rather than inferred.
-        let _ = console_log::init_with_level(log::Level::Debug);
+        //
+        // w0-07 adds `?log=info` as an opt-in override. It is a *control*,
+        // not a tuning knob: at Debug this sink carries ~8,900 naga
+        // typifier lines on the WebGL2 arm (naga runs only on that arm —
+        // the WebGPU backend hands WGSL to the browser untouched), and
+        // `console.debug` across the wasm/JS boundary is not free, so a
+        // bring-up figure measured at Debug cannot by itself say whether
+        // the WebGL2 arm's ~2s is naga's translation or the logging of it.
+        // Running the same build both ways answers that. Default unchanged
+        // (Debug), so every prior section's numbers stay comparable.
+        let log_level = if log_level_info() {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
+        let _ = console_log::init_with_level(log_level);
 
         let arm = Arm::from_query();
         log_line(&format!(
@@ -940,6 +1121,26 @@ mod web {
     /// NO-GO half of the acceptance criterion is satisfiable without
     /// guesswork about which layer refused.
     async fn bring_up(arm: Arm, window: &Arc<Window>) -> Result<Gpu, String> {
+        // w0-07 step 4. `SurfaceRenderer::on_surface_created` performs
+        // adapter request, device request, surface configure and the engine's
+        // inline pipeline warm-up behind ONE `await`, and `frust-render`'s
+        // public seam offers no finer split — so the breakdown below reports
+        // the spans this write scope can actually observe, and says so,
+        // rather than inventing a decomposition of a call it cannot enter.
+        // `time_raw_webgl2_context` puts an independent floor under the
+        // biggest of them.
+        if matches!(arm, Arm::WebGl2) {
+            match time_raw_webgl2_context() {
+                Some((first, second)) => log_line(&format!(
+                    "timing: raw browser WebGL2 context (detached canvas,                      document.createElement + getContext('webgl2')):                      first={first:.3}ms second={second:.3}ms —                      ANGLE context bring-up alone, no wgpu involved"
+                )),
+                None => log_line(
+                    "timing: raw browser WebGL2 context probe unavailable                      (no canvas or no webgl2 context)",
+                ),
+            }
+        }
+
+        let ctx_start = now_ms();
         let mut ctx = RenderContext::with_options(ContextOptions {
             device_label: format!("frust w0-03 {} device", arm.label()),
             // The whole point of the GL arm. `RenderContext::new()` would
@@ -948,16 +1149,25 @@ mod web {
             // compiled-in backend and quietly prefer WebGPU where available.
             backends: Some(arm.backends()),
         });
+        let ctx_ms = now_ms() - ctx_start;
         log_line(&format!(
             "wgpu: instance restricted to {:?}",
             arm.backends()
         ));
+        log_line(&format!(
+            "timing: stage 1/5 instance init (RenderContext::with_options,              wgpu::Instance::new) = {ctx_ms:.3}ms"
+        ));
 
+        let surface_start = now_ms();
         let mut renderer = SurfaceRenderer::new();
         let attempts = create_surface_with_retry(&mut ctx, &mut renderer, &window).await?;
+        let surface_ms = now_ms() - surface_start;
         log_line(&format!(
             "surface: online after {attempts} attempt(s), phase={:?}",
             renderer.phase()
+        ));
+        log_line(&format!(
+            "timing: stage 2/5 surface online (SurfaceRenderer::on_surface_created              x{attempts}: requestAdapter + requestDevice + surface configure +              frust-gpu inline pipeline warm-up — ONE await, not separable at              frust-render's public seam) = {surface_ms:.3}ms"
         ));
 
         let caps = ctx
@@ -1004,6 +1214,7 @@ mod web {
             ));
         }
 
+        let font_start = now_ms();
         let mut text_ctx = frust_text::TextContext::new();
         let family = match super::register_probe_font(&mut text_ctx) {
             Ok(family) => {
@@ -1022,16 +1233,38 @@ mod web {
             }
         };
 
+        let font_ms = now_ms() - font_start;
+        log_line(&format!(
+            "timing: stage 3/5 font register (TextContext::new + register_fonts)              = {font_ms:.3}ms"
+        ));
+
+        let paint_probes = paint_probes_enabled();
+        if paint_probes {
+            log_line(
+                "probe: ?probe=paints — adding a linear gradient, a blurred rounded                  rect and a half-alpha layer, so encoded_paints_texture,                  gradient_texture and layer_input_texture are exercised too",
+            );
+        }
+        let scene_start = now_ms();
         let scene = build_scene(
             &mut text_ctx,
             family,
             f64::from(CANVAS_WIDTH),
             f64::from(CANVAS_HEIGHT),
+            paint_probes,
         );
+        let scene_ms = now_ms() - scene_start;
+        let compile_start = now_ms();
         let draws = compile_frame(&scene, CANVAS_WIDTH, CANVAS_HEIGHT);
+        let compile_ms = now_ms() - compile_start;
         log_line(&format!(
             "scene: {} commands -> {draws} engine draws (CPU compile)",
             scene.commands().len()
+        ));
+        log_line(&format!(
+            "timing: stage 4/5 scene build (shape + record commands) = {scene_ms:.3}ms"
+        ));
+        log_line(&format!(
+            "timing: stage 5/5 throwaway CPU compile (compile_frame, a diagnostic              re-compile this probe does NOT reuse for the frame) = {compile_ms:.3}ms"
         ));
 
         Ok(Gpu {

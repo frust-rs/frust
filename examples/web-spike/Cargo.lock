@@ -2687,6 +2687,7 @@ dependencies = [
  "js-sys",
  "kurbo",
  "log",
+ "naga",
  "peniko",
  "reactive_graph",
  "wasm-bindgen",

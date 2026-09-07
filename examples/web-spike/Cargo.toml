@@ -182,3 +182,28 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# --- w0-07 naga GLSL-ES lowering inspector (native dev-only) --------------
+#
+# `examples/lower_strip.rs` translates `frust-engine`'s shipped
+# `strip.wgsl` to the GLSL ES 3.00 fragment source wgpu's own GL backend
+# would hand the driver, so RESULTS.md § 17 can quote the lowered
+# `alphas_texture`/atlas reads verbatim instead of describing them. A
+# DEV-dependency, so the wasm32 browser artifact this spike ships is
+# byte-identical with and without it (dev-dependencies are not in a
+# `cargo build` graph), and native-only in effect for the same reason.
+#
+# Version-Pin Policy: `=30.0.1`, an EXACT pin to the naga version this
+# spike's own committed `Cargo.lock` already resolved transitively under
+# `wgpu` 30.0.1 (`Cargo.lock`'s `name = "naga" / version = "30.0.1"` row).
+# Naming it directly adds NO crate and moves NO version — it only turns an
+# already-resolved transitive node into a direct edge and turns on two
+# feature flags on it. `wgsl-in` is already on in the wasm graph (wgpu's
+# `wgsl` feature); `glsl-out` is the one this row adds, and it is a naga
+# feature, not a new dependency.
+[dev-dependencies]
+naga = { version = "=30.0.1", features = ["wgsl-in", "glsl-out"] }
+
+[[example]]
+name = "lower_strip"
+path = "examples/lower_strip.rs"
