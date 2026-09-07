@@ -509,24 +509,35 @@ fn handle_connection(stream: TcpStream, root: &Path, log: Option<&(dyn Fn(&str) 
     };
 
     if let Some(log) = log {
-        // Sanitize the request line by stripping ASCII control characters.
-        let sanitized_target = request
-            .target
-            .chars()
-            .map(|c| if c.is_ascii_control() { ' ' } else { c })
-            .collect::<String>();
-        let sanitized_method = request
-            .method
-            .chars()
-            .map(|c| if c.is_ascii_control() { ' ' } else { c })
-            .collect::<String>();
         log(&format!(
             "{} {} -> {}",
-            sanitized_method,
-            sanitized_target,
+            sanitize_log_field(&request.method),
+            sanitize_log_field(&request.target),
             status.code()
         ));
     }
+}
+
+/// Longest request-line field the request log reproduces; anything past it
+/// is replaced by an ellipsis. A target is attacker-supplied text headed for
+/// a terminal, so it is bounded as well as scrubbed.
+const MAX_LOGGED_FIELD: usize = 512;
+
+/// Makes an attacker-supplied request-line field safe to print: every ASCII
+/// control character (`\x00`–`\x1f` and DEL — the bytes that carry terminal
+/// escape sequences, the CR/LF that would forge a second log line, and NUL)
+/// becomes a space, printable text passes through untouched, and a field
+/// longer than [`MAX_LOGGED_FIELD`] characters is cut with an ellipsis.
+fn sanitize_log_field(field: &str) -> String {
+    let mut out: String = field
+        .chars()
+        .take(MAX_LOGGED_FIELD)
+        .map(|c| if c.is_ascii_control() { ' ' } else { c })
+        .collect();
+    if field.chars().count() > MAX_LOGGED_FIELD {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// The request line's method and target, plus the Host header.
@@ -1180,9 +1191,37 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// Control characters in request lines are sanitized before logging.
+    /// The scrubber's contract on the inputs it exists for: NUL, a terminal
+    /// escape, the CR/LF that would forge a second log line, and DEL each
+    /// become one space; printable text is untouched; an over-long field is
+    /// cut at [`MAX_LOGGED_FIELD`] with an ellipsis.
     #[test]
-    fn control_characters_in_request_line_are_sanitized() {
+    fn sanitize_log_field_replaces_every_control_character_and_caps_length() {
+        let hostile = "/pkg/\x1b[2J\x00app\r\n.js\x7f";
+        let clean = sanitize_log_field(hostile);
+        assert!(!clean.chars().any(|c| c.is_ascii_control()), "{clean:?}");
+        assert_eq!(clean, "/pkg/ [2J app  .js ");
+        assert_eq!(sanitize_log_field("GET /pkg/app.js"), "GET /pkg/app.js");
+        let long = "a".repeat(MAX_LOGGED_FIELD + 10);
+        let cut = sanitize_log_field(&long);
+        assert_eq!(cut.chars().count(), MAX_LOGGED_FIELD + 1);
+        assert!(cut.ends_with('\u{2026}'), "{cut:?}");
+        assert_eq!(
+            sanitize_log_field(&"b".repeat(MAX_LOGGED_FIELD))
+                .chars()
+                .count(),
+            MAX_LOGGED_FIELD,
+            "a field exactly at the cap is not cut"
+        );
+    }
+
+    /// End to end: a request line whose target carries a terminal escape
+    /// and a NUL reaches the log sink with both scrubbed. Neither byte is
+    /// whitespace, so the request-line split keeps them inside the target,
+    /// and the path resolver answers 404 for the name they corrupt — the
+    /// sink still sees exactly one line, with no control character in it.
+    #[test]
+    fn control_characters_in_the_request_line_never_reach_the_log_sink() {
         let root = artifact_root("e2e-sanitize");
         let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = Arc::clone(&lines);
@@ -1197,19 +1236,17 @@ mod tests {
             })),
         )
         .unwrap();
-        // Send a request with control characters (e.g., null byte) in the target.
-        // The request parser won't parse this cleanly, but we can verify the
-        // sanitization logic by using a valid target path. This test verifies
-        // that the sanitization function itself works (it's tested via the
-        // request-log output).
+        // `\x1b[2J` clears a terminal; `\x00` truncates a C string.
         request(
             server.local_addr(),
-            "GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /pkg/\x1b[2J\x00app.js HTTP/1.1\r\nHost: localhost\r\n\r\n",
         );
         server.shutdown();
         let recorded = lines.lock().unwrap().clone();
-        assert!(recorded[0].contains("GET"), "log should contain GET method");
-        assert!(recorded[0].contains("200"), "log should contain 200 status");
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        let line = &recorded[0];
+        assert!(!line.chars().any(|c| c.is_ascii_control()), "{line:?}");
+        assert_eq!(line, "GET /pkg/ [2J app.js -> 404");
         let _ = fs::remove_dir_all(&root);
     }
 
