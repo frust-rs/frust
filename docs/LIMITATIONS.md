@@ -4514,28 +4514,56 @@ warm-up-in-first-frame design costs more up front than nothing, but still
 lands the first-ever launch faster than classic's, and every launch after
 the first is markedly cheaper on the engine.
 
-### `engine-webgl2-unhosted` — no browser/WebGL2 measurement exists, and none is planned inside the engine plan
+### `engine-webgl2-unhosted` — the engine plan itself records no browser/WebGL2 number; that measurement now lives in the Web Shell plan
 
 **Observed** (evidence: `benchmarks/harness/webgl2_arm.md` and the retired
 "Arm 7 — Browser WebGL2: NO-GO" section of `benchmarks/RESULTS.md`, in git history (`git show f64be636:benchmarks/RESULTS.md`);
-no `p7-07` commit ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — this
-plan adds no wgpu `gles`/`webgpu` feature and hosts no wasm shell; the
-target-gated `wasm32` browser section belongs to the Web Shell plan instead
-(`engine-wasm-single-thread` above is the one engine-side fact already on
-record for that future target). The desktop stand-in this plan DID land is
+no `p7-07` commit ever landed): OPEN #1 (engine plan, decided 2026-08-29) is **(b)** — the
+engine plan itself adds no wgpu `gles`/`webgpu` feature and hosts no wasm shell, so it
+recorded no browser number of its own. The desktop stand-in the engine plan DID land is
 `FRUST_ENGINE_DOWNLEVEL=1` (`crates/frust-gpu/src/caps.rs`), rehearsing
 `downlevel_webgl2_defaults()`'s limit profile against the desktop Metal
-backend — it answers the WebGL2 *limits* question without a browser, but a
-`p7-07` card that would have used it for a browser frame-time number was
-cancelled once OPEN #1 closed as out of this plan's scope.
+backend — it answers the WebGL2 *limits* question without a browser. The
+browser measurement itself has since landed under the Web Shell plan:
+`examples/web-spike/RESULTS.md` §§ 1-17 puts Chrome WebGPU at **GO** (shapes
+and shaped text both correct) and Chrome WebGL2 at **PARTIAL NO-GO** (shapes
+correct, text broken — see `engine-webgl2-atlas-target` below).
 
-**Accepted because**: the decision that WebGL2/wasm belongs to the Web Shell
-plan was made deliberately, not defaulted into; `FRUST_ENGINE_DOWNLEVEL=1`
-already gives the downlevel design rules a desktop-measurable proxy for the
-limits half of the question.
+**Accepted because**: splitting the browser measurement into the Web Shell
+plan was a deliberate scope decision, not a default, and that plan has since
+delivered it; `FRUST_ENGINE_DOWNLEVEL=1` still gives the downlevel design
+rules a desktop-measurable proxy for the limits half of the question.
 
-**Trigger for removal**: the Web Shell plan reaching its own wasm/browser
-measurement pass.
+**Trigger for removal**: `engine-webgl2-atlas-target`'s workaround (card
+w0-08) lands and WebGL2 reaches a full GO, at which point this entry and
+that one both fold into a plain "measured, WebGL2 GO" note rather than two
+accepted-limitation entries.
+
+### `engine-webgl2-atlas-target` — wgpu-hal's GLES backend binds a one-layer atlas as `GL_TEXTURE_2D`, so every glyph and atlas image reads as blank on WebGL2
+
+**Observed** (evidence: `examples/web-spike/RESULTS.md` § 17; upstream wgpu
+issues #1614/#1574): `wgpu-hal` 30.0.1's GLES backend picks a texture's GL
+target from the `wgpu::TextureDescriptor` alone (`get_info_from_desc`,
+wgpu-hal `src/gles/mod.rs:513`), never consulting the view dimension a
+sampler later asks for. `frust-engine`'s image/glyph atlas is a `D2` texture
+with `depth_or_array_layers == 1` until a second layer is needed, sampled
+through a `sampler2DArray` (`D2Array` view) — target and sampler disagree,
+so GLES 3.0's incomplete-texture rule makes every sample read `(0,0,0,1)`:
+every cached glyph paints as a solid box, every atlas image as an opaque
+black rect. The desktop Vulkan/Metal/DX12 backends are unaffected; this is
+WebGL2-only, and it is the one thing standing between the browser tier and a
+full GO (`engine-webgl2-unhosted` above).
+
+**Accepted because**: the workaround — a two-layer atlas floor, which keys
+off the exact condition wgpu-hal's own heuristic checks — is designed and
+verified end to end (`examples/web-spike/RESULTS.md` § 17.4: the WebGL2 arm
+then renders shaped text, images, gradients, blur and layers identically to
+the WebGPU arm, with the host Vulkan engine goldens unaffected), but is
+filed as its own card (w0-08) and not yet landed.
+
+**Trigger for removal**: card w0-08 lands (the two-layer atlas floor), or a
+future wgpu-hal honours the requested view dimension instead of the
+descriptor's own layer count, removing the need for the floor entirely.
 
 ### `engine-shader-quad-goldens-uncomparable` — a shader quad renders on the engine but no golden oracle can score it
 
@@ -4909,3 +4937,121 @@ the first place; the alternative was an already-mismatched comparison.
 **Trigger for removal**: none needed to remove the entry outright — flagged so a reader does not mix
 pre- and post-change S2 numbers in one comparison; superseded in practice by the next published S2
 pass, which uses only post-change data.
+
+### `web-paced-30hz-straddle` — a nominal 30 Hz paced loop actually paces at 20-30 Hz on a 60 Hz display
+
+**Observed** (evidence: `crates/frust-shell-web/src/pacing.rs`; measured in
+headed Chrome 151 on the project's Linux GPU rig): a paced request naming a
+30 Hz cadence resolves an interval that lands a hair above two 60 Hz refresh
+periods, so the achieved cadence alternates between 33.9 ms and 50 ms
+frame-to-frame rather than holding a steady ~33.3 ms — a rounding artefact of
+composing two browser wake mechanisms (`ControlFlow::WaitUntil` plus
+`requestAnimationFrame`), not a lost- or torn-frame defect. See
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the pacing contract this
+composes with.
+
+**Accepted because**: every paced frame still lands on a real display
+refresh; the straddle is `raf_quantized` rounding a deadline up to the next
+rAF tick rather than to the exact requested interval.
+
+**Trigger for removal**: a pacing computation that rounds to the nearest
+rather than the next-above refresh boundary, if a future measurement shows
+the straddle is visible to users.
+
+### `web-no-startup-spans` — the web shell records no startup span line
+
+**Observed** (evidence: `frust_shell_common::perf::SystemClock`/
+`StartupSpans` use `std::time::Instant`, which panics on
+`wasm32-unknown-unknown`): every other shell tier emits a one-time startup
+span line (rebuild/layout/paint/first-present timing) through that shared
+type; `frust-shell-web` cannot construct one without panicking on the very
+target it targets, so it emits none.
+
+**Accepted because**: the browser tier's own `web_time::Instant`-based
+`perf::UiSpans` still covers per-frame rebuild/layout/paint cost every
+frame (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)), so only the
+one-time startup line is missing, not ongoing frame telemetry.
+
+**Trigger for removal**: `frust_shell_common::perf::SystemClock`/
+`StartupSpans` gain a `web_time`-backed `wasm32` arm.
+
+### `web-ime-a11y-devtools` — the web shell has no IME, no accessibility tree, and no devtools loopback
+
+**Observed** (evidence: `crates/frust-shell-web/src/app_handler.rs`'s
+`sync_ime`/`push_semantics`/`pump_devtools`): winit's web backend emits no
+`WindowEvent::Ime` at all, so no IME composition reaches the shell (a
+hidden-input bridge is the Phase 3 seam this leaves in place, not yet
+built); AccessKit ships no web adapter, so the semantics pass publishes
+nothing (a canvas app needs its tree mirrored into real DOM/ARIA elements,
+a whole subsystem this shell does not attempt); and the in-app devtools
+service is a loopback TCP listener a `wasm32` build has no sockets for, so
+`frust-shell-web` forwards no `devtools` cargo feature at all
+(`crates/frust/Cargo.toml`'s `devtools` feature list omits it).
+
+**Accepted because**: each gap is a documented no-op with a stated call
+site for the eventual real implementation, not a silent absence — see
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
+
+**Trigger for removal**: a real web IME bridge (hidden editable element), a
+DOM/ARIA semantics mirror, and a WebSocket-based devtools transport, each
+its own future card.
+
+### `web-touch-single-contact` — the web shell tracks only one touch contact at a time
+
+**Observed** (evidence: `crates/frust-shell-web/src/input.rs`'s
+`TouchTracker`): `frust_core::event::PointerEvent` carries no per-finger id,
+so a second simultaneous browser touch contact is not tracked — matching
+the mobile shells' own v1 single-contact contract rather than inventing a
+multi-touch protocol unilaterally on the web tier.
+
+**Accepted because**: this matches the existing Android/iOS single-contact
+v1 contract rather than diverging from it; a multi-touch protocol is a
+`frust_core` vocabulary change affecting every shell, not a web-only fix.
+
+**Trigger for removal**: `frust_core::event::PointerEvent` gains a
+per-contact id, adopted by every shell together.
+
+### `web-systemui-font-unresolved` — `FontFamily::SystemUi` and every generic family resolve no glyph on `wasm32`
+
+**Observed** (evidence: `examples/web-gallery/README.md` § "A font defect
+and how this app works around it"): fontique 0.11.1 ships a "Dummy system
+font backend for targets like wasm32-unknown-unknown" whose generic-family
+map is empty, so `TextStyle::default()`'s `FontFamily::SystemUi` — and
+`Theme::neutral()`'s own generic `SansSerif` stack — resolves zero glyphs in
+the browser; registering a bundled font through `frust::register_app_fonts`
+does not change this, since nothing populates the generic-family map
+itself. Every widget that does not call `.family(...)` explicitly renders
+invisible text, on both the WebGPU and WebGL2 arms.
+
+**Accepted because**: `examples/web-gallery` demonstrates a working
+per-call `.family(...)` override as an app-level workaround; the underlying
+fix (a `wasm32` generic-family seam in `frust-text`, or a fallback-family
+hook in the widget set) is out of this task's write scope.
+
+**Trigger for removal**: `frust-text`'s `TextContext` gains a way to
+populate fontique's generic-family map from an app-registered face on
+`wasm32`, or the widget set gains a fallback-family hook.
+
+### `web-canvas-inline-style-resize` — an unstyled host page's canvas never tracks a live browser resize
+
+**Observed** (evidence: `examples/web-gallery/README.md` § "Resize — live,
+after a page-level fix"; `examples/web-gallery/index.html`'s
+`MutationObserver`): winit sets the canvas's inline `style.width`/
+`style.height` in pixels at creation time; an external stylesheet rule
+targeting the canvas cannot override an inline declaration in the CSS
+cascade, `!important` or not, so a page that styles the canvas only through
+a stylesheet never sees it track a later window resize. A plain JS property
+assignment (`canvas.style.width = "100vw"`) does override the inline value,
+and once it is a viewport-relative unit the browser's own layout recomputes
+it on every later resize, which winit's already-attached `ResizeObserver`
+picks up correctly.
+
+**Accepted because**: the shell's `WindowEvent::Resized` handling is
+correct once the canvas element is sized by anything other than winit's own
+inline declaration; `examples/web-gallery/index.html`'s `MutationObserver`
+workaround is a two-line, host-page-only fix, not a shell defect requiring
+a code change.
+
+**Trigger for removal**: `frust-shell-web` grows a canvas-sizing option
+(adopt a host-provided CSS class, or clear its own inline style after
+creation) that removes the need for a host page to work around it.

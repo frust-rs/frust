@@ -13,9 +13,13 @@ off this index — read this plus the one that covers what you are touching:
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
-  `frust-shell-desktop`, `frust-shell-linux`, `frust`) stays `unsafe`-free — where
-  Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting instead:
-  bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
+  `frust-shell-desktop`, `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free —
+  where Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting
+  instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
+  `frust-shell-web`'s frame waker in particular needs no sanctioned zone of its own: it is a
+  capture-nothing closure over a `thread_local` `EventLoopProxy` slot
+  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`), chosen over
+  the Phase-0 probe's `unsafe impl Send + Sync` precedent. The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
   in one function/module with a `# Safety` doc comment stating the caller contract:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
