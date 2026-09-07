@@ -33,9 +33,13 @@
 //!   currently feeds [`ComposeLatch`]; it ships anyway because it is the seam a
 //!   real web IME bridge (a hidden editable element) would push into, and
 //!   [`map_key_event`]'s dedupe rule is meaningless without it.
-//! * `WindowEvent::Touch` *is* emitted, and is deliberately unmapped here —
-//!   pointer/touch unification is a behaviour decision, not a translation, and
-//!   inventing one would put this shell out of step with the mobile tier.
+//! * `WindowEvent::Touch` *is* emitted, and is deliberately mapped in
+//!   [`crate::input`] rather than here: unlike every mapping above, it has no
+//!   twin in `frust-shell-desktop` (winit reports no touch on the desktop
+//!   backends that crate targets), and pointer/touch unification is a
+//!   behaviour decision — [`crate::input::TouchTracker`] tracks a single
+//!   contact at a time, matching the mobile shells' own v1 contract, rather
+//!   than this crate inventing a multi-touch protocol on its own.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -782,6 +786,7 @@ mod browser_loop {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use frust_core::event::{CursorIcon, InputEvent};
     use frust_core::view::View;
     use frust_core::{FrameTime, RenderRoot};
     use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
@@ -803,10 +808,13 @@ mod browser_loop {
     use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
     use winit::window::{Window, WindowId};
 
+    use crate::input::TouchTracker;
     use crate::pacing::{
         ControlFlowIntent, OVERSHOOT_LOG_THRESHOLD, next_paced_wake, overshoot, paced_wake_action,
     };
     use crate::render::{FrameFollowUp, WebFrameExecutor};
+
+    use super::InputState;
 
     /// The canvas this shell asks winit for when nothing else sized it, in
     /// physical pixels.
@@ -1011,6 +1019,17 @@ mod browser_loop {
         /// enters from the shell — and on this target the clock is
         /// `performance.now()` behind `web_time`.
         epoch: Instant,
+        /// The mouse/wheel/keyboard translation state carried between events
+        /// (last pointer position, held modifiers, the secondary-press latch,
+        /// the IME compose latch) — see [`InputState`].
+        input: InputState,
+        /// The single-contact touch tracker `WindowEvent::Touch` is wired
+        /// through — see [`crate::input::TouchTracker`].
+        touch: TouchTracker,
+        /// The cursor shape last pushed to the canvas's CSS `cursor` property,
+        /// so [`super::sync_cursor`] only writes it again when
+        /// [`RenderRoot::cursor`] actually resolved to something new.
+        cursor_icon: CursorIcon,
     }
 
     impl<State, Logic, V> WebShellHandler<State, Logic, V>
@@ -1019,6 +1038,27 @@ mod browser_loop {
         V: View<State>,
         Logic: FnMut(&mut State) -> V + 'static,
     {
+        /// Deliver one mapped input event to the tree under the reactive
+        /// root `Owner` ([`super::event_under_owner`]), re-sync the two
+        /// per-event seams every dispatch can move (IME — a documented
+        /// no-op here, [`super::sync_ime`] — and the cursor shape,
+        /// [`super::sync_cursor`]), and request the one frame a dirtying
+        /// event owes.
+        ///
+        /// Mirrors `frust-shell-desktop`'s own `dispatch`: the event pass
+        /// never repaints directly, it only sets `EventOutcome::needs_redraw`,
+        /// which this turns into a single `request_redraw()` so the `Wait`
+        /// loop wakes for exactly one frame.
+        fn dispatch(&mut self, window: &Window, event: InputEvent) {
+            let outcome =
+                super::event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
+            super::sync_ime(window);
+            super::sync_cursor(window, &mut self.cursor_icon, self.root.cursor());
+            if outcome.needs_redraw {
+                window.request_redraw();
+            }
+        }
+
         /// The whole `rebuild → layout → paint → encode → present` turn, run
         /// inside the `requestAnimationFrame` callback winit services
         /// `RedrawRequested` from.
@@ -1197,9 +1237,20 @@ mod browser_loop {
                 // to nothing visible. Adopting a host page's own canvas
                 // instead is the canvas-binding work this default stands in
                 // for.
+                //
+                // `with_focusable(true)` is winit's own default already
+                // (`WindowAttributesExtWebSys::with_focusable`'s doc: "Enabled
+                // by default") — its web backend sets the canvas's
+                // `tabindex="0"` attribute whenever it is set, which is what
+                // lets a click focus the canvas and route `KeyboardInput` to
+                // it at all. Named explicitly here rather than left to the
+                // default so the focusable-canvas requirement this module's
+                // keyboard path depends on is a decision on record, not an
+                // accident of what winit happens to default to.
                 let attributes = Window::default_attributes()
                     .with_inner_size(DEFAULT_CANVAS_SIZE)
-                    .with_append(true);
+                    .with_append(true)
+                    .with_focusable(true);
                 match event_loop.create_window(attributes) {
                     Ok(window) => self.window = Some(Arc::new(window)),
                     Err(err) => {
@@ -1337,10 +1388,81 @@ mod browser_loop {
                 // be inventing a lifecycle the host does not have.
                 WindowEvent::CloseRequested => {}
 
-                // Input events fall through unhandled: mapping them onto the
-                // framework's own vocabulary is what this module's
-                // `InputState`/`map_*` half exists for, and wiring that half
-                // into the loop is its own piece of work.
+                // Dispatched unconditionally, not only while a button is
+                // down, so hover/cursor-shape resolution works — mirrors the
+                // desktop core exactly (see `InputState::pointer_moved`).
+                WindowEvent::CursorMoved { position, .. } => {
+                    let scale = window.scale_factor();
+                    let event = self.input.pointer_moved(position, scale);
+                    self.dispatch(&window, event);
+                }
+
+                // The press/release position is the last `CursorMoved`
+                // position (winit carries none on the event itself);
+                // `InputState::mouse_input` applies the secondary-press
+                // delivery gate against `RenderRoot::is_pointer_captured`.
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let captured = self.root.is_pointer_captured();
+                    if let Some(event) = self.input.mouse_input(state, button, captured) {
+                        self.dispatch(&window, event);
+                    }
+                }
+
+                // Both the unit and the sign conversion live in
+                // `map_scroll_delta`, behind `InputState::mouse_wheel`.
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let scale = window.scale_factor();
+                    let event = self.input.mouse_wheel(delta, scale);
+                    self.dispatch(&window, event);
+                }
+
+                // winit delivers this *before* the `KeyboardInput` that
+                // relies on it, so tracking it here keeps the chord current
+                // by the time a key event is mapped.
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    self.input.modifiers_changed(modifiers.state());
+                }
+
+                // Plain text entry only — `InputState::keyboard_input` drops
+                // key-ups, unmapped named keys, and (once a real web IME
+                // bridge exists) a composing-suppressed character; `repeat`
+                // passes straight through to the framework event. There is no
+                // web `Ime` bridge yet (see the module doc), so
+                // `is_composing()` is always `false` here today and every
+                // resolved character key reaches the tree.
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let Some(input_event) = self.input.keyboard_input(
+                        &event.logical_key,
+                        event.text.as_deref(),
+                        event.state,
+                        event.repeat,
+                    ) {
+                        self.dispatch(&window, input_event);
+                    }
+                }
+
+                // Web-specific: no desktop-core twin (see the module doc and
+                // `crate::input`). `TouchTracker` tracks a single concurrent
+                // contact, matching the mobile shells' own v1 contract, and
+                // maps it onto the same `PointerEvent` path a mouse drag uses.
+                WindowEvent::Touch(touch) => {
+                    let scale = window.scale_factor();
+                    if let Some(event) =
+                        self.touch
+                            .touch(touch.id, touch.phase, touch.location, scale)
+                    {
+                        self.dispatch(&window, event);
+                    }
+                }
+
+                // `WindowEvent::Ime` is never emitted by winit's web backend
+                // (verified against the pinned 0.30.13 — see the module doc),
+                // so there is nothing to wire it to; a real web IME bridge (a
+                // hidden editable element) is Phase 3's work, not this
+                // module's. Every other variant (window focus, cursor
+                // enter/leave, drag-and-drop, gesture events winit reports on
+                // other backends) has no handling this card's acceptance
+                // criteria call for.
                 _ => {}
             }
         }
@@ -1401,6 +1523,9 @@ mod browser_loop {
             paced_wake: None,
             anim_pacing: !anim_pacing_kill_switch_engaged(),
             epoch,
+            input: InputState::new(),
+            touch: TouchTracker::new(),
+            cursor_icon: CursorIcon::default(),
         };
 
         // Apply any fonts registered before the app started, before the first
