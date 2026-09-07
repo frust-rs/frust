@@ -11,9 +11,33 @@ license.workspace = true
 # Version-Pin Policy): the frame path is a custom subscriber, not `RenderEffect`.
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
+# Not yet a workspace dependency; pinned directly here for future use.
+futures = "0.3"
+
+# `tokio` is target-gated: `wasm32-unknown-unknown` has no OS threads and no
+# mio-backed reactor, so `rt-multi-thread` and `net` fail to compile there
+# (mio needs epoll/kqueue-equivalent syscalls absent on wasm — see
+# `examples/web-spike/RESULTS.md`). See `src/runtime.rs`'s module docs for
+# what the wasm arm builds instead and what it costs (`use_task`/
+# `spawn_blocking` have no working wasm equivalent yet).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 # `net` is the smallest feature that satisfies tokio's `enable_io()` gate
 # (cfg_io_driver requires `net`, or `process`/`signal` on unix) — the IO
 # driver `frust::spawn`'s background tasks need to host real sockets.
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
-# Not yet a workspace dependency; pinned directly here for future use.
-futures = "0.3"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# `rt` alone (no `rt-multi-thread`, no `time`, no `net`) is the only tokio
+# feature set that compiles for wasm32-unknown-unknown; it gives
+# `tokio::runtime::Handle`/`AbortHandle`, which `executor.rs`/`task.rs` use
+# unconditionally (their type signatures, not their wasm behaviour — see
+# `runtime.rs`).
+tokio = { workspace = true, features = ["rt"] }
+# `any_spawner`'s wasm precedent: no automatic default, so
+# `ReactiveRuntime::init`'s wasm arm calls `Executor::init_wasm_bindgen()`
+# explicitly (see `runtime.rs`). Needs `wasm-bindgen-futures`, which this
+# workspace's `Cargo.lock` already resolves (transitively, via `frust-gpu`'s
+# `wgpu` `webgpu` feature edge) — this adds a direct edge to that same
+# already-resolved crate, not a new identity.
+any_spawner = { workspace = true, features = ["wasm-bindgen"] }
+wasm-bindgen-futures = "0.4.50"

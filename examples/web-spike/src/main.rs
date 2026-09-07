@@ -263,14 +263,16 @@ mod web {
     use std::sync::Arc;
 
     use frust_gpu::{ContextOptions, DownlevelProfile, RenderContext};
+    use frust_reactive::{FrameWaker, ReactiveRuntime, RwSignal, TrackedScope};
     use frust_render::{
         AcquireOutcome, EncodeOutcome, FrameOutcome, SurfaceAlphaRequest, SurfaceRenderer,
     };
+    use reactive_graph::traits::{Get, Set};
     use wasm_bindgen::prelude::*;
     use winit::application::ApplicationHandler;
     use winit::dpi::PhysicalSize;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
     use winit::window::{Window, WindowId};
 
@@ -365,6 +367,47 @@ mod web {
         }
     }
 
+    /// w0-04's proof mode, orthogonal to [`Arm`] (either backend can carry
+    /// it): reads `?signal=timer` off `window.location.search`. When set,
+    /// [`ProbeApp`] wires a real `frust_reactive::ReactiveRuntime`, gates off
+    /// the continuous per-frame `request_redraw` loop the two w0-03 arms use
+    /// (see [`ProbeApp::window_event`]'s `RedrawRequested` arm), and proves
+    /// that a signal write — not a redraw request this file makes directly —
+    /// is what wakes the one extra repaint. See RESULTS.md's w0-04 section
+    /// for the full design and evidence.
+    fn signal_mode_enabled() -> bool {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+            .and_then(|params| params.get("signal"))
+            .is_some_and(|value| value == "timer")
+    }
+
+    /// Delay before the one-shot signal write, started once the baseline
+    /// frame has rendered. Long enough that a screenshot/log capture taken
+    /// right after bring-up unambiguously catches the "baseline, not yet
+    /// written" state before the write happens.
+    const SIGNAL_DELAY_MS: i32 = 800;
+
+    /// Wraps a wasm [`EventLoopProxy`] so it satisfies
+    /// [`frust_reactive::FrameWaker`]'s `Send + Sync` bound.
+    ///
+    /// # Safety
+    ///
+    /// `wasm32-unknown-unknown` (this build has no `atomics` target feature —
+    /// see `crates/frust-gpu/Cargo.toml`'s `fragile-send-sync-non-atomic-wasm`
+    /// precedent, the same reasoning) has no real OS threads: this process
+    /// runs entirely on the one JS event-loop thread, so nothing can ever
+    /// race across a thread boundary this proxy is used from. Winit's wasm
+    /// `EventLoopProxy` is not `Send`/`Sync` upstream only because `winit` is
+    /// a cross-platform crate whose *native* platform impls genuinely do
+    /// cross real OS threads (`frust-shell-desktop`'s own waker relies on
+    /// exactly that native `Send + Sync`-ness — see `app_handler.rs`); this
+    /// wrapper is the wasm-specific closing of that same gap.
+    struct SendSyncProxy(EventLoopProxy<()>);
+    unsafe impl Send for SendSyncProxy {}
+    unsafe impl Sync for SendSyncProxy {}
+
     /// The live GPU state, built asynchronously and then owned by the event
     /// loop.
     struct Gpu {
@@ -389,6 +432,29 @@ mod web {
         /// [`ProbeApp::window_event`] — the first few frames are worth a log
         /// line each, and after that only the running count matters.
         frames: u32,
+        /// w0-04 proof mode ([`signal_mode_enabled`]). When set, the
+        /// `RedrawRequested` handler gates off the continuous
+        /// `request_redraw` loop the two w0-03 arms use, and the counter
+        /// signal / timer below drive the one expected extra repaint instead.
+        signal_mode: bool,
+        /// The tracked counter signal `signal_mode` writes once, `Some` only
+        /// when `signal_mode` is set. `RwSignal` is `Copy`, so this is cheap
+        /// to hand into the timer's `spawn_local` closure.
+        counter: Option<RwSignal<u32>>,
+        /// Keeps the [`TrackedScope`] that subscribed to `counter` alive for
+        /// the life of the app — dropping it would unsubscribe before the
+        /// write ever arrives. Never read again after construction; its job
+        /// is entirely to stay alive and fire on the signal write.
+        #[allow(dead_code)]
+        scope: Option<TrackedScope>,
+        /// Guards [`ProbeApp::start_signal_timer`] so the one-shot timer is
+        /// scheduled exactly once (the baseline frame can only fire it the
+        /// first time `frames` reaches 1).
+        signal_timer_started: bool,
+        /// Pointer/keyboard events observed while `signal_mode` is set — the
+        /// acceptance criterion's "zero input events delivered" is asserted
+        /// against this count, not assumed.
+        input_events: u32,
     }
 
     /// How many frames get their own log line before the mirror goes quiet.
@@ -486,6 +552,36 @@ mod web {
         // requested explicitly after bring-up and on resize.
         event_loop.set_control_flow(ControlFlow::Wait);
 
+        // w0-04 proof mode: wire a real `ReactiveRuntime` before the app is
+        // handed to the event loop, so its `FrameWaker` can capture a proxy
+        // created from this still-owned `event_loop`. Left entirely off
+        // (`counter`/`scope` stay `None`) for the two w0-03 arms, so their
+        // documented RESULTS.md console traces are unaffected.
+        let signal_mode = signal_mode_enabled();
+        let (counter, scope) = if signal_mode {
+            log_line("signal: mode enabled (?signal=timer) — wiring ReactiveRuntime");
+            let proxy = SendSyncProxy(event_loop.create_proxy());
+            let waker: FrameWaker = Arc::new(move || {
+                // `EventLoopClosed` (the loop already shut down) is the same
+                // benign shutdown race `frust-shell-desktop`'s own waker
+                // ignores — see `app_handler.rs`.
+                let _ = proxy.0.send_event(());
+            });
+            let rt = ReactiveRuntime::init(waker);
+            let counter = rt.with_owner(|| RwSignal::new(0u32));
+            let scope = TrackedScope::new();
+            // Establishes the subscription: `notify_dirty` fires the
+            // FrameWaker above on this signal's next write (see
+            // `frust_reactive::tracked`'s clean→dirty edge).
+            scope.track(|| {
+                let _ = counter.get();
+            });
+            log_line("signal: counter signal created and tracked (initial value 0)");
+            (Some(counter), Some(scope))
+        } else {
+            (None, None)
+        };
+
         // `spawn_app`, not `run_app`: winit's web backend implements
         // `run_app` by throwing a JS exception to unwind out of the caller's
         // stack, which would surface as an uncaught error out of `init()`.
@@ -498,6 +594,11 @@ mod web {
             gpu: Rc::new(RefCell::new(None)),
             started: false,
             frames: 0,
+            signal_mode,
+            counter,
+            scope,
+            signal_timer_started: false,
+            input_events: 0,
         });
     }
 
@@ -575,10 +676,36 @@ mod web {
                                 self.frames
                             ));
                         }
+
+                        if self.signal_mode {
+                            // The baseline frame: schedule the one-shot
+                            // signal write and stop here — no
+                            // `request_redraw` below, unlike the two w0-03
+                            // arms (see the `if !self.signal_mode` guard
+                            // after this block).
+                            if self.frames == 1 && !self.signal_timer_started {
+                                self.signal_timer_started = true;
+                                self.start_signal_timer();
+                            } else if self.frames == 2 {
+                                // The signal-triggered extra repaint. Report
+                                // the whole acceptance criterion in one line:
+                                // exactly one baseline frame, exactly one
+                                // frame after the write, and how many
+                                // pointer/key events (expected zero) arrived
+                                // while waiting for it.
+                                set_verdict(&format!(
+                                    "frust w0-04 signal | PROVEN: baseline=1 frame, \
+                                     +1 repaint after the signal write, \
+                                     input_events={}",
+                                    self.input_events
+                                ));
+                            }
+                        }
                     }
-                    // Keep asking. A canvas is only guaranteed to hold the
-                    // pixels the compositor last consumed: with WebGL's
-                    // default `preserveDrawingBuffer: false` — and in
+                    // Keep asking — but ONLY for the two w0-03 arms
+                    // (`signal_mode` unset). A canvas is only guaranteed to
+                    // hold the pixels the compositor last consumed: with
+                    // WebGL's default `preserveDrawingBuffer: false` — and in
                     // practice with WebGPU's presented texture too — a
                     // single one-shot frame drawn outside the browser's
                     // animation callback can be composited away before a
@@ -589,15 +716,94 @@ mod web {
                     // `requestAnimationFrame`, so re-requesting here is the
                     // ordinary animation loop, and it is also what any real
                     // shell does.
-                    if let Some(window) = self.window.as_ref() {
+                    //
+                    // `signal_mode` gates this off on purpose: the proof is
+                    // that the ONLY extra repaint comes from the signal
+                    // write's `FrameWaker` → `user_event` path below, not
+                    // from this file re-requesting one itself. Without the
+                    // gate, this continuous loop would mask the signal path
+                    // entirely — `frame 2` would arrive regardless of
+                    // whether the write ever happened.
+                    if !self.signal_mode
+                        && let Some(window) = self.window.as_ref()
+                    {
                         window.request_redraw();
                     }
                 }
                 WindowEvent::CloseRequested => {
                     log_line("winit: close requested (ignored — the probe has no exit path)");
                 }
+                // The acceptance criterion's other half: the extra repaint
+                // must come with zero pointer/key events, not merely arrive
+                // alongside an unrelated one. Only counted (and only worth
+                // counting) in `signal_mode` — the two w0-03 arms never
+                // claimed anything about input, and fall through to the
+                // catch-all arm below unchanged.
+                WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::Touch(_)
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+                    if self.signal_mode =>
+                {
+                    self.input_events += 1;
+                    log_line(&format!(
+                        "signal: unexpected input event observed (count={})",
+                        self.input_events
+                    ));
+                }
                 _ => {}
             }
+        }
+
+        /// The `signal_mode` proof's other half: `frust_reactive`'s
+        /// `FrameWaker` (installed in `start()`) sends this through the
+        /// `EventLoopProxy` when the counter signal's write fires
+        /// `TrackedScope`'s clean→dirty edge — this is the ONLY place in
+        /// `signal_mode` that calls `request_redraw`, so a `frame 2` log
+        /// line is evidence the signal path (not this file re-asking on its
+        /// own, which is gated off — see `window_event`) produced it.
+        fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+            log_line(
+                "signal: FrameWaker fired via the EventLoopProxy -> requesting the \
+                 one post-write repaint",
+            );
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+    }
+
+    impl ProbeApp {
+        /// Schedules the `signal_mode` proof's one-shot signal write, called
+        /// once the baseline frame has rendered (see `window_event`'s
+        /// `RedrawRequested` arm). The write itself never calls
+        /// `request_redraw` — that only happens in
+        /// [`ApplicationHandler::user_event`] above, reached solely through
+        /// the installed `FrameWaker`.
+        fn start_signal_timer(&self) {
+            let Some(counter) = self.counter else {
+                return;
+            };
+            log_line(&format!(
+                "signal: baseline frame rendered; scheduling a one-shot \
+                 {SIGNAL_DELAY_MS}ms timer to write the tracked counter signal"
+            ));
+            wasm_bindgen_futures::spawn_local(async move {
+                sleep_ms(SIGNAL_DELAY_MS).await;
+                // The write: `TrackedScope::track`'s subscription (in
+                // `start()`) turns this into a `mark_dirty` call, which fires
+                // the process-wide `FrameWaker` on the clean→dirty edge (see
+                // `frust_reactive::tracked`) — nothing here touches winit
+                // directly.
+                counter.set(1);
+                log_line(
+                    "signal: wrote counter signal (0 -> 1) — this write's TrackedScope \
+                     dirty edge is what fires the FrameWaker",
+                );
+            });
         }
     }
 

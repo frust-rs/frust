@@ -139,3 +139,21 @@ web-sys = { version = "0.3.105", features = [
 log = "0.4.34"
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
+
+# --- w0-04 reactive-wasm proof row (wasm32 only) --------------------------
+#
+# Path dep, per this crate's own Version-Pin Policy shape above: the one
+# thing this task adds to the graph, so the `signal=timer` proof mode can
+# drive a real `frust_reactive::ReactiveRuntime`/`TrackedScope`/`RwSignal`
+# instead of a stand-in. `crates/frust-reactive/Cargo.toml`'s own wasm arm
+# (this task's other write-file) is what makes this path dep buildable for
+# `wasm32-unknown-unknown` at all — see that manifest and `runtime.rs`.
+frust-reactive = { path = "../../crates/frust-reactive" }
+# `reactive_graph`'s `Get`/`Set` traits: `frust-reactive` does not re-export
+# them (only the `RwSignal`/`Owner`/`TrackedScope` types), so reading/writing
+# the proof's counter signal needs this direct edge. Same unpinned `"0.2"`
+# range as the root workspace's own `[workspace.dependencies]` row
+# (`crates/frust-reactive/Cargo.toml` resolves `reactive_graph` through the
+# identical range via its path dep above), so this spike's own resolver
+# unifies onto one `reactive_graph` identity rather than forking a second.
+reactive_graph = "0.2"

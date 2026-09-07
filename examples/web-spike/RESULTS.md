@@ -4,6 +4,11 @@
 are still live — the flags table, the `Send`/`Sync` diagnosis — are carried
 forward in § 8 and § 9 rather than deleted, with their status updated.)*
 
+*(§ 15 adds w0-04's results — the `frust-reactive` wasm arm — on top of this
+file rather than in a new one, per the card's own write scope. Everything
+above § 15 is w0-03's, unmodified and re-verified unaffected — see § 15's own
+regression check.)*
+
 ## Verdict
 
 | Arm | Bring-up | Shapes | Shaped text | Overall |
@@ -402,10 +407,13 @@ write scope.
 
 ## 12. What this probe deliberately does not do
 
-* **No `frust-reactive`** — still excluded (its `tokio` multi-thread runtime
-  init fails on wasm32). The scene here is static and the frame loop is
-  driven by winit's `requestAnimationFrame`, not by a signal. w0-04 lands
-  that arm.
+* **`frust-reactive`** — was excluded at w0-03 time (its `tokio` multi-thread
+  runtime init failed to compile on wasm32). **w0-04 lands that arm** — see
+  § 15. The two w0-03 arms above (`?arm=webgpu`/`?arm=webgl`, no `?signal=`)
+  remain exactly as documented in this section and in § 1–§ 11: their scene
+  is still static and their frame loop is still driven by winit's
+  `requestAnimationFrame`, not by a signal — § 15's regression check
+  confirms their console trace is byte-identical to what is recorded above.
 * **No measurement.** Binary size, first-frame time and per-backend
   `strip_us` are w0-05's, and `wasm-opt` was not run for the same reason.
 * **No device-pixel-ratio handling.** The canvas is a fixed 800×600 backing
@@ -426,7 +434,7 @@ write scope.
 | `README.md` | w0-02's; stale — see § 11.5. |
 | `RESULTS.md` | This file. |
 | `Cargo.lock` | Committed, per the `examples/huddle` precedent. |
-| `pkg/` | wasm-bindgen output. **Generated, untracked, and not ignored by any rule** — there is no `.gitignore` here and adding one was out of scope, so take care not to `git add` it. A `pkg/` ignore rule is worth adding with the § 11.5 README refresh. |
+| `pkg/` | wasm-bindgen output. Generated and gitignored (`.gitignore`, added on this task's base). |
 
 ## 14. Toolchain facts (environment-supplied, unmodified)
 
@@ -443,3 +451,240 @@ write scope.
 
 Nothing above was installed, upgraded or otherwise modified by this task, and
 the container was not modified.
+
+## 15. w0-04 results: the `frust-reactive` wasm arm — signal → repaint proof
+
+### Verdict
+
+**GO.** `crates/frust-reactive` now compiles for `wasm32-unknown-unknown`
+(`cargo check --target wasm32-unknown-unknown -p frust-reactive` green), the
+host-side test suite is untouched (`cargo test -p frust-reactive`: 25/25,
+unchanged), and the browser proves the wasm arm actually wakes: a
+`frust_reactive` signal write, triggered by a one-shot JS timer, fires the
+installed `FrameWaker` and produces **exactly one** extra repaint — with the
+w0-03 arms' own continuous `request_redraw` loop gated off for this run, so
+nothing else could have produced it — and **zero** pointer/keyboard events
+observed while waiting for it.
+
+### What changed, and where
+
+`crates/frust-reactive` (this task's other two write files):
+
+- **`Cargo.toml`** target-gates `tokio`: non-wasm keeps the exact native
+  feature set (`rt-multi-thread`, `time`, `net` — byte-identical, `cfg`'d
+  only by which arm compiles for a given target); wasm gets `rt` only
+  (`rt-multi-thread`/`net` fail to compile on `wasm32-unknown-unknown` — mio
+  needs epoll/kqueue-equivalent syscalls this target does not have, measured
+  directly, see the probe transcript this task ran and is described in the
+  commit). Also adds `any_spawner`'s `wasm-bindgen` feature +
+  `wasm-bindgen-futures`, wasm-only.
+- **`src/runtime.rs`**: `ReactiveRuntime::init`'s wasm arm builds a bare
+  `Builder::new_current_thread()` runtime with no driver enabled (instead of
+  the native multi-thread pool) and calls
+  `any_spawner::Executor::init_wasm_bindgen()` explicitly (`any_spawner` has
+  no automatic wasm default, unlike its `tokio` feature) instead of
+  installing the custom `ForgeExecutor` — `spawn_local` then routes straight
+  to `wasm_bindgen_futures::spawn_local`, driven by the browser's own
+  microtask queue. The current-thread runtime is never driven (nothing calls
+  `block_on`); it exists purely so `handle()`/`spawn_blocking` — used
+  unconditionally by `executor.rs`/`task.rs`'s type signatures, neither of
+  which is in this task's write scope — keep a real
+  `tokio::runtime::Handle` to type-check against. **`use_task`'s background
+  half and `spawn_blocking` have no working wasm equivalent yet**: a task
+  handed to that handle is silently never polled. Documented on
+  `spawn_blocking` and in `runtime.rs`'s module docs, not hidden.
+
+`examples/web-spike` (this file plus `src/main.rs`, both in this task's write
+scope; `Cargo.toml`/`Cargo.lock` under the conductor's scope extension since
+the card's own `write_files` omitted them):
+
+- **`Cargo.toml`** adds two wasm-only rows: `frust-reactive` (path dep — the
+  point of this task) and `reactive_graph` (its `Get`/`Set` traits, which
+  `frust-reactive` does not re-export). Both resolve within this spike's own
+  standalone lockfile; see the lock-delta note below.
+- **`src/main.rs`** adds a `?signal=timer` proof mode, orthogonal to `?arm=`
+  (either backend arm can carry it — this run used the WebGPU arm, since
+  arm 2's text bug (§ 5) is unrelated and would only add noise):
+  - `ReactiveRuntime::init` is wired with a `FrameWaker` that sends a unit
+    event through a winit `EventLoopProxy` (wrapped in a
+    `# Safety`-documented `unsafe impl Send + Sync` newtype — wasm's
+    `EventLoopProxy` is not `Send`/`Sync` upstream because winit is
+    cross-platform and its *native* impls genuinely cross real OS threads;
+    `wasm32-unknown-unknown` here has none, mirroring `frust-gpu`'s own
+    `fragile-send-sync-non-atomic-wasm` precedent).
+  - A `TrackedScope` tracks one read of a fresh `RwSignal<u32>` counter
+    (initial value 0) right after `ReactiveRuntime::init`.
+  - The continuous `request_redraw` loop the two w0-03 arms use (re-request
+    at the end of every `RedrawRequested`) is gated off for this mode — the
+    proof needs the *only* source of a second repaint to be the signal path,
+    not this file re-asking on its own.
+  - Once the baseline frame renders (`frame 1`), a one-shot
+    `window.set_timeout` (800 ms) fires, and the spawned continuation writes
+    the counter signal (`0 -> 1`). That write is what trips
+    `TrackedScope`'s clean→dirty edge (`frust_reactive::tracked`), which
+    fires the installed `FrameWaker`, which sends the `EventLoopProxy` event,
+    which lands in `ApplicationHandler::user_event` — the **only** place in
+    `signal_mode` that calls `window.request_redraw()`.
+  - Every pointer/keyboard `WindowEvent` variant is counted while
+    `signal_mode` is set, and the final verdict line reports the count.
+
+### Exact commands
+
+Build/serve, from `examples/web-spike` (unchanged recipe from § 2):
+
+```sh
+cargo build --target wasm32-unknown-unknown --release
+wasm-bindgen --target web --out-dir pkg --out-name web_spike \
+  /data/cache/target/wasm32-unknown-unknown/release/web-spike.wasm
+./serve.sh 8931
+```
+
+Chromedriver, identically to § 2:
+
+```sh
+docker exec -d frust-linux-native env DISPLAY=:20 \
+  /home/user/apps/chromedriver-linux64/chromedriver --port=9516 \
+  --allowed-ips= "--allowed-origins=*"
+```
+
+then the same plain-HTTP W3C WebDriver session against `127.0.0.1:9516`, same
+`goog:chromeOptions.args` as § 2, navigating to
+`http://localhost:8931/?arm=webgpu&signal=timer`, polling `document.title`
+for `PROVEN`/`FAIL`, then reading `#log`'s `textContent` and taking a
+screenshot — `screenshots/w0-04-signal-webgpu.png`.
+
+Verification, from the repository root:
+
+```sh
+cargo check --target wasm32-unknown-unknown -p frust-reactive   # green
+cargo test -p frust-reactive                                    # 25/25, unchanged
+cargo build --workspace --locked && cargo test --workspace \
+  && cargo clippy --workspace --all-targets -- -D warnings \
+  && cargo fmt --check                                          # green, no failures
+cargo tree -e features -p frust-reactive                        # diffed empty vs base_sha
+```
+
+and from `examples/web-spike`:
+
+```sh
+cargo check                                     # native probe, unchanged, green
+cargo check --target wasm32-unknown-unknown     # green
+```
+
+### Console output, verbatim (`?arm=webgpu&signal=timer`)
+
+```
+frust w0-03 browser render probe | arm=webgpu | renderer=frust-engine (the only one)
+verdict: frust w0-03 webgpu | starting
+signal: mode enabled (?signal=timer) — wiring ReactiveRuntime
+signal: counter signal created and tracked (initial value 0)
+winit: window created over the page canvas
+wgpu: instance restricted to Backends(BROWSER_WEBGPU)
+surface: online after 1 attempt(s), phase=SurfaceReady
+adapter:
+backend: BrowserWebGpu
+downlevel profile: Full
+limits: max_texture_dimension_2d=8192 max_texture_array_layers=256 max_bind_groups=4 max_uniform_buffer_binding_size=65536 min_uniform_buffer_offset_alignment=256 max_vertex_attributes=16
+caps: storage_buffers=true timestamp_query=true resource_texture_dim=4096 downlevel_flags=DownlevelFlags(COMPUTE_SHADERS | FRAGMENT_WRITABLE_STORAGE | INDIRECT_EXECUTION | BASE_VERTEX | READ_ONLY_DEPTH_STENCIL | NON_POWER_OF_TWO_MIPMAPPED_TEXTURES | CUBE_ARRAY_TEXTURES | COMPARISON_SAMPLERS | INDEPENDENT_BLEND | VERTEX_STORAGE | ANISOTROPIC_FILTERING | FRAGMENT_STORAGE | MULTISAMPLED_SHADING | DEPTH_TEXTURE_AND_BUFFER_COPIES | WEBGPU_TEXTURE_FORMAT_SUPPORT | BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED | UNRESTRICTED_INDEX_BUFFER | FULL_DRAW_INDEX_UINT32 | DEPTH_BIAS_CLAMP | VIEW_FORMATS | UNRESTRICTED_EXTERNAL_TEXTURE_COPIES | SURFACE_VIEW_FORMATS | NONBLOCKING_QUERY_RESOLVE | SHADER_F16_IN_F32 | MSL2_1 | TEXTURE_COMPRESSION)
+profile check: OK — Full on BrowserWebGpu, resolved by frust-gpu, not by the probe
+font: registered bundled face -> Named(["Noto Sans"])
+scene: 8 commands -> 28 engine draws (CPU compile)
+verdict: frust w0-03 webgpu | RENDERED
+frame 1: RENDERED
+signal: baseline frame rendered; scheduling a one-shot 800ms timer to write the tracked counter signal
+signal: wrote counter signal (0 -> 1) — this write's TrackedScope dirty edge is what fires the FrameWaker
+signal: FrameWaker fired via the EventLoopProxy -> requesting the one post-write repaint
+frame 2: RENDERED
+verdict: frust w0-04 signal | PROVEN: baseline=1 frame, +1 repaint after the signal write, input_events=0
+```
+
+`document.title` at completion: `frust w0-04 signal | PROVEN: baseline=1
+frame, +1 repaint after the signal write, input_events=0`. Screenshot:
+`screenshots/w0-04-signal-webgpu.png` (canvas identical to arm 1's § 1
+evidence, log mirror carries the transcript above).
+
+**Reading the transcript as the acceptance criterion:** exactly one `frame N:
+RENDERED` line (`frame 1`) precedes the signal write; the next repaint
+(`frame 2`) appears only after, and strictly after, `signal: wrote counter
+signal` and the `FrameWaker`/`EventLoopProxy`/`user_event` chain — the
+continuous loop that would otherwise explain `frame 2` for free is gated off
+in `signal_mode` (see `src/main.rs`'s `window_event`), so this frame has no
+other possible cause. `input_events=0` in the final verdict is read directly
+off a counter incremented in the same `WindowEvent` match the frame count
+comes from, not asserted separately.
+
+### Regression check: the two w0-03 arms are unaffected
+
+Re-ran `?arm=webgpu` (no `?signal=`) against the same build; the `#log`
+transcript is **byte-identical** to § 3's Arm 1 transcript (same lines, same
+order, ending `frame 2: RENDERED` with no `signal:`/`verdict: frust w0-04`
+lines at all — `signal_mode` is entirely off). `?arm=webgl` was not
+re-driven (its own code path is untouched by this task; `signal_mode` is
+orthogonal to `Arm` and gates independently), but there is no `signal_mode`
+branch reachable without `?signal=timer` in the URL, so its behaviour follows
+the same "off by construction" reasoning as the webgpu re-run.
+
+### Lock deltas
+
+**Root workspace (`Cargo.lock`).** Two new dependency edges, no version
+bumps, no new package rows: `any_spawner -> wasm-bindgen-futures` and
+`frust-reactive -> wasm-bindgen-futures`, both resolving to the
+already-present `wasm-bindgen-futures 0.4.77` (pulled in transitively before
+this task, via `frust-gpu`'s `wgpu` `webgpu` feature edge — § 9's flags
+table). `cargo tree -e features -p frust-reactive` (native) diffed empty
+against `base_sha` — the native feature graph this crate resolves is
+unchanged.
+
+**This spike (`examples/web-spike/Cargo.lock`).** Two new direct
+dependencies (`frust-reactive`, `reactive_graph`) pull in `frust-reactive`'s
+own dependency tree (`any_spawner`, `reactive_graph`, `futures`, and — on
+this wasm32 build — the wasm-only `tokio`/`wasm-bindgen-futures` rows the
+Cargo.toml changes above add) plus their transitive graph. No version was
+independently chosen: `reactive_graph = "0.2"` matches the root workspace's
+own unpinned range, and `wasm-bindgen`/`wasm-bindgen-futures`/`js-sys`/
+`web-sys` stay unified on the exact versions § 9/§ 10 already recorded
+(`wasm-bindgen 0.2.128`, `wasm-bindgen-futures 0.4.78`) — this task's new
+rows do not name any of those crates directly, so nothing forced a further
+bump. `wasm-bindgen-futures` in this spike's lock now has two edges into it
+(the pre-existing `wasm-bindgen-futures` row used by the bring-up retry, and
+the new one via `any_spawner`'s `wasm-bindgen` feature) — same crate, same
+identity, no fork.
+
+### Risks and open follow-ups
+
+- **`use_task`/`spawn_blocking` have no working wasm equivalent.** Documented
+  in `runtime.rs`, not fixed here — the card's `unimplemented`-or-documented
+  bar is met by documentation, not by a working background-thread story
+  (wasm32-unknown-unknown has none to give it). A future task that wants
+  `use_task` on the web will need its own design (a `wasm-bindgen-futures`
+  or Web Worker-backed path), not a small follow-up to this one.
+- **The 800 ms timer delay is this proof's own choice**, not a measured
+  minimum — it only needs to be long enough that a screenshot/log capture
+  taken immediately after bring-up unambiguously shows the pre-write state.
+  Not a finding about signal-wake latency, which w0-05 (binary size,
+  first-frame time, `strip_us`) does not cover either — nothing in this repo
+  yet measures wasm wake latency.
+- **The `SendSyncProxy` `unsafe impl Send + Sync`** lives in
+  `examples/web-spike/src/main.rs`, a throwaway spike excluded from
+  `docs/DOC_POLICY.md`'s doc-unit graph (and from `docs/CODE_STANDARDS.md`'s
+  sanctioned-unsafe zone list, which only enumerates shipping crates) — it is
+  `# Safety`-documented inline per that convention's spirit, but is not
+  itself part of the registry. If a real web shell wants this waker pattern,
+  it should land the wrapper (or an upstream-safe equivalent) inside
+  `crates/frust-shell-*` where the sanctioned-unsafe register applies, not
+  copy this file's copy.
+
+### `doc_updates_needed`
+
+None of `docs/CORE_ARCHITECTURE.md`/`docs/CORE_DEVELOPMENT.md` need a change
+for this task's actual landing shape (the wasm arm's behaviour is documented
+in `runtime.rs`'s own doc comments, which is where `CORE_ARCHITECTURE.md`
+already points readers for `ReactiveRuntime`/`FrameWaker` detail). Worth a
+future doc pass, not required by this task:
+
+- `docs/CORE_DEVELOPMENT.md`'s `reactive_graph`/`any_spawner`/`tokio` pin row
+  could gain a one-clause note that `tokio` is now target-gated (wasm gets
+  `rt` only) — today a reader has to open `Cargo.toml` to learn that.
+- If a future task gives `use_task`/`spawn_blocking` a real wasm story, that
+  is exactly the kind of change `docs/CORE_ARCHITECTURE.md`'s "Data Flow"
+  section would want a line for.

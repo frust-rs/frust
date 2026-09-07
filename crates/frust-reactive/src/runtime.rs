@@ -4,6 +4,25 @@
 //! executor, holds the root reactive [`Owner`], and carries a swappable
 //! [`FrameWaker`] the executor fires to nudge the shell into pumping the
 //! UI-thread local task queue.
+//!
+//! **wasm32 arm.** `wasm32-unknown-unknown` has no OS threads and no
+//! mio-backed reactor, so the native background runtime's `rt-multi-thread`
+//! and `net` tokio features fail to compile there (see `Cargo.toml`'s
+//! target-gated `tokio` rows). [`ReactiveRuntime::init`] therefore builds a
+//! bare current-thread runtime instead of the multi-thread pool, and
+//! installs `any_spawner`'s `wasm-bindgen` executor
+//! (`Executor::init_wasm_bindgen()`, called explicitly — unlike the native
+//! `tokio` feature, `wasm-bindgen` has no automatic default) instead of the
+//! custom [`ForgeExecutor`](crate::executor::ForgeExecutor): `spawn_local`
+//! then routes straight to `wasm_bindgen_futures::spawn_local`, driven by the
+//! browser's own microtask queue, so [`pump_local`](ReactiveRuntime::pump_local)
+//! has nothing of this crate's own to drain on that arm. The current-thread
+//! runtime is never driven (nothing calls `block_on`), so it exists only to
+//! give [`handle`](ReactiveRuntime::handle)/[`spawn_blocking`] a real
+//! `tokio::runtime::Handle` to type-check against — `use_task`'s background
+//! half and `spawn_blocking` have **no working wasm equivalent yet**: a task
+//! handed to this handle is silently never polled, rather than failing
+//! loudly. Treat that as an open gap, not a proven path.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -12,13 +31,46 @@ use any_spawner::Executor;
 use reactive_graph::owner::Owner;
 use tokio::runtime::{Builder, Handle, Runtime};
 
-use crate::executor::{self, ForgeExecutor};
+use crate::executor;
+#[cfg(not(target_family = "wasm"))]
+use crate::executor::ForgeExecutor;
 
 /// A thread-safe, cheaply-cloneable "wake up and pump soon" callback. On
 /// desktop this is a winit `EventLoopProxy` send; on mobile (continuous frame
 /// loop) it is a no-op. It must be callable from any thread, since the executor
 /// fires it and background tasks may drive signal writes.
 pub type FrameWaker = Arc<dyn Fn() + Send + Sync>;
+
+/// Builds the one background runtime [`ReactiveRuntime::init`] installs.
+///
+/// Native: the real multi-thread worker pool with the time + IO drivers
+/// enabled — this arm is byte-identical to the pre-wasm code, `cfg`'d only by
+/// which arm compiles for a given target.
+#[cfg(not(target_family = "wasm"))]
+fn build_background_runtime() -> Runtime {
+    Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_time()
+        // IO driver: `frust::spawn`'s background tasks (tonic/hyper socket
+        // work) need a live reactor, not just the timer driver above.
+        .enable_io()
+        .thread_name("frust-reactive")
+        .build()
+        .expect("frust-reactive: failed to build the background tokio runtime")
+}
+
+/// Wasm: a bare current-thread runtime with no driver enabled (see the module
+/// docs for why) — nothing ever calls `block_on` on it, so it exists purely
+/// to give [`ReactiveRuntime::handle`]/[`spawn_blocking`] a real
+/// `tokio::runtime::Handle` to type-check against, not a functioning
+/// executor.
+#[cfg(target_family = "wasm")]
+fn build_background_runtime() -> Runtime {
+    Builder::new_current_thread()
+        .thread_name("frust-reactive")
+        .build()
+        .expect("frust-reactive: failed to build the wasm placeholder tokio runtime")
+}
 
 /// The one process-wide runtime. Installed on first [`ReactiveRuntime::init`]
 /// and never torn down (process lifetime — the matrix-rust-sdk precedent).
@@ -62,15 +114,7 @@ impl ReactiveRuntime {
             return existing;
         }
 
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_time()
-            // IO driver: `frust::spawn`'s background tasks (tonic/hyper socket
-            // work) need a live reactor, not just the timer driver above.
-            .enable_io()
-            .thread_name("frust-reactive")
-            .build()
-            .expect("frust-reactive: failed to build the background tokio runtime");
+        let runtime = build_background_runtime();
         let handle = runtime.handle().clone();
         let root = Owner::new();
 
@@ -88,7 +132,16 @@ impl ReactiveRuntime {
                 // Install the executor AFTER the runtime is reachable, so the
                 // executor's `spawn_local` can fire the waker via `get()`.
                 // `AlreadySet` (a prior shell already installed it) is benign.
-                let _ = Executor::init_custom_executor(ForgeExecutor::new(handle));
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let _ = Executor::init_custom_executor(ForgeExecutor::new(handle));
+                }
+                // No automatic wasm default exists (see module docs); install
+                // `any_spawner`'s `wasm-bindgen` executor explicitly.
+                #[cfg(target_family = "wasm")]
+                {
+                    let _ = Executor::init_wasm_bindgen();
+                }
                 rt
             }
             Err(candidate) => {
@@ -123,6 +176,13 @@ impl ReactiveRuntime {
     ///
     /// Must be called on the UI thread (the one [`init`](Self::init) ran on);
     /// off-thread it pumps a distinct, empty queue.
+    ///
+    /// **Wasm:** a harmless no-op drain of an always-empty queue. On this
+    /// target `spawn_local` routes to `wasm_bindgen_futures::spawn_local`
+    /// rather than this crate's own local pool (see the module docs), so
+    /// there is nothing of this crate's own for a shell to pump — it is still
+    /// safe (and, for cross-platform shell code, simplest) to call this every
+    /// loop turn on wasm too.
     pub fn pump_local(&self) {
         debug_assert!(
             executor::is_ui_thread(),
@@ -217,6 +277,13 @@ impl ReactiveRuntime {
 /// result from being delivered, but a blocking closure *already running*
 /// cannot be interrupted (there is no safe way to unwind arbitrary blocking
 /// code) — the same limitation every runtime has.
+///
+/// **No working wasm equivalent yet.** `wasm32-unknown-unknown` has no OS
+/// threads, so there is no blocking pool for `Handle::spawn_blocking` to hand
+/// work to (see the module docs) — the returned `JoinHandle` is real and
+/// type-checks, but on that target nothing ever drives the current-thread
+/// runtime backing it, so the closure is never actually run and the handle
+/// never resolves. Treat this as an open gap on wasm, not a proven path.
 ///
 /// # Panics
 ///
