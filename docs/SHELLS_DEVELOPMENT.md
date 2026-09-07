@@ -64,6 +64,30 @@ checks remain). Per host:
 - **Linux:** the window pairs with its `.desktop` entry (Wayland `app_id` / X11 `WM_CLASS`) and
   the X11 window icon shows; run non-headless, on both session types where available.
 
+## Browser manual gate (web)
+
+A gate for `crates/frust-shell-web`, run against `examples/web-gallery` per its own README's
+Build/Serve sections (`cargo build --release --target wasm32-unknown-unknown`, then
+`wasm-bindgen --target web ...` and `wasm-opt -O --all-features ...`, served by anything that
+sends `.wasm` as `application/wasm`) — the README has the full recipe, including the
+ship-the-optimized-artifact copy step; do not restate it here. Open the served page in a
+Chrome 15x with WebGPU and check:
+
+- pointer, wheel, touch-drag scroll, and keyboard text entry (typing into the index page's
+  filter field) all reach the app
+- dark/light theme flips live, with the app already running and no reload
+- resize and DPR 2 track live and stay pixel-correct
+- the index page's ticking counter advances with zero pointer/keyboard events (proves a signal
+  write alone drives the repaint, not a poll loop)
+
+Then reload with `?arm=webgl` (forces the WebGL2 fallback arm): shapes, layout, backgrounds and
+theme colours stay pixel-correct, but every glyph paints as a solid opaque box instead of text —
+a known, accepted defect until the atlas two-layer floor lands (see
+[LIMITATIONS.md](LIMITATIONS.md) `engine-webgl2-atlas-target`); do not try to fix it from this
+gate. Chrome's `--disable-features=WebGPU` flag does **not** reach this fallback on this
+stack — `requestAdapter` fails outright instead of falling through to GL — so `?arm=webgl` is
+the only way to exercise the WebGL2 arm (per the README's own record of that finding).
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are
@@ -73,6 +97,10 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 |---|---|---|
 | `muda 0.19` minor | `frust-shell-macos`'/`frust-shell-windows`'s native menu-bar bindings (`NSMenu`/`HMENU` built from `DesktopConfig::menu_spec`). Pins `objc2 0.6.1` + `objc2-app-kit 0.3.x`, unifying with this workspace's existing `objc2` family; muda's own `gtk`/`libxdo` deps live behind a Linux/BSD-only target table internally, so this pin resolves no GTK dependency on macOS/Windows — `frust-shell-linux` deliberately never depends on it | `cargo check --target aarch64-apple-darwin -p frust-shell-macos && cargo check --target x86_64-pc-windows-gnu -p frust-shell-windows`, plus `cargo tree -d` (watch for muda bumping its `objc2` lineage); on a bump, re-verify two Windows contracts this pin's internals carry (`frust-shell-windows/src/menu.rs`): submenu accelerators register into the root `HACCEL` only while the submenu is attached (attach-then-fill order), and the predefined quit stays unused (it calls `PostQuitMessage`, inert under winit) |
 | `windows-sys 0.61` minor | `frust-shell-windows`'s Win32 bindings (`SetCurrentProcessExplicitAppUserModelID`, `TranslateAcceleratorW`/`HACCEL`/`MSG`). Resolved empirically, not guessed: muda 0.19.3's own `>=0.60, <=0.61` constraint picks `0.61.2`, the minor already dominant in this lockfile. No features declared at the workspace level — each consuming crate selects its own list (`frust-shell-windows/Cargo.toml`: `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`) | `cargo check --target x86_64-pc-windows-gnu -p frust-shell-windows`; `cargo tree -d --target x86_64-pc-windows-msvc` — watch for a third `windows-sys` minor appearing beyond the pre-existing `0.52.0`/`0.61.2` pair |
+| `wasm-bindgen =0.2.128` exact | The crate's own glue-generation ABI schema, which must equal the host `wasm-bindgen-cli` — a stricter contract than semver, so a mismatch fails at glue-generation time, not at `cargo check`. `crates/frust-shell-web`'s `[target.'cfg(target_arch = "wasm32")'.dependencies]` table is where the pin is anchored (a workspace row only takes effect where a member depends on it, and this crate is the browser tier's only entry point); `crates/frust`'s own wasm32 table re-exports it unconditionally for `web_app!`'s start shim. The exact pin forces `wasm-bindgen-futures`/`js-sys`/`web-sys` into lockstep below, since each declares its own exact `wasm-bindgen` requirement. `wasm-bindgen-macro-support`'s `syn` dependency resolves onto the same `syn 3.0.3` this lockfile already carries via `async-trait`/`bytemuck_derive` — no second `syn 3.x` identity | `cargo check --target wasm32-unknown-unknown -p frust --tests` (docs/DEVELOPMENT.md), plus `examples/web-gallery`'s packaging step (`wasm-bindgen --target web ...`, its README's Build section) erroring on a CLI/crate schema mismatch; `cargo tree -i wasm-bindgen` — watch for a second `wasm-bindgen` identity or a `syn` split |
+| `wasm-bindgen-futures 0.4.77` / `js-sys 0.3.104` / `web-sys 0.3.104` caret | Forced to lockstep by the `wasm-bindgen` exact pin above (this lockfile currently resolves `0.4.78`/`0.3.105`/`0.3.105`). `web-sys` features are declared per crate, not at the workspace level, and trimmed to what each caller actually touches — `frust-shell-web` takes only `Window` (the `setTimeout` half of its surface-bring-up retry wait); `crates/frust`'s own wasm32 table pulls no `web-sys`/`js-sys` row at all. `wasm-bindgen-futures` supplies `spawn_local` (no blocking executor exists on a target that must never block) and the `JsFuture` half of that same retry wait; `js-sys` supplies `Promise`, the object the `setTimeout` callback resolves | `cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery` (docs/DEVELOPMENT.md); `cargo tree -i js-sys -i web-sys -i wasm-bindgen-futures` — watch for a second minor entering the lockstep |
+| `web-time 1.1.0` | `std::time::Instant::now()` panics on `wasm32-unknown-unknown` (no clock syscall on that target); `web-time` is the drop-in replacement winit 0.30.13 itself already resolves internally, so this pin introduces no new identity. Every `Instant` in `frust-shell-web` is `web_time::Instant` — winit types `ControlFlow::WaitUntil` over it on this target, so using anything else would also mistype that contract | `cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery`; `cargo tree -i web-time` — expect exactly one entry, resolved through `winit` |
+| `console_log 1.0.0` / `console_error_panic_hook 0.1.7` caret | (this lockfile currently resolves `console_log 1.1.0` from the `1.0.0` caret; `console_error_panic_hook 0.1.7` exact-matches) stderr is a silent no-op in a browser. The facade's `web_app!` bootstrap (`frust::__web_bootstrap`, the start shim's first call) installs both unconditionally — `console_error_panic_hook::set_once()` and `console_log::init_with_level(log::Level::Warn)` — before `frust_shell_web::logging::install` runs. A second `install` call is treated as "someone got here first" and swallowed rather than erroring (`log` allows exactly one sink per process), so an app or the gallery's own `?log=` query param re-levelling the sink afterward is safe and idempotent | `cargo check --target wasm32-unknown-unknown -p frust --tests`; `cargo test -p frust-shell-web` (the `logging` module's own unit tests) — watch for `frust-shell-web`'s `DEFAULT_LEVEL` (`Warn`) drifting from the facade bootstrap's own default |
 
 `objc2-app-kit 0.3` (the `NSApplication`/`NSResponder` slice `frust-shell-macos` names directly,
 for the Dock-reopen observer) joins the objc2 pin family owned by

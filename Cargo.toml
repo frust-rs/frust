@@ -66,7 +66,10 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
+# examples/web-spike (web-shell plan Phase 0) is a throwaway standalone
+# workspace that compiles the engine graph for wasm32 with its own target
+# and RUSTFLAGS; it must never be absorbed by the `examples/*` glob.
+exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
@@ -89,10 +92,10 @@ license = "MIT OR Apache-2.0"
 # Deliberately dropped everywhere: `gles` (no shipping shell surfaces a
 # GLES-only device; the engine tier's own downlevel design covers the
 # WebGL2/GLES3.0 ceiling via `FRUST_ENGINE_DOWNLEVEL` tested against a desktop
-# adapter, per `docs/RENDER_DEVELOPMENT.md`; the web arm is cancelled,
-# `engine-webgl2-unhosted`) and `webgpu` (wasm target only, Frust ships no
-# wasm shell). Confirmed via `cargo tree -e features`: these two (and their
-# naga frontends/backends) are absent from every target's dependency graph.
+# adapter, per `docs/RENDER_DEVELOPMENT.md`) and `webgpu`/`webgl` (wasm target
+# only; the web-shell plan owns the wasm arm via `crates/frust-gpu/Cargo.toml`'s
+# target-gated section). Confirmed via `cargo tree -e features`: these features
+# (and their naga frontends/backends) are absent from the native target graph.
 #
 # The pin itself (30.0.1) is LAW — docs/DEVELOPMENT.md's Version-Pin Policy,
 # row owned by docs/RENDER_DEVELOPMENT.md. Moving features between this row
@@ -104,6 +107,30 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "wgsl",
 ] }
 winit = "0.30.13"
+
+# --- Browser shell (wasm32-unknown-unknown) rows -------------------------------
+# Consumed only by `crates/frust-shell-web` and the facade's wasm32 arm; a row
+# no member references never enters Cargo.lock, so these are inert for every
+# native graph. Facts behind each pin were established by the Phase-0 spike
+# (examples/web-spike/RESULTS.md): wgpu 30.0.1 needs no RUSTFLAGS/cfg on wasm32.
+#
+# The wasm-bindgen CRATE must equal the host `wasm-bindgen-cli` (0.2.128,
+# installed 2026-09-07) — the CLI refuses a mismatched schema — hence the exact
+# pin; wasm-bindgen-futures/js-sys/web-sys each require their own exact
+# wasm-bindgen, so the pin forces them in lockstep (Cargo.lock resolves
+# 0.4.78 / 0.3.105 / 0.3.105 — the caret rows below are what allowed that
+# forced move without a second edit here).
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "0.4.77"
+js-sys = "0.3.104"
+web-sys = "0.3.104"
+# `std::time::Instant` panics on wasm32; `web-time` is the drop-in winit 0.30
+# itself uses (already 1.1.0 in Cargo.lock through winit).
+web-time = "1.1.0"
+# stderr is a silent no-op in a browser: `console_log` routes the `log` facade
+# to `console.*`, `console_error_panic_hook` routes panics to `console.error`.
+console_log = "1.0.0"
+console_error_panic_hook = "0.1.7"
 parley = "0.11.0"
 peniko = "0.6.1"
 kurbo = "0.13.1"
@@ -608,6 +635,7 @@ frust-shell-ios = { path = "crates/frust-shell-ios" }
 frust-shell-macos = { path = "crates/frust-shell-macos" }
 frust-shell-windows = { path = "crates/frust-shell-windows" }
 frust-shell-linux = { path = "crates/frust-shell-linux" }
+frust-shell-web = { path = "crates/frust-shell-web" }
 frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:

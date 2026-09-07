@@ -1,0 +1,191 @@
+<!doctype html>
+<!--
+  frust-gallery web demo — the web shell's browser milestone gate vehicle.
+
+  Unlike `examples/web-spike`'s host page, this one carries no `<canvas>` of
+  its own: `frust::web_app!` drives the app through `frust_shell_web::run_app`,
+  and that shell creates and appends its own canvas to `<body>` (see
+  `crates/frust-shell-web/src/app_handler.rs`'s `DEFAULT_CANVAS_SIZE` doc
+  comment) — adopting a host page's own canvas is future web-shell work, not
+  this app's concern. So this page's only job is to load the compiled module
+  and report a load failure the same way a Rust-side panic would (into
+  `document.title` and the on-page `<pre id="log">`), mirroring
+  `examples/web-spike/index.html`'s failure-reporting shape.
+
+  Query parameters this app reads (see `src/main.rs`):
+
+    ?case=<slug>   Render exactly one `frust-gallery` case (e.g.
+                   `?case=button`, `?case=material/button`). Omit it for the
+                   index page (search box + scrollable case list + the
+                   zero-input-event ticking-counter demo).
+    ?log=<level>   Raise the browser console's log ceiling above the facade's
+                   `Warn` default (`off`/`error`/`warn`/`info`/`debug`/`trace`
+                   — `frust_shell_web::logging::level_from_query`).
+    ?arm=webgl     Force the WebGL2 backend arm — see the classic `<script>`
+                   below `#log` for the exact mechanism and why it lives in
+                   this page rather than in Rust.
+
+  Build and serve (from `examples/web-gallery`):
+
+      cargo build --target wasm32-unknown-unknown --release
+      wasm-bindgen --target web --out-dir pkg --out-name web_gallery \
+        target/wasm32-unknown-unknown/release/web-gallery.wasm
+      wasm-opt -O --all-features -o pkg/web_gallery_bg.opt.wasm pkg/web_gallery_bg.wasm
+      python3 -m http.server 8000    # or any static server sending .wasm as
+                                      # application/wasm — see README.md
+
+  `pkg/` and `target/` are generated and MUST NOT be committed — see
+  README.md's "Generated output" section (this standalone workspace's own
+  `.gitignore` is outside this task's write scope; the conductor adds it).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>frust-gallery web demo</title>
+    <style>
+      /* No fixed page background: the app's own root paints the active
+         theme's `surface` colour (or nothing, over the shell's transparent
+         clear, for an index/case screen that never fills) — see the "no
+         hard-coded page chrome" note in README.md. A neutral dark fallback
+         here only avoids a flash-of-white before the first frame lands, and
+         is deliberately close to `Theme::neutral()`'s own dark surface so a
+         page that never finishes loading is still legible. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #101418;
+        color: #cfe3f5;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      /* winit's web backend attaches a `ResizeObserver` to whatever canvas
+         it owns and re-requests `WindowEvent::Resized` (and, at a changed
+         `devicePixelRatio`, `ScaleFactorChanged`) from that observed CSS box
+         — but the shell's own placeholder (`DEFAULT_CANVAS_SIZE`, 800x600)
+         sets the canvas's `style.width`/`style.height` INLINE, in pixels, at
+         creation, and an inline declaration outranks any ordinary stylesheet
+         rule (even `!important`) regardless of selector — a plain `canvas {
+         ... }` rule here is silently outvoted, verified empirically while
+         building this app (see README.md's Milestone 4). Sizing it to the
+         viewport is therefore this page's `<script>`'s job, not this
+         stylesheet's — see the inline-style-replacing `observeCanvas` call
+         below, which is what actually lets a live resize reach the app.
+         `display: block` alone is a harmless, purely cosmetic rule this
+         sheet CAN still make stick (no competing inline declaration exists
+         for it). */
+      canvas {
+        display: block;
+      }
+      /* Load-failure mirror only (see the header comment) — hidden unless
+         something is written into it, so a successful load shows nothing but
+         the shell's own canvas. */
+      #log:empty {
+        display: none;
+      }
+      #log {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: 0;
+        padding: 6px 8px;
+        background: #3a0d0d;
+        color: #ffd7d7;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="log"></pre>
+    <script>
+      // `?arm=webgl`: forces wgpu's browser bring-up onto its WebGL2 backend
+      // instead of WebGPU — the honest seam available AT THIS TASK'S WRITE
+      // SCOPE. `RenderContext::new()` (`crates/frust-gpu/src/context.rs`)
+      // takes `wgpu::Backends::from_env().unwrap_or_default()`; `from_env`
+      // reads the `WGPU_BACKEND` process environment variable, which does
+      // not exist on `wasm32-unknown-unknown` (no process, no env — the
+      // comment on that exact line says so), so it always falls through to
+      // wgpu's own compiled-in default mask, `BROWSER_WEBGPU | GL`. Neither
+      // `crates/frust-shell-web` (`src/render.rs`'s `RenderContext::new()`
+      // call is unconditional — no `ContextOptions`/`?arm=` seam exists
+      // there) nor this app's own `write_files` (`Cargo.toml`,
+      // `src/main.rs`, this file) can select a `wgpu::Backends` value
+      // without editing `crates/frust-gpu`/`crates/frust-shell-web`, which
+      // is out of scope (see `src/main.rs`'s module doc and the card's own
+      // "no render-tier switch" instruction — this is a wgpu BACKEND choice,
+      // not a second renderer). A host PAGE has exactly one honest lever
+      // instead: wgpu's own WebGPU probe checks `navigator.gpu` before ever
+      // asking it for an adapter, so removing that property before the wasm
+      // module loads makes the probe find nothing and fall through to the
+      // `GL` bit already in the default mask — no Rust changed, no backend
+      // invented, the identical default-mask fallback `RenderContext::new()`
+      // already had, just steered by what the browser reports having.
+      // `Object.defineProperty` (not `delete`): `navigator.gpu` is an
+      // inherited accessor on `Navigator.prototype`, so `delete
+      // navigator.gpu` deletes nothing (own-property delete only); defining
+      // an own `undefined` property on the instance shadows the inherited
+      // getter instead, which is what `navigator.gpu` reads as `undefined`
+      // requires. Verified empirically against this exact build — see
+      // README.md's WebGL2 section for the resulting console trace and
+      // screenshots, and the honest caveat about what this technique does
+      // NOT prove (a real deployment's WebGPU-unsupported visitors reach the
+      // GL arm through the browser's own absent `navigator.gpu`, never
+      // through this override).
+      if (new URLSearchParams(location.search).get("arm") === "webgl") {
+        try {
+          Object.defineProperty(navigator, "gpu", {
+            value: undefined,
+            configurable: true,
+          });
+        } catch (err) {
+          console.error("frust-gallery: could not force ?arm=webgl:", err);
+        }
+      }
+    </script>
+    <script type="module">
+      // wasm-bindgen `--target web` glue. `--out-name web_gallery` is passed
+      // explicitly at build time (see the header comment) so this import path
+      // does not depend on how cargo happened to spell the artifact
+      // (`web-gallery.wasm`, with a hyphen, from the package name) —
+      // `examples/web-spike/index.html`'s identical `--out-name` precedent.
+      //
+      // `init()` resolves once the module is instantiated; by then the Rust
+      // `#[wasm_bindgen(start)]` entry `web_app!` generates has already run
+      // and started the winit event loop. A failure before that point never
+      // reaches Rust's panic hook (installed by the facade's own bootstrap),
+      // so it is reported here instead.
+      import init from "./pkg/web_gallery.js";
+      init().catch((err) => {
+        const line = `FAIL: wasm init: ${err}`;
+        document.title = `frust-gallery | ${line}`;
+        document.getElementById("log").textContent += `${line}\n`;
+        console.error(err);
+      });
+
+      // The resize/DPR milestone's other half (see the `canvas` rule's
+      // comment above): the shell creates its canvas asynchronously, some
+      // time after `init()` has already returned (surface bring-up is
+      // `async`, off winit's `resumed` callback), so this page cannot just
+      // style a canvas that exists yet at parse time. A `MutationObserver`
+      // on `<body>` catches it the moment winit appends it and REPLACES its
+      // inline `width`/`height` with viewport-relative units — a plain JS
+      // property assignment, not a stylesheet rule, is what actually wins
+      // here, because it overwrites winit's own inline declaration outright
+      // rather than trying to outrank it in the cascade. Once the inline
+      // value itself is `100vw`/`100vh`, the browser recomputes it on every
+      // later layout change on its own, and winit's `ResizeObserver` (already
+      // watching this element) picks that up as an ordinary observed resize
+      // — no further script involvement, and no change to how winit itself
+      // decides `WindowEvent::Resized`/`ScaleFactorChanged`.
+      const canvasObserver = new MutationObserver(() => {
+        const canvas = document.querySelector("canvas");
+        if (!canvas) return;
+        canvas.style.width = "100vw";
+        canvas.style.height = "100vh";
+        canvasObserver.disconnect();
+      });
+      canvasObserver.observe(document.body, { childList: true });
+    </script>
+  </body>
+</html>

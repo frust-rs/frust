@@ -1,0 +1,4 @@
+# Build output of the standalone browser gallery: wasm-bindgen/wasm-opt output and
+# this workspace's own cargo target directory. Never committed (see README.md § Build).
+/pkg/
+/target/

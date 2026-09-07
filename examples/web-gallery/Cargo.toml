@@ -1,0 +1,114 @@
+# Standalone package (own `[workspace]` root, own `Cargo.lock`) — the
+# Phase-1 gate vehicle for the web-shell plan (w1-06). The root `Cargo.toml`'s
+# `[workspace]` `exclude` list already carries `examples/web-gallery`
+# (present on this task's own base commit, alongside `examples/web-spike`),
+# so the root `examples/*` glob never absorbs it. Same shape as
+# `examples/web-spike`/`examples/huddle`: a `wasm32`-only browser app has no
+# business sharing the native workspace's lockfile or `target/` dir.
+#
+# Unlike `web-spike` (which depends on the render-engine crates directly,
+# bypassing the facade so it could probe `frust-gpu`'s seams one at a time),
+# this is an ordinary Frust APP: authored through the `frust` facade's
+# `web_app!` entry point (w1-05), the same vocabulary a desktop/Android/iOS
+# app author uses. It renders the shared widget/page case registry
+# (`frust-gallery`, `examples/gallery` — a ROOT-workspace member, reached here
+# as an ordinary path dependency) so the whole 107-case registry — including
+# the five design-system plugins — is proven end to end for `wasm32` in one
+# binary, not just the five render-engine crates `web-spike` checked.
+[workspace]
+
+[package]
+name = "web-gallery"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The facade: every widget/theme/reactive/app-entry vocabulary this crate
+# uses (`web_app!`, `Component`/`component`, the widget set, `RwSignal`,
+# `set_default_theme`, `spawn_local`, ...) comes from here, never from a
+# `frust-*` crate named directly — the same discipline every other Frust app
+# in this repo follows.
+frust = { path = "../../crates/frust" }
+# The shared case registry (`cases()`/`find(slug)`/`theme(design, variant)`)
+# this app renders. A ROOT-workspace member (see its own `Cargo.toml`
+# header), reached here the same way `examples/huddle`'s standalone workspace
+# reaches its own root-adjacent path deps: a plain relative path, no version
+# requirement to keep in lockstep. Its own `wasm32` compilability rides on
+# the same render-engine graph `web-spike` proved (`frust-gallery`'s
+# `Cargo.toml` header: "compiling the crate for wasm32 ... depends on that
+# graph being made wasm-clean" — w0-02 already established that; this crate
+# is the first thing to actually build `frust-gallery` itself for the
+# target).
+frust-gallery = { path = "../gallery" }
+
+# --- wasm32-only rows -------------------------------------------------------
+#
+# Target-gated so a native `cargo check` of this crate (not part of any
+# verify gate here, but harmless to keep working) resolves nothing below.
+# Version-Pin Policy (root CLAUDE.md's Agent Guardrails / docs/DEVELOPMENT.md
+# § Version-Pin Policy): every row here is either the exact version
+# `examples/web-spike/Cargo.toml` already pinned and documented at w0-02/w0-03
+# (this host's `wasm-bindgen-cli` is 0.2.128, which forces the `=0.2.128`
+# crate pin and its lockstep `js-sys`/`web-sys` 0.3.105 / `wasm-bindgen-futures`
+# 0.4.78 partners — see that manifest's own comments for the mechanical
+# derivation) or a plain path dependency already declared above. Nothing here
+# is a new *workspace* pin — this is a standalone workspace and the root
+# graph never resolves it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `=0.2.128`, matching the host `wasm-bindgen-cli` exactly (a schema-version
+# contract stricter than semver — see `web-spike/Cargo.toml`'s identical row
+# for the full derivation). Reached indirectly already (through `frust` ->
+# `frust-shell-web`'s own wasm32 row), but declared directly here too because
+# this crate's own `src/main.rs` names `wasm_bindgen`-adjacent glue itself
+# (`web_sys`/`js_sys` calls run through `wasm-bindgen`'s ABI) and because a
+# direct dependency edge is what lets Cargo unify the whole graph onto one
+# identity rather than trusting a transitive default to land on it.
+wasm-bindgen = "=0.2.128"
+# The `?case=`/`?log=` query-string reader and the ticking-counter demo's
+# `setTimeout` wait both need `window.location` and a timer — feature list
+# trimmed to exactly those three DOM surfaces, mirroring
+# `web-spike/Cargo.toml`'s "name exactly what is called" discipline. No
+# `HtmlCanvasElement`/`Document`/`console`: this app never touches the canvas
+# directly (the shell adopts/creates it — see `crates/frust-shell-web`) and
+# never logs straight to `console` (logging goes through
+# `frust_shell_web::logging`, reached via the `frust-shell-web` row below).
+web-sys = { version = "0.3.105", features = ["Window", "Location", "UrlSearchParams"] }
+# `js_sys::Promise`, the object a `setTimeout` callback resolves — the same
+# single-purpose row `web-spike/Cargo.toml` carries, for the identical reason
+# (there is no `std::thread::sleep` on this target).
+js-sys = "0.3.105"
+# `JsFuture`: turns the `Promise` above into something `async`/`.await`-able,
+# for the ticking-counter demo's one-second wait loop (proves the
+# "signal-driven update with ZERO input events" Phase-1 milestone — a real
+# `frust::RwSignal` write on a timer, no pointer/key event involved). Version
+# copied verbatim from `web-spike/Cargo.toml`'s identical row (its own
+# comment derives why `wasm-bindgen-futures` 0.4.78, not the root
+# workspace's 0.4.77, is what a `=0.2.128` `wasm-bindgen` pin forces).
+wasm-bindgen-futures = "0.4.78"
+# The browser console log sink + `?log=` query-parameter parser
+# (`level_from_query`/`install`/`DEFAULT_LEVEL`) — a direct path edge to the
+# shell crate this app is otherwise reached through only via the facade's
+# hidden `__frust_shell_web` re-export, needed here because `web_app!`'s
+# generated bootstrap installs at a fixed `Warn` ceiling and this app raises
+# it explicitly from `?log=` before `run_app` starts (see `src/main.rs`'s
+# `raise_log_level_from_query`). Same crate + version the facade itself
+# resolves (`frust`'s own `wasm32` dependency row), so this is not a second
+# `frust-shell-web` identity.
+frust-shell-web = { path = "../../crates/frust-shell-web" }
+
+# --- release profile (w0-05 precedent) --------------------------------------
+#
+# This crate is a STANDALONE workspace (its own `[workspace]` root above), so
+# the root `Cargo.toml`'s own `[profile.release]` never applies here — copied
+# verbatim from that root profile and from `examples/web-spike/Cargo.toml`'s
+# identical hand-synced copy (both read-only references for this task), not a
+# new choice. Without this a plain `cargo build --release` in this directory
+# falls back to Cargo's own defaults (no LTO, cgu=16, no strip), which would
+# make the shipped `.wasm`'s size unrepresentative of what a real Frust app
+# ships — the README records the measured size against exactly this profile.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
