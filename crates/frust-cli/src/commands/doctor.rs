@@ -1,27 +1,36 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use frust_drive::doctor::report::ComponentStatus;
-use frust_drive::doctor::{DoctorCtx, RealEnv, Status, Validation};
+use frust_drive::doctor::{DoctorCtx, RealEnv, Status, Validation, Validator};
 use frust_drive::process::ProcessRunner;
 use frust_drive::web_build::{self, WebPreflight};
 
-/// Runs all doctor validators and prints their results. Returns the process
-/// exit code: `1` if any validator is `Fail`, else `0`. The browser checks
-/// ([`web_build::preflight`]) are informational only and never affect the exit
-/// code — a host without wasm-bindgen or a directory without a frust path
-/// dependency is not a doctor failure. The process runner is injected by
-/// `commands::dispatch` (the CLI's one `Real` construction site); the env
-/// lookup seam stays [`RealEnv`] here.
+/// Runs all doctor validators and prints their results, then the browser
+/// preflight under its own "Web" heading, and returns the process exit code
+/// by the one rule [`exit_code`] states: `1` if any validator is `Fail`, else
+/// `0`. The browser checks ([`web_build::preflight`]) are informational only
+/// and never affect the exit code — a host without wasm-bindgen or a
+/// directory without a frust path dependency is not a doctor failure.
 ///
-/// The browser checks ([`web_build::preflight`]) are appended under their own
-/// "Web" heading rather than folded into `default_validators()`'s flat list:
+/// This entry point is where every host-bound input is fixed: the process
+/// runner injected by `commands::dispatch` (the CLI's one `Real` construction
+/// site), the [`RealEnv`] lookup seam, the host's own `target_os`, the
+/// current directory, and [`frust_drive::doctor::default_validators`]. All
+/// of them are parameters of [`run_with`], which is why the exit-code rule
+/// can be tested against a scripted environment rather than against
+/// whatever toolchains the machine running the test happens to have.
+///
+/// The browser checks are appended under their own "Web" heading rather than
+/// folded into `default_validators()`'s flat list:
 /// `frust-drive::doctor::report::Area` has no `Web` grouping of its own (the
 /// component-level `DoctorReport`/`build_report` this crate never touches —
 /// see that module's doc comment), so this is a CLI-side heading over the
 /// same [`frust_drive::doctor::report::Component`] rows the browser pipeline
-/// itself reports through, not a new `frust-drive` area. Each row renders with
-/// appropriate wording (e.g. 'skipped' when wasm-bindgen is absent) to match
-/// how validators on non-applicable platforms report off-platform results
-/// (e.g. XcodeValidator off macOS).
+/// itself reports through, not a new `frust-drive` area. Each Web row prints
+/// the preflight's own icon and summary (`[✗]` for a missing wasm-bindgen,
+/// `[!]` for an absent wasm-opt) exactly as the browser pipeline reports it:
+/// the rows are excluded from the exit code, not reworded.
 pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let env = RealEnv;
     let ctx = DoctorCtx {
@@ -29,28 +38,45 @@ pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
         env: &env,
         is_macos: cfg!(target_os = "macos"),
     };
-
-    let validators = frust_drive::doctor::default_validators();
-    let results = frust_drive::doctor::run_all(&ctx, &validators);
-    print_results(&results, verbose);
-
     // The browser preflight is project-aware (it reports the resolved host
     // page and `[web]` manifest section), so it runs against the current
     // directory the same way `frust build`/`frust run` resolve their own
     // project root — a project-less directory still reports every host-tool
-    // row honestly, just with the two project-specific rows degraded rather
+    // row honestly, just with the project-specific rows degraded rather
     // than failed (see `web_build::preflight`'s own doc comment).
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let web_preflight = web_build::preflight(runner, &cwd);
+    let validators = frust_drive::doctor::default_validators();
+    Ok(run_with(&ctx, &validators, &cwd, verbose))
+}
+
+/// The testable core of [`run_in`]: the validator set, the context they run
+/// under (process runner, env lookup, host OS) and the project directory the
+/// browser preflight inspects are all parameters, so nothing about the
+/// machine running a test leaks into the exit code it asserts.
+fn run_with(
+    ctx: &DoctorCtx<'_>,
+    validators: &[Box<dyn Validator>],
+    project_dir: &Path,
+    verbose: bool,
+) -> u8 {
+    let results = frust_drive::doctor::run_all(ctx, validators);
+    print_results(&results, verbose);
+
+    let web_preflight = web_build::preflight(ctx.runner, project_dir);
     print_web_results(&web_preflight, verbose);
 
+    exit_code(&results)
+}
+
+/// The exit-code rule in one place: `1` if any validator is `Fail`, else
+/// `0`. Deliberately takes only the validator results — the browser
+/// preflight is printed by [`run_with`] but never consulted here, which is
+/// what makes its rows informational.
+fn exit_code(results: &[(String, Validation)]) -> u8 {
     let any_fail = results
         .iter()
         .any(|(_, validation)| validation.status == Status::Fail);
-    // Web rows are purely informational and never affect exit code: a host
-    // without wasm-bindgen or a directory without a frust path dependency is
-    // not a doctor failure.
-    Ok(if any_fail { 1 } else { 0 })
+    if any_fail { 1 } else { 0 }
 }
 
 fn print_results(results: &[(String, Validation)], verbose: bool) {
@@ -95,18 +121,155 @@ fn print_web_results(preflight: &WebPreflight, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_drive::process::FakeProcessRunner;
+    use frust_drive::doctor::EnvLookup;
+    use frust_drive::process::{FakeProcessRunner, Output};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// `frust doctor` reaches the browser preflight and renders it under its
-    /// own heading — proof `run_in` calls `web_build::preflight` rather than
-    /// only ever running `default_validators()`.
+    /// An env lookup that knows no variable at all — no `ANDROID_HOME`, no
+    /// `CARGO_TARGET_DIR` — so nothing this machine exports reaches a
+    /// validator under test.
+    struct EmptyEnv;
+
+    impl EnvLookup for EmptyEnv {
+        fn get(&self, _key: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// A validator with a fixed answer, standing in for the real set so the
+    /// exit-code rule is established against a known input rather than
+    /// against whichever toolchains the test host has installed.
+    struct Fixed(Status);
+
+    impl Validator for Fixed {
+        fn name(&self) -> &str {
+            "fixed"
+        }
+
+        fn validate(&self, _ctx: &DoctorCtx) -> Validation {
+            Validation {
+                status: self.0,
+                messages: vec!["scripted".to_string()],
+            }
+        }
+    }
+
+    fn fixed(statuses: &[Status]) -> Vec<Box<dyn Validator>> {
+        statuses
+            .iter()
+            .map(|status| Box::new(Fixed(*status)) as Box<dyn Validator>)
+            .collect()
+    }
+
+    fn ctx<'a>(runner: &'a FakeProcessRunner, env: &'a EmptyEnv) -> DoctorCtx<'a> {
+        DoctorCtx {
+            runner,
+            env,
+            is_macos: false,
+        }
+    }
+
+    fn ok(stdout: &str) -> Output {
+        Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    /// A fresh directory that is not a project (no `Cargo.toml`), so the
+    /// browser preflight's project rows degrade the way `frust doctor` in an
+    /// arbitrary directory sees them.
+    fn empty_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("frust-cli-doctor-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn row(status: Status) -> (String, Validation) {
+        (
+            "row".to_string(),
+            Validation {
+                status,
+                messages: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn exit_code_is_one_iff_a_validator_fails() {
+        assert_eq!(exit_code(&[]), 0);
+        assert_eq!(exit_code(&[row(Status::Pass), row(Status::Partial)]), 0);
+        assert_eq!(exit_code(&[row(Status::Pass), row(Status::Fail)]), 1);
+    }
+
+    /// The contract in one scripted run: a browser preflight that is not
+    /// ready (an empty runner knows no `rustup` and no `wasm-bindgen`, and
+    /// the directory is no project) leaves the exit code at 0 when every
+    /// validator passes — the Web rows are printed, never counted.
+    #[test]
+    fn a_not_ready_web_preflight_never_changes_the_exit_code() {
+        let dir = empty_dir("not-ready");
+        let runner = FakeProcessRunner::new();
+        let env = EmptyEnv;
+        assert!(
+            !web_build::preflight(&runner, &dir).is_ready(),
+            "precondition: the preflight under test must be degraded"
+        );
+        let validators = fixed(&[Status::Pass, Status::Partial]);
+        assert_eq!(run_with(&ctx(&runner, &env), &validators, &dir, false), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the same rule: a failing validator exits 1 whether
+    /// or not the Web rows are healthy — the preflight cannot rescue a run
+    /// any more than it can sink one.
+    #[test]
+    fn a_failing_validator_exits_one_regardless_of_the_web_rows() {
+        let dir = empty_dir("validator-fail");
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("wasm32-unknown-unknown\n"),
+            )
+            .with("wasm-bindgen --version", ok("wasm-bindgen 0.2.128\n"))
+            .with("wasm-opt --version", ok("wasm-opt version 130\n"));
+        let env = EmptyEnv;
+        let validators = fixed(&[Status::Pass, Status::Fail]);
+        assert_eq!(run_with(&ctx(&runner, &env), &validators, &dir, false), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The delta form of the rule, on the row that first motivated it:
+    /// the same validator set yields the same exit code with `wasm-bindgen`
+    /// present and with it absent.
+    #[test]
+    fn the_wasm_bindgen_row_is_informational() {
+        let dir = empty_dir("bindgen-delta");
+        let env = EmptyEnv;
+        let validators = fixed(&[Status::Pass]);
+        let present =
+            FakeProcessRunner::new().with("wasm-bindgen --version", ok("wasm-bindgen 0.2.128\n"));
+        let absent = FakeProcessRunner::new().missing("wasm-bindgen --version");
+        assert_eq!(
+            run_with(&ctx(&present, &env), &validators, &dir, false),
+            run_with(&ctx(&absent, &env), &validators, &dir, false),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The production entry point runs end to end on any host: the only error
+    /// it can return is an unreadable current directory. The exit code is
+    /// deliberately not asserted here — it depends on this machine's
+    /// toolchains, which is exactly what the scripted tests above avoid.
     #[test]
     fn run_in_reaches_the_web_preflight() {
-        let runner = FakeProcessRunner::new();
-        // Exit code is not asserted: the host running this test may or may
-        // not have the mobile/desktop toolchains `default_validators()`
-        // checks, and this test is only about the web heading being reached.
-        let _ = run_in(&runner, false);
+        run_in(&FakeProcessRunner::new(), false).expect("doctor runs to completion");
     }
 
     /// [`print_web_results`] never panics on an empty component list (a
@@ -115,65 +278,5 @@ mod tests {
     #[test]
     fn print_web_results_handles_empty_components() {
         print_web_results(&WebPreflight { components: vec![] }, true);
-    }
-
-    /// `frust doctor` in a directory with no Cargo.toml and no valid toolchain
-    /// validators exits 0, not 1 — the web preflight's Missing rows are
-    /// informational only, not fatal. Web validators return Missing (e.g.,
-    /// wasm-bindgen not on PATH), but the exit code is still 0 because Web
-    /// rows never affect it.
-    #[test]
-    fn doctor_exits_zero_in_empty_temp_dir() {
-        use frust_drive::process::Output;
-        let ok = |stdout: &str| Output {
-            success: true,
-            stdout: stdout.to_string(),
-            stderr: String::new(),
-        };
-        let runner = FakeProcessRunner::new()
-            // Mock all the validators to return Pass so we only test the Web exit code logic
-            .with("rustc --version", ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"))
-            .with("cargo --version", ok("cargo 1.91.1\n"))
-            .with("rustup target list --installed", ok("wasm32-unknown-unknown\naarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"))
-            .with("cargo ndk --version", ok("cargo-ndk 0.15.0\n"))
-            .with("adb --version", ok("Android Debug Bridge version 1.0.0\n"))
-            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
-            .with("cargo install --list", ok("cargo-packager v0.11.8\n"));
-        let exit_code = run_in(&runner, false).unwrap();
-        assert_eq!(
-            exit_code, 0,
-            "doctor should exit 0 even when web preflight rows are Missing"
-        );
-    }
-
-    /// `frust doctor` with a runner that has no wasm-bindgen exits 0, not 1 —
-    /// a missing wasm-bindgen is informational only (not fatal), matching the
-    /// contract that web checks are advisory in non-web contexts. All host
-    /// validators pass, but web preflight returns Missing for wasm-bindgen, and
-    /// the exit code is still 0 because Web rows are purely informational.
-    #[test]
-    fn doctor_exits_zero_when_wasm_bindgen_missing() {
-        use frust_drive::process::Output;
-        let ok = |stdout: &str| Output {
-            success: true,
-            stdout: stdout.to_string(),
-            stderr: String::new(),
-        };
-        let runner = FakeProcessRunner::new()
-            // Mock all the validators to return Pass so we only test the Web exit code logic
-            .with("rustc --version", ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"))
-            .with("cargo --version", ok("cargo 1.91.1\n"))
-            .with("rustup target list --installed", ok("wasm32-unknown-unknown\naarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"))
-            .with("cargo ndk --version", ok("cargo-ndk 0.15.0\n"))
-            .with("adb --version", ok("Android Debug Bridge version 1.0.0\n"))
-            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
-            .with("cargo install --list", ok("cargo-packager v0.11.8\n"))
-            // web-bindgen missing - this should NOT cause exit code 1
-            .missing("wasm-bindgen --version");
-        let exit_code = run_in(&runner, false).unwrap();
-        assert_eq!(
-            exit_code, 0,
-            "doctor should exit 0 when wasm-bindgen is missing"
-        );
     }
 }
