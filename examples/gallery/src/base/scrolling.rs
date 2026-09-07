@@ -1,31 +1,30 @@
 //! `Base`-design cases for the website's `widgets/base/scrolling` catalog
-//! page set: `list-view`, `scroll-view` (g1-04). See the crate docs and
+//! page set: `list-view`, `scroll-view`. See the crate docs and
 //! `crate::base` for the pure-`View`/slug-rule contract every case in this
-//! registry follows.
+//! registry follows, and [`super::framed`] for why neither case fills its
+//! own backdrop.
 
-use frust_core::{AnyView, View, any};
+use frust_core::{AnyView, any};
 use frust_widgets::{
-    Axis, CrossAxisAlignment, FlexChild, FlexView, container, inflexible, list_view, scroll_view,
-    text,
+    Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible, list_view,
+    scroll_view, text,
 };
 use peniko::Color;
 
+use super::framed;
 use crate::case::{Case, Design};
 
 /// Explicit caption color for row text painted directly onto a fixed
 /// `row_color` swatch — self-consistent (both literal, not theme-driven)
-/// regardless of which `Variant` the recorder resolves, unlike `framed`'s
-/// deliberately un-filled backdrop (see its own doc).
+/// regardless of which `Variant` the recorder resolves, unlike
+/// [`super::framed`]'s deliberately un-filled backdrop.
 const CAPTION: Color = Color::from_rgb8(0x33, 0x33, 0x37);
 
-/// Wrap `child`, centered, in a fixed 360x240 frame (`Case::DEFAULT_SIZE`) —
-/// see `input.rs`'s `framed` for why this deliberately never fills the
-/// backdrop itself (the recorder already clears to the active theme's
-/// `surface` per `Variant`, which is what keeps a themed label legible in
-/// both the light and dark recording pass).
-fn framed<V: View<()>>(child: V) -> AnyView<()> {
-    any(container(child).size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height))
-}
+/// The viewport `list_view` is boxed into inside the frame. A scrollable
+/// viewport hands its rows TIGHT cross-axis constraints, so a row's own
+/// `size_centered` width cannot shrink it — the box is what leaves the
+/// variant's cleared surface visible around the list.
+const LIST_VIEWPORT: (f64, f64) = (300.0, 196.0);
 
 /// Alternating row swatch color, so a scrolled/virtualized list reads as a
 /// stack of distinct rows rather than one solid fill.
@@ -37,7 +36,11 @@ fn row_color(index: usize) -> Color {
     }
 }
 
-/// A row swatch wide enough to show inside the frame with a visible margin.
+/// The row swatch width. `scroll_view` measures its content against a LOOSE
+/// cross axis, so a `scroll-view` row honours this and leaves a margin
+/// either side; `list_view`'s virtualized viewport hands its rows a TIGHT
+/// cross axis instead, so a `list-view` row spans the whole
+/// [`LIST_VIEWPORT`] width regardless of what is asked for here.
 const ROW_WIDTH: f64 = 320.0;
 
 /// A fresh `ListView` materializes its rebuild-time window before its first
@@ -51,13 +54,19 @@ const ROW_WIDTH: f64 = 320.0;
 const LIST_ITEM_EXTENT: f64 = 132.0;
 
 fn list_view_case() -> AnyView<()> {
-    framed(list_view(6, LIST_ITEM_EXTENT, |i: usize| {
-        any(
-            container(text(format!("Row {}", i + 1)).size(14.0).color(CAPTION))
-                .fill(row_color(i))
-                .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0),
-        )
-    }))
+    framed(
+        SizedBox(Some(LIST_VIEWPORT.0), Some(LIST_VIEWPORT.1)).child(list_view(
+            6,
+            LIST_ITEM_EXTENT,
+            |i: usize| {
+                any(
+                    container(text(format!("Row {}", i + 1)).size(14.0).color(CAPTION))
+                        .fill(row_color(i))
+                        .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0),
+                )
+            },
+        )),
+    )
 }
 
 fn scroll_view_case() -> AnyView<()> {

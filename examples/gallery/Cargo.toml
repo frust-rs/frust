@@ -11,11 +11,17 @@
 # --workspace`/`cargo clippy --workspace --all-targets -- -D warnings` covers
 # it automatically, with no separate per-example gate to remember.
 #
-# Library-only, desktop-free shape (no `main.rs`/`android`/`ios`/`cdylib`):
-# this crate must later compile to `wasm32` for the browser gallery, so it
-# takes NO `frust-render`/`frust-gpu`/`wgpu`/`vello` edge — every `Case`
+# Library-only shape (no `main.rs`/`android`/`ios`/`cdylib`): every `Case`
 # records a pure `View` construction (`build: fn() ->
-# frust_core::AnyView<()>`), never a rendered frame.
+# frust_core::AnyView<()>`), never a rendered frame, and nothing below
+# declares a `frust-render`/`frust-gpu`/`wgpu` dependency directly. That is a
+# statement about THIS manifest only: the five design-system plugins are each
+# built on the `frust` facade, and the facade carries `frust-render` ->
+# `frust-gpu` -> `wgpu`, so the renderer graph is a transitive dependency of
+# this crate (`cargo tree -p frust-gallery -e normal -i wgpu`). Compiling the
+# crate for `wasm32` — what the browser gallery will need — therefore depends
+# on that graph being made wasm-clean by the web-shell work, and is not
+# established today.
 [package]
 name = "frust-gallery"
 version.workspace = true

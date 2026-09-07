@@ -8,9 +8,16 @@
 //! (a different shape than [`super::layout`]'s own `padding` case: an
 //! asymmetric struct literal rather than a uniform inset), `TextStyle` via
 //! `text(..).style(..)` (the bulk-styling knob `text.rs`'s `text` case
-//! doesn't reach for). Every case forces its own full [`Case::DEFAULT_SIZE`]
-//! footprint via `container(..).size_centered(..)`, for the same reason
-//! [`super::basics`] does (see that module's docs).
+//! doesn't reach for).
+//!
+//! Every case takes its [`Case::DEFAULT_SIZE`] footprint from
+//! [`super::framed`], which sizes the frame without filling it so the
+//! recorder's per-variant `surface` clear stays visible (see [`super`]'s
+//! "The variant has to reach the pixels"). A label sitting on that surface is
+//! left at its themed `on_surface` default; the `TextStyle` case is the one
+//! that *must* name colours explicitly — `TextStyle` carries its own colour
+//! field, so a bulk-styled run can never fall back to the theme — and it
+//! picks values that keep contrast on a light and a dark surface alike.
 
 use frust_core::{AnyView, any};
 use frust_text::{FontWeight, TextStyle};
@@ -20,18 +27,28 @@ use frust_widgets::{
 };
 use peniko::Color;
 
+use super::framed;
 use crate::case::{Case, Design};
 
-const PAGE_BG: Color = Color::from_rgb8(0x0D, 0x14, 0x24);
 const CARD_A: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 const CARD_B: Color = Color::from_rgb8(0xF4, 0x3F, 0x5E);
 const CARD_C: Color = Color::from_rgb8(0x10, 0xB9, 0x81);
 const CARD_D: Color = Color::from_rgb8(0xF5, 0x9E, 0x0B);
 
+/// [`text_style_case`]'s body gray, and the caption gray under it: mid tones
+/// chosen to keep readable contrast against both the light (`#FAFAFA`) and
+/// the dark (`#121212`) neutral surface, since a [`TextStyle`] always carries
+/// an explicit colour of its own.
+const BODY_INK: Color = Color::from_rgb8(0x75, 0x75, 0x75);
+const CAPTION_INK: Color = Color::from_rgb8(0x8A, 0x8A, 0x8A);
+
 /// `Alignment`: the five named constants (`CENTER`/`TOP_LEFT`/`TOP_RIGHT`/
 /// `BOTTOM_LEFT`/`BOTTOM_RIGHT`) each placed via `Align` inside one shared,
 /// bounded box — the page's "component to `0.0..=1.0` fraction of free
-/// space" mapping, read off five points at once.
+/// space" mapping, read off five points at once. The stack's bottom-most
+/// child is an *unfilled* expanding box: it establishes the shared bounded
+/// box the five `Align`s resolve against without painting over the variant's
+/// surface clear.
 fn alignment_case() -> AnyView<()> {
     fn badge(label: &'static str) -> AnyView<()> {
         any(container(text(label).color(Color::WHITE).size(11.0))
@@ -40,14 +57,14 @@ fn alignment_case() -> AnyView<()> {
             .size_centered(104.0, 32.0))
     }
     let stack = Stack(vec![
-        any(colored_box().fill(PAGE_BG).expand()),
+        any(colored_box().expand()),
         any(Align(Alignment::TOP_LEFT, badge("TOP_LEFT"))),
         any(Align(Alignment::TOP_RIGHT, badge("TOP_RIGHT"))),
         any(Align(Alignment::CENTER, badge("CENTER"))),
         any(Align(Alignment::BOTTOM_LEFT, badge("BOTTOM_LEFT"))),
         any(Align(Alignment::BOTTOM_RIGHT, badge("BOTTOM_RIGHT"))),
     ]);
-    any(container(stack).size_centered(360.0, 240.0))
+    framed(stack)
 }
 
 pub(super) const ALIGNMENT: Case = Case {
@@ -62,12 +79,13 @@ pub(super) const ALIGNMENT: Case = Case {
 
 /// `Color`: a row of `Color::from_rgb8` swatches, each labelled with its own
 /// hex literal — the "literal is appropriate ... for authoring the palette
-/// itself" case the page calls out, as opposed to a themed role lookup.
+/// itself" case the page calls out, as opposed to a themed role lookup. The
+/// labels themselves are the counterpoint: they take the themed default.
 fn color_case() -> AnyView<()> {
     fn swatch(color: Color, label: &'static str) -> AnyView<()> {
         any(Column(vec![
             any(colored_box().fill(color).radius(8.0).size(64.0, 64.0)),
-            any(text(label).color(Color::WHITE).size(12.0)),
+            any(text(label).size(12.0)),
         ])
         .cross_axis(CrossAxisAlignment::Center))
     }
@@ -78,7 +96,7 @@ fn color_case() -> AnyView<()> {
         swatch(CARD_D, "#F59E0B"),
     ])
     .cross_axis(CrossAxisAlignment::Center);
-    any(container(row).fill(PAGE_BG).size_centered(360.0, 240.0))
+    framed(row)
 }
 
 pub(super) const COLOR: Case = Case {
@@ -102,14 +120,14 @@ fn edge_insets_case() -> AnyView<()> {
         right: 12.0,
         bottom: 12.0,
     };
-    let framed = container(Padding(
+    let framed_child = container(Padding(
         insets,
         colored_box().fill(CARD_C).radius(6.0).expand(),
     ))
     .fill(CARD_A)
     .radius(10.0)
     .size_centered(280.0, 180.0);
-    any(container(framed).fill(PAGE_BG).size_centered(360.0, 240.0))
+    framed(framed_child)
 }
 
 pub(super) const EDGE_INSETS: Case = Case {
@@ -125,14 +143,17 @@ pub(super) const EDGE_INSETS: Case = Case {
 /// `TextStyle`: three runs bulk-styled with `text(..).style(..)` rather than
 /// the leaf's individual `.size`/`.weight`/`.color` knobs — a heavier
 /// heading, a regular body line, and a wide-tracked caption, each carrying a
-/// distinct [`TextStyle`] value built with [`TextStyle::new`].
+/// distinct [`TextStyle`] value built with [`TextStyle::new`]. Because a
+/// `TextStyle` always names a colour, these three runs are the module's one
+/// place that cannot defer to the theme; see [`BODY_INK`] for how the values
+/// were picked.
 fn text_style_case() -> AnyView<()> {
     let heading = TextStyle {
         weight: FontWeight::BOLD,
-        ..TextStyle::new(26.0, CARD_D)
+        ..TextStyle::new(26.0, CARD_A)
     };
-    let body = TextStyle::new(16.0, Color::WHITE);
-    let mut caption = TextStyle::new(13.0, Color::from_rgb8(0x9C, 0xA3, 0xAF));
+    let body = TextStyle::new(16.0, BODY_INK);
+    let mut caption = TextStyle::new(13.0, CAPTION_INK);
     caption.letter_spacing = 2.0;
 
     let column = Column(vec![
@@ -141,7 +162,7 @@ fn text_style_case() -> AnyView<()> {
         any(text("CAPTION").style(caption)),
     ])
     .cross_axis(CrossAxisAlignment::Center);
-    any(container(column).fill(PAGE_BG).size_centered(360.0, 240.0))
+    framed(column)
 }
 
 pub(super) const TEXT_STYLE: Case = Case {

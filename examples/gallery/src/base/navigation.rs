@@ -1,9 +1,9 @@
 //! `Base`-design cases for the website's `widgets/base/navigation` catalog
-//! page set: `hero`, `navigator` (g1-04). See the crate docs and
-//! `crate::base` for the pure-`View`/slug-rule contract every case in this
-//! registry follows.
+//! page set: `hero`, `navigator`. See the crate docs and `crate::base` for
+//! the pure-`View`/slug-rule contract every case in this registry follows,
+//! and [`super::framed`] for why neither case fills its own backdrop.
 
-use frust_core::{AnyView, View, any};
+use frust_core::{AnyView, any};
 use frust_text::FontWeight;
 use frust_widgets::{
     Axis, CrossAxisAlignment, FlexView, NavigatorController, SizedBox, container, hero, inflexible,
@@ -11,19 +11,11 @@ use frust_widgets::{
 };
 use peniko::Color;
 
+use super::framed;
 use crate::case::{Case, Design};
 
 /// Shared accent used for the hero's shared-element avatar swatch.
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-
-/// Wrap `child`, centered, in a fixed 360x240 frame (`Case::DEFAULT_SIZE`) —
-/// see `input.rs`'s `framed` for why this deliberately never fills the
-/// backdrop itself (the recorder already clears to the active theme's
-/// `surface` per `Variant`, which is what keeps a themed label legible in
-/// both the light and dark recording pass).
-fn framed<V: View<()>>(child: V) -> AnyView<()> {
-    any(container(child).size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height))
-}
 
 /// `hero` is zero-cost outside a page transition (see its own docs) — a
 /// single build has no second, same-tagged page to morph into, so this case

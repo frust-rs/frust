@@ -1,33 +1,26 @@
 //! `Base`-design cases for the website's `widgets/base/interaction` catalog
-//! page set: `button`, `gesture-detector`, `icon-button` (g1-04). See the
-//! crate docs and `crate::base` for the pure-`View`/slug-rule contract every
-//! case in this registry follows.
+//! page set: `button`, `gesture-detector`, `icon-button`. See the crate docs
+//! and `crate::base` for the pure-`View`/slug-rule contract every case in
+//! this registry follows, and [`super::framed`] for why none of these cases
+//! fills its own backdrop.
 //!
-//! `button`/`container` replace the two seed cases `base::cases()` shipped with
-//! from g1-01 — the conductor drops those two seed entries from
-//! `base/mod.rs` at merge (see the module docs there and this crate's task
-//! summary) so `button` stays a unique slug.
+//! The `button` case here owns the `button` slug outright: the registry's
+//! two original placeholder entries (a `button` and a `container` sketch)
+//! were dropped from `base/mod.rs` once the real category modules landed, so
+//! no second case competes for it.
 
-use frust_core::{AnyView, View, any};
+use frust_core::AnyView;
 use frust_widgets::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, container,
     icon_button, icons, inflexible, text,
 };
 use peniko::Color;
 
+use super::framed;
 use crate::case::{Case, Design};
 
 /// Shared accent used for the gesture-detector's visible target.
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-
-/// Wrap `child`, centered, in a fixed 360x240 frame (`Case::DEFAULT_SIZE`) —
-/// see `input.rs`'s `framed` for why this deliberately never fills the
-/// backdrop itself (the recorder already clears to the active theme's
-/// `surface` per `Variant`, which is what keeps a themed label legible in
-/// both the light and dark recording pass).
-fn framed<V: View<()>>(child: V) -> AnyView<()> {
-    any(container(child).size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height))
-}
 
 fn button_case() -> AnyView<()> {
     framed(

@@ -1,6 +1,6 @@
 //! `frust-gallery`: the shared widget/page CASE REGISTRY both the static
-//! snapshot generator (`crates/frust-testing`'s widget-snapshots bin, g1-02)
-//! and the future browser gallery app (`examples/web-gallery`) read.
+//! snapshot generator (`crates/frust-testing`'s widget-snapshots bin) and the
+//! future browser gallery app (`examples/web-gallery`) read.
 //!
 //! # The pure-`View` constraint
 //!
@@ -28,9 +28,20 @@
 //! # Dev-only
 //!
 //! Like `crates/frust-testing`, this crate exists to be read by test/tooling
-//! binaries, never shipped in an app's own dependency graph. It takes no
-//! `frust-render`/`frust-gpu`/`wgpu`/`vello` edge so it can later compile to
-//! `wasm32` for the browser gallery.
+//! binaries, never shipped in an app's own dependency graph.
+//!
+//! # What this crate actually depends on
+//!
+//! Its own manifest declares no renderer edge — the case modules build
+//! `View` trees out of `frust-core`/`frust-widgets`/`frust-theme`/
+//! `frust-text` and never touch a surface, a device or a frame. The five
+//! design-system plugins it depends on for [`theme`] each depend on the
+//! `frust` facade, though, and the facade pulls `frust-render` ->
+//! `frust-gpu` -> `wgpu`, so the renderer graph IS in this crate's
+//! transitive dependencies (`cargo tree -p frust-gallery -e normal -i wgpu`
+//! shows the path). Compiling this crate for `wasm32` is therefore not yet
+//! established: it depends on that graph being made wasm-clean, which the
+//! web-shell work owns.
 //!
 //! See `README.md` for how to add a case.
 
