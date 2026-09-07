@@ -9,7 +9,32 @@ license.workspace = true
 # it as a [dev-dependencies] edge only (enforced by tests/deps.rs's guard).
 publish = false
 
+# The website's widget-preview generator (`src/bin/widget-snapshots.rs`): walks
+# `frust-gallery`'s case registry and writes a light/dark PNG pair plus a
+# `manifest.json`. It lives in THIS crate rather than its own because
+# everything it needs is this crate's own API — the pure-`View` frame recorder
+# (`src/frame.rs`), the GPU-free `CpuOracle`, `corpus::straighten_alpha`, and
+# the bundled deterministic fonts — and because it is dev tooling for exactly
+# the reason this crate is (`publish = false`, reachable only across a
+# `[dev-dependencies]` edge). Declared explicitly rather than left to
+# `src/bin/` auto-discovery, so the target is visible in the manifest that
+# carries its rationale.
+[[bin]]
+name = "widget-snapshots"
+path = "src/bin/widget-snapshots.rs"
+
 [dependencies]
+# The shared widget/page CASE REGISTRY the `widget-snapshots` bin renders
+# (`examples/gallery`). A root-workspace member, so this is an ordinary
+# intra-workspace path edge, declared the way the design-system plugins below
+# are (`workspace.dependencies` carries no entry for either). Dev-only in both
+# directions: `frust-gallery` is `publish = false` too, takes no
+# `frust-render`/`frust-gpu`/`wgpu`/`vello` edge of its own, and depends on
+# nothing in this crate — so there is no cycle and no production graph is
+# involved. A NORMAL rather than a dev dependency because `src/snapshot.rs`
+# names `Case`/`Variant` in this crate's own public API, and because a
+# `[[bin]]` target cannot see `[dev-dependencies]` at all.
+frust-gallery = { path = "../../examples/gallery" }
 # Renderer-agnostic scene display list every `SceneRenderer` implementation
 # renders — the vocabulary both oracle arms decode, and the only render input
 # a golden case is allowed to record through (`corpus::unit`'s
@@ -133,6 +158,21 @@ wgpu = { workspace = true }
 # and need it too). A NORMAL dependency for the same reason
 # `vello_cpu_oracle` is one: `EngineOracle` is part of this crate's API.
 pollster = { workspace = true }
+# `widget-snapshots`' argument parsing (`--out`/`--filter`/`--list`/`--check`/
+# `--gpu`), on the workspace's existing `clap 4.6 + derive` pin — the same one
+# `frust-cli` resolves, so this adds an edge onto an identity already in the
+# graph rather than a new one. A NORMAL dependency because Cargo does not
+# expose `[dev-dependencies]` to a `[[bin]]` target.
+clap = { workspace = true }
+# The `sha256` field of every `manifest.json` row (`snapshot::sha256_hex`) — a
+# content hash of the PNG bytes, so the website can cache-bust a preview and a
+# reader can tell two runs apart without diffing images. NOT a
+# `workspace = true` row: `sha2` has no `[workspace.dependencies]` entry, and
+# `Cargo.lock` already resolves exactly 0.10.9 transitively, so it is pinned
+# here to that exact version — a caret pin could later float to a second
+# identity of a crate already in the graph, which the Version-Pin Policy exists
+# to prevent. Bump it only together with whatever transitively pulls it.
+sha2 = "=0.10.9"
 
 [dev-dependencies]
 # tests/deps.rs parses every crate/plugin manifest to enforce the
