@@ -189,7 +189,13 @@ fn check_passes_against_its_own_fresh_output() {
     let write = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
     assert!(write.status.success(), "{}", stderr_of(&write));
 
-    let check = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
+    let check = run(&[
+        "--out",
+        dir.to_str().unwrap(),
+        "--filter",
+        "container",
+        "--check",
+    ]);
     assert!(
         check.status.success(),
         "--check must pass against its own output:\n{}",
@@ -285,6 +291,101 @@ fn an_exhaustive_check_reports_a_stray_png() {
         stderr.contains("not-a-real-case.light.png") && stderr.contains("not produced by any case"),
         "the failure must name the stray file:\n{stderr}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reads `(slug, variant, sha256)` triples back out of the manifest at `out_dir`.
+fn manifest_hashes(out_dir: &Path) -> Vec<(String, String, String)> {
+    let text = std::fs::read_to_string(out_dir.join("manifest.json")).expect("manifest.json");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("manifest parses");
+    json["snapshots"]
+        .as_array()
+        .expect("snapshots array")
+        .iter()
+        .map(|row| {
+            (
+                row["slug"].as_str().unwrap().to_owned(),
+                row["variant"].as_str().unwrap().to_owned(),
+                row["sha256"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// An exhaustive write followed by an exhaustive `--check` must pass, and no
+/// case may render byte-identically in light and dark: a fixed full-frame
+/// backdrop painted over the recorder's per-variant surface clear is exactly
+/// the defect that once made 22 of 35 previews publish one image for both
+/// themes. Colour-agnostic on purpose -- it asserts only that the two variant
+/// renders of a slug differ, never what they contain.
+#[test]
+fn exhaustive_check_passes_and_every_case_differs_between_light_and_dark() {
+    let dir = unique_dir("exhaustive-ok");
+    let write = run(&["--out", dir.to_str().unwrap()]);
+    assert!(write.status.success(), "{}", stderr_of(&write));
+
+    let check = run(&["--out", dir.to_str().unwrap(), "--check"]);
+    assert!(
+        check.status.success(),
+        "exhaustive --check must pass against its own output:\n{}",
+        stderr_of(&check)
+    );
+
+    let mut by_slug: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (slug, variant, sha) in manifest_hashes(&dir) {
+        by_slug.entry(slug).or_default().push((variant, sha));
+    }
+    assert!(!by_slug.is_empty(), "the registry rendered nothing");
+    let identical: Vec<&String> = by_slug
+        .iter()
+        .filter(|(_, rows)| {
+            let light = rows.iter().find(|(v, _)| v == "light").map(|(_, s)| s);
+            let dark = rows.iter().find(|(v, _)| v == "dark").map(|(_, s)| s);
+            light.is_some() && light == dark
+        })
+        .map(|(slug, _)| slug)
+        .collect();
+    assert!(
+        identical.is_empty(),
+        "these cases render byte-identically in light and dark (a fixed full-frame backdrop is \
+         hiding the variant surface): {identical:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An exhaustive write prunes a PNG a previous run left behind (a renamed or
+/// deleted case), so the tree under `--out` never carries a snapshot that no
+/// manifest row references; a filtered write leaves it alone.
+#[test]
+fn an_exhaustive_write_prunes_a_stale_png_but_a_filtered_write_does_not() {
+    let dir = unique_dir("prune");
+    let first = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
+    assert!(first.status.success(), "{}", stderr_of(&first));
+
+    let stale = dir.join("renamed-away.light.png");
+    std::fs::write(&stale, b"not a real png").expect("write stale file");
+
+    let filtered = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
+    assert!(filtered.status.success(), "{}", stderr_of(&filtered));
+    assert!(stale.exists(), "a filtered write must not prune");
+
+    let exhaustive = run(&["--out", dir.to_str().unwrap()]);
+    assert!(exhaustive.status.success(), "{}", stderr_of(&exhaustive));
+    assert!(
+        !stale.exists(),
+        "an exhaustive write must prune the stale PNG"
+    );
+    assert!(
+        stderr_of(&exhaustive).contains("pruned 1 stale PNG"),
+        "prune must be reported on stderr:\n{}",
+        stderr_of(&exhaustive)
+    );
+
+    let check = run(&["--out", dir.to_str().unwrap(), "--check"]);
+    assert!(check.status.success(), "{}", stderr_of(&check));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

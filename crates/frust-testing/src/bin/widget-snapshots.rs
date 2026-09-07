@@ -208,6 +208,16 @@ fn run() -> Result<ExitCode> {
             merge_with_existing(&out, manifest)?
         };
         write(&out, &rendered, &to_write)?;
+        if exhaustive {
+            let pruned = prune_stale(&out, &rendered)?;
+            if pruned > 0 {
+                eprintln!(
+                    "widget-snapshots: pruned {pruned} stale PNG(s) this exhaustive run no longer \
+                     produces from {}",
+                    out.display()
+                );
+            }
+        }
         eprintln!(
             "widget-snapshots: wrote {} PNG(s) + {MANIFEST_NAME} to {} ({} on {})",
             rendered.len(),
@@ -291,6 +301,26 @@ fn write(
     let path = out.join(MANIFEST_NAME);
     refuse_symlink(&path)?;
     fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
+/// After an EXHAUSTIVE write, removes every `.png` under `out` that this run
+/// did not produce, so a case renamed or deleted from the registry cannot
+/// leave its old snapshot behind to be published: `rsync -a --delete` at the
+/// publish step only deletes what is absent from its *source*, and a stale
+/// PNG still present under `--out` would be copied, not removed. Symlinked
+/// entries are never followed or deleted (see [`stray_pngs`]); a filtered run
+/// never prunes, because it cannot know which of the untouched files are
+/// stale. Returns the number of files removed.
+fn prune_stale(out: &Path, rendered: &[(PathBuf, Vec<u8>, SnapshotEntry)]) -> Result<usize> {
+    let expected: BTreeSet<PathBuf> = rendered
+        .iter()
+        .map(|(relative, _, _)| out.join(relative))
+        .collect();
+    let scan = stray_pngs(out, &expected);
+    for path in &scan.pngs {
+        fs::remove_file(path).with_context(|| format!("pruning stale {}", path.display()))?;
+    }
+    Ok(scan.pngs.len())
 }
 
 /// Compares this run's bytes against the tree already in `out`, reporting every
