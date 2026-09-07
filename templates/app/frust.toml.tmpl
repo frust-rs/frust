@@ -53,6 +53,33 @@ icon = "assets/logo.png"
 # [linux]
 # categories = ["Utility"]
 
+# Browser-target build configuration, the fourth platform beside the three
+# desktop sections above. Every key below is optional and shown at its
+# default, so this whole section may stay commented out: a freshly scaffolded
+# project already has the layout these defaults describe (`web/` holds the
+# checked-in host page, `frust build web` assembles `build/web/` around the
+# wasm output). Unlike the desktop stubs above, this section IS parsed by
+# Frust — uncomment a key only to move away from its default.
+# [web]
+# # Directory holding the checked-in host-page sources (`index.html` +
+# # `frust_web.js`), relative to this file. This is what a build READS.
+# host-dir = "web"
+# # Directory the assembled site is WRITTEN to. Deliberately not `host-dir`:
+# # the host page is checked in and the assembled site is generated, so
+# # pointing one at the other would make a rebuild eat its own sources.
+# out-dir = "build/web"
+# # `wasm-bindgen --out-name`: the basename of the generated JS glue module
+# # (`<out-dir>/pkg/<out-name>.js`), which is also what the host page's
+# # `?module=` default resolves to. Defaults to `[app] name` above.
+# out-name = "{{ project_name }}"
+# # Run `wasm-opt` over the generated `.wasm`. Absent follows the build mode
+# # (release optimizes, debug does not), so this key overrides in BOTH
+# # directions: `true` opts a debug build in, `false` opts a release build out.
+# wasm-opt = true
+# # Port the local static preview server binds. Not 8080 — that port is in
+# # constant use by unrelated local services.
+# port = 8000
+
 {% if deeplink_scheme -%}
 # Deep-link scheme registered in the generated Android manifest / iOS
 # Info.plist. Informational here — Frust tooling doesn't parse

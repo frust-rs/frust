@@ -1847,6 +1847,103 @@ mod tests {
         let _ = fs::remove_dir_all(&clean_signals_dest);
     }
 
+    /// The browser target's one dependency row, in BOTH `Cargo.toml`
+    /// variants: `frust::app!` expands to `frust::web_app!` on `wasm32`, and
+    /// that expansion carries a `#[wasm_bindgen(start)]` attribute whose own
+    /// generated glue names `wasm_bindgen::` paths inside the app crate — so
+    /// the app crate needs the dependency edge itself (without it the
+    /// scaffold fails `E0433: cannot find module or crate `wasm_bindgen``).
+    ///
+    /// The pin is asserted EXACT, not merely present: `wasm-bindgen`'s crate
+    /// and CLI share a schema version, so `=0.2.128` is a contract with the
+    /// host toolchain rather than a semver floor (Version-Pin Policy).
+    #[test]
+    fn both_cargo_toml_variants_carry_the_exact_wasm32_wasm_bindgen_pin() {
+        let ctx = test_context();
+
+        let default_dest = unique_temp_dir("wasm-row-default");
+        generate(&default_dest, &ctx, None, false, None).unwrap();
+        let clean_signals_dest = unique_temp_dir("wasm-row-clean-signals");
+        generate(
+            &clean_signals_dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+        )
+        .unwrap();
+
+        for dest in [&default_dest, &clean_signals_dest] {
+            let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+            assert!(
+                cargo_toml.contains("[target.'cfg(target_arch = \"wasm32\")'.dependencies]"),
+                "{cargo_toml}"
+            );
+            assert!(
+                cargo_toml.contains("wasm-bindgen = \"=0.2.128\""),
+                "{cargo_toml}"
+            );
+            // Target-gated, never an unconditional row: a native build must
+            // not resolve it.
+            assert!(
+                !cargo_toml.contains("\nwasm-bindgen = \"=0.2.128\"\n\n[dependencies]"),
+                "{cargo_toml}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&default_dest);
+        let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    /// `src/main.rs`'s target gating, which is what makes a scaffold
+    /// buildable for the browser at all.
+    ///
+    /// Two independent facts, both load-bearing:
+    ///
+    /// 1. The desktop `main` is gated off `wasm32` as well as Android —
+    ///    `frust::app!` emits no `__frust_main` on either, so calling it
+    ///    there is `E0425`.
+    /// 2. The `wasm32` `main` is NOT empty. On that target this crate's
+    ///    `cdylib` and its bin compile to the same
+    ///    `<profile>/<name>.wasm` — cargo reports an "output filename
+    ///    collision" and writes one of them, in an order nothing downstream
+    ///    can choose. Binding the library's browser entry keeps the whole
+    ///    library in the bin's link graph, so BOTH candidates are complete,
+    ///    startable modules; an empty `main` there ships a few-kilobyte stub
+    ///    that instantiates and silently mounts nothing.
+    #[test]
+    fn generate_main_rs_gates_the_desktop_entry_off_wasm32_and_keeps_the_lib_linked() {
+        let dest = unique_temp_dir("main-rs-wasm-gate");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let main_rs = fs::read_to_string(dest.join("src/main.rs")).unwrap();
+        assert!(
+            main_rs.contains("#[cfg(not(any(target_os = \"android\", target_arch = \"wasm32\")))]"),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains(&format!("{}::__frust_main();", ctx.project_name)),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains("#[cfg(target_arch = \"wasm32\")]"),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains(&format!(
+                "let _entry: fn() = {}::__frust_web_start;",
+                ctx.project_name
+            )),
+            "the wasm32 `main` must keep the library's browser entry in the \
+             binary's link graph:\n{main_rs}"
+        );
+        assert!(!main_rs.contains("{{"), "{main_rs}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     #[test]
     fn generate_produces_linux_desktop_entry_with_substitutions() {
         let dest = unique_temp_dir("linux-tree");
@@ -1906,7 +2003,34 @@ mod tests {
         assert!(toml.contains("# [macos]"), "{toml}");
         assert!(toml.contains("# [windows]"), "{toml}");
         assert!(toml.contains("# [linux]"), "{toml}");
+        // The browser stub is the fourth platform's, and documents every
+        // `manifest::WebSection` key at its own default.
+        assert!(toml.contains("# [web]"), "{toml}");
+        for key in [
+            "# host-dir = \"web\"",
+            "# out-dir = \"build/web\"",
+            "# wasm-opt = true",
+            "# port = 8000",
+        ] {
+            assert!(toml.contains(key), "missing `{key}` in:\n{toml}");
+        }
+        assert!(
+            toml.contains(&format!("# out-name = \"{}\"", ctx.project_name)),
+            "{toml}"
+        );
         assert!(!toml.contains("{{"), "{toml}");
+
+        // Commented out means *inert*: the scaffolded manifest still parses
+        // and still carries no `[web]` section, so a browser build runs on
+        // the documented defaults rather than on whatever the stub spells.
+        let parsed = crate::manifest::load_optional(&dest)
+            .unwrap()
+            .expect("the scaffolded frust.toml must parse");
+        assert!(
+            parsed.web.is_none(),
+            "the `[web]` stub must stay commented out: {:?}",
+            parsed.web
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
