@@ -24,6 +24,12 @@ extended by this section.)*
 | **2. Chrome forced GL** (`?arm=webgl`, `Backends::GL` = WebGL2) | OK | **correct** | **BROKEN — every glyph is a solid filled box** | **PARTIAL NO-GO** |
 | 3. Safari 26 | not run | — | — | **unavailable on this host** (§ 7) |
 
+*Caveat:* The verdict runs carry Chrome safety flags disabled (§ 2/§ 6 flags table;
+`--no-sandbox --enable-unsafe-webgpu`); the GO/NO-GO outcome is not affected by
+those flags themselves (both arms needed the WebGPU API enabled; `--no-sandbox`
+is orthogonal), but they are necessary for the rig's headless/container setup
+and are not representative of a production deployment.
+
 `frust-engine` renders in a browser. On WebGPU it renders *correctly*, glyphs
 included. On WebGL2 every non-text primitive is pixel-identical to the WebGPU
 arm — fills, rounded-rect corners, stroke antialiasing — and every **glyph**
@@ -86,9 +92,15 @@ Driving the browser (host side; the container uses `--network host`, so
 
 ```sh
 docker exec -d frust-linux-native env DISPLAY=:20 \
-  /home/user/apps/chromedriver-linux64/chromedriver --port=9516 \
-  --allowed-ips= "--allowed-origins=*"
+  /home/user/apps/chromedriver-linux64/chromedriver --port=9516
 ```
+
+(Loopback-only binding on `127.0.0.1:9516` is sufficient — the driver and
+client are both on the host. Any relaxation for wider network access must be
+scoped: `--allowed-ips=127.0.0.1` plus a named `--allowed-origins`, never
+wildcarded, because the container shares the host network and an open
+`--allowed-origins=*` exposes an unauthenticated WebDriver RCE endpoint to
+the LAN.)
 
 then a W3C WebDriver session over plain HTTP to `127.0.0.1:9516` with
 `goog:chromeOptions.args`:
@@ -490,16 +502,16 @@ observed while waiting for it.
   the native multi-thread pool) and calls
   `any_spawner::Executor::init_wasm_bindgen()` explicitly (`any_spawner` has
   no automatic wasm default, unlike its `tokio` feature) instead of
-  installing the custom `ForgeExecutor` — `spawn_local` then routes straight
-  to `wasm_bindgen_futures::spawn_local`, driven by the browser's own
-  microtask queue. The current-thread runtime is never driven (nothing calls
-  `block_on`); it exists purely so `handle()`/`spawn_blocking` — used
-  unconditionally by `executor.rs`/`task.rs`'s type signatures, neither of
-  which is in this task's write scope — keep a real
+  installing the custom `ForgeExecutor` — `spawn_local` and `frust::spawn`
+  then route straight to `wasm_bindgen_futures::spawn_local`, driven by the
+  browser's own microtask queue. The current-thread runtime is never driven
+  (nothing calls `block_on`); it exists purely so `handle()`/`spawn_blocking`
+  — used unconditionally by `executor.rs`/`task.rs`'s type signatures, neither
+  of which is in this task's write scope — keep a real
   `tokio::runtime::Handle` to type-check against. **`use_task`'s background
-  half and `spawn_blocking` have no working wasm equivalent yet**: a task
-  handed to that handle is silently never polled. Documented on
-  `spawn_blocking` and in `runtime.rs`'s module docs, not hidden.
+  half and `spawn_blocking` have no working wasm equivalent**: `spawn_blocking`
+  now fails loudly with a compile error on `wasm32-unknown-unknown` (r0-02's
+  change). Documented on `spawn_blocking` and in `runtime.rs`'s module docs.
 
 `examples/web-spike` (this file plus `src/main.rs`, both in this task's write
 scope; `Cargo.toml`/`Cargo.lock` under the conductor's scope extension since
@@ -546,12 +558,11 @@ wasm-bindgen --target web --out-dir pkg --out-name web_spike \
 ./serve.sh 8931
 ```
 
-Chromedriver, identically to § 2:
+Chromedriver, identically to § 2 (loopback-only binding; see § 2 for security notes):
 
 ```sh
 docker exec -d frust-linux-native env DISPLAY=:20 \
-  /home/user/apps/chromedriver-linux64/chromedriver --port=9516 \
-  --allowed-ips= "--allowed-origins=*"
+  /home/user/apps/chromedriver-linux64/chromedriver --port=9516
 ```
 
 then the same plain-HTTP W3C WebDriver session against `127.0.0.1:9516`, same
@@ -969,10 +980,10 @@ are in § 16.4's verbatim transcripts.
    path before the probe's own timing spans start — most plausibly ANGLE's
    GL context/shader-compiler bring-up, which this probe's write scope
    (`examples/web-spike`, no `crates/` edits) cannot instrument further.
-   **This is a new finding, not previously recorded** (§ 3/§ 5 measured GL
-   *correctness*, never GL *bring-up time*) — worth its own `crates/frust-gpu`
-   task if the web shell plan wants a real answer for it, per this file's own
-   "seams, not changes" convention (§ 11).
+   **Superseded by § 17:** the apparent 2.1s cost is a measurement artefact.
+   § 17 reveals that ~1.5–1.8 s of it is this probe's own `Debug`-level
+   logging (the `console_log` at `Debug` prints naga's typifier trace); the
+   real WebGL2 backend bring-up is 3–6× slower than WebGPU's, not 20×.
 3. **First-submit warm-up cost is real on both arms** (WebGPU: 10.2ms vs
    0.6–0.8ms steady state, ~13–17×; WebGL2: 16.7ms vs 0.9–1.4ms, ~12–19×) —
    consistent with `engine-wasm-single-thread`'s prediction that the warm-up
@@ -1071,14 +1082,9 @@ w0-02's now-superseded "expect it to fail" framing.
 
 None of `docs/*.md` need a change for this task's own write scope — it adds
 no new crate dependency, no new cfg, no new build flag reachable outside
-`examples/web-spike`. Two things worth a future task's attention, neither
-blocking this one:
+`examples/web-spike`. One thing worth a future task's attention, not blocking
+this one:
 
-- The GL-arm bring-up cost (§ 16.3 point 2, ~2.1s, unexplained by anything
-  this probe's write scope can instrument) is a strong candidate for its own
-  `crates/frust-gpu` investigation task, parallel to § 5's WebGL2 text-defect
-  task — both are Phase-0 blockers for a WebGL2 fallback, one correctness,
-  one now perf.
 - `docs/LIMITATIONS.md`'s `engine-wasm-single-thread` entry could gain a
   one-line pointer to this section's measured warm-up cost (10–17ms, once,
   not per-frame) now that it has been measured rather than only predicted —

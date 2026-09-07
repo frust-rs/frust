@@ -8,10 +8,10 @@
 # web-shell plan Phase 0 (w0-02): probes whether the render-engine graph
 # (frust-scene + frust-text + frust-gpu + frust-engine + frust-render)
 # compiles for `wasm32-unknown-unknown` and records the exact flags/cfgs that
-# turned out to be needed in RESULTS.md. `frust-reactive` is deliberately NOT
-# a dependency here — its `tokio` multi-thread runtime init fails on wasm32
-# (see RESULTS.md); w0-04 lands that arm. No browser is driven from this
-# crate; that is w0-03's job.
+# turned out to be needed in RESULTS.md. `frust-reactive` is NOT a native
+# dependency — its `tokio` multi-thread runtime init fails on wasm32 — but
+# w0-04 added a wasm32-only target-gated dependency (see RESULTS.md § 15).
+# No browser is driven from this crate; that is w0-03's job.
 [workspace]
 
 [package]
