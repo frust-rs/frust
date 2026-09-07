@@ -5,10 +5,12 @@ use frust_drive::process::ProcessRunner;
 use frust_drive::web_build::{self, WebPreflight};
 
 /// Runs all doctor validators and prints their results. Returns the process
-/// exit code: `1` if any validator is `Fail` or the browser preflight is not
-/// ready, else `0`. The process runner is injected by `commands::dispatch`
-/// (the CLI's one `Real` construction site); the env lookup seam stays
-/// [`RealEnv`] here.
+/// exit code: `1` if any validator is `Fail`, else `0`. The browser checks
+/// ([`web_build::preflight`]) are informational only and never affect the exit
+/// code — a host without wasm-bindgen or a directory without a frust path
+/// dependency is not a doctor failure. The process runner is injected by
+/// `commands::dispatch` (the CLI's one `Real` construction site); the env
+/// lookup seam stays [`RealEnv`] here.
 ///
 /// The browser checks ([`web_build::preflight`]) are appended under their own
 /// "Web" heading rather than folded into `default_validators()`'s flat list:
@@ -16,7 +18,10 @@ use frust_drive::web_build::{self, WebPreflight};
 /// component-level `DoctorReport`/`build_report` this crate never touches —
 /// see that module's doc comment), so this is a CLI-side heading over the
 /// same [`frust_drive::doctor::report::Component`] rows the browser pipeline
-/// itself reports through, not a new `frust-drive` area.
+/// itself reports through, not a new `frust-drive` area. Each row renders with
+/// appropriate wording (e.g. 'skipped' when wasm-bindgen is absent) to match
+/// how validators on non-applicable platforms report off-platform results
+/// (e.g. XcodeValidator off macOS).
 pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let env = RealEnv;
     let ctx = DoctorCtx {
@@ -42,11 +47,10 @@ pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let any_fail = results
         .iter()
         .any(|(_, validation)| validation.status == Status::Fail);
-    Ok(if any_fail || !web_preflight.is_ready() {
-        1
-    } else {
-        0
-    })
+    // Web rows are purely informational and never affect exit code: a host
+    // without wasm-bindgen or a directory without a frust path dependency is
+    // not a doctor failure.
+    Ok(if any_fail { 1 } else { 0 })
 }
 
 fn print_results(results: &[(String, Validation)], verbose: bool) {
@@ -111,5 +115,65 @@ mod tests {
     #[test]
     fn print_web_results_handles_empty_components() {
         print_web_results(&WebPreflight { components: vec![] }, true);
+    }
+
+    /// `frust doctor` in a directory with no Cargo.toml and no valid toolchain
+    /// validators exits 0, not 1 — the web preflight's Missing rows are
+    /// informational only, not fatal. Web validators return Missing (e.g.,
+    /// wasm-bindgen not on PATH), but the exit code is still 0 because Web
+    /// rows never affect it.
+    #[test]
+    fn doctor_exits_zero_in_empty_temp_dir() {
+        use frust_drive::process::Output;
+        let ok = |stdout: &str| Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        };
+        let runner = FakeProcessRunner::new()
+            // Mock all the validators to return Pass so we only test the Web exit code logic
+            .with("rustc --version", ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"))
+            .with("cargo --version", ok("cargo 1.91.1\n"))
+            .with("rustup target list --installed", ok("wasm32-unknown-unknown\naarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"))
+            .with("cargo ndk --version", ok("cargo-ndk 0.15.0\n"))
+            .with("adb --version", ok("Android Debug Bridge version 1.0.0\n"))
+            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
+            .with("cargo install --list", ok("cargo-packager v0.11.8\n"));
+        let exit_code = run_in(&runner, false).unwrap();
+        assert_eq!(
+            exit_code, 0,
+            "doctor should exit 0 even when web preflight rows are Missing"
+        );
+    }
+
+    /// `frust doctor` with a runner that has no wasm-bindgen exits 0, not 1 —
+    /// a missing wasm-bindgen is informational only (not fatal), matching the
+    /// contract that web checks are advisory in non-web contexts. All host
+    /// validators pass, but web preflight returns Missing for wasm-bindgen, and
+    /// the exit code is still 0 because Web rows are purely informational.
+    #[test]
+    fn doctor_exits_zero_when_wasm_bindgen_missing() {
+        use frust_drive::process::Output;
+        let ok = |stdout: &str| Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        };
+        let runner = FakeProcessRunner::new()
+            // Mock all the validators to return Pass so we only test the Web exit code logic
+            .with("rustc --version", ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"))
+            .with("cargo --version", ok("cargo 1.91.1\n"))
+            .with("rustup target list --installed", ok("wasm32-unknown-unknown\naarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"))
+            .with("cargo ndk --version", ok("cargo-ndk 0.15.0\n"))
+            .with("adb --version", ok("Android Debug Bridge version 1.0.0\n"))
+            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
+            .with("cargo install --list", ok("cargo-packager v0.11.8\n"))
+            // web-bindgen missing - this should NOT cause exit code 1
+            .missing("wasm-bindgen --version");
+        let exit_code = run_in(&runner, false).unwrap();
+        assert_eq!(
+            exit_code, 0,
+            "doctor should exit 0 when wasm-bindgen is missing"
+        );
     }
 }

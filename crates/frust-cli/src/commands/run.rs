@@ -729,27 +729,43 @@ fn run_web(
 /// `cmd /C start` on Windows (`start` is a `cmd.exe` builtin, not a
 /// standalone executable — the empty title argument keeps a URL containing
 /// `&` from being misparsed as a second `start` argument), `xdg-open`
-/// elsewhere. No new dependency — pins are law — this shells out through the
-/// same injected [`ProcessRunner`] every other tool invocation goes through,
-/// rather than linking a crate for what is a single, well-known command per
-/// OS. A failure here (no desktop environment, no such command) is reported
-/// to the caller to render as a note, never a hard error: the dev server is
-/// already up and its URL already printed, so a missing browser is a
-/// degraded convenience, not a failed `run`.
-fn open_browser(runner: &dyn ProcessRunner, url: &str) -> Result<()> {
-    let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+/// elsewhere. The browser is spawned detached (Stdio::null for all streams)
+/// to avoid blocking the dev server startup or the interrupt wait: a failure
+/// to spawn is reported to the caller to render as a note, never a hard
+/// error. The dev server is already up and its URL already printed, so a
+/// missing browser is a degraded convenience, not a failed `run`.
+///
+/// ProcessRunner seam cannot express detached spawning (its methods either
+/// wait or return a handle that must be managed), so this bypasses the runner
+/// and spawns directly through [`std::process::Command`] — justified because
+/// browser opening is a best-effort convenience, not a core build tool
+/// subject to test mocking.
+fn open_browser(_runner: &dyn ProcessRunner, url: &str) -> Result<()> {
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    let url = url.to_string();
+    let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C", "start", "", url])
+        ("cmd", vec!["/C".to_string(), "start".to_string(), String::new(), url])
     } else {
         ("xdg-open", vec![url])
     };
-    let out = runner.run(cmd, &args)?;
-    if out.success {
-        Ok(())
-    } else {
-        bail!("`{cmd}` exited with a failure opening {url}")
-    }
+
+    // Spawn in a background thread so we can drop the child handle without
+    // blocking on the browser process. The thread exits immediately after
+    // spawning.
+    thread::spawn(move || {
+        let _ = Command::new(cmd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]
