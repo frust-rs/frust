@@ -3,11 +3,16 @@ name = "{{ project_name }}"
 version = "0.1.0"
 edition = "2024"
 publish = false
+{%- if platform_windows %}
 # Windows-only resource embedding (taskbar/exe icon, FileVersion/
 # ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
 # isn't itself platform-conditional (Cargo has no such thing) and stays a
-# no-op off Windows.
+# no-op off Windows. Rendered only when the windows platform is selected
+# (`--platforms`, `ScaffoldPlatform::Windows`): Cargo compiles a `build`
+# script's source for the HOST on every target it builds, so this key must
+# not survive a selection that never emits `windows/build.rs` at all.
 build = "windows/build.rs"
+{%- endif %}
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
@@ -67,14 +72,18 @@ frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-prefe
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
 # `frust-perf` output.
 log = "0.4"
+{%- if platform_windows %}
 
 # `windows/build.rs`'s resource embedder. `winres` (the older, commonly
 # referenced crate for this) was last published 2021-09-28 — stale — so this
 # uses the actively maintained `winresource` fork instead. A
 # `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
-# never touches a macOS/Linux build.
+# never touches a macOS/Linux build. Rendered only alongside the `build =
+# "windows/build.rs"` key above, for the same reason: this build-dependency
+# is meaningless without the script that reads it.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+{%- endif %}
 
 # Browser (`wasm32-unknown-unknown`) row. `src/lib.rs`'s `frust::app!` binds
 # a fourth platform beside Android/iOS/desktop: on this target it expands to

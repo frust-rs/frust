@@ -318,7 +318,15 @@ pub fn generate_with_platforms(
         None => Source::Embedded(&EMBEDDED_APP_TEMPLATE),
     };
     let manifest = source.manifest()?;
-    let render_vars = ctx.render_vars();
+    // Platform-inclusion axis, threaded into the render context too: a
+    // platform-agnostic file that is ALWAYS emitted (`Cargo.toml`) can still
+    // carry content — the `windows/build.rs` wiring — that only makes sense
+    // when a particular platform subtree exists, so every `.tmpl` file gets
+    // one `{{ platform_<tag> }}` boolean-shaped var per
+    // `ScaffoldPlatform::ALL` entry, not just the coarser whole-subtree
+    // skip below. See `context::platform_render_vars`'s doc.
+    let mut render_vars = ctx.render_vars();
+    render_vars.extend(context::platform_render_vars(platforms));
     let path_vars = ctx.path_vars();
 
     let mut written = Vec::with_capacity(manifest.len());
@@ -1473,13 +1481,15 @@ mod tests {
         generate(&dest, &ctx, None, false, None).unwrap();
 
         let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/app");
+        let mut render_vars = ctx.render_vars();
+        render_vars.extend(context::platform_render_vars(ScaffoldPlatform::DEFAULT));
         for (raw_name, out_name) in [
             ("Cargo.toml.tmpl", "Cargo.toml"),
             ("src/lib.rs.tmpl", "src/lib.rs"),
         ] {
             let raw = fs::read_to_string(repo_templates.join(raw_name))
                 .unwrap_or_else(|e| panic!("reading {raw_name}: {e}"));
-            let expected = renderer::render(&raw, &ctx.render_vars()).unwrap();
+            let expected = renderer::render(&raw, &render_vars).unwrap();
             let actual = fs::read_to_string(dest.join(out_name))
                 .unwrap_or_else(|e| panic!("reading generated {out_name}: {e}"));
             assert_eq!(
@@ -2300,6 +2310,182 @@ mod tests {
                 "`{absent}/` must not be emitted"
             );
         }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// `windows/build.rs` is only ever a valid `build` script when the
+    /// `windows.tmpl/` subtree is actually emitted — a selection that
+    /// excludes it must not still
+    /// wire the manifest's `build =` key or the `cfg(windows)`
+    /// build-dependency table, or `cargo build` fails immediately trying to
+    /// read a file that was never written.
+    #[test]
+    fn generate_with_platforms_web_only_omits_windows_build_wiring() {
+        let dest = unique_temp_dir("platforms-web-only-no-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Web]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            !cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("winresource"), "{cargo_toml}");
+        assert!(!cargo_toml.contains("{{"), "{cargo_toml}");
+        assert!(!dest.join("windows").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The counterpart of the test above: selecting every platform (not
+    /// just the pre-axis [`ScaffoldPlatform::DEFAULT`] set the byte-identity
+    /// golden already covers) still wires both pieces.
+    #[test]
+    fn generate_with_platforms_all_still_wires_windows_build() {
+        let dest = unique_temp_dir("platforms-all-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, ScaffoldPlatform::ALL).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+        assert!(cargo_toml.contains("winresource = \"0.1\""), "{cargo_toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// An empty platform selection — [`generate_with_no_platforms_still_emits_the_app_crate`]'s
+    /// case — must not leave the windows wiring behind either: the manifest
+    /// this produces is the one [`generate_with_platforms`]'s own doc
+    /// promises is "a valid app crate", which a stray `build =
+    /// "windows/build.rs"` key would silently break for every host.
+    #[test]
+    fn generate_with_no_platforms_cargo_toml_carries_neither_windows_wiring_key() {
+        let dest = unique_temp_dir("platforms-none-no-windows-wiring");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            !cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Both `Cargo.toml.tmpl` variants must obey the platform axis
+    /// identically — the same clean-signals-guardrail precedent
+    /// [`generate_wires_windows_build_script_identically_in_both_cargo_toml_variants`]
+    /// pins for the always-on case, applied to a windows-less selection.
+    #[test]
+    fn generate_with_platforms_web_only_omits_windows_wiring_in_both_cargo_toml_variants() {
+        let ctx = test_context();
+
+        let default_dest = unique_temp_dir("platforms-web-only-default");
+        generate_with_platforms(
+            &default_dest,
+            &ctx,
+            None,
+            false,
+            None,
+            &[ScaffoldPlatform::Web],
+        )
+        .unwrap();
+        let clean_signals_dest = unique_temp_dir("platforms-web-only-clean-signals");
+        generate_with_platforms(
+            &clean_signals_dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+            &[ScaffoldPlatform::Web],
+        )
+        .unwrap();
+
+        for dest in [&default_dest, &clean_signals_dest] {
+            let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+            assert!(
+                !cargo_toml.contains("build = \"windows/build.rs\""),
+                "{cargo_toml}"
+            );
+            assert!(
+                !cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+                "{cargo_toml}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&default_dest);
+        let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    /// Acceptance criterion (2): a windows-less manifest must actually
+    /// RESOLVE, not merely fail two substring checks. `scaffold` is a pure
+    /// file-write module with no `ProcessRunner` seam of its own (see
+    /// `docs/CLI_ARCHITECTURE.md`'s scaffold row) and this crate's own real
+    /// Cargo invocations are `frust-cli`'s ignored build gates, out of this
+    /// task's declared write scope — so this resolves the manifest text with
+    /// the `toml` crate (already a dependency, used by
+    /// `context::manifest_names_package`) instead of shelling out to `cargo
+    /// metadata`. LIMITATION: this proves the emitted manifest is
+    /// well-formed TOML with no dangling `package.build` / `cfg(windows)`
+    /// build-dependency table; it does not resolve the crate's dependency
+    /// graph the way `cargo metadata`/`cargo build` would — that end-to-end
+    /// proof is acceptance criterion (3)'s scratch build.
+    #[test]
+    fn generate_with_platforms_web_only_manifest_parses_with_no_windows_build_key() {
+        let dest = unique_temp_dir("platforms-web-only-manifest-resolves");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Web]).unwrap();
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        // `toml::Table` (a keyed document), not `toml::Value::from_str`
+        // (which parses a single bare value expression, not a whole
+        // multi-table document, on this crate's pinned `1.1.4+spec-1.1.0`
+        // line) — mirrors `context::manifest_names_package`'s existing
+        // typed-deserialize precedent.
+        let manifest: toml::Table =
+            toml::from_str(&cargo_toml).expect("generated Cargo.toml must be valid TOML");
+
+        let package = manifest
+            .get("package")
+            .and_then(|p| p.as_table())
+            .expect("generated Cargo.toml must have a [package] table");
+        assert!(
+            !package.contains_key("build"),
+            "a web-only selection must emit no `package.build` key: {package:?}"
+        );
+
+        let has_windows_build_deps = manifest
+            .get("target")
+            .and_then(|t| t.as_table())
+            .and_then(|t| t.get("cfg(windows)"))
+            .and_then(|t| t.as_table())
+            .is_some_and(|t| t.contains_key("build-dependencies"));
+        assert!(
+            !has_windows_build_deps,
+            "a web-only selection must emit no `[target.'cfg(windows)'.build-dependencies]` \
+             table: {manifest:?}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
