@@ -16,7 +16,10 @@
 #
 # Usage: scripts/widget-snapshots.sh [--out DIR] [--check] [--filter SUBSTR]
 #   --out DIR        Output directory (default: target/widget-snapshots),
-#                    relative to the repository root unless absolute.
+#                    relative to the repository root unless absolute. A run
+#                    without --filter also DELETES PNGs that DIR's existing
+#                    manifest.json lists but the registry no longer produces;
+#                    keep DIR a disposable build directory.
 #   --check          Re-render and byte-compare against DIR instead of writing.
 #                    Exits non-zero, listing every file that differs or is
 #                    missing. This is the determinism gate.

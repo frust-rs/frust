@@ -18,8 +18,10 @@
 //! Every case renders through the GPU-free CPU oracle (the binary's default;
 //! none of these pass `--gpu`), so this needs no adapter and stays fast: two
 //! known slugs for the write/merge case, one case each for the tamper/delete
-//! cases, and one exhaustive (35-case) run for the stray-PNG case — all well
-//! under a minute together.
+//! cases, and three exhaustive (whole-registry) tests — stray reporting, the
+//! `--check` success path plus the light/dark divergence guard, and pruning —
+//! each of which renders the registry twice; the whole file still runs in a
+//! few seconds.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -338,12 +340,24 @@ fn exhaustive_check_passes_and_every_case_differs_between_light_and_dark() {
         by_slug.entry(slug).or_default().push((variant, sha));
     }
     assert!(!by_slug.is_empty(), "the registry rendered nothing");
+    // Establish the shape first: exactly one light and one dark row per slug,
+    // so a missing or renamed variant fails loudly instead of exempting the
+    // slug from the divergence check below.
+    for (slug, rows) in &by_slug {
+        let mut tags: Vec<&str> = rows.iter().map(|(v, _)| v.as_str()).collect();
+        tags.sort_unstable();
+        assert_eq!(
+            tags,
+            ["dark", "light"],
+            "{slug}: expected exactly one light and one dark row"
+        );
+    }
     let identical: Vec<&String> = by_slug
         .iter()
         .filter(|(_, rows)| {
             let light = rows.iter().find(|(v, _)| v == "light").map(|(_, s)| s);
             let dark = rows.iter().find(|(v, _)| v == "dark").map(|(_, s)| s);
-            light.is_some() && light == dark
+            light == dark
         })
         .map(|(slug, _)| slug)
         .collect();
@@ -356,36 +370,79 @@ fn exhaustive_check_passes_and_every_case_differs_between_light_and_dark() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An exhaustive write prunes a PNG a previous run left behind (a renamed or
-/// deleted case), so the tree under `--out` never carries a snapshot that no
-/// manifest row references; a filtered write leaves it alone.
+/// An exhaustive write prunes a PNG that the previous manifest listed but the
+/// registry no longer produces (a renamed or deleted case) — and ONLY such
+/// files: a `.png` the manifest never attributed to this tool is left alone
+/// whatever `--out` names, and a filtered write never prunes at all.
 #[test]
-fn an_exhaustive_write_prunes_a_stale_png_but_a_filtered_write_does_not() {
+fn an_exhaustive_write_prunes_only_manifest_listed_stale_pngs() {
     let dir = unique_dir("prune");
-    let first = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
+    let first = run(&["--out", dir.to_str().unwrap()]);
     assert!(first.status.success(), "{}", stderr_of(&first));
 
+    // Simulate a case that was renamed away after the first run: its PNG and
+    // its manifest row exist, but no registry case produces it any more.
     let stale = dir.join("renamed-away.light.png");
-    std::fs::write(&stale, b"not a real png").expect("write stale file");
+    std::fs::copy(dir.join("button.light.png"), &stale).expect("copy a real PNG");
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let mut row = manifest["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["slug"] == "button" && r["variant"] == "light")
+        .cloned()
+        .expect("button.light row");
+    row["slug"] = serde_json::Value::String("renamed-away".into());
+    manifest["snapshots"].as_array_mut().unwrap().push(row);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    // A PNG this tool never wrote: must survive every run below.
+    let foreign = dir.join("not-ours.png");
+    std::fs::write(&foreign, b"not a real png").expect("write foreign file");
 
     let filtered = run(&["--out", dir.to_str().unwrap(), "--filter", "container"]);
     assert!(filtered.status.success(), "{}", stderr_of(&filtered));
     assert!(stale.exists(), "a filtered write must not prune");
+    assert!(
+        foreign.exists(),
+        "a filtered write must not touch foreign files"
+    );
 
     let exhaustive = run(&["--out", dir.to_str().unwrap()]);
     assert!(exhaustive.status.success(), "{}", stderr_of(&exhaustive));
     assert!(
         !stale.exists(),
-        "an exhaustive write must prune the stale PNG"
+        "an exhaustive write must prune the manifest-listed stale PNG"
     );
     assert!(
-        stderr_of(&exhaustive).contains("pruned 1 stale PNG"),
-        "prune must be reported on stderr:\n{}",
-        stderr_of(&exhaustive)
+        foreign.exists(),
+        "an exhaustive write must never delete a PNG the manifest did not list"
+    );
+    let err = stderr_of(&exhaustive);
+    assert!(
+        err.contains("renamed-away.light.png") && err.contains("pruned 1 stale PNG"),
+        "each pruned path and the count must be reported on stderr:\n{err}"
     );
 
+    // The foreign file is still reported as a stray by an exhaustive --check —
+    // reported, never deleted.
     let check = run(&["--out", dir.to_str().unwrap(), "--check"]);
-    assert!(check.status.success(), "{}", stderr_of(&check));
+    assert!(
+        !check.status.success(),
+        "a foreign stray must fail an exhaustive --check"
+    );
+    assert!(
+        stderr_of(&check).contains("not-ours.png"),
+        "{}",
+        stderr_of(&check)
+    );
+    assert!(foreign.exists(), "--check must not delete");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

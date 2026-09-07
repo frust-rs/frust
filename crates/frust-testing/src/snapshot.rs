@@ -71,14 +71,16 @@
 //! `manifest.json` yet, a filtered run writes one that describes only its own
 //! rows and says so on stderr -- there is nothing to merge into.
 //!
-//! An EXHAUSTIVE write also prunes: every `.png` under `--out` that the run
-//! did not produce is removed after the tree is written, so a case renamed or
-//! deleted from the registry cannot leave its old snapshot behind. This has to
-//! happen here, not at the publish step -- `rsync -a --delete` only deletes
-//! files absent from its *source*, and a stale PNG still present under
-//! `--out` would be copied to the site, not removed. A filtered run never
-//! prunes (it cannot tell which untouched files are stale); an exhaustive
-//! `--check` still reports strays rather than deleting them.
+//! An EXHAUSTIVE write also prunes: after the tree is written, every PNG that
+//! the `manifest.json` previously at `--out` listed but the run no longer
+//! produced is removed, so a case renamed or deleted from the registry cannot
+//! leave its old snapshot behind. This has to happen here, not at the publish
+//! step -- `rsync -a --delete` only deletes files absent from its *source*,
+//! and a stale PNG still present under `--out` would be copied to the site,
+//! not removed. The delete set is bounded to what the previous manifest
+//! attributes to this tool: a `.png` it never listed is never touched. A
+//! filtered run never prunes; an exhaustive `--check` still reports strays
+//! rather than deleting them.
 
 use std::path::PathBuf;
 

@@ -91,7 +91,11 @@ const MANIFEST_NAME: &str = "manifest.json";
 )]
 struct Cli {
     /// Directory the PNG tree and manifest.json are written to (or, with
-    /// --check, compared against).
+    /// --check, compared against). An exhaustive write (no --filter) also
+    /// DELETES every PNG that the manifest.json already in DIR lists but this
+    /// run no longer produces (a renamed or removed case); files the manifest
+    /// does not list are never touched. Point it at a disposable build
+    /// directory such as target/widget-snapshots.
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
     /// Only render cases whose slug contains this substring.
@@ -202,18 +206,32 @@ fn run() -> Result<ExitCode> {
     if cli.check {
         check(&out, &rendered, &manifest, exhaustive)
     } else {
+        // Read the manifest this run is about to replace BEFORE writing: on an
+        // exhaustive run it is the only record of which PNGs under `--out`
+        // this tool produced earlier, and therefore the only set it may prune.
+        let previous = if exhaustive {
+            read_existing_manifest(&out)?
+        } else {
+            None
+        };
         let to_write = if exhaustive {
             manifest
         } else {
             merge_with_existing(&out, manifest)?
         };
         write(&out, &rendered, &to_write)?;
-        if exhaustive {
-            let pruned = prune_stale(&out, &rendered)?;
-            if pruned > 0 {
+        if let Some(previous) = previous {
+            let pruned = prune_stale(&out, &previous, &rendered)?;
+            for path in &pruned {
                 eprintln!(
-                    "widget-snapshots: pruned {pruned} stale PNG(s) this exhaustive run no longer \
-                     produces from {}",
+                    "widget-snapshots: pruned {} (listed by the previous manifest, no longer produced)",
+                    path.display()
+                );
+            }
+            if !pruned.is_empty() {
+                eprintln!(
+                    "widget-snapshots: pruned {} stale PNG(s) from {}",
+                    pruned.len(),
                     out.display()
                 );
             }
@@ -303,24 +321,74 @@ fn write(
     fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
 }
 
-/// After an EXHAUSTIVE write, removes every `.png` under `out` that this run
-/// did not produce, so a case renamed or deleted from the registry cannot
-/// leave its old snapshot behind to be published: `rsync -a --delete` at the
-/// publish step only deletes what is absent from its *source*, and a stale
-/// PNG still present under `--out` would be copied, not removed. Symlinked
-/// entries are never followed or deleted (see [`stray_pngs`]); a filtered run
-/// never prunes, because it cannot know which of the untouched files are
-/// stale. Returns the number of files removed.
-fn prune_stale(out: &Path, rendered: &[(PathBuf, Vec<u8>, SnapshotEntry)]) -> Result<usize> {
+/// The `manifest.json` already at `out`, or `None` when there is none yet.
+///
+/// # Errors
+///
+/// A manifest that exists but cannot be read or parsed is an error, never
+/// silently treated as absent: it is the record of what this tool wrote
+/// earlier, and a corrupt one must not be papered over.
+fn read_existing_manifest(out: &Path) -> Result<Option<Manifest>> {
+    let manifest_path = out.join(MANIFEST_NAME);
+    match fs::read_to_string(&manifest_path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .with_context(|| format!("parsing existing {}", manifest_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => {
+            Err(err).with_context(|| format!("reading existing {}", manifest_path.display()))
+        }
+    }
+}
+
+/// After an EXHAUSTIVE write, removes the PNGs that `previous` (the
+/// `manifest.json` this run just replaced) listed but this run no longer
+/// produced — a case renamed or deleted from the registry — so a stale
+/// snapshot cannot linger under `--out` and be published: `rsync -a --delete`
+/// at the publish step only deletes what is absent from its *source*, and a
+/// stale PNG still present under `--out` would be copied, not removed.
+///
+/// The delete set is bounded to files the previous manifest attributes to this
+/// tool: a `.png` the manifest never listed is never touched, whatever
+/// directory `--out` names (an operator who points `--out` at a populated tree
+/// loses nothing the generator did not itself write). Symlinked entries are
+/// refused rather than followed; a missing file is not an error (it was
+/// already gone). A filtered run never prunes. Returns the removed paths.
+fn prune_stale(
+    out: &Path,
+    previous: &Manifest,
+    rendered: &[(PathBuf, Vec<u8>, SnapshotEntry)],
+) -> Result<Vec<PathBuf>> {
     let expected: BTreeSet<PathBuf> = rendered
         .iter()
         .map(|(relative, _, _)| out.join(relative))
         .collect();
-    let scan = stray_pngs(out, &expected);
-    for path in &scan.pngs {
-        fs::remove_file(path).with_context(|| format!("pruning stale {}", path.display()))?;
+    let mut pruned = Vec::new();
+    for row in &previous.snapshots {
+        let Some(variant) = [Variant::Light, Variant::Dark]
+            .into_iter()
+            .find(|v| variant_tag(*v) == row.variant)
+        else {
+            continue;
+        };
+        let path = out.join(snapshot_relative_path(&row.slug, variant)?);
+        if expected.contains(&path) {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!("{}: refusing to prune through a symlink", path.display())
+            }
+            Ok(meta) if meta.is_file() => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("pruning stale {}", path.display()))?;
+                pruned.push(path);
+            }
+            _ => {}
+        }
     }
-    Ok(scan.pngs.len())
+    pruned.sort();
+    Ok(pruned)
 }
 
 /// Compares this run's bytes against the tree already in `out`, reporting every
