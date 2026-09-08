@@ -28,6 +28,18 @@
 //!   host's explicit request to pin one appearance end-to-end
 //!   ([`app::resolve_theme_override_from_query`]), overriding whatever the
 //!   host itself reports.
+//! - `?embed=1`, orthogonal to both of the above and layered on top of
+//!   `?case=`: strips this app's own chrome away entirely, down to exactly
+//!   the hosted [`frust_gallery::Case`] — no "‹ Index" header row, no debug
+//!   title, no outer `scroll_view`/padding
+//!   ([`app::embedded_case_view`] vs. the chromed [`app::case_view`]) — for a
+//!   preview host that sizes an iframe from the case's own bare poster
+//!   ([`app::resolve_embed_from_query`]). Any value other than the exact
+//!   string `"1"` (including absent) leaves the existing chromed `?case=`
+//!   page unchanged; this is additive, not a replacement, the identical
+//!   contract `?theme=` already established. Resolved once at construction
+//!   and never toggled after, so an embedded frame has no path back to the
+//!   index page — see [`app::AppState::embed`]'s own doc.
 //!
 //! Dark/light theme **follow** and resize/DPR handling need no app code at
 //! all when `?theme=` is absent: both are the browser shell's own job
@@ -44,7 +56,7 @@
 //! contract) is likewise not this crate's own code — see `index.html`'s
 //! header comment for where that lives.
 //!
-//! # A discovered pre-existing limitation: `SystemUi` never resolves on `wasm32`
+//! # `SystemUi`/`SansSerif` now resolve on `wasm32`; `Monospace`/`Serif`/`Emoji` still do not
 //!
 //! Every text-bearing widget defaults to [`frust_text::FontFamily::SystemUi`]
 //! (`TextStyle::default()`) unless a caller sets `.family(...)` explicitly —
@@ -53,20 +65,32 @@
 //! that resolves through fontique's real system-font backend; on
 //! `wasm32-unknown-unknown` fontique ships a documented "dummy system font
 //! backend" with an empty generic-family map (see
-//! `fontique-0.11.1/src/backend/mod.rs`), so `SystemUi` — and a generic
-//! `NamedWithGeneric([], SansSerif)` stack, which is what [`Theme::neutral`]'s
-//! own type scale carries too — resolves **zero glyphs**, and nothing an app
-//! registers through [`frust::register_app_fonts`] changes that (verified
-//! empirically here: registering a bundled face and re-rendering with no
-//! other change left `SystemUi`-styled text exactly as blank). This app
-//! works around it for its *own* authored chrome — see [`app::LABEL_FAMILY`]
-//! and [`app::nav_row`] — by never using [`frust_widgets::button`] (whose
-//! internal label has no family override) and instead building its own
-//! tappable rows with an explicit bundled family. It cannot work around it
-//! for a hosted [`frust_gallery::Case`]'s own internal text, which is outside
-//! this task's write scope (`crates/frust-text`, `crates/frust-widgets`,
-//! `examples/gallery`) — see README.md's "Known limitation" section for the
-//! full writeup and the recommended follow-up card.
+//! `fontique-0.11.1/src/backend/mod.rs`). That was a real defect for
+//! `SystemUi` and the generic `NamedWithGeneric([], SansSerif)` stack
+//! [`Theme::neutral`]'s own type scale carries too — but it is fixed at the
+//! framework level now, not worked around per-app: `crates/frust-shell-web`'s
+//! `install_default_fonts` registers a bundled Inter Variable face as the
+//! [`frust_text::GenericSlot::SystemUi`]/[`frust_text::GenericSlot::SansSerif`]
+//! generic-family fallback, unconditionally, before the shell builds its own
+//! `TextContext` — no app code required. See `docs/LIMITATIONS.md`'s
+//! `web-generic-family-partial-fallback` entry for the full record:
+//! `Monospace`, `Serif`, and `Emoji` remain **unmapped** on this target (a
+//! proportional face substituted for `Monospace` would silently regress
+//! `TextInput`/code-display layout, and the bundled face set has neither a
+//! serif nor an emoji face), so text explicitly requesting one of those
+//! three still resolves zero glyphs there — but no case in this registry
+//! does. This app's own [`app::LABEL_FAMILY`]/[`app::nav_row`]
+//! hand-registration (a *named*-family route through
+//! [`frust::register_app_fonts`], predating the shell fix above) is now
+//! redundant per `frust-shell-web`'s own doc comment on
+//! `install_default_fonts` ("once an app ... calls this seam, that hand
+//! registration is redundant and can be dropped in favor of this default")
+//! — left in place since dropping it is outside this task's scope, and a
+//! named lookup winning over a generic one makes keeping it harmless. A
+//! hosted [`frust_gallery::Case`]'s own internal text goes through the
+//! identical `SystemUi`/`Theme::neutral()` default path and now renders too,
+//! for the same reason — see README.md's font-defect section for the full
+//! writeup.
 //!
 //! See `README.md` for the build/serve/drive commands and the recorded
 //! evidence for every milestone above, on both the WebGPU and the forced
@@ -122,6 +146,15 @@ mod app {
         /// `Some` while a single case is on screen (from `?case=` or a click
         /// on the index list); `None` shows the index page.
         case: Option<&'static Case>,
+        /// `true` when `?embed=1` requested the chrome-free single-case view
+        /// (see [`resolve_embed_from_query`]); read once here and never
+        /// written again anywhere else in this app — [`view`]'s dispatch on
+        /// `(case, embed)` renders [`embedded_case_view`] instead of
+        /// [`case_view`] in that case, and `embedded_case_view` never draws
+        /// the "back to index" affordance that is the *only* code path
+        /// anywhere in this app that ever sets `case` back to `None`. So an
+        /// embedded frame has no in-app way back to [`index_view`].
+        embed: bool,
         /// The index page's search box contents — [`text_input`]'s
         /// controlled value (see its own doc: "reports the requested text
         /// through `on_change` and adopts the app-confirmed `value` on the
@@ -154,6 +187,10 @@ mod app {
             frust::register_app_fonts(LABEL_FONT_BYTES.to_vec());
 
             let case = resolve_case_from_query();
+            // See [`resolve_embed_from_query`]'s own doc for the exact
+            // parsing/fall-back contract; resolved once here, exactly like
+            // `case` above, and never re-read.
+            let embed = resolve_embed_from_query().unwrap_or(false);
             // `?theme=light|dark` (see [`resolve_theme_override_from_query`])
             // takes precedence over the design-tagged-case seeding below: it
             // is an explicit embedding-host request to pin one appearance
@@ -188,6 +225,7 @@ mod app {
 
             Self {
                 case,
+                embed,
                 filter: String::new(),
                 ticks,
             }
@@ -242,6 +280,20 @@ mod app {
             "dark" => Some(Variant::Dark),
             _ => None,
         }
+    }
+
+    /// Reads `?embed=1` off `window.location.search`: `Some(true)` for the
+    /// exact value `"1"`, `Some(false)` for any other value present, `None`
+    /// for a missing query parameter or an unavailable `window`/`Location` —
+    /// [`AppState::new`]'s call site collapses `None` and `Some(false)` alike
+    /// via `.unwrap_or(false)`, the identical "fall back rather than fail"
+    /// contract [`resolve_case_from_query`]/[`resolve_theme_override_from_query`]
+    /// both follow for `?case=`/`?theme=`.
+    fn resolve_embed_from_query() -> Option<bool> {
+        let window = web_sys::window()?;
+        let search = window.location().search().ok()?;
+        let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
+        Some(params.get("embed")?.as_str() == "1")
     }
 
     /// Awaits `ms` milliseconds of wall-clock time via the
@@ -324,13 +376,17 @@ mod app {
         }
     }
 
-    /// The `?case=<slug>` page: a "back to index" row (mouse/touch/keyboard
-    /// exercise) and title over the hosted case, scrollable in case a case's
-    /// own fixed frame ([`Case::DEFAULT_SIZE`] or an override) is taller than
-    /// the viewport. The hosted case's *own* text will not be legible on this
-    /// target — see this module's header doc — but its shapes, images,
-    /// layout and theme colour still render, and its interaction handling
-    /// (hover/press/focus/keyboard) still runs exactly as elsewhere.
+    /// The `?case=<slug>` page (the human-browsing default; see
+    /// [`embedded_case_view`] for the `?embed=1` sibling that strips this
+    /// chrome away): a "back to index" row (mouse/touch/keyboard exercise)
+    /// and title over the hosted case, scrollable in case a case's own fixed
+    /// frame ([`Case::DEFAULT_SIZE`] or an override) is taller than the
+    /// viewport. The hosted case's own text now renders on this target for
+    /// the common `SystemUi`/`SansSerif` defaults — see this module's header
+    /// doc — though a case naming `Monospace`/`Serif`/`Emoji` explicitly
+    /// would still resolve no glyphs there; its shapes, images, layout and
+    /// theme colour render regardless, and its interaction handling
+    /// (hover/press/focus/keyboard) runs exactly as elsewhere.
     fn case_view(case: &'static Case) -> frust::AnyView<AppState> {
         let header = Row(vec![
             nav_row(
@@ -356,6 +412,23 @@ mod app {
             ],
         )
         .cross_axis(CrossAxisAlignment::Stretch))
+    }
+
+    /// The `?case=<slug>&embed=1` page: the hosted case, and *nothing*
+    /// else — no header `Row`, no `nav_row`, no debug title, no outer
+    /// `scroll_view` or extra `Padding`, unlike [`case_view`]. This is the
+    /// whole point of `?embed=1` (see this file's module doc): a preview
+    /// host sizes its iframe from the case's own bare poster
+    /// ([`Case::DEFAULT_SIZE`], the exact frame `frust-testing`'s CPU oracle
+    /// renders the case at with no chrome), so any header/padding here would
+    /// show as cropped, squeezed-in content inside that same box instead of
+    /// matching it. Structurally inescapable: there is no
+    /// `nav_row`/`GestureDetector` anywhere in this function's output, so
+    /// nothing it renders can ever set [`AppState::case`] back to `None` —
+    /// the only way out of an embedded frame is the host page itself (e.g.
+    /// navigating the iframe's own `src`), never a tap inside it.
+    fn embedded_case_view(case: &'static Case) -> frust::AnyView<AppState> {
+        any(component(CaseHost(case.build)))
     }
 
     /// The fallback/landing page: a live filter box (keyboard text-entry
@@ -442,10 +515,14 @@ mod app {
         .cross_axis(CrossAxisAlignment::Stretch))
     }
 
-    /// `web_app!`'s `app_logic`: dispatches to [`case_view`]/[`index_view`]
-    /// on [`AppState::case`].
+    /// `web_app!`'s `app_logic`: dispatches to
+    /// [`case_view`]/[`embedded_case_view`]/[`index_view`] on
+    /// [`AppState::case`] and [`AppState::embed`]. `embed` only chooses
+    /// between the two case pages — a missing/unknown `?case=` still falls
+    /// back to the index page exactly as before this task, `embed` or not.
     fn view(state: &mut AppState) -> frust::AnyView<AppState> {
         match state.case {
+            Some(case) if state.embed => embedded_case_view(case),
             Some(case) => case_view(case),
             None => index_view(state),
         }
